@@ -281,6 +281,17 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
       const label = value.name ?? capitalize(value.key);
       const options = value.options ?? [];
 
+      // Check if this field should be conditionally rendered
+      if (value.condition) {
+        const conditionKey = `settings-${itemKey}-${value.condition.key}`;
+        const conditionValue = form.values.settings[conditionKey];
+
+        // Skip rendering if condition is not met
+        if (conditionValue !== value.condition.value) {
+          return;
+        }
+      }
+
       const error = form.errors[`settings.settings-${itemKey}-${key}`] ? (
         <MantineText c="red" component="span" size="xs">
           {form.errors[`settings.settings-${itemKey}-${key}`]}
@@ -356,7 +367,7 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
     });
 
     return <Stack gap="xs">{elements}</Stack>;
-  }, [info, form]);
+  }, [info, form, form.values.settings]);
 
   return (
     <SettingsProvider value={settings}>

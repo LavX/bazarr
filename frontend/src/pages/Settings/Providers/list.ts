@@ -12,6 +12,10 @@ type Input<T, N> = {
   validation?: {
     rule: (value: string) => string | null;
   };
+  condition?: {
+    key: string;
+    value: boolean;
+  };
 };
 
 type AvailableInput =
@@ -366,30 +370,74 @@ export const ProviderList: Readonly<ProviderInfo[]> = [
   {
     key: "opensubtitles",
     name: "OpenSubtitles.org",
-    description: "Only works if you have VIP status",
+    description:
+      "Choose between Official API (requires VIP) or Web Scraper (no VIP needed)",
     inputs: [
+      {
+        type: "switch",
+        key: "use_web_scraper",
+        name: "Use Web Scraper (bypasses VIP requirement)",
+        defaultValue: false,
+      },
+      // Web Scraper specific fields - only show when web scraper is enabled
+      {
+        type: "text",
+        key: "scraper_service_url",
+        name: "Scraper Service URL",
+        defaultValue: "http://localhost:8000",
+        description: "URL of the OpenSubtitles scraper service",
+        condition: {
+          key: "use_web_scraper",
+          value: true,
+        },
+      },
+      // API specific fields - only show when web scraper is disabled
       {
         type: "text",
         key: "username",
+        name: "Username",
+        description: "OpenSubtitles.org username",
+        condition: {
+          key: "use_web_scraper",
+          value: false,
+        },
       },
       {
         type: "password",
         key: "password",
+        name: "Password",
+        description: "OpenSubtitles.org password",
+        condition: {
+          key: "use_web_scraper",
+          value: false,
+        },
       },
       {
         type: "switch",
         key: "vip",
-        name: "VIP",
+        name: "VIP Status",
+        description: "Enable if you have VIP subscription",
+        condition: {
+          key: "use_web_scraper",
+          value: false,
+        },
       },
       {
         type: "switch",
         key: "ssl",
         name: "Use SSL",
+        description: "Use secure connection",
+        condition: {
+          key: "use_web_scraper",
+          value: false,
+        },
       },
+      // Common fields - always show
       {
         type: "switch",
         key: "skip_wrong_fps",
         name: "Skip Wrong FPS",
+        description: "Skip subtitles with mismatched frame rates",
       },
     ],
   },
