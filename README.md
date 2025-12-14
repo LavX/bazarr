@@ -16,6 +16,21 @@
 
 ---
 
+## ❓ Why This Fork Exists
+
+This fork was created after the [pull request (#3012)](https://github.com/morpheus65535/bazarr/pull/3012) to add OpenSubtitles.org web scraper support was declined by the upstream maintainer:
+
+> *"Unfortunately, you should have asked before since we won't be merging this. It's going against our agreement with os.org/os.com. We've put them on their knees before and that's the reason why os.org is only for VIP. They don't have the horse power to support us on their legacy service. You should migrate to os.com."*
+
+**The upstream decision is understandable** - they have agreements with OpenSubtitles and want to respect their infrastructure. However, some users:
+- Don't want to pay for VIP API access
+- Want to use the legacy OpenSubtitles.org which has a larger subtitle database
+- Are willing to accept the limitations of web scraping
+
+**This fork provides that option** while maintaining full compatibility with upstream Bazarr. The web scraper is rate-limited and respectful to OpenSubtitles.org's servers.
+
+---
+
 ## 🚀 Quick Start
 
 ### Option 1: Docker Compose (Recommended)
