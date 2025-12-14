@@ -130,8 +130,14 @@ jobs:
             git checkout HEAD -- .gitattributes 2>/dev/null || true
             git checkout HEAD -- .gitmodules 2>/dev/null || true
             
-            # Check if we need to commit the restored files
-            if ! git diff --quiet; then
+            # Remove upstream-only workflows that we don't need
+            echo "Removing upstream-only workflows..."
+            rm -f .github/workflows/schedule.yaml 2>/dev/null || true
+            rm -f .github/workflows/release_beta_to_dev.yaml 2>/dev/null || true
+            rm -f .github/workflows/release_dev_to_master.yaml 2>/dev/null || true
+            
+            # Check if we need to commit the changes
+            if ! git diff --quiet || [ -n "$(git status --porcelain)" ]; then
               git add -A
               git commit --amend --no-edit
             fi
