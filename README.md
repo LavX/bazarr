@@ -93,9 +93,9 @@ services:
     container_name: opensubtitles-scraper
     restart: unless-stopped
     ports:
-      - "8765:8765"
+      - "8000:8000"
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8765/health"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -114,8 +114,8 @@ services:
       - PUID=1000
       - PGID=1000
       - TZ=Europe/Budapest
-      # Point to the scraper service
-      - OPENSUBTITLES_SCRAPER_URL=http://opensubtitles-scraper:8765
+      # Point to the scraper service (port 8000)
+      - OPENSUBTITLES_SCRAPER_URL=http://opensubtitles-scraper:8000
     volumes:
       - ./config:/config
       - /path/to/movies:/movies
@@ -210,13 +210,15 @@ See [Fork Maintenance Guide](docs/FORK_MAINTENANCE.md) for technical details.
 
 ```bash
 # Check if scraper is healthy
-curl http://localhost:8765/health
+curl http://localhost:8000/health
 
 # Check scraper logs
 docker logs opensubtitles-scraper
 
-# Test a search
-curl "http://localhost:8765/search?imdb_id=tt0111161&type=movie"
+# Test a search (POST request format)
+curl -X POST http://localhost:8000/search \
+  -H "Content-Type: application/json" \
+  -d '{"criteria":[{"imdbid":"0111161"}]}'
 ```
 
 ### Common Issues
