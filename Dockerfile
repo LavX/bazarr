@@ -75,18 +75,19 @@ LABEL org.opencontainers.image.title="Bazarr (LavX Fork)" \
       org.opencontainers.image.licenses="GPL-3.0"
 
 # Install runtime dependencies only
+# Note: Using unar instead of unrar (unrar removed from Alpine 3.22)
 RUN apk add --no-cache \
-    ffmpeg \
-    libxml2 \
-    libxslt \
-    libpq \
-    mediainfo \
-    python3 \
-    p7zip \
-    unrar \
-    bash \
-    su-exec \
-    tzdata && \
+ffmpeg \
+libxml2 \
+libxslt \
+libpq \
+mediainfo \
+python3 \
+p7zip \
+unar \
+bash \
+su-exec \
+tzdata && \
     # Create directories
     mkdir -p \
         /app/bazarr/bin \
