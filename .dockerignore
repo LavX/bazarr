@@ -1,0 +1,72 @@
+# =============================================================================
+# Bazarr Production Docker Build - Ignore File
+# =============================================================================
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Development files
+dev-setup/
+dev-requirements.txt
+.release-it.json
+changelog-*.hbs
+.auto-changelog
+
+# Documentation
+*.md
+!README.md
+docs/
+screenshot/
+
+# Tests
+tests/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# CI/CD (keep workflows but ignore scripts)
+.github/ISSUE_TEMPLATE/
+.github/files_to_copy
+
+# Frontend development files (build is copied separately)
+frontend/node_modules/
+frontend/.env*
+frontend/*.log
+frontend/.eslintcache
+
+# Data directories (mounted at runtime)
+data/
+config/
+
+# Build artifacts (in case of local builds)
+__builds__/
+*.zip
+*.tar.gz
+
+# Docker files (avoid recursive copy)
+docker-compose*.yml
+!docker-compose.yml
+Dockerfile*
+!Dockerfile
+
+# Misc
+*.log
+*.tmp
+.env
+.env.*

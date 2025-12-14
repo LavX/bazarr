@@ -14,6 +14,11 @@ from zipfile import ZipFile
 from .get_args import args
 from .config import settings
 
+# Fork configuration - allows overriding via environment variable
+# Default: LavX/bazarr (this fork)
+# To use upstream releases, set BAZARR_UPSTREAM_REPO=morpheus65535/Bazarr
+RELEASES_REPO = os.environ.get('BAZARR_RELEASES_REPO', 'LavX/bazarr')
+
 
 def deprecated_python_version():
     # return True if Python version is deprecated
@@ -22,7 +27,7 @@ def deprecated_python_version():
 
 def check_releases():
     releases = []
-    url_releases = 'https://api.github.com/repos/morpheus65535/Bazarr/releases?per_page=100'
+    url_releases = f'https://api.github.com/repos/{RELEASES_REPO}/releases?per_page=100'
     try:
         logging.debug(f'BAZARR getting releases from Github: {url_releases}')
         r = requests.get(url_releases, allow_redirects=True, timeout=15)
