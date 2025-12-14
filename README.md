@@ -114,6 +114,8 @@ services:
       - PUID=1000
       - PGID=1000
       - TZ=Europe/Budapest
+      # Enable the web scraper mode (auto-enables "Use Web Scraper" in settings)
+      - OPENSUBTITLES_USE_WEB_SCRAPER=true
       # Point to the scraper service (port 8000)
       - OPENSUBTITLES_SCRAPER_URL=http://opensubtitles-scraper:8000
     volumes:
@@ -132,11 +134,21 @@ Then run:
 docker compose up -d
 ```
 
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PUID` | User ID for file permissions | `1000` |
+| `PGID` | Group ID for file permissions | `1000` |
+| `TZ` | Timezone | `UTC` |
+| `OPENSUBTITLES_USE_WEB_SCRAPER` | Enable web scraper mode | `false` |
+| `OPENSUBTITLES_SCRAPER_URL` | URL of the scraper service | `http://localhost:8000` |
+
 ### Enabling the Provider
 
 1. Go to **Settings** → **Providers**
 2. Enable **"OpenSubtitles.org"** (not OpenSubtitles.com - that's the API version)
-3. Configure the scraper URL if not using the default
+3. If `OPENSUBTITLES_USE_WEB_SCRAPER=true` is set, "Use Web Scraper" will auto-enable
 4. Save and test with a manual search
 
 ---

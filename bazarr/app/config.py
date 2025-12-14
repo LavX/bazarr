@@ -279,8 +279,14 @@ validators = [
     Validator('opensubtitles.ssl', must_exist=True, default=False, is_type_of=bool),
     Validator('opensubtitles.timeout', must_exist=True, default=15, is_type_of=int, gte=1),
     Validator('opensubtitles.skip_wrong_fps', must_exist=True, default=False, is_type_of=bool),
-    Validator('opensubtitles.use_web_scraper', must_exist=True, default=False, is_type_of=bool),
-    Validator('opensubtitles.scraper_service_url', must_exist=True, default='http://localhost:8000', is_type_of=str),
+    # Web scraper mode - can be enabled via OPENSUBTITLES_USE_WEB_SCRAPER=true environment variable
+    Validator('opensubtitles.use_web_scraper', must_exist=True,
+              default=os.environ.get('OPENSUBTITLES_USE_WEB_SCRAPER', 'false').lower() in ('true', '1', 'yes'),
+              is_type_of=bool),
+    # Scraper URL - can be set via OPENSUBTITLES_SCRAPER_URL environment variable
+    Validator('opensubtitles.scraper_service_url', must_exist=True,
+              default=os.environ.get('OPENSUBTITLES_SCRAPER_URL', 'http://localhost:8000'),
+              is_type_of=str),
 
     # opensubtitles.com section
     Validator('opensubtitlescom.username', must_exist=True, default='', is_type_of=str, cast=str),

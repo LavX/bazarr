@@ -51,8 +51,10 @@ services:
       # Timezone (e.g., Europe/Budapest, America/New_York)
       - TZ=${TZ:-UTC}
       
-      # OpenSubtitles Scraper URL - points to the scraper service
-      # This is used by the custom OpenSubtitles.org provider
+      # OpenSubtitles Scraper Configuration
+      # Enable the web scraper for OpenSubtitles.org (bypasses API/VIP requirement)
+      - OPENSUBTITLES_USE_WEB_SCRAPER=true
+      # Scraper service URL - points to the scraper container
       - OPENSUBTITLES_SCRAPER_URL=http://opensubtitles-scraper:8000
     
     volumes:
