@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - master
     paths-ignore:
       - '*.md'
       - 'docs/**'
@@ -30,6 +31,9 @@ env:
   UI_DIRECTORY: ./frontend
 
 jobs:
+  # ==========================================================================
+  # Build Scraper Image (separate job with its own cache)
+  # ==========================================================================
   build-scraper:
     runs-on: ubuntu-latest
     permissions:
@@ -80,23 +84,21 @@ jobs:
           cache-from: type=gha,scope=scraper
           cache-to: type=gha,mode=max,scope=scraper
 
+  # ==========================================================================
+  # Build Frontend (cached via GitHub Actions cache)
+  # ==========================================================================
   build-frontend:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Cache node_modules
-        uses: actions/cache@v4
-        with:
-          path: "${{ env.UI_DIRECTORY }}/node_modules"
-          key: ${{ runner.os }}-modules-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: ${{ runner.os }}-modules-
-
       - name: Setup NodeJS
         uses: actions/setup-node@v4
         with:
           node-version-file: "${{ env.UI_DIRECTORY }}/.nvmrc"
+          cache: 'npm'
+          cache-dependency-path: "${{ env.UI_DIRECTORY }}/package-lock.json"
 
       - name: Install Dependencies
         run: npm ci
@@ -113,6 +115,9 @@ jobs:
           path: ${{ env.UI_DIRECTORY }}/build
           retention-days: 1
 
+  # ==========================================================================
+  # Build and Push Bazarr Image
+  # ==========================================================================
   build-and-push:
     needs: [build-frontend, build-scraper]
     runs-on: ubuntu-latest
@@ -183,7 +188,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            # Latest tag on main branch
+            # Latest tag on main/master branch
             type=raw,value=latest,enable={{is_default_branch}}
             # Version tag (e.g., v1.5.3-lavx.20241214)
             type=raw,value=${{ steps.version.outputs.fork_version }}
@@ -207,8 +212,11 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Use GHA cache with separate scopes for different layers
+          cache-from: |
+            type=gha,scope=bazarr-deps
+            type=gha,scope=bazarr-main
+          cache-to: type=gha,mode=max,scope=bazarr-main
           build-args: |
             BAZARR_VERSION=${{ steps.version.outputs.fork_version }}
             BUILD_DATE=${{ github.event.repository.updated_at }}
@@ -223,28 +231,27 @@ jobs:
 
       - name: Create Release Summary
         run: |
-          echo "## 🐳 Docker Image Published" >> $GITHUB_STEP_SUMMARY
+          echo "## 🐳 Docker Images Published" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Pull Commands" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Bazarr (LavX Fork)" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-          echo "# Latest" >> $GITHUB_STEP_SUMMARY
           echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "# Specific Version" >> $GITHUB_STEP_SUMMARY
           echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.fork_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### OpenSubtitles Scraper" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.SCRAPER_IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Image Details" >> $GITHUB_STEP_SUMMARY
           echo "- **Digest:** \`${{ steps.push.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Platforms:** linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 🔌 OpenSubtitles Scraper" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-          echo "docker pull ${{ env.REGISTRY }}/${{ env.SCRAPER_IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Cache Status:** GHA cache enabled" >> $GITHUB_STEP_SUMMARY
 
-  # Optional: Create GitHub Release for tagged versions
+  # ==========================================================================
+  # Create GitHub Release for tagged versions
+  # ==========================================================================
   create-release:
     needs: build-and-push
     runs-on: ubuntu-latest
@@ -260,15 +267,20 @@ jobs:
         with:
           generate_release_notes: true
           body: |
-            ## 🐳 Docker Image
+            ## 🐳 Docker Images
             
             ```bash
+            # Bazarr (LavX Fork)
             docker pull ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            
+            # OpenSubtitles Scraper
+            docker pull ghcr.io/${{ github.repository_owner }}/opensubtitles-scraper:latest
             ```
             
             ## 📝 Changes
             
             This release is based on upstream Bazarr with the following custom modifications:
-            - OpenSubtitles.org web scraper provider
+            - OpenSubtitles.org web scraper provider (no VIP API needed)
+            - Auto-sync with upstream daily at 4 AM UTC
             
             See the auto-generated release notes below for detailed changes.

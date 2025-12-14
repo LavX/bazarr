@@ -1,7 +1,7 @@
 # =============================================================================
 # Bazarr LavX Fork - Production Docker Image
 # =============================================================================
-# Multi-stage build for optimized image size
+# Multi-stage build optimized for layer caching
 # Based on Debian Slim for better compatibility (unrar, etc.)
 # =============================================================================
 
@@ -10,22 +10,7 @@ ARG BUILD_DATE
 ARG VCS_REF
 
 # =============================================================================
-# Stage 1: Build Frontend
-# =============================================================================
-FROM node:20-slim AS frontend-builder
-
-WORKDIR /app
-
-# Install dependencies first for better caching
-COPY frontend/package*.json ./frontend/
-RUN cd frontend && npm ci
-
-# Copy frontend source and build
-COPY frontend ./frontend/
-RUN cd frontend && npm run build
-
-# =============================================================================
-# Stage 2: Install Python Dependencies
+# Stage 1: Install Python Dependencies (cached heavily)
 # =============================================================================
 FROM python:3.12-slim-bookworm AS python-builder
 
@@ -40,12 +25,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy requirements and install Python packages
+# Copy ONLY requirements first for maximum caching
+# This layer will only rebuild when requirements.txt changes
 COPY requirements.txt ./
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# Use pip cache mount to avoid re-downloading packages across builds
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --prefix=/install -r requirements.txt
 
 # =============================================================================
-# Stage 3: Production Image
+# Stage 2: Production Image
 # =============================================================================
 FROM python:3.12-slim-bookworm AS production
 
@@ -64,7 +53,10 @@ LABEL org.opencontainers.image.title="Bazarr (LavX Fork)" \
       org.opencontainers.image.licenses="GPL-3.0"
 
 # Enable non-free repository for unrar and install runtime dependencies
-RUN sed -i 's/Components: main/Components: main non-free non-free-firmware/' /etc/apt/sources.list.d/debian.sources && \
+# Use apt cache mount to speed up repeated builds
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    sed -i 's/Components: main/Components: main non-free non-free-firmware/' /etc/apt/sources.list.d/debian.sources && \
     apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libxml2 \
@@ -76,31 +68,35 @@ RUN sed -i 's/Components: main/Components: main non-free non-free-firmware/' /et
     bash \
     gosu \
     curl \
-    && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /app/bazarr/bin /config /defaults \
     && groupadd -g 1000 bazarr \
     && useradd -u 1000 -g bazarr -d /config -s /bin/bash bazarr
 
-# Copy Python packages from builder
+# Copy Python packages from builder (changes rarely)
 COPY --from=python-builder /install /usr/local
 
-# Copy application code
+# Copy entrypoint script (changes rarely)
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Set work directory
 WORKDIR /app/bazarr
-COPY bazarr.py ./
+
+# Copy libs directories (change less frequently than main app code)
 COPY libs ./libs
 COPY custom_libs ./custom_libs
-COPY bazarr ./bazarr
 COPY migrations ./migrations
+
+# Copy main application code (changes most frequently - keep at end)
+COPY bazarr.py ./
+COPY bazarr ./bazarr
 
 # Copy fork identification file (shows "LavX Fork" in System Status)
 COPY package_info /app/bazarr/package_info
 
-# Copy frontend build
-COPY --from=frontend-builder /app/frontend/build ./frontend/build
-
-# Copy entrypoint script
-COPY docker/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+# Copy pre-built frontend (built in GitHub Actions workflow for caching)
+# This layer only rebuilds when frontend/build changes
+COPY frontend/build ./frontend/build
 
 # Set environment variables
 ENV HOME="/config" \
