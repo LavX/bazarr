@@ -17,17 +17,11 @@ jobs:
     name: Python ${{ matrix.python-version }} test
 
     steps:
-      - name: Validate branch
-        if: ${{ github.ref != 'refs/heads/development' }}
-        run: |
-          echo This action can only be run on development branch, not ${{ github.ref }}
-          exit 1
-
       - name: Checkout
         uses: actions/checkout@v5
         with:
           fetch-depth: ${{ env.FETCH_DEPTH }}
-          ref: development
+          submodules: recursive
 
       - name: Setup NodeJS
         uses: actions/setup-node@v4

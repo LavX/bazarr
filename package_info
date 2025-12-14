@@ -1,0 +1,18 @@
+# LavX Bazarr Fork Package Information
+# This file identifies the build as a LavX fork with OpenSubtitles.org scraper support
+
+# Package version identifier (shown in System Status)
+packageversion=LavX Fork
+
+# Package author (shown in System Status)
+packageauthor=LavX
+
+# Update method - set to External to disable in-app updates
+# Docker containers should be updated by pulling new images
+updatemethod=External
+
+# Message shown when user tries to update from within the app
+updatemethodmessage=This is a Docker container. Update by pulling the new image: docker compose pull && docker compose up -d
+
+# Branch to follow for release notifications
+branch=development

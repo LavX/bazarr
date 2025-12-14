@@ -1,0 +1,274 @@
+name: Build Docker Image
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - '.github/ISSUE_TEMPLATE/**'
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: 'Version tag for the image (e.g., v1.5.3)'
+        required: false
+        default: ''
+        type: string
+  workflow_call:
+    inputs:
+      version_tag:
+        description: 'Version tag for the image'
+        required: false
+        default: ''
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  SCRAPER_IMAGE_NAME: ${{ github.repository_owner }}/opensubtitles-scraper
+  UI_DIRECTORY: ./frontend
+
+jobs:
+  build-scraper:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Scraper Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.SCRAPER_IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-
+            type=ref,event=branch
+          labels: |
+            org.opencontainers.image.title=OpenSubtitles.org Scraper
+            org.opencontainers.image.description=Web scraper service for OpenSubtitles.org
+            org.opencontainers.image.vendor=LavX
+
+      - name: Build and Push Scraper Image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./opensubtitles-scraper
+          file: ./opensubtitles-scraper/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=scraper
+          cache-to: type=gha,mode=max,scope=scraper
+
+  build-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: "${{ env.UI_DIRECTORY }}/node_modules"
+          key: ${{ runner.os }}-modules-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-modules-
+
+      - name: Setup NodeJS
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: "${{ env.UI_DIRECTORY }}/.nvmrc"
+
+      - name: Install Dependencies
+        run: npm ci
+        working-directory: ${{ env.UI_DIRECTORY }}
+
+      - name: Build Frontend
+        run: npm run build
+        working-directory: ${{ env.UI_DIRECTORY }}
+
+      - name: Upload Frontend Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: ${{ env.UI_DIRECTORY }}/build
+          retention-days: 1
+
+  build-and-push:
+    needs: [build-frontend, build-scraper]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Download Frontend Build
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-build
+          path: ${{ env.UI_DIRECTORY }}/build
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine Version
+        id: version
+        run: |
+          # Priority: workflow input > git tag > git describe > commit sha
+          if [ -n "${{ inputs.version_tag }}" ]; then
+            VERSION="${{ inputs.version_tag }}"
+          elif [ -n "${{ github.ref_name }}" ] && [[ "${{ github.ref_name }}" == v* ]]; then
+            VERSION="${{ github.ref_name }}"
+          else
+            VERSION=$(git describe --tags --always 2>/dev/null || echo "dev")
+          fi
+          
+          # Remove 'v' prefix for semver
+          SEMVER="${VERSION#v}"
+          
+          # Create LavX fork version
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          BUILD_DATE=$(date -u +%Y%m%d)
+          FORK_VERSION="${SEMVER}-lavx.${BUILD_DATE}"
+          
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "semver=$SEMVER" >> $GITHUB_OUTPUT
+          echo "fork_version=$FORK_VERSION" >> $GITHUB_OUTPUT
+          echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+          
+          echo "## Version Info" >> $GITHUB_STEP_SUMMARY
+          echo "- **Base Version:** $VERSION" >> $GITHUB_STEP_SUMMARY
+          echo "- **Fork Version:** $FORK_VERSION" >> $GITHUB_STEP_SUMMARY
+          echo "- **Short SHA:** $SHORT_SHA" >> $GITHUB_STEP_SUMMARY
+
+      - name: Extract Docker Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # Latest tag on main branch
+            type=raw,value=latest,enable={{is_default_branch}}
+            # Version tag (e.g., v1.5.3-lavx.20241214)
+            type=raw,value=${{ steps.version.outputs.fork_version }}
+            # Short SHA tag
+            type=raw,value=sha-${{ steps.version.outputs.short_sha }}
+            # Branch name
+            type=ref,event=branch
+          labels: |
+            org.opencontainers.image.title=Bazarr (LavX Fork)
+            org.opencontainers.image.description=Bazarr with OpenSubtitles.org scraper support
+            org.opencontainers.image.vendor=LavX
+            org.opencontainers.image.version=${{ steps.version.outputs.fork_version }}
+
+      - name: Build and Push Docker Image
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BAZARR_VERSION=${{ steps.version.outputs.fork_version }}
+            BUILD_DATE=${{ github.event.repository.updated_at }}
+            VCS_REF=${{ github.sha }}
+
+      - name: Generate Artifact Attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Create Release Summary
+        run: |
+          echo "## 🐳 Docker Image Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Pull Commands" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "# Latest" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# Specific Version" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.fork_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Image Details" >> $GITHUB_STEP_SUMMARY
+          echo "- **Digest:** \`${{ steps.push.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Platforms:** linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔌 OpenSubtitles Scraper" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.SCRAPER_IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+  # Optional: Create GitHub Release for tagged versions
+  create-release:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            ## 🐳 Docker Image
+            
+            ```bash
+            docker pull ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ```
+            
+            ## 📝 Changes
+            
+            This release is based on upstream Bazarr with the following custom modifications:
+            - OpenSubtitles.org web scraper provider
+            
+            See the auto-generated release notes below for detailed changes.

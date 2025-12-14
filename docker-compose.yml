@@ -1,0 +1,108 @@
+# =============================================================================
+# Bazarr LavX Fork - Docker Compose
+# =============================================================================
+# Production deployment configuration with OpenSubtitles.org Scraper
+#
+# Usage:
+#   docker compose up -d
+#
+# Environment variables can be set in a .env file or directly in the environment
+# =============================================================================
+
+services:
+  # OpenSubtitles.org Scraper Service (required for the fork's custom provider)
+  opensubtitles-scraper:
+    build:
+      context: ./opensubtitles-scraper
+      dockerfile: Dockerfile
+    image: ghcr.io/lavx/opensubtitles-scraper:latest
+    container_name: opensubtitles-scraper
+    restart: unless-stopped
+    ports:
+      - "${SCRAPER_PORT:-8765}:8765"
+    environment:
+      - DEBUG=${SCRAPER_DEBUG:-false}
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8765/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - bazarr-network
+
+  bazarr:
+    image: ghcr.io/lavx/bazarr:latest
+    container_name: bazarr
+    restart: unless-stopped
+    depends_on:
+      opensubtitles-scraper:
+        condition: service_healthy
+    
+    ports:
+      - "${BAZARR_PORT:-6767}:6767"
+    
+    environment:
+      # User/Group ID for file permissions
+      # Match these to your media user on the host
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      
+      # Timezone (e.g., Europe/Budapest, America/New_York)
+      - TZ=${TZ:-UTC}
+      
+      # OpenSubtitles Scraper URL - points to the scraper service
+      # This is used by the custom OpenSubtitles.org provider
+      - OPENSUBTITLES_SCRAPER_URL=http://opensubtitles-scraper:8765
+    
+    volumes:
+      # Configuration directory - contains database, logs, and settings
+      - ${CONFIG_PATH:-./config}:/config
+      
+      # Media directories - adjust paths to match your setup
+      # Movies library
+      - ${MOVIES_PATH:-/path/to/movies}:/movies
+      
+      # TV Shows library
+      - ${TV_PATH:-/path/to/tv}:/tv
+      
+      # Optional: Additional media paths
+      # - /path/to/anime:/anime
+      # - /path/to/downloads:/downloads
+    
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:6767/api/system/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    
+    networks:
+      - bazarr-network
+    
+    # Optional: Resource limits
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '2.0'
+    #       memory: 2G
+    #     reservations:
+    #       cpus: '0.5'
+    #       memory: 512M
+
+networks:
+  bazarr-network:
+    driver: bridge
+
+# =============================================================================
+# Example .env file contents:
+# =============================================================================
+# BAZARR_PORT=6767
+# SCRAPER_PORT=8765
+# PUID=1000
+# PGID=1000
+# TZ=Europe/Budapest
+# CONFIG_PATH=./config
+# MOVIES_PATH=/mnt/media/movies
+# TV_PATH=/mnt/media/tv
+# =============================================================================

@@ -1,3 +1,30 @@
-static/jquery/* linguist-vendored
-static/semantic/* linguist-vendored
-*.tpl linguist-language=Python
+# Auto-detect text files and perform LF normalization
+* text=auto
+
+# Fork-specific files - always keep ours during merge conflicts
+# These files contain customizations that should not be overwritten by upstream merges
+README.md merge=ours
+package_info merge=ours
+bazarr/app/check_update.py merge=ours
+custom_libs/subliminal_patch/providers/opensubtitles_scraper.py merge=ours
+Dockerfile merge=ours
+docker-compose.yml merge=ours
+docker/entrypoint.sh merge=ours
+.dockerignore merge=ours
+.gitattributes merge=ours
+docs/FORK_MAINTENANCE.md merge=ours
+
+# GitHub workflows - keep our fork's versions
+.github/workflows/* merge=ours
+
+# Git submodule - keep our reference
+.gitmodules merge=ours
+opensubtitles-scraper merge=ours
+
+# Binary files
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.zip binary
