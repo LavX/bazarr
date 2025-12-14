@@ -254,6 +254,8 @@ def get_providers_auth():
             'use_ssl': settings.opensubtitles.ssl,
             'timeout': int(settings.opensubtitles.timeout) or 15,
             'skip_wrong_fps': settings.opensubtitles.skip_wrong_fps,
+            'use_web_scraper': settings.opensubtitles.use_web_scraper,
+            'scraper_service_url': settings.opensubtitles.scraper_service_url,
         },
         'opensubtitlescom': {'username': settings.opensubtitlescom.username,
                              'password': settings.opensubtitlescom.password,

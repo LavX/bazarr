@@ -279,6 +279,8 @@ validators = [
     Validator('opensubtitles.ssl', must_exist=True, default=False, is_type_of=bool),
     Validator('opensubtitles.timeout', must_exist=True, default=15, is_type_of=int, gte=1),
     Validator('opensubtitles.skip_wrong_fps', must_exist=True, default=False, is_type_of=bool),
+    Validator('opensubtitles.use_web_scraper', must_exist=True, default=False, is_type_of=bool),
+    Validator('opensubtitles.scraper_service_url', must_exist=True, default='http://localhost:8000', is_type_of=str),
 
     # opensubtitles.com section
     Validator('opensubtitlescom.username', must_exist=True, default='', is_type_of=str, cast=str),
@@ -770,6 +772,13 @@ def save_settings(settings_items):
             if key != settings.opensubtitles.password:
                 reset_providers = True
                 region.delete('os_token')
+        elif key == 'settings-opensubtitles-use_web_scraper':
+            if key != settings.opensubtitles.use_web_scraper:
+                reset_providers = True
+                region.delete('os_token')  # Clear any cached tokens
+        elif key == 'settings-opensubtitles-scraper_service_url':
+            if key != settings.opensubtitles.scraper_service_url:
+                reset_providers = True
 
         if key == 'settings-opensubtitlescom-username':
             if key != settings.opensubtitlescom.username:

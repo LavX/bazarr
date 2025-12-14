@@ -16,6 +16,7 @@ from subliminal.providers.opensubtitles import OpenSubtitlesProvider as _OpenSub
     OpenSubtitlesSubtitle as _OpenSubtitlesSubtitle, Episode, Movie, ServerProxy, Unauthorized, NoSession, \
     DownloadLimitReached, InvalidImdbid, UnknownUserAgent, DisabledUserAgent, OpenSubtitlesError, PaymentRequired
 from .mixins import ProviderRetryMixin
+from .opensubtitles_scraper import OpenSubtitlesScraperMixin
 from subliminal.subtitle import fix_line_ending
 from subliminal_patch.providers import reinitialize_on_error
 from subliminal_patch.http import SubZeroRequestsTransport
@@ -122,7 +123,7 @@ class OpenSubtitlesSubtitle(_OpenSubtitlesSubtitle):
         return matches
 
 
-class OpenSubtitlesProvider(ProviderRetryMixin, _OpenSubtitlesProvider):
+class OpenSubtitlesProvider(ProviderRetryMixin, OpenSubtitlesScraperMixin, _OpenSubtitlesProvider):
     only_foreign = False
     also_foreign = False
     subtitle_class = OpenSubtitlesSubtitle
@@ -143,28 +144,46 @@ class OpenSubtitlesProvider(ProviderRetryMixin, _OpenSubtitlesProvider):
     video_types = (Episode, Movie)
 
     def __init__(self, username=None, password=None, use_tag_search=False, only_foreign=False, also_foreign=False,
-                 skip_wrong_fps=True, is_vip=False, use_ssl=True, timeout=15):
-        if any((username, password)) and not all((username, password)):
-            raise ConfigurationError('Username and password must be specified')
+                 skip_wrong_fps=True, is_vip=False, use_ssl=True, timeout=15, use_web_scraper=False,
+                 scraper_service_url='http://localhost:8000'):
+        # Web scraper mode configuration
+        self.use_web_scraper = use_web_scraper
+        self.scraper_service_url = scraper_service_url
+        
+        if self.use_web_scraper:
+            logger.info("Using web scraper mode - bypassing authentication")
+            # Initialize minimal configuration for scraper mode
+            self.username = ''
+            self.password = ''
+            self.token = None
+            self.server = None
+            self.is_vip = False
+        else:
+            # Traditional API mode
+            if any((username, password)) and not all((username, password)):
+                raise ConfigurationError('Username and password must be specified')
 
-        self.username = username or ''
-        self.password = password or ''
+            self.username = username or ''
+            self.password = password or ''
+            self.token = None
+            self.is_vip = is_vip
+
+        # Common configuration for both modes
         self.use_tag_search = use_tag_search
         self.only_foreign = only_foreign
         self.also_foreign = also_foreign
         self.skip_wrong_fps = skip_wrong_fps
-        self.token = None
-        self.is_vip = is_vip
         self.use_ssl = use_ssl
         self.timeout = timeout
 
         logger.debug("Using timeout: %d", timeout)
 
-        if use_ssl:
-            logger.debug("Using HTTPS connection")
+        if not self.use_web_scraper:
+            if use_ssl:
+                logger.debug("Using HTTPS connection")
 
-        self.default_url = ("https:" if use_ssl else "http:") + self.default_url
-        self.vip_url = ("https:" if use_ssl else "http:") + self.vip_url
+            self.default_url = ("https:" if use_ssl else "http:") + self.default_url
+            self.vip_url = ("https:" if use_ssl else "http:") + self.vip_url
 
         if use_tag_search:
             logger.info("Using tag/exact filename search")
@@ -222,6 +241,14 @@ class OpenSubtitlesProvider(ProviderRetryMixin, _OpenSubtitlesProvider):
             return func()
 
     def initialize(self):
+        if self.use_web_scraper:
+            # Skip authentication for scraper mode
+            logger.debug("Web scraper mode - skipping authentication")
+            self.server = None
+            self.token = None
+            return
+            
+        # Traditional API mode initialization
         token_cache = region.get("os_token")
         url_cache = region.get("os_server_url")
 
@@ -275,6 +302,17 @@ class OpenSubtitlesProvider(ProviderRetryMixin, _OpenSubtitlesProvider):
     @reinitialize_on_error((NoSession, Unauthorized, OpenSubtitlesError, ServiceUnavailable), attempts=1)
     def query(self, video, languages, hash=None, size=None, imdb_id=None, query=None, season=None, episode=None,
               tag=None, use_tag_search=False, only_foreign=False, also_foreign=False):
+        if self.use_web_scraper:
+            return self._query_scraper(video, languages, hash=hash, size=size, imdb_id=imdb_id, query=query,
+                                     season=season, episode=episode, tag=tag, use_tag_search=use_tag_search,
+                                     only_foreign=only_foreign, also_foreign=also_foreign)
+        else:
+            return self._query_api(video, languages, hash=hash, size=size, imdb_id=imdb_id, query=query,
+                                 season=season, episode=episode, tag=tag, use_tag_search=use_tag_search,
+                                 only_foreign=only_foreign, also_foreign=also_foreign)
+
+    def _query_api(self, video, languages, hash=None, size=None, imdb_id=None, query=None, season=None, episode=None,
+                   tag=None, use_tag_search=False, only_foreign=False, also_foreign=False):
         # fill the search criteria
         criteria = []
         if hash and size:
@@ -380,13 +418,16 @@ class OpenSubtitlesProvider(ProviderRetryMixin, _OpenSubtitlesProvider):
 
     @reinitialize_on_error((NoSession, Unauthorized, OpenSubtitlesError, ServiceUnavailable), attempts=1)
     def download_subtitle(self, subtitle):
-        logger.info('Downloading subtitle %r', subtitle)
-        response = self.use_token_or_login(
-            lambda: checked(
-                lambda: self.server.DownloadSubtitles(self.token, [str(subtitle.subtitle_id)])
+        if self.use_web_scraper:
+            return self._download_subtitle_scraper(subtitle)
+        else:
+            logger.info('Downloading subtitle %r', subtitle)
+            response = self.use_token_or_login(
+                lambda: checked(
+                    lambda: self.server.DownloadSubtitles(self.token, [str(subtitle.subtitle_id)])
+                )
             )
-        )
-        subtitle.content = fix_line_ending(zlib.decompress(base64.b64decode(response['data'][0]['data']), 47))
+            subtitle.content = fix_line_ending(zlib.decompress(base64.b64decode(response['data'][0]['data']), 47))
 
 
 def checked(fn, raise_api_limit=False):
