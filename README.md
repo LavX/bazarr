@@ -238,8 +238,8 @@ For major changes, please open an issue first.
 ## 📄 License
 
 - [GNU GPL v3](http://www.gnu.org/licenses/gpl.html)
-- Original Bazarr Copyright 2010-2024 morpheus65535
-- Fork modifications Copyright 2024 LavX
+- Original Bazarr Copyright 2010-2025 morpheus65535
+- Fork modifications Copyright 2025 LavX
 
 ---
 
@@ -259,21 +259,22 @@ Thanks to the folks at OpenSubtitles for their logo that was an inspiration for 
 At the request of some, here is a way to demonstrate your appreciation for the efforts made in the development of Bazarr:
 [![Donate](https://img.shields.io/badge/Donate-PayPal-green.svg)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=XHHRWXT9YB7WE&source=url)
 
-## Status
+## Status (LavX Fork)
 
-[![GitHub issues](https://img.shields.io/github/issues/morpheus65535/bazarr.svg?style=flat-square)](https://github.com/morpheus65535/bazarr/issues)
-[![GitHub stars](https://img.shields.io/github/stars/morpheus65535/bazarr.svg?style=flat-square)](https://github.com/morpheus65535/bazarr/stargazers)
-[![Docker Pulls](https://img.shields.io/docker/pulls/linuxserver/bazarr.svg?style=flat-square)](https://hub.docker.com/r/linuxserver/bazarr/)
-[![Docker Pulls](https://img.shields.io/docker/pulls/hotio/bazarr.svg?style=flat-square)](https://hub.docker.com/r/hotio/bazarr/)
-[![Discord](https://img.shields.io/badge/discord-chat-MH2e2eb.svg?style=flat-square)](https://discord.gg/MH2e2eb)
-
+[![GitHub issues](https://img.shields.io/github/issues/LavX/bazarr.svg?style=flat-square)](https://github.com/LavX/bazarr/issues)
+[![GitHub stars](https://img.shields.io/github/stars/LavX/bazarr.svg?style=flat-square)](https://github.com/LavX/bazarr/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/LavX/bazarr.svg?style=flat-square)](https://github.com/LavX/bazarr/network)
+[![Upstream Sync](https://img.shields.io/github/actions/workflow/status/LavX/bazarr/sync-upstream.yml?style=flat-square&label=upstream%20sync)](https://github.com/LavX/bazarr/actions/workflows/sync-upstream.yml)
+[![Docker Build](https://img.shields.io/github/actions/workflow/status/LavX/bazarr/build-docker.yml?style=flat-square&label=docker)](https://github.com/LavX/bazarr/actions/workflows/build-docker.yml)
 ## Support
 
-For installation and configuration instructions, see [wiki](https://wiki.bazarr.media).
+For installation and configuration instructions, see upstream [wiki](https://wiki.bazarr.media).
 
-You can reach us for support on [Discord](https://discord.gg/MH2e2eb).
+For fork-specific issues (OpenSubtitles scraper), open an issue on [this fork](https://github.com/LavX/bazarr/issues).
 
-If you find a bug, please open an issue on [Github](https://github.com/morpheus65535/bazarr/issues).
+For general Bazarr issues, please use the [upstream repo](https://github.com/morpheus65535/bazarr/issues).
+
+Original Bazarr Discord: [![Discord](https://img.shields.io/badge/discord-chat-MH2e2eb.svg?style=flat-square)](https://discord.gg/MH2e2eb)
 
 ## Feature Requests
 
@@ -316,7 +317,7 @@ If you need something that is not already part of Bazarr, feel free to create a 
 - Napisy24
 - Nekur
 - OpenSubtitles.com
-- OpenSubtitles.org (VIP users only)
+- OpenSubtitles.org (LavX Fork)
 - Podnapisi
 - RegieLive
 - Sous-Titres.eu
