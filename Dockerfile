@@ -63,8 +63,9 @@ LABEL org.opencontainers.image.title="Bazarr (LavX Fork)" \
       org.opencontainers.image.vendor="LavX" \
       org.opencontainers.image.licenses="GPL-3.0"
 
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Enable non-free repository for unrar and install runtime dependencies
+RUN sed -i 's/Components: main/Components: main non-free non-free-firmware/' /etc/apt/sources.list.d/debian.sources && \
+    apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libxml2 \
     libxslt1.1 \
