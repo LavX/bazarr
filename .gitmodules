@@ -1,0 +1,3 @@
+[submodule "opensubtitles-scraper"]
+	path = opensubtitles-scraper
+	url = https://github.com/LavX/opensubtitles-scraper.git
