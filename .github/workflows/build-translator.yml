@@ -58,7 +58,8 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/ai-subtitle-translator
+  # Force lowercase for Docker image names
+  IMAGE_NAME: lavx/ai-subtitle-translator
 
 jobs:
   build-translator:
