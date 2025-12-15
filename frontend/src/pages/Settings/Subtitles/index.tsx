@@ -21,6 +21,7 @@ import {
   SubzeroColorModification,
   SubzeroModification,
 } from "@/pages/Settings/utilities/modifications";
+import { useStagedValues } from "@/pages/Settings/utilities/FormValues";
 import { TranslatorStatusPanel } from "@/components/TranslatorStatus";
 import {
   adaptiveSearchingDelayOption,
@@ -137,6 +138,19 @@ const commandOptionElements: React.JSX.Element[] = commandOptions.map(
 );
 
 const SettingsSubtitlesView: FunctionComponent = () => {
+  const staged = useStagedValues();
+
+  // Get the staged values for translator settings
+  const savedApiKey = staged["settings-translator-openrouter_api_key"] as
+    | string
+    | undefined;
+  const savedModel = staged["settings-translator-openrouter_model"] as
+    | string
+    | undefined;
+  const savedMaxConcurrent = staged[
+    "settings-translator-openrouter_max_concurrent"
+  ] as number | undefined;
+
   return (
     <Layout name="Subtitles">
       <Section header="Subtitle File Options">
@@ -651,7 +665,11 @@ const SettingsSubtitlesView: FunctionComponent = () => {
             label="Service Status & Jobs"
             labelPosition="center"
           />
-          <TranslatorStatusPanel />
+          <TranslatorStatusPanel
+            savedApiKey={savedApiKey}
+            savedModel={savedModel}
+            savedMaxConcurrent={savedMaxConcurrent}
+          />
         </CollapseBox>
         <Check
           label="Add translation info at the beginning"

@@ -138,6 +138,7 @@ class OpenRouterTranslatorService:
                     "apiKey": settings.translator.openrouter_api_key,
                     "model": settings.translator.openrouter_model,
                     "temperature": settings.translator.openrouter_temperature,
+                    "maxConcurrent": settings.translator.openrouter_max_concurrent,
                 }
             }
 
