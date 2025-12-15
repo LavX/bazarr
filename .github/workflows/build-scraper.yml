@@ -58,7 +58,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/opensubtitles-scraper
+  # Note: IMAGE_NAME is set dynamically in job to ensure lowercase
 
 jobs:
   build-scraper:
@@ -70,6 +70,10 @@ jobs:
       id-token: write
 
     steps:
+      - name: Set lowercase image name
+        run: |
+          echo "IMAGE_NAME=${GITHUB_REPOSITORY_OWNER,,}/opensubtitles-scraper" >> $GITHUB_ENV
+
       - name: Checkout
         uses: actions/checkout@v5
         with:
