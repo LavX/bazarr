@@ -635,7 +635,11 @@ const SettingsSubtitlesView: FunctionComponent = () => {
               https://openrouter.ai/keys
             </a>
           </Message>
-          <AIModelSelector />
+          <Text
+            label="AI Model"
+            settingKey="settings-translator-openrouter_model"
+            placeholder="Select or type a model..."
+          />
           <Message>
             Models are fetched from the AI Subtitle Translator service. You can
             also type any model ID from{" "}
