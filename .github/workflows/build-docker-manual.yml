@@ -1,0 +1,354 @@
+name: Build Docker Image (Manual)
+
+# =============================================================================
+# Manual workflow for building Docker images from any branch
+# Supports flexible tagging strategies and build types
+# =============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to build from'
+        required: true
+        type: choice
+        options:
+          - master
+          - development
+          - python_3_14
+        default: 'master'
+      
+      build_type:
+        description: 'Build type (affects tagging strategy)'
+        required: true
+        type: choice
+        options:
+          - release      # Tagged as: version, latest (if from master)
+          - nightly      # Tagged as: nightly, nightly-YYYYMMDD
+          - dev          # Tagged as: dev, dev-branch-sha
+          - custom       # Uses custom_tag input
+        default: 'dev'
+      
+      version_tag:
+        description: 'Version tag (e.g., v1.5.3) - used for release builds'
+        required: false
+        default: ''
+        type: string
+      
+      custom_tag:
+        description: 'Custom tag - used when build_type is custom'
+        required: false
+        default: ''
+        type: string
+      
+      push_latest:
+        description: 'Also tag as latest?'
+        required: false
+        type: boolean
+        default: false
+      
+      platforms:
+        description: 'Target platforms'
+        required: true
+        type: choice
+        options:
+          - linux/amd64,linux/arm64
+          - linux/amd64
+          - linux/arm64
+        default: 'linux/amd64,linux/arm64'
+      
+      skip_scraper:
+        description: 'Skip building scraper image'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  SCRAPER_IMAGE_NAME: ${{ github.repository_owner }}/opensubtitles-scraper
+  UI_DIRECTORY: ./frontend
+
+jobs:
+  # ==========================================================================
+  # Build Scraper Image (optional)
+  # ==========================================================================
+  build-scraper:
+    if: ${{ !inputs.skip_scraper }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.branch }}
+          submodules: recursive
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine Scraper Tags
+        id: scraper-tags
+        run: |
+          TAGS="${{ env.REGISTRY }}/${{ env.SCRAPER_IMAGE_NAME }}:sha-$(git rev-parse --short HEAD)"
+          
+          case "${{ inputs.build_type }}" in
+            release)
+              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.SCRAPER_IMAGE_NAME }}:latest"
+              ;;
+            nightly)
+              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.SCRAPER_IMAGE_NAME }}:nightly"
+              ;;
+            dev)
+              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.SCRAPER_IMAGE_NAME }}:dev"
+              ;;
+          esac
+          
+          echo "tags=$TAGS" >> $GITHUB_OUTPUT
+
+      - name: Build and Push Scraper Image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./opensubtitles-scraper
+          file: ./opensubtitles-scraper/Dockerfile
+          platforms: ${{ inputs.platforms }}
+          push: true
+          tags: ${{ steps.scraper-tags.outputs.tags }}
+          cache-from: type=gha,scope=scraper
+          cache-to: type=gha,mode=max,scope=scraper
+
+  # ==========================================================================
+  # Build Frontend
+  # ==========================================================================
+  build-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Setup NodeJS
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: "${{ env.UI_DIRECTORY }}/.nvmrc"
+          cache: 'npm'
+          cache-dependency-path: "${{ env.UI_DIRECTORY }}/package-lock.json"
+
+      - name: Install Dependencies
+        run: npm ci
+        working-directory: ${{ env.UI_DIRECTORY }}
+
+      - name: Build Frontend
+        run: npm run build
+        working-directory: ${{ env.UI_DIRECTORY }}
+
+      - name: Upload Frontend Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build-${{ github.run_id }}
+          path: ${{ env.UI_DIRECTORY }}/build
+          retention-days: 1
+
+  # ==========================================================================
+  # Build and Push Bazarr Image
+  # ==========================================================================
+  build-and-push:
+    needs: [build-frontend]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.branch }}
+          submodules: recursive
+          fetch-depth: 0  # Full history for git describe
+
+      - name: Download Frontend Build
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-build-${{ github.run_id }}
+          path: ${{ env.UI_DIRECTORY }}/build
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine Version and Tags
+        id: version
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          BUILD_DATE=$(date -u +%Y%m%d)
+          BUILD_DATETIME=$(date -u +%Y%m%dT%H%M%S)
+          BRANCH="${{ inputs.branch }}"
+          
+          # Initialize tags array
+          TAGS=""
+          
+          case "${{ inputs.build_type }}" in
+            release)
+              # Release build - use version tag or auto-detect
+              if [ -n "${{ inputs.version_tag }}" ]; then
+                VERSION="${{ inputs.version_tag }}"
+              else
+                VERSION=$(git describe --tags --always 2>/dev/null || echo "0.0.0")
+              fi
+              VERSION="${VERSION#v}"  # Remove 'v' prefix
+              FORK_VERSION="${VERSION}-lavx"
+              
+              TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${FORK_VERSION}"
+              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${VERSION}"
+              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}"
+              
+              # Major.Minor tag (e.g., 1.5)
+              MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1,2)
+              if [ -n "$MAJOR_MINOR" ]; then
+                TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${MAJOR_MINOR}"
+              fi
+              
+              echo "display_version=${FORK_VERSION}" >> $GITHUB_OUTPUT
+              ;;
+              
+            nightly)
+              # Nightly build - date-based versioning
+              FORK_VERSION="nightly-${BUILD_DATE}"
+              
+              TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:nightly"
+              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:nightly-${BUILD_DATE}"
+              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}"
+              
+              echo "display_version=${FORK_VERSION}" >> $GITHUB_OUTPUT
+              ;;
+              
+            dev)
+              # Development build - branch + sha based
+              SAFE_BRANCH=$(echo "$BRANCH" | sed 's/[^a-zA-Z0-9]/-/g')
+              FORK_VERSION="dev-${SAFE_BRANCH}-${SHORT_SHA}"
+              
+              TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev"
+              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev-${SAFE_BRANCH}"
+              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}"
+              
+              echo "display_version=${FORK_VERSION}" >> $GITHUB_OUTPUT
+              ;;
+              
+            custom)
+              # Custom tag - user specified
+              CUSTOM_TAG="${{ inputs.custom_tag }}"
+              if [ -z "$CUSTOM_TAG" ]; then
+                CUSTOM_TAG="custom-${SHORT_SHA}"
+              fi
+              FORK_VERSION="${CUSTOM_TAG}"
+              
+              TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${CUSTOM_TAG}"
+              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}"
+              
+              echo "display_version=${FORK_VERSION}" >> $GITHUB_OUTPUT
+              ;;
+          esac
+          
+          # Add latest tag if requested
+          if [ "${{ inputs.push_latest }}" == "true" ]; then
+            TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          fi
+          
+          echo "tags=${TAGS}" >> $GITHUB_OUTPUT
+          echo "fork_version=${FORK_VERSION}" >> $GITHUB_OUTPUT
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "build_date=${BUILD_DATE}" >> $GITHUB_OUTPUT
+          
+          # Summary
+          echo "## 🏷️ Version & Tags" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Build Type** | ${{ inputs.build_type }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Branch** | ${BRANCH} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Version** | ${FORK_VERSION} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Short SHA** | ${SHORT_SHA} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Build Date** | ${BUILD_DATE} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Tags to be pushed:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${TAGS}" | tr ',' '\n' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Build and Push Docker Image
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ inputs.platforms }}
+          push: true
+          tags: ${{ steps.version.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=Bazarr (LavX Fork)
+            org.opencontainers.image.description=Bazarr with OpenSubtitles.org scraper support
+            org.opencontainers.image.vendor=LavX
+            org.opencontainers.image.version=${{ steps.version.outputs.fork_version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ steps.version.outputs.build_date }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: |
+            type=gha,scope=bazarr-deps
+            type=gha,scope=bazarr-main
+          cache-to: type=gha,mode=max,scope=bazarr-main
+          build-args: |
+            BAZARR_VERSION=${{ steps.version.outputs.fork_version }}
+            BUILD_DATE=${{ steps.version.outputs.build_date }}
+            VCS_REF=${{ github.sha }}
+
+      - name: Generate Artifact Attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Create Build Summary
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 🐳 Docker Image Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Pull Commands" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "# By version" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.fork_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# By SHA (immutable)" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ steps.version.outputs.short_sha }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Image Details" >> $GITHUB_STEP_SUMMARY
+          echo "- **Digest:** \`${{ steps.push.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Platforms:** ${{ inputs.platforms }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Build Type:** ${{ inputs.build_type }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Source Branch:** ${{ inputs.branch }}" >> $GITHUB_STEP_SUMMARY

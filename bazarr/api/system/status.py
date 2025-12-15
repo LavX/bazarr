@@ -3,6 +3,7 @@
 import os
 import platform
 import logging
+import sys
 
 from flask_restx import Resource, Namespace
 from tzlocal import get_localzone_name
@@ -54,7 +55,25 @@ class SystemStatus(Resource):
         system_status.update({'sonarr_version': get_sonarr_info.version()})
         system_status.update({'radarr_version': get_radarr_info.version()})
         system_status.update({'operating_system': platform.platform()})
-        system_status.update({'python_version': platform.python_version()})
+        
+        # Check if JIT is enabled (Python 3.13+)
+        python_version = platform.python_version()
+        jit_status = None
+        try:
+            # Python 3.13+ has sys._jit module when JIT is available
+            if hasattr(sys, '_jit') and hasattr(sys._jit, 'is_enabled'):
+                jit_enabled = sys._jit.is_enabled()
+                jit_status = "JIT enabled" if jit_enabled else "JIT disabled"
+            elif os.environ.get('PYTHON_JIT', '0') == '1':
+                # Fallback: check environment variable
+                jit_status = "JIT requested (env)"
+        except Exception:
+            pass
+        
+        if jit_status:
+            python_version = f"{python_version} ({jit_status})"
+        
+        system_status.update({'python_version': python_version})
         system_status.update({'database_engine': f'{engine.dialect.name.capitalize()} {database_version}'})
         system_status.update({'database_migration': database_migration})
         system_status.update({'bazarr_directory': os.path.dirname(os.path.dirname(os.path.dirname(
