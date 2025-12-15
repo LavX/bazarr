@@ -1,0 +1,272 @@
+name: Build AI Subtitle Translator
+
+# =============================================================================
+# Standalone workflow for building the AI Subtitle Translator Docker image
+# Can be triggered manually with version and platform options
+# =============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type'
+        required: true
+        type: choice
+        options:
+          - release      # latest + version tag
+          - dev          # dev + sha tag
+          - nightly      # nightly + date tag
+        default: 'dev'
+      
+      version_tag:
+        description: 'Version tag (e.g., v1.0.0) - used for release builds'
+        required: false
+        default: ''
+        type: string
+      
+      python_version:
+        description: 'Python version for the image'
+        required: true
+        type: choice
+        options:
+          - '3.14'
+          - '3.13'
+          - '3.12'
+        default: '3.14'
+      
+      enable_jit:
+        description: 'Enable Python JIT compiler'
+        required: false
+        type: boolean
+        default: true
+      
+      platforms:
+        description: 'Target platforms'
+        required: true
+        type: choice
+        options:
+          - linux/amd64,linux/arm64
+          - linux/amd64
+          - linux/arm64
+        default: 'linux/amd64,linux/arm64'
+      
+      push_latest:
+        description: 'Also tag as latest'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/ai-subtitle-translator
+
+jobs:
+  build-translator:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine Version and Tags
+        id: version
+        working-directory: ./ai-subtitle-translator
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          BUILD_DATE=$(date -u +%Y%m%d)
+          PYTHON_VER="${{ inputs.python_version }}"
+          JIT_SUFFIX="${{ inputs.enable_jit == true && '-jit' || '' }}"
+          
+          # Initialize tags
+          TAGS=""
+          VERSION=""
+          
+          case "${{ inputs.build_type }}" in
+            release)
+              if [ -n "${{ inputs.version_tag }}" ]; then
+                VERSION="${{ inputs.version_tag }}"
+              else
+                VERSION=$(git describe --tags --always 2>/dev/null || echo "1.0.0")
+              fi
+              VERSION="${VERSION#v}"
+              DISPLAY_VERSION="v${VERSION}-py${PYTHON_VER}${JIT_SUFFIX}"
+              
+              TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}"
+              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${VERSION}"
+              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:py${PYTHON_VER}${JIT_SUFFIX}"
+              ;;
+              
+            nightly)
+              VERSION="nightly-${BUILD_DATE}"
+              DISPLAY_VERSION="${VERSION}-py${PYTHON_VER}${JIT_SUFFIX}"
+              
+              TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:nightly"
+              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:nightly-${BUILD_DATE}"
+              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:nightly-py${PYTHON_VER}${JIT_SUFFIX}"
+              ;;
+              
+            dev)
+              VERSION="dev-${SHORT_SHA}"
+              DISPLAY_VERSION="${VERSION}-py${PYTHON_VER}${JIT_SUFFIX}"
+              
+              TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev"
+              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev-${SHORT_SHA}"
+              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev-py${PYTHON_VER}${JIT_SUFFIX}"
+              ;;
+          esac
+          
+          # Always add sha tag for immutability
+          TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}"
+          
+          # Add latest if requested
+          if [ "${{ inputs.push_latest }}" == "true" ]; then
+            TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          fi
+          
+          echo "tags=${TAGS}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "display_version=${DISPLAY_VERSION}" >> $GITHUB_OUTPUT
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "python_version=${PYTHON_VER}" >> $GITHUB_OUTPUT
+          echo "jit_enabled=${{ inputs.enable_jit }}" >> $GITHUB_OUTPUT
+          
+          # Build summary
+          echo "## 🏷️ AI Subtitle Translator Build Info" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Build Type** | ${{ inputs.build_type }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Version** | ${DISPLAY_VERSION} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Python** | ${PYTHON_VER} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **JIT** | ${{ inputs.enable_jit }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Platforms** | ${{ inputs.platforms }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **SHA** | ${SHORT_SHA} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Tags" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${TAGS}" | tr ',' '\n' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Generate Dockerfile with Python version
+        run: |
+          cd ai-subtitle-translator
+          
+          # Create a modified Dockerfile with the selected Python version
+          cat > Dockerfile.build << EOF
+          # Generated Dockerfile with Python ${{ steps.version.outputs.python_version }}
+          FROM python:${{ steps.version.outputs.python_version }}-slim
+          
+          # Set working directory
+          WORKDIR /app
+          
+          # Install system dependencies
+          RUN apt-get update && apt-get install -y \\
+              gcc \\
+              && rm -rf /var/lib/apt/lists/*
+          
+          # Set environment variables
+          ENV PYTHONDONTWRITEBYTECODE=1 \\
+              PYTHONUNBUFFERED=1
+          EOF
+          
+          # Add JIT env var if enabled
+          if [ "${{ inputs.enable_jit }}" == "true" ]; then
+            echo 'ENV PYTHON_JIT=1' >> Dockerfile.build
+          fi
+          
+          cat >> Dockerfile.build << 'EOF'
+          
+          # Copy requirements file
+          COPY requirements.txt .
+          
+          # Install Python dependencies
+          RUN pip install --no-cache-dir --upgrade pip && \
+              pip install --no-cache-dir -r requirements.txt
+          
+          # Copy application code
+          COPY . .
+          
+          # Expose port 8765
+          EXPOSE 8765
+          
+          # Health check
+          HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+              CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8765/health')" || exit 1
+          
+          # Run the application
+          CMD ["uvicorn", "src.subtitle_translator.main:app", "--host", "0.0.0.0", "--port", "8765"]
+          EOF
+          
+          cat Dockerfile.build
+
+      - name: Build and Push Translator Image
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./ai-subtitle-translator
+          file: ./ai-subtitle-translator/Dockerfile.build
+          platforms: ${{ inputs.platforms }}
+          push: true
+          tags: ${{ steps.version.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=AI Subtitle Translator
+            org.opencontainers.image.description=LLM-powered subtitle translation service using OpenRouter API
+            org.opencontainers.image.vendor=LavX
+            org.opencontainers.image.version=${{ steps.version.outputs.display_version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.python-version=${{ steps.version.outputs.python_version }}
+            org.opencontainers.image.jit-enabled=${{ inputs.enable_jit }}
+          cache-from: type=gha,scope=translator-${{ inputs.python_version }}
+          cache-to: type=gha,mode=max,scope=translator-${{ inputs.python_version }}
+
+      - name: Generate Artifact Attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Create Build Summary
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 🐳 AI Subtitle Translator Image Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Pull Commands" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "# By version" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# By SHA (immutable)" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ steps.version.outputs.short_sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# With Python version tag" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.build_type }}-py${{ inputs.python_version }}${{ inputs.enable_jit == true && '-jit' || '' }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Image Details" >> $GITHUB_STEP_SUMMARY
+          echo "- **Digest:** \`${{ steps.push.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Platforms:** ${{ inputs.platforms }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Python Version:** ${{ inputs.python_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **JIT Enabled:** ${{ inputs.enable_jit }}" >> $GITHUB_STEP_SUMMARY
