@@ -59,7 +59,7 @@ class SubtitlesApi extends BaseApi {
   async batchTranslate(
     items: BatchTranslateItem[],
   ): Promise<BatchTranslateResponse> {
-    const response = await this.post<BatchTranslateResponse>(
+    const response = await this.postRaw<BatchTranslateResponse>(
       "/translate/batch",
       { items },
     );
