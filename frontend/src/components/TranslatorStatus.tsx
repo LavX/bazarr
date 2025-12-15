@@ -1,9 +1,10 @@
-import { FunctionComponent } from "react";
+import { FunctionComponent, useState, useCallback } from "react";
 import {
   ActionIcon,
   Alert,
   Badge,
   Box,
+  Button,
   Card,
   Group,
   Progress,
@@ -19,6 +20,7 @@ import {
   faCircle,
   faClock,
   faExclamationTriangle,
+  faRefresh,
   faSpinner,
   faTimes,
   faTrash,
@@ -137,14 +139,46 @@ const StatCard: FunctionComponent<StatCardProps> = ({
   </Card>
 );
 
-export const TranslatorStatusPanel: FunctionComponent = () => {
+interface TranslatorStatusPanelProps {
+  enabled?: boolean;
+}
+
+export const TranslatorStatusPanel: FunctionComponent<
+  TranslatorStatusPanelProps
+> = ({ enabled = true }) => {
+  const [retryKey, setRetryKey] = useState(0);
+
   const {
     data: status,
     isError: statusError,
     error: statusErr,
-  } = useTranslatorStatus();
-  const { data: jobsData, isError: jobsError } = useTranslatorJobs();
+    isLoading: statusLoading,
+    refetch: refetchStatus,
+  } = useTranslatorStatus(enabled);
+  const {
+    data: jobsData,
+    isError: jobsError,
+    refetch: refetchJobs,
+  } = useTranslatorJobs(enabled && !statusError);
   const cancelJob = useCancelTranslatorJob();
+
+  const handleRetry = useCallback(() => {
+    setRetryKey((k) => k + 1);
+    void refetchStatus();
+    void refetchJobs();
+  }, [refetchStatus, refetchJobs]);
+
+  // Show loading state on first load
+  if (statusLoading && !status) {
+    return (
+      <Card withBorder mt="md" p="md">
+        <Group justify="center" py="md">
+          <FontAwesomeIcon icon={faSpinner} spin />
+          <Text c="dimmed">Connecting to AI Subtitle Translator...</Text>
+        </Group>
+      </Card>
+    );
+  }
 
   if (statusError || jobsError) {
     const errorMessage =
@@ -153,8 +187,23 @@ export const TranslatorStatusPanel: FunctionComponent = () => {
         : "Cannot connect to the AI Subtitle Translator service. Make sure it is running at the configured URL.";
 
     return (
-      <Alert color="red" title="AI Subtitle Translator Unavailable" mt="md">
-        {errorMessage}
+      <Alert
+        color="yellow"
+        title="AI Subtitle Translator Unavailable"
+        mt="md"
+        icon={<FontAwesomeIcon icon={faExclamationTriangle} />}
+      >
+        <Text size="sm" mb="sm">
+          {errorMessage}
+        </Text>
+        <Button
+          size="xs"
+          variant="light"
+          leftSection={<FontAwesomeIcon icon={faRefresh} />}
+          onClick={handleRetry}
+        >
+          Retry Connection
+        </Button>
       </Alert>
     );
   }

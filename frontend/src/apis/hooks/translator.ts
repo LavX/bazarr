@@ -48,7 +48,7 @@ const translatorQueryKeys = {
   job: (id: string) => [...translatorQueryKeys.all, "jobs", id] as const,
 };
 
-export function useTranslatorStatus() {
+export function useTranslatorStatus(enabled = true) {
   return useQuery({
     queryKey: translatorQueryKeys.status(),
     queryFn: async () => {
@@ -56,12 +56,17 @@ export function useTranslatorStatus() {
         await client.axios.get<TranslatorStatus>("/translator/status");
       return response.data;
     },
-    refetchInterval: 5000, // Refresh every 5 seconds
+    // Stop polling on error to avoid spamming the console
+    refetchInterval: (query) => (query.state.error ? false : 10000),
     retry: false,
+    enabled,
+    staleTime: 5000,
+    // Suppress console errors - we handle them gracefully in the UI
+    throwOnError: false,
   });
 }
 
-export function useTranslatorJobs() {
+export function useTranslatorJobs(enabled = true) {
   return useQuery({
     queryKey: translatorQueryKeys.jobs(),
     queryFn: async () => {
@@ -69,8 +74,13 @@ export function useTranslatorJobs() {
         await client.axios.get<TranslatorJobsResponse>("/translator/jobs");
       return response.data;
     },
-    refetchInterval: 2000, // Refresh every 2 seconds for real-time updates
+    // Stop polling on error to avoid spamming the console
+    refetchInterval: (query) => (query.state.error ? false : 5000),
     retry: false,
+    enabled,
+    staleTime: 2000,
+    // Suppress console errors - we handle them gracefully in the UI
+    throwOnError: false,
   });
 }
 
@@ -83,9 +93,12 @@ export function useTranslatorJob(jobId: string) {
       );
       return response.data;
     },
-    refetchInterval: 1000,
+    // Stop polling on error
+    refetchInterval: (query) => (query.state.error ? false : 2000),
     enabled: !!jobId,
     retry: false,
+    staleTime: 1000,
+    throwOnError: false,
   });
 }
 
