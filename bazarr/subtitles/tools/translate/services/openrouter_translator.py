@@ -1,0 +1,278 @@
+# coding=utf-8
+
+import time
+import logging
+import pysubs2
+import requests
+
+from retry.api import retry
+from deep_translator.exceptions import TooManyRequests, RequestError
+
+from app.config import settings
+from languages.get_languages import language_from_alpha2, language_from_alpha3
+from radarr.history import history_log_movie
+from sonarr.history import history_log
+from app.event_handler import show_progress, hide_progress, show_message
+
+from ..core.translator_utils import add_translator_info, create_process_result, get_title
+
+logger = logging.getLogger(__name__)
+
+
+class OpenRouterTranslatorService:
+    """
+    Translates subtitles using external AI Subtitle Translator service.
+    Uses async job queue for long-running translations.
+    """
+
+    def __init__(self, source_srt_file, dest_srt_file, lang_obj, to_lang, from_lang, media_type,
+                 video_path, orig_to_lang, forced, hi, sonarr_series_id, sonarr_episode_id,
+                 radarr_id):
+        self.source_srt_file = source_srt_file
+        self.dest_srt_file = dest_srt_file
+        self.lang_obj = lang_obj
+        self.to_lang = to_lang
+        self.from_lang = from_lang
+        self.media_type = media_type
+        self.video_path = video_path
+        self.orig_to_lang = orig_to_lang
+        self.forced = forced
+        self.hi = hi
+        self.sonarr_series_id = sonarr_series_id
+        self.sonarr_episode_id = sonarr_episode_id
+        self.radarr_id = radarr_id
+        self.language_code_convert_dict = {
+            'he': 'iw',
+            'zh': 'zh-CN',
+            'zt': 'zh-TW',
+        }
+
+    def translate(self):
+        try:
+            subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
+            lines_list = [x.plaintext for x in subs]
+            lines_list_len = len(lines_list)
+
+            if lines_list_len == 0:
+                logger.debug('No lines to translate in subtitle file')
+                return self.dest_srt_file
+
+            logger.debug(f'Starting AI translation for {self.source_srt_file}')
+
+            # Submit job and poll for completion
+            translated_lines = self._submit_and_poll(lines_list)
+
+            if translated_lines is None:
+                logger.error(f'Translation failed for {self.source_srt_file}')
+                show_message(f'Translation failed for {self.source_srt_file}')
+                return False
+
+            # Process results
+            logger.debug(f'BAZARR saving AI translated subtitles to {self.dest_srt_file}')
+            translation_map = {}
+            for item in translated_lines:
+                if isinstance(item, dict) and 'position' in item and 'line' in item:
+                    translation_map[item['position']] = item['line']
+
+            for i, line in enumerate(subs):
+                if i in translation_map and translation_map[i]:
+                    line.text = translation_map[i]
+
+            try:
+                subs.save(self.dest_srt_file)
+                add_translator_info(self.dest_srt_file, "# Subtitles translated with AI Subtitle Translator #")
+            except OSError:
+                logger.error(f'BAZARR is unable to save translated subtitles to {self.dest_srt_file}')
+                show_message(f'Translation failed: Unable to save translated subtitles to {self.dest_srt_file}')
+                raise OSError
+
+            message = f"{language_from_alpha2(self.from_lang)} subtitles translated to {language_from_alpha3(self.to_lang)} using AI Subtitle Translator."
+            result = create_process_result(message, self.video_path, self.orig_to_lang, self.forced, self.hi, self.dest_srt_file, self.media_type)
+
+            if self.media_type == 'series':
+                history_log(action=6,
+                            sonarr_series_id=self.sonarr_series_id,
+                            sonarr_episode_id=self.sonarr_episode_id,
+                            result=result)
+            else:
+                history_log_movie(action=6,
+                                  radarr_id=self.radarr_id,
+                                  result=result)
+
+            return self.dest_srt_file
+
+        except Exception as e:
+            logger.error(f'BAZARR encountered an error during AI translation: {str(e)}')
+            show_message(f'AI translation failed: {str(e)}')
+            hide_progress(id=f'translate_progress_{self.dest_srt_file}')
+            return False
+
+    def _submit_and_poll(self, lines_list):
+        """Submit translation job and poll for completion with progress updates"""
+        try:
+            # Prepare payload
+            source_lang = self.language_code_convert_dict.get(self.from_lang, self.from_lang)
+            target_lang = self.language_code_convert_dict.get(self.orig_to_lang, self.orig_to_lang)
+
+            lines_payload = [{"position": i, "line": line} for i, line in enumerate(lines_list)]
+
+            title = get_title(
+                media_type=self.media_type,
+                radarr_id=self.radarr_id,
+                sonarr_series_id=self.sonarr_series_id,
+                sonarr_episode_id=self.sonarr_episode_id
+            )
+
+            api_media_type = "Episode" if self.media_type == 'series' else "Movie"
+            arr_media_id = self.sonarr_series_id if self.media_type == 'series' else self.radarr_id or 0
+
+            payload = {
+                "arrMediaId": arr_media_id,
+                "title": title,
+                "sourceLanguage": source_lang,
+                "targetLanguage": target_lang,
+                "mediaType": api_media_type,
+                "lines": lines_payload,
+                # Add configuration from Bazarr settings
+                "config": {
+                    "apiKey": settings.translator.openrouter_api_key,
+                    "model": settings.translator.openrouter_model,
+                    "temperature": settings.translator.openrouter_temperature,
+                }
+            }
+
+            base_url = settings.translator.openrouter_url.rstrip('/')
+
+            # Submit job
+            logger.debug(f'BAZARR submitting {len(lines_payload)} lines to AI Subtitle Translator')
+            submit_response = requests.post(
+                f"{base_url}/api/v1/jobs/translate/content",
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=30
+            )
+
+            if submit_response.status_code != 200:
+                # Fallback to sync endpoint if job queue not available
+                logger.debug('Job queue not available, falling back to sync endpoint')
+                return self._translate_sync(lines_list, payload)
+
+            job_data = submit_response.json()
+            job_id = job_data.get("jobId")
+            if not job_id:
+                logger.error("No jobId returned from translation service")
+                return None
+
+            logger.debug(f'BAZARR translation job submitted: {job_id}')
+
+            # Poll for completion
+            return self._poll_job(base_url, job_id, len(lines_payload))
+
+        except requests.exceptions.Timeout:
+            logger.error('AI Subtitle Translator request timed out')
+            return None
+        except requests.exceptions.ConnectionError:
+            logger.error('AI Subtitle Translator connection error')
+            return None
+        except Exception as e:
+            logger.error(f'AI Subtitle Translator error: {str(e)}')
+            return None
+
+    def _poll_job(self, base_url, job_id, total_lines):
+        """Poll job status until completion"""
+        poll_interval = 2  # seconds
+        max_wait_time = 1800  # 30 minutes
+        elapsed = 0
+
+        while elapsed < max_wait_time:
+            try:
+                status_response = requests.get(
+                    f"{base_url}/api/v1/jobs/{job_id}",
+                    timeout=10
+                )
+
+                if status_response.status_code != 200:
+                    logger.error(f"Error getting job status: {status_response.status_code}")
+                    time.sleep(poll_interval)
+                    elapsed += poll_interval
+                    continue
+
+                job_status = status_response.json()
+                status = job_status.get("status")
+                progress = job_status.get("progress", 0)
+                message = job_status.get("message", "")
+
+                # Update progress in Bazarr UI
+                show_progress(
+                    id=f'translate_progress_{self.dest_srt_file}',
+                    header='Translating subtitles with AI...',
+                    name=message,
+                    value=progress,
+                    count=100
+                )
+
+                if status == "completed":
+                    hide_progress(id=f'translate_progress_{self.dest_srt_file}')
+                    result = job_status.get("result")
+                    if result:
+                        return result
+                    logger.error("Job completed but no result returned")
+                    return None
+
+                elif status == "failed":
+                    hide_progress(id=f'translate_progress_{self.dest_srt_file}')
+                    error = job_status.get("error", "Unknown error")
+                    logger.error(f"Translation job failed: {error}")
+                    show_message(f"Translation failed: {error}")
+                    return None
+
+                elif status == "cancelled":
+                    hide_progress(id=f'translate_progress_{self.dest_srt_file}')
+                    logger.info("Translation job was cancelled")
+                    return None
+
+                # Still processing or queued
+                time.sleep(poll_interval)
+                elapsed += poll_interval
+
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"Error polling job status: {e}")
+                time.sleep(poll_interval)
+                elapsed += poll_interval
+
+        # Timeout
+        hide_progress(id=f'translate_progress_{self.dest_srt_file}')
+        logger.error("Translation job timed out")
+        show_message("Translation timed out after 30 minutes")
+        return None
+
+    @retry(exceptions=(TooManyRequests, RequestError, requests.exceptions.RequestException), tries=3, delay=1, backoff=2, jitter=(0, 1))
+    def _translate_sync(self, lines_list, payload):
+        """Fallback synchronous translation (Lingarr-compatible)"""
+        base_url = settings.translator.openrouter_url.rstrip('/')
+
+        response = requests.post(
+            f"{base_url}/api/v1/translate/content",
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=1800
+        )
+
+        if response.status_code == 200:
+            translated_batch = response.json()
+            if isinstance(translated_batch, list):
+                for item in translated_batch:
+                    if not isinstance(item, dict) or 'position' not in item or 'line' not in item:
+                        logger.error(f'Invalid response format: {item}')
+                        return None
+                return translated_batch
+            else:
+                logger.error(f'Unexpected response format: {translated_batch}')
+                return None
+        elif response.status_code == 429:
+            raise TooManyRequests("Rate limit exceeded")
+        elif response.status_code >= 500:
+            raise RequestError(f"Server error: {response.status_code}")
+        else:
+            logger.error(f'API error: {response.status_code} - {response.text}')
+            return None

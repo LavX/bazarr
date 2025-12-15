@@ -16,6 +16,10 @@ class TranslatorFactory:
             from .lingarr_translator import LingarrTranslatorService
             return LingarrTranslatorService(**kwargs)
 
+        elif translator_type == 'openrouter':
+            from .openrouter_translator import OpenRouterTranslatorService
+            return OpenRouterTranslatorService(**kwargs)
+
         else:
             raise ValueError(
                 f"Unknown translator type: '{translator_type}'"
