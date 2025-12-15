@@ -32,6 +32,7 @@ import {
   useTranslatorStatus,
   useCancelTranslatorJob,
 } from "@/apis/hooks/translator";
+import { useStagedValues } from "@/pages/Settings/utilities/FormValues";
 
 interface StatusBadgeProps {
   status: TranslatorJob["status"];
@@ -347,6 +348,32 @@ export const TranslatorStatusPanel: FunctionComponent<
         )}
       </Card>
     </Stack>
+  );
+};
+
+/**
+ * Wrapper component that accesses the form context and passes values to TranslatorStatusPanel.
+ * This must be rendered inside a FormContext (i.e., inside Layout component).
+ */
+export const TranslatorStatusPanelWithFormContext: FunctionComponent = () => {
+  const staged = useStagedValues();
+
+  const savedApiKey = staged["settings-translator-openrouter_api_key"] as
+    | string
+    | undefined;
+  const savedModel = staged["settings-translator-openrouter_model"] as
+    | string
+    | undefined;
+  const savedMaxConcurrent = staged[
+    "settings-translator-openrouter_max_concurrent"
+  ] as number | undefined;
+
+  return (
+    <TranslatorStatusPanel
+      savedApiKey={savedApiKey}
+      savedModel={savedModel}
+      savedMaxConcurrent={savedMaxConcurrent}
+    />
   );
 };
 
