@@ -12,7 +12,7 @@ ARG VCS_REF
 # =============================================================================
 # Stage 1: Install Python Dependencies (cached heavily)
 # =============================================================================
-FROM python:3.12-slim-bookworm AS python-builder
+FROM python:3.14-slim-bookworm AS python-builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -36,7 +36,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # =============================================================================
 # Stage 2: Production Image
 # =============================================================================
-FROM python:3.12-slim-bookworm AS production
+FROM python:3.14-slim-bookworm AS production
 
 ARG BAZARR_VERSION
 ARG BUILD_DATE
@@ -91,6 +91,9 @@ COPY migrations ./migrations
 COPY bazarr.py ./
 COPY bazarr ./bazarr
 
+# Write version to VERSION file so bazarr/main.py can read it
+RUN echo "${BAZARR_VERSION}" > /app/bazarr/VERSION
+
 # Copy fork identification file (shows "LavX Fork" in System Status)
 COPY package_info /app/bazarr/package_info
 
@@ -99,9 +102,11 @@ COPY package_info /app/bazarr/package_info
 COPY frontend/build ./frontend/build
 
 # Set environment variables
+# PYTHON_JIT=1 enables the experimental JIT compiler (Python 3.13+)
 ENV HOME="/config" \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PYTHON_JIT=1
 
 # Volume for persistent data
 VOLUME /config
