@@ -91,8 +91,18 @@ def get_local_announcements():
             'text': 'Opensubtitles.org is deprecated for non-VIP users, migrate to Opensubtitles.com ASAP and disable '
                     'this provider to remove this announcement.',
             'link': 'https://wiki.bazarr.media/Troubleshooting/OpenSubtitles-migration/',
-            'dismissible': False,
+            'dismissible': True,
             'timestamp': 1676236978,
+        })
+
+    # opensubtitles-scraper alternative announcement
+    if enabled_providers and 'opensubtitles' in enabled_providers:
+        announcements.append({
+            'text': 'An alternative OpenSubtitles scraper service is available that bypasses API limitations. '
+                    'Consider using opensubtitles-scraper for improved subtitle downloads.',
+            'link': 'https://github.com/morpheus65535/bazarr/tree/master/opensubtitles-scraper',
+            'dismissible': True,
+            'timestamp': 1765805148,
         })
 
     # deprecated Sonarr and Radarr versions
