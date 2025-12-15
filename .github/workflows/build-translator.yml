@@ -188,8 +188,7 @@ jobs:
           
           # Set environment variables
           ENV PYTHONDONTWRITEBYTECODE=1 \\
-              PYTHONUNBUFFERED=1 \\
-              PYTHONPATH=/app/src
+              PYTHONUNBUFFERED=1
           EOF
           
           # Add JIT env var if enabled

@@ -1,5 +1,11 @@
 import React, { FunctionComponent } from "react";
-import { Code, Space, Table, Text as MantineText } from "@mantine/core";
+import {
+  Code,
+  Divider,
+  Space,
+  Table,
+  Text as MantineText,
+} from "@mantine/core";
 import {
   Check,
   CollapseBox,
@@ -15,9 +21,12 @@ import {
   SubzeroColorModification,
   SubzeroModification,
 } from "@/pages/Settings/utilities/modifications";
+import { TranslatorStatusPanel } from "@/components/TranslatorStatus";
 import {
   adaptiveSearchingDelayOption,
   adaptiveSearchingDeltaOption,
+  aiTranslatorConcurrentOptions,
+  aiTranslatorModelOptions,
   colorOptions,
   embeddedSubtitlesParserOption,
   folderOptions,
@@ -559,6 +568,90 @@ const SettingsSubtitlesView: FunctionComponent = () => {
             settingKey="settings-translator-lingarr_url"
           />
           <Message>Base URL of Lingarr (e.g., http://localhost:9876)</Message>
+        </CollapseBox>
+        <CollapseBox
+          settingKey="settings-translator-translator_type"
+          on={(val) => val === "openrouter"}
+        >
+          <Text
+            label="Service URL"
+            settingKey="settings-translator-openrouter_url"
+          />
+          <Message>
+            URL of the AI Subtitle Translator service.
+            <br />
+            <a
+              href="https://github.com/LavX/ai-subtitle-translator"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              https://github.com/LavX/ai-subtitle-translator
+            </a>
+          </Message>
+          <Text
+            label="OpenRouter API Key"
+            settingKey="settings-translator-openrouter_api_key"
+          />
+          <Message>
+            Get your API key at{" "}
+            <a
+              href="https://openrouter.ai/keys"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              https://openrouter.ai/keys
+            </a>
+          </Message>
+          <Selector
+            label="AI Model"
+            options={aiTranslatorModelOptions}
+            settingKey="settings-translator-openrouter_model"
+          />
+          <CollapseBox
+            settingKey="settings-translator-openrouter_model"
+            on={(val) => val === "custom"}
+          >
+            <Text
+              label="Custom Model"
+              settingKey="settings-translator-openrouter_model"
+              placeholder="e.g., anthropic/claude-3-opus"
+            />
+            <Message>
+              Enter any model from{" "}
+              <a
+                href="https://openrouter.ai/models"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                https://openrouter.ai/models
+              </a>
+            </Message>
+          </CollapseBox>
+          <Slider
+            label="Temperature"
+            settingKey="settings-translator-openrouter_temperature"
+            min={0}
+            max={1}
+            step={0.1}
+          />
+          <Message>
+            Lower = more deterministic, higher = more creative. Default: 0.3
+          </Message>
+          <Selector
+            label="Max Concurrent Jobs"
+            options={aiTranslatorConcurrentOptions}
+            settingKey="settings-translator-openrouter_max_concurrent"
+          />
+          <Message>
+            Maximum number of translations to process simultaneously. Higher
+            values use more API quota.
+          </Message>
+          <Divider
+            my="md"
+            label="Service Status & Jobs"
+            labelPosition="center"
+          />
+          <TranslatorStatusPanel />
         </CollapseBox>
         <Check
           label="Add translation info at the beginning"

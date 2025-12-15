@@ -7,11 +7,13 @@
 </p>
 
 <p align="center">
-  <strong>🎬 Automated subtitle management with OpenSubtitles.org web scraper support</strong>
+  <strong>🎬 Automated subtitle management with OpenSubtitles.org scraper & AI-powered translation</strong>
 </p>
 
 <p align="center">
-  This fork of <a href="https://github.com/morpheus65535/bazarr">Bazarr</a> includes a custom OpenSubtitles.org provider that works <strong>without VIP API credentials</strong> by using web scraping.
+  This fork of <a href="https://github.com/morpheus65535/bazarr">Bazarr</a> includes:<br/>
+  • OpenSubtitles.org provider that works <strong>without VIP API credentials</strong><br/>
+  • <strong>AI Subtitle Translator</strong> using OpenRouter LLMs for subtitle translation
 </p>
 
 ---
@@ -49,9 +51,10 @@ docker compose up -d
 ### Option 2: Pull Pre-built Images
 
 ```bash
-# Pull both images
+# Pull all images
 docker pull ghcr.io/lavx/bazarr:latest
 docker pull ghcr.io/lavx/opensubtitles-scraper:latest
+docker pull ghcr.io/lavx/ai-subtitle-translator:latest
 ```
 
 ---
@@ -61,6 +64,7 @@ docker pull ghcr.io/lavx/opensubtitles-scraper:latest
 | Feature | Upstream Bazarr | LavX Fork |
 |---------|-----------------|-----------|
 | **OpenSubtitles.org (Scraper)** | ❌ Not available | ✅ Included |
+| **AI Subtitle Translator** | ❌ Not available | ✅ Included |
 | OpenSubtitles.org (API) | VIP only | VIP only |
 | OpenSubtitles.com (API) | ✅ Available | ✅ Available |
 | Auto-sync with upstream | N/A | ✅ Daily at 4 AM UTC |
@@ -76,6 +80,19 @@ This fork adds a **new subtitle provider** called "OpenSubtitles.org" that:
 - ✅ Supports both movies and TV shows
 - ✅ Provides subtitle rating and download count info
 - ✅ Runs as a separate microservice for reliability
+
+### 🤖 AI Subtitle Translator
+
+This fork includes an **LLM-powered subtitle translator** that:
+
+- ✅ Uses **OpenRouter API** for access to 100+ AI models (Gemini, GPT, Claude, LLaMA, Grok, etc.)
+- ✅ Translates subtitles when no good match is found in your target language
+- ✅ **Async job queue** for handling multiple translations
+- ✅ Real-time **progress tracking** in Bazarr UI
+- ✅ Configurable directly in Bazarr Settings (API key, model, temperature, concurrent jobs)
+- ✅ Runs as a separate microservice for reliability
+
+**Repository:** [github.com/LavX/ai-subtitle-translator](https://github.com/LavX/ai-subtitle-translator)
 
 ---
 
@@ -100,6 +117,23 @@ services:
       timeout: 10s
       retries: 3
 
+  # AI Subtitle Translator Service (required for AI translation)
+  ai-subtitle-translator:
+    image: ghcr.io/lavx/ai-subtitle-translator:latest
+    container_name: ai-subtitle-translator
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      # OpenRouter API key (can also be configured in Bazarr UI)
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENROUTER_DEFAULT_MODEL=google/gemini-2.5-flash-preview-05-20
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8765/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   # Bazarr with OpenSubtitles.org scraper support
   bazarr:
     image: ghcr.io/lavx/bazarr:latest
@@ -107,6 +141,8 @@ services:
     restart: unless-stopped
     depends_on:
       opensubtitles-scraper:
+        condition: service_healthy
+      ai-subtitle-translator:
         condition: service_healthy
     ports:
       - "6767:6767"
@@ -151,30 +187,41 @@ docker compose up -d
 3. If `OPENSUBTITLES_USE_WEB_SCRAPER=true` is set, "Use Web Scraper" will auto-enable
 4. Save and test with a manual search
 
+### Enabling AI Translation
+
+1. Go to **Settings** → **Subtitles** → **Translating**
+2. Select **"AI Subtitle Translator"** from the Translator dropdown
+3. Enter your **OpenRouter API Key** (get one at [openrouter.ai/keys](https://openrouter.ai/keys))
+4. Choose your preferred **AI Model** (Gemini 2.5 Flash recommended)
+5. Save and test with a manual translation
+
 ---
 
 ## 🏗️ Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Docker Network                            │
-│                                                                  │
-│  ┌────────────────────────┐      ┌─────────────────────────┐    │
-│  │       Bazarr           │      │  OpenSubtitles Scraper  │    │
-│  │   (LavX Fork)          │      │      (Port 8765)        │    │
-│  │                        │      │                         │    │
-│  │  ┌──────────────────┐  │ HTTP │  ┌───────────────────┐  │    │
-│  │  │ OpenSubtitles.org│──┼──────┼──│  Search API       │  │    │
-│  │  │ Provider         │  │  API │  │  Download API     │  │    │
-│  │  └──────────────────┘  │      │  └───────────────────┘  │    │
-│  │                        │      │           │             │    │
-│  │  Port 6767 (WebUI)     │      │           ▼             │    │
-│  └────────────────────────┘      │  ┌───────────────────┐  │    │
-│                                  │  │ Web Scraper       │  │    │
-│                                  │  │ opensubtitles.org │  │    │
-│                                  │  └───────────────────┘  │    │
-│                                  └─────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                                Docker Network                                     │
+│                                                                                   │
+│  ┌────────────────────────┐      ┌───────────────────────┐      ┌─────────────┐  │
+│  │       Bazarr           │      │ OpenSubtitles Scraper │      │   AI Sub    │  │
+│  │   (LavX Fork)          │      │     (Port 8000)       │      │ Translator  │  │
+│  │                        │      │                       │      │ (Port 8765) │  │
+│  │  ┌──────────────────┐  │ HTTP │  ┌─────────────────┐  │      │             │  │
+│  │  │ OpenSubtitles.org│──┼──────┼──│ Search API      │  │      │ ┌─────────┐ │  │
+│  │  │ Provider         │  │  API │  │ Download API    │  │      │ │Translate│ │  │
+│  │  └──────────────────┘  │      │  └─────────────────┘  │      │ │  API    │ │  │
+│  │                        │      │          │            │      │ │Job Queue│ │  │
+│  │  ┌──────────────────┐  │ HTTP │          ▼            │      │ └────┬────┘ │  │
+│  │  │ AI Subtitle      │──┼──────┼──────────────────────────────┼──────┘      │  │
+│  │  │ Translator       │  │  API │  ┌─────────────────┐  │      │      │      │  │
+│  │  └──────────────────┘  │      │  │ Web Scraper     │  │      │      ▼      │  │
+│  │                        │      │  │opensubtitles.org│  │      │ ┌─────────┐ │  │
+│  │  Port 6767 (WebUI)     │      │  └─────────────────┘  │      │ │OpenRoute│ │  │
+│  └────────────────────────┘      └───────────────────────┘      │ │   API   │ │  │
+│                                                                  │ └─────────┘ │  │
+│                                                                  └─────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -248,6 +295,7 @@ curl -X POST http://localhost:8000/search \
 
 - [Fork Maintenance Guide](docs/FORK_MAINTENANCE.md) - How sync works
 - [OpenSubtitles Scraper](https://github.com/LavX/opensubtitles-scraper) - Scraper docs
+- [AI Subtitle Translator](https://github.com/LavX/ai-subtitle-translator) - AI translator docs
 - [Bazarr Wiki](https://wiki.bazarr.media) - General Bazarr documentation
 
 ---

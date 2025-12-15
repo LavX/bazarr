@@ -190,6 +190,11 @@ validators = [
     Validator('translator.translator_info', must_exist=True, default=True, is_type_of=bool),
     Validator('translator.translator_type', must_exist=True, default='google_translate', is_type_of=str, cast=str),
     Validator('translator.lingarr_url', must_exist=True, default='http://lingarr:9876', is_type_of=str),
+    Validator('translator.openrouter_url', must_exist=True, default='http://subtitle-translator:8765', is_type_of=str),
+    Validator('translator.openrouter_api_key', must_exist=True, default='', is_type_of=str, cast=str),
+    Validator('translator.openrouter_model', must_exist=True, default='google/gemini-2.5-flash-preview-05-20', is_type_of=str),
+    Validator('translator.openrouter_temperature', must_exist=True, default=0.3, is_type_of=float),
+    Validator('translator.openrouter_max_concurrent', must_exist=True, default=2, is_type_of=int, gte=1, lte=10),
 
     # sonarr section
     Validator('sonarr.ip', must_exist=True, default='127.0.0.1', is_type_of=str),
