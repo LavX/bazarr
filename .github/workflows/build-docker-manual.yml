@@ -16,6 +16,7 @@ on:
           - master
           - development
           - python_3_14
+          - ai_translate
         default: 'master'
       
       build_type:
