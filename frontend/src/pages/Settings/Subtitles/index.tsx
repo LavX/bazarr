@@ -28,6 +28,7 @@ import {
   adaptiveSearchingDeltaOption,
   aiTranslatorConcurrentOptions,
   aiTranslatorModelOptions,
+  aiTranslatorReasoningOptions,
   colorOptions,
   embeddedSubtitlesParserOption,
   folderOptions,
@@ -617,30 +618,26 @@ const SettingsSubtitlesView: FunctionComponent = () => {
             </a>
           </Message>
           <Selector
-            label="AI Model"
+            label="AI Model (Quick Select)"
             options={aiTranslatorModelOptions}
             settingKey="settings-translator-openrouter_model"
+            placeholder="Select a preset or type below..."
           />
-          <CollapseBox
+          <Text
+            label="Model ID"
             settingKey="settings-translator-openrouter_model"
-            on={(val) => val === "custom"}
-          >
-            <Text
-              label="Custom Model"
-              settingKey="settings-translator-openrouter_model"
-              placeholder="e.g., anthropic/claude-3-opus"
-            />
-            <Message>
-              Enter any model from{" "}
-              <a
-                href="https://openrouter.ai/models"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                https://openrouter.ai/models
-              </a>
-            </Message>
-          </CollapseBox>
+            placeholder="e.g., google/gemini-2.5-flash-preview-05-20"
+          />
+          <Message>
+            Select a preset above or type any model ID from{" "}
+            <a
+              href="https://openrouter.ai/models"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              https://openrouter.ai/models
+            </a>
+          </Message>
           <Slider
             label="Temperature"
             settingKey="settings-translator-openrouter_temperature"
@@ -659,6 +656,16 @@ const SettingsSubtitlesView: FunctionComponent = () => {
           <Message>
             Maximum number of translations to process simultaneously. Higher
             values use more API quota.
+          </Message>
+          <Selector
+            label="Reasoning Mode"
+            options={aiTranslatorReasoningOptions}
+            settingKey="settings-translator-openrouter_reasoning"
+          />
+          <Message>
+            Enable extended thinking for supported models (Gemini, Claude Haiku
+            4.5, Grok). Higher levels improve translation quality but increase
+            cost and time.
           </Message>
           <Divider
             my="md"

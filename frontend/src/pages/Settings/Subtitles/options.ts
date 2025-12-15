@@ -220,6 +220,10 @@ export const aiTranslatorModelOptions: SelectorOption<string>[] = [
     value: "anthropic/claude-3-haiku",
   },
   {
+    label: "Claude Haiku 4.5 (Extended Thinking)",
+    value: "anthropic/claude-haiku-4.5",
+  },
+  {
     label: "LLaMA 4 Maverick",
     value: "meta-llama/llama-4-maverick",
   },
@@ -231,10 +235,13 @@ export const aiTranslatorModelOptions: SelectorOption<string>[] = [
     label: "Kimi K2",
     value: "moonshotai/kimi-k2-0905",
   },
-  {
-    label: "Custom (enter below)",
-    value: "custom",
-  },
+];
+
+export const aiTranslatorReasoningOptions: SelectorOption<string>[] = [
+  { label: "Disabled", value: "disabled" },
+  { label: "Low (Minimal thinking)", value: "low" },
+  { label: "Medium (Default)", value: "medium" },
+  { label: "High (Extended thinking)", value: "high" },
 ];
 
 export const aiTranslatorConcurrentOptions: SelectorOption<number>[] = [

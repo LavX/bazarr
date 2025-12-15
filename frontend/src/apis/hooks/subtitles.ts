@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
+import { BatchTranslateItem } from "@/apis/raw/subtitles";
 
 export function useSubtitleAction() {
   const client = useQueryClient();
@@ -179,5 +180,27 @@ export function useRefTracksByMovieId(
     queryFn: () =>
       api.subtitles.getRefTracksByMovieId(subtitlesPath, radarrMovieId),
     enabled: isMovie,
+  });
+}
+
+export function useBatchTranslate() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationKey: [QueryKeys.Subtitles, "batch-translate"],
+    mutationFn: (items: BatchTranslateItem[]) =>
+      api.subtitles.batchTranslate(items),
+    onSuccess: () => {
+      // Invalidate wanted queries to refresh the lists
+      void client.invalidateQueries({
+        queryKey: [QueryKeys.Series, QueryKeys.Wanted],
+      });
+      void client.invalidateQueries({
+        queryKey: [QueryKeys.Movies, QueryKeys.Wanted],
+      });
+      // Also invalidate translator jobs to show new jobs
+      void client.invalidateQueries({
+        queryKey: [QueryKeys.Translator],
+      });
+    },
   });
 }

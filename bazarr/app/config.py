@@ -195,6 +195,8 @@ validators = [
     Validator('translator.openrouter_model', must_exist=True, default='google/gemini-2.5-flash-preview-05-20', is_type_of=str),
     Validator('translator.openrouter_temperature', must_exist=True, default=0.3, is_type_of=float),
     Validator('translator.openrouter_max_concurrent', must_exist=True, default=2, is_type_of=int, gte=1, lte=10),
+    Validator('translator.openrouter_reasoning', must_exist=True, default='disabled', is_type_of=str,
+              is_in=['disabled', 'low', 'medium', 'high']),
 
     # sonarr section
     Validator('sonarr.ip', must_exist=True, default='127.0.0.1', is_type_of=str),

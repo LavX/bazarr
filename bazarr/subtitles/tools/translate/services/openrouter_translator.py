@@ -47,6 +47,30 @@ class OpenRouterTranslatorService:
             'zt': 'zh-TW',
         }
 
+    def _build_reasoning_config(self):
+        """
+        Build reasoning configuration based on Bazarr settings.
+        Maps effort levels to max_tokens for the AI Subtitle Translator service.
+        """
+        reasoning_mode = getattr(settings.translator, 'openrouter_reasoning', 'disabled')
+        
+        if reasoning_mode == 'disabled':
+            return None
+        
+        # Map effort levels to max_tokens for reasoning
+        effort_to_tokens = {
+            'low': 1000,      # Minimal thinking
+            'medium': 2000,   # Default balanced
+            'high': 4000,     # Extended thinking
+        }
+        
+        max_tokens = effort_to_tokens.get(reasoning_mode, 2000)
+        
+        return {
+            'enabled': True,
+            'maxTokens': max_tokens,
+        }
+
     def translate(self):
         try:
             subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
@@ -138,7 +162,8 @@ class OpenRouterTranslatorService:
                     "apiKey": settings.translator.openrouter_api_key,
                     "model": settings.translator.openrouter_model,
                     "temperature": settings.translator.openrouter_temperature,
-                    "maxConcurrent": settings.translator.openrouter_max_concurrent,
+                    "maxConcurrentJobs": settings.translator.openrouter_max_concurrent,
+                    "reasoning": self._build_reasoning_config(),
                 }
             }
 
