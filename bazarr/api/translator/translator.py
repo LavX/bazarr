@@ -125,6 +125,33 @@ class TranslatorJob(Resource):
             return {"error": str(e)}, 500
 
 
+@api_ns_translator.route('translator/models')
+class TranslatorModels(Resource):
+    @authenticate
+    @api_ns_translator.doc(
+        responses={200: 'Success', 503: 'Service Unavailable'}
+    )
+    def get(self):
+        """Get available AI translation models from the service"""
+        service_url = get_service_url()
+        if not service_url:
+            return {"error": "AI Subtitle Translator service URL not configured"}, 503
+
+        try:
+            response = requests.get(f"{service_url}/api/v1/models", timeout=10)
+            if response.status_code == 200:
+                return response.json(), 200
+            else:
+                return {"error": f"Service returned {response.status_code}"}, response.status_code
+        except requests.exceptions.ConnectionError:
+            return {"error": "Cannot connect to AI Subtitle Translator service"}, 503
+        except requests.exceptions.Timeout:
+            return {"error": "Service timeout"}, 503
+        except Exception as e:
+            logger.error(f"Error getting models: {e}")
+            return {"error": str(e)}, 500
+
+
 @api_ns_translator.route('translator/config')
 class TranslatorConfig(Resource):
     @authenticate

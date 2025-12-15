@@ -41,11 +41,29 @@ export interface TranslatorJobsResponse {
   queued: number;
 }
 
+export interface TranslatorModelInfo {
+  id: string;
+  name: string;
+  description?: string;
+  context_length?: number;
+  pricing?: {
+    prompt?: string;
+    completion?: string;
+  };
+  is_default?: boolean;
+}
+
+export interface TranslatorModelsResponse {
+  models: TranslatorModelInfo[];
+  default_model: string;
+}
+
 const translatorQueryKeys = {
   all: [QueryKeys.Translator] as const,
   status: () => [...translatorQueryKeys.all, "status"] as const,
   jobs: () => [...translatorQueryKeys.all, "jobs"] as const,
   job: (id: string) => [...translatorQueryKeys.all, "jobs", id] as const,
+  models: () => [...translatorQueryKeys.all, "models"] as const,
 };
 
 export function useTranslatorStatus(enabled = true) {
@@ -117,5 +135,20 @@ export function useCancelTranslatorJob() {
         queryKey: translatorQueryKeys.status(),
       });
     },
+  });
+}
+
+export function useTranslatorModels(enabled = true) {
+  return useQuery({
+    queryKey: translatorQueryKeys.models(),
+    queryFn: async () => {
+      const response =
+        await client.axios.get<TranslatorModelsResponse>("/translator/models");
+      return response.data;
+    },
+    retry: false,
+    enabled,
+    staleTime: 60000, // Cache for 1 minute
+    throwOnError: false,
   });
 }

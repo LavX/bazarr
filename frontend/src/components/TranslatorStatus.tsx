@@ -32,7 +32,7 @@ import {
   useTranslatorStatus,
   useCancelTranslatorJob,
 } from "@/apis/hooks/translator";
-import { useStagedValues } from "@/pages/Settings/utilities/FormValues";
+import { useSettingValue } from "@/pages/Settings/utilities/hooks";
 
 interface StatusBadgeProps {
   status: TranslatorJob["status"];
@@ -356,23 +356,22 @@ export const TranslatorStatusPanel: FunctionComponent<
  * This must be rendered inside a FormContext (i.e., inside Layout component).
  */
 export const TranslatorStatusPanelWithFormContext: FunctionComponent = () => {
-  const staged = useStagedValues();
-
-  const savedApiKey = staged["settings-translator-openrouter_api_key"] as
-    | string
-    | undefined;
-  const savedModel = staged["settings-translator-openrouter_model"] as
-    | string
-    | undefined;
-  const savedMaxConcurrent = staged[
-    "settings-translator-openrouter_max_concurrent"
-  ] as number | undefined;
+  // Use useSettingValue which properly merges saved settings with staged overrides
+  const savedApiKey = useSettingValue<string>(
+    "settings-translator-openrouter_api_key",
+  );
+  const savedModel = useSettingValue<string>(
+    "settings-translator-openrouter_model",
+  );
+  const savedMaxConcurrent = useSettingValue<number>(
+    "settings-translator-openrouter_max_concurrent",
+  );
 
   return (
     <TranslatorStatusPanel
-      savedApiKey={savedApiKey}
-      savedModel={savedModel}
-      savedMaxConcurrent={savedMaxConcurrent}
+      savedApiKey={savedApiKey ?? undefined}
+      savedModel={savedModel ?? undefined}
+      savedMaxConcurrent={savedMaxConcurrent ?? undefined}
     />
   );
 };

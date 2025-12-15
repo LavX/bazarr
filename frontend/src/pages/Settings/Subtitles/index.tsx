@@ -1,4 +1,4 @@
-import React, { FunctionComponent } from "react";
+import React, { FunctionComponent, useMemo } from "react";
 import {
   Code,
   Divider,
@@ -22,6 +22,8 @@ import {
   SubzeroModification,
 } from "@/pages/Settings/utilities/modifications";
 import { TranslatorStatusPanelWithFormContext } from "@/components/TranslatorStatus";
+import { useTranslatorModels } from "@/apis/hooks/translator";
+import { SelectorOption } from "@/components";
 import {
   adaptiveSearchingDelayOption,
   adaptiveSearchingDeltaOption,
@@ -136,6 +138,36 @@ const commandOptionElements: React.JSX.Element[] = commandOptions.map(
     </tr>
   ),
 );
+
+/**
+ * AI Model Selector that fetches available models from the translator service.
+ * Falls back to static options if the service is unavailable.
+ */
+const AIModelSelector: FunctionComponent = () => {
+  const { data: modelsResponse, isLoading, isError } = useTranslatorModels();
+
+  const modelOptions = useMemo((): SelectorOption<string>[] => {
+    // If we have data from the service, use it
+    if (modelsResponse?.models && modelsResponse.models.length > 0) {
+      return modelsResponse.models.map((model) => ({
+        label: model.name + (model.is_default ? " (Recommended)" : ""),
+        value: model.id,
+      }));
+    }
+    // Fall back to static options
+    return aiTranslatorModelOptions;
+  }, [modelsResponse]);
+
+  return (
+    <Selector
+      label="AI Model"
+      options={modelOptions}
+      settingKey="settings-translator-openrouter_model"
+      placeholder={isLoading ? "Loading models..." : "Select a model..."}
+      disabled={isLoading}
+    />
+  );
+};
 
 const SettingsSubtitlesView: FunctionComponent = () => {
   return (
@@ -603,26 +635,18 @@ const SettingsSubtitlesView: FunctionComponent = () => {
               https://openrouter.ai/keys
             </a>
           </Message>
-          <Selector
-            label="AI Model (Quick Select)"
-            options={aiTranslatorModelOptions}
-            settingKey="settings-translator-openrouter_model"
-            placeholder="Select a preset or type below..."
-          />
-          <Text
-            label="Model ID"
-            settingKey="settings-translator-openrouter_model"
-            placeholder="e.g., google/gemini-2.5-flash-preview-05-20"
-          />
+          <AIModelSelector />
           <Message>
-            Select a preset above or type any model ID from{" "}
+            Models are fetched from the AI Subtitle Translator service. You can
+            also type any model ID from{" "}
             <a
               href="https://openrouter.ai/models"
               target="_blank"
               rel="noopener noreferrer"
             >
               https://openrouter.ai/models
-            </a>
+            </a>{" "}
+            in the field above.
           </Message>
           <Slider
             label="Temperature"
