@@ -100,12 +100,12 @@ def add_translator_info(dest_srt_file, info):
 
         # Add the info subtitle
         new_sub = srt.Subtitle(
-            index=1,  # temporary, will be reindexed
+            index=0,  # temporary, will be reindexed
             start=start_time,
             end=end_time,
             content=info
         )
-        subtitles.insert(0, new_sub)
+        subtitles.append(new_sub)
 
         # Re-index and sort
         subtitles = list(srt.sort_and_reindex(subtitles))

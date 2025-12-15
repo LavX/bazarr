@@ -4,6 +4,7 @@ import time
 import logging
 import pysubs2
 import requests
+from typing import Optional, List, Dict, Any
 
 from retry.api import retry
 from deep_translator.exceptions import TooManyRequests, RequestError
@@ -74,7 +75,7 @@ class OpenRouterTranslatorService:
     def translate(self):
         try:
             subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
-            lines_list = [x.plaintext for x in subs]
+            lines_list: List[str] = [x.plaintext for x in subs]
             lines_list_len = len(lines_list)
 
             if lines_list_len == 0:
@@ -131,14 +132,15 @@ class OpenRouterTranslatorService:
             hide_progress(id=f'translate_progress_{self.dest_srt_file}')
             return False
 
-    def _submit_and_poll(self, lines_list):
+    def _submit_and_poll(self, lines_list: List[str]) -> Optional[List[Dict[str, Any]]]:
         """Submit translation job and poll for completion with progress updates"""
         try:
             # Prepare payload
             source_lang = self.language_code_convert_dict.get(self.from_lang, self.from_lang)
-            target_lang = self.language_code_convert_dict.get(self.orig_to_lang, self.orig_to_lang)
+            target_lang = self.orig_to_lang or self.to_lang
+            target_lang = self.language_code_convert_dict.get(target_lang, target_lang)
 
-            lines_payload = [{"position": i, "line": line} for i, line in enumerate(lines_list)]
+            lines_payload: List[Dict[str, Any]] = [{"position": i, "line": line} for i, line in enumerate(lines_list)]
 
             title = get_title(
                 media_type=self.media_type,
@@ -150,11 +152,14 @@ class OpenRouterTranslatorService:
             api_media_type = "Episode" if self.media_type == 'series' else "Movie"
             arr_media_id = self.sonarr_series_id if self.media_type == 'series' else self.radarr_id or 0
 
+            # Use original target language code (orig_to_lang) if available
+            target_lang_code = self.orig_to_lang or self.to_lang
+
             payload = {
                 "arrMediaId": arr_media_id,
                 "title": title,
                 "sourceLanguage": source_lang,
-                "targetLanguage": target_lang,
+                "targetLanguage": target_lang_code,
                 "mediaType": api_media_type,
                 "lines": lines_payload,
                 # Add configuration from Bazarr settings
@@ -204,7 +209,7 @@ class OpenRouterTranslatorService:
             logger.error(f'AI Subtitle Translator error: {str(e)}')
             return None
 
-    def _poll_job(self, base_url, job_id, total_lines):
+    def _poll_job(self, base_url: str, job_id: str, total_lines: int) -> Optional[Any]:
         """Poll job status until completion"""
         poll_interval = 2  # seconds
         max_wait_time = 1800  # 30 minutes
@@ -273,7 +278,7 @@ class OpenRouterTranslatorService:
         return None
 
     @retry(exceptions=(TooManyRequests, RequestError, requests.exceptions.RequestException), tries=3, delay=1, backoff=2, jitter=(0, 1))
-    def _translate_sync(self, lines_list, payload):
+    def _translate_sync(self, lines_list: List[str], payload: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
         """Fallback synchronous translation (Lingarr-compatible)"""
         base_url = settings.translator.openrouter_url.rstrip('/')
 
