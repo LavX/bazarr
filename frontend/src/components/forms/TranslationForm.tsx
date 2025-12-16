@@ -190,6 +190,12 @@ const TranslationForm: FunctionComponent<Props> = ({
           ...defaultConfig,
           service: "Lingarr",
         };
+      case "openrouter":
+        return {
+          ...defaultConfig,
+          service: "AI Translator",
+          model: ` (${settings?.data?.translator?.openrouter_model || ""})`,
+        };
       default:
         return defaultConfig;
     }
