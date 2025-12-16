@@ -5,7 +5,6 @@ interface Settings {
   proxy: Settings.Proxy;
   auth: Settings.Auth;
   subsync: Settings.Subsync;
-  analytics: Settings.Analytic;
   sonarr: Settings.Sonarr;
   radarr: Settings.Radarr;
   backup: Settings.Backup;
@@ -126,10 +125,6 @@ declare namespace Settings {
     max_offset_seconds: number;
     no_fix_framerate: boolean;
     gss: boolean;
-  }
-
-  interface Analytic {
-    enabled: boolean;
   }
 
   interface Notifications {

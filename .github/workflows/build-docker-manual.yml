@@ -17,6 +17,7 @@ on:
           - development
           - python_3_14
           - ai_translate
+          - no_telemetry
         default: 'master'
       
       build_type:
