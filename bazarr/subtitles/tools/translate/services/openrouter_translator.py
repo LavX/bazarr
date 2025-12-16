@@ -135,10 +135,23 @@ class OpenRouterTranslatorService:
     def _submit_and_poll(self, lines_list: List[str]) -> Optional[List[Dict[str, Any]]]:
         """Submit translation job and poll for completion with progress updates"""
         try:
-            # Prepare payload
-            source_lang = self.language_code_convert_dict.get(self.from_lang, self.from_lang)
-            target_lang = self.orig_to_lang or self.to_lang
+            # Prepare language codes
+            # from_lang should be alpha2 (e.g., "en")
+            # orig_to_lang should be alpha2 (e.g., "hu")
+            # to_lang is alpha3 (e.g., "hun")
+            source_lang = self.from_lang
+            target_lang = self.orig_to_lang  # Use original alpha2 code
+            
+            # Apply any special language code conversions
+            source_lang = self.language_code_convert_dict.get(source_lang, source_lang)
             target_lang = self.language_code_convert_dict.get(target_lang, target_lang)
+
+            logger.debug(f'BAZARR translation language codes: from_lang={self.from_lang}, to_lang={self.to_lang}, '
+                         f'orig_to_lang={self.orig_to_lang}, final source={source_lang}, final target={target_lang}')
+
+            if not target_lang:
+                logger.error(f'Target language is empty! from_lang={self.from_lang}, to_lang={self.to_lang}, orig_to_lang={self.orig_to_lang}')
+                return None
 
             lines_payload: List[Dict[str, Any]] = [{"position": i, "line": line} for i, line in enumerate(lines_list)]
 
@@ -152,14 +165,11 @@ class OpenRouterTranslatorService:
             api_media_type = "Episode" if self.media_type == 'series' else "Movie"
             arr_media_id = self.sonarr_series_id if self.media_type == 'series' else self.radarr_id or 0
 
-            # Use original target language code (orig_to_lang) if available
-            target_lang_code = self.orig_to_lang or self.to_lang
-
             payload = {
                 "arrMediaId": arr_media_id,
                 "title": title,
                 "sourceLanguage": source_lang,
-                "targetLanguage": target_lang_code,
+                "targetLanguage": target_lang,
                 "mediaType": api_media_type,
                 "lines": lines_payload,
                 # Add configuration from Bazarr settings
