@@ -213,10 +213,10 @@ class BatchTranslate(Resource):
         import json
         import os
 
-        logger.debug(f'Looking for {language_code} subtitle. Subtitles data: {subtitles}')
+        logger.debug(f'Looking for "{language_code}" subtitle. Subtitles data type: {type(subtitles)}')
 
         if not subtitles:
-            logger.debug('No subtitles data found')
+            logger.debug('No subtitles data found in database for this media')
             return None
 
         # Parse subtitles if it's a string (JSON)
@@ -224,21 +224,39 @@ class BatchTranslate(Resource):
             try:
                 subtitles = json.loads(subtitles)
             except json.JSONDecodeError:
-                logger.debug('Failed to parse subtitles JSON')
+                logger.error('Failed to parse subtitles JSON from database')
                 return None
 
         if not isinstance(subtitles, list):
             logger.debug(f'Subtitles is not a list: {type(subtitles)}')
             return None
 
-        logger.debug(f'Parsed {len(subtitles)} subtitles')
+        logger.debug(f'Found {len(subtitles)} subtitle(s) in database')
+
+        # Collect available language codes for better error reporting
+        available_codes = []
+        for sub in subtitles:
+            if isinstance(sub, dict):
+                code = sub.get('code2', '')
+                if code:
+                    available_codes.append(code)
+
+        if available_codes:
+            logger.info(f'Available subtitle language codes: {available_codes}')
+        else:
+            logger.warning('No language codes found in subtitle data')
+
+        # Check if requested language exists
+        if language_code not in available_codes:
+            logger.warning(f'Requested language code "{language_code}" not in available codes: {available_codes}. '
+                          f'Make sure you\'re using the correct 2-letter language code (e.g., "en" not "English").')
 
         # Look for matching subtitle
         for sub in subtitles:
             sub_code = sub.get('code2', '')
             sub_path = sub.get('path', '')
             
-            logger.debug(f'Checking subtitle: code2={sub_code}, path={sub_path}')
+            logger.debug(f'Checking subtitle: code2="{sub_code}", path="{sub_path}"')
             
             if sub_code == language_code and sub_path:
                 # Apply path mapping if needed
@@ -253,7 +271,7 @@ class BatchTranslate(Resource):
                     logger.debug(f'Found matching subtitle at original path {sub_path}')
                     return sub_path
                 else:
-                    logger.debug(f'Path does not exist: {mapped_path} or {sub_path}')
+                    logger.warning(f'Subtitle path does not exist: {mapped_path} (original: {sub_path})')
                     
-        logger.debug(f'No {language_code} subtitle found')
+        logger.warning(f'No "{language_code}" subtitle found. Available languages: {available_codes}')
         return None

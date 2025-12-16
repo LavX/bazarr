@@ -256,6 +256,12 @@ class OpenRouterTranslatorService:
                     hide_progress(id=f'translate_progress_{self.dest_srt_file}')
                     result = job_status.get("result")
                     if result:
+                        # Handle structured response with "lines" key from AI Subtitle Translator
+                        # The service returns {"lines": [...], "model_used": ..., "tokens_used": ...}
+                        if isinstance(result, dict) and "lines" in result:
+                            logger.debug(f'Extracted {len(result["lines"])} lines from structured result')
+                            return result["lines"]
+                        # Fallback for direct list response
                         return result
                     logger.error("Job completed but no result returned")
                     return None
