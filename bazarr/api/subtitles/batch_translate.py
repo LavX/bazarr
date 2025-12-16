@@ -130,13 +130,13 @@ class BatchTranslate(Resource):
         source_subtitle_path = subtitle_path
         if not source_subtitle_path:
             source_subtitle_path = self._find_subtitle_by_language(
-                episode.subtitles, source_language, video_path
+                episode.subtitles, source_language, video_path, media_type='series'
             )
 
         if not source_subtitle_path:
             return {
-                'queued': False, 
-                'error': f'No {source_language} subtitle found for episode {sonarr_episode_id}'
+                'queued': False,
+                'error': f'No subtitle found for episode {sonarr_episode_id} (requested source: {source_language})'
             }
 
         # Queue translation
@@ -180,13 +180,13 @@ class BatchTranslate(Resource):
         source_subtitle_path = subtitle_path
         if not source_subtitle_path:
             source_subtitle_path = self._find_subtitle_by_language(
-                movie.subtitles, source_language, video_path
+                movie.subtitles, source_language, video_path, media_type='movie'
             )
 
         if not source_subtitle_path:
             return {
                 'queued': False,
-                'error': f'No {source_language} subtitle found for movie {radarr_id}'
+                'error': f'No subtitle found for movie {radarr_id} (requested source: {source_language})'
             }
 
         # Queue translation  
@@ -208,8 +208,22 @@ class BatchTranslate(Resource):
             logger.error(f'Translation failed for movie {radarr_id}: {e}')
             return {'queued': False, 'error': str(e)}
 
-    def _find_subtitle_by_language(self, subtitles, language_code, video_path):
-        """Find a subtitle file by language code from the subtitles list"""
+    def _find_subtitle_by_language(self, subtitles, language_code, video_path, media_type='movie'):
+        """Find a subtitle file by language code from the subtitles list.
+        
+        If no exact language match is found, falls back to using any available subtitle.
+        This is useful when the source language detection might differ or when users
+        want to translate from whatever subtitle is available.
+        
+        Args:
+            subtitles: List of subtitle dictionaries or JSON string
+            language_code: Preferred source language code (e.g., "en")
+            video_path: Path to the video file
+            media_type: Either 'movie' or 'series' for correct path mapping
+            
+        Returns:
+            Path to the subtitle file, or None if no subtitles available
+        """
         import json
         import os
 
@@ -233,45 +247,87 @@ class BatchTranslate(Resource):
 
         logger.debug(f'Found {len(subtitles)} subtitle(s) in database')
 
-        # Collect available language codes for better error reporting
-        available_codes = []
+        # Collect available subtitles with their paths for better processing
+        available_subtitles = []
         for sub in subtitles:
             if isinstance(sub, dict):
-                code = sub.get('code2', '')
-                if code:
-                    available_codes.append(code)
+                sub_code = sub.get('code2', '')
+                sub_path = sub.get('path', '')
+                sub_hi = sub.get('hi', False)
+                sub_forced = sub.get('forced', False)
+                
+                if sub_path:
+                    available_subtitles.append({
+                        'code2': sub_code,
+                        'path': sub_path,
+                        'hi': sub_hi,
+                        'forced': sub_forced
+                    })
 
+        available_codes = [s['code2'] for s in available_subtitles if s['code2']]
+        
         if available_codes:
             logger.info(f'Available subtitle language codes: {available_codes}')
         else:
             logger.warning('No language codes found in subtitle data')
 
-        # Check if requested language exists
-        if language_code not in available_codes:
-            logger.warning(f'Requested language code "{language_code}" not in available codes: {available_codes}. '
-                          f'Make sure you\'re using the correct 2-letter language code (e.g., "en" not "English").')
+        if not available_subtitles:
+            logger.warning('No subtitle files with valid paths found')
+            return None
 
-        # Look for matching subtitle
-        for sub in subtitles:
-            sub_code = sub.get('code2', '')
-            sub_path = sub.get('path', '')
-            
-            logger.debug(f'Checking subtitle: code2="{sub_code}", path="{sub_path}"')
-            
-            if sub_code == language_code and sub_path:
-                # Apply path mapping if needed
+        # Helper function to resolve and validate subtitle path
+        def resolve_subtitle_path(sub_path):
+            # Apply path mapping based on media type
+            if media_type == 'series':
+                mapped_path = path_mappings.path_replace(sub_path)
+            else:
                 mapped_path = path_mappings.path_replace_movie(sub_path)
-                logger.debug(f'Mapped path: {mapped_path}')
-                
-                # Check if file exists
-                if os.path.exists(mapped_path):
-                    logger.debug(f'Found matching subtitle at {mapped_path}')
-                    return mapped_path
-                elif os.path.exists(sub_path):
-                    logger.debug(f'Found matching subtitle at original path {sub_path}')
-                    return sub_path
-                else:
-                    logger.warning(f'Subtitle path does not exist: {mapped_path} (original: {sub_path})')
-                    
-        logger.warning(f'No "{language_code}" subtitle found. Available languages: {available_codes}')
+            
+            logger.debug(f'Checking path: {mapped_path} (original: {sub_path})')
+            
+            # Check if file exists at mapped path
+            if os.path.exists(mapped_path):
+                return mapped_path
+            # Fallback to original path
+            elif os.path.exists(sub_path):
+                return sub_path
+            
+            return None
+
+        # First pass: Look for exact language match
+        exact_matches = [s for s in available_subtitles if s['code2'] == language_code]
+        
+        # Sort matches: prefer non-HI, non-forced first, then HI, then forced
+        exact_matches.sort(key=lambda x: (x['forced'], x['hi']))
+        
+        for sub in exact_matches:
+            resolved_path = resolve_subtitle_path(sub['path'])
+            if resolved_path:
+                logger.info(f'Found exact language match "{language_code}" at {resolved_path} '
+                           f'(hi={sub["hi"]}, forced={sub["forced"]})')
+                return resolved_path
+
+        # Second pass: If no exact match found, try any available subtitle
+        logger.info(f'No exact match for "{language_code}" found. '
+                   f'Falling back to any available subtitle.')
+        
+        # Sort all available: prefer non-HI, non-forced, and prioritize common languages
+        common_languages = ['en', 'eng']  # English often has good quality subs
+        
+        def sort_key(sub):
+            is_common = sub['code2'] in common_languages
+            return (sub['forced'], sub['hi'], not is_common)
+        
+        available_subtitles.sort(key=sort_key)
+        
+        for sub in available_subtitles:
+            resolved_path = resolve_subtitle_path(sub['path'])
+            if resolved_path:
+                logger.warning(f'Using fallback subtitle with language "{sub["code2"]}" at {resolved_path} '
+                              f'(hi={sub["hi"]}, forced={sub["forced"]}). '
+                              f'Requested language was "{language_code}".')
+                return resolved_path
+        
+        logger.warning(f'No usable subtitle files found. '
+                      f'Checked {len(available_subtitles)} subtitle(s), none exist on disk.')
         return None

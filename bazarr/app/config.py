@@ -379,7 +379,7 @@ validators = [
     Validator('betaseries.token', must_exist=True, default='', is_type_of=str, cast=str),
 
     # analytics section
-    Validator('analytics.enabled', must_exist=True, default=True, is_type_of=bool),
+    Validator('analytics.enabled', must_exist=True, default=False, is_type_of=bool),
     
     # jimaku section
     Validator('jimaku.api_key', must_exist=True, default='', is_type_of=str),
