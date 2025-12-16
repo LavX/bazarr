@@ -378,9 +378,6 @@ validators = [
     # betaseries section
     Validator('betaseries.token', must_exist=True, default='', is_type_of=str, cast=str),
 
-    # analytics section
-    Validator('analytics.enabled', must_exist=True, default=False, is_type_of=bool),
-    
     # jimaku section
     Validator('jimaku.api_key', must_exist=True, default='', is_type_of=str),
     Validator('jimaku.enable_name_search_fallback', must_exist=True, default=True, is_type_of=bool),

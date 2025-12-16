@@ -53,9 +53,6 @@ os.environ["SZ_HI_EXTENSION"] = settings.general.hi_extension
 # set anti-captcha provider and key
 configure_captcha_func()
 
-# import Google Analytics module to make sure logging is properly configured afterwards
-from ga4mp import GtagMP  # noqa E402
-
 # configure logging
 configure_logging(settings.general.debug or args.debug)
 import logging  # noqa E402
@@ -160,12 +157,6 @@ if not os.path.exists(os.path.join(args.config_dir, 'config', 'announcements.txt
     from app.announcements import get_announcements_to_file
     get_announcements_to_file()
     logging.debug("BAZARR Created announcements file")
-
-# Move GA visitor from config to dedicated file
-if 'visitor' in settings.analytics:
-    with open(os.path.normpath(os.path.join(args.config_dir, 'config', 'analytics.dat')), 'w+') as handle:
-        handle.write(settings.analytics.visitor)
-    settings['analytics'].pop('visitor', None)
 
 # Clean unused settings from config
 settings['general'].pop('throtteled_providers', None)
