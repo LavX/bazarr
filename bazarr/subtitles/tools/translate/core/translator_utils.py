@@ -84,31 +84,27 @@ def add_translator_info(dest_srt_file, info):
         subtitles = list(srt.parse(srt_content))
 
         if subtitles:
-            first_start = subtitles[0].start
+            # Find the last subtitle's end time and add the info after it
+            last_end = max(sub.end for sub in subtitles)
+            start_time = last_end + datetime.timedelta(milliseconds=100)
+            end_time = start_time + datetime.timedelta(seconds=4)
         else:
-            # If no subtitles exist, set an arbitrary end time for the info subtitle
-            first_start = datetime.timedelta(seconds=5)
+            # If no subtitles exist, add at the end of a typical video
+            start_time = datetime.timedelta(hours=2)
+            end_time = start_time + datetime.timedelta(seconds=4)
 
-        # Determine the end time as the minimum of first_start and 5s
-        end_time = min(first_start, datetime.timedelta(seconds=5))
-
-        # If end time is exactly 5s, start at 1s. Otherwise, start at 0s.
-        if end_time == datetime.timedelta(seconds=5):
-            start_time = datetime.timedelta(seconds=1)
-        else:
-            start_time = datetime.timedelta(seconds=0)
-
-        # Add the info subtitle
+        # Add the info subtitle at the end
         new_sub = srt.Subtitle(
-            index=1,  # temporary, will be reindexed
+            index=len(subtitles) + 1,
             start=start_time,
             end=end_time,
             content=info
         )
-        subtitles.insert(0, new_sub)
+        subtitles.append(new_sub)
 
-        # Re-index and sort
-        subtitles = list(srt.sort_and_reindex(subtitles))
+        # Re-index (no sorting needed since we're adding at the end)
+        for i, sub in enumerate(subtitles, start=1):
+            sub.index = i
 
         with open(dest_srt_file, "w", encoding="utf-8") as f:
             f.write(srt.compose(subtitles))

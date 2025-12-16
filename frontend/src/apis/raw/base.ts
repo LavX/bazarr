@@ -47,6 +47,14 @@ class BaseApi {
     });
   }
 
+  protected postRaw<T = void>(
+    path: string,
+    data?: any,
+    params?: LooseObject,
+  ): Promise<AxiosResponse<T>> {
+    return client.axios.post(this.prefix + path, data, { params });
+  }
+
   protected patch<T = void>(
     path: string,
     formdata?: LooseObject,

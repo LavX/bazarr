@@ -1,5 +1,23 @@
 import BaseApi from "./base";
 
+export interface BatchTranslateItem {
+  type: "episode" | "movie";
+  sonarrSeriesId?: number;
+  sonarrEpisodeId?: number;
+  radarrId?: number;
+  sourceLanguage: string;
+  targetLanguage: string;
+  subtitlePath?: string;
+  forced?: boolean;
+  hi?: boolean;
+}
+
+export interface BatchTranslateResponse {
+  queued: number;
+  skipped: number;
+  errors: string[];
+}
+
 class SubtitlesApi extends BaseApi {
   constructor() {
     super("/subtitles");
@@ -36,6 +54,16 @@ class SubtitlesApi extends BaseApi {
 
   async modify(action: string, form: FormType.ModifySubtitle) {
     await this.patch("", form, { action });
+  }
+
+  async batchTranslate(
+    items: BatchTranslateItem[],
+  ): Promise<BatchTranslateResponse> {
+    const response = await this.postRaw<BatchTranslateResponse>(
+      "/translate/batch",
+      { items },
+    );
+    return response.data;
   }
 }
 

@@ -1,6 +1,6 @@
-import { FunctionComponent, useMemo } from "react";
+import { FunctionComponent, useCallback, useMemo } from "react";
 import { Link } from "react-router";
-import { Anchor, Badge, Group } from "@mantine/core";
+import { Anchor, Badge, Checkbox, Group } from "@mantine/core";
 import { faSearch } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
@@ -10,6 +10,7 @@ import {
   useSeriesAction,
 } from "@/apis/hooks";
 import Language from "@/components/bazarr/Language";
+import { WantedItem } from "@/components/forms/MassTranslateForm";
 import { task, TaskGroup } from "@/modules/task";
 import WantedView from "@/pages/views/WantedView";
 import { BuildKey } from "@/utilities";
@@ -19,6 +20,29 @@ const WantedSeriesView: FunctionComponent = () => {
 
   const columns = useMemo<ColumnDef<Wanted.Episode>[]>(
     () => [
+      {
+        id: "selection",
+        header: ({ table }) => {
+          return (
+            <Checkbox
+              id="table-header-selection"
+              indeterminate={table.getIsSomeRowsSelected()}
+              checked={table.getIsAllRowsSelected()}
+              onChange={table.getToggleAllRowsSelectedHandler()}
+            />
+          );
+        },
+        cell: ({ row: { index, getIsSelected, getToggleSelectedHandler } }) => {
+          return (
+            <Checkbox
+              id={`table-cell-${index}`}
+              checked={getIsSelected()}
+              onChange={getToggleSelectedHandler()}
+              onClick={getToggleSelectedHandler()}
+            />
+          );
+        },
+      },
       {
         header: "Name",
         accessorKey: "seriesTitle",
@@ -93,6 +117,16 @@ const WantedSeriesView: FunctionComponent = () => {
     [download],
   );
 
+  const getWantedItem = useCallback((row: Wanted.Episode): WantedItem => {
+    return {
+      type: "episode",
+      sonarrSeriesId: row.sonarrSeriesId,
+      sonarrEpisodeId: row.sonarrEpisodeId,
+      seriesTitle: row.seriesTitle,
+      episodeTitle: row.episodeTitle,
+    };
+  }, []);
+
   const { mutateAsync } = useSeriesAction();
   const query = useEpisodeWantedPagination();
   return (
@@ -101,7 +135,8 @@ const WantedSeriesView: FunctionComponent = () => {
       columns={columns}
       query={query}
       searchAll={() => mutateAsync({ action: "search-wanted" })}
-    ></WantedView>
+      getWantedItem={getWantedItem}
+    />
   );
 };
 

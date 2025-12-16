@@ -32,6 +32,7 @@ import {
   useTranslatorStatus,
   useCancelTranslatorJob,
 } from "@/apis/hooks/translator";
+import { useSettingValue } from "@/pages/Settings/utilities/hooks";
 
 interface StatusBadgeProps {
   status: TranslatorJob["status"];
@@ -141,11 +142,14 @@ const StatCard: FunctionComponent<StatCardProps> = ({
 
 interface TranslatorStatusPanelProps {
   enabled?: boolean;
+  savedApiKey?: string;
+  savedModel?: string;
+  savedMaxConcurrent?: number;
 }
 
 export const TranslatorStatusPanel: FunctionComponent<
   TranslatorStatusPanelProps
-> = ({ enabled = true }) => {
+> = ({ enabled = true, savedApiKey, savedModel, savedMaxConcurrent }) => {
   const [retryKey, setRetryKey] = useState(0);
 
   const {
@@ -230,29 +234,62 @@ export const TranslatorStatusPanel: FunctionComponent<
           )}
         </Group>
 
+        {/* Bazarr Configuration (Saved Settings) */}
+        <Text size="xs" c="dimmed" mt="md" mb="xs" fw={600}>
+          Bazarr Configuration
+        </Text>
+        <Group gap="xl">
+          <Box>
+            <Text size="xs" c="dimmed">
+              API Key
+            </Text>
+            <Text size="sm">{savedApiKey ? "✓ Set" : "✗ Not Set"}</Text>
+          </Box>
+          <Box>
+            <Text size="xs" c="dimmed">
+              Model
+            </Text>
+            <Text size="sm">{savedModel || "Not configured"}</Text>
+          </Box>
+          <Box>
+            <Text size="xs" c="dimmed">
+              Max Concurrent
+            </Text>
+            <Text size="sm">{savedMaxConcurrent ?? "Not set"}</Text>
+          </Box>
+        </Group>
+
+        {/* Service Status (Runtime State) */}
         {status && (
-          <Group gap="xl">
-            <Box>
-              <Text size="xs" c="dimmed">
-                Model
-              </Text>
-              <Text size="sm">{status.config.model}</Text>
-            </Box>
-            <Box>
-              <Text size="xs" c="dimmed">
-                API Key
-              </Text>
-              <Text size="sm">
-                {status.config.apiKeyConfigured ? "✓ Configured" : "✗ Not Set"}
-              </Text>
-            </Box>
-            <Box>
-              <Text size="xs" c="dimmed">
-                Max Concurrent
-              </Text>
-              <Text size="sm">{status.queue.maxConcurrent}</Text>
-            </Box>
-          </Group>
+          <>
+            <Text size="xs" c="dimmed" mt="md" mb="xs" fw={600}>
+              Service Runtime State
+            </Text>
+            <Group gap="xl">
+              <Box>
+                <Text size="xs" c="dimmed">
+                  Active Model
+                </Text>
+                <Text size="sm">{status.config.model}</Text>
+              </Box>
+              <Box>
+                <Text size="xs" c="dimmed">
+                  API Key Status
+                </Text>
+                <Text size="sm">
+                  {status.config.apiKeyConfigured
+                    ? "✓ Configured"
+                    : "✗ Not Set"}
+                </Text>
+              </Box>
+              <Box>
+                <Text size="xs" c="dimmed">
+                  Max Concurrent
+                </Text>
+                <Text size="sm">{status.queue.maxConcurrent}</Text>
+              </Box>
+            </Group>
+          </>
         )}
       </Card>
 
@@ -311,6 +348,31 @@ export const TranslatorStatusPanel: FunctionComponent<
         )}
       </Card>
     </Stack>
+  );
+};
+
+/**
+ * Wrapper component that accesses the form context and passes values to TranslatorStatusPanel.
+ * This must be rendered inside a FormContext (i.e., inside Layout component).
+ */
+export const TranslatorStatusPanelWithFormContext: FunctionComponent = () => {
+  // Use useSettingValue which properly merges saved settings with staged overrides
+  const savedApiKey = useSettingValue<string>(
+    "settings-translator-openrouter_api_key",
+  );
+  const savedModel = useSettingValue<string>(
+    "settings-translator-openrouter_model",
+  );
+  const savedMaxConcurrent = useSettingValue<number>(
+    "settings-translator-openrouter_max_concurrent",
+  );
+
+  return (
+    <TranslatorStatusPanel
+      savedApiKey={savedApiKey ?? undefined}
+      savedModel={savedModel ?? undefined}
+      savedMaxConcurrent={savedMaxConcurrent ?? undefined}
+    />
   );
 };
 

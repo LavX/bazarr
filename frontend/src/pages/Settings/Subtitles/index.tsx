@@ -1,4 +1,4 @@
-import React, { FunctionComponent } from "react";
+import React, { FunctionComponent, useMemo } from "react";
 import {
   Code,
   Divider,
@@ -21,12 +21,15 @@ import {
   SubzeroColorModification,
   SubzeroModification,
 } from "@/pages/Settings/utilities/modifications";
-import { TranslatorStatusPanel } from "@/components/TranslatorStatus";
+import { TranslatorStatusPanelWithFormContext } from "@/components/TranslatorStatus";
+import { useTranslatorModels } from "@/apis/hooks/translator";
+import { SelectorOption } from "@/components";
 import {
   adaptiveSearchingDelayOption,
   adaptiveSearchingDeltaOption,
   aiTranslatorConcurrentOptions,
   aiTranslatorModelOptions,
+  aiTranslatorReasoningOptions,
   colorOptions,
   embeddedSubtitlesParserOption,
   folderOptions,
@@ -135,6 +138,36 @@ const commandOptionElements: React.JSX.Element[] = commandOptions.map(
     </tr>
   ),
 );
+
+/**
+ * AI Model Selector that fetches available models from the translator service.
+ * Falls back to static options if the service is unavailable.
+ */
+const AIModelSelector: FunctionComponent = () => {
+  const { data: modelsResponse, isLoading, isError } = useTranslatorModels();
+
+  const modelOptions = useMemo((): SelectorOption<string>[] => {
+    // If we have data from the service, use it
+    if (modelsResponse?.models && modelsResponse.models.length > 0) {
+      return modelsResponse.models.map((model) => ({
+        label: model.name + (model.is_default ? " (Recommended)" : ""),
+        value: model.id,
+      }));
+    }
+    // Fall back to static options
+    return aiTranslatorModelOptions;
+  }, [modelsResponse]);
+
+  return (
+    <Selector
+      label="AI Model"
+      options={modelOptions}
+      settingKey="settings-translator-openrouter_model"
+      placeholder={isLoading ? "Loading models..." : "Select a model..."}
+      disabled={isLoading}
+    />
+  );
+};
 
 const SettingsSubtitlesView: FunctionComponent = () => {
   return (
@@ -602,31 +635,23 @@ const SettingsSubtitlesView: FunctionComponent = () => {
               https://openrouter.ai/keys
             </a>
           </Message>
-          <Selector
+          <Text
             label="AI Model"
-            options={aiTranslatorModelOptions}
             settingKey="settings-translator-openrouter_model"
+            placeholder="Select or type a model..."
           />
-          <CollapseBox
-            settingKey="settings-translator-openrouter_model"
-            on={(val) => val === "custom"}
-          >
-            <Text
-              label="Custom Model"
-              settingKey="settings-translator-openrouter_model"
-              placeholder="e.g., anthropic/claude-3-opus"
-            />
-            <Message>
-              Enter any model from{" "}
-              <a
-                href="https://openrouter.ai/models"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                https://openrouter.ai/models
-              </a>
-            </Message>
-          </CollapseBox>
+          <Message>
+            Models are fetched from the AI Subtitle Translator service. You can
+            also type any model ID from{" "}
+            <a
+              href="https://openrouter.ai/models"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              https://openrouter.ai/models
+            </a>{" "}
+            in the field above.
+          </Message>
           <Slider
             label="Temperature"
             settingKey="settings-translator-openrouter_temperature"
@@ -646,12 +671,22 @@ const SettingsSubtitlesView: FunctionComponent = () => {
             Maximum number of translations to process simultaneously. Higher
             values use more API quota.
           </Message>
+          <Selector
+            label="Reasoning Mode"
+            options={aiTranslatorReasoningOptions}
+            settingKey="settings-translator-openrouter_reasoning"
+          />
+          <Message>
+            Enable extended thinking for supported models (Gemini, Claude Haiku
+            4.5, Grok). Higher levels improve translation quality but increase
+            cost and time.
+          </Message>
           <Divider
             my="md"
             label="Service Status & Jobs"
             labelPosition="center"
           />
-          <TranslatorStatusPanel />
+          <TranslatorStatusPanelWithFormContext />
         </CollapseBox>
         <Check
           label="Add translation info at the beginning"

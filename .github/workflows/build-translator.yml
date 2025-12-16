@@ -8,6 +8,16 @@ name: Build AI Subtitle Translator
 on:
   workflow_dispatch:
     inputs:
+      source_branch:
+        description: 'Branch containing the ai-subtitle-translator submodule'
+        required: true
+        type: choice
+        options:
+          - ai_translate
+          - development
+          - master
+        default: 'ai_translate'
+      
       build_type:
         description: 'Build type'
         required: true
@@ -74,8 +84,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
         with:
+          ref: ${{ inputs.source_branch }}
           submodules: recursive
           fetch-depth: 0
+      
+      - name: Verify submodule exists
+        run: |
+          if [ ! -d "ai-subtitle-translator" ]; then
+            echo "❌ Error: ai-subtitle-translator submodule not found!"
+            echo "The selected branch '${{ inputs.source_branch }}' may not have the submodule configured."
+            echo ""
+            echo "Available branches with the submodule:"
+            echo "  - ai_translate (recommended)"
+            exit 1
+          fi
+          echo "✅ Submodule found: ai-subtitle-translator"
+          ls -la ai-subtitle-translator/
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

@@ -181,6 +181,11 @@ declare namespace Settings {
     lingarr_url: string;
     translator_info: boolean;
     translator_type: string;
+    openrouter_url?: string;
+    openrouter_api_key?: string;
+    openrouter_model?: string;
+    openrouter_temperature?: number;
+    openrouter_max_concurrent?: number;
   }
 
   interface Plex {
