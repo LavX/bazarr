@@ -213,7 +213,10 @@ class BatchTranslate(Resource):
         import json
         import os
 
+        logger.debug(f'Looking for {language_code} subtitle. Subtitles data: {subtitles}')
+
         if not subtitles:
+            logger.debug('No subtitles data found')
             return None
 
         # Parse subtitles if it's a string (JSON)
@@ -221,19 +224,36 @@ class BatchTranslate(Resource):
             try:
                 subtitles = json.loads(subtitles)
             except json.JSONDecodeError:
+                logger.debug('Failed to parse subtitles JSON')
                 return None
 
         if not isinstance(subtitles, list):
+            logger.debug(f'Subtitles is not a list: {type(subtitles)}')
             return None
+
+        logger.debug(f'Parsed {len(subtitles)} subtitles')
 
         # Look for matching subtitle
         for sub in subtitles:
             sub_code = sub.get('code2', '')
             sub_path = sub.get('path', '')
             
+            logger.debug(f'Checking subtitle: code2={sub_code}, path={sub_path}')
+            
             if sub_code == language_code and sub_path:
-                # Return the path if it exists
-                if os.path.exists(sub_path):
+                # Apply path mapping if needed
+                mapped_path = path_mappings.path_replace_movie(sub_path)
+                logger.debug(f'Mapped path: {mapped_path}')
+                
+                # Check if file exists
+                if os.path.exists(mapped_path):
+                    logger.debug(f'Found matching subtitle at {mapped_path}')
+                    return mapped_path
+                elif os.path.exists(sub_path):
+                    logger.debug(f'Found matching subtitle at original path {sub_path}')
                     return sub_path
+                else:
+                    logger.debug(f'Path does not exist: {mapped_path} or {sub_path}')
                     
+        logger.debug(f'No {language_code} subtitle found')
         return None
