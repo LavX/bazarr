@@ -128,8 +128,9 @@ class BatchTranslate(Resource):
 
         # Find source subtitle
         source_subtitle_path = subtitle_path
+        detected_source_lang = None
         if not source_subtitle_path:
-            source_subtitle_path = self._find_subtitle_by_language(
+            source_subtitle_path, detected_source_lang = self._find_subtitle_by_language(
                 episode.subtitles, source_language, video_path, media_type='series'
             )
 
@@ -138,6 +139,10 @@ class BatchTranslate(Resource):
                 'queued': False,
                 'error': f'No subtitle found for episode {sonarr_episode_id} (requested source: {source_language})'
             }
+
+        # Use detected language if available
+        if detected_source_lang:
+            source_language = detected_source_lang
 
         # Queue translation
         try:
@@ -178,8 +183,9 @@ class BatchTranslate(Resource):
 
         # Find source subtitle
         source_subtitle_path = subtitle_path
+        detected_source_lang = None
         if not source_subtitle_path:
-            source_subtitle_path = self._find_subtitle_by_language(
+            source_subtitle_path, detected_source_lang = self._find_subtitle_by_language(
                 movie.subtitles, source_language, video_path, media_type='movie'
             )
 
@@ -188,6 +194,10 @@ class BatchTranslate(Resource):
                 'queued': False,
                 'error': f'No subtitle found for movie {radarr_id} (requested source: {source_language})'
             }
+
+        # Use detected language if available
+        if detected_source_lang:
+            source_language = detected_source_lang
 
         # Queue translation  
         try:
@@ -222,58 +232,44 @@ class BatchTranslate(Resource):
             media_type: Either 'movie' or 'series' for correct path mapping
             
         Returns:
-            Path to the subtitle file, or None if no subtitles available
+            Tuple of (Path to the subtitle file, detected language code), or (None, None) if no subtitles available
         """
-        import json
+        import ast
         import os
 
         logger.debug(f'Looking for "{language_code}" subtitle. Subtitles data type: {type(subtitles)}')
 
-        if not subtitles:
-            logger.debug('No subtitles data found in database for this media')
-            return None
-
-        # Parse subtitles if it's a string (JSON)
-        if isinstance(subtitles, str):
-            try:
-                subtitles = json.loads(subtitles)
-            except json.JSONDecodeError:
-                logger.error('Failed to parse subtitles JSON from database')
-                return None
-
-        if not isinstance(subtitles, list):
-            logger.debug(f'Subtitles is not a list: {type(subtitles)}')
-            return None
-
-        logger.debug(f'Found {len(subtitles)} subtitle(s) in database')
-
-        # Collect available subtitles with their paths for better processing
         available_subtitles = []
-        for sub in subtitles:
-            if isinstance(sub, dict):
-                sub_code = sub.get('code2', '')
-                sub_path = sub.get('path', '')
-                sub_hi = sub.get('hi', False)
-                sub_forced = sub.get('forced', False)
-                
-                if sub_path:
-                    available_subtitles.append({
-                        'code2': sub_code,
-                        'path': sub_path,
-                        'hi': sub_hi,
-                        'forced': sub_forced
-                    })
 
-        available_codes = [s['code2'] for s in available_subtitles if s['code2']]
-        
-        if available_codes:
-            logger.info(f'Available subtitle language codes: {available_codes}')
-        else:
-            logger.warning('No language codes found in subtitle data')
+        if subtitles:
+            # Parse subtitles if it's a string (Python literal from DB)
+            if isinstance(subtitles, str):
+                try:
+                    subtitles = ast.literal_eval(subtitles)
+                except (ValueError, SyntaxError):
+                    logger.error('Failed to parse subtitles from database')
+                    subtitles = []
 
-        if not available_subtitles:
-            logger.warning('No subtitle files with valid paths found')
-            return None
+            if isinstance(subtitles, list):
+                logger.debug(f'Found {len(subtitles)} subtitle(s) in database')
+
+                # Collect available subtitles with their paths for better processing
+                for sub in subtitles:
+                    # DB format is [lang_str, path, size]
+                    if isinstance(sub, (list, tuple)) and len(sub) >= 2:
+                        lang_parts = sub[0].split(':')
+                        sub_code = lang_parts[0]
+                        sub_path = sub[1]
+                        sub_hi = len(lang_parts) > 1 and lang_parts[1].lower() == 'hi'
+                        sub_forced = len(lang_parts) > 1 and lang_parts[1].lower() == 'forced'
+                        
+                        if sub_path:
+                            available_subtitles.append({
+                                'code2': sub_code,
+                                'path': sub_path,
+                                'hi': sub_hi,
+                                'forced': sub_forced
+                            })
 
         # Helper function to resolve and validate subtitle path
         def resolve_subtitle_path(sub_path):
@@ -294,7 +290,7 @@ class BatchTranslate(Resource):
             
             return None
 
-        # First pass: Look for exact language match
+        # First pass: Look for exact language match in DB
         exact_matches = [s for s in available_subtitles if s['code2'] == language_code]
         
         # Sort matches: prefer non-HI, non-forced first, then HI, then forced
@@ -305,29 +301,105 @@ class BatchTranslate(Resource):
             if resolved_path:
                 logger.info(f'Found exact language match "{language_code}" at {resolved_path} '
                            f'(hi={sub["hi"]}, forced={sub["forced"]})')
-                return resolved_path
+                return resolved_path, sub['code2']
 
-        # Second pass: If no exact match found, try any available subtitle
-        logger.info(f'No exact match for "{language_code}" found. '
-                   f'Falling back to any available subtitle.')
+        # Second pass: If no exact match found in DB, try any available subtitle from DB
+        if available_subtitles:
+            logger.info(f'No exact match for "{language_code}" found in DB. '
+                       f'Falling back to any available subtitle from DB.')
+            
+            # Sort all available: prefer non-HI, non-forced, and prioritize common languages
+            common_languages = ['en', 'eng']  # English often has good quality subs
+            
+            def sort_key(sub):
+                is_common = sub['code2'] in common_languages
+                return (sub['forced'], sub['hi'], not is_common)
+            
+            available_subtitles.sort(key=sort_key)
+            
+            for sub in available_subtitles:
+                resolved_path = resolve_subtitle_path(sub['path'])
+                if resolved_path:
+                    logger.warning(f'Using fallback subtitle with language "{sub["code2"]}" at {resolved_path} '
+                                  f'(hi={sub["hi"]}, forced={sub["forced"]}). '
+                                  f'Requested language was "{language_code}".')
+                    return resolved_path, sub['code2']
+
+        # Third pass: Scan filesystem fallback
+        logger.info(f'No usable subtitle found in DB. Scanning filesystem near {video_path}')
+        filesystem_subs = self._scan_filesystem_for_subtitles(video_path)
         
-        # Sort all available: prefer non-HI, non-forced, and prioritize common languages
-        common_languages = ['en', 'eng']  # English often has good quality subs
+        if filesystem_subs:
+            # Prefer English
+            for sub in filesystem_subs:
+                if sub['is_english']:
+                    logger.info(f'Found English subtitle on filesystem: {sub["path"]}')
+                    return sub['path'], 'en'
+            
+            # Use first available
+            sub = filesystem_subs[0]
+            logger.info(f'Using non-English subtitle from filesystem: {sub["path"]} (detected: {sub["detected_language"]})')
+            return sub['path'], sub['detected_language']
         
-        def sort_key(sub):
-            is_common = sub['code2'] in common_languages
-            return (sub['forced'], sub['hi'], not is_common)
+        logger.warning(f'No usable subtitle files found in DB or on filesystem.')
+        return None, None
+
+    def _scan_filesystem_for_subtitles(self, video_path):
+        """Scan filesystem for .srt files next to the video file."""
+        import os
+        import re
+
+        ENGLISH_PATTERNS = [
+            r'\.en\.srt$', r'\.eng\.srt$', r'\.english\.srt$',
+            r'[._-]en[._-]', r'[._-]eng[._-]', r'[._-]english[._-]',
+        ]
         
-        available_subtitles.sort(key=sort_key)
+        video_dir = os.path.dirname(video_path)
+        video_name = os.path.splitext(os.path.basename(video_path))[0]
+        results = []
         
-        for sub in available_subtitles:
-            resolved_path = resolve_subtitle_path(sub['path'])
-            if resolved_path:
-                logger.warning(f'Using fallback subtitle with language "{sub["code2"]}" at {resolved_path} '
-                              f'(hi={sub["hi"]}, forced={sub["forced"]}). '
-                              f'Requested language was "{language_code}".')
-                return resolved_path
+        # Search directories
+        search_dirs = [video_dir]
+        for subfolder in ['Subs', 'Subtitles', 'subs', 'subtitles', video_name]:
+            subdir = os.path.join(video_dir, subfolder)
+            if os.path.isdir(subdir):
+                search_dirs.append(subdir)
         
-        logger.warning(f'No usable subtitle files found. '
-                      f'Checked {len(available_subtitles)} subtitle(s), none exist on disk.')
+        for directory in search_dirs:
+            try:
+                for filename in os.listdir(directory):
+                    if filename.lower().endswith('.srt'):
+                        full_path = os.path.join(directory, filename)
+                        
+                        # Detect language from filename
+                        is_english = any(re.search(p, filename.lower()) for p in ENGLISH_PATTERNS)
+                        detected_lang = 'en' if is_english else self._detect_language_from_content(full_path)
+                        
+                        results.append({
+                            'path': full_path,
+                            'filename': filename,
+                            'is_english': is_english or detected_lang == 'en',
+                            'detected_language': detected_lang or 'und'
+                        })
+            except OSError:
+                continue
+        
+        # Sort: English first
+        results.sort(key=lambda x: (not x['is_english'], x['filename']))
+        return results
+
+    def _detect_language_from_content(self, srt_path):
+        """Detect language by analyzing subtitle content."""
+        from guess_language import guess_language
+        from charset_normalizer import detect
+        try:
+            with open(srt_path, 'rb') as f:
+                raw = f.read(8192)  # Read first 8KB
+            
+            encoding = detect(raw)
+            if encoding and encoding.get('encoding'):
+                text = raw.decode(encoding['encoding'], errors='ignore')
+                return guess_language(text)
+        except Exception:
+            pass
         return None
