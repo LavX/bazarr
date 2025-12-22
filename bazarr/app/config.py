@@ -3,6 +3,7 @@
 import hashlib
 import os
 import ast
+import json
 import logging
 import re
 import secrets
@@ -710,6 +711,13 @@ def save_settings(settings_items):
             value = True
         elif value == 'false':
             value = False
+
+        # Handle JSON strings for dict settings
+        if settings_keys[-1] == 'provider_priorities' and isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                pass
 
         if key in ['settings-general-use_embedded_subs', 'settings-general-ignore_pgs_subs',
                    'settings-general-ignore_vobsub_subs', 'settings-general-ignore_ass_subs']:

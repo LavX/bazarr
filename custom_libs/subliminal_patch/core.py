@@ -468,7 +468,7 @@ class SZProviderPool(ProviderPool):
                 continue
 
             # Search this provider
-            provider_subtitles = self.list_subtitles_provider(name, video, languages)
+            provider_subtitles = SZProviderPool.list_subtitles_provider(self, name, video, languages)
 
             if provider_subtitles is None:
                 logger.info('Discarding provider %s', name)

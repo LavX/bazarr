@@ -10,7 +10,7 @@ from subtitles.tools.translate.main import translate_subtitles_file
 
 logger = logging.getLogger(__name__)
 
-def process_episode_translation(item, source_language, target_language, forced, hi, subtitle_path):
+def process_episode_translation(item, source_language, target_language, forced, hi, subtitle_path, job_id=None):
     """Process a single episode for translation in background"""
     sonarr_series_id = item.get('sonarrSeriesId')
     sonarr_episode_id = item.get('sonarrEpisodeId')
@@ -66,7 +66,7 @@ def process_episode_translation(item, source_language, target_language, forced, 
         logger.error(f'Translation failed for episode {sonarr_episode_id}: {e}')
         return False
 
-def process_movie_translation(item, source_language, target_language, forced, hi, subtitle_path):
+def process_movie_translation(item, source_language, target_language, forced, hi, subtitle_path, job_id=None):
     """Process a single movie for translation in background"""
     radarr_id = item.get('radarrId')
 

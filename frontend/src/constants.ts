@@ -1,1 +1,1 @@
-export const GithubRepoRoot = "https://github.com/morpheus65535/bazarr";
+export const GithubRepoRoot = "https://github.com/LavX/bazarr";

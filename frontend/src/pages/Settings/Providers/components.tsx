@@ -241,7 +241,8 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
         if (settings?.general?.provider_priorities?.[payload.key]) {
           const priorities = { ...settings.general.provider_priorities };
           delete priorities[payload.key];
-          changes["settings-general-provider_priorities"] = priorities;
+          changes["settings-general-provider_priorities"] =
+            JSON.stringify(priorities);
         }
 
         onChangeRef.current(changes);
@@ -275,7 +276,8 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
             ...(settings?.general?.provider_priorities ?? {}),
           };
           priorities[info.key] = priority;
-          changes["settings-general-provider_priorities"] = priorities;
+          changes["settings-general-provider_priorities"] =
+            JSON.stringify(priorities);
           delete changes[priorityKey];
         }
 
