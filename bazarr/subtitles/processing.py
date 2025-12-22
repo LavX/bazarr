@@ -9,7 +9,6 @@ from utilities.post_processing import pp_replace, set_chmod
 from utilities.autopulse_webhook import call_external_webhook
 from languages.get_languages import alpha2_from_alpha3, alpha2_from_language, alpha3_from_language, language_from_alpha3
 from app.database import TableShows, TableEpisodes, TableMovies, database, select
-from utilities.analytics import event_tracker
 from radarr.notify import notify_radarr
 from sonarr.notify import notify_sonarr
 from plex.operations import plex_set_movie_added_date_now, plex_update_library, plex_set_episode_added_date_now, plex_refresh_item
@@ -176,8 +175,6 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         language=downloaded_language,
         media_type=media_type
     )
-
-    event_tracker.track_subtitles(provider=downloaded_provider, action=action, language=downloaded_language)
 
     return ProcessSubtitlesResult(message=message,
                                   reversed_path=reversed_path,
