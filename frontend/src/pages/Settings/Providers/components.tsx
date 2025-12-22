@@ -3,6 +3,7 @@ import {
   FunctionComponent,
   JSX,
   useCallback,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -25,6 +26,7 @@ import {
   Check,
   Chips,
   Message,
+  Number,
   Password,
   ProviderTestButton,
   Selector as GlobalSelector,
@@ -99,6 +101,7 @@ export const ProviderView: FunctionComponent<ProviderViewProps> = ({
 
   const cards = useMemo(() => {
     if (providers) {
+      const priorities = settings?.general?.provider_priorities ?? {};
       return providers
         .flatMap((v) => {
           const item = availableOptions.find((inn) => inn.key === v);
@@ -108,20 +111,32 @@ export const ProviderView: FunctionComponent<ProviderViewProps> = ({
             return [];
           }
         })
-        .map((v, idx) => (
-          <Card
-            titleStyles={{ overflow: "hidden", textOverflow: "ellipsis" }}
-            key={BuildKey(v.key, idx)}
-            header={v.name ?? capitalize(v.key)}
-            description={v.description}
-            onClick={() => select(v)}
-            lineClamp={2}
-          ></Card>
-        ));
+        .map((v, idx) => {
+          const priority = priorities[v.key] ?? 100;
+          return (
+            <Card
+              titleStyles={{ overflow: "hidden", textOverflow: "ellipsis" }}
+              key={BuildKey(v.key, idx)}
+              header={
+                <Group justify="space-between" wrap="nowrap">
+                  <MantineText fw={700}>
+                    {v.name ?? capitalize(v.key)}
+                  </MantineText>
+                  <MantineText size="xs" c="dimmed">
+                    Priority: {priority}
+                  </MantineText>
+                </Group>
+              }
+              description={v.description}
+              onClick={() => select(v)}
+              lineClamp={2}
+            ></Card>
+          );
+        });
     } else {
       return [];
     }
-  }, [providers, select, availableOptions]);
+  }, [providers, select, availableOptions, settings]);
 
   return (
     <SimpleGrid cols={3}>
@@ -192,7 +207,11 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
 
   const form = useForm<FormValues>({
     initialValues: {
-      settings: staged,
+      settings: {
+        ...staged,
+        [`settings-general-provider_priorities-${info?.key}`]:
+          settings?.general?.provider_priorities?.[info?.key ?? ""] ?? 100,
+      },
       hooks: {},
     },
     validate: {
@@ -200,17 +219,36 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
     },
   });
 
+  useEffect(() => {
+    if (info?.key) {
+      const priorityKey = `settings-general-provider_priorities-${info.key}`;
+      const priorityValue =
+        settings?.general?.provider_priorities?.[info.key] ?? 100;
+      form.setFieldValue(`settings.${priorityKey}`, priorityValue);
+    }
+  }, [info?.key]);
+
   const deletePayload = useCallback(() => {
     if (payload && enabledProviders) {
       const idx = enabledProviders.findIndex((v) => v === payload.key);
       if (idx !== -1) {
         const newProviders = [...enabledProviders];
         newProviders.splice(idx, 1);
-        onChangeRef.current({ [settingsKey]: newProviders });
+
+        const changes: LooseObject = { [settingsKey]: newProviders };
+
+        // Remove priority
+        if (settings?.general?.provider_priorities?.[payload.key]) {
+          const priorities = { ...settings.general.provider_priorities };
+          delete priorities[payload.key];
+          changes["settings-general-provider_priorities"] = priorities;
+        }
+
+        onChangeRef.current(changes);
         modals.closeAll();
       }
     }
-  }, [payload, enabledProviders, modals, settingsKey]);
+  }, [payload, enabledProviders, modals, settingsKey, settings]);
 
   const submit = useCallback(
     (values: FormValues) => {
@@ -229,6 +267,18 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
           changes[settingsKey] = [...enabledProviders, info.key];
         }
 
+        // Handle priority
+        const priorityKey = `settings-general-provider_priorities-${info.key}`;
+        const priority = changes[priorityKey];
+        if (priority !== undefined) {
+          const priorities = {
+            ...(settings?.general?.provider_priorities ?? {}),
+          };
+          priorities[info.key] = priority;
+          changes["settings-general-provider_priorities"] = priorities;
+          delete changes[priorityKey];
+        }
+
         // Apply submit hooks
         runHooks(hooks, changes);
 
@@ -236,7 +286,7 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
         modals.closeAll();
       }
     },
-    [info, enabledProviders, modals, settingsKey, form],
+    [info, enabledProviders, modals, settingsKey, form, settings],
   );
 
   const canSave = info !== null;
@@ -385,6 +435,15 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
               onChange={onSelect}
             ></Selector>
             <Message>{info?.description}</Message>
+            {info?.key && (
+              <Number
+                label="Priority"
+                description="Lower number = higher priority (e.g., 10 is searched before 100)"
+                settingKey={`settings-general-provider_priorities-${info.key}`}
+                min={1}
+                max={999}
+              />
+            )}
             {inputs}
             <div hidden={info?.message === undefined}>
               <Message>{info?.message}</Message>

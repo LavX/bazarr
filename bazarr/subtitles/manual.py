@@ -45,7 +45,10 @@ def manual_search(path, profile_id, providers, sceneName, title, media_type):
     if video:
         try:
             if providers:
-                subtitles = list_all_subtitles([video], language_set, pool)
+                minimum_score = settings.general.minimum_score
+                minimum_score_movie = settings.general.minimum_score_movie
+                min_score, _, _ = _get_scores(media_type, minimum_score_movie, minimum_score)
+                subtitles = list_all_subtitles([video], language_set, pool, min_score=int(min_score))
             else:
                 logging.info("BAZARR All providers are throttled")
                 return 'All providers are throttled'

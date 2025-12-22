@@ -215,7 +215,7 @@ class SZProviderPool(ProviderPool):
     def __init__(self, providers=None, provider_configs=None, blacklist=None, ban_list=None, throttle_callback=None,
                  pre_download_hook=None, post_download_hook=None, language_hook=None, language_equals=None):
         #: Name of providers to use
-        self.providers = set(providers or [])
+        self.providers = list(providers or [])
 
         #: Initialized providers
         self.initialized_providers = {}
@@ -249,22 +249,24 @@ class SZProviderPool(ProviderPool):
         # Check if the pool was initialized enough hours ago
         self._check_lifetime()
 
-        providers = set(providers or [])
+        providers = list(providers or [])
 
         # Check if any new provider has been added
         updated = providers != self.providers or ban_list != self.ban_list
-        removed_providers = set(sorted(self.providers - providers))
+        removed_providers = set(sorted(set(self.providers) - set(providers)))
 
         logger.debug("Discarded providers: %s | New providers: %s", self.discarded_providers, providers)
-        self.discarded_providers.difference_update(providers)
+        self.discarded_providers.difference_update(set(providers))
         logger.debug("Updated discarded providers: %s", self.discarded_providers)
 
         removed_providers.update(self.discarded_providers)
 
         logger.debug("Removed providers: %s", removed_providers)
 
-        self.providers.difference_update(removed_providers)
-        self.providers.update(list(providers))
+        self.providers = [p for p in self.providers if p not in removed_providers]
+        for p in providers:
+            if p not in self.providers:
+                self.providers.append(p)
 
         # Terminate and delete removed providers from instance
         for removed in removed_providers:
@@ -447,6 +449,51 @@ class SZProviderPool(ProviderPool):
             subtitles.extend(provider_subtitles)
 
         return subtitles
+
+    def list_subtitles_prioritized(self, video, languages, min_score=0, provider_order=None, compute_score=None):
+        """List subtitles with priority-based provider search.
+
+        Search providers in priority order. If a provider returns subtitles
+        that meet the minimum score, don't query remaining providers.
+        """
+        from .score import compute_score as default_compute_score
+        compute_score = compute_score or default_compute_score
+
+        all_subtitles = []
+        providers_to_search = provider_order if provider_order else list(self.providers)
+
+        for name in providers_to_search:
+            if name in self.discarded_providers:
+                logger.debug('Skipping discarded provider %r', name)
+                continue
+
+            # Search this provider
+            provider_subtitles = self.list_subtitles_provider(name, video, languages)
+
+            if provider_subtitles is None:
+                logger.info('Discarding provider %s', name)
+                self.discarded_providers.add(name)
+                continue
+
+            if not provider_subtitles:
+                continue
+
+            # Check if any subtitle meets minimum score
+            found_good_subtitle = False
+            for subtitle in provider_subtitles:
+                matches = subtitle.get_matches(video)
+                score, _ = compute_score(matches, subtitle, video, False)
+                if score >= min_score:
+                    logger.info('Provider %s returned subtitle meeting min_score %d', name, min_score)
+                    found_good_subtitle = True
+                    break
+
+            all_subtitles.extend(provider_subtitles)
+
+            if found_good_subtitle:
+                return all_subtitles  # Stop searching other providers
+
+        return all_subtitles
 
     def download_subtitle(self, subtitle):
         """Download `subtitle`'s :attr:`~subliminal.subtitle.Subtitle.content`.

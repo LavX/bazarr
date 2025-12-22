@@ -172,6 +172,15 @@ settings.general.enabled_providers = [x for x in enabled_providers if x in exist
 write_config()
 
 
+# Initialize provider_priorities if not exists
+if not hasattr(settings.general, 'provider_priorities') or not settings.general.provider_priorities:
+    settings.general.provider_priorities = {}
+    # Set default priorities based on current order in enabled_providers
+    for idx, provider in enumerate(settings.general.enabled_providers):
+        settings.general.provider_priorities[provider] = (idx + 1) * 10
+    write_config()
+
+
 def init_binaries():
     try:
         exe = get_binary("unar")

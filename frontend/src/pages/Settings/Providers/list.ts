@@ -32,6 +32,7 @@ export interface ProviderInfo {
   description?: string;
   message?: string;
   inputs?: AvailableInput[];
+  priority?: number;
 }
 
 export const logLevelOptions: SelectorOption<string>[] = [

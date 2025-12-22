@@ -6,7 +6,7 @@ from flask_restx import Resource, Namespace, reqparse, fields, marshal
 
 from app.database import TableEpisodes, TableShows, get_audio_profile_languages, get_profile_id, database, select
 from utilities.path_mappings import path_mappings
-from app.get_providers import get_providers
+from app.get_providers import get_providers_sorted
 from subtitles.manual import manual_search, manual_download_subtitle
 from sonarr.history import history_log
 from app.config import settings
@@ -81,7 +81,7 @@ class ProviderEpisodes(Resource):
         sceneName = episodeInfo.sceneName or "None"
         profileId = episodeInfo.profileId
 
-        providers_list = get_providers()
+        providers_list = get_providers_sorted()
 
         data = manual_search(episodePath, profileId, providers_list, sceneName, title, 'series')
         if isinstance(data, str):

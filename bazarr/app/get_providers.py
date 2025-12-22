@@ -222,6 +222,29 @@ def get_enabled_providers():
         return []
 
 
+def get_providers_sorted():
+    """Get enabled providers sorted by priority (lower = higher priority)"""
+    providers_list = get_providers()
+    if not providers_list:
+        return None
+
+    priorities = settings.general.provider_priorities or {}
+    default_priority = priorities.get('default', 100)
+
+    # Sort by priority (lower number = higher priority)
+    sorted_providers = sorted(
+        providers_list,
+        key=lambda p: priorities.get(p, default_priority)
+    )
+    return sorted_providers
+
+
+def get_provider_priority(provider_name):
+    """Get priority for a specific provider"""
+    priorities = settings.general.provider_priorities or {}
+    return priorities.get(provider_name, priorities.get('default', 100))
+
+
 _FFPROBE_BINARY = get_binary("ffprobe")
 _FFMPEG_BINARY = get_binary("ffmpeg")
 
