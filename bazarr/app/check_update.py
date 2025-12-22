@@ -11,8 +11,9 @@ import sys
 from shutil import rmtree
 from zipfile import ZipFile
 
-from .get_args import args
-from .config import settings
+from app.jobs_queue import jobs_queue
+from app.get_args import args
+from app.config import settings
 
 # Fork configuration - allows overriding via environment variable
 # Default: LavX/bazarr (this fork)
@@ -25,7 +26,12 @@ def deprecated_python_version():
     return sys.version_info.major == 2 or (sys.version_info.major == 3 and sys.version_info.minor < 8)
 
 
-def check_releases():
+def check_releases(job_id=None, startup=False):
+    # startup is used to prevent trying to create a job before the jobs queue is initialized
+    if not startup and not job_id:
+        jobs_queue.add_job_from_function("Updating Release Info", is_progress=False)
+        return
+
     releases = []
     url_releases = f'https://api.github.com/repos/{RELEASES_REPO}/releases?per_page=100'
     try:
@@ -56,6 +62,9 @@ def check_releases():
         with open(os.path.join(args.config_dir, 'config', 'releases.txt'), 'w') as f:
             json.dump(releases, f)
         logging.debug(f'BAZARR saved {len(r.json())} releases to releases.txt')
+    finally:
+        if not startup:
+            jobs_queue.update_job_name(job_id=job_id, new_job_name="Updated Release Info")
 
 
 def check_if_new_update():
@@ -68,7 +77,7 @@ def check_if_new_update():
         return
     logging.debug(f'BAZARR updater is using {settings.general.branch} branch')
 
-    check_releases()
+    check_releases(startup=True)
 
     with open(os.path.join(args.config_dir, 'config', 'releases.txt'), 'r') as f:
         data = json.load(f)

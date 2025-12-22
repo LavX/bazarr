@@ -6,11 +6,16 @@ from threading import Thread
 
 bazarr_version = 'unknown'
 
+# Try to read version from VERSION file (authoritative for releases)
 version_file = os.path.join(os.path.dirname(__file__), '..', 'VERSION')
 if os.path.isfile(version_file):
     with open(version_file, 'r') as f:
         bazarr_version = f.readline()
         bazarr_version = bazarr_version.rstrip('\n')
+
+# Fall back to environment variable if VERSION file not found (dev/Docker setups)
+if bazarr_version == 'unknown' and "BAZARR_VERSION" in os.environ:
+    bazarr_version = os.environ["BAZARR_VERSION"]
 
 os.environ["BAZARR_VERSION"] = bazarr_version.lstrip('v')
 
@@ -29,7 +34,7 @@ if bazarr_version != '':
 # Check for new update and install latest
 if args.no_update or not settings.general.auto_update:
     # user have explicitly requested that we do not update or is using some kind of package/docker that prevent it
-    check_releases()
+    check_releases(startup=True)
 else:
     # we want to update to the latest version before loading too much stuff. This should prevent deadlock when
     # there's missing embedded packages after a commit
@@ -56,7 +61,7 @@ else:
 
 configure_proxy_func()
 
-get_announcements_to_file()
+get_announcements_to_file(startup=True)
 
 # Reset the updated once Bazarr have been restarted after an update
 database.execute(

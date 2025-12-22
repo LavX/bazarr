@@ -182,7 +182,8 @@ class SubdlProvider(ProviderRetryMixin, Provider):
 
         if ('success' in result and not result['success']) or ('status' in result and not result['status']):
             logger.debug(result)
-            return []
+            if 'error' in result:
+                raise ProviderError(result['error'])
 
         logger.debug(f"Query returned {len(result['subtitles'])} subtitles")
 

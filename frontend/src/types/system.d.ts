@@ -16,6 +16,18 @@ declare namespace System {
     next_run_time: string;
   }
 
+  interface Jobs {
+    job_id: number;
+    job_name: string;
+    status: string;
+    last_run_time: string;
+    is_progress: boolean;
+    is_signalr: boolean;
+    progress_value: number;
+    progress_max: number;
+    progress_message: string;
+  }
+
   interface Status {
     bazarr_config_directory: string;
     bazarr_directory: string;

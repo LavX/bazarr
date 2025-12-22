@@ -21,6 +21,7 @@ import {
   Text,
 } from "@/pages/Settings/components";
 import { Environment, toggleState } from "@/utilities";
+import ExternalWebhookSelector from "./ExternalWebhookSelector";
 import { branchOptions, proxyOptions, securityOptions } from "./options";
 
 const characters = "abcdef0123456789";
@@ -62,6 +63,11 @@ const SettingsGeneralView: FunctionComponent = () => {
           }}
         ></Text>
         <Message>Reverse proxy support</Message>
+        <Text
+          label="Instance Name"
+          settingKey="settings-general-instance_name"
+        ></Text>
+        <Message>Have a custom instance name as browser's tab title</Message>
       </Section>
       <Section header="Security">
         <Selector
@@ -126,6 +132,9 @@ const SettingsGeneralView: FunctionComponent = () => {
           Allow third parties to make requests towards your Bazarr installation.
           Requires a restart of Bazarr when changed
         </Message>
+      </Section>
+      <Section header="External Integrations">
+        <ExternalWebhookSelector />
       </Section>
       <Section header="Proxy">
         <Selector

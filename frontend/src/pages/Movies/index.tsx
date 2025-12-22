@@ -1,6 +1,6 @@
 import { FunctionComponent, useMemo } from "react";
 import { Link } from "react-router";
-import { Anchor, Badge, Container } from "@mantine/core";
+import { Anchor, Badge, Container, Tooltip } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import { faBookmark as farBookmark } from "@fortawesome/free-regular-svg-icons";
 import { faBookmark, faWrench } from "@fortawesome/free-solid-svg-icons";
@@ -8,6 +8,7 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import { uniqueId } from "lodash";
 import { useMovieModification, useMoviesPagination } from "@/apis/hooks";
+import { useInstanceName } from "@/apis/hooks/site";
 import { Action } from "@/components";
 import { AudioList } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
@@ -33,10 +34,11 @@ const MovieView: FunctionComponent = () => {
             original: { monitored },
           },
         }) => (
-          <FontAwesomeIcon
-            title={monitored ? "monitored" : "unmonitored"}
-            icon={monitored ? faBookmark : farBookmark}
-          ></FontAwesomeIcon>
+          <Tooltip
+            label={monitored ? "Monitored in Radarr" : "Unmonitored in Radarr"}
+          >
+            <FontAwesomeIcon icon={monitored ? faBookmark : farBookmark} />
+          </Tooltip>
         ),
       },
       {
@@ -133,7 +135,7 @@ const MovieView: FunctionComponent = () => {
     [modals, modifyMovie],
   );
 
-  useDocumentTitle("Movies - Bazarr");
+  useDocumentTitle(`Movies - ${useInstanceName()}`);
 
   return (
     <Container fluid px={0}>

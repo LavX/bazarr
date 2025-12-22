@@ -27,6 +27,7 @@ import {
   useMovieById,
   useMovieModification,
 } from "@/apis/hooks/movies";
+import { useInstanceName } from "@/apis/hooks/site";
 import { Action, DropContent, Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import { ItemEditModal } from "@/components/forms/ItemEditForm";
@@ -103,7 +104,9 @@ const MovieDetailView: FunctionComponent = () => {
 
   const hasTask = useIsMovieActionRunning();
 
-  useDocumentTitle(`${movie?.title ?? "Unknown Movie"} - Bazarr (Movies)`);
+  useDocumentTitle(
+    `${movie?.title ?? "Unknown Movie"} - ${useInstanceName()} (Movies)`,
+  );
 
   const openDropzone = useRef<VoidFunction>(null);
 
@@ -128,9 +131,9 @@ const MovieDetailView: FunctionComponent = () => {
             <Toolbox.Button
               icon={faSync}
               disabled={hasTask}
-              onClick={() => {
+              onClick={async () => {
                 if (movie) {
-                  task.create(movie.title, TaskGroup.Sync, action, {
+                  await action({
                     action: "sync",
                     radarrid: id,
                   });
@@ -157,9 +160,9 @@ const MovieDetailView: FunctionComponent = () => {
               icon={faSearch}
               disabled={!isNumber(movie?.profileId)}
               loading={hasTask}
-              onClick={() => {
+              onClick={async () => {
                 if (movie) {
-                  task.create(movie.title, TaskGroup.SearchSubtitle, action, {
+                  await action({
                     action: "search-missing",
                     radarrid: id,
                   });

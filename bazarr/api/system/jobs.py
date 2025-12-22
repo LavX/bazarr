@@ -15,6 +15,12 @@ class SystemJobs(Resource):
         'job_id': fields.Integer(),
         'job_name': fields.String(),
         'status': fields.String(),
+        'last_run_time': fields.String(),
+        'is_progress': fields.Boolean(),
+        'is_signalr': fields.Boolean(),
+        'progress_value': fields.Integer(),
+        'progress_max': fields.Integer(),
+        'progress_message': fields.String(),
     })
 
     get_request_parser = reqparse.RequestParser()
@@ -34,6 +40,25 @@ class SystemJobs(Resource):
         return marshal(jobs_queue.list_jobs_from_queue(job_id=job_id, status=status), self.get_response_model,
                        envelope='data')
 
+    patch_request_parser = reqparse.RequestParser()
+    patch_request_parser.add_argument('queueName', type=str, required=True, help='Jobs queue name to empty',
+                                      choices=['pending', 'failed', 'completed'])
+
+    @authenticate
+    @api_ns_system_jobs.doc(parser=patch_request_parser)
+    @api_ns_system_jobs.response(204, 'Success')
+    @api_ns_system_jobs.response(400, 'Jobs queue name not provided')
+    @api_ns_system_jobs.response(401, 'Not Authenticated')
+    def patch(self):
+        """Empty a specific jobs queue"""
+        args = self.patch_request_parser.parse_args()
+        queue_name = args.get('queueName')
+        if queue_name:
+            jobs_queue.empty_jobs_queue(queue_name=queue_name)
+            return '', 204
+        else:
+            return 'Jobs queue name not provided', 400
+
     delete_request_parser = reqparse.RequestParser()
     delete_request_parser.add_argument('id', type=int, required=True, help='Job ID to delete from queue')
 
@@ -47,7 +72,7 @@ class SystemJobs(Resource):
         args = self.delete_request_parser.parse_args()
         job_id = args.get('id')
         if job_id:
-            deleted = jobs_queue.remove_job_from_pending_queue(task_id=job_id)
+            deleted = jobs_queue.remove_job_from_pending_queue(job_id=job_id)
             if deleted:
                 return '', 204
         return 'Job ID not provided', 400

@@ -49,6 +49,14 @@ const SettingsSonarrView: FunctionComponent = () => {
           <URLTestButton category="sonarr"></URLTestButton>
         </Section>
         <Section header="Options">
+          <Check
+            label="Sync with Sonarr on live connection establishment"
+            settingKey="settings-sonarr-series_sync_on_live"
+          ></Check>
+          <Message>
+            When Bazarr connects or reconnects to Sonarr, run a series and
+            episodes synchronization to make sure that we're up-to-date.
+          </Message>
           <Slider
             label="Minimum Score For Episodes"
             settingKey="settings-general-minimum_score"

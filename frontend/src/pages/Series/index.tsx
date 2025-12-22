@@ -12,6 +12,7 @@ import {
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import { useSeriesModification, useSeriesPagination } from "@/apis/hooks";
+import { useInstanceName } from "@/apis/hooks/site";
 import { Action } from "@/components";
 import LanguageProfileName from "@/components/bazarr/LanguageProfile";
 import { ItemEditModal } from "@/components/forms/ItemEditForm";
@@ -133,7 +134,7 @@ const SeriesView: FunctionComponent = () => {
     [mutation, modals],
   );
 
-  useDocumentTitle("Series - Bazarr");
+  useDocumentTitle(`Series - ${useInstanceName()}`);
 
   return (
     <Container px={0} fluid>

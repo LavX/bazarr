@@ -6,6 +6,7 @@ import {
   useMovieBlacklist,
   useMovieDeleteBlacklist,
 } from "@/apis/hooks/movies";
+import { useInstanceName } from "@/apis/hooks/site";
 import { Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import Table from "./table";
@@ -16,7 +17,7 @@ const BlacklistMoviesView: FunctionComponent = () => {
 
   const { mutateAsync } = useMovieDeleteBlacklist();
 
-  useDocumentTitle("Movies Blacklist - Bazarr");
+  useDocumentTitle(`Movies Blacklist - ${useInstanceName()}`);
 
   return (
     <Container fluid px={0}>

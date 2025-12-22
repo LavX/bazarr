@@ -13,3 +13,8 @@ export function useShowOnlyDesired() {
   const { data } = useSystemSettings();
   return data?.general.embedded_subs_show_desired ?? false;
 }
+
+export function useInstanceName() {
+  const { data } = useSystemSettings();
+  return data?.general.instance_name;
+}

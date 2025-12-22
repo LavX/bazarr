@@ -25,6 +25,7 @@ import {
 import { faCode, faPaperPlane } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useSystemHealth, useSystemStatus } from "@/apis/hooks";
+import { useInstanceName } from "@/apis/hooks/site";
 import { QueryOverlay } from "@/components/async";
 import { GithubRepoRoot } from "@/constants";
 import { Environment, useInterval } from "@/utilities";
@@ -126,7 +127,7 @@ const SystemStatusView: FunctionComponent = () => {
 
   useInterval(update, 1000);
 
-  useDocumentTitle("Status - Bazarr (System)");
+  useDocumentTitle(`Status - ${useInstanceName()} (System)`);
 
   return (
     <Container fluid>

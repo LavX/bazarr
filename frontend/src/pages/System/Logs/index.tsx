@@ -9,6 +9,7 @@ import {
   faTrash,
 } from "@fortawesome/free-solid-svg-icons";
 import { useDeleteLogs, useSystemLogs, useSystemSettings } from "@/apis/hooks";
+import { useInstanceName } from "@/apis/hooks/site";
 import { Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import { Check, LayoutModal, Message, Text } from "@/pages/Settings/components";
@@ -25,7 +26,7 @@ const SystemLogsView: FunctionComponent = () => {
     window.open(`${Environment.baseUrl}/bazarr.log`);
   }, []);
 
-  useDocumentTitle("Logs - Bazarr (System)");
+  useDocumentTitle(`Logs - ${useInstanceName()} (System)`);
 
   const { data: settings } = useSystemSettings();
   const modals = useModals();

@@ -1,5 +1,5 @@
 import React, { forwardRef, useCallback, useEffect, useMemo } from "react";
-import { Group, Text } from "@mantine/core";
+import { Group, Text, Tooltip } from "@mantine/core";
 import { faBookmark as farBookmark } from "@fortawesome/free-regular-svg-icons";
 import {
   faBookmark,
@@ -121,10 +121,13 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
             },
           }) => {
             return (
-              <FontAwesomeIcon
-                title={monitored ? "monitored" : "unmonitored"}
-                icon={monitored ? faBookmark : farBookmark}
-              ></FontAwesomeIcon>
+              <Tooltip
+                label={
+                  monitored ? "Monitored in Sonarr" : "Unmonitored in Sonarr"
+                }
+              >
+                <FontAwesomeIcon icon={monitored ? faBookmark : farBookmark} />
+              </Tooltip>
             );
           },
         },

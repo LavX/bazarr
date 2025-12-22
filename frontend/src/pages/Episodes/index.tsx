@@ -34,6 +34,7 @@ import {
   useSeriesById,
   useSeriesModification,
 } from "@/apis/hooks";
+import { useInstanceName } from "@/apis/hooks/site";
 import { DropContent, Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import { ItemEditModal } from "@/components/forms/ItemEditForm";
@@ -112,7 +113,9 @@ const SeriesEpisodesView: FunctionComponent = () => {
     [modals, profile, series],
   );
 
-  useDocumentTitle(`${series?.title ?? "Unknown Series"} - Bazarr (Series)`);
+  useDocumentTitle(
+    `${series?.title ?? "Unknown Series"} - ${useInstanceName()} (Series)`,
+  );
 
   const tableRef = useRef<TableInstance<Item.Episode> | null>(null);
 
@@ -141,9 +144,9 @@ const SeriesEpisodesView: FunctionComponent = () => {
             <Toolbox.Button
               icon={faSync}
               disabled={!available || hasTask}
-              onClick={() => {
+              onClick={async () => {
                 if (series) {
-                  task.create(series.title, TaskGroup.Sync, action, {
+                  await action({
                     action: "sync",
                     seriesid: id,
                   });
@@ -168,9 +171,9 @@ const SeriesEpisodesView: FunctionComponent = () => {
             </Toolbox.Button>
             <Toolbox.Button
               icon={faSearch}
-              onClick={() => {
+              onClick={async () => {
                 if (series) {
-                  task.create(series.title, TaskGroup.SearchSubtitle, action, {
+                  await action({
                     action: "search-missing",
                     seriesid: id,
                   });

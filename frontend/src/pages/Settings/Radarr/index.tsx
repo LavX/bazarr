@@ -47,6 +47,14 @@ const SettingsRadarrView: FunctionComponent = () => {
           <URLTestButton category="radarr"></URLTestButton>
         </Section>
         <Section header="Options">
+          <Check
+            label="Sync with Radarr on live connection establishment"
+            settingKey="settings-radarr-movies_sync_on_live"
+          ></Check>
+          <Message>
+            When Bazarr connects or reconnects to Radarr, run a movies
+            synchronization to make sure that we're up-to-date.
+          </Message>
           <Slider
             label="Minimum Score For Movies"
             settingKey="settings-general-minimum_score_movie"
@@ -85,7 +93,7 @@ const SettingsRadarrView: FunctionComponent = () => {
             Search can be triggered using this command
             <Code>
               {`curl -H "Content-Type: application/json" -H "X-API-KEY: ###############################" -X POST 
-                -d '{ "eventType": "Download", "movieFile": [ { "id": "$radarr_moviefile_id" } ] }' 
+                -d '{ "eventType": "Download", "movieFile": { "id": "$radarr_moviefile_id" } }' 
                 http://localhost:6767/api/webhooks/radarr
               `}
             </Code>

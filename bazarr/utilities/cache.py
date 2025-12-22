@@ -8,9 +8,14 @@ import glob
 from subliminal import region as subliminal_cache_region
 
 from app.get_args import args
+from app.jobs_queue import jobs_queue
 
 
-def cache_maintenance():
+def cache_maintenance(job_id=None):
+    if not job_id:
+        jobs_queue.add_job_from_function("Performing Cache Maintenance", is_progress=False)
+        return
+
     main_cache_validity = 14  # days
     pack_cache_validity = 4  # days
 
@@ -32,3 +37,5 @@ def cache_maintenance():
     # archive cache
     for fn in glob.iglob(os.path.join(args.config_dir, "*.archive")):
         remove_expired(fn, pack_cache_validity)
+
+    jobs_queue.update_job_name(job_id=job_id, new_job_name="Performed Cache Maintenance")
