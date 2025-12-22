@@ -2,7 +2,7 @@
 # This file identifies the build as a LavX fork with OpenSubtitles.org scraper support
 
 # Package version identifier (shown in System Status)
-packageversion=LavX Fork
+packageversion=LavX Fork (2025.12.22)
 
 # Package author (shown in System Status)
 packageauthor=LavX
