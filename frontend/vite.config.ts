@@ -38,6 +38,7 @@ export default defineConfig(({ mode, command }) => {
       VitePWA({
         workbox: {
           globIgnores: ["index.html"],
+          navigateFallback: null,
         },
         registerType: "autoUpdate",
         includeAssets: [
