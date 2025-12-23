@@ -381,24 +381,34 @@ class SZProviderPool(ProviderPool):
             seen = []
             out = []
             for s in results:
-                self.lang_equals.update_subtitle(s)
-
-                if not self.blacklist.is_valid(provider, s):
+                # Validate that we got a proper subtitle object, not a string or other invalid type
+                if not hasattr(s, 'id') or not hasattr(s, 'language'):
+                    logger.warning('Provider %r returned invalid subtitle object (type: %s): %r',
+                                   provider, type(s).__name__, s)
                     continue
 
-                if not self.ban_list.is_valid(s):
+                try:
+                    self.lang_equals.update_subtitle(s)
+
+                    if not self.blacklist.is_valid(provider, s):
+                        continue
+
+                    if not self.ban_list.is_valid(s):
+                        continue
+
+                    if s.id in seen:
+                        continue
+
+                    s.radarrId = video.radarrId if hasattr(video, 'radarrId') else None
+                    s.sonarrSeriesId = video.sonarrSeriesId if hasattr(video, 'sonarrSeriesId') else None
+                    s.sonarrEpisodeId = video.sonarrEpisodeId if hasattr(video, 'sonarrEpisodeId') else None
+
+                    s.plex_media_fps = float(video.fps) if video.fps else None
+                    out.append(s)
+                    seen.append(s.id)
+                except AttributeError as e:
+                    logger.warning('Provider %r returned subtitle with missing attributes: %s', provider, e)
                     continue
-
-                if s.id in seen:
-                    continue
-
-                s.radarrId = video.radarrId if hasattr(video, 'radarrId') else None
-                s.sonarrSeriesId = video.sonarrSeriesId if hasattr(video, 'sonarrSeriesId') else None
-                s.sonarrEpisodeId = video.sonarrEpisodeId if hasattr(video, 'sonarrEpisodeId') else None
-
-                s.plex_media_fps = float(video.fps) if video.fps else None
-                out.append(s)
-                seen.append(s.id)
 
             return out
 
@@ -478,17 +488,34 @@ class SZProviderPool(ProviderPool):
             if not provider_subtitles:
                 continue
 
+            # Filter out invalid subtitle objects (strings, None, etc.)
+            valid_subtitles = []
+            for subtitle in provider_subtitles:
+                # Check if this is actually a subtitle object with get_matches method
+                if not hasattr(subtitle, 'get_matches'):
+                    logger.warning('Provider %s returned invalid subtitle object (type: %s): %r',
+                                   name, type(subtitle).__name__, subtitle)
+                    continue
+                valid_subtitles.append(subtitle)
+            
+            if not valid_subtitles:
+                continue
+
             # Check if any subtitle meets minimum score
             found_good_subtitle = False
-            for subtitle in provider_subtitles:
-                matches = subtitle.get_matches(video)
+            for subtitle in valid_subtitles:
+                try:
+                    matches = subtitle.get_matches(video)
+                except AttributeError:
+                    logger.error("%r: Match computation failed: %s", subtitle, traceback.format_exc())
+                    continue
                 score, _ = compute_score(matches, subtitle, video, False)
                 if score >= min_score:
                     logger.info('Provider %s returned subtitle meeting min_score %d', name, min_score)
                     found_good_subtitle = True
                     break
 
-            all_subtitles.extend(provider_subtitles)
+            all_subtitles.extend(valid_subtitles)
 
             if found_good_subtitle:
                 return all_subtitles  # Stop searching other providers
