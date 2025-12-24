@@ -12,6 +12,7 @@ import requests
 import json
 from subzero.language import Language
 from subliminal.exceptions import ServiceUnavailable, ConfigurationError
+from subliminal_patch.exceptions import APIThrottled
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,8 @@ class OpenSubtitlesScraperMixin:
                 
             return self._parse_scraper_response(response['data'], languages, only_foreign, also_foreign, video)
             
+        except APIThrottled:
+            raise
         except requests.RequestException as e:
             logger.error('Scraper service request failed: %s', e)
             raise ServiceUnavailable(f'Scraper service unavailable: {e}')
@@ -103,7 +106,15 @@ class OpenSubtitlesScraperMixin:
             headers=headers,
             timeout=120  # Increased timeout for scraper service (IMDB lookups + page navigation)
         )
-        
+
+        if response.status_code in (429, 503):
+            retry_after = response.headers.get("Retry-After")
+            response.close()
+            message = "Scraper service busy"
+            if retry_after:
+                message = f"{message}, retry after {retry_after}s"
+            raise APIThrottled(message)
+
         response.raise_for_status()
         return response.json()
 
@@ -228,6 +239,8 @@ class OpenSubtitlesScraperMixin:
             else:
                 raise ServiceUnavailable('No subtitle content received from scraper')
                 
+        except APIThrottled:
+            raise
         except requests.RequestException as e:
             logger.error('Failed to download subtitle from scraper: %s', e)
             raise ServiceUnavailable(f'Scraper download failed: {e}')
