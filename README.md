@@ -1,35 +1,35 @@
-# Bazarr (LavX Fork)
+# Bazarr (LavX Fork) - "Nexus Dawn"
 
 <p align="center">
   <a href="https://ghcr.io/lavx/bazarr"><img src="https://img.shields.io/badge/ghcr.io-lavx%2Fbazarr-blue?style=for-the-badge&logo=docker" alt="Docker"></a>
-  <a href="https://github.com/LavX/bazarr/actions/workflows/sync-upstream.yml"><img src="https://img.shields.io/github/actions/workflow/status/LavX/bazarr/sync-upstream.yml?style=for-the-badge&label=UPSTREAM%20SYNC" alt="Upstream Sync"></a>
+  <a href="https://github.com/LavX/bazarr/releases/latest"><img src="https://img.shields.io/github/v/release/LavX/bazarr?style=for-the-badge&label=RELEASE" alt="Latest Release"></a>
   <a href="https://github.com/LavX/bazarr/actions/workflows/build-docker.yml"><img src="https://img.shields.io/github/actions/workflow/status/LavX/bazarr/build-docker.yml?style=for-the-badge&label=DOCKER%20BUILD" alt="Docker Build"></a>
 </p>
 
 <p align="center">
-  <strong>🎬 Automated subtitle management with OpenSubtitles.org scraper & AI-powered translation</strong>
+  <strong>Automated subtitle management with OpenSubtitles.org scraper & AI-powered translation</strong>
 </p>
 
 <p align="center">
   This fork of <a href="https://github.com/morpheus65535/bazarr">Bazarr</a> includes:<br/>
-  • OpenSubtitles.org provider that works <strong>without VIP API credentials</strong><br/>
-  • <strong>AI Subtitle Translator</strong> using OpenRouter LLMs for subtitle translation
+  - OpenSubtitles.org provider that works <strong>without VIP API credentials</strong> (survives the API shutdown)<br/>
+  - <strong>AI Subtitle Translator</strong> using OpenRouter LLMs for high-quality subtitle translation<br/>
+  - <strong>Batch translation</strong> for entire series/movie libraries
 </p>
 
 ---
 
-## ❓ Why This Fork Exists
+## OpenSubtitles.org API Shutdown Notice
 
-This fork was created after the [pull request (#3012)](https://github.com/morpheus65535/bazarr/pull/3012) to add OpenSubtitles.org web scraper support was declined by the upstream maintainer:
+On **January 29, 2026**, OpenSubtitles.org [announced the final shutdown](https://forum.opensubtitles.org/viewtopic.php?t=19471) of their legacy XML-RPC API for **all third-party applications** -- both VIP and non-VIP users. The shutdown is taking effect in the coming weeks.
 
-> *"Unfortunately, you should have asked before since we won't be merging this. It's going against our agreement with os.org/os.com. We've put them on their knees before and that's the reason why os.org is only for VIP. They don't have the horse power to support us on their legacy service. You should migrate to os.com."*
+**This fork is not affected.** It includes a self-hosted web scraper that accesses OpenSubtitles.org directly through the website, bypassing the API entirely. As long as the OpenSubtitles.org website remains accessible ([confirmed by the site admin](https://forum.opensubtitles.org/viewtopic.php?t=19471) to stay available as read-only), subtitle search and download will continue to work.
 
-**The upstream decision is understandable** - they have agreements with OpenSubtitles and want to respect their infrastructure. However, some users:
-- Don't want to pay for VIP API access
-- Want to use the legacy OpenSubtitles.org which has a larger subtitle database
-- Are willing to accept the limitations of web scraping
+## Why This Fork Exists
 
-**This fork provides that option** while maintaining full compatibility with upstream Bazarr. The web scraper is rate-limited and respectful to OpenSubtitles.org's servers.
+This fork was created after the [pull request (#3012)](https://github.com/morpheus65535/bazarr/pull/3012) to add OpenSubtitles.org web scraper support was declined by the upstream maintainer. The upstream decision is understandable -- they have agreements with OpenSubtitles and want to respect their infrastructure.
+
+However, with the official API now being shut down, this fork with its scraper companion container is one of the few ways to maintain access to OpenSubtitles.org subtitles. The web scraper is rate-limited and respectful to their servers.
 
 ---
 
@@ -63,13 +63,14 @@ docker pull ghcr.io/lavx/ai-subtitle-translator:latest
 
 | Feature | Upstream Bazarr | LavX Fork |
 |---------|-----------------|-----------|
-| **OpenSubtitles.org (Scraper)** | ❌ Not available | ✅ Included |
-| **AI Subtitle Translator** | ❌ Not available | ✅ Included |
-| OpenSubtitles.org (API) | VIP only | VIP only |
+| **OpenSubtitles.org (Scraper)** | ❌ Not available | ✅ Included (API-independent) |
+| **AI Subtitle Translator** | ❌ Not available | ✅ Included (OpenRouter, Gemini, Lingarr) |
+| **Batch Translation** | ❌ Not available | ✅ Translate entire series/libraries |
+| OpenSubtitles.org (API) | Shutting down | N/A (uses scraper instead) |
 | OpenSubtitles.com (API) | ✅ Available | ✅ Available |
-| Auto-sync with upstream | N/A | ✅ Daily at 4 AM UTC |
 | Docker images | linuxserver/hotio | ghcr.io/lavx |
-| Fork identification in UI | N/A | ✅ "LavX Fork" |
+| Python runtime | 3.11/3.12 | 3.14 with JIT |
+| Fork identification in UI | N/A | ✅ "LavX Fork - Nexus Dawn" |
 
 ### 🎯 OpenSubtitles.org Scraper Provider
 
@@ -226,22 +227,6 @@ docker compose up -d
 
 ---
 
-## 🔄 Fork Maintenance
-
-This fork automatically stays up-to-date with upstream:
-
-- **Daily sync** at 4 AM UTC via GitHub Actions
-- **Automatic merge** when no conflicts
-- **Protected files** preserved during merges:
-  - OpenSubtitles scraper provider
-  - Docker configuration
-  - Fork documentation
-  - GitHub workflows
-
-See [Fork Maintenance Guide](docs/FORK_MAINTENANCE.md) for technical details.
-
----
-
 ## 🛠️ Configuration Options
 
 ### Environment Variables
@@ -359,7 +344,6 @@ At the request of some, here is a way to demonstrate your appreciation for the e
 [![GitHub issues](https://img.shields.io/github/issues/LavX/bazarr.svg?style=flat-square)](https://github.com/LavX/bazarr/issues)
 [![GitHub stars](https://img.shields.io/github/stars/LavX/bazarr.svg?style=flat-square)](https://github.com/LavX/bazarr/stargazers)
 [![GitHub forks](https://img.shields.io/github/forks/LavX/bazarr.svg?style=flat-square)](https://github.com/LavX/bazarr/network)
-[![Upstream Sync](https://img.shields.io/github/actions/workflow/status/LavX/bazarr/sync-upstream.yml?style=flat-square&label=upstream%20sync)](https://github.com/LavX/bazarr/actions/workflows/sync-upstream.yml)
 [![Docker Build](https://img.shields.io/github/actions/workflow/status/LavX/bazarr/build-docker.yml?style=flat-square&label=docker)](https://github.com/LavX/bazarr/actions/workflows/build-docker.yml)
 ## Support
 
