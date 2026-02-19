@@ -72,25 +72,23 @@ class SubdivxSubtitle(Subtitle):
         return self.page_link
 
     def get_matches(self, video):
-        matches = set()
-
         # episode
         if isinstance(video, Episode):
             # already matched within provider
-            matches.update(["title", "series", "season", "episode", "year"])
+            self.matches.update(["title", "series", "season", "episode", "year"])
 
         # movie
         elif isinstance(video, Movie):
             # already matched within provider
-            matches.update(["title", "year"])
+            self.matches.update(["title", "year"])
 
-        update_matches(matches, video, self._description)
+        update_matches(self.matches, video, self._description)
 
         # Don't lowercase; otherwise it will match a lot of false positives
         if video.release_group and video.release_group in self._description:
-            matches.add("release_group")
+            self.matches.add("release_group")
 
-        return matches
+        return self.matches
 
 
 _IDUSER_COOKIE = "VkZaRk9WQlJQVDA12809"

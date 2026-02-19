@@ -276,7 +276,7 @@ def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode
             store_subtitles(result.path, episodePath)
             return '', 204
     finally:
-        jobs_queue.update_job_name(job_id=job_id, new_job_name="Manually downloaded Subtitles for {title} - "
+        jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Manually downloaded Subtitles for {title} - "
                                                                f"S{episodeInfo.season:02d}E{episodeInfo.episode:02d} - "
                                                                f"{episodeInfo.episodeTitle}")
 

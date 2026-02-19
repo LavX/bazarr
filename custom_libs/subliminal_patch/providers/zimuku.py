@@ -62,26 +62,24 @@ class ZimukuSubtitle(Subtitle):
         return self.page_link
 
     def get_matches(self, video):
-        matches = set()
-
         if video.year == self.year:
-            matches.add('year')
+            self.matches.add('year')
 
         # episode
         if isinstance(video, Episode):
             info = guessit(self.version, {"type": "episode"})
             # other properties
-            matches |= guess_matches(video, info)
+            self.matches |= guess_matches(video, info)
 
             # add year to matches if video doesn't have a year but series, season and episode are matched
-            if not video.year and all(item in matches for item in ['series', 'season', 'episode']):
-                matches |= {'year'}
+            if not video.year and all(item in self.matches for item in ['series', 'season', 'episode']):
+                self.matches |= {'year'}
         # movie
         elif isinstance(video, Movie):
             # other properties
-            matches |= guess_matches(video, guessit(self.version, {"type": "movie"}))
+            self.matches |= guess_matches(video, guessit(self.version, {"type": "movie"}))
 
-        return matches
+        return self.matches
 
 
 def string_to_hex(s):

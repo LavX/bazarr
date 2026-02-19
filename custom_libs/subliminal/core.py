@@ -28,7 +28,6 @@ import socket
 
 from babelfish import Language, LanguageReverseError
 from guessit import guessit
-from six.moves.xmlrpc_client import ProtocolError
 from rarfile import BadRarFile, NotRarFile, RarCannotExec, RarFile
 from zipfile import BadZipfile
 from ssl import SSLError
@@ -100,7 +99,7 @@ class ProviderPool(object):
             self.initialized_providers[name].terminate()
         except (requests.Timeout, socket.timeout):
             logger.error('Provider %r timed out, improperly terminated', name)
-        except (ServiceUnavailable, ProtocolError):  # OpenSubtitles raises xmlrpclib.ProtocolError when unavailable
+        except ServiceUnavailable:
             logger.error('Provider %r unavailable, improperly terminated', name)
         except requests.exceptions.HTTPError as e:
             if e.response.status_code in range(500, 600):
@@ -151,7 +150,7 @@ class ProviderPool(object):
             return self[provider].list_subtitles(video, provider_languages)
         except (requests.Timeout, socket.timeout):
             logger.error('Provider %r timed out', provider)
-        except (ServiceUnavailable, ProtocolError):  # OpenSubtitles raises xmlrpclib.ProtocolError when unavailable
+        except ServiceUnavailable:
             logger.error('Provider %r unavailable', provider)
         except requests.exceptions.HTTPError as e:
             if e.response.status_code in range(500, 600):
@@ -218,7 +217,7 @@ class ProviderPool(object):
             logger.error('Provider %r timed out, discarding it', subtitle.provider_name)
             self.discarded_providers.add(subtitle.provider_name)
             return False
-        except (ServiceUnavailable, ProtocolError):  # OpenSubtitles raises xmlrpclib.ProtocolError when unavailable
+        except ServiceUnavailable:
             logger.error('Provider %r unavailable, discarding it', subtitle.provider_name)
             self.discarded_providers.add(subtitle.provider_name)
             return False

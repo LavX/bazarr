@@ -42,40 +42,39 @@ class XSubsSubtitle(Subtitle):
         self.hearing_impaired = None
         self.encoding = 'windows-1253'
         self.release_info = version
+        self.matches = None
 
     @property
     def id(self):
         return self.download_link
 
     def get_matches(self, video):
-        matches = set()
-
         if isinstance(video, Episode):
             # series name
             if video.series and sanitize(self.series) in (
                     sanitize(name) for name in [video.series] + video.alternative_series):
-                matches.add('series')
+                self.matches.add('series')
             # season
             if video.season and self.season == video.season:
-                matches.add('season')
+                self.matches.add('season')
             # episode
             if video.episode and self.episode == video.episode:
-                matches.add('episode')
+                self.matches.add('episode')
             # title of the episode
             if video.title and sanitize(self.title) == sanitize(video.title):
-                matches.add('title')
+                self.matches.add('title')
             # year
             if video.original_series and self.year is None or video.year and video.year == self.year:
-                matches.add('year')
+                self.matches.add('year')
             # release_group
             if (video.release_group and self.version and
                     any(r in sanitize_release_group(self.version)
                         for r in get_equivalent_release_groups(sanitize_release_group(video.release_group)))):
-                matches.add('release_group')
+                self.matches.add('release_group')
             # other properties
-            matches |= guess_matches(video, guessit(self.version, {'type': 'episode'}))
+            self.matches |= guess_matches(video, guessit(self.version, {'type': 'episode'}))
 
-        return matches
+        return self.matches
 
 
 class XSubsProvider(Provider):

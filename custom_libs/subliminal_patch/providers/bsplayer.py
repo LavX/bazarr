@@ -42,22 +42,21 @@ class BSPlayerSubtitle(Subtitle):
         return self.subid
 
     def get_matches(self, video):
-        matches = set()
-        matches |= guess_matches(video, guessit(self.filename))
+        self.matches |= guess_matches(video, guessit(self.filename))
 
         # episode
         if isinstance(video, Episode):
             # already matched in search query
-            matches.update(["title", "series", "season", "episode", "year"])
+            self.matches.update(["title", "series", "season", "episode", "year"])
 
         # movie
         elif isinstance(video, Movie):
             # already matched in search query
-            matches.update(["title", "year"])
+            self.matches.update(["title", "year"])
 
-        matches.add("hash")
+        self.matches.add("hash")
 
-        return matches
+        return self.matches
 
 
 class BSPlayerProvider(Provider):

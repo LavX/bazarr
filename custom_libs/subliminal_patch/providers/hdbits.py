@@ -31,11 +31,11 @@ class HDBitsSubtitle(Subtitle):
         self.release_info = name
         self.filename = filename
         self.episode = episode
-        self._matches = matches or set()
+        self.matches = matches or set()
 
     def get_matches(self, video):
-        update_matches(self._matches, video, self.release_info)
-        return self._matches
+        update_matches(self.matches, video, self.release_info)
+        return self.matches
 
     @property
     def id(self):

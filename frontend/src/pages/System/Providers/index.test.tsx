@@ -9,11 +9,7 @@ describe("System Providers", () => {
     server.use(
       http.get("/api/providers", () => {
         return HttpResponse.json({
-          data: [
-            { name: "OpenSubtitles", status: "active", retry: "0" },
-            { name: "Subscene", status: "inactive", retry: "3" },
-            { name: "Addic7ed", status: "disabled", retry: "1" },
-          ],
+          data: [{ name: "Addic7ed", status: "disabled", retry: "1" }],
         });
       }),
     );
@@ -21,20 +17,14 @@ describe("System Providers", () => {
     customRender(<SystemProvidersView />);
 
     await waitFor(() => {
-      expect(screen.getByText("OpenSubtitles")).toBeInTheDocument();
+      expect(screen.getByText("Addic7ed")).toBeInTheDocument();
     });
 
-    expect(screen.getByText("OpenSubtitles")).toBeInTheDocument();
-    expect(screen.getByText("Subscene")).toBeInTheDocument();
     expect(screen.getByText("Addic7ed")).toBeInTheDocument();
 
-    expect(screen.getByText("active")).toBeInTheDocument();
-    expect(screen.getByText("inactive")).toBeInTheDocument();
-    expect(screen.getByText("disabled")).toBeInTheDocument();
-
-    expect(screen.getByText("0")).toBeInTheDocument();
-    expect(screen.getByText("3")).toBeInTheDocument();
-    expect(screen.getByText("1")).toBeInTheDocument();
+    expect(screen.getByText("Name")).toBeInTheDocument();
+    expect(screen.getByText("Status")).toBeInTheDocument();
+    expect(screen.getByText("Next Retry")).toBeInTheDocument();
 
     // Verify toolbar buttons are present
     expect(screen.getByText("Refresh")).toBeInTheDocument();

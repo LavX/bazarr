@@ -29,25 +29,24 @@ class GreekSubtitlesSubtitle(Subtitle):
         self.hearing_impaired = None
         self.encoding = 'windows-1253'
         self.release_info = version
+        self.matches = None
 
     @property
     def id(self):
         return self.download_link
 
     def get_matches(self, video):
-        matches = set()
-
         # episode
         if isinstance(video, Episode):
-            matches.add("year")
+            self.matches.add("year")
             # other properties
-            matches |= guess_matches(video, guessit(self.version, {'type': 'episode'}), partial=True)
+            self.matches |= guess_matches(video, guessit(self.version, {'type': 'episode'}), partial=True)
         # movie
         elif isinstance(video, Movie):
             # other properties
-            matches |= guess_matches(video, guessit(self.version, {'type': 'movie'}), partial=True)
+            self.matches |= guess_matches(video, guessit(self.version, {'type': 'movie'}), partial=True)
 
-        return matches
+        return self.matches
 
 
 class GreekSubtitlesProvider(Provider):

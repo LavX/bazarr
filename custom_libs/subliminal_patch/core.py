@@ -947,9 +947,6 @@ def scan_video(path, dont_use_actual_file=False, hints=None, providers=None, ski
             if "bsplayer" in providers:
                 video.hashes['bsplayer'] = osub_hash = hash_opensubtitles(hash_path)
 
-            if "opensubtitles" in providers:
-                video.hashes['opensubtitles'] = osub_hash = osub_hash or hash_opensubtitles(hash_path)
-
             if "opensubtitlescom" in providers:
                 video.hashes['opensubtitlescom'] = osub_hash = osub_hash or hash_opensubtitles(hash_path)
 
@@ -1278,7 +1275,7 @@ def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=Non
     saved_subtitles = []
     for subtitle in subtitles:
         # check if HI mods will be used to get the proper name for the subtitles file
-        must_remove_hi = 'remove_HI' in subtitle.mods
+        must_remove_hi = subtitle.mods and 'remove_HI' in subtitle.mods
 
         # check content
         if subtitle.content is None or subtitle.text is None:

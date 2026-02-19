@@ -137,7 +137,7 @@ def sanitize_release_group(string):
         return
 
     # remove content in square brackets
-    string = re.sub(r'\[\w+\]', '', string)
+    string = re.sub(r'\[[\w|.]+\]', '', string)
 
     # strip and upper case
     return string.strip().upper()

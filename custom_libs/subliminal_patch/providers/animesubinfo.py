@@ -8,6 +8,7 @@ from requests import Session
 from bs4 import BeautifulSoup
 from subliminal_patch.subtitle import Subtitle
 from subliminal_patch.providers import Provider
+from subliminal_patch.subtitle import guess_matches
 from subliminal.subtitle import fix_line_ending
 from subliminal.utils import sanitize
 from subliminal.video import Episode, Movie
@@ -114,7 +115,6 @@ class AnimesubinfoSubtitle(Subtitle):
             logger.debug(f'Parsed release groups: {self.release_groups}')
 
     def get_matches(self, video):
-        matches = set()
         logger.debug(f'Matching subtitle {self.subtitle_id} against video: {video}')
 
         # Sanitize titles for comparison
@@ -123,41 +123,42 @@ class AnimesubinfoSubtitle(Subtitle):
         # Check against all three title variants
         if video_title:
             if sanitize(self.title_org) and video_title in sanitize(self.title_org):
-                matches.add('title')
+                self.matches.add('title')
             elif sanitize(self.title_eng) and video_title in sanitize(self.title_eng):
-                matches.add('title')
+                self.matches.add('title')
             elif sanitize(self.title_alt) and video_title in sanitize(self.title_alt):
-                matches.add('title')
+                self.matches.add('title')
 
         # For episodes, check series match
         if isinstance(video, Episode):
             if video.series:
                 series_sanitized = sanitize(video.series)
                 if series_sanitized in (sanitize(self.title_org) or ''):
-                    matches.add('series')
+                    self.matches.add('series')
                 elif series_sanitized in (sanitize(self.title_eng) or ''):
-                    matches.add('series')
+                    self.matches.add('series')
                 elif series_sanitized in (sanitize(self.title_alt) or ''):
-                    matches.add('series')
+                    self.matches.add('series')
 
             # Season match
             if video.season and self.season == video.season:
-                matches.add('season')
+                self.matches.add('season')
             elif video.season == 1 and self.season is None:
                 # If video is season 1 and subtitle doesn't specify season,
                 # assume it's season 1 (common for anime)
-                matches.add('season')
+                self.matches.add('season')
 
             # Episode match
-            if video.episode and self.episode == video.episode:
-                matches.add('episode')
+            if (video.absolute_episode and self.episode == video.absolute_episode) or \
+                    (video.episode and self.episode == video.episode):
+                self.matches.add('episode')
 
             # Release group match
             if self.release_groups and hasattr(video, 'release_group') and video.release_group:
                 video_group = video.release_group.lower()
                 for subtitle_group in self.release_groups:
                     if video_group == subtitle_group.lower():
-                        matches.add('release_group')
+                        self.matches.add('release_group')
                         logger.debug(f'Release group match: {video_group} == {subtitle_group}')
                         break
 
@@ -169,19 +170,22 @@ class AnimesubinfoSubtitle(Subtitle):
                 if title:
                     year_match = re.search(year_pattern, title)
                     if year_match and int(year_match.group(0)) == video.year:
-                        matches.add('year')
+                        self.matches.add('year')
                         break
 
         # Video type match
         video_type = 'movie' if isinstance(video, Movie) else 'episode'
-        matches.add(video_type)
+        self.matches.add(video_type)
 
         # Format preference - Advanced SSA/ASS is better quality
         if self.format_type and 'Advanced SSA' in self.format_type:
-            matches.add('audio_codec')  # Repurpose for format priority
+            self.matches.add('audio_codec')  # Repurpose for format priority
 
-        logger.debug(f'Subtitle {self.subtitle_id} matches: {matches}')
-        return matches
+        # Other properties matching from release info
+        self.matches |= guess_matches(video, guessit(self.release_info, {"type": video_type}))
+
+        logger.debug(f'Subtitle {self.subtitle_id} matches: {self.matches}')
+        return self.matches
 
 
 class AnimesubinfoProvider(Provider):
@@ -356,7 +360,9 @@ class AnimesubinfoProvider(Provider):
         if isinstance(video, Episode):
             search_title = video.series
             # For episodes, use pattern like "Kimetsu no Yaiba ep01"
-            if video.episode:
+            if video.absolute_episode:
+                search_title_with_ep = f'{search_title} ep{video.absolute_episode}'
+            elif video.episode:
                 search_title_with_ep = f'{search_title} ep{video.episode:02d}'
             else:
                 search_title_with_ep = None
@@ -385,7 +391,9 @@ class AnimesubinfoProvider(Provider):
         # Strategy 3: Try alternative titles if available
         if isinstance(video, Episode) and video.alternative_series:
             for alt_series in video.alternative_series[:2]:  # Limit to first 2 alternatives
-                if video.episode:
+                if video.absolute_episode:
+                    search_strategies.append(('en', f'{alt_series} ep{video.absolute_episode}'))
+                elif video.episode:
                     search_strategies.append(('en', f'{alt_series} ep{video.episode:02d}'))
                 search_strategies.append(('en', alt_series))
         elif isinstance(video, Movie) and video.alternative_titles:

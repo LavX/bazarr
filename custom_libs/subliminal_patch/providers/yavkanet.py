@@ -73,8 +73,6 @@ class YavkaNetSubtitle(Subtitle):
         return self
 
     def get_matches(self, video):
-        matches = set()
-
         video_filename = video.name
         video_filename = os.path.basename(video_filename)
         video_filename, _ = os.path.splitext(video_filename)
@@ -87,14 +85,14 @@ class YavkaNetSubtitle(Subtitle):
 
         if ((video_filename == subtitle_filename) or
                 (self.single_file is True and video_filename in self.notes.upper())):
-            matches.add('hash')
+            self.matches.add('hash')
 
         if video.year and self.year == video.year:
-            matches.add('year')
+            self.matches.add('year')
 
-        matches |= guess_matches(video, guessit(self.title, {'type': self.type}))
-        matches |= guess_matches(video, guessit(self.filename, {'type': self.type}))
-        return matches
+        self.matches |= guess_matches(video, guessit(self.title, {'type': self.type}))
+        self.matches |= guess_matches(video, guessit(self.filename, {'type': self.type}))
+        return self.matches
 
 
 class YavkaNetProvider(Provider):

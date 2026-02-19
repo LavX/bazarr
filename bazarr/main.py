@@ -68,6 +68,11 @@ database.execute(
     update(System)
     .values(updated='0'))
 
+# Set the configured state based on config.yaml file existence
+database.execute(
+    update(System)
+    .values(configured=os.environ.get('BAZARR_CONFIGURED', '0')))
+
 # Load languages in database
 load_language_in_db()
 
