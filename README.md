@@ -312,6 +312,24 @@ For major changes, please open an issue first.
 
 ---
 
+## 🌐 About the Maintainer
+
+This fork is maintained by **LavX**. Explore more of my projects and services:
+
+### 🚀 Services
+- **[LavX Managed Systems](https://lavx.hu)** – Enterprise AI solutions, RAG systems, and LLMOps.
+- **[LavX News](https://news.lavx.hu)** – Latest insights on AI, Open Source, and emerging tech.
+- **[LMS Tools](https://tools.lavx.hu)** – 140+ free, privacy-focused online tools for developers and researchers.
+
+### 🛠️ Open Source Projects
+- **[AI Subtitle Translator](https://github.com/LavX/ai-subtitle-translator)** – LLM-powered subtitle translator using OpenRouter API.
+- **[OpenSubtitles Scraper](https://github.com/LavX/opensubtitles-scraper)** – Web scraper for OpenSubtitles.org (no VIP required).
+- **[JFrog to Nexus OSS](https://github.com/LavX/jfrogtonexusoss)** – Automated migration tool for repository managers.
+- **[WeatherFlow](https://github.com/LavX/weatherflow)** – Multi-platform weather data forwarding (WU to Windy/Idokep).
+- **[Like4Like Suite](https://github.com/LavX/Like4Like-Suite)** – Social media automation and engagement toolkit.
+
+---
+
 ## 📄 License
 
 - [GNU GPL v3](http://www.gnu.org/licenses/gpl.html)
@@ -376,6 +394,7 @@ If you need something that is not already part of Bazarr, feel free to create a 
 - Addic7ed
 - AnimeKalesi
 - Animetosho (requires AniDb HTTP API client described [here](https://wiki.anidb.net/HTTP_API_Definition))
+- AnimeSub.info
 - Assrt
 - AvistaZ, CinemaZ (Get session cookies using method described [here](https://github.com/morpheus65535/bazarr/pull/2375#issuecomment-2057010996))
 - BetaSeries

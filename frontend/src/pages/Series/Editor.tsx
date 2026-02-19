@@ -3,6 +3,7 @@ import { Checkbox } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import { ColumnDef } from "@tanstack/react-table";
 import { useSeries, useSeriesModification } from "@/apis/hooks";
+import { useInstanceName } from "@/apis/hooks/site";
 import { QueryOverlay } from "@/components/async";
 import { AudioList } from "@/components/bazarr";
 import LanguageProfileName from "@/components/bazarr/LanguageProfile";
@@ -67,7 +68,7 @@ const SeriesMassEditor: FunctionComponent = () => {
     [],
   );
 
-  useDocumentTitle("Series - Bazarr (Mass Editor)");
+  useDocumentTitle(`Series - ${useInstanceName()} (Mass Editor)`);
 
   return (
     <QueryOverlay result={query}>

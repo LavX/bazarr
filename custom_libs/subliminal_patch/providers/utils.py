@@ -12,6 +12,7 @@ from guessit import guessit
 import pysubs2
 import rarfile
 from subliminal.subtitle import fix_line_ending
+from subliminal.utils import sanitize_release_group
 from subliminal_patch.exceptions import MustGetBlacklisted
 from subliminal_patch.core import Episode
 from subliminal_patch.subtitle import guess_matches
@@ -204,12 +205,18 @@ def update_matches(
     if isinstance(release_info, str):
         release_info = release_info.split(split)
 
+    sanitized_video_release_group = sanitize_release_group(video.release_group)
+
     for release in release_info:
         for release_split in release.split(split):
-            logger.debug("Updating matches from release info: %s", release)
+            sanitized_release_info = sanitize_release_group(release_split.strip())
+            logger.debug("Updating matches from sanitized release info: %s", sanitized_release_info)
             matches |= guess_matches(
-                video, guessit(release_split.strip(), guessit_options)
+                video, guessit(sanitized_release_info, guessit_options)
             )
+            if ("release_group" not in matches and sanitized_video_release_group and
+                    re.search(f"\\b({re.escape(sanitized_video_release_group)})\\b", sanitized_release_info)):
+                matches.add("release_group")
             logger.debug("New matches: %s", matches)
 
     return matches

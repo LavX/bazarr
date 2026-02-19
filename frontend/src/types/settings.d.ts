@@ -13,7 +13,6 @@ interface Settings {
   anticaptcha: Settings.Anticaptcha;
   deathbycaptcha: Settings.DeathByCaptche;
   // Providers
-  opensubtitles: Settings.OpenSubtitles;
   opensubtitlescom: Settings.OpenSubtitlesCom;
   addic7ed: Settings.Addic7ed;
   legendasdivx: Settings.Legandasdivx;
@@ -38,6 +37,7 @@ declare namespace Settings {
     branch: string;
     chmod?: string;
     chmod_enabled: boolean;
+    concurrent_jobs: number;
     days_to_upgrade_subs: number;
     debug: boolean;
     dont_notify_manual_actions: boolean;
@@ -45,6 +45,7 @@ declare namespace Settings {
     enabled_providers: string[];
     ignore_pgs_subs: boolean;
     ignore_vobsub_subs: boolean;
+    instance_name: string;
     ip: string;
     multithreading: boolean;
     minimum_score: number;
@@ -81,6 +82,10 @@ declare namespace Settings {
     utf8_encode: boolean;
     wanted_search_frequency: number;
     wanted_search_frequency_movie: number;
+    use_external_webhook?: boolean;
+    external_webhook_url?: string;
+    external_webhook_username?: string;
+    external_webhook_password?: string;
   }
 
   interface Log {
@@ -174,6 +179,7 @@ declare namespace Settings {
     gemini_key: string;
     gemini_model: string;
     lingarr_url: string;
+    lingarr_token: string;
     translator_info: boolean;
     translator_type: string;
     openrouter_url?: string;
@@ -190,10 +196,15 @@ declare namespace Settings {
     ssl?: boolean;
     set_movie_added?: boolean;
     set_episode_added?: boolean;
-    movie_library?: string;
-    series_library?: string;
+    movie_library?: string[];
+    series_library?: string[];
     update_movie_library?: boolean;
     update_series_library?: boolean;
+    use_autopulse?: boolean;
+    autopulse_host?: string;
+    autopulse_port?: number;
+    autopulse_username?: string;
+    autopulse_password?: string;
   }
 
   interface Anticaptcha {
@@ -210,14 +221,6 @@ declare namespace Settings {
   interface BaseProvider {
     username?: string;
     password?: string;
-  }
-
-  interface OpenSubtitles extends BaseProvider {
-    use_tag_search: boolean;
-    vip: boolean;
-    ssl: boolean;
-    timeout: number;
-    skip_wrong_fps: boolean;
   }
 
   interface OpenSubtitlesCom extends BaseProvider {

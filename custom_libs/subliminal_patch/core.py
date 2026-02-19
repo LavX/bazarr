@@ -215,7 +215,7 @@ class SZProviderPool(ProviderPool):
     def __init__(self, providers=None, provider_configs=None, blacklist=None, ban_list=None, throttle_callback=None,
                  pre_download_hook=None, post_download_hook=None, language_hook=None, language_equals=None):
         #: Name of providers to use
-        self.providers = set(providers or [])
+        self.providers = list(providers or [])
 
         #: Initialized providers
         self.initialized_providers = {}
@@ -249,22 +249,24 @@ class SZProviderPool(ProviderPool):
         # Check if the pool was initialized enough hours ago
         self._check_lifetime()
 
-        providers = set(providers or [])
+        providers = list(providers or [])
 
         # Check if any new provider has been added
         updated = providers != self.providers or ban_list != self.ban_list
-        removed_providers = set(sorted(self.providers - providers))
+        removed_providers = set(sorted(set(self.providers) - set(providers)))
 
         logger.debug("Discarded providers: %s | New providers: %s", self.discarded_providers, providers)
-        self.discarded_providers.difference_update(providers)
+        self.discarded_providers.difference_update(set(providers))
         logger.debug("Updated discarded providers: %s", self.discarded_providers)
 
         removed_providers.update(self.discarded_providers)
 
         logger.debug("Removed providers: %s", removed_providers)
 
-        self.providers.difference_update(removed_providers)
-        self.providers.update(list(providers))
+        self.providers = [p for p in self.providers if p not in removed_providers]
+        for p in providers:
+            if p not in self.providers:
+                self.providers.append(p)
 
         # Terminate and delete removed providers from instance
         for removed in removed_providers:
@@ -379,24 +381,34 @@ class SZProviderPool(ProviderPool):
             seen = []
             out = []
             for s in results:
-                self.lang_equals.update_subtitle(s)
-
-                if not self.blacklist.is_valid(provider, s):
+                # Validate that we got a proper subtitle object, not a string or other invalid type
+                if not hasattr(s, 'id') or not hasattr(s, 'language'):
+                    logger.warning('Provider %r returned invalid subtitle object (type: %s): %r',
+                                   provider, type(s).__name__, s)
                     continue
 
-                if not self.ban_list.is_valid(s):
+                try:
+                    self.lang_equals.update_subtitle(s)
+
+                    if not self.blacklist.is_valid(provider, s):
+                        continue
+
+                    if not self.ban_list.is_valid(s):
+                        continue
+
+                    if s.id in seen:
+                        continue
+
+                    s.radarrId = video.radarrId if hasattr(video, 'radarrId') else None
+                    s.sonarrSeriesId = video.sonarrSeriesId if hasattr(video, 'sonarrSeriesId') else None
+                    s.sonarrEpisodeId = video.sonarrEpisodeId if hasattr(video, 'sonarrEpisodeId') else None
+
+                    s.plex_media_fps = float(video.fps) if video.fps else None
+                    out.append(s)
+                    seen.append(s.id)
+                except AttributeError as e:
+                    logger.warning('Provider %r returned subtitle with missing attributes: %s', provider, e)
                     continue
-
-                if s.id in seen:
-                    continue
-
-                s.radarrId = video.radarrId if hasattr(video, 'radarrId') else None
-                s.sonarrSeriesId = video.sonarrSeriesId if hasattr(video, 'sonarrSeriesId') else None
-                s.sonarrEpisodeId = video.sonarrEpisodeId if hasattr(video, 'sonarrEpisodeId') else None
-
-                s.plex_media_fps = float(video.fps) if video.fps else None
-                out.append(s)
-                seen.append(s.id)
 
             return out
 
@@ -447,6 +459,68 @@ class SZProviderPool(ProviderPool):
             subtitles.extend(provider_subtitles)
 
         return subtitles
+
+    def list_subtitles_prioritized(self, video, languages, min_score=0, provider_order=None, compute_score=None):
+        """List subtitles with priority-based provider search.
+
+        Search providers in priority order. If a provider returns subtitles
+        that meet the minimum score, don't query remaining providers.
+        """
+        from .score import compute_score as default_compute_score
+        compute_score = compute_score or default_compute_score
+
+        all_subtitles = []
+        providers_to_search = provider_order if provider_order else list(self.providers)
+
+        for name in providers_to_search:
+            if name in self.discarded_providers:
+                logger.debug('Skipping discarded provider %r', name)
+                continue
+
+            # Search this provider
+            provider_subtitles = SZProviderPool.list_subtitles_provider(self, name, video, languages)
+
+            if provider_subtitles is None:
+                logger.info('Discarding provider %s', name)
+                self.discarded_providers.add(name)
+                continue
+
+            if not provider_subtitles:
+                continue
+
+            # Filter out invalid subtitle objects (strings, None, etc.)
+            valid_subtitles = []
+            for subtitle in provider_subtitles:
+                # Check if this is actually a subtitle object with get_matches method
+                if not hasattr(subtitle, 'get_matches'):
+                    logger.warning('Provider %s returned invalid subtitle object (type: %s): %r',
+                                   name, type(subtitle).__name__, subtitle)
+                    continue
+                valid_subtitles.append(subtitle)
+            
+            if not valid_subtitles:
+                continue
+
+            # Check if any subtitle meets minimum score
+            found_good_subtitle = False
+            for subtitle in valid_subtitles:
+                try:
+                    matches = subtitle.get_matches(video)
+                except AttributeError:
+                    logger.error("%r: Match computation failed: %s", subtitle, traceback.format_exc())
+                    continue
+                score, _ = compute_score(matches, subtitle, video, False)
+                if score >= min_score:
+                    logger.info('Provider %s returned subtitle meeting min_score %d', name, min_score)
+                    found_good_subtitle = True
+                    break
+
+            all_subtitles.extend(valid_subtitles)
+
+            if found_good_subtitle:
+                return all_subtitles  # Stop searching other providers
+
+        return all_subtitles
 
     def download_subtitle(self, subtitle):
         """Download `subtitle`'s :attr:`~subliminal.subtitle.Subtitle.content`.
@@ -873,9 +947,6 @@ def scan_video(path, dont_use_actual_file=False, hints=None, providers=None, ski
             if "bsplayer" in providers:
                 video.hashes['bsplayer'] = osub_hash = hash_opensubtitles(hash_path)
 
-            if "opensubtitles" in providers:
-                video.hashes['opensubtitles'] = osub_hash = osub_hash or hash_opensubtitles(hash_path)
-
             if "opensubtitlescom" in providers:
                 video.hashes['opensubtitlescom'] = osub_hash = osub_hash or hash_opensubtitles(hash_path)
 
@@ -1204,7 +1275,7 @@ def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=Non
     saved_subtitles = []
     for subtitle in subtitles:
         # check if HI mods will be used to get the proper name for the subtitles file
-        must_remove_hi = 'remove_HI' in subtitle.mods
+        must_remove_hi = subtitle.mods and 'remove_HI' in subtitle.mods
 
         # check content
         if subtitle.content is None or subtitle.text is None:

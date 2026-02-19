@@ -3,6 +3,7 @@ import { Checkbox } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import { ColumnDef } from "@tanstack/react-table";
 import { useMovieModification, useMovies } from "@/apis/hooks";
+import { useInstanceName } from "@/apis/hooks/site";
 import { QueryOverlay } from "@/components/async";
 import { AudioList } from "@/components/bazarr";
 import LanguageProfileName from "@/components/bazarr/LanguageProfile";
@@ -12,7 +13,7 @@ const MovieMassEditor: FunctionComponent = () => {
   const query = useMovies();
   const mutation = useMovieModification();
 
-  useDocumentTitle("Movies - Bazarr (Mass Editor)");
+  useDocumentTitle(`Movies - ${useInstanceName()} (Mass Editor)`);
 
   const columns = useMemo<ColumnDef<Item.Movie>[]>(
     () => [

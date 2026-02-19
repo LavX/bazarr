@@ -318,6 +318,7 @@ declare namespace Plex {
     uuid: string;
     updatedAt: number;
     createdAt: number;
+    locations: string[];
   }
 
   interface WebhookResult {
@@ -331,9 +332,36 @@ declare namespace Plex {
     url: string;
   }
 
+  interface PlexPassSubscription {
+    active: boolean;
+    has_webhooks_feature: boolean;
+    plan: string | null;
+  }
+
   interface WebhookList {
     webhooks: WebhookInfo[];
     count: number;
+    plexPassSubscription?: PlexPassSubscription;
+  }
+
+  interface AutopulseResult {
+    success: boolean;
+    message: string;
+  }
+
+  interface AutopulseConfig {
+    config_yaml: string;
+    server_name: string;
+    rewrite_detected?: boolean;
+    rewrite_suggestion?: string;
+    template_info?: string;
+  }
+
+  interface AutopulseLibrary {
+    key: string;
+    title: string;
+    type: string;
+    locations: string[];
   }
 }
 

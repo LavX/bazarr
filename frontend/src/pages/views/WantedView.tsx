@@ -4,6 +4,7 @@ import { useDocumentTitle } from "@mantine/hooks";
 import { faLanguage, faSearch } from "@fortawesome/free-solid-svg-icons";
 import { ColumnDef, Row } from "@tanstack/react-table";
 import { useIsAnyActionRunning } from "@/apis/hooks";
+import { useInstanceName } from "@/apis/hooks/site";
 import { UsePaginationQueryResult } from "@/apis/queries/hooks";
 import { QueryPageTable, Toolbox } from "@/components";
 import { MassTranslateModal } from "@/components/forms/MassTranslateForm";
@@ -30,7 +31,7 @@ function WantedView<T extends Wanted.Base>({
   const modals = useModals();
   const [selectedRows, setSelectedRows] = useState<Row<T>[]>([]);
 
-  useDocumentTitle(`Wanted ${name} - Bazarr`);
+  useDocumentTitle(`Wanted ${name} - ${useInstanceName()}`);
 
   const handleRowSelectionChanged = useCallback((rows: Row<T>[]) => {
     setSelectedRows(rows);

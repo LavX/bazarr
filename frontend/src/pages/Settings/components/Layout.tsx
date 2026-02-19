@@ -4,6 +4,7 @@ import { useForm } from "@mantine/form";
 import { useDocumentTitle } from "@mantine/hooks";
 import { faSave } from "@fortawesome/free-solid-svg-icons";
 import { useSettingsMutation, useSystemSettings } from "@/apis/hooks";
+import { useInstanceName } from "@/apis/hooks/site";
 import { Toolbox } from "@/components";
 import { LoadingProvider } from "@/contexts";
 import {
@@ -63,7 +64,7 @@ const Layout: FunctionComponent<Props> = (props) => {
     `You have ${totalStagedCount} unsaved changes, are you sure you want to leave?`,
   );
 
-  useDocumentTitle(`${name} - Bazarr (Settings)`);
+  useDocumentTitle(`${name} - ${useInstanceName()} (Settings)`);
 
   return (
     <SettingsProvider value={settings ?? null}>

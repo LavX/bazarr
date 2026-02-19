@@ -3,6 +3,7 @@ import {
   FunctionComponent,
   JSX,
   useCallback,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -25,6 +26,7 @@ import {
   Check,
   Chips,
   Message,
+  Number,
   Password,
   ProviderTestButton,
   Selector as GlobalSelector,
@@ -60,6 +62,52 @@ interface ProviderSelect {
   payload: ProviderInfo;
 }
 
+const parseProviderPriorities = (
+  value: unknown,
+): Record<string, number> | null => {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, number>;
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, number>;
+  }
+
+  return null;
+};
+
+const resolveProviderPriorities = (
+  staged: LooseObject | undefined,
+  settings: Settings | null,
+): Record<string, number> => {
+  const fromStaged = parseProviderPriorities(
+    staged?.["settings-general-provider_priorities"],
+  );
+  if (fromStaged) {
+    return { ...fromStaged };
+  }
+
+  const fromSettings = parseProviderPriorities(
+    settings?.general?.provider_priorities,
+  );
+  if (fromSettings) {
+    return { ...fromSettings };
+  }
+
+  return {};
+};
+
 export const ProviderView: FunctionComponent<ProviderViewProps> = ({
   availableOptions,
   settingsKey,
@@ -67,6 +115,10 @@ export const ProviderView: FunctionComponent<ProviderViewProps> = ({
   const settings = useSettings();
   const staged = useStagedValues();
   const providers = useSettingValue<string[]>(settingsKey);
+  const priorities = useMemo(
+    () => resolveProviderPriorities(staged, settings),
+    [staged, settings],
+  );
 
   const { update } = useFormActions();
 
@@ -108,20 +160,32 @@ export const ProviderView: FunctionComponent<ProviderViewProps> = ({
             return [];
           }
         })
-        .map((v, idx) => (
-          <Card
-            titleStyles={{ overflow: "hidden", textOverflow: "ellipsis" }}
-            key={BuildKey(v.key, idx)}
-            header={v.name ?? capitalize(v.key)}
-            description={v.description}
-            onClick={() => select(v)}
-            lineClamp={2}
-          ></Card>
-        ));
+        .map((v, idx) => {
+          const priority = priorities[v.key] ?? 100;
+          return (
+            <Card
+              titleStyles={{ overflow: "hidden", textOverflow: "ellipsis" }}
+              key={BuildKey(v.key, idx)}
+              header={
+                <Group justify="space-between" wrap="nowrap">
+                  <MantineText fw={700}>
+                    {v.name ?? capitalize(v.key)}
+                  </MantineText>
+                  <MantineText size="xs" c="dimmed">
+                    Priority: {priority}
+                  </MantineText>
+                </Group>
+              }
+              description={v.description}
+              onClick={() => select(v)}
+              lineClamp={2}
+            ></Card>
+          );
+        });
     } else {
       return [];
     }
-  }, [providers, select, availableOptions]);
+  }, [providers, select, availableOptions, priorities]);
 
   return (
     <SimpleGrid cols={3}>
@@ -189,10 +253,15 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
   onChangeRef.current = onChange;
 
   const [info, setInfo] = useState<Nullable<ProviderInfo>>(payload);
+  const seededPriorities = resolveProviderPriorities(staged, settings);
 
   const form = useForm<FormValues>({
     initialValues: {
-      settings: staged,
+      settings: {
+        ...staged,
+        [`settings-general-provider_priorities-${info?.key}`]:
+          seededPriorities[info?.key ?? ""] ?? 100,
+      },
       hooks: {},
     },
     validate: {
@@ -200,17 +269,35 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
     },
   });
 
+  useEffect(() => {
+    if (info?.key) {
+      const priorityKey = `settings-general-provider_priorities-${info.key}`;
+      const priorityValue =
+        resolveProviderPriorities(staged, settings)[info.key] ?? 100;
+      form.setFieldValue(`settings.${priorityKey}`, priorityValue);
+    }
+  }, [info?.key]);
+
   const deletePayload = useCallback(() => {
     if (payload && enabledProviders) {
       const idx = enabledProviders.findIndex((v) => v === payload.key);
       if (idx !== -1) {
         const newProviders = [...enabledProviders];
         newProviders.splice(idx, 1);
-        onChangeRef.current({ [settingsKey]: newProviders });
+
+        const changes: LooseObject = { [settingsKey]: newProviders };
+
+        const priorities = resolveProviderPriorities(staged, settings);
+        const nextPriorities = { ...priorities };
+        delete nextPriorities[payload.key];
+        changes["settings-general-provider_priorities"] =
+          JSON.stringify(nextPriorities);
+
+        onChangeRef.current(changes);
         modals.closeAll();
       }
     }
-  }, [payload, enabledProviders, modals, settingsKey]);
+  }, [payload, enabledProviders, modals, settingsKey, staged, settings]);
 
   const submit = useCallback(
     (values: FormValues) => {
@@ -229,6 +316,15 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
           changes[settingsKey] = [...enabledProviders, info.key];
         }
 
+        // Handle priority
+        const priorityKey = `settings-general-provider_priorities-${info.key}`;
+        const priority = changes[priorityKey];
+        const priorities = resolveProviderPriorities(values.settings, settings);
+        priorities[info.key] = priority ?? priorities[info.key] ?? 100;
+        changes["settings-general-provider_priorities"] =
+          JSON.stringify(priorities);
+        delete changes[priorityKey];
+
         // Apply submit hooks
         runHooks(hooks, changes);
 
@@ -236,7 +332,7 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
         modals.closeAll();
       }
     },
-    [info, enabledProviders, modals, settingsKey, form],
+    [info, enabledProviders, modals, settingsKey, form, settings],
   );
 
   const canSave = info !== null;
@@ -385,6 +481,15 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
               onChange={onSelect}
             ></Selector>
             <Message>{info?.description}</Message>
+            {info?.key && (
+              <Number
+                label="Priority"
+                description="Lower number = higher priority (e.g., 10 is searched before 100)"
+                settingKey={`settings-general-provider_priorities-${info.key}`}
+                min={1}
+                max={999}
+              />
+            )}
             {inputs}
             <div hidden={info?.message === undefined}>
               <Message>{info?.message}</Message>

@@ -105,7 +105,8 @@ def get_series_from_sonarr_api(apikey_sonarr, sonarr_series_id=None):
 
 def get_episodes_from_sonarr_api(apikey_sonarr, series_id=None, episode_id=None):
     if series_id:
-        url_sonarr_api_episode = f"{url_api_sonarr()}episode?seriesId={series_id}&apikey={apikey_sonarr}"
+        url_sonarr_api_episode = (f"{url_api_sonarr()}episode?seriesId={series_id}&includeEpisodeFile=true&"
+                                  f"apikey={apikey_sonarr}")
     elif episode_id:
         url_sonarr_api_episode = f"{url_api_sonarr()}episode/{episode_id}?apikey={apikey_sonarr}"
     else:

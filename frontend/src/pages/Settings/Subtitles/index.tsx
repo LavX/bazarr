@@ -367,6 +367,12 @@ const SettingsSubtitlesView: FunctionComponent = () => {
           color etc.
         </Message>
         <Check
+          label="Remove Emoji"
+          settingOptions={{ onLoaded: SubzeroModification("emoji") }}
+          settingKey="subzero-emoji"
+        ></Check>
+        <Message>Removes emoji characters from subtitles.</Message>
+        <Check
           label="OCR Fixes"
           settingOptions={{ onLoaded: SubzeroModification("OCR_fixes") }}
           settingKey="subzero-OCR_fixes"
@@ -601,6 +607,14 @@ const SettingsSubtitlesView: FunctionComponent = () => {
             settingKey="settings-translator-lingarr_url"
           />
           <Message>Base URL of Lingarr (e.g., http://localhost:9876)</Message>
+          <Text
+            label="Lingarr API Key (optional)"
+            settingKey="settings-translator-lingarr_token"
+          />
+          <Message>
+            Optional API key for authentication. Leave empty if your Lingarr
+            instance doesn't require authentication.
+          </Message>
         </CollapseBox>
         <CollapseBox
           settingKey="settings-translator-translator_type"

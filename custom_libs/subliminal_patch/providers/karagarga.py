@@ -29,12 +29,13 @@ class KaragargaSubtitle(Subtitle):
 
         self.release_info = release_info
         self.downloads = downloads
-        self._matches = {"title", "year"}
 
     def get_matches(self, video):
-        update_matches(self._matches, video, self.release_info, type="movie")
+        self.matches = {"title", "year"}
 
-        return self._matches
+        update_matches(self.matches, video, self.release_info, type="movie")
+
+        return self.matches
 
     @property
     def id(self):
@@ -104,8 +105,8 @@ class KaragargaProvider(Provider):
             "auth_key": "880ea6a14ea49e853634fbdc5015a024",
             #
             "referer": "https://forum.karagarga.in/",
-            "ips_username": self._username,
-            "ips_password": self._password,
+            "ips_username": self._f_username,
+            "ips_password": self._f_password,
             "rememberMe": "1",
             "anonymous": "1",
         }

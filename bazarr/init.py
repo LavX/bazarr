@@ -150,12 +150,12 @@ subliminal.region.backend.sync()
 
 if not os.path.exists(os.path.join(args.config_dir, 'config', 'releases.txt')):
     from app.check_update import check_releases
-    check_releases()
+    check_releases(startup=True)
     logging.debug("BAZARR Created releases file")
 
 if not os.path.exists(os.path.join(args.config_dir, 'config', 'announcements.txt')):
     from app.announcements import get_announcements_to_file
-    get_announcements_to_file()
+    get_announcements_to_file(startup=True)
     logging.debug("BAZARR Created announcements file")
 
 # Clean unused settings from config
@@ -170,6 +170,15 @@ existing_providers = provider_registry.names()
 enabled_providers = settings.general.enabled_providers
 settings.general.enabled_providers = [x for x in enabled_providers if x in existing_providers]
 write_config()
+
+
+# Initialize provider_priorities if not exists
+if not hasattr(settings.general, 'provider_priorities') or not settings.general.provider_priorities:
+    settings.general.provider_priorities = {}
+    # Set default priorities based on current order in enabled_providers
+    for idx, provider in enumerate(settings.general.enabled_providers):
+        settings.general.provider_priorities[provider] = (idx + 1) * 10
+    write_config()
 
 
 def init_binaries():

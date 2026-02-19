@@ -130,8 +130,8 @@ class AssrtSubtitle(Subtitle):
         return detail['url']
 
     def get_matches(self, video):
-        matches = guess_matches(video, guessit(self.video_name))
-        return matches
+        self.matches = guess_matches(video, guessit(self.video_name))
+        return self.matches
 
 
 class AssrtProvider(Provider):

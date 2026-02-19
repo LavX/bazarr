@@ -42,33 +42,32 @@ class Subs4SeriesSubtitle(Subtitle):
         self.uploader = uploader
         self.hearing_impaired = None
         self.encoding = 'windows-1253'
+        self.matches = None
 
     @property
     def id(self):
         return self.download_link
 
     def get_matches(self, video):
-        matches = set()
-
         # episode
         if isinstance(video, Episode):
             # series name
             if video.series and sanitize(self.series) in (
                     sanitize(name) for name in [video.series] + video.alternative_series):
-                matches.add('series')
+                self.matches.add('series')
             # year
             if video.original_series and self.year is None or video.year and video.year == self.year:
-                matches.add('year')
+                self.matches.add('year')
 
         # release_group
         if (video.release_group and self.version and
                 any(r in sanitize_release_group(self.version)
                     for r in get_equivalent_release_groups(sanitize_release_group(video.release_group)))):
-            matches.add('release_group')
+            self.matches.add('release_group')
         # other properties
-        matches |= guess_matches(video, guessit(self.version, {'type': 'episode'}), partial=True)
+        self.matches |= guess_matches(video, guessit(self.version, {'type': 'episode'}), partial=True)
 
-        return matches
+        return self.matches
 
 
 class Subs4SeriesProvider(Provider):

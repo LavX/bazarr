@@ -90,32 +90,31 @@ class HosszupuskaSubtitle(Subtitle):
         return str(self.subtitle_id)
 
     def get_matches(self, video):
-        matches = set()
         # series
         if video.series and ( sanitize(self.series) == sanitize(fix_inconsistent_naming(video.series)) or sanitize(self.series) == sanitize(video.series)):
-            matches.add('series')
+            self.matches.add('series')
         # season
         if video.season and self.season == video.season:
-            matches.add('season')
+            self.matches.add('season')
         # episode
         if video.episode and self.episode == video.episode:
-            matches.add('episode')
+            self.matches.add('episode')
         # year
-        if ('series' in matches and video.original_series and self.year is None or
+        if ('series' in self.matches and video.original_series and self.year is None or
            video.year and video.year == self.year):
-            matches.add('year')
+            self.matches.add('year')
 
-        logger.debug("Matches: %s", matches)
+        logger.debug("Matches: %s", self.matches)
 
         # release_group
         if (video.release_group and self.version and
                 any(r in sanitize_release_group(self.version)
                     for r in get_equivalent_release_groups(sanitize_release_group(video.release_group)))):
-            matches.add('release_group')
+            self.matches.add('release_group')
 
-        matches |= guess_matches(video, guessit(self.release_info), {"type": "episode"})
+        self.matches |= guess_matches(video, guessit(self.release_info), {"type": "episode"})
 
-        return matches
+        return self.matches
 
 
 class HosszupuskaProvider(Provider, ProviderSubtitleArchiveMixin):

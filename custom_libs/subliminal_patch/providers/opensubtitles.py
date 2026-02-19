@@ -1,4 +1,11 @@
 # coding=utf-8
+"""
+OpenSubtitles.org provider - self-contained version.
+
+This module is fully self-contained and does not depend on the removed
+subliminal.providers.opensubtitles base module. All necessary base classes
+and exception types are defined inline.
+"""
 from __future__ import absolute_import
 import base64
 import logging
@@ -8,28 +15,172 @@ import zlib
 import time
 import requests
 
+from xmlrpc.client import ServerProxy
+
 from babelfish import language_converters
 from dogpile.cache.api import NO_VALUE
 from guessit import guessit
-from subliminal.exceptions import ConfigurationError, ServiceUnavailable
-from subliminal.providers.opensubtitles import OpenSubtitlesProvider as _OpenSubtitlesProvider,\
-    OpenSubtitlesSubtitle as _OpenSubtitlesSubtitle, Episode, Movie, ServerProxy, Unauthorized, NoSession, \
-    DownloadLimitReached, InvalidImdbid, UnknownUserAgent, DisabledUserAgent, OpenSubtitlesError, PaymentRequired
-from .mixins import ProviderRetryMixin
-from .opensubtitles_scraper import OpenSubtitlesScraperMixin
+from subliminal import Episode, Movie
+from subliminal.exceptions import (AuthenticationError, ConfigurationError, DownloadLimitExceeded,
+                                   ProviderError, ServiceUnavailable)
 from subliminal.subtitle import fix_line_ending
-from subliminal_patch.providers import reinitialize_on_error
+from subliminal.cache import region
+from subliminal_patch.providers import Provider, reinitialize_on_error
 from subliminal_patch.http import SubZeroRequestsTransport
 from subliminal_patch.utils import sanitize, fix_inconsistent_naming
-from subliminal.cache import region
 from subliminal_patch.score import framerate_equal
-from subliminal_patch.subtitle import guess_matches
+from subliminal_patch.subtitle import Subtitle, guess_matches
 from subzero.language import Language
 
+from .mixins import ProviderRetryMixin
+from .opensubtitles_scraper import OpenSubtitlesScraperMixin
 from ..exceptions import TooManyRequests, APIThrottled
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# OpenSubtitles-specific exceptions (previously in subliminal.providers.opensubtitles)
+# ---------------------------------------------------------------------------
+
+class OpenSubtitlesError(ProviderError):
+    """Base class for non-generic OpenSubtitles exceptions."""
+    pass
+
+
+class Unauthorized(OpenSubtitlesError, AuthenticationError):
+    """Exception raised when status is '401 Unauthorized'."""
+    pass
+
+
+class PaymentRequired(OpenSubtitlesError):
+    """Exception raised when status is '402 Payment Required'."""
+    pass
+
+
+class NoSession(OpenSubtitlesError, AuthenticationError):
+    """Exception raised when status is '406 No session'."""
+    pass
+
+
+class DownloadLimitReached(OpenSubtitlesError, DownloadLimitExceeded):
+    """Exception raised when status is '407 Download limit reached'."""
+    pass
+
+
+class InvalidImdbid(OpenSubtitlesError):
+    """Exception raised when status is '413 Invalid ImdbID'."""
+    pass
+
+
+class UnknownUserAgent(OpenSubtitlesError, AuthenticationError):
+    """Exception raised when status is '414 Unknown User Agent'."""
+    pass
+
+
+class DisabledUserAgent(OpenSubtitlesError, AuthenticationError):
+    """Exception raised when status is '415 Disabled user agent'."""
+    pass
+
+
+# ---------------------------------------------------------------------------
+# Base OpenSubtitles subtitle class (previously in subliminal.providers.opensubtitles)
+# ---------------------------------------------------------------------------
+
+class _OpenSubtitlesSubtitle(Subtitle):
+    """Base OpenSubtitles Subtitle."""
+    provider_name = 'opensubtitles'
+    series_re = re.compile(r'^"(?P<series_name>.*)" (?P<series_title>.*)$')
+
+    def __init__(self, language, hearing_impaired, page_link, subtitle_id, matched_by, movie_kind, hash, movie_name,
+                 movie_release_name, movie_year, movie_imdb_id, series_season, series_episode, filename, encoding):
+        super(_OpenSubtitlesSubtitle, self).__init__(language, hearing_impaired=hearing_impaired,
+                                                     page_link=page_link, encoding=encoding)
+        self.subtitle_id = subtitle_id
+        self.matched_by = matched_by
+        self.movie_kind = movie_kind
+        self.hash = hash
+        self.movie_name = movie_name
+        self.movie_release_name = movie_release_name
+        self.movie_year = movie_year
+        self.movie_imdb_id = movie_imdb_id
+        self.series_season = series_season
+        self.series_episode = series_episode
+        self.filename = filename
+
+    @property
+    def id(self):
+        return str(self.subtitle_id)
+
+    @property
+    def series_name(self):
+        return self.series_re.match(self.movie_name).group('series_name')
+
+    @property
+    def series_title(self):
+        return self.series_re.match(self.movie_name).group('series_title')
+
+    def get_matches(self, video):
+        matches = set()
+        # episode
+        if isinstance(video, Episode) and self.movie_kind == 'episode':
+            # tag match, assume series, year, season and episode matches
+            if self.matched_by == 'tag':
+                if not video.imdb_id or self.movie_imdb_id == video.imdb_id:
+                    matches |= {'series', 'year', 'season', 'episode'}
+            # series
+            if video.series and sanitize(self.series_name) == sanitize(video.series):
+                matches.add('series')
+            # year
+            if video.original_series and self.movie_year is None or video.year and video.year == self.movie_year:
+                matches.add('year')
+            # season
+            if video.season and self.series_season == video.season:
+                matches.add('season')
+            # episode
+            if video.episode and self.series_episode == video.episode:
+                matches.add('episode')
+            # title
+            if video.title and sanitize(self.series_title) == sanitize(video.title):
+                matches.add('title')
+            # hash
+            if 'opensubtitles' in video.hashes and self.hash == video.hashes['opensubtitles']:
+                if 'series' in matches and 'season' in matches and 'episode' in matches:
+                    matches.add('hash')
+                else:
+                    logger.debug('Match on hash discarded')
+        # movie
+        elif isinstance(video, Movie) and self.movie_kind == 'movie':
+            # tag match, assume title and year matches
+            if self.matched_by == 'tag':
+                if not video.imdb_id or self.movie_imdb_id == video.imdb_id:
+                    matches |= {'title', 'year'}
+            # title
+            if video.title and sanitize(self.movie_name) == sanitize(video.title):
+                matches.add('title')
+            # year
+            if video.year and self.movie_year == video.year:
+                matches.add('year')
+            # hash
+            if 'opensubtitles' in video.hashes and self.hash == video.hashes['opensubtitles']:
+                if 'title' in matches:
+                    matches.add('hash')
+                else:
+                    logger.debug('Match on hash discarded')
+        else:
+            logger.info('%r is not a valid movie_kind', self.movie_kind)
+            return matches
+
+        # imdb_id
+        if video.imdb_id and self.movie_imdb_id == video.imdb_id:
+            matches.add('imdb_id')
+
+        return matches
+
+
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
 
 def fix_tv_naming(title):
     """Fix TV show titles with inconsistent naming using dictionary, but do not sanitize them.
@@ -47,6 +198,10 @@ def fix_movie_naming(title):
     return fix_inconsistent_naming(title, {
                                            }, True)
 
+
+# ---------------------------------------------------------------------------
+# Patched OpenSubtitles subtitle and provider classes
+# ---------------------------------------------------------------------------
 
 class OpenSubtitlesSubtitle(_OpenSubtitlesSubtitle):
     hash_verifiable = True
@@ -123,7 +278,7 @@ class OpenSubtitlesSubtitle(_OpenSubtitlesSubtitle):
         return matches
 
 
-class OpenSubtitlesProvider(ProviderRetryMixin, OpenSubtitlesScraperMixin, _OpenSubtitlesProvider):
+class OpenSubtitlesProvider(ProviderRetryMixin, OpenSubtitlesScraperMixin, Provider):
     only_foreign = False
     also_foreign = False
     subtitle_class = OpenSubtitlesSubtitle

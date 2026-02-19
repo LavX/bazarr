@@ -20,7 +20,7 @@ const mockMovieHistory = {
       description: "Test description",
       upgradable: true,
       blacklisted: false,
-      provider: "opensubtitles",
+      provider: "opensubtitlescom",
       subs_id: "123",
       subtitles_path: "/path/to/subtitles.srt",
     },

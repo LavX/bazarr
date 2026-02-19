@@ -14,9 +14,8 @@ import re
 
 from requests import ConnectionError
 from subzero.language import Language
-from subliminal_patch.exceptions import TooManyRequests, APIThrottled, ParseResponseError, IPAddressBlocked, \
-    MustGetBlacklisted, SearchLimitReached, ProviderError
-from subliminal.providers.opensubtitles import DownloadLimitReached, PaymentRequired, Unauthorized
+from subliminal_patch.exceptions import (TooManyRequests, APIThrottled, ParseResponseError, IPAddressBlocked,
+                                         MustGetBlacklisted, SearchLimitReached, ProviderError, ForbiddenError)
 from subliminal.exceptions import DownloadLimitExceeded, ServiceUnavailable, AuthenticationError, ConfigurationError
 from subliminal import region as subliminal_cache_region
 from subliminal_patch.extensions import provider_registry
@@ -78,15 +77,6 @@ def provider_throttle_map():
             requests.exceptions.ProxyError: (datetime.timedelta(hours=1), "1 hour"),
             AuthenticationError: (datetime.timedelta(hours=12), "12 hours"),
         },
-        "opensubtitles": {
-            TooManyRequests: (datetime.timedelta(hours=3), "3 hours"),
-            DownloadLimitExceeded: (datetime.timedelta(hours=6), "6 hours"),
-            DownloadLimitReached: (datetime.timedelta(hours=6), "6 hours"),
-            PaymentRequired: (datetime.timedelta(hours=12), "12 hours"),
-            Unauthorized: (datetime.timedelta(hours=12), "12 hours"),
-            APIThrottled: (datetime.timedelta(seconds=15), "15 seconds"),
-            ServiceUnavailable: (datetime.timedelta(hours=1), "1 hour"),
-        },
         "opensubtitlescom": {
             TooManyRequests: (datetime.timedelta(minutes=1), "1 minute"),
             DownloadLimitExceeded: (datetime.timedelta(hours=6), "6 hours"),
@@ -127,6 +117,15 @@ def provider_throttle_map():
             TooManyRequests: (datetime.timedelta(minutes=5), "5 minutes"),
             ProviderError: (datetime.timedelta(minutes=10), "10 minutes"),
         },
+        "subsource": {
+            APIThrottled: (datetime.timedelta(minutes=10), "10 minutes"),
+            AuthenticationError: (datetime.timedelta(hours=1), "1 hour"),
+            ForbiddenError: (datetime.timedelta(minutes=15), "15 minutes"),
+            TooManyRequests: (datetime.timedelta(hours=1), "1 hour"),
+        },
+        "subdl": {
+            ProviderError: (datetime.timedelta(hours=1), "1 hour"),
+        }
     }
 
 
@@ -222,6 +221,29 @@ def get_enabled_providers():
         return []
 
 
+def get_providers_sorted():
+    """Get enabled providers sorted by priority (lower = higher priority)"""
+    providers_list = get_providers()
+    if not providers_list:
+        return None
+
+    priorities = settings.general.provider_priorities or {}
+    default_priority = priorities.get('default', 100)
+
+    # Sort by priority (lower number = higher priority)
+    sorted_providers = sorted(
+        providers_list,
+        key=lambda p: priorities.get(p, default_priority)
+    )
+    return sorted_providers
+
+
+def get_provider_priority(provider_name):
+    """Get priority for a specific provider"""
+    priorities = settings.general.provider_priorities or {}
+    return priorities.get(provider_name, priorities.get('default', 100))
+
+
 _FFPROBE_BINARY = get_binary("ffprobe")
 _FFMPEG_BINARY = get_binary("ffmpeg")
 
@@ -260,6 +282,7 @@ def get_providers_auth():
                              'password': settings.opensubtitlescom.password,
                              'use_hash': settings.opensubtitlescom.use_hash,
                              'include_ai_translated': settings.opensubtitlescom.include_ai_translated,
+                             'include_machine_translated': settings.opensubtitlescom.include_machine_translated,
                              'api_key': 's38zmzVlW7IlYruWi7mHwDYl2SfMQoC1'
                              },
         'napiprojekt': {'only_authors': settings.napiprojekt.only_authors,
@@ -351,7 +374,11 @@ def get_providers_auth():
         'turkcealtyaziorg': {
             'cookies': settings.turkcealtyaziorg.cookies,
             'user_agent': settings.turkcealtyaziorg.user_agent,
-        }
+        },
+        'subsource': {
+            'api_key': settings.subsource.apikey,
+        },
+        'animesubinfo': {}
     }
 
 

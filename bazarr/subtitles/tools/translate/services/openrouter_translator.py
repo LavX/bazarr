@@ -72,7 +72,7 @@ class OpenRouterTranslatorService:
             'maxTokens': max_tokens,
         }
 
-    def translate(self):
+    def translate(self, job_id=None):
         try:
             subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
             lines_list: List[str] = [x.plaintext for x in subs]

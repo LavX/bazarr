@@ -17,6 +17,7 @@ import {
   useLanguages,
   useSystemProviders,
 } from "@/apis/hooks";
+import { useInstanceName } from "@/apis/hooks/site";
 import { Selector, Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import { useSelectorOptions } from "@/utilities";
@@ -60,7 +61,7 @@ const HistoryStats: FunctionComponent = () => {
     }
   }, [data]);
 
-  useDocumentTitle("History Statistics - Bazarr");
+  useDocumentTitle(`History Statistics - ${useInstanceName()}`);
 
   const theme = useMantineTheme();
 

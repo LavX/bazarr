@@ -43,13 +43,11 @@ class BetaSeriesSubtitle(Subtitle):
         return self.download_url
 
     def get_matches(self, video):
-        matches = self.matches
-
         if isinstance(video, Episode):
-            matches |= guess_matches(video, guessit(
+            self.matches |= guess_matches(video, guessit(
                 self.video_name, {'type': 'episode'}), partial=True)
 
-        return matches
+        return self.matches
 
 
 class BetaSeriesProvider(Provider):

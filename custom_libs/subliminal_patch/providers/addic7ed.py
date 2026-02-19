@@ -45,20 +45,21 @@ class Addic7edSubtitle(_Addic7edSubtitle):
         # Guessit will fail if the input is None
         self.release_info = version.replace('+', ',') if version else ""
         self.uploader = uploader
+        self.matches = None
 
     def get_matches(self, video):
-        matches = super(Addic7edSubtitle, self).get_matches(video)
+        self.matches = super(Addic7edSubtitle, self).get_matches(video)
         if not subliminal.score.episode_scores.get("addic7ed_boost"):
-            return matches
+            return self.matches
 
         # if the release group matches, the source is most likely correct, as well
-        if "release_group" in matches:
-            matches.add("source")
+        if "release_group" in self.matches:
+            self.matches.add("source")
 
-        if {"series", "season", "episode", "year"}.issubset(matches) and "source" in matches:
-            matches.add("addic7ed_boost")
+        if {"series", "season", "episode", "year"}.issubset(self.matches) and "source" in self.matches:
+            self.matches.add("addic7ed_boost")
             logger.info("Boosting Addic7ed subtitle by %s" % subliminal.score.episode_scores.get("addic7ed_boost"))
-        return matches
+        return self.matches
 
     def __repr__(self):
         return '<%s %r [%s]>' % (

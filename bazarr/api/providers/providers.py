@@ -1,8 +1,10 @@
 # coding=utf-8
 
+from flask import request
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
 from operator import itemgetter
 
+from app.config import settings, write_config
 from app.database import TableHistory, TableHistoryMovie, database, select
 from app.get_providers import list_throttled_providers, reset_throttled_providers
 
@@ -80,3 +82,26 @@ class Providers(Resource):
             return '', 204
 
         return 'Unknown action', 400
+
+
+@api_ns_providers.route('providers/priorities')
+class ProviderPriorities(Resource):
+    @authenticate
+    @api_ns_providers.response(200, 'Success')
+    @api_ns_providers.response(401, 'Not Authenticated')
+    def get(self):
+        """Get provider priorities"""
+        return settings.general.provider_priorities or {}
+
+    @authenticate
+    @api_ns_providers.response(200, 'Success')
+    @api_ns_providers.response(401, 'Not Authenticated')
+    def post(self):
+        """Set provider priorities"""
+        priorities = request.json
+        if not isinstance(priorities, dict):
+            return 'Invalid data format', 400
+
+        settings.general.provider_priorities = priorities
+        write_config()
+        return {'status': 'ok'}

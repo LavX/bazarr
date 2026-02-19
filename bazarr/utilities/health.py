@@ -8,12 +8,17 @@ from app.config import settings
 from app.database import (TableShowsRootfolder, TableMoviesRootfolder, TableLanguagesProfiles, database, select,
                           TableShows, TableMovies)
 from app.event_handler import event_stream
-from .path_mappings import path_mappings
+from app.jobs_queue import jobs_queue
+from utilities.path_mappings import path_mappings
 from sonarr.rootfolder import check_sonarr_rootfolder
 from radarr.rootfolder import check_radarr_rootfolder
 
 
-def check_health():
+def check_health(job_id=None):
+    if not job_id:
+        jobs_queue.add_job_from_function("Checking Health", is_progress=False)
+        return
+
     if settings.general.use_sonarr:
         check_sonarr_rootfolder()
     if settings.general.use_radarr:
@@ -22,6 +27,8 @@ def check_health():
 
     from .backup import backup_rotation
     backup_rotation()
+
+    jobs_queue.update_job_name(job_id=job_id, new_job_name="Checked Health")
 
 
 def get_health_issues():

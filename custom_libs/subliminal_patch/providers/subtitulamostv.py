@@ -29,14 +29,14 @@ class SubtitulamosTVSubtitle(Subtitle):
         return self.download_link
 
     def get_matches(self, video):
-        matches = {'series', 'season', 'episode', 'year', 'title'}
+        self.matches = {'series', 'season', 'episode', 'year', 'title'}
 
         if video.release_group and video.release_group.lower() in self.release_info.lower():
-            matches.add('release_group')
+            self.matches.add('release_group')
 
-        matches |= guess_matches(video, guessit(self.release_info, {"type": "episode"}))
+        self.matches |= guess_matches(video, guessit(self.release_info, {"type": "episode"}))
 
-        return matches
+        return self.matches
 
 
 class SubtitulamosTVProvider(Provider):

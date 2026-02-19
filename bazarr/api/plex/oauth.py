@@ -1,5 +1,6 @@
 # coding=utf-8
 
+import os
 import time
 import uuid
 import requests
@@ -7,8 +8,11 @@ import xml.etree.ElementTree as ET
 import logging
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import quote_plus
 from flask import request
 from flask_restx import Resource, reqparse, abort
+import plexapi
+from plexapi.exceptions import BadRequest
 
 from . import api_ns_plex
 from .exceptions import *
@@ -16,6 +20,22 @@ from .security import (TokenManager, sanitize_log_data, pin_cache, get_or_create
                        encrypt_api_key)
 from app.config import settings, write_config
 from app.logger import logger
+from utilities.plex_utils import _get_library_locations
+
+def _update_plexapi_headers():
+    """Update plexapi headers to show Bazarr identity in Plex.
+    
+    Sets product name, version, instance name, and client ID for consistent
+    device identification across all Plex API calls via plexapi library.
+    """
+    bazarr_version = os.environ.get('BAZARR_VERSION', 'unknown')
+    instance_name = settings.general.get('instance_name', 'Bazarr')
+    client_id = get_or_create_client_identifier()
+    
+    plexapi.BASE_HEADERS['X-Plex-Product'] = 'Bazarr'
+    plexapi.BASE_HEADERS['X-Plex-Version'] = bazarr_version
+    plexapi.BASE_HEADERS['X-Plex-Device-Name'] = instance_name
+    plexapi.BASE_HEADERS['X-Plex-Client-Identifier'] = client_id
 
 
 def get_token_manager():
@@ -48,6 +68,21 @@ def generate_client_id():
     return str(uuid.uuid4())
 
 
+def get_or_create_client_identifier():
+    """Get existing client identifier or create and persist a new one.
+    
+    This ensures each Bazarr instance has a persistent, unique identifier
+    that survives restarts and is used consistently in all Plex API calls.
+    """
+    client_id = settings.plex.get('client_identifier', '')
+    if not client_id:
+        client_id = str(uuid.uuid4())
+        settings.plex.client_identifier = client_id
+        write_config()
+        logger.info(f"Generated new persistent Plex client identifier: {client_id[:8]}...")
+    return client_id
+
+
 def get_decrypted_token():
     auth_method = settings.plex.get('auth_method', 'apikey')
 
@@ -68,6 +103,39 @@ def get_decrypted_token():
                 return None
 
         return decrypt_token(apikey)
+
+
+def check_plex_pass_feature(account, feature_name):
+    """
+    Check if a Plex account has access to a specific Plex Pass feature.
+    
+    This helper function can be reused across the codebase to check for
+    any Plex Pass feature (webhooks, sync, hardware_transcoding, etc.)
+    
+    Args:
+        account: MyPlexAccount instance
+        feature_name: The feature to check (e.g., 'webhooks', 'sync')
+    
+    Returns:
+        tuple: (has_feature: bool, error_message: str or None)
+               - (True, None) if feature is available
+               - (False, error_message) if feature is not available
+    """
+    # Check if subscription is active first
+    if not account.subscriptionActive:
+        return False, (
+            f'Plex Pass subscription required. The "{feature_name}" feature requires Plex Pass. '
+            'Please subscribe at https://www.plex.tv/plans/'
+        )
+    
+    # Check if specific feature is in the subscription features list
+    if feature_name not in account.subscriptionFeatures:
+        return False, (
+            f'The "{feature_name}" feature is not available for your Plex account. '
+            'This may require a different Plex Pass tier or the feature may be disabled.'
+        )
+    
+    return True, None
 
 
 def validate_plex_token(token):
@@ -177,7 +245,13 @@ class PlexPin(Resource):
     def post(self):
         try:
             args = self.post_request_parser.parse_args()
-            client_id = args.get('clientId') if args.get('clientId') else generate_client_id()
+            
+            # Use persistent client identifier for consistent device identity
+            client_id = get_or_create_client_identifier()
+            
+            # Get instance name and version for device identification in Plex
+            instance_name = settings.general.get('instance_name', 'Bazarr')
+            bazarr_version = os.environ.get('BAZARR_VERSION', 'unknown')
 
             state_token = get_token_manager().generate_state_token()
 
@@ -185,12 +259,12 @@ class PlexPin(Resource):
                 'Accept': 'application/json',
                 'Content-Type': 'application/json',
                 'X-Plex-Product': 'Bazarr',
-                'X-Plex-Version': '1.0',
+                'X-Plex-Version': bazarr_version,
                 'X-Plex-Client-Identifier': client_id,
                 'X-Plex-Platform': 'Web',
                 'X-Plex-Platform-Version': '1.0',
                 'X-Plex-Device': 'Bazarr',
-                'X-Plex-Device-Name': 'Bazarr Web'
+                'X-Plex-Device-Name': instance_name
             }
 
             response = requests.post(
@@ -210,13 +284,16 @@ class PlexPin(Resource):
                 'created_at': datetime.now().isoformat()
             })
 
+            # Include instance name in auth URL for Plex device display
+            instance_name_encoded = quote_plus(instance_name)
+
             return {
                 'data': {
                     'pinId': pin_data['id'],
                     'code': pin_data['code'],
                     'clientId': client_id,
                     'state': state_token,
-                    'authUrl': f"https://app.plex.tv/auth#?clientID={client_id}&code={pin_data['code']}&context[device][product]=Bazarr"
+                    'authUrl': f"https://app.plex.tv/auth#?clientID={client_id}&code={pin_data['code']}&context[device][product]=Bazarr&context[device][deviceName]={instance_name_encoded}"
                 }
             }
 
@@ -428,6 +505,7 @@ class PlexServers(Resource):
                     # Collect all connections for parallel testing
                     connection_candidates = []
                     connections = []
+                    all_device_connection_uris = []  # Store ALL URIs before testing
                     for conn in device.get('connections', []):
                         connection_data = {
                             'uri': conn['uri'],
@@ -437,6 +515,7 @@ class PlexServers(Resource):
                             'local': conn.get('local', False)
                         }
                         connection_candidates.append(connection_data)
+                        all_device_connection_uris.append(conn['uri'])  # Store ALL URIs
 
                     # Test all connections in parallel using threads
                     if connection_candidates:
@@ -468,7 +547,7 @@ class PlexServers(Resource):
                         connections.sort(key=lambda x: x.get('latency', float('inf')))
                         bestConnection = connections[0] if connections else None
 
-                        servers.append({
+                        server_data = {
                             'name': device['name'],
                             'machineIdentifier': device['clientIdentifier'],
                             'connections': connections,
@@ -476,7 +555,20 @@ class PlexServers(Resource):
                             'version': device.get('productVersion'),
                             'platform': device.get('platform'),
                             'device': device.get('device')
-                        })
+                        }
+                        servers.append(server_data)
+
+                        # Update stored connections if this is the currently selected server
+                        selected_machine_id = settings.plex.get('server_machine_id')
+                        if selected_machine_id and device['clientIdentifier'] == selected_machine_id:
+                            # Store ALL connection URIs (not just the working ones) for round-robin fallback
+                            settings.plex.server_connections = all_device_connection_uris
+                            # Update best connection if it changed
+                            if bestConnection:
+                                settings.plex.server_url = bestConnection['uri']
+                                settings.plex.server_local = bestConnection.get('local', False)
+                            write_config()
+                            logger.debug(f"Auto-updated connections for server {device['name']}: {len(all_device_connection_uris)} total, {len(connections)} available")
 
             return {'data': servers}
 
@@ -494,69 +586,99 @@ class PlexLibraries(Resource):
         try:
             decrypted_token = get_decrypted_token()
             if not decrypted_token:
-                logger.warning("No decrypted token available for Plex library fetching")
+                logger.debug("No decrypted token available for Plex library fetching")
                 return {'data': []}
 
-            # Get the selected server URL
-            server_url = settings.plex.get('server_url')
-            if not server_url:
-                logger.warning("No Plex server selected")
+            # Get all stored server connections for round-robin fallback
+            primary_url = settings.plex.get('server_url')
+            all_connections = settings.plex.get('server_connections', [])
+            
+            # Build connection list: primary URL first, then others as fallback
+            server_connections = []
+            if primary_url:
+                server_connections.append(primary_url)
+                # Add other connections as fallback (skip duplicates)
+                server_connections.extend([url for url in all_connections if url != primary_url])
+            elif all_connections:
+                server_connections = all_connections
+            else:
+                logger.debug("No Plex server connections available")
                 return {'data': []}
 
-            logger.debug(f"Fetching Plex libraries from server: {sanitize_server_url(server_url)}")
+            logger.debug(f"Fetching Plex libraries for server: {settings.plex.get('server_name', 'Unknown')}")
             
             headers = {
                 'X-Plex-Token': decrypted_token,
                 'Accept': 'application/json'
             }
 
-            # Get libraries from the selected server
-            response = requests.get(
-                f"{server_url}/library/sections",
-                headers=headers,
-                timeout=10,
-                verify=False
-            )
+            # Try each connection in order until one succeeds (round-robin)
+            sections = []
+            successful_server_url = None
+            
+            for idx, server_url in enumerate(server_connections, 1):
+                try:
+                    logger.debug(f"Attempting to fetch libraries from connection {idx}/{len(server_connections)}: {sanitize_server_url(server_url)}")
+                    
+                    # Get libraries from this server URL
+                    lib_response = requests.get(
+                        f"{server_url}/library/sections",
+                        headers=headers,
+                        timeout=10,
+                        verify=False
+                    )
 
-            if response.status_code in (401, 403):
-                logger.warning(f"Plex authentication failed: {response.status_code}")
+                    if lib_response.status_code in (401, 403):
+                        logger.debug(f"Connection {idx}: Authentication failed ({lib_response.status_code})")
+                        continue
+                    elif lib_response.status_code != 200:
+                        logger.debug(f"Connection {idx}: HTTP {lib_response.status_code}")
+                        continue
+
+                    # Parse the response
+                    lib_content_type = lib_response.headers.get('content-type', '')
+                    
+                    if 'application/json' in lib_content_type:
+                        data = lib_response.json()
+                        if 'MediaContainer' in data and 'Directory' in data['MediaContainer']:
+                            sections = data['MediaContainer']['Directory']
+                    elif 'application/xml' in lib_content_type or 'text/xml' in lib_content_type:
+                        import xml.etree.ElementTree as ET
+                        root = ET.fromstring(lib_response.text)
+                        sections = []
+                        for directory in root.findall('Directory'):
+                            sections.append({
+                                'key': directory.get('key'),
+                                'title': directory.get('title'),
+                                'type': directory.get('type'),
+                                'count': int(directory.get('count', 0)),
+                                'agent': directory.get('agent', ''),
+                                'scanner': directory.get('scanner', ''),
+                                'language': directory.get('language', ''),
+                                'uuid': directory.get('uuid', ''),
+                                'updatedAt': int(directory.get('updatedAt', 0)),
+                                'createdAt': int(directory.get('createdAt', 0))
+                            })
+                    
+                    # If we got sections, this connection worked
+                    if sections:
+                        successful_server_url = server_url
+                        logger.debug(f"Successfully fetched libraries from connection {idx}/{len(server_connections)}")
+                        break
+                    else:
+                        logger.debug(f"Connection {idx}: No sections returned")
+                        
+                except requests.exceptions.RequestException as e:
+                    logger.debug(f"Connection {idx} failed: {type(e).__name__}: {str(e)}")
+                    continue
+                except Exception as e:
+                    logger.debug(f"Connection {idx} error: {type(e).__name__}: {str(e)}")
+                    continue
+
+            # If no connection succeeded, return empty
+            if not successful_server_url or not sections:
+                logger.warning(f"Failed to fetch libraries from all {len(server_connections)} connection(s)")
                 return {'data': []}
-            elif response.status_code != 200:
-                logger.error(f"Plex API error: {response.status_code}")
-                raise PlexConnectionError(f"Failed to get libraries: HTTP {response.status_code}")
-
-            response.raise_for_status()
-            
-            # Parse the response - it could be JSON or XML depending on the server
-            content_type = response.headers.get('content-type', '')
-            logger.debug(f"Plex libraries response content-type: {content_type}")
-            
-            if 'application/json' in content_type:
-                data = response.json()
-                logger.debug(f"Plex libraries JSON response: {data}")
-                if 'MediaContainer' in data and 'Directory' in data['MediaContainer']:
-                    sections = data['MediaContainer']['Directory']
-                else:
-                    sections = []
-            elif 'application/xml' in content_type or 'text/xml' in content_type:
-                import xml.etree.ElementTree as ET
-                root = ET.fromstring(response.text)
-                sections = []
-                for directory in root.findall('Directory'):
-                    sections.append({
-                        'key': directory.get('key'),
-                        'title': directory.get('title'),
-                        'type': directory.get('type'),
-                        'count': int(directory.get('count', 0)),
-                        'agent': directory.get('agent', ''),
-                        'scanner': directory.get('scanner', ''),
-                        'language': directory.get('language', ''),
-                        'uuid': directory.get('uuid', ''),
-                        'updatedAt': int(directory.get('updatedAt', 0)),
-                        'createdAt': int(directory.get('createdAt', 0))
-                    })
-            else:
-                raise PlexConnectionError(f"Unexpected response format: {content_type}")
 
             # Filter and format libraries for movie and show types only
             libraries = []
@@ -566,7 +688,7 @@ class PlexLibraries(Resource):
                     try:
                         section_key = section.get('key')
                         count_response = requests.get(
-                            f"{server_url}/library/sections/{section_key}/all",
+                            f"{successful_server_url}/library/sections/{section_key}/all",
                             headers={'X-Plex-Token': decrypted_token, 'Accept': 'application/json'},
                             timeout=5,
                             verify=False
@@ -596,10 +718,11 @@ class PlexLibraries(Resource):
                         'language': section.get('language', ''),
                         'uuid': section.get('uuid', ''),
                         'updatedAt': int(section.get('updatedAt', 0)),
-                        'createdAt': int(section.get('createdAt', 0))
+                        'createdAt': int(section.get('createdAt', 0)),
+                        'locations': _get_library_locations(successful_server_url, section_key, decrypted_token)
                     })
 
-            logger.debug(f"Filtered Plex libraries: {libraries}")
+            logger.debug(f"Successfully retrieved {len(libraries)} movie/show libraries from Plex")
             return {'data': libraries}
 
         except requests.exceptions.RequestException as e:
@@ -758,6 +881,7 @@ class PlexSelectServer(Resource):
     post_request_parser.add_argument('name', type=str, required=True, help='Server name')
     post_request_parser.add_argument('uri', type=str, required=True, help='Connection URI')
     post_request_parser.add_argument('local', type=str, required=False, default='false', help='Is local connection')
+    post_request_parser.add_argument('connections', type=list, location='json', required=False, help='All available connection URIs')
 
     @api_ns_plex.doc(parser=post_request_parser)
     def post(self):
@@ -766,11 +890,14 @@ class PlexSelectServer(Resource):
         name = args.get('name')
         connection_uri = args.get('uri')
         connection_local = args.get('local', 'false').lower() == 'true'
+        connections = args.get('connections', [])
 
         settings.plex.server_machine_id = machine_identifier
         settings.plex.server_name = name
         settings.plex.server_url = connection_uri
         settings.plex.server_local = connection_local
+        # Store all connection URIs for round-robin fallback
+        settings.plex.server_connections = connections if connections else [connection_uri]
         write_config()
 
         return {
@@ -797,11 +924,20 @@ class PlexWebhookCreate(Resource):
             if not decrypted_token:
                 raise UnauthorizedError()
 
+            # Update plexapi device name before using the library
+            _update_plexapi_headers()
+            
             # Import MyPlexAccount here to avoid circular imports
             from plexapi.myplex import MyPlexAccount
             
             # Create account instance with OAuth token
             account = MyPlexAccount(token=decrypted_token)
+            
+            # Check if user has Plex Pass with webhooks feature
+            has_webhooks, error_msg = check_plex_pass_feature(account, 'webhooks')
+            if not has_webhooks:
+                logger.warning(f"Plex Pass check failed for webhooks: {error_msg}")
+                return {'error': error_msg}, 403
             
             # Build webhook URL for this Bazarr instance
             # Try to get base URL from settings first, then fall back to request host
@@ -813,15 +949,18 @@ class PlexWebhookCreate(Resource):
                 logger.error("No API key configured - cannot create webhook")
                 return {'error': 'No API key configured. Set up API key in Settings > General first.'}, 400
             
+            # Get instance name for webhook identification
+            instance_name = settings.general.get('instance_name', 'Bazarr')
+            instance_param = quote_plus(instance_name)
+            
+            scheme = 'https' if request.is_secure else 'http'
+            host = request.host
             if configured_base_url:
-                webhook_url = f"{configured_base_url}/api/webhooks/plex?apikey={apikey}"
-                logger.info(f"Using configured base URL for webhook: {configured_base_url}/api/webhooks/plex")
+                webhook_url = f"{scheme}://{host}{configured_base_url}/api/webhooks/plex?apikey={apikey}&instance={instance_param}"
+                logger.info(f"Using configured base URL for webhook: {scheme}://{host}{configured_base_url}/api/webhooks/plex (instance: {instance_name})")
             else:
-                # Fall back to using the current request's host
-                scheme = 'https' if request.is_secure else 'http'
-                host = request.host
-                webhook_url = f"{scheme}://{host}/api/webhooks/plex?apikey={apikey}"
-                logger.info(f"Using request host for webhook (no base URL configured): {scheme}://{host}/api/webhooks/plex")
+                webhook_url = f"{scheme}://{host}/api/webhooks/plex?apikey={apikey}&instance={instance_param}"
+                logger.info(f"Using request host for webhook (no base URL configured): {scheme}://{host}/api/webhooks/plex (instance: {instance_name})")
                 logger.info("Note: If Bazarr is behind a reverse proxy, configure Base URL in General Settings for better reliability")
             
             # Get existing webhooks
@@ -863,9 +1002,26 @@ class PlexWebhookCreate(Resource):
                 }
             }
 
+        except BadRequest as e:
+            error_msg = str(e)
+            logger.error(f"Plex API rejected webhook creation: {error_msg}")
+            
+            # Parse common Plex error scenarios
+            if '422' in error_msg:
+                if '1998' in error_msg or 'validation' in error_msg.lower():
+                    return {
+                        'error': 'Plex rejected the webhook. This usually means:\n'
+                                 '1. Plex Pass subscription is required but not active\n'
+                                 '2. The webhook URL is not publicly accessible\n'
+                                 '3. Maximum webhook limit reached (check plex.tv/webhooks)\n'
+                                 f'Technical details: {error_msg}'
+                    }, 422
+            
+            return {'error': f'Plex API error: {error_msg}'}, 502
+
         except Exception as e:
             logger.error(f"Failed to create Plex webhook: {e}")
-            return {'error': f'Failed to create webhook: {str(e)}'}, 500
+            return {'error': f'Failed to create webhook: {str(e)}'}, 502
 
 
 @api_ns_plex.route('plex/webhook/list')
@@ -876,6 +1032,9 @@ class PlexWebhookList(Resource):
             if not decrypted_token:
                 raise UnauthorizedError()
 
+            # Update plexapi device name before using the library
+            _update_plexapi_headers()
+            
             from plexapi.myplex import MyPlexAccount
             account = MyPlexAccount(token=decrypted_token)
             
@@ -903,13 +1062,18 @@ class PlexWebhookList(Resource):
             return {
                 'data': {
                     'webhooks': webhook_list,
-                    'count': len(webhook_list)
+                    'count': len(webhook_list),
+                    'plexPassSubscription': {
+                        'active': account.subscriptionActive,
+                        'has_webhooks_feature': 'webhooks' in account.subscriptionFeatures,
+                        'plan': getattr(account, 'subscriptionPlan', None)
+                    }
                 }
             }
 
         except Exception as e:
             logger.error(f"Failed to list Plex webhooks: {e}")
-            return {'error': f'Failed to list webhooks: {str(e)}'}, 500
+            return {'error': f'Failed to list webhooks: {str(e)}'}, 502
 
 
 @api_ns_plex.route('plex/webhook/delete')
@@ -929,6 +1093,9 @@ class PlexWebhookDelete(Resource):
             if not decrypted_token:
                 raise UnauthorizedError()
 
+            # Update plexapi device name before using the library
+            _update_plexapi_headers()
+            
             from plexapi.myplex import MyPlexAccount
             account = MyPlexAccount(token=decrypted_token)
             
@@ -950,6 +1117,33 @@ class PlexWebhookDelete(Resource):
 
         except Exception as e:
             logger.error(f"Failed to delete Plex webhook: {e}")
-            return {'error': f'Failed to delete webhook: {str(e)}'}, 500
+            return {'error': f'Failed to delete webhook: {str(e)}'}, 502
 
 
+@api_ns_plex.route('plex/autopulse/config')
+class PlexAutopulseConfig(Resource):
+    get_request_parser = reqparse.RequestParser()
+
+    @api_ns_plex.doc(parser=get_request_parser)
+    def get(self):
+        try:
+            decrypted_token = get_decrypted_token()
+            if not decrypted_token:
+                raise UnauthorizedError()
+
+            # Use config generator from utilities (handles OAuth and decryption internally)
+            from utilities.autopulse_webhook import generate_autopulse_config
+            config = generate_autopulse_config(decrypted_token)
+            
+            if config:
+                return {
+                    'data': config
+                }
+            else:
+                return {'error': 'Failed to get Plex configuration for Autopulse'}, 400
+
+        except UnauthorizedError:
+            return {'error': 'Plex authentication required'}, 401
+        except Exception as e:
+            logger.error(f"Failed to get Autopulse config: {e}")
+            return {'error': f'Failed to get Autopulse config: {str(e)}'}, 500

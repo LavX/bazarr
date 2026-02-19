@@ -10,7 +10,7 @@ from subliminal.core import check_video
 logger = logging.getLogger(__name__)
 
 # list_all_subtitles, list_supported_languages, list_supported_video_types, download_subtitles, download_best_subtitles
-def list_all_subtitles(videos, languages, pool_instance):
+def list_all_subtitles(videos, languages, pool_instance, min_score=0):
     listed_subtitles = defaultdict(list)
 
     # return immediatly if no video passed the checks
@@ -19,8 +19,8 @@ def list_all_subtitles(videos, languages, pool_instance):
 
     for video in videos:
         logger.info("Listing subtitles for %r", video)
-        subtitles = pool_instance.list_subtitles(
-            video, languages - video.subtitle_languages
+        subtitles = pool_instance.list_subtitles_prioritized(
+            video, languages - video.subtitle_languages, min_score=min_score
         )
         listed_subtitles[video].extend(subtitles)
         logger.info("Found %d subtitle(s)", len(subtitles))
@@ -71,7 +71,7 @@ def download_best_subtitles(
     for video in checked_videos:
         logger.info("Downloading best subtitles for %r", video)
         subtitles = pool_instance.download_best_subtitles(
-            pool_instance.list_subtitles(video, languages - video.subtitle_languages),
+            pool_instance.list_subtitles_prioritized(video, languages - video.subtitle_languages, min_score=min_score),
             video,
             languages,
             min_score=min_score,
