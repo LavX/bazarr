@@ -46,15 +46,13 @@ class EmbeddedSubtitle(Subtitle):
         self.release_info = _get_pretty_release_name(stream, container)
         self.media_type = media_type
 
-        self._matches: set = matches
-
     def get_matches(self, video):
         if self.language.hi:
-            self._matches.add("hearing_impaired")
+            self.matches.add("hearing_impaired")
 
-        self._matches.add("hash")
+        self.matches.add("hash")
 
-        return self._matches
+        return self.matches
 
     @property
     def id(self):
@@ -201,16 +199,6 @@ class EmbeddedSubtitlesProvider(Provider):
         except KeyError:  # TODO: add MustGetBlacklisted support
             logger.error("Couldn't get subtitle path")
             return None
-
-        modifiers = _type_modifiers.get(subtitle.stream.codec_name) or set()
-        logger.debug("Found modifiers for %s type: %s", subtitle.stream, modifiers)
-
-        for mod in modifiers:
-            logger.debug("Running %s modifier for %s", mod, path)
-            try:
-                mod(path, path)
-            except Exception as error:
-                logger.debug("'%s' raised running modifier", error)
 
         if os.path.exists(path):
             with open(path, "rb") as sub:
@@ -366,28 +354,3 @@ def _get_pretty_release_name(stream, container):
 def _basename_callback(path: str):
     path, ext = os.path.splitext(path)
     return hashlib.md5(path.encode()).hexdigest() + ext
-
-
-# TODO: improve this
-_SIGNS_LINE_RE = re.compile(r",([\w|_]{,15}(fx|karaoke))", flags=re.IGNORECASE)
-
-
-def _clean_ass_subtitles(path, output_path):
-    """An attempt to ignore extraneous lines from ASS anime subtitles. Experimental."""
-
-    clean_lines = []
-
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        lines = f.readlines()
-        for line in lines:
-            if _SIGNS_LINE_RE.search(line) is None:
-                clean_lines.append(line)
-
-    logger.debug("Cleaned lines: %d", abs(len(lines) - len(clean_lines)))
-
-    with open(output_path, "w", encoding="utf-8", errors="ignore") as f:
-        f.writelines(clean_lines)
-        logger.debug("Lines written to output path: %s", output_path)
-
-
-_type_modifiers = {"ass": {_clean_ass_subtitles}}

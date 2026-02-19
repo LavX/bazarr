@@ -41,33 +41,32 @@ class Subs4FreeSubtitle(Subtitle):
         self.uploader = uploader
         self.hearing_impaired = None
         self.encoding = 'utf8'
+        self.matches = None
 
     @property
     def id(self):
         return self.download_link
 
     def get_matches(self, video):
-        matches = set()
-
         # movie
         if isinstance(video, Movie):
             # title
             if video.title and (sanitize(self.title) in (
                     sanitize(name) for name in [video.title] + video.alternative_titles)):
-                matches.add('title')
+                self.matches.add('title')
             # year
             if video.year and self.year == video.year:
-                matches.add('year')
+                self.matches.add('year')
 
         # release_group
         if (video.release_group and self.version and
                 any(r in sanitize_release_group(self.version)
                     for r in get_equivalent_release_groups(sanitize_release_group(video.release_group)))):
-            matches.add('release_group')
+            self.matches.add('release_group')
         # other properties
-        matches |= guess_matches(video, guessit(self.version, {'type': 'movie'}), partial=True)
+        self.matches |= guess_matches(video, guessit(self.version, {'type': 'movie'}), partial=True)
 
-        return matches
+        return self.matches
 
 
 class Subs4FreeProvider(Provider):

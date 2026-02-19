@@ -30,26 +30,25 @@ class GreekSubsSubtitle(Subtitle):
         self.uploader = uploader
         self.referer = referer
         self.subtitle_id = subtitle_id
+        self.matches = None
 
     @property
     def id(self):
         return self.subtitle_id
 
     def get_matches(self, video):
-        matches = set()
-
         # episode
         if isinstance(video, Episode):
             # Blatanly match the year
-            matches.add("year")
+            self.matches.add("year")
             # other properties
-            matches |= guess_matches(video, guessit(self.version, {'type': 'episode'}), partial=True)
+            self.matches |= guess_matches(video, guessit(self.version, {'type': 'episode'}), partial=True)
         # movie
         elif isinstance(video, Movie):
             # other properties
-            matches |= guess_matches(video, guessit(self.version, {'type': 'movie'}), partial=True)
+            self.matches |= guess_matches(video, guessit(self.version, {'type': 'movie'}), partial=True)
 
-        return matches
+        return self.matches
 
 
 class GreekSubsProvider(Provider):

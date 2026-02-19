@@ -67,7 +67,6 @@ class KtuvitSubtitle(Subtitle):
         return str(self.subtitle_id)
 
     def get_matches(self, video):
-        matches = set()
         # episode
         if isinstance(video, Episode):
             # series
@@ -77,31 +76,31 @@ class KtuvitSubtitle(Subtitle):
                     sanitize(name) for name in [video.series] + video.alternative_series
                 )
             ):
-                matches.add("series")
+                self.matches.add("series")
             # season
             if video.season and self.season == video.season:
-                matches.add("season")
+                self.matches.add("season")
             # episode
             if video.episode and self.episode == video.episode:
-                matches.add("episode")
+                self.matches.add("episode")
             # imdb_id
             if video.series_imdb_id and self.imdb_id == video.series_imdb_id:
-                matches.add("series_imdb_id")
+                self.matches.add("series_imdb_id")
             # guess
-            matches |= guess_matches(video, guessit(self.release, {"type": "episode"}))
+            self.matches |= guess_matches(video, guessit(self.release, {"type": "episode"}))
         # movie
         elif isinstance(video, Movie):
             # guess
-            matches |= guess_matches(video, guessit(self.release, {"type": "movie"}))
+            self.matches |= guess_matches(video, guessit(self.release, {"type": "movie"}))
 
             # title
             if video.title and (
                 sanitize(self.title)
                 in (sanitize(name) for name in [video.title] + video.alternative_titles)
             ):
-                matches.add("title")
+                self.matches.add("title")
 
-        return matches
+        return self.matches
 
 
 class KtuvitProvider(Provider):

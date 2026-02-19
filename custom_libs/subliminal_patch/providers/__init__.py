@@ -6,18 +6,16 @@ import functools
 import importlib
 import os
 import logging
-import subliminal
 from subliminal.providers import Provider as _Provider
 from subliminal.subtitle import Subtitle as _Subtitle
 from subliminal_patch.extensions import provider_registry
 from subliminal_patch.http import RetryingSession
 from subliminal_patch.subtitle import Subtitle, guess_matches
 
-from subzero.lib.io import get_viable_encoding
-import six
-
 
 logger = logging.getLogger(__name__)
+
+CUSTOM_SESSION_EXCLUDED_PROVIDERS = ["podnapisi.py"]
 
 
 class Provider(_Provider):
@@ -105,8 +103,12 @@ for name in os.listdir(os.path.dirname(__file__)):
 
                 cls.subtitle_class.__bases__ = tuple(new_bases)
 
-            # inject our requests.Session wrapper for automatic retry
-            mod.Session = RetryingSession
+            # inject our requests.Session wrapper for automatic retry but not for specific providers that are already
+            # struggling and that we don't want to hurt more
+            if name not in CUSTOM_SESSION_EXCLUDED_PROVIDERS:
+                mod.Session = RetryingSession
+
+            # inject our guess_matches function
             mod.guess_matches = guess_matches
 
             provider_registry.register(module_name, cls)
@@ -117,6 +119,9 @@ for name in os.listdir(os.path.dirname(__file__)):
     except ImportError:
         pass
     else:
-        subliminal_mod.Session = RetryingSession
+        # inject our requests.Session wrapper for automatic retry but not for specific providers that are already
+        # struggling and that we don't want to hurt more
+        if name not in CUSTOM_SESSION_EXCLUDED_PROVIDERS:
+            subliminal_mod.Session = RetryingSession
         subliminal_mod.guess_matches = guess_matches
 

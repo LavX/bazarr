@@ -44,26 +44,26 @@ class SubsynchroSubtitle(Subtitle):
         self.release_info = (
             release_info if len(release_info) > len(filename) else filename
         )
-        self.found_matches = matches
+        self.matches = matches
 
     @property
     def id(self):
         return self.download_url
 
     def get_matches(self, video):
-        self.found_matches |= guess_matches(
+        self.matches |= guess_matches(
             video,
             guessit(
                 self.filename,
             ),
         )
-        self.found_matches |= guess_matches(
+        self.matches |= guess_matches(
             video,
             guessit(
                 self.release_info,
             ),
         )
-        return self.found_matches
+        return self.matches
 
 
 class SubsynchroProvider(Provider):

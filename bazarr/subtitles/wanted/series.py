@@ -139,6 +139,9 @@ def wanted_search_missing_subtitles_series(job_id=None):
         providers = get_providers()
         if providers:
             wanted_download_subtitles(episode.sonarrEpisodeId, job_id=job_id)
+
+            # make sure to override the progress value updated by the subtitles synchronization
+            jobs_queue.update_job_progress(job_id=job_id, progress_value=i, progress_max=count_episodes)
         else:
             logging.info("BAZARR All providers are throttled")
             break

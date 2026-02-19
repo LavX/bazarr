@@ -17,7 +17,7 @@ from utilities.helper import check_credentials
 from utilities.central import get_log_file_path
 
 from .config import settings, base_url
-from .database import System
+from .database import database, System
 from .get_args import args
 
 frontend_build_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'frontend', 'build')
@@ -90,9 +90,14 @@ def catch_all(path):
             auth = False
 
     try:
-        updated = System.get().updated
+        updated = database.scalar(System.updated)
     except Exception:
         updated = '0'
+
+    try:
+        configured = database.scalar(System.configured)
+    except Exception:
+        configured = '0'
 
     inject = dict()
 
@@ -100,6 +105,7 @@ def catch_all(path):
         inject["baseUrl"] = base_url
         inject["canUpdate"] = not args.no_update
         inject["hasUpdate"] = updated != '0'
+        inject["isConfigured"] = configured != '0'
 
         if auth:
             inject["apiKey"] = settings.auth.apikey
@@ -161,14 +167,11 @@ def swaggerui_static(filename):
     basepath = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'libs', 'flask_restx',
                             'static')
     fullpath = os.path.realpath(os.path.join(basepath, filename))
-    if not basepath == os.path.commonpath((basepath, fullpath)):
+    # Use startswith to prevent path traversal
+    if not fullpath.startswith(os.path.realpath(basepath) + os.sep):
         return '', 404
     else:
         return send_file(fullpath)
-
-
-def configured():
-    System.update({System.configured: '1'}).execute()
 
 
 @check_login

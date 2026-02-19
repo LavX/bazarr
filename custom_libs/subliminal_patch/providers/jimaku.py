@@ -46,40 +46,38 @@ class JimakuSubtitle(Subtitle):
         return self.download_url
 
     def get_matches(self, video):
-        matches = set()
-        
         # Episode/Movie specific matches
         if isinstance(video, Episode):
             if sanitize(video.series) and sanitize(self.video.series) in (
                     sanitize(name) for name in [video.series] + video.alternative_series):
-                matches.add('series')
+                self.matches.add('series')
             
             if video.season and self.video.season is None or video.season and video.season == self.video.season:
-                matches.add('season')
+                self.matches.add('season')
         elif isinstance(video, Movie):
             if sanitize(video.title) and sanitize(self.video.title) in (
                     sanitize(name) for name in [video.title] + video.alternative_titles):
-                matches.add('title')
+                self.matches.add('title')
 
         # General matches
         if video.year and video.year == self.video.year:
-            matches.add('year')
+            self.matches.add('year')
 
         video_type = 'movie' if isinstance(video, Movie) else 'episode'
-        matches.add(video_type)
+        self.matches.add(video_type)
         
         guess = guessit(self.filename, {'type': video_type})
         for g in guess:
             if g[0] == "release_group" or "source":
                 if video.release_group == g[1]:
-                    matches.add('release_group')
+                    self.matches.add('release_group')
                     break
                 
         # Prioritize .srt by repurposing the audio_codec match
         if self.filename.endswith(".srt"):
-            matches.add('audio_codec')
+            self.matches.add('audio_codec')
 
-        return matches
+        return self.matches
 
 class JimakuProvider(Provider):
     '''Jimaku Provider.'''

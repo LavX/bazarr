@@ -285,14 +285,12 @@ class WhisperAISubtitle(Subtitle):
         return f"{self.video.original_name}_{self.task}_{str(self.language)}"
 
     def get_matches(self, video):
-        matches = set()
-
         if isinstance(video, Episode):
-            matches.update(["series", "season", "episode"])
+            self.matches.update(["series", "season", "episode"])
         elif isinstance(video, Movie):
-            matches.update(["title"])
+            self.matches.update(["title"])
 
-        return matches
+        return self.matches
 
 
 class WhisperAIProvider(Provider):
@@ -344,7 +342,6 @@ class WhisperAIProvider(Provider):
         try:
             # This launches a subprocess to decode audio while down-mixing and resampling as necessary.
             inp = ffmpeg.input(path, threads=0)
-            out = inp.output("-", format="s16le", acodec="pcm_s16le", ac=1, ar=16000, af="aresample=async=1")
             if audio_stream_language:
                 # There is more than one audio stream, so pick the requested one by name
                 # Use the ISO 639-2 code if available
@@ -353,8 +350,11 @@ class WhisperAIProvider(Provider):
                 # 0 = Pick first stream in case there are multiple language streams of the same language,
                 # otherwise ffmpeg will try to combine multiple streams, but our output format doesn't support that.
                 # The first stream is probably the correct one, as later streams are usually commentaries
-                lang_map = f"0:m:language:{audio_stream_language}"
-                out = out.global_args("-map", lang_map)
+                lang_map = f"0:a:m:language:{audio_stream_language}"
+                out = inp.output("-", format="s16le", acodec="pcm_s16le", ac=1, ar=16000, af="aresample=async=1",
+                                 map=lang_map)
+            else:
+                out = inp.output("-", format="s16le", acodec="pcm_s16le", ac=1, ar=16000, af="aresample=async=1")
 
             start_time = time.time()
             out, _ = out.run(cmd=[ffmpeg_path, "-nostdin"], capture_stdout=True, capture_stderr=True) 

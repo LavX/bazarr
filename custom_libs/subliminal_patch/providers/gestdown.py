@@ -27,12 +27,13 @@ class GestdownSubtitle(Subtitle):
         self.page_link = _BASE_URL + data["downloadUri"]
         self._id = data["subtitleId"]
         self.release_info = data["version"]
-        self._matches = {"title", "series", "season", "episode", "tvdb_id"}
 
     def get_matches(self, video):
-        update_matches(self._matches, video, self.release_info)
+        self.matches = {"title", "series", "season", "episode", "tvdb_id"}
 
-        return self._matches
+        update_matches(self.matches, video, self.release_info)
+
+        return self.matches
 
     @property
     def id(self):
@@ -64,7 +65,6 @@ class GestdownProvider(Provider):
     provider_name = "gestdown"
 
     video_types = (Episode,)
-    subtitle_class = GestdownSubtitle
 
     # fmt: off
     languages = {Language('por', 'BR')} | {Language(l) for l in [

@@ -5,13 +5,12 @@ import re
 import time
 import logging
 import traceback
-import types
 import os
 from six.moves.http_client import ResponseNotReady
 
 from guessit import guessit
-from subliminal.exceptions import ServiceUnavailable, DownloadLimitExceeded, ConfigurationError, AuthenticationError
-from subliminal.providers.opensubtitles import Unauthorized
+from subliminal.exceptions import (ServiceUnavailable, DownloadLimitExceeded, ConfigurationError, AuthenticationError,
+                                   Unauthorized)
 from subliminal.subtitle import fix_line_ending
 from subliminal_patch.exceptions import TooManyRequests
 

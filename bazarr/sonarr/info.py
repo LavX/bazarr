@@ -3,6 +3,8 @@
 import logging
 import requests
 import datetime
+import semver
+
 from requests.exceptions import JSONDecodeError
 
 from dogpile.cache import make_region
@@ -49,6 +51,15 @@ class GetSonarrInfo:
         logging.debug(f'BAZARR got this Sonarr version from its API: {sonarr_version}')
         region.set("sonarr_version", sonarr_version)
         return sonarr_version
+
+    def semver(self):
+        semver_version = None
+        if isinstance(self.version(), str) and self.version() not in ['', 'unknown']:
+            split_version = self.version().split('.')
+            if len(split_version) >= 3 and all(
+                    split_version[i].isdigit() for i in range(len(split_version))):
+                semver_version = semver.Version(*split_version)
+        return semver_version
 
     def is_legacy(self):
         """

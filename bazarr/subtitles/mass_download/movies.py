@@ -23,7 +23,12 @@ from ..download import generate_subtitles
 
 def movies_download_subtitles(no, job_id=None, job_sub_function=False):
     if not job_sub_function and not job_id:
-        jobs_queue.add_job_from_function("Searching missing subtitles", is_progress=True)
+        jobs_queue.add_job_from_function(f"""Downloading missing subtitles for """
+                                         f"""{database.scalar(select(TableMovies.title)
+                                                              .where(TableMovies.radarrId == no))}"""
+                                         f""" ({database.scalar(select(TableMovies.year)
+                                                                .where(TableMovies.radarrId == no))})""",
+                                         is_progress=True)
         return
 
     conditions = [(TableMovies.radarrId == no)]
@@ -34,6 +39,7 @@ def movies_download_subtitles(no, job_id=None, job_sub_function=False):
                   TableMovies.radarrId,
                   TableMovies.sceneName,
                   TableMovies.title,
+                  TableMovies.year,
                   TableMovies.tags,
                   TableMovies.monitored,
                   TableMovies.profileId,
@@ -105,7 +111,7 @@ def movies_download_subtitles(no, job_id=None, job_sub_function=False):
         logging.info("BAZARR All providers are throttled")
 
     jobs_queue.update_job_progress(job_id=job_id, progress_value="max")
-    jobs_queue.update_job_name(job_id=job_id, new_job_name="Searched missing subtitles")
+    jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Downloaded missing subtitles for {movie.title} ({movie.year})")
 
 
 def movie_download_specific_subtitles(radarr_id, language, hi, forced, job_id=None):

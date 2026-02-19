@@ -49,10 +49,9 @@ class YifySubtitle(Subtitle):
         return self
 
     def get_matches(self, video):
-        matches = set()
-        matches.add('imdb_id')
-        matches |= guess_matches(video, guessit(self.release_info, video.hints))
-        return matches
+        self.matches.add('imdb_id')
+        self.matches |= guess_matches(video, guessit(self.release_info, video.hints))
+        return self.matches
 
 
 class YifySubtitlesProvider(Provider):

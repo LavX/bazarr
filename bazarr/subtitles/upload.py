@@ -115,13 +115,15 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, aud
 
     saved_subtitles = []
     try:
+        # ensure that formats must be a tuple of strings
+        sub_format = (sub.format,) if isinstance(sub.format, str) else sub.format
         saved_subtitles = save_subtitles(path,
                                          [sub],
                                          single=single,
                                          tags=None,  # fixme
                                          directory=get_target_folder(path),
                                          chmod=chmod,
-                                         formats=(sub.format,) if use_original_format else ("srt",),
+                                         formats=sub_format if use_original_format else ("srt",),
                                          path_decoder=force_unicode)
     except Exception as e:
         logging.exception(f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')

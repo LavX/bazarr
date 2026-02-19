@@ -9,10 +9,14 @@ from subzero.language import Language
 from subliminal.subtitle import guess_matches
 from subliminal.video import Episode, Movie
 from subliminal_patch.utils import fix_inconsistent_naming as _fix_inconsistent_naming
+from subliminal_patch.providers.mixins import ProviderRetryMixin
 from bs4 import BeautifulSoup
 from guessit import guessit
 
 logger = logging.getLogger(__name__)
+
+QUERY_RETRIES = 3
+QUERY_TIMEOUT = 15
 
 
 def fix_inconsistent_naming(title):
@@ -30,13 +34,11 @@ class NapiProjektSubtitle(_NapiProjektSubtitle):
             self.__class__.__name__, self.release_info, self.language)
 
     def get_matches(self, video):
-        matches = super().get_matches(video)
-        if self.matches is not None:
-            matches |= self.matches
-        return matches
+        self.matches |= super().get_matches(video)
+        return self.matches
 
 
-class NapiProjektProvider(_NapiProjektProvider):
+class NapiProjektProvider(ProviderRetryMixin, _NapiProjektProvider):
     languages = {Language.fromalpha2(l) for l in ['pl']}
     video_types = (Episode, Movie)
     subtitle_class = NapiProjektSubtitle
@@ -57,7 +59,18 @@ class NapiProjektProvider(_NapiProjektProvider):
             'f': hash,
             't': get_subhash(hash)}
         logger.info('Searching subtitle %r', params)
-        r = self.session.get(self.server_url, params=params, timeout=10)
+
+        def query_retry(params):
+            res = self.session.get(self.server_url, params=params, timeout=10)
+            res.raise_for_status()
+            return res
+
+        r = self.retry(
+            lambda: query_retry(params=params),
+            amount=QUERY_RETRIES,
+            retry_timeout=QUERY_TIMEOUT
+        )
+
         r.raise_for_status()
 
         # handle subtitles not found and errors
@@ -104,8 +117,18 @@ class NapiProjektProvider(_NapiProjektProvider):
             return []
         episode = f'-s{video.season:02d}e{video.episode:02d}' if isinstance(
             video, Episode) else ''
-        response = self.session.get(
-            f'https://www.napiprojekt.pl/napisy1,7,0-dla-{title}{episode}')
+
+        def query_retry():
+            res = self.session.get(f'https://www.napiprojekt.pl/napisy1,7,0-dla-{title}{episode}')
+            res.raise_for_status()
+            return res
+
+        response = self.retry(
+            lambda: query_retry(),
+            amount=QUERY_RETRIES,
+            retry_timeout=QUERY_TIMEOUT
+        )
+
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
         subtitles = []
@@ -167,13 +190,24 @@ class NapiProjektProvider(_NapiProjektProvider):
         return subtitles
 
     def _find_title(self, video):
-        search_response = self.session.post('https://www.napiprojekt.pl/ajax/search_catalog.php', {
-            'queryString': video.series if isinstance(video, Episode) else video.title,
-            'queryKind': 1 if isinstance(video, Episode) else 2,
-            'queryYear': str(video.year) if video.year is not None else '',
-            'associate': '',
-        })
+        def query_retry():
+            res = self.session.post('https://www.napiprojekt.pl/ajax/search_catalog.php', {
+                'queryString': video.series if isinstance(video, Episode) else video.title,
+                'queryKind': 1 if isinstance(video, Episode) else 2,
+                'queryYear': str(video.year) if video.year is not None else '',
+                'associate': '',
+            })
+            res.raise_for_status()
+            return res
+
+        search_response = self.retry(
+            lambda: query_retry(),
+            amount=QUERY_RETRIES,
+            retry_timeout=QUERY_TIMEOUT
+        )
+
         search_response.raise_for_status()
+
         soup = BeautifulSoup(search_response.content, 'html.parser')
         imdb_id = video.series_imdb_id if isinstance(
             video, Episode) else video.imdb_id

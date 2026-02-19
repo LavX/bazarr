@@ -29,12 +29,13 @@ class KaragargaSubtitle(Subtitle):
 
         self.release_info = release_info
         self.downloads = downloads
-        self._matches = {"title", "year"}
 
     def get_matches(self, video):
-        update_matches(self._matches, video, self.release_info, type="movie")
+        self.matches = {"title", "year"}
 
-        return self._matches
+        update_matches(self.matches, video, self.release_info, type="movie")
+
+        return self.matches
 
     @property
     def id(self):

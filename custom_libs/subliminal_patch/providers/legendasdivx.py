@@ -55,8 +55,6 @@ class LegendasdivxSubtitle(Subtitle):
             return f"legendasdivx_{self.video.imdb_id}_{self.release_info}_{self.uploader}"
 
     def get_matches(self, video):
-        matches = set()
-
         # if skip_wrong_fps = True no point to continue if they don't match
         subtitle_fps = None
         try:
@@ -84,16 +82,16 @@ class LegendasdivxSubtitle(Subtitle):
         video_filename = sanitize_release_group(video_filename)
 
         if sanitize(video_filename) in description:
-            matches.update(['title'])
+            self.matches.update(['title'])
             # relying people won' use just S01E01 for the file name
             if isinstance(video, Episode):
-                matches.update(['series'])
-                matches.update(['season'])
-                matches.update(['episode'])
+                self.matches.update(['series'])
+                self.matches.update(['season'])
+                self.matches.update(['episode'])
 
         # can match both movies and series
         if video.year and '{:04d}'.format(video.year) in description:
-            matches.update(['year'])
+            self.matches.update(['year'])
 
         type_ = "movie" if isinstance(video, Movie) else "episode"
         # match movie title (include alternative movie names)
@@ -101,19 +99,19 @@ class LegendasdivxSubtitle(Subtitle):
             if video.title:
                 for movie_name in [video.title] + video.alternative_titles:
                     if sanitize(movie_name) in description:
-                        matches.update(['title'])
+                        self.matches.update(['title'])
 
         else:
             if video.title and sanitize(video.title) in description:
-                matches.update(['title'])
+                self.matches.update(['title'])
             if video.series:
                 for series_name in [video.series] + video.alternative_series:
                     if sanitize(series_name) in description:
-                        matches.update(['series'])
+                        self.matches.update(['series'])
             if video.season and 's{:02d}'.format(video.season) in description:
-                matches.update(['season'])
+                self.matches.update(['season'])
             if video.episode and 'e{:02d}'.format(video.episode) in description:
-                matches.update(['episode'])
+                self.matches.update(['episode'])
             # All the search is already based on the series_imdb_id when present in the video and controlled via the
             # the legendasdivx backend it, so if there is a result, it matches, either inside of a pack or a specific
             # series and episode, so we can assume the season and episode matches.
@@ -122,11 +120,11 @@ class LegendasdivxSubtitle(Subtitle):
 
         # release_group
         if video.release_group and sanitize_release_group(video.release_group) in sanitize_release_group(description):
-            matches.update(['release_group'])
+            self.matches.update(['release_group'])
 
-        matches |= guess_matches(video, guessit(description, {"type": type_}))
+        self.matches |= guess_matches(video, guessit(description, {"type": type_}))
 
-        return matches
+        return self.matches
 
 
 class LegendasdivxProvider(Provider):

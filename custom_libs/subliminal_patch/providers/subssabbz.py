@@ -82,8 +82,6 @@ class SubsSabBzSubtitle(Subtitle):
         return self
 
     def get_matches(self, video):
-        matches = set()
-
         video_filename = video.name
         video_filename = os.path.basename(video_filename)
         video_filename, _ = os.path.splitext(video_filename)
@@ -96,25 +94,25 @@ class SubsSabBzSubtitle(Subtitle):
 
         if ((video_filename == subtitle_filename) or
             (self.single_file is True and video_filename in self.notes.upper())):
-            matches.add('hash')
+            self.matches.add('hash')
 
         if video.year and self.year == video.year:
-            matches.add('year')
+            self.matches.add('year')
 
         if isinstance(video, Movie):
             if video.imdb_id and self.imdb_id == video.imdb_id:
-                matches.add('imdb_id')
+                self.matches.add('imdb_id')
 
-        matches |= guess_matches(video, guessit(self.title, {'type': self.type}))
+        self.matches |= guess_matches(video, guessit(self.title, {'type': self.type}))
 
         guess_filename = guessit(self.filename, video.hints)
-        matches |= guess_matches(video, guess_filename)
+        self.matches |= guess_matches(video, guess_filename)
 
         if isinstance(video, Movie) and ((isinstance(self.num_cds, int) and self.num_cds > 1) or 'cd' in guess_filename):
             # reduce score of subtitles for multi-disc movie releases
             return set()
 
-        return matches
+        return self.matches
 
 
 class SubsSabBzProvider(Provider):

@@ -96,8 +96,7 @@ def _set_forced_providers(pool, also_forced=False, forced_required=False):
         forced_required = False
     pool.provider_configs.update(
         {
-            "podnapisi": {'also_foreign': also_forced, "only_foreign": forced_required},
-            "opensubtitles": {'also_foreign': also_forced, "only_foreign": forced_required}
+            "podnapisi": {'also_foreign': also_forced, "only_foreign": forced_required}
         }
     )
 

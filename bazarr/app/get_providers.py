@@ -14,9 +14,8 @@ import re
 
 from requests import ConnectionError
 from subzero.language import Language
-from subliminal_patch.exceptions import TooManyRequests, APIThrottled, ParseResponseError, IPAddressBlocked, \
-    MustGetBlacklisted, SearchLimitReached, ProviderError, ForbiddenError
-from subliminal.providers.opensubtitles import DownloadLimitReached, PaymentRequired, Unauthorized
+from subliminal_patch.exceptions import (TooManyRequests, APIThrottled, ParseResponseError, IPAddressBlocked,
+                                         MustGetBlacklisted, SearchLimitReached, ProviderError, ForbiddenError)
 from subliminal.exceptions import DownloadLimitExceeded, ServiceUnavailable, AuthenticationError, ConfigurationError
 from subliminal import region as subliminal_cache_region
 from subliminal_patch.extensions import provider_registry
@@ -77,15 +76,6 @@ def provider_throttle_map():
             PermissionError: (datetime.timedelta(hours=12), "12 hours"),
             requests.exceptions.ProxyError: (datetime.timedelta(hours=1), "1 hour"),
             AuthenticationError: (datetime.timedelta(hours=12), "12 hours"),
-        },
-        "opensubtitles": {
-            TooManyRequests: (datetime.timedelta(hours=3), "3 hours"),
-            DownloadLimitExceeded: (datetime.timedelta(hours=6), "6 hours"),
-            DownloadLimitReached: (datetime.timedelta(hours=6), "6 hours"),
-            PaymentRequired: (datetime.timedelta(hours=12), "12 hours"),
-            Unauthorized: (datetime.timedelta(hours=12), "12 hours"),
-            APIThrottled: (datetime.timedelta(seconds=15), "15 seconds"),
-            ServiceUnavailable: (datetime.timedelta(hours=1), "1 hour"),
         },
         "opensubtitlescom": {
             TooManyRequests: (datetime.timedelta(minutes=1), "1 minute"),
@@ -292,6 +282,7 @@ def get_providers_auth():
                              'password': settings.opensubtitlescom.password,
                              'use_hash': settings.opensubtitlescom.use_hash,
                              'include_ai_translated': settings.opensubtitlescom.include_ai_translated,
+                             'include_machine_translated': settings.opensubtitlescom.include_machine_translated,
                              'api_key': 's38zmzVlW7IlYruWi7mHwDYl2SfMQoC1'
                              },
         'napiprojekt': {'only_authors': settings.napiprojekt.only_authors,

@@ -35,16 +35,16 @@ class Subf2mSubtitle(Subtitle):
         self.episode_number = episode_number
         self.episode_title = None
 
-        self._matches = set(
+        self.matches = set(
             ("title", "year", "imdb_id")
             if episode_number is None
             else ("title", "series", "year", "season", "episode", "imdb_id")
         )
 
     def get_matches(self, video):
-        update_matches(self._matches, video, self.release_info)
+        update_matches(self.matches, video, self.release_info)
 
-        return self._matches
+        return self.matches
 
     @property
     def id(self):

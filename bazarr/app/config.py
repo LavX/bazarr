@@ -11,7 +11,6 @@ import threading
 import time
 from datetime import datetime
 
-import random
 import configparser
 import yaml
 
@@ -166,6 +165,8 @@ validators = [
     Validator('general.parse_embedded_audio_track', must_exist=True, default=False, is_type_of=bool),
     Validator('general.skip_hashing', must_exist=True, default=False, is_type_of=bool),
     Validator('general.language_equals', must_exist=True, default=[], is_type_of=list),
+    Validator('general.concurrent_jobs', must_exist=True, default=4 if os.cpu_count() >= 4 else os.cpu_count(),
+              is_type_of=int),
 
     # log section
     Validator('log.include_filter', must_exist=True, default='', is_type_of=str, cast=str),
@@ -310,11 +311,13 @@ validators = [
               default=os.environ.get('OPENSUBTITLES_SCRAPER_URL', 'http://localhost:8000'),
               is_type_of=str),
 
+
     # opensubtitles.com section
     Validator('opensubtitlescom.username', must_exist=True, default='', is_type_of=str, cast=str),
     Validator('opensubtitlescom.password', must_exist=True, default='', is_type_of=str, cast=str),
     Validator('opensubtitlescom.use_hash', must_exist=True, default=True, is_type_of=bool),
     Validator('opensubtitlescom.include_ai_translated', must_exist=True, default=False, is_type_of=bool),
+    Validator('opensubtitlescom.include_machine_translated', must_exist=True, default=False, is_type_of=bool),
 
     # napiprojekt section
     Validator('napiprojekt.only_authors', must_exist=True, default=False, is_type_of=bool),
@@ -517,6 +520,9 @@ elif not os.path.exists(config_yaml_file):
     if not os.path.isdir(os.path.dirname(config_yaml_file)):
         os.makedirs(os.path.dirname(config_yaml_file))
     open(config_yaml_file, mode='w').close()
+
+if os.path.exists(config_yaml_file):
+    os.environ['BAZARR_CONFIGURED'] = '1'
 
 settings = Dynaconf(
     settings_file=config_yaml_file,
@@ -823,6 +829,7 @@ def save_settings(settings_items):
             if key != settings.opensubtitles.scraper_service_url:
                 reset_providers = True
 
+
         if key == 'settings-opensubtitlescom-username':
             if key != settings.opensubtitlescom.username:
                 reset_providers = True
@@ -914,6 +921,12 @@ def save_settings(settings_items):
         raise
     else:
         write_config()
+
+        # Set the configured state based on config.yaml file existence
+        from .database import database, update, System
+        database.execute(
+            update(System)
+            .values(configured=1))
 
         # Reconfigure Bazarr to reflect changes
         if configure_debug:

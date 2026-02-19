@@ -42,7 +42,7 @@ ftfy_defaults = {
 class Subtitle(Subtitle_):
     storage_path = None
     release_info = None
-    matches = {}
+    matches = None
     hash_verifiable = False
     hearing_impaired_verifiable = False
     mods = None
@@ -78,6 +78,7 @@ class Subtitle(Subtitle_):
         self._is_valid = False
         self.use_original_format = original_format
         self._og_format = None
+        self.matches = set()
 
     @property
     def format(self):

@@ -25,7 +25,7 @@ from utilities.path_mappings import path_mappings
 from subtitles.processing import ProcessSubtitlesResult
 from app.jobs_queue import jobs_queue
 from languages.get_languages import alpha3_from_alpha2, language_from_alpha2, language_from_alpha3
-from ..core.translator_utils import add_translator_info, get_description
+from ..core.translator_utils import add_translator_info, get_description, create_process_result
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +111,18 @@ class GeminiTranslatorService:
         except Exception as e:
             logger.error(f'BAZARR encountered an error translating with Gemini: {str(e)}')
             return False
+
+        else:
+            message = (f"{language_from_alpha2(self.from_lang)} subtitles translated to "
+                       f"{language_from_alpha3(self.to_lang)}.")
+            result = create_process_result(message, self.video_path, self.orig_to_lang, self.forced, self.hi,
+                                           self.dest_srt_file, self.media_type)
+
+            if self.media_type == 'series':
+                history_log(action=6, sonarr_series_id=self.sonarr_series_id, sonarr_episode_id=self.sonarr_episode_id,
+                            result=result)
+            else:
+                history_log_movie(action=6, radarr_id=self.radarr_id, result=result)
 
     @staticmethod
     def get_instruction(language: str, description: str) -> str:

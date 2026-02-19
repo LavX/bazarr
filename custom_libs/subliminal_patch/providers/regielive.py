@@ -37,24 +37,23 @@ class RegieLiveSubtitle(Subtitle):
 
     def get_matches(self, video):
         type_ = "movie" if isinstance(video, Movie) else "episode"
-        matches = set()
         subtitle_filename = self.filename.lower()
 
         # episode
         if type_ == "episode":
             # already matched in search query
-            matches.update(['title', 'series', 'season', 'episode', 'year'])
+            self.matches.update(['title', 'series', 'season', 'episode', 'year'])
         # movie
         else:
             # already matched in search query
-            matches.update(['title', 'year'])
+            self.matches.update(['title', 'year'])
 
         if video.release_group and video.release_group.lower() in subtitle_filename:
-            matches.update(['release_group', 'hash'])
+            self.matches.update(['release_group', 'hash'])
 
-        matches |= guess_matches(video, guessit(self.filename, {"type": type_}))
+        self.matches |= guess_matches(video, guessit(self.filename, {"type": type_}))
 
-        return matches
+        return self.matches
 
 
 class RegieLiveProvider(Provider):
