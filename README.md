@@ -14,7 +14,8 @@
   This fork of <a href="https://github.com/morpheus65535/bazarr">Bazarr</a> includes:<br/>
   - OpenSubtitles.org provider that works <strong>without VIP API credentials</strong> (survives the API shutdown)<br/>
   - <strong>AI Subtitle Translator</strong> using OpenRouter LLMs for high-quality subtitle translation<br/>
-  - <strong>Batch translation</strong> for entire series/movie libraries
+  - <strong>Batch translation</strong> for entire series/movie libraries<br/>
+  - <strong>Advanced table filters</strong> with collapsible panels, active filter pills, and audio language filtering
 </p>
 
 ---
@@ -66,6 +67,8 @@ docker pull ghcr.io/lavx/ai-subtitle-translator:latest
 | **OpenSubtitles.org (Scraper)** | ❌ Not available | ✅ Included (API-independent) |
 | **AI Subtitle Translator** | ❌ Not available | ✅ Included (OpenRouter, Gemini, Lingarr) |
 | **Batch Translation** | ❌ Not available | ✅ Translate entire series/libraries |
+| **Audio Language Display** | ❌ Not shown in tables | ✅ Audio languages visible in all table views |
+| **Advanced Table Filters** | ❌ Basic search only | ✅ Collapsible filter panel with active filter pills |
 | OpenSubtitles.org (API) | Shutting down | N/A (uses scraper instead) |
 | OpenSubtitles.com (API) | ✅ Available | ✅ Available |
 | Docker images | linuxserver/hotio | ghcr.io/lavx |
@@ -94,6 +97,25 @@ This fork includes an **LLM-powered subtitle translator** that:
 - ✅ Runs as a separate microservice for reliability
 
 **Repository:** [github.com/LavX/ai-subtitle-translator](https://github.com/LavX/ai-subtitle-translator)
+
+### 🔍 Advanced Table Filters
+
+All table views (Movies, Series, Wanted Movies, Wanted Series) feature a **sophisticated filter system**:
+
+- ✅ **Collapsible filter panel** toggled via a filter button with active filter count badge
+- ✅ **Include/Exclude audio language** filters with labeled, searchable multi-select dropdowns
+- ✅ **Missing subtitle language** filter (on Wanted pages)
+- ✅ **Active filter pills** showing each active filter as a color-coded removable badge
+- ✅ **Clear all** button to reset all filters at once
+- ✅ **Search by title** with inline clear button
+
+| Wanted Movies with filters | Series with audio filter |
+|:---:|:---:|
+| ![Wanted Movies Filter](/screenshot/filter-wanted-movies.png?raw=true "Wanted Movies with active filters") | ![Series Filter](/screenshot/filter-series-include.png?raw=true "Series with Include Audio filter") |
+
+| Mass Translate with filtered selection |
+|:---:|
+| ![Mass Translate](/screenshot/filter-mass-translate.png?raw=true "Mass Translate dialog with filtered items") |
 
 ---
 

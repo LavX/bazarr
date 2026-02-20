@@ -15,6 +15,7 @@ on:
         options:
           - master
           - development
+          - feature/audio-display-with-filter
           - python_3_14
           - ai_translate
           - no_telemetry
