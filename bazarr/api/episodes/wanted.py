@@ -6,7 +6,7 @@ from flask_restx import Resource, Namespace, reqparse, fields, marshal
 from functools import reduce
 
 from app.database import get_exclusion_clause, TableEpisodes, TableShows, database, select, func
-from api.swaggerui import subtitles_language_model
+from api.swaggerui import subtitles_language_model, audio_language_model
 
 from ..utils import authenticate, postprocess
 
@@ -22,8 +22,10 @@ class EpisodesWanted(Resource):
                                     help='Episodes ID to list')
 
     get_subtitles_language_model = api_ns_episodes_wanted.model('subtitles_language_model', subtitles_language_model)
+    get_audio_language_model = api_ns_episodes_wanted.model('audio_language_model', audio_language_model)
 
     data_model = api_ns_episodes_wanted.model('wanted_episodes_data_model', {
+        'audio_language': fields.Nested(get_audio_language_model),
         'seriesTitle': fields.String(),
         'episode_number': fields.String(),
         'episodeTitle': fields.String(),
@@ -51,7 +53,7 @@ class EpisodesWanted(Resource):
         wanted_conditions = [(TableEpisodes.missing_subtitles.is_not(None)),
                              (TableEpisodes.missing_subtitles != '[]')]
         if len(episodeid) > 0:
-            wanted_conditions.append((TableEpisodes.sonarrEpisodeId in episodeid))
+            wanted_conditions.append((TableEpisodes.sonarrEpisodeId.in_(episodeid)))
             start = 0
             length = 0
         else:
@@ -61,7 +63,8 @@ class EpisodesWanted(Resource):
         wanted_conditions += get_exclusion_clause('series')
         wanted_condition = reduce(operator.and_, wanted_conditions)
 
-        stmt = select(TableShows.title.label('seriesTitle'),
+        stmt = select(TableEpisodes.audio_language,
+                      TableShows.title.label('seriesTitle'),
                       TableEpisodes.season.concat('x').concat(TableEpisodes.episode).label('episode_number'),
                       TableEpisodes.title.label('episodeTitle'),
                       TableEpisodes.missing_subtitles,
@@ -78,6 +81,7 @@ class EpisodesWanted(Resource):
             stmt = stmt.order_by(TableEpisodes.sonarrEpisodeId.desc()).limit(length).offset(start)
 
         results = [postprocess({
+            'audio_language': x.audio_language,
             'seriesTitle': x.seriesTitle,
             'episode_number': x.episode_number,
             'episodeTitle': x.episodeTitle,

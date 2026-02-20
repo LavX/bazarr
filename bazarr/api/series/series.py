@@ -4,6 +4,7 @@ import operator
 
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
 from functools import reduce
+from sqlalchemy import case
 
 from app.database import get_exclusion_clause, TableEpisodes, TableShows, database, select, update, func
 from sonarr.sync.series import update_one_series
@@ -88,9 +89,26 @@ class Series(Resource):
             .group_by(TableShows.sonarrSeriesId)\
             .subquery()
 
+        # Correlated subquery: get the first non-empty audio_language from an episode
+        # for this series (fallback for Sonarr v4 where series-level audio_language is empty)
+        first_episode_audio = (
+            select(TableEpisodes.audio_language)
+            .where(TableEpisodes.sonarrSeriesId == TableShows.sonarrSeriesId)
+            .where(TableEpisodes.audio_language.is_not(None))
+            .where(TableEpisodes.audio_language != '[]')
+            .limit(1)
+            .correlate(TableShows)
+            .scalar_subquery()
+        )
+
+        audio_language_col = case(
+            (TableShows.audio_language.in_(['[]', None, '']), first_episode_audio),
+            else_=TableShows.audio_language
+        ).label('audio_language')
+
         stmt = select(TableShows.tvdbId,
                       TableShows.alternativeTitles,
-                      TableShows.audio_language,
+                      audio_language_col,
                       TableShows.fanart,
                       TableShows.imdbId,
                       TableShows.monitored,

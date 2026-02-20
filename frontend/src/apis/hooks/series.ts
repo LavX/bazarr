@@ -60,9 +60,12 @@ export function useSeries() {
   return query;
 }
 
-export function useSeriesPagination() {
-  return usePaginationQuery([QueryKeys.Series], (param) =>
-    api.series.seriesBy(param),
+export function useSeriesPagination(fetchAll = false) {
+  return usePaginationQuery(
+    [QueryKeys.Series],
+    (param) => api.series.seriesBy(param),
+    true,
+    fetchAll,
   );
 }
 

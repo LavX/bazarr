@@ -1,6 +1,7 @@
-import { FunctionComponent, useCallback, useMemo } from "react";
+import { FunctionComponent, useCallback, useMemo, useState } from "react";
 import { Link } from "react-router";
 import { Anchor, Badge, Checkbox, Group } from "@mantine/core";
+import { useDebouncedValue } from "@mantine/hooks";
 import { faSearch } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
@@ -9,6 +10,7 @@ import {
   useMovieSubtitleModification,
   useMovieWantedPagination,
 } from "@/apis/hooks";
+import { AudioList } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
 import { WantedItem } from "@/components/forms/MassTranslateForm";
 import WantedView from "@/pages/views/WantedView";
@@ -16,6 +18,93 @@ import { BuildKey } from "@/utilities";
 
 const WantedMoviesView: FunctionComponent = () => {
   const { download } = useMovieSubtitleModification();
+
+  const [search, setSearch] = useState("");
+  const [audioLanguages, setAudioLanguages] = useState<string[]>([]);
+  const [excludeLanguages, setExcludeLanguages] = useState<string[]>([]);
+  const [missingLanguage, setMissingLanguage] = useState<string | null>(null);
+  const [debouncedSearch] = useDebouncedValue(search, 300);
+
+  const hasActiveFilter =
+    debouncedSearch.length > 0 ||
+    audioLanguages.length > 0 ||
+    excludeLanguages.length > 0 ||
+    missingLanguage !== null;
+
+  // Always fetchAll so language dropdowns show ALL actual languages from data
+  const query = useMovieWantedPagination(true);
+
+  // Extract unique audio language options from actual data
+  const langOptions = useMemo(() => {
+    const allData = query.data?.data ?? [];
+    const langMap = new Map<string, string>();
+    for (const item of allData) {
+      for (const lang of (item as Wanted.Movie).audio_language ?? []) {
+        if (lang.code2 && !langMap.has(lang.code2)) {
+          langMap.set(lang.code2, lang.name);
+        }
+      }
+    }
+    return Array.from(langMap.entries())
+      .map(([code, name]) => ({ value: code, label: name }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [query.data?.data]);
+
+  // Extract unique missing subtitle language options from actual data
+  const missingLangOptions = useMemo(() => {
+    const allData = query.data?.data ?? [];
+    const langMap = new Map<string, string>();
+    for (const item of allData) {
+      for (const sub of item.missing_subtitles ?? []) {
+        if (sub.code2 && !langMap.has(sub.code2)) {
+          langMap.set(sub.code2, sub.name);
+        }
+      }
+    }
+    return Array.from(langMap.entries())
+      .map(([code, name]) => ({ value: code, label: name }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [query.data?.data]);
+
+  // Build client-side filter function
+  const dataFilter = useCallback(
+    (item: Wanted.Movie) => {
+      if (debouncedSearch) {
+        const lowerSearch = debouncedSearch.toLowerCase();
+        if (!item.title.toLowerCase().includes(lowerSearch)) {
+          return false;
+        }
+      }
+      if (audioLanguages.length > 0) {
+        const itemLangs = item.audio_language ?? [];
+        const hasMatchingLang = itemLangs.some((lang) =>
+          audioLanguages.includes(lang.code2),
+        );
+        if (!hasMatchingLang) {
+          return false;
+        }
+      }
+      if (excludeLanguages.length > 0) {
+        const itemLangs = item.audio_language ?? [];
+        const hasExcludedLang = itemLangs.some((lang) =>
+          excludeLanguages.includes(lang.code2),
+        );
+        if (hasExcludedLang) {
+          return false;
+        }
+      }
+      if (missingLanguage) {
+        const hasMissing = item.missing_subtitles.some(
+          (sub) => sub.code2 === missingLanguage,
+        );
+        if (!hasMissing) {
+          return false;
+        }
+      }
+      return true;
+    },
+    [debouncedSearch, audioLanguages, excludeLanguages, missingLanguage],
+  );
 
   const columns = useMemo<ColumnDef<Wanted.Movie>[]>(
     () => [
@@ -56,6 +145,17 @@ const WantedMoviesView: FunctionComponent = () => {
               {title}
             </Anchor>
           );
+        },
+      },
+      {
+        header: "Audio",
+        accessorKey: "audio_language",
+        cell: ({
+          row: {
+            original: { audio_language: audioLanguage },
+          },
+        }) => {
+          return <AudioList audios={audioLanguage}></AudioList>;
         },
       },
       {
@@ -105,13 +205,23 @@ const WantedMoviesView: FunctionComponent = () => {
   }, []);
 
   const { mutateAsync } = useMovieAction();
-  const query = useMovieWantedPagination();
 
   return (
     <WantedView
       name="Movies"
       columns={columns}
       query={query}
+      searchValue={search}
+      onSearchChange={setSearch}
+      audioLanguages={audioLanguages}
+      onAudioLanguagesChange={setAudioLanguages}
+      excludeLanguages={excludeLanguages}
+      onExcludeLanguagesChange={setExcludeLanguages}
+      missingLanguage={missingLanguage ?? undefined}
+      onMissingLanguageChange={setMissingLanguage}
+      langOptions={langOptions}
+      missingLangOptions={missingLangOptions}
+      dataFilter={hasActiveFilter ? dataFilter : undefined}
       searchAll={() => mutateAsync({ action: "search-wanted" })}
       getWantedItem={getWantedItem}
     />

@@ -193,12 +193,13 @@ declare namespace Wanted {
 
   type Episode = Base &
     EpisodeIdType &
-    EpisodeTitleType & {
+    EpisodeTitleType &
+    AudioLanguageType & {
       episode_number: string;
       seriesType: SonarrSeriesType;
     };
 
-  type Movie = Base & MovieIdType & TitleType;
+  type Movie = Base & MovieIdType & TitleType & AudioLanguageType;
 }
 
 declare namespace Blacklist {

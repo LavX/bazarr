@@ -6,10 +6,9 @@ from flask_restx import Resource, Namespace, reqparse, fields, marshal
 from functools import reduce
 
 from app.database import get_exclusion_clause, TableMovies, database, select, func
-from api.swaggerui import subtitles_language_model
+from api.swaggerui import subtitles_language_model, audio_language_model
 
 from api.utils import authenticate, postprocess
-
 
 api_ns_movies_wanted = Namespace('Movies Wanted', description='List movies wanted subtitles')
 
@@ -23,8 +22,10 @@ class MoviesWanted(Resource):
                                     help='Movies ID to list')
 
     get_subtitles_language_model = api_ns_movies_wanted.model('subtitles_language_model', subtitles_language_model)
+    get_audio_language_model = api_ns_movies_wanted.model('audio_language_model', audio_language_model)
 
     data_model = api_ns_movies_wanted.model('wanted_movies_data_model', {
+        'audio_language': fields.Nested(get_audio_language_model),
         'title': fields.String(),
         'missing_subtitles': fields.Nested(get_subtitles_language_model),
         'radarrId': fields.Integer(),
@@ -58,16 +59,19 @@ class MoviesWanted(Resource):
         wanted_conditions += get_exclusion_clause('movie')
         wanted_condition = reduce(operator.and_, wanted_conditions)
 
-        stmt = select(TableMovies.title,
+        stmt = select(TableMovies.audio_language,
+                      TableMovies.title,
                       TableMovies.missing_subtitles,
                       TableMovies.radarrId,
                       TableMovies.sceneName,
                       TableMovies.tags) \
             .where(wanted_condition)
+
         if length > 0:
             stmt = stmt.order_by(TableMovies.radarrId.desc()).limit(length).offset(start)
 
         results = [postprocess({
+            'audio_language': x.audio_language,
             'title': x.title,
             'missing_subtitles': x.missing_subtitles,
             'radarrId': x.radarrId,

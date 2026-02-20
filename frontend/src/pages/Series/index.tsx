@@ -1,4 +1,4 @@
-import { FunctionComponent, useMemo } from "react";
+import { FunctionComponent, useMemo, useState } from "react";
 import { Link } from "react-router";
 import { Anchor, Container, Group, Progress } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
@@ -14,6 +14,7 @@ import { ColumnDef } from "@tanstack/react-table";
 import { useSeriesModification, useSeriesPagination } from "@/apis/hooks";
 import { useInstanceName } from "@/apis/hooks/site";
 import { Action } from "@/components";
+import { AudioList } from "@/components/bazarr";
 import LanguageProfileName from "@/components/bazarr/LanguageProfile";
 import { ItemEditModal } from "@/components/forms/ItemEditForm";
 import { useModals } from "@/modules/modals";
@@ -21,10 +22,19 @@ import ItemView from "@/pages/views/ItemView";
 
 const SeriesView: FunctionComponent = () => {
   const mutation = useSeriesModification();
-
-  const query = useSeriesPagination();
-
   const modals = useModals();
+
+  const [search, setSearch] = useState("");
+  const [audioLanguages, setAudioLanguages] = useState<string[]>([]);
+  const [excludeLanguages, setExcludeLanguages] = useState<string[]>([]);
+
+  const hasActiveFilter =
+    search.length > 0 ||
+    audioLanguages.length > 0 ||
+    excludeLanguages.length > 0;
+
+  // Always fetchAll so language dropdowns show ALL actual languages from data
+  const query = useSeriesPagination(true);
 
   const columns = useMemo<ColumnDef<Item.Series>[]>(
     () => [
@@ -54,6 +64,17 @@ const SeriesView: FunctionComponent = () => {
               {original.title}
             </Anchor>
           );
+        },
+      },
+      {
+        header: "Audio",
+        accessorKey: "audio_language",
+        cell: ({
+          row: {
+            original: { audio_language: audioLanguage },
+          },
+        }) => {
+          return <AudioList audios={audioLanguage}></AudioList>;
         },
       },
       {
@@ -138,7 +159,16 @@ const SeriesView: FunctionComponent = () => {
 
   return (
     <Container px={0} fluid>
-      <ItemView query={query} columns={columns}></ItemView>
+      <ItemView
+        query={query}
+        columns={columns}
+        searchValue={search}
+        onSearchChange={setSearch}
+        audioLanguages={audioLanguages}
+        onAudioLanguagesChange={setAudioLanguages}
+        excludeLanguages={excludeLanguages}
+        onExcludeLanguagesChange={setExcludeLanguages}
+      ></ItemView>
     </Container>
   );
 };
