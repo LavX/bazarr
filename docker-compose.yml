@@ -15,7 +15,7 @@ services:
     build:
       context: ./opensubtitles-scraper
       dockerfile: Dockerfile
-    image: ghcr.io/lavx/opensubtitles-scraper:latest
+    image: ghcr.io/lavx/opensubtitles-scraper:v1.1.0
     container_name: opensubtitles-scraper
     restart: unless-stopped
     ports:
