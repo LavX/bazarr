@@ -46,6 +46,8 @@ def postprocess(item):
     # Parse audio language
     if item.get('audio_language'):
         item['audio_language'] = get_audio_profile_languages(item['audio_language'])
+    else:
+        item['audio_language'] = []
 
     # Make sure profileId is a valid None value
     if item.get('profileId') in None_Keys:
