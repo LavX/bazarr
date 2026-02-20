@@ -6,6 +6,7 @@ import { faSearch } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import {
+  useAudioLanguages,
   useEpisodeSubtitleModification,
   useEpisodeWantedPagination,
   useSeriesAction,
@@ -31,40 +32,13 @@ const WantedSeriesView: FunctionComponent = () => {
     excludeLanguages.length > 0 ||
     missingLanguage !== null;
 
-  // Always fetchAll so language dropdowns show ALL actual languages from data
-  const query = useEpisodeWantedPagination(true);
+  const { data: audioLangs = [] } = useAudioLanguages();
+  const query = useEpisodeWantedPagination(hasActiveFilter);
 
-  // Extract unique audio language options from actual data
-  const langOptions = useMemo(() => {
-    const allData = query.data?.data ?? [];
-    const langMap = new Map<string, string>();
-    for (const item of allData) {
-      for (const lang of (item as Wanted.Episode).audio_language ?? []) {
-        if (lang.code2 && !langMap.has(lang.code2)) {
-          langMap.set(lang.code2, lang.name);
-        }
-      }
-    }
-    return Array.from(langMap.entries())
-      .map(([code, name]) => ({ value: code, label: name }))
-      .sort((a, b) => a.label.localeCompare(b.label));
-  }, [query.data?.data]);
-
-  // Extract unique missing subtitle language options from actual data
-  const missingLangOptions = useMemo(() => {
-    const allData = query.data?.data ?? [];
-    const langMap = new Map<string, string>();
-    for (const item of allData) {
-      for (const sub of item.missing_subtitles ?? []) {
-        if (sub.code2 && !langMap.has(sub.code2)) {
-          langMap.set(sub.code2, sub.name);
-        }
-      }
-    }
-    return Array.from(langMap.entries())
-      .map(([code, name]) => ({ value: code, label: name }))
-      .sort((a, b) => a.label.localeCompare(b.label));
-  }, [query.data?.data]);
+  const langOptions = useMemo(
+    () => audioLangs.map((l) => ({ value: l.code2, label: l.name })),
+    [audioLangs],
+  );
 
   // Build client-side filter function
   const dataFilter = useCallback(
@@ -237,7 +211,7 @@ const WantedSeriesView: FunctionComponent = () => {
       missingLanguage={missingLanguage ?? undefined}
       onMissingLanguageChange={setMissingLanguage}
       langOptions={langOptions}
-      missingLangOptions={missingLangOptions}
+      missingLangOptions={langOptions}
       dataFilter={hasActiveFilter ? dataFilter : undefined}
       searchAll={() => mutateAsync({ action: "search-wanted" })}
       getWantedItem={getWantedItem}

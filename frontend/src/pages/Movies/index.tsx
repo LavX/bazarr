@@ -31,8 +31,7 @@ const MovieView: FunctionComponent = () => {
     audioLanguages.length > 0 ||
     excludeLanguages.length > 0;
 
-  // Always fetchAll so language dropdowns show ALL actual languages from data
-  const query = useMoviesPagination(true);
+  const query = useMoviesPagination(hasActiveFilter);
 
   const columns = useMemo<ColumnDef<Item.Movie>[]>(
     () => [

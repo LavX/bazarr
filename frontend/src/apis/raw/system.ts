@@ -41,6 +41,12 @@ class SystemApi extends BaseApi {
     return response;
   }
 
+  async audioLanguages() {
+    const response =
+      await this.get<{ code2: string; name: string }[]>("/languages/audio");
+    return response;
+  }
+
   async languagesProfileList() {
     const response = await this.get<Language.Profile[]>("/languages/profiles");
     return response;

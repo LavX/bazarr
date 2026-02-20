@@ -33,8 +33,7 @@ const SeriesView: FunctionComponent = () => {
     audioLanguages.length > 0 ||
     excludeLanguages.length > 0;
 
-  // Always fetchAll so language dropdowns show ALL actual languages from data
-  const query = useSeriesPagination(true);
+  const query = useSeriesPagination(hasActiveFilter);
 
   const columns = useMemo<ColumnDef<Item.Series>[]>(
     () => [
