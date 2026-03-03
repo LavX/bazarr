@@ -25,7 +25,7 @@ from subtitles.indexer.series import store_subtitles
 from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.processing import ProcessSubtitlesResult
 
-from .cache import subtitle_cache
+from bazarr.subtitles.cache import subtitle_cache
 from .pool import update_pools, _get_pool
 from .utils import get_video, _get_lang_obj, _get_scores, _set_forced_providers
 from .processing import process_subtitle
@@ -127,7 +127,7 @@ def manual_search(path, profile_id, providers, sceneName, title, media_type):
                          language=str(s.language.basename),
                          hearing_impaired=str(s.hearing_impaired),
                          provider=s.provider_name,
-                         subtitle=subtitle_cache.store(s.make_picklable()),
+                         subtitle=subtitle_cache.store(s),
                          url=s.page_link,
                          original_format=s.use_original_format,
                          matches=list(matches),
