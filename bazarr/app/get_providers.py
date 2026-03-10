@@ -93,6 +93,7 @@ def provider_throttle_map():
             TooManyRequests: (datetime.timedelta(minutes=10), "10 minutes"),
         },
         "titulky": {
+            TooManyRequests: (datetime.timedelta(minutes=1), "1 minute"),
             DownloadLimitExceeded: (
                 titulky_limit_reset_timedelta(),
                 f"{titulky_limit_reset_timedelta().seconds // 3600 + 1} hours")
@@ -378,7 +379,11 @@ def get_providers_auth():
         'subsource': {
             'api_key': settings.subsource.apikey,
         },
-        'animesubinfo': {}
+        'animesubinfo': {},
+        'subx':
+            {
+                'api_key': settings.subx.api_key,
+            }
     }
 
 
