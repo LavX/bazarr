@@ -103,5 +103,8 @@
       "last 1 firefox version",
       "last 1 safari version"
     ]
+  },
+  "overrides": {
+    "serialize-javascript": "^7.0.4"
   }
 }
