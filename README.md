@@ -1,4 +1,4 @@
-# Bazarr (LavX Fork) - "Nexus Dawn"
+# Bazarr (LavX Fork) - "Neon Pulse"
 
 <p align="center">
   <a href="https://ghcr.io/lavx/bazarr"><img src="https://img.shields.io/badge/ghcr.io-lavx%2Fbazarr-blue?style=for-the-badge&logo=docker" alt="Docker"></a>
@@ -73,7 +73,7 @@ docker pull ghcr.io/lavx/ai-subtitle-translator:latest
 | OpenSubtitles.com (API) | ✅ Available | ✅ Available |
 | Docker images | linuxserver/hotio | ghcr.io/lavx |
 | Python runtime | 3.11/3.12 | 3.14 with JIT |
-| Fork identification in UI | N/A | ✅ "LavX Fork - Nexus Dawn" |
+| Fork identification in UI | N/A | ✅ "LavX Fork - Neon Pulse" |
 
 ### 🎯 OpenSubtitles.org Scraper Provider
 
@@ -423,7 +423,7 @@ If you need something that is not already part of Bazarr, feel free to create a 
 - Podnapisi
 - RegieLive
 - Sous-Titres.eu
-- Subdivx
+- SubX
 - subf2m.co
 - Subs.sab.bz
 - Subs4Free
