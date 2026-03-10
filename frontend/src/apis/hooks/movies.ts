@@ -43,9 +43,12 @@ export function useMovies() {
   return query;
 }
 
-export function useMoviesPagination() {
-  return usePaginationQuery([QueryKeys.Movies], (param) =>
-    api.movies.moviesBy(param),
+export function useMoviesPagination(fetchAll = false) {
+  return usePaginationQuery(
+    [QueryKeys.Movies],
+    (param) => api.movies.moviesBy(param),
+    true,
+    fetchAll,
   );
 }
 
@@ -84,9 +87,12 @@ export function useMovieAction() {
   });
 }
 
-export function useMovieWantedPagination() {
-  return usePaginationQuery([QueryKeys.Movies, QueryKeys.Wanted], (param) =>
-    api.movies.wanted(param),
+export function useMovieWantedPagination(fetchAll = false) {
+  return usePaginationQuery(
+    [QueryKeys.Movies, QueryKeys.Wanted],
+    (param) => api.movies.wanted(param),
+    true,
+    fetchAll,
   );
 }
 

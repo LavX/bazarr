@@ -1,4 +1,4 @@
-import { FunctionComponent, useMemo } from "react";
+import { FunctionComponent, useMemo, useState } from "react";
 import { Link } from "react-router";
 import { Anchor, Badge, Container, Tooltip } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
@@ -20,10 +20,18 @@ import { BuildKey } from "@/utilities";
 
 const MovieView: FunctionComponent = () => {
   const modifyMovie = useMovieModification();
-
   const modals = useModals();
 
-  const query = useMoviesPagination();
+  const [search, setSearch] = useState("");
+  const [audioLanguages, setAudioLanguages] = useState<string[]>([]);
+  const [excludeLanguages, setExcludeLanguages] = useState<string[]>([]);
+
+  const hasActiveFilter =
+    search.length > 0 ||
+    audioLanguages.length > 0 ||
+    excludeLanguages.length > 0;
+
+  const query = useMoviesPagination(hasActiveFilter);
 
   const columns = useMemo<ColumnDef<Item.Movie>[]>(
     () => [
@@ -139,7 +147,16 @@ const MovieView: FunctionComponent = () => {
 
   return (
     <Container fluid px={0}>
-      <ItemView query={query} columns={columns}></ItemView>
+      <ItemView
+        query={query}
+        columns={columns}
+        searchValue={search}
+        onSearchChange={setSearch}
+        audioLanguages={audioLanguages}
+        onAudioLanguagesChange={setAudioLanguages}
+        excludeLanguages={excludeLanguages}
+        onExcludeLanguagesChange={setExcludeLanguages}
+      ></ItemView>
     </Container>
   );
 };

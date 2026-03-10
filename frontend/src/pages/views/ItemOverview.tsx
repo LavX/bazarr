@@ -91,7 +91,7 @@ const ItemOverview: FunctionComponent<Props> = (props) => {
 
   const audioBadges = useMemo(
     () =>
-      item?.audio_language.map((v, idx) => (
+      (item?.audio_language ?? []).map((v, idx) => (
         <ItemBadge
           key={BuildKey(idx, "audio", v.code2)}
           icon={faMusic}
@@ -99,7 +99,7 @@ const ItemOverview: FunctionComponent<Props> = (props) => {
         >
           {normalizeAudioLanguage(v.name)}
         </ItemBadge>
-      )) ?? [],
+      )),
     [item?.audio_language],
   );
 

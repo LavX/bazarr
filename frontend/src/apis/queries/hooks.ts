@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import {
   QueryKey,
@@ -22,6 +22,7 @@ export type UsePaginationQueryResult<T extends object> = UseQueryResult<
     pageSize: number;
     pageCount: number;
     page: number;
+    fetchAll: boolean;
   };
 };
 
@@ -32,6 +33,7 @@ export function usePaginationQuery<
   queryKey: TQueryKey,
   queryFn: RangeQuery<TObject>,
   cacheIndividual = true,
+  fetchAll = false,
 ): UsePaginationQueryResult<TObject> {
   const client = useQueryClient();
 
@@ -43,15 +45,27 @@ export function usePaginationQuery<
 
   const pageSize = usePageSize();
 
-  const start = page * pageSize;
+  // Reset to page 0 when switching between fetchAll modes
+  const prevFetchAllRef = useRef(fetchAll);
+  useEffect(() => {
+    if (prevFetchAllRef.current !== fetchAll) {
+      setIndex(0);
+    }
+    prevFetchAllRef.current = fetchAll;
+  }, [fetchAll]);
+
+  const start = fetchAll ? 0 : page * pageSize;
+  const length = fetchAll ? -1 : pageSize;
 
   const results = useQuery({
-    queryKey: [...queryKey, QueryKeys.Range, { start, size: pageSize }],
+    queryKey: fetchAll
+      ? [...queryKey, QueryKeys.Range, { all: true }]
+      : [...queryKey, QueryKeys.Range, { start, size: pageSize }],
 
     queryFn: () => {
       const param: Parameter.Range = {
         start,
-        length: pageSize,
+        length,
       };
       return queryFn(param);
     },
@@ -78,7 +92,9 @@ export function usePaginationQuery<
   ]);
 
   const totalCount = data?.total ?? 0;
-  const pageCount = Math.ceil(totalCount / pageSize);
+  const pageCount = fetchAll
+    ? Math.ceil(totalCount / pageSize)
+    : Math.ceil(totalCount / pageSize);
 
   const gotoPage = useCallback(
     (idx: number) => {
@@ -122,6 +138,7 @@ export function usePaginationQuery<
       pageCount,
       pageSize,
       page,
+      fetchAll,
     },
     controls: {
       gotoPage,

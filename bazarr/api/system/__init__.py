@@ -12,6 +12,7 @@ from .health import api_ns_system_health
 from .ping import api_ns_system_ping
 from .releases import api_ns_system_releases
 from .settings import api_ns_system_settings
+from .audio_languages import api_ns_system_audio_languages
 from .languages import api_ns_system_languages
 from .languages_profiles import api_ns_system_languages_profiles
 from .notifications import api_ns_system_notifications
@@ -21,6 +22,7 @@ api_ns_list_system = [
     api_ns_system,
     api_ns_system_account,
     api_ns_system_announcements,
+    api_ns_system_audio_languages,
     api_ns_system_backups,
     api_ns_system_health,
     api_ns_system_languages,

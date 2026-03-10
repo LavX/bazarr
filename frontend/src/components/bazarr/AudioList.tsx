@@ -4,7 +4,7 @@ import { BuildKey } from "@/utilities";
 import { normalizeAudioLanguage } from "@/utilities/languages";
 
 export type AudioListProps = GroupProps & {
-  audios: Language.Info[];
+  audios: Language.Info[] | null | undefined;
   badgeProps?: BadgeProps;
 };
 
@@ -13,6 +13,9 @@ const AudioList: FunctionComponent<AudioListProps> = ({
   badgeProps,
   ...group
 }) => {
+  if (!audios || audios.length === 0) {
+    return null;
+  }
   return (
     <Group gap="xs" {...group}>
       {audios.map((audio, idx) => (
