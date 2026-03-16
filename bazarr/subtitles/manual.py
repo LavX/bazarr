@@ -9,10 +9,10 @@ import subliminal
 from subzero.language import Language
 from subliminal_patch.core import save_subtitles
 from subliminal_patch.core_persistent import list_all_subtitles, download_subtitles
-from subliminal_patch.score import ComputeScore
+from subliminal_patch.score import compute_score, DEFAULT_SCORES
 
 from languages.get_languages import alpha3_from_alpha2
-from app.config import get_scores, settings, get_array_from
+from app.config import settings, get_array_from
 from utilities.helper import get_target_folder, force_unicode
 from utilities.path_mappings import path_mappings
 from app.database import (database, get_profiles_list, select, TableEpisodes, TableShows, get_audio_profile_languages,
@@ -43,7 +43,6 @@ def manual_search(path, profile_id, providers, sceneName, title, media_type):
     also_forced = any([x.forced for x in language_set])
     forced_required = all([x.forced for x in language_set])
     normal = not also_forced and not forced_required and all([not x.hi for x in language_set])
-    compute_score = ComputeScore(get_scores())
     _set_forced_providers(pool=pool, also_forced=also_forced, forced_required=forced_required)
 
     if providers:
@@ -67,6 +66,7 @@ def manual_search(path, profile_id, providers, sceneName, title, media_type):
             subtitles_list = []
             minimum_score = settings.general.minimum_score
             minimum_score_movie = settings.general.minimum_score_movie
+            score_handler = DEFAULT_SCORES['episode'] if media_type == "series" else DEFAULT_SCORES['movie']
 
             for s in subtitles[video]:
                 if not normal and s.language not in language_set:
@@ -74,7 +74,9 @@ def manual_search(path, profile_id, providers, sceneName, title, media_type):
                     continue
 
                 try:
-                    matches = s.get_matches(video)
+                    matches = s.matches if hasattr(s, 'matches') and isinstance(s.matches, set) and len(s.matches) \
+                        else s.get_matches(video)
+                    matches = {match for match in matches if match in score_handler.keys()}  # cleanup unwanted criterion
                 except AttributeError:
                     continue
 
@@ -99,8 +101,10 @@ def manual_search(path, profile_id, providers, sceneName, title, media_type):
 
                 if 'hash' not in matches:
                     not_matched = scores - matches
+                    not_matched = {match for match in not_matched if match in score_handler.keys()}
                     s.score = score_without_hash
                 else:
+                    matches = s.matches = {match for match in matches if match in ("hash", "hearing_impaired")}
                     s.score = score
                     not_matched = set()
 

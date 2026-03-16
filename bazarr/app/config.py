@@ -457,33 +457,6 @@ validators = [
     Validator('subsync.max_offset_seconds', must_exist=True, default=60, is_type_of=int,
               is_in=[60, 120, 300, 600]),
 
-    # series_scores section
-    Validator('series_scores.hash', must_exist=True, default=359, is_type_of=int),
-    Validator('series_scores.series', must_exist=True, default=180, is_type_of=int),
-    Validator('series_scores.year', must_exist=True, default=90, is_type_of=int),
-    Validator('series_scores.season', must_exist=True, default=30, is_type_of=int),
-    Validator('series_scores.episode', must_exist=True, default=30, is_type_of=int),
-    Validator('series_scores.release_group', must_exist=True, default=14, is_type_of=int),
-    Validator('series_scores.source', must_exist=True, default=7, is_type_of=int),
-    Validator('series_scores.audio_codec', must_exist=True, default=3, is_type_of=int),
-    Validator('series_scores.resolution', must_exist=True, default=2, is_type_of=int),
-    Validator('series_scores.video_codec', must_exist=True, default=2, is_type_of=int),
-    Validator('series_scores.streaming_service', must_exist=True, default=1, is_type_of=int),
-    Validator('series_scores.hearing_impaired', must_exist=True, default=1, is_type_of=int),
-
-    # movie_scores section
-    Validator('movie_scores.hash', must_exist=True, default=119, is_type_of=int),
-    Validator('movie_scores.title', must_exist=True, default=60, is_type_of=int),
-    Validator('movie_scores.year', must_exist=True, default=30, is_type_of=int),
-    Validator('movie_scores.release_group', must_exist=True, default=13, is_type_of=int),
-    Validator('movie_scores.source', must_exist=True, default=7, is_type_of=int),
-    Validator('movie_scores.audio_codec', must_exist=True, default=3, is_type_of=int),
-    Validator('movie_scores.resolution', must_exist=True, default=2, is_type_of=int),
-    Validator('movie_scores.video_codec', must_exist=True, default=2, is_type_of=int),
-    Validator('movie_scores.streaming_service', must_exist=True, default=1, is_type_of=int),
-    Validator('movie_scores.edition', must_exist=True, default=1, is_type_of=int),
-    Validator('movie_scores.hearing_impaired', must_exist=True, default=1, is_type_of=int),
-
     # postgresql section
     Validator('postgresql.enabled', must_exist=True, default=False, is_type_of=bool),
     Validator('postgresql.host', must_exist=True, default='localhost', is_type_of=str),
@@ -633,6 +606,13 @@ if hasattr(settings.embeddedsubtitles, 'unknown_as_english'):
         settings.embeddedsubtitles.unknown_as_fallback = True
         settings.embeddedsubtitles.fallback_lang = 'en'
     del settings.embeddedsubtitles.unknown_as_english
+
+# delete custom scores sections since we don't use this anymore
+if hasattr(settings, 'series_scores'):
+    settings.unset('SERIES_SCORES')
+if hasattr(settings, 'movie_scores'):
+    settings.unset('MOVIE_SCORES')
+
 # save updated settings to file
 write_config()
 
@@ -1036,10 +1016,6 @@ def get_ssl_verify(service):
         raise ValueError(f"Unknown service for SSL verify: {service}")
     return settings.get(f'{service}.verify_ssl', False)
 
-
-def get_scores():
-    settings = get_settings()
-    return {"movie": settings["movie_scores"], "episode": settings["series_scores"]}
 
 
 def sync_checker(subtitle):

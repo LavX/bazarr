@@ -82,6 +82,7 @@ class EpisodesHistory(Resource):
                       TableEpisodes.path,
                       TableHistory.language,
                       TableHistory.score,
+                      TableHistory.score_out_of,
                       TableShows.tags,
                       TableHistory.action,
                       TableHistory.video_path,
@@ -117,6 +118,7 @@ class EpisodesHistory(Resource):
             'language': x.language,
             'profileId': x.profileId,
             'score': x.score,
+            'score_out_of': x.score_out_of,
             'tags': x.tags,
             'action': x.action,
             'video_path': x.video_path,
@@ -154,7 +156,7 @@ class EpisodesHistory(Resource):
             del item['profileId']
 
             if item['score']:
-                item['score'] = f"{round((int(item['score']) * 100 / 360), 2)}%"
+                item['score'] = f"{round((int(item['score']) * 100 / item['score_out_of']), 2)}%"
 
             # Make timestamp pretty
             if item['timestamp']:

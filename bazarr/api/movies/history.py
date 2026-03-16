@@ -80,6 +80,7 @@ class MoviesHistory(Resource):
                       TableHistoryMovie.language,
                       TableMovies.tags,
                       TableHistoryMovie.score,
+                      TableHistoryMovie.score_out_of,
                       TableHistoryMovie.subs_id,
                       TableHistoryMovie.provider,
                       TableHistoryMovie.subtitles_path,
@@ -110,6 +111,7 @@ class MoviesHistory(Resource):
             'profileId': x.profileId,
             'tags': x.tags,
             'score': x.score,
+            'score_out_of': x.score_out_of,
             'subs_id': x.subs_id,
             'provider': x.provider,
             'subtitles_path': x.subtitles_path,
@@ -145,7 +147,7 @@ class MoviesHistory(Resource):
             del item['profileId']
 
             if item['score']:
-                item['score'] = f"{round((int(item['score']) * 100 / 120), 2)}%"
+                item['score'] = f"{round((int(item['score']) * 100 / item['score_out_of']), 2)}%"
 
             # Make timestamp pretty
             if item['timestamp']:
