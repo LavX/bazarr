@@ -4,9 +4,13 @@ import logging
 import os
 import ast
 import re
+import subprocess
 from app.database import TableEpisodes, TableMovies, database, select
 from app.event_handler import event_stream
 from utilities.path_mappings import path_mappings
+from utilities.binaries import get_binary
+from utilities.video_analyzer import parse_video_metadata, _handle_alpha3
+from languages.get_languages import alpha3_from_alpha2
 from subtitles.indexer.series import store_subtitles
 from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.tools.translate.main import translate_subtitles_file
@@ -215,20 +219,172 @@ def find_subtitle_by_language(subtitles, language_code, video_path, media_type='
             if resolved_path:
                 return resolved_path, sub['code2']
 
-    # Third pass: Scan filesystem fallback
+    # Third pass: Extract embedded subtitles from video container
+    if subtitles and isinstance(subtitles, list):
+        embedded_subs = []
+        for sub in subtitles:
+            if isinstance(sub, (list, tuple)) and len(sub) >= 2:
+                lang_parts = sub[0].split(':')
+                sub_code = lang_parts[0]
+                sub_path = sub[1]
+                if sub_path is None:  # Embedded subtitle (no file on disk)
+                    embedded_subs.append({
+                        'code2': sub_code,
+                        'hi': len(lang_parts) > 1 and lang_parts[1].lower() == 'hi',
+                        'forced': len(lang_parts) > 1 and lang_parts[1].lower() == 'forced',
+                    })
+
+        if embedded_subs:
+            # Prefer exact language match, then fall back to any (preferring English)
+            candidates = [s for s in embedded_subs if s['code2'] == language_code]
+            if not candidates:
+                common_languages = ['en', 'eng']
+                candidates = sorted(embedded_subs,
+                                    key=lambda x: (x['forced'], x['hi'], x['code2'] not in common_languages))
+
+            for sub in candidates:
+                extracted_path = extract_embedded_subtitle(video_path, sub['code2'], media_type)
+                if extracted_path:
+                    return extracted_path, sub['code2']
+
+    # Fourth pass: Scan filesystem fallback
     filesystem_subs = scan_filesystem_for_subtitles(video_path)
-    
+
     if filesystem_subs:
         # Prefer English
         for sub in filesystem_subs:
             if sub['is_english']:
                 return sub['path'], 'en'
-        
+
         # Use first available
         sub = filesystem_subs[0]
         return sub['path'], sub['detected_language']
-    
+
     return None, None
+
+def extract_embedded_subtitle(video_path, language_code2, media_type):
+    """Extract an embedded subtitle track from a video file using ffmpeg.
+
+    Returns the path to the extracted .srt file, or None on failure.
+    """
+    target_alpha3 = alpha3_from_alpha2(language_code2)
+    if not target_alpha3:
+        logger.error(f'Cannot convert language code {language_code2} to alpha3')
+        return None
+
+    # Look up file metadata needed by parse_video_metadata
+    if media_type == 'series':
+        db_path = path_mappings.path_replace_reverse(video_path)
+        media = database.execute(
+            select(TableEpisodes.episode_file_id, TableEpisodes.file_size)
+            .where(TableEpisodes.path == db_path)
+        ).first()
+        if not media:
+            return None
+        data = parse_video_metadata(video_path, media.file_size,
+                                    episode_file_id=media.episode_file_id)
+    else:
+        db_path = path_mappings.path_replace_reverse_movie(video_path)
+        media = database.execute(
+            select(TableMovies.movie_file_id, TableMovies.file_size)
+            .where(TableMovies.path == db_path)
+        ).first()
+        if not media:
+            return None
+        data = parse_video_metadata(video_path, media.file_size,
+                                    movie_file_id=media.movie_file_id)
+
+    if not data:
+        return None
+
+    # Find the subtitle provider (ffprobe or mediainfo)
+    cache_provider = None
+    if data.get("ffprobe") and "subtitle" in data["ffprobe"]:
+        cache_provider = 'ffprobe'
+    elif data.get("mediainfo") and "subtitle" in data["mediainfo"]:
+        cache_provider = 'mediainfo'
+    if not cache_provider:
+        return None
+
+    # Bitmap-based subtitle codecs that cannot be converted to SRT
+    bitmap_codecs = ['pgs', 'vobsub', 'dvd_subtitle', 'dvbsub', 'hdmv_pgs_subtitle', 'dvd']
+
+    # Find the matching subtitle stream index
+    track_id = 0
+    found_track = None
+    for track in data[cache_provider]["subtitle"]:
+        codec = (track.get("format") or track.get("name") or "").lower()
+        if any(bc in codec for bc in bitmap_codecs):
+            track_id += 1
+            continue
+
+        if "language" not in track:
+            track_id += 1
+            continue
+
+        track_alpha3 = _handle_alpha3(track)
+        if track_alpha3 == target_alpha3:
+            found_track = track_id
+            break
+        track_id += 1
+
+    if found_track is None:
+        logger.debug(f'No extractable embedded subtitle found for language {language_code2} in {video_path}')
+        return None
+
+    # Build output path in Bazarr's config dir so Jellyfin won't pick it up
+    import hashlib
+    extract_dir = os.path.join('/config', 'extracted_subs')
+    os.makedirs(extract_dir, exist_ok=True)
+    video_hash = hashlib.md5(video_path.encode()).hexdigest()
+    output_path = os.path.join(extract_dir, f"{video_hash}.{language_code2}.srt")
+
+    # Skip extraction if already done
+    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+        logger.debug(f'Using previously extracted subtitle: {output_path}')
+        return output_path
+
+    # Extract using ffmpeg
+    try:
+        ffmpeg_path = get_binary("ffmpeg")
+    except Exception:
+        logger.error("ffmpeg binary not found, cannot extract embedded subtitles")
+        return None
+
+    cmd = [ffmpeg_path, '-y', '-loglevel', 'error',
+           '-i', video_path,
+           '-map', f'0:s:{found_track}',
+           '-c:s', 'srt',
+           output_path]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            logger.error(f'ffmpeg extraction failed for {video_path}: {result.stderr}')
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            return None
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            # Strip Windows carriage returns (\r) that ffmpeg may produce
+            with open(output_path, 'r', encoding='utf-8-sig', errors='replace') as f:
+                content = f.read()
+            if '\r' in content:
+                with open(output_path, 'w', encoding='utf-8') as f:
+                    f.write(content.replace('\r', ''))
+            logger.info(f'Extracted embedded {language_code2} subtitle to: {output_path}')
+            return output_path
+        return None
+    except subprocess.TimeoutExpired:
+        logger.error(f'ffmpeg extraction timed out for {video_path}')
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        return None
+    except Exception as e:
+        logger.error(f'Failed to extract embedded subtitle: {e}')
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        return None
+
 
 def scan_filesystem_for_subtitles(video_path):
     """Scan filesystem for .srt files next to the video file."""

@@ -146,6 +146,10 @@ class OpenRouterTranslatorService:
             source_lang = self.language_code_convert_dict.get(source_lang, source_lang)
             target_lang = self.language_code_convert_dict.get(target_lang, target_lang)
 
+            # Resolve alpha2 codes to full language names for the AI translator prompt
+            source_lang = language_from_alpha2(source_lang) or source_lang
+            target_lang = language_from_alpha2(target_lang) or target_lang
+
             logger.debug(f'BAZARR translation language codes: from_lang={self.from_lang}, to_lang={self.to_lang}, '
                          f'orig_to_lang={self.orig_to_lang}, final source={source_lang}, final target={target_lang}')
 
