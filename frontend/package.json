@@ -4,12 +4,12 @@
   "description": "Bazarr is a companion application to Sonarr and Radarr. It manages and downloads subtitles based on your requirements. You define your preferences by TV show or movie and Bazarr takes care of everything for you.",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/morpheus65535/bazarr.git"
+    "url": "git+https://github.com/LavX/bazarr.git"
   },
-  "author": "morpheus65535",
+  "author": "LavX",
   "license": "GPL-3",
   "bugs": {
-    "url": "https://github.com/morpheus65535/bazarr/issues"
+    "url": "https://github.com/LavX/bazarr/issues"
   },
   "private": true,
   "dependencies": {

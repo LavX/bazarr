@@ -1,6 +1,6 @@
 # Bazarr LavX Fork - Maintenance Guide
 
-This document describes the automated workflow for maintaining this fork of [Bazarr](https://github.com/morpheus65535/bazarr).
+This document describes the automated workflow for maintaining this fork of [Bazarr](https://github.com/morpheus65535/bazarr) (upstream).
 
 ## Overview
 
@@ -41,7 +41,7 @@ This fork contains custom modifications (primarily the OpenSubtitles.org web scr
 - Manual dispatch from GitHub Actions UI
 
 **Process:**
-1. Fetches latest commits from `morpheus65535/bazarr:master`
+1. Fetches latest commits from upstream `bazarr:master`
 2. Compares with current fork
 3. Attempts automatic merge
 4. If successful: pushes changes and triggers Docker build
@@ -247,7 +247,7 @@ To change the release source (e.g., for debugging), set the environment variable
 ```yaml
 # docker-compose.yml
 environment:
-  - BAZARR_RELEASES_REPO=morpheus65535/Bazarr  # Use upstream releases
+  - BAZARR_RELEASES_REPO=morpheus65535/Bazarr  # Use upstream releases instead
 ```
 
 ### Updating Docker Containers

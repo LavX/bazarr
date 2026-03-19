@@ -5,7 +5,7 @@
     "directory": "unrar",
     "name": "unrar",
     "checksum": "be7a08a75ffb1dcc5f8c6b16a75e822c",
-    "url": "https://github.com/morpheus65535/bazarr-binaries/raw/master/bin/Linux/aarch64/unrar/unrar"
+    "url": "https://github.com/LavX/bazarr-binaries/raw/master/bin/Linux/aarch64/unrar/unrar"
   },
   {
     "system": "Linux",
@@ -13,7 +13,7 @@
     "directory": "unrar",
     "name": "unrar",
     "checksum": "07a6371cc7db8493352739ce26b19ea1",
-    "url": "https://github.com/morpheus65535/bazarr-binaries/raw/master/bin/Linux/armv5tel/unrar/unrar"
+    "url": "https://github.com/LavX/bazarr-binaries/raw/master/bin/Linux/armv5tel/unrar/unrar"
   },
   {
     "system": "Linux",
@@ -21,7 +21,7 @@
     "directory": "ffmpeg",
     "name": "ffmpeg",
     "checksum": "43910b9df223a772402830461a80e9a1",
-    "url": "https://github.com/morpheus65535/bazarr-binaries/raw/master/bin/Linux/i386/ffmpeg/ffmpeg"
+    "url": "https://github.com/LavX/bazarr-binaries/raw/master/bin/Linux/i386/ffmpeg/ffmpeg"
   },
   {
     "system": "Linux",
@@ -29,7 +29,7 @@
     "directory": "ffmpeg",
     "name": "ffprobe",
     "checksum": "24ccbd651630c562fbaf17e30a18ce38",
-    "url": "https://github.com/morpheus65535/bazarr-binaries/raw/master/bin/Linux/i386/ffmpeg/ffprobe"
+    "url": "https://github.com/LavX/bazarr-binaries/raw/master/bin/Linux/i386/ffmpeg/ffprobe"
   },
   {
     "system": "Linux",
@@ -37,7 +37,7 @@
     "directory": "unrar",
     "name": "unrar",
     "checksum": "f03ae1d4abf871b95142a7248a6cfa3a",
-    "url": "https://github.com/morpheus65535/bazarr-binaries/raw/master/bin/Linux/i386/unrar/unrar"
+    "url": "https://github.com/LavX/bazarr-binaries/raw/master/bin/Linux/i386/unrar/unrar"
   },
   {
     "system": "Linux",
@@ -45,7 +45,7 @@
     "directory": "ffmpeg",
     "name": "ffmpeg",
     "checksum": "9fd68f7b80cd1177b94a71455b288131",
-    "url": "https://github.com/morpheus65535/bazarr-binaries/raw/master/bin/Linux/x86_64/ffmpeg/ffmpeg"
+    "url": "https://github.com/LavX/bazarr-binaries/raw/master/bin/Linux/x86_64/ffmpeg/ffmpeg"
   },
   {
     "system": "Linux",
@@ -53,7 +53,7 @@
     "directory": "ffmpeg",
     "name": "ffprobe",
     "checksum": "29fdc34d9c7ad07c8f75e83d8fb5965b",
-    "url": "https://github.com/morpheus65535/bazarr-binaries/raw/master/bin/Linux/x86_64/ffmpeg/ffprobe"
+    "url": "https://github.com/LavX/bazarr-binaries/raw/master/bin/Linux/x86_64/ffmpeg/ffprobe"
   },
   {
     "system": "Linux",
@@ -61,7 +61,7 @@
     "directory": "unrar",
     "name": "unrar",
     "checksum": "2a63e80d50c039e1fba01de7dcfa6432",
-    "url": "https://github.com/morpheus65535/bazarr-binaries/raw/master/bin/Linux/x86_64/unrar/unrar"
+    "url": "https://github.com/LavX/bazarr-binaries/raw/master/bin/Linux/x86_64/unrar/unrar"
   },
   {
     "system": "MacOSX",
@@ -69,7 +69,7 @@
     "directory": "ffmpeg",
     "name": "ffmpeg",
     "checksum": "af1723314ba5ca9c70ef35dc8b5c2260",
-    "url": "https://github.com/morpheus65535/bazarr-binaries/raw/master/bin/MacOSX/i386/ffmpeg/ffmpeg"
+    "url": "https://github.com/LavX/bazarr-binaries/raw/master/bin/MacOSX/i386/ffmpeg/ffmpeg"
   },
   {
     "system": "MacOSX",
@@ -77,7 +77,7 @@
     "directory": "ffmpeg",
     "name": "ffprobe",
     "checksum": "d81468cebd6630450d2f5a17720b4504",
-    "url": "https://github.com/morpheus65535/bazarr-binaries/raw/master/bin/MacOSX/i386/ffmpeg/ffprobe"
+    "url": "https://github.com/LavX/bazarr-binaries/raw/master/bin/MacOSX/i386/ffmpeg/ffprobe"
   },
   {
     "system": "MacOSX",
@@ -85,7 +85,7 @@
     "directory": "unrar",
     "name": "unrar",
     "checksum": "47de1fed0a5d4f7bac4d8f7557926398",
-    "url": "https://github.com/morpheus65535/bazarr-binaries/raw/master/bin/MacOSX/i386/unrar/unrar"
+    "url": "https://github.com/LavX/bazarr-binaries/raw/master/bin/MacOSX/i386/unrar/unrar"
   },
   {
     "system": "MacOSX",
@@ -93,7 +93,7 @@
     "directory": "ffmpeg",
     "name": "ffmpeg",
     "checksum": "af1723314ba5ca9c70ef35dc8b5c2260",
-    "url": "https://github.com/morpheus65535/bazarr-binaries/raw/master/bin/MacOSX/x86_64/ffmpeg/ffmpeg"
+    "url": "https://github.com/LavX/bazarr-binaries/raw/master/bin/MacOSX/x86_64/ffmpeg/ffmpeg"
   },
   {
     "system": "MacOSX",
@@ -101,7 +101,7 @@
     "directory": "ffmpeg",
     "name": "ffprobe",
     "checksum": "d81468cebd6630450d2f5a17720b4504",
-    "url": "https://github.com/morpheus65535/bazarr-binaries/raw/master/bin/MacOSX/x86_64/ffmpeg/ffprobe"
+    "url": "https://github.com/LavX/bazarr-binaries/raw/master/bin/MacOSX/x86_64/ffmpeg/ffprobe"
   },
   {
     "system": "MacOSX",
@@ -109,7 +109,7 @@
     "directory": "unrar",
     "name": "unrar",
     "checksum": "8d5b3d5d6be2c14b74b02767430ade9c",
-    "url": "https://github.com/morpheus65535/bazarr-binaries/raw/master/bin/MacOSX/x86_64/unrar/unrar"
+    "url": "https://github.com/LavX/bazarr-binaries/raw/master/bin/MacOSX/x86_64/unrar/unrar"
   },
   {
     "system": "MacOSX",
@@ -117,7 +117,7 @@
     "directory": "ffmpeg",
     "name": "ffmpeg",
     "checksum": "af1723314ba5ca9c70ef35dc8b5c2260",
-    "url": "https://github.com/morpheus65535/bazarr-binaries/raw/master/bin/MacOSX/x86_64/ffmpeg/ffmpeg"
+    "url": "https://github.com/LavX/bazarr-binaries/raw/master/bin/MacOSX/x86_64/ffmpeg/ffmpeg"
   },
   {
     "system": "MacOSX",
@@ -125,7 +125,7 @@
     "directory": "ffmpeg",
     "name": "ffprobe",
     "checksum": "d81468cebd6630450d2f5a17720b4504",
-    "url": "https://github.com/morpheus65535/bazarr-binaries/raw/master/bin/MacOSX/x86_64/ffmpeg/ffprobe"
+    "url": "https://github.com/LavX/bazarr-binaries/raw/master/bin/MacOSX/x86_64/ffmpeg/ffprobe"
   },
   {
     "system": "MacOSX",
@@ -133,7 +133,7 @@
     "directory": "unrar",
     "name": "unrar",
     "checksum": "8d5b3d5d6be2c14b74b02767430ade9c",
-    "url": "https://github.com/morpheus65535/bazarr-binaries/raw/master/bin/MacOSX/x86_64/unrar/unrar"
+    "url": "https://github.com/LavX/bazarr-binaries/raw/master/bin/MacOSX/x86_64/unrar/unrar"
   },
   {
     "system": "Windows",
@@ -141,7 +141,7 @@
     "directory": "ffmpeg",
     "name": "ffmpeg.exe",
     "checksum": "43f89a5172c377e05ebb4c26a498a366",
-    "url": "https://github.com/morpheus65535/bazarr-binaries/raw/master/bin/Windows/i386/ffmpeg/ffmpeg.exe"
+    "url": "https://github.com/LavX/bazarr-binaries/raw/master/bin/Windows/i386/ffmpeg/ffmpeg.exe"
   },
   {
     "system": "Windows",
@@ -149,7 +149,7 @@
     "directory": "ffmpeg",
     "name": "ffprobe.exe",
     "checksum": "a0d88aa85624070a8ab65ed99c214bea",
-    "url": "https://github.com/morpheus65535/bazarr-binaries/raw/master/bin/Windows/i386/ffmpeg/ffprobe.exe"
+    "url": "https://github.com/LavX/bazarr-binaries/raw/master/bin/Windows/i386/ffmpeg/ffprobe.exe"
   },
   {
     "system": "Windows",
@@ -157,6 +157,6 @@
     "directory": "unrar",
     "name": "unrar.exe",
     "checksum": "4611a5b3f70a8d6c40776e0bfa3b3f36",
-    "url": "https://github.com/morpheus65535/bazarr-binaries/raw/master/bin/Windows/i386/unrar/UnRAR.exe"
+    "url": "https://github.com/LavX/bazarr-binaries/raw/master/bin/Windows/i386/unrar/UnRAR.exe"
   }
 ]

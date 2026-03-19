@@ -56,14 +56,14 @@ def get_announcements_to_file(job_id=None, startup=False):
 
     try:
         r = requests.get(
-            url="https://cdn.jsdelivr.net/gh/morpheus65535/bazarr-binaries@latest/announcements.json",
+            url="https://cdn.jsdelivr.net/gh/LavX/bazarr-binaries@latest/announcements.json",
             timeout=30
         )
     except Exception:
         try:
             logging.exception("Error trying to get announcements from jsdelivr.net, falling back to Github.")
             r = requests.get(
-                url="https://raw.githubusercontent.com/morpheus65535/bazarr-binaries/refs/heads/master/announcements.json",
+                url="https://raw.githubusercontent.com/LavX/bazarr-binaries/refs/heads/master/announcements.json",
                 timeout=30
             )
         except Exception:
@@ -112,7 +112,7 @@ def get_local_announcements():
         announcements.append({
             'text': 'An alternative OpenSubtitles scraper service is available that bypasses API limitations. '
                     'Consider using opensubtitles-scraper for improved subtitle downloads.',
-            'link': 'https://github.com/morpheus65535/bazarr/tree/master/opensubtitles-scraper',
+            'link': 'https://github.com/LavX/bazarr/tree/master/opensubtitles-scraper',
             'dismissible': True,
             'timestamp': 1765805148,
         })

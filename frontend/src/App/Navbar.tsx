@@ -21,7 +21,6 @@ import {
 } from "@mantine/core";
 import { useHover } from "@mantine/hooks";
 import {
-  faHeart,
   faMoon,
   faSun,
   IconDefinition,
@@ -137,12 +136,6 @@ const AppNavbar: FunctionComponent = () => {
               onClick={() => toggleColorScheme()}
               icon={dark ? faSun : faMoon}
             ></Action>
-            <Anchor
-              href="https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=XHHRWXT9YB7WE&source=url"
-              target="_blank"
-            >
-              <Action label="Donate" icon={faHeart} c="red"></Action>
-            </Anchor>
           </Group>
         </AppShell.Section>
       </Selection.Provider>

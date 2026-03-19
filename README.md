@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  This fork of <a href="https://github.com/morpheus65535/bazarr">Bazarr</a> includes:<br/>
+  Built on <a href="https://www.bazarr.media">Bazarr</a>, this fork adds:<br/>
   - OpenSubtitles.org provider that works <strong>without VIP API credentials</strong> (survives the API shutdown)<br/>
   - <strong>AI Subtitle Translator</strong> using OpenRouter LLMs for high-quality subtitle translation<br/>
   - <strong>Batch translation</strong> for entire series/movie libraries<br/>
@@ -28,9 +28,9 @@ On **January 29, 2026**, OpenSubtitles.org [announced the final shutdown](https:
 
 ## Why This Fork Exists
 
-This fork was created after the [pull request (#3012)](https://github.com/morpheus65535/bazarr/pull/3012) to add OpenSubtitles.org web scraper support was declined by the upstream maintainer. The upstream decision is understandable -- they have agreements with OpenSubtitles and want to respect their infrastructure.
+With the OpenSubtitles.org API shut down for all third-party apps (VIP included), and OpenSubtitles.com still lacking full parity with the .org library, there's a real gap for users who depend on older or less common subtitles.
 
-However, with the official API now being shut down, this fork with its scraper companion container is one of the few ways to maintain access to OpenSubtitles.org subtitles. The web scraper is rate-limited and respectful to their servers.
+This fork fills that gap with a self-hosted web scraper that accesses OpenSubtitles.org directly — rate-limited and respectful to their infrastructure. It also adds AI-powered subtitle translation and advanced UI filters not available upstream.
 
 ---
 
@@ -340,69 +340,22 @@ This fork is maintained by **LavX**. Explore more of my projects and services:
 ## 📄 License
 
 - [GNU GPL v3](http://www.gnu.org/licenses/gpl.html)
-- Original Bazarr Copyright 2010-2025 morpheus65535
-- Fork modifications Copyright 2025 LavX
+- Original Bazarr: [upstream repository](https://github.com/morpheus65535/bazarr)
+- Fork modifications Copyright 2025-2026 LavX
 
 ---
 
 <details>
-<summary><h2>📜 Original Bazarr README</h2></summary>
+<summary><h2>📜 Supported Subtitle Providers</h2></summary>
 
-# bazarr
-
-Bazarr is a companion application to Sonarr and Radarr. It manages and downloads subtitles based on your requirements. You define your preferences by TV show or movie and Bazarr takes care of everything for you.
-
-Be aware that Bazarr doesn't scan disk to detect series and movies: It only takes care of the series and movies that are indexed in Sonarr and Radarr.
-
-Thanks to the folks at OpenSubtitles for their logo that was an inspiration for ours.
-
-## Support on Paypal
-
-At the request of some, here is a way to demonstrate your appreciation for the efforts made in the development of Bazarr:
-[![Donate](https://img.shields.io/badge/Donate-PayPal-green.svg)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=XHHRWXT9YB7WE&source=url)
-
-## Status (LavX Fork)
-
-[![GitHub issues](https://img.shields.io/github/issues/LavX/bazarr.svg?style=flat-square)](https://github.com/LavX/bazarr/issues)
-[![GitHub stars](https://img.shields.io/github/stars/LavX/bazarr.svg?style=flat-square)](https://github.com/LavX/bazarr/stargazers)
-[![GitHub forks](https://img.shields.io/github/forks/LavX/bazarr.svg?style=flat-square)](https://github.com/LavX/bazarr/network)
-[![Docker Build](https://img.shields.io/github/actions/workflow/status/LavX/bazarr/build-docker.yml?style=flat-square&label=docker)](https://github.com/LavX/bazarr/actions/workflows/build-docker.yml)
-## Support
-
-For installation and configuration instructions, see upstream [wiki](https://wiki.bazarr.media).
-
-For fork-specific issues (OpenSubtitles scraper), open an issue on [this fork](https://github.com/LavX/bazarr/issues).
-
-For general Bazarr issues, please use the [upstream repo](https://github.com/morpheus65535/bazarr/issues).
-
-Original Bazarr Discord: [![Discord](https://img.shields.io/badge/discord-chat-MH2e2eb.svg?style=flat-square)](https://discord.gg/MH2e2eb)
-
-## Feature Requests
-
-If you need something that is not already part of Bazarr, feel free to create a feature request on [Feature Upvote](http://features.bazarr.media).
-
-## Major Features Include:
-
-- Support for major platforms: Windows, Linux, macOS, Raspberry Pi, etc.
-- Automatically add new series and episodes from Sonarr
-- Automatically add new movies from Radarr
-- Series or movies based configuration for subtitles languages
-- Scan your existing library for internal and external subtitles and download any missing
-- Keep history of what was downloaded from where and when
-- Manual search so you can download subtitles on demand
-- Upgrade subtitles previously downloaded when a better one is found
-- Ability to delete external subtitles from disk
-- Currently support 184 subtitles languages with support for forced/foreign subtitles (depending of providers)
-- And a beautiful UI based on Sonarr
-
-## Supported subtitles providers:
+Includes all upstream providers plus fork additions:
 
 - Addic7ed
 - AnimeKalesi
-- Animetosho (requires AniDb HTTP API client described [here](https://wiki.anidb.net/HTTP_API_Definition))
+- Animetosho (requires [AniDb HTTP API client](https://wiki.anidb.net/HTTP_API_Definition))
 - AnimeSub.info
 - Assrt
-- AvistaZ, CinemaZ (Get session cookies using method described [here](https://github.com/morpheus65535/bazarr/pull/2375#issuecomment-2057010996))
+- AvistaZ, CinemaZ
 - BetaSeries
 - BSplayer
 - Embedded Subtitles
@@ -419,7 +372,7 @@ If you need something that is not already part of Bazarr, feel free to create a 
 - Napisy24
 - Nekur
 - OpenSubtitles.com
-- OpenSubtitles.org (LavX Fork)
+- **OpenSubtitles.org (LavX Fork — web scraper, no API needed)**
 - Podnapisi
 - RegieLive
 - Sous-Titres.eu
@@ -443,15 +396,11 @@ If you need something that is not already part of Bazarr, feel free to create a 
 - Turkcealtyazi.org
 - TuSubtitulo
 - TVSubtitles
-- Whisper (requires [ahmetoner/whisper-asr-webservice](https://github.com/ahmetoner/whisper-asr-webservice))
+- Whisper (requires [whisper-asr-webservice](https://github.com/ahmetoner/whisper-asr-webservice))
 - Wizdom
 - XSubs
 - Yavka.net
 - YIFY Subtitles
 - Zimuku
-
-## Screenshot
-
-![Bazarr](/screenshot/bazarr-screenshot.png?raw=true "Bazarr")
 
 </details>
