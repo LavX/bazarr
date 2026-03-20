@@ -17,7 +17,7 @@ from app.config import settings
 
 # Fork configuration - allows overriding via environment variable
 # Default: LavX/bazarr (this fork)
-# To use upstream releases, set BAZARR_UPSTREAM_REPO=morpheus65535/Bazarr
+# To use upstream releases, set BAZARR_RELEASES_REPO to the upstream repo
 RELEASES_REPO = os.environ.get('BAZARR_RELEASES_REPO', 'LavX/bazarr')
 
 
