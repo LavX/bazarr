@@ -3,16 +3,14 @@
 import os
 import re
 import sys
+import shlex
 import logging
 
 from app.config import settings
 
 
-# Wraps the input string within quotes & escapes the string
 def _escape(in_str):
-    raw_map = {8: r'\\b', 7: r'\\a', 12: r'\\f', 10: r'\\n', 13: r'\\r', 9: r'\\t', 11: r'\\v', 34: r'\"', 92: r'\\'}
-    raw_str = r''.join(raw_map.get(ord(i), i) for i in in_str)
-    return f"\"{raw_str}\""
+    return shlex.quote(str(in_str))
 
 
 def pp_replace(pp_command, episode, subtitles, language, language_code2, language_code3, episode_language,
