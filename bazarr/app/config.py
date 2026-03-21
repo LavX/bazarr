@@ -1020,10 +1020,14 @@ def configure_proxy_func():
         os.environ['NO_PROXY'] = exclude
 
 
+_SSL_VERIFY_SERVICES = frozenset({'sonarr', 'radarr', 'plex'})
+
+
 def get_ssl_verify(service):
-    """Return the verify parameter for requests calls to a service.
-    service should be 'sonarr', 'radarr', or 'plex'."""
-    return settings.get(service, {}).get('verify_ssl', False)
+    """Return the verify parameter for requests calls to a service."""
+    if service not in _SSL_VERIFY_SERVICES:
+        raise ValueError(f"Unknown service for SSL verify: {service}")
+    return settings.get(f'{service}.verify_ssl', False)
 
 
 def get_scores():
