@@ -1,6 +1,7 @@
 # coding=utf-8
 
 import ast
+import hmac
 import logging
 
 from functools import wraps
@@ -17,25 +18,29 @@ None_Keys = ['null', 'undefined', '', None]
 False_Keys = ['False', 'false', '0']
 
 
+def _safe_apikey_compare(provided, expected):
+    if not provided:
+        return False
+    return hmac.compare_digest(str(provided), str(expected))
+
+
 def authenticate(actual_method):
     @wraps(actual_method)
     def wrapper(*args, **kwargs):
         apikey_settings = settings.auth.apikey
-        apikey_header = None
-        if 'X-API-KEY' in request.headers:
-            apikey_header = request.headers['X-API-KEY']
+        apikey_header = request.headers.get('X-API-KEY')
 
-        if apikey_header == apikey_settings:
+        if _safe_apikey_compare(apikey_header, apikey_settings):
             return actual_method(*args, **kwargs)
 
         # Legacy: accept API key from query string or form data with deprecation warning
         apikey_get = request.args.get('apikey')
         apikey_post = request.form.get('apikey')
-        if apikey_settings in [apikey_get, apikey_post]:
+        if _safe_apikey_compare(apikey_get, apikey_settings) or _safe_apikey_compare(apikey_post, apikey_settings):
             logging.warning(
                 'API key passed via query string or form data is deprecated. '
                 'Use the X-API-KEY header instead. '
-                f'Endpoint: {request.method} {request.path}'
+                'Endpoint: %s %s', request.method, request.path
             )
             return actual_method(*args, **kwargs)
 
