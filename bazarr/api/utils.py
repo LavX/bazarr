@@ -1,6 +1,7 @@
 # coding=utf-8
 
 import ast
+import logging
 
 from functools import wraps
 from flask import request, abort
@@ -20,13 +21,22 @@ def authenticate(actual_method):
     @wraps(actual_method)
     def wrapper(*args, **kwargs):
         apikey_settings = settings.auth.apikey
-        apikey_get = request.args.get('apikey')
-        apikey_post = request.form.get('apikey')
         apikey_header = None
         if 'X-API-KEY' in request.headers:
             apikey_header = request.headers['X-API-KEY']
 
-        if apikey_settings in [apikey_get, apikey_post, apikey_header]:
+        if apikey_header == apikey_settings:
+            return actual_method(*args, **kwargs)
+
+        # Legacy: accept API key from query string or form data with deprecation warning
+        apikey_get = request.args.get('apikey')
+        apikey_post = request.form.get('apikey')
+        if apikey_settings in [apikey_get, apikey_post]:
+            logging.warning(
+                'API key passed via query string or form data is deprecated. '
+                'Use the X-API-KEY header instead. '
+                f'Endpoint: {request.method} {request.path}'
+            )
             return actual_method(*args, **kwargs)
 
         return abort(401)
