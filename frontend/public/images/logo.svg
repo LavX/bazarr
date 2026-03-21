@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" xmlns:bx="https://boxy-svg.com">
+  <defs>
+    <linearGradient gradientUnits="userSpaceOnUse" x1="256.806" y1="132.019" x2="256.806" y2="287.514" id="gradient-0" gradientTransform="matrix(0.761309, 0, 0, 1, -0.000074, 0.000167)">
+      <stop offset="0" style="stop-color: rgb(255, 153, 0)"/>
+      <stop offset="1" style="stop-color: rgb(63.987% 31.058% 0%)"/>
+    </linearGradient>
+    <linearGradient gradientUnits="userSpaceOnUse" x1="256" y1="300" x2="256" y2="335" id="gradient-1">
+      <stop offset="0" style="stop-color: rgb(255, 153, 0)"/>
+      <stop offset="1" style="stop-color: rgb(63.987% 31.058% 0%)"/>
+    </linearGradient>
+    <linearGradient gradientUnits="userSpaceOnUse" x1="253.868" y1="333.576" x2="253.868" y2="362.776" id="gradient-2" gradientTransform="matrix(1, 0, 0, 1, 2.1325, 0)">
+      <stop offset="0" style="stop-color: rgb(255, 153, 0)"/>
+      <stop offset="1" style="stop-color: rgb(63.987% 31.058% 0%)"/>
+    </linearGradient>
+    <linearGradient gradientUnits="userSpaceOnUse" x1="256" y1="16" x2="256" y2="496" id="gradient-3">
+      <stop offset="0" style="stop-color: rgb(26, 26, 46)"/>
+      <stop offset="1" style="stop-color: rgb(7.1274% 6.8743% 14.681%)"/>
+    </linearGradient>
+    <linearGradient gradientUnits="userSpaceOnUse" x1="256.806" y1="132.019" x2="256.806" y2="287.514" id="gradient-4" gradientTransform="matrix(0.761309, 0, 0, 1, -0.000074, 0.000167)">
+      <stop offset="0" style="stop-color: rgb(255, 153, 0)"/>
+      <stop offset="1" style="stop-color: rgb(63.987% 31.058% 0%)"/>
+    </linearGradient>
+    <bx:export>
+      <bx:file format="png"/>
+    </bx:export>
+  </defs>
+  <circle cx="256" cy="256" r="240" style="fill: url(&quot;#gradient-3&quot;);"/>
+  <path d="M 100,300 Q 256,370 412,300" stroke-width="16" stroke-linecap="round" fill="none" style="stroke: url(&quot;#gradient-1&quot;);"/>
+  <path d="M 115.95 333.576 C 209.316 372.51 302.683 372.51 396.049 333.576" fill="none" stroke-width="16" stroke-linecap="round" style="stroke: url(&quot;#gradient-2&quot;);"/>
+  <path d="M 195.509 132.019 L 254.699 287.514 L 136.319 287.514 L 195.509 132.019 Z" bx:shape="triangle 136.319 132.019 118.38 155.495 0.5 0 1@f97fb752" style="fill: url(&quot;#gradient-0&quot;); stroke: url(&quot;#gradient-4&quot;); transform-box: fill-box; transform-origin: 50% 50%;" transform="matrix(0, 1, -1, 0, 68.491165, -4.562052)"/>
+</svg>
