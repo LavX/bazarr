@@ -4,6 +4,7 @@ import gc
 import time
 import logging
 import threading
+from collections import OrderedDict
 
 from flask import session, request
 from flask_restx import Resource, Namespace, reqparse
@@ -14,16 +15,17 @@ from utilities.helper import check_credentials
 api_ns_system_account = Namespace('System Account', description='Login or logout from Bazarr UI')
 
 # In-memory login rate limiter: {ip: (fail_count, last_fail_time)}
-_login_attempts = {}
+_login_attempts = OrderedDict()
 _login_lock = threading.Lock()
 _MAX_ATTEMPTS = 5
 _LOCKOUT_SECONDS = 300  # 5 minutes
+_MAX_TRACKED_IPS = 10000
 
 
 def _get_client_ip():
-    return (request.environ.get('HTTP_X_FORWARDED_FOR') or
-            request.environ.get('HTTP_X_REAL_IP') or
-            request.remote_addr)
+    # Only use remote_addr by default to prevent IP spoofing via headers.
+    # Reverse proxies should be configured to set X-Real-IP reliably.
+    return request.remote_addr
 
 
 def _is_rate_limited(ip):
@@ -39,6 +41,10 @@ def _is_rate_limited(ip):
 
 def _record_failed_attempt(ip):
     with _login_lock:
+        # Evict oldest entries if at capacity
+        while len(_login_attempts) >= _MAX_TRACKED_IPS:
+            _login_attempts.popitem(last=False)
+
         now = time.time()
         if ip in _login_attempts:
             count, last_time = _login_attempts[ip]
