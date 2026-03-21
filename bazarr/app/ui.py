@@ -1,13 +1,15 @@
 # coding=utf-8
 
 import os
+import ipaddress
+import socket
 import requests
 import mimetypes
 
 from flask import (request, abort, render_template, Response, session, send_file, stream_with_context, Blueprint,
                    redirect)
 from functools import wraps
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 from constants import HEADERS
 from literals import FILE_LOG
@@ -175,6 +177,25 @@ def swaggerui_static(filename):
         return send_file(fullpath)
 
 
+def _is_safe_url(url_str):
+    """Block requests to cloud metadata endpoints and link-local addresses."""
+    try:
+        parsed = urlparse(url_str)
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+        addrs = socket.getaddrinfo(hostname, None)
+        for _, _, _, _, sockaddr in addrs:
+            ip = ipaddress.ip_address(sockaddr[0])
+            if ip.is_loopback or ip.is_link_local or ip.is_private:
+                # Allow private IPs (LAN) but block link-local (169.254.x.x / cloud metadata)
+                if ip.is_link_local:
+                    return False
+        return True
+    except (socket.gaierror, ValueError):
+        return True  # Let requests handle DNS failures
+
+
 @check_login
 @ui_bp.route('/test', methods=['GET'])
 @ui_bp.route('/test/<protocol>/<path:url>', methods=['GET'])
@@ -182,6 +203,8 @@ def proxy(protocol, url):
     if protocol.lower() not in ['http', 'https']:
         return dict(status=False, error='Unsupported protocol', code=0)
     url = f'{protocol}://{unquote(url)}'
+    if not _is_safe_url(url):
+        return dict(status=False, error='Request to link-local or metadata addresses is not allowed', code=0)
     params = request.args
     try:
         result = requests.get(url, params, allow_redirects=False, verify=False, timeout=5, headers=HEADERS)
