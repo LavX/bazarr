@@ -318,11 +318,11 @@ class PlexPinCheck(Resource):
             if not cached_pin:
                 raise PlexPinExpiredError("PIN not found or expired")
 
-            if state_param:
-                stored_state = cached_pin.get('state_token')
-                if not stored_state or not get_token_manager().validate_state_token(state_param, stored_state):
+            stored_state = cached_pin.get('state_token')
+            if stored_state:
+                if not state_param or not get_token_manager().validate_state_token(state_param, stored_state):
                     logger.warning(f"CSRF state validation failed for PIN {pin_id}")
-                    return abort(403, "CSRF state validation failed")
+                    abort(403, "Request validation failed")
 
             headers = {
                 'Accept': 'application/json',
