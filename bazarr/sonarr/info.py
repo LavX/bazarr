@@ -9,7 +9,7 @@ from requests.exceptions import JSONDecodeError
 
 from dogpile.cache import make_region
 
-from app.config import settings, empty_values
+from app.config import settings, empty_values, get_ssl_verify
 from constants import HEADERS
 
 region = make_region().configure('dogpile.cache.memory')
@@ -31,7 +31,7 @@ class GetSonarrInfo:
         if settings.general.use_sonarr:
             try:
                 sv = f"{url_sonarr()}/api/system/status?apikey={settings.sonarr.apikey}"
-                sonarr_json = requests.get(sv, timeout=int(settings.sonarr.http_timeout), verify=False,
+                sonarr_json = requests.get(sv, timeout=int(settings.sonarr.http_timeout), verify=get_ssl_verify('sonarr'),
                                            headers=HEADERS).json()
                 if 'version' in sonarr_json:
                     sonarr_version = sonarr_json['version']
@@ -40,7 +40,7 @@ class GetSonarrInfo:
             except JSONDecodeError:
                 try:
                     sv = f"{url_sonarr()}/api/v3/system/status?apikey={settings.sonarr.apikey}"
-                    sonarr_version = requests.get(sv, timeout=int(settings.sonarr.http_timeout), verify=False,
+                    sonarr_version = requests.get(sv, timeout=int(settings.sonarr.http_timeout), verify=get_ssl_verify('sonarr'),
                                                   headers=HEADERS).json()['version']
                 except JSONDecodeError:
                     logging.debug('BAZARR cannot get Sonarr version')

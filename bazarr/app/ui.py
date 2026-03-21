@@ -16,7 +16,7 @@ from radarr.info import url_api_radarr
 from utilities.helper import check_credentials
 from utilities.central import get_log_file_path
 
-from .config import settings, base_url
+from .config import settings, base_url, get_ssl_verify
 from .database import database, System
 from .get_args import args
 
@@ -132,7 +132,7 @@ def series_images(url):
     baseUrl = settings.sonarr.base_url
     url_image = f'{url_api_sonarr()}{url.lstrip(baseUrl)}?apikey={apikey}'.replace('poster-250', 'poster-500')
     try:
-        req = requests.get(url_image, stream=True, timeout=15, verify=False, headers=HEADERS)
+        req = requests.get(url_image, stream=True, timeout=15, verify=get_ssl_verify('sonarr'), headers=HEADERS)
     except Exception:
         return '', 404
     else:
@@ -146,7 +146,7 @@ def movies_images(url):
     baseUrl = settings.radarr.base_url
     url_image = f'{url_api_radarr()}{url.lstrip(baseUrl)}?apikey={apikey}'
     try:
-        req = requests.get(url_image, stream=True, timeout=15, verify=False, headers=HEADERS)
+        req = requests.get(url_image, stream=True, timeout=15, verify=get_ssl_verify('radarr'), headers=HEADERS)
     except Exception:
         return '', 404
     else:

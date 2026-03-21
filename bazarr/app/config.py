@@ -235,6 +235,7 @@ validators = [
     Validator('sonarr.defer_search_signalr', must_exist=True, default=False, is_type_of=bool),
     Validator('sonarr.sync_only_monitored_series', must_exist=True, default=False, is_type_of=bool),
     Validator('sonarr.sync_only_monitored_episodes', must_exist=True, default=False, is_type_of=bool),
+    Validator('sonarr.verify_ssl', must_exist=True, default=False, is_type_of=bool),
 
     # radarr section
     Validator('radarr.ip', must_exist=True, default='127.0.0.1', is_type_of=str),
@@ -256,6 +257,7 @@ validators = [
     Validator('radarr.use_ffprobe_cache', must_exist=True, default=True, is_type_of=bool),
     Validator('radarr.defer_search_signalr', must_exist=True, default=False, is_type_of=bool),
     Validator('radarr.sync_only_monitored_movies', must_exist=True, default=False, is_type_of=bool),
+    Validator('radarr.verify_ssl', must_exist=True, default=False, is_type_of=bool),
 
     # plex section
     Validator('plex.ip', must_exist=True, default='127.0.0.1', is_type_of=str),
@@ -277,6 +279,7 @@ validators = [
     Validator('plex.user_id', must_exist=True, default='', is_type_of=(int, str)),
     Validator('plex.auth_method', must_exist=True, default='apikey', is_type_of=str, is_in=['apikey', 'oauth']),
     Validator('plex.encryption_key', must_exist=True, default='', is_type_of=str),
+    Validator('plex.verify_ssl', must_exist=True, default=False, is_type_of=bool),
     Validator('plex.server_machine_id', must_exist=True, default='', is_type_of=str),
     Validator('plex.server_name', must_exist=True, default='', is_type_of=str),
     Validator('plex.server_url', must_exist=True, default='', is_type_of=str),
@@ -1015,6 +1018,12 @@ def configure_proxy_func():
         os.environ['HTTPS_PROXY'] = str(proxy)
         exclude = ','.join(settings.proxy.exclude)
         os.environ['NO_PROXY'] = exclude
+
+
+def get_ssl_verify(service):
+    """Return the verify parameter for requests calls to a service.
+    service should be 'sonarr', 'radarr', or 'plex'."""
+    return settings.get(service, {}).get('verify_ssl', False)
 
 
 def get_scores():
