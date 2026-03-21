@@ -177,23 +177,23 @@ def swaggerui_static(filename):
         return send_file(fullpath)
 
 
-def _is_safe_url(url_str):
-    """Block requests to cloud metadata endpoints and link-local addresses."""
-    try:
-        parsed = urlparse(url_str)
-        hostname = parsed.hostname
-        if not hostname:
-            return False
-        addrs = socket.getaddrinfo(hostname, None)
-        for _, _, _, _, sockaddr in addrs:
-            ip = ipaddress.ip_address(sockaddr[0])
-            if ip.is_loopback or ip.is_link_local or ip.is_private:
-                # Allow private IPs (LAN) but block link-local (169.254.x.x / cloud metadata)
-                if ip.is_link_local:
-                    return False
-        return True
-    except (socket.gaierror, ValueError):
-        return True  # Let requests handle DNS failures
+def _resolve_and_validate(url_str):
+    """Resolve DNS once and validate all resolved IPs are safe.
+    Returns (resolved_ip, hostname, parsed) or raises ValueError."""
+    parsed = urlparse(url_str)
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("No hostname in URL")
+    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    addrs = socket.getaddrinfo(hostname, port)
+    if not addrs:
+        raise ValueError("DNS resolution returned no results")
+    for _, _, _, _, sockaddr in addrs:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if ip.is_link_local or ip.is_loopback:
+            raise ValueError(f"Blocked address: {ip}")
+    # Return first resolved IP for pinning
+    return addrs[0][4][0], hostname, parsed
 
 
 @check_login
@@ -203,11 +203,19 @@ def proxy(protocol, url):
     if protocol.lower() not in ['http', 'https']:
         return dict(status=False, error='Unsupported protocol', code=0)
     url = f'{protocol}://{unquote(url)}'
-    if not _is_safe_url(url):
-        return dict(status=False, error='Request to link-local or metadata addresses is not allowed', code=0)
+    try:
+        resolved_ip, hostname, parsed = _resolve_and_validate(url)
+    except (ValueError, socket.gaierror) as e:
+        return dict(status=False, error=f'Request blocked: {e}', code=0)
+    # Pin request to resolved IP to prevent DNS rebinding
+    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    pinned_netloc = f'{resolved_ip}:{port}'
+    pinned_url = parsed._replace(netloc=pinned_netloc).geturl()
+    pinned_headers = dict(HEADERS)
+    pinned_headers['Host'] = hostname
     params = request.args
     try:
-        result = requests.get(url, params, allow_redirects=False, verify=False, timeout=5, headers=HEADERS)
+        result = requests.get(pinned_url, params, allow_redirects=False, verify=False, timeout=5, headers=pinned_headers)
     except Exception as e:
         return dict(status=False, error=repr(e))
     else:
