@@ -6,7 +6,7 @@ from flask import session, request
 from flask_restx import Resource, Namespace, reqparse
 
 from app.config import settings
-from utilities.helper import check_credentials
+from utilities.helper import check_credentials, needs_password_upgrade, upgrade_password_hash
 
 api_ns_system_account = Namespace('System Account', description='Login or logout from Bazarr UI')
 
@@ -15,7 +15,8 @@ api_ns_system_account = Namespace('System Account', description='Login or logout
 @api_ns_system_account.route('system/account')
 class SystemAccount(Resource):
     post_request_parser = reqparse.RequestParser()
-    post_request_parser.add_argument('action', type=str, required=True, help='Action from ["login", "logout"]')
+    post_request_parser.add_argument('action', type=str, required=True,
+                                     help='Action from ["login", "logout", "upgrade_hash"]')
     post_request_parser.add_argument('username', type=str, required=False, help='Bazarr username')
     post_request_parser.add_argument('password', type=str, required=False, help='Bazarr password')
 
@@ -37,6 +38,8 @@ class SystemAccount(Resource):
             password = args.get('password')
             if check_credentials(username, password, request):
                 session['logged_in'] = True
+                if needs_password_upgrade():
+                    return {'upgrade_hash': True}, 200
                 return '', 204
             else:
                 session['logged_in'] = False
@@ -48,5 +51,13 @@ class SystemAccount(Resource):
                 session.clear()
                 gc.collect()
                 return '', 204
+        elif action == 'upgrade_hash':
+            username = args.get('username')
+            password = args.get('password')
+            if check_credentials(username, password, request, log_success=False):
+                upgrade_password_hash(password)
+                return '', 204
+            else:
+                return 'Authentication failed', 403
 
         return 'Unknown action', 400
