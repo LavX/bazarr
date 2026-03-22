@@ -1,5 +1,5 @@
 import { Text } from "@mantine/core";
-import { describe, it } from "vitest";
+import { describe, it, expect } from "vitest";
 import { customRender, screen } from "@/tests";
 import Layout from "./Layout";
 
@@ -12,13 +12,29 @@ describe("Settings layout", () => {
     );
   });
 
-  it.concurrent("save button should be disabled by default", () => {
+  it.concurrent(
+    "save button should not be visible when no changes are staged",
+    () => {
+      customRender(
+        <Layout name="Test Settings">
+          <Text>Value</Text>
+        </Layout>,
+      );
+
+      // The floating save button is hidden when totalStagedCount === 0
+      expect(
+        screen.queryByRole("button", { name: /save/i }),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it.concurrent("renders children content", () => {
     customRender(
       <Layout name="Test Settings">
-        <Text>Value</Text>
+        <Text>Test Content</Text>
       </Layout>,
     );
 
-    expect(screen.getAllByRole("button", { name: "Save" })[0]).toBeDisabled();
+    expect(screen.getByText("Test Content")).toBeInTheDocument();
   });
 });
