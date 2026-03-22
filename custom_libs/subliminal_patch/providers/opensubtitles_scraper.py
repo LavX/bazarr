@@ -207,11 +207,9 @@ class OpenSubtitlesScraperMixin:
                         if series_match:
                             subtitle.movie_name = series_match.group(1)
                         else:
-                            # Fallback: keep quoted format for series_name property compatibility
-                            # series_name expects '"SeriesName" EpisodeTitle' format
-                            parts = movie_release_name.split()
-                            name = parts[0] if parts else 'Unknown'
-                            subtitle.movie_name = f'"{name}" {" ".join(parts[1:])}'.strip()
+                            # Use release name as-is; series_name property returns
+                            # movie_name directly when quoted format doesn't match
+                            subtitle.movie_name = movie_release_name
                 
                 logger.debug('Found subtitle %r by %s via scraper', subtitle, matched_by)
                 subtitles.append(subtitle)

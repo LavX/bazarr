@@ -398,7 +398,7 @@ def _handle_mgb(name, exception, ids, language):
 
     if ids:
         if exception.media_type == "series":
-            if 'sonarrSeriesId' in ids and 'sonarrEpsiodeId' in ids:
+            if 'sonarrSeriesId' in ids and 'sonarrEpisodeId' in ids:
                 blacklist_log(ids['sonarrSeriesId'], ids['sonarrEpisodeId'], name, exception.id, language_str)
         else:
             blacklist_log_movie(ids['radarrId'], name, exception.id, language_str)
@@ -412,7 +412,7 @@ def provider_throttle(name, exception, ids=None, language=None):
     cls_name = getattr(cls, "__name__")
     if cls not in VALID_THROTTLE_EXCEPTIONS:
         for valid_cls in VALID_THROTTLE_EXCEPTIONS:
-            if isinstance(cls, valid_cls):
+            if issubclass(cls, valid_cls):
                 cls = valid_cls
 
     throttle_data = provider_throttle_map().get(name, provider_throttle_map()["default"]).get(cls, None) or \
