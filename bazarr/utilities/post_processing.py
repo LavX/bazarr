@@ -18,31 +18,36 @@ def _escape(in_str):
     return shlex.quote(s)
 
 
+def _pp_sub(pattern, value, command):
+    """Substitute a placeholder, escaping backslashes for re.sub replacement."""
+    escaped = _escape(value)
+    return re.sub(pattern, lambda _: escaped, command)
+
+
 def pp_replace(pp_command, episode, subtitles, language, language_code2, language_code3, episode_language,
                episode_language_code2, episode_language_code3, score, subtitle_id, provider, uploader,
                release_info, series_id, episode_id):
-    pp_command = re.sub(r'[\'"]?{{directory}}[\'"]?', _escape(os.path.dirname(episode)), pp_command)
-    pp_command = re.sub(r'[\'"]?{{episode}}[\'"]?', _escape(episode), pp_command)
-    pp_command = re.sub(r'[\'"]?{{episode_name}}[\'"]?', _escape(os.path.splitext(os.path.basename(episode))[0]),
-                        pp_command)
-    pp_command = re.sub(r'[\'"]?{{subtitles}}[\'"]?', _escape(str(subtitles)), pp_command)
-    pp_command = re.sub(r'[\'"]?{{subtitles_language}}[\'"]?',  _escape(str(language)), pp_command)
-    pp_command = re.sub(r'[\'"]?{{subtitles_language_code2}}[\'"]?', _escape(str(language_code2)), pp_command)
-    pp_command = re.sub(r'[\'"]?{{subtitles_language_code3}}[\'"]?', _escape(str(language_code3)), pp_command)
-    pp_command = re.sub(r'[\'"]?{{subtitles_language_code2_dot}}[\'"]?',
-                        _escape(str(language_code2).replace(':', '.')), pp_command)
-    pp_command = re.sub(r'[\'"]?{{subtitles_language_code3_dot}}[\'"]?',
-                        _escape(str(language_code3).replace(':', '.')), pp_command)
-    pp_command = re.sub(r'[\'"]?{{episode_language}}[\'"]?', _escape(str(episode_language)), pp_command)
-    pp_command = re.sub(r'[\'"]?{{episode_language_code2}}[\'"]?', _escape(str(episode_language_code2)), pp_command)
-    pp_command = re.sub(r'[\'"]?{{episode_language_code3}}[\'"]?', _escape(str(episode_language_code3)), pp_command)
-    pp_command = re.sub(r'[\'"]?{{score}}[\'"]?', _escape(str(score)), pp_command)
-    pp_command = re.sub(r'[\'"]?{{subtitle_id}}[\'"]?', _escape(str(subtitle_id)), pp_command)
-    pp_command = re.sub(r'[\'"]?{{provider}}[\'"]?', _escape(str(provider)), pp_command)
-    pp_command = re.sub(r'[\'"]?{{uploader}}[\'"]?', _escape(str(uploader)), pp_command)
-    pp_command = re.sub(r'[\'"]?{{release_info}}[\'"]?', _escape(str(release_info)), pp_command)
-    pp_command = re.sub(r'[\'"]?{{series_id}}[\'"]?', _escape(str(series_id)), pp_command)
-    pp_command = re.sub(r'[\'"]?{{episode_id}}[\'"]?', _escape(str(episode_id)), pp_command)
+    pp_command = _pp_sub(r'[\'"]?{{directory}}[\'"]?', os.path.dirname(episode), pp_command)
+    pp_command = _pp_sub(r'[\'"]?{{episode}}[\'"]?', episode, pp_command)
+    pp_command = _pp_sub(r'[\'"]?{{episode_name}}[\'"]?', os.path.splitext(os.path.basename(episode))[0], pp_command)
+    pp_command = _pp_sub(r'[\'"]?{{subtitles}}[\'"]?', str(subtitles), pp_command)
+    pp_command = _pp_sub(r'[\'"]?{{subtitles_language}}[\'"]?', str(language), pp_command)
+    pp_command = _pp_sub(r'[\'"]?{{subtitles_language_code2}}[\'"]?', str(language_code2), pp_command)
+    pp_command = _pp_sub(r'[\'"]?{{subtitles_language_code3}}[\'"]?', str(language_code3), pp_command)
+    pp_command = _pp_sub(r'[\'"]?{{subtitles_language_code2_dot}}[\'"]?',
+                         str(language_code2).replace(':', '.'), pp_command)
+    pp_command = _pp_sub(r'[\'"]?{{subtitles_language_code3_dot}}[\'"]?',
+                         str(language_code3).replace(':', '.'), pp_command)
+    pp_command = _pp_sub(r'[\'"]?{{episode_language}}[\'"]?', str(episode_language), pp_command)
+    pp_command = _pp_sub(r'[\'"]?{{episode_language_code2}}[\'"]?', str(episode_language_code2), pp_command)
+    pp_command = _pp_sub(r'[\'"]?{{episode_language_code3}}[\'"]?', str(episode_language_code3), pp_command)
+    pp_command = _pp_sub(r'[\'"]?{{score}}[\'"]?', str(score), pp_command)
+    pp_command = _pp_sub(r'[\'"]?{{subtitle_id}}[\'"]?', str(subtitle_id), pp_command)
+    pp_command = _pp_sub(r'[\'"]?{{provider}}[\'"]?', str(provider), pp_command)
+    pp_command = _pp_sub(r'[\'"]?{{uploader}}[\'"]?', str(uploader), pp_command)
+    pp_command = _pp_sub(r'[\'"]?{{release_info}}[\'"]?', str(release_info), pp_command)
+    pp_command = _pp_sub(r'[\'"]?{{series_id}}[\'"]?', str(series_id), pp_command)
+    pp_command = _pp_sub(r'[\'"]?{{episode_id}}[\'"]?', str(episode_id), pp_command)
     return pp_command
 
 
