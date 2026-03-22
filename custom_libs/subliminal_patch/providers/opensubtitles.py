@@ -138,7 +138,7 @@ class _OpenSubtitlesSubtitle(Subtitle):
             if video.series and sanitize(self.series_name) == sanitize(video.series):
                 matches.add('series')
             # year
-            if video.original_series and self.movie_year is None or video.year and video.year == self.movie_year:
+            if (video.original_series and self.movie_year is None) or (video.year and video.year == self.movie_year):
                 matches.add('year')
             # season
             if video.season and self.series_season == video.season:
@@ -230,7 +230,7 @@ class OpenSubtitlesSubtitle(_OpenSubtitlesSubtitle):
     def get_fps(self):
         try:
             return float(self.fps)
-        except:
+        except (ValueError, TypeError):
             return None
 
     def get_matches(self, video, hearing_impaired=False):
@@ -616,7 +616,7 @@ def checked(fn, raise_api_limit=False):
                 status_code = 506
         else:
             status_code = int(response['status'][:3])
-    except:
+    except Exception:
         status_code = None
 
     if status_code == 401:
