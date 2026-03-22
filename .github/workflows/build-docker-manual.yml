@@ -173,7 +173,7 @@ jobs:
   # Build and Push Bazarr Image
   # ==========================================================================
   build-and-push:
-    needs: [build-frontend]
+    needs: [build-frontend, build-scraper]
     runs-on: ubuntu-latest
     permissions:
       contents: read
