@@ -172,65 +172,15 @@ jobs:
           echo "${TAGS}" | tr ',' '\n' >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
-      - name: Generate Dockerfile with Python version
-        run: |
-          cd opensubtitles-scraper
-          
-          # Create a modified Dockerfile with the selected Python version
-          cat > Dockerfile.build << EOF
-          # Generated Dockerfile with Python ${{ steps.version.outputs.python_version }}
-          FROM python:${{ steps.version.outputs.python_version }}-slim
-          
-          # Set working directory
-          WORKDIR /app
-          
-          # Install system dependencies
-          RUN apt-get update && apt-get install -y \\
-              gcc \\
-              && rm -rf /var/lib/apt/lists/*
-          
-          # Set environment variables
-          ENV PYTHONDONTWRITEBYTECODE=1 \\
-              PYTHONUNBUFFERED=1
-          EOF
-          
-          # Add JIT env var if enabled
-          if [ "${{ inputs.enable_jit }}" == "true" ]; then
-            echo 'ENV PYTHON_JIT=1' >> Dockerfile.build
-          fi
-          
-          cat >> Dockerfile.build << 'EOF'
-          
-          # Copy requirements file
-          COPY requirements.txt .
-          
-          # Install Python dependencies
-          RUN pip install --no-cache-dir --upgrade pip && \
-              pip install --no-cache-dir -r requirements.txt
-          
-          # Copy application code
-          COPY . .
-          
-          # Expose port 8000
-          EXPOSE 8000
-          
-          # Health check
-          HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-              CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
-          
-          # Run the application
-          CMD ["python", "main.py"]
-          EOF
-          
-          cat Dockerfile.build
-
       - name: Build and Push Scraper Image
         id: push
         uses: docker/build-push-action@v6
         with:
           context: ./opensubtitles-scraper
-          file: ./opensubtitles-scraper/Dockerfile.build
+          file: ./opensubtitles-scraper/Dockerfile
           platforms: ${{ inputs.platforms }}
+          build-args: |
+            PYTHON_JIT=${{ inputs.enable_jit == true && '1' || '0' }}
           push: true
           tags: ${{ steps.version.outputs.tags }}
           labels: |
