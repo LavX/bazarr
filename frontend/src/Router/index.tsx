@@ -40,6 +40,7 @@ import SettingsRadarrView from "@/pages/Settings/Radarr";
 import SettingsSchedulerView from "@/pages/Settings/Scheduler";
 import SettingsSonarrView from "@/pages/Settings/Sonarr";
 import SettingsSubtitlesView from "@/pages/Settings/Subtitles";
+import SettingsTranslatorView from "@/pages/Settings/Translator";
 import SettingsUIView from "@/pages/Settings/UI";
 import SystemAnnouncementsView from "@/pages/System/Announcements";
 import SystemBackupsView from "@/pages/System/Backups";
@@ -227,6 +228,11 @@ function useRoutes(): CustomRouteObject[] {
                 path: "plex",
                 name: "Plex",
                 element: <SettingsPlexView></SettingsPlexView>,
+              },
+              {
+                path: "translator",
+                name: "AI Translator",
+                element: <SettingsTranslatorView></SettingsTranslatorView>,
               },
               {
                 path: "notifications",
