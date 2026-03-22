@@ -752,7 +752,8 @@ def save_settings(settings_items):
 
         if key == 'settings-auth-password':
             if value != settings.auth.password and value is not None:
-                value = hashlib.md5(f"{value}".encode('utf-8')).hexdigest()
+                from utilities.helper import hash_password
+                value = hash_password(value)
 
         if key == 'settings-general-debug':
             configure_debug = True

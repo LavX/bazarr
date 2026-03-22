@@ -1,8 +1,9 @@
-import { FunctionComponent, useEffect, useState } from "react";
+import { FunctionComponent, useCallback, useEffect, useState } from "react";
 import { Outlet, useNavigate } from "react-router";
-import { AppShell } from "@mantine/core";
+import { AppShell, Button, Group, Modal, Stack, Text } from "@mantine/core";
 import { useWindowEvent } from "@mantine/hooks";
 import { showNotification } from "@mantine/notifications";
+import api from "@/apis/raw";
 import AppNavbar from "@/App/Navbar";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import NavbarProvider from "@/contexts/Navbar";
@@ -35,6 +36,9 @@ const App: FunctionComponent = () => {
     setOnline(detail.online);
   });
 
+  const [upgradeModalOpen, setUpgradeModalOpen] = useState(false);
+  const [upgrading, setUpgrading] = useState(false);
+
   useEffect(() => {
     if (Environment.hasUpdate) {
       showNotification(
@@ -44,6 +48,41 @@ const App: FunctionComponent = () => {
         ),
       );
     }
+  }, []);
+
+  useEffect(() => {
+    const token = sessionStorage.getItem("password_upgrade_token");
+    if (token) {
+      setUpgradeModalOpen(true);
+    }
+  }, []);
+
+  const handleUpgradeAccept = useCallback(async () => {
+    const token = sessionStorage.getItem("password_upgrade_token");
+    if (!token) return;
+    setUpgrading(true);
+    try {
+      await api.system.upgradePasswordHash(token);
+      showNotification(
+        notification.info(
+          "Password upgraded",
+          "Your password hash has been upgraded to PBKDF2-SHA256",
+        ),
+      );
+    } catch {
+      showNotification(
+        notification.warn("Upgrade failed", "Could not upgrade password hash"),
+      );
+    } finally {
+      sessionStorage.removeItem("password_upgrade_token");
+      setUpgradeModalOpen(false);
+      setUpgrading(false);
+    }
+  }, []);
+
+  const handleUpgradeDecline = useCallback(() => {
+    sessionStorage.removeItem("password_upgrade_token");
+    setUpgradeModalOpen(false);
   }, []);
 
   if (criticalError !== null) {
@@ -69,6 +108,31 @@ const App: FunctionComponent = () => {
               <Outlet></Outlet>
             </AppShell.Main>
           </AppShell>
+          <Modal
+            opened={upgradeModalOpen}
+            onClose={handleUpgradeDecline}
+            title="Upgrade Password Security"
+            centered
+          >
+            <Stack>
+              <Text size="sm">
+                Your password is currently stored using a weak MD5 hash.
+                Would you like to upgrade to PBKDF2-SHA256 for better security?
+              </Text>
+              <Text size="xs" c="dimmed">
+                Note: After upgrading, reverting to upstream Bazarr will require
+                resetting your password via the config file.
+              </Text>
+              <Group justify="flex-end">
+                <Button variant="default" onClick={handleUpgradeDecline}>
+                  Not now
+                </Button>
+                <Button onClick={handleUpgradeAccept} loading={upgrading}>
+                  Upgrade
+                </Button>
+              </Group>
+            </Stack>
+          </Modal>
         </OnlineProvider>
       </NavbarProvider>
     </ErrorBoundary>
