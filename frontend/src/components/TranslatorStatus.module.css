@@ -1,0 +1,39 @@
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.statusDotConnected {
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.statCard {
+  transition: var(--bz-transition-lift);
+  cursor: default;
+  border-left-width: 3px;
+  border-left-style: solid;
+}
+
+.statCard:hover {
+  transform: translateY(-2px);
+  background-color: var(--bz-surface-card-hover);
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .statusDotConnected,
+  .spin {
+    animation: none;
+  }
+  .statCard:hover {
+    transform: none;
+  }
+}

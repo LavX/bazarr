@@ -17,7 +17,6 @@ import {
 } from "@mantine/core";
 import {
   faCheck,
-  faCircle,
   faClock,
   faExclamationTriangle,
   faRefresh,
@@ -26,6 +25,7 @@ import {
   faTrash,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import classes from "./TranslatorStatus.module.css";
 import {
   TranslatorJob,
   useTranslatorJobs,
@@ -55,6 +55,7 @@ const StatusBadge: FunctionComponent<StatusBadgeProps> = ({ status }) => {
           icon={config.icon}
           spin={status === "processing"}
           size="xs"
+          aria-hidden="true"
         />
       }
     >
@@ -110,8 +111,9 @@ const JobRow: FunctionComponent<JobRowProps> = ({
             variant="subtle"
             onClick={() => onCancel(job.jobId)}
             loading={isDeleting}
+            aria-label={`Cancel job ${job.jobId}`}
           >
-            <FontAwesomeIcon icon={faTrash} />
+            <FontAwesomeIcon icon={faTrash} aria-hidden="true" />
           </ActionIcon>
         )}
       </Table.Td>
@@ -130,12 +132,17 @@ const StatCard: FunctionComponent<StatCardProps> = ({
   value,
   color,
 }) => (
-  <Card withBorder p="sm">
-    <Text size="xs" c="dimmed">
-      {label}
-    </Text>
-    <Text size="xl" fw={700} c={color}>
+  <Card
+    withBorder
+    p="sm"
+    className={classes.statCard}
+    style={{ borderLeftColor: `var(--bz-stat-${color})` }}
+  >
+    <Text size="2rem" fw={700} c="gray.1" lh={1}>
       {value}
+    </Text>
+    <Text size="xs" c="dimmed" tt="uppercase" style={{ letterSpacing: 0.5 }} fw={600}>
+      {label}
     </Text>
   </Card>
 );
@@ -177,7 +184,7 @@ export const TranslatorStatusPanel: FunctionComponent<
     return (
       <Card withBorder mt="md" p="md">
         <Group justify="center" py="md">
-          <FontAwesomeIcon icon={faSpinner} spin />
+          <FontAwesomeIcon icon={faSpinner} spin aria-hidden="true" />
           <Text c="dimmed">Connecting to AI Subtitle Translator...</Text>
         </Group>
       </Card>
@@ -195,7 +202,7 @@ export const TranslatorStatusPanel: FunctionComponent<
         color="yellow"
         title="AI Subtitle Translator Unavailable"
         mt="md"
-        icon={<FontAwesomeIcon icon={faExclamationTriangle} />}
+        icon={<FontAwesomeIcon icon={faExclamationTriangle} aria-hidden="true" />}
       >
         <Text size="sm" mb="sm">
           {errorMessage}
@@ -203,7 +210,7 @@ export const TranslatorStatusPanel: FunctionComponent<
         <Button
           size="xs"
           variant="light"
-          leftSection={<FontAwesomeIcon icon={faRefresh} />}
+          leftSection={<FontAwesomeIcon icon={faRefresh} aria-hidden="true" />}
           onClick={handleRetry}
         >
           Retry Connection
@@ -222,16 +229,32 @@ export const TranslatorStatusPanel: FunctionComponent<
       <Card withBorder>
         <Group justify="space-between" mb="md">
           <Title order={5}>AI Subtitle Translator Service</Title>
-          {status?.healthy ? (
+          <div
+            role="status"
+            aria-live="assertive"
+          >
             <Badge
-              color="green"
-              leftSection={<FontAwesomeIcon icon={faCircle} size="xs" />}
+              color={status?.healthy ? "green" : "red"}
+              variant="light"
+              size="lg"
+              leftSection={
+                <Box
+                  w={8}
+                  h={8}
+                  aria-hidden="true"
+                  style={{
+                    borderRadius: "50%",
+                    backgroundColor: status?.healthy
+                      ? "var(--bz-stat-completed)"
+                      : "var(--bz-stat-failed)",
+                  }}
+                  className={status?.healthy ? classes.statusDotConnected : undefined}
+                />
+              }
             >
-              Connected
+              {status?.healthy ? "Connected" : "Disconnected"}
             </Badge>
-          ) : (
-            <Badge color="red">Disconnected</Badge>
-          )}
+          </div>
         </Group>
 
         {/* Bazarr Configuration (Saved Settings) */}
@@ -295,30 +318,30 @@ export const TranslatorStatusPanel: FunctionComponent<
 
       {/* Queue Stats */}
       {status && (
-        <SimpleGrid cols={4}>
+        <SimpleGrid cols={{ base: 2, sm: 4 }}>
           <StatCard
             label="Processing"
             value={status.queue.processing}
-            color="blue"
+            color="processing"
           />
-          <StatCard label="Queued" value={status.queue.queued} color="gray" />
+          <StatCard label="Queued" value={status.queue.queued} color="queued" />
           <StatCard
             label="Completed"
             value={status.queue.completed}
-            color="green"
+            color="completed"
           />
-          <StatCard label="Failed" value={status.queue.failed} color="red" />
+          <StatCard label="Failed" value={status.queue.failed} color="failed" />
         </SimpleGrid>
       )}
 
       {/* Jobs Table */}
       <Card withBorder>
-        <Title order={5} mb="md">
+        <Title order={5} mb="md" id="translation-jobs-heading">
           Translation Jobs
         </Title>
         {jobsData && jobsData.jobs.length > 0 ? (
           <Table.ScrollContainer minWidth={600}>
-            <Table striped highlightOnHover>
+            <Table striped highlightOnHover aria-labelledby="translation-jobs-heading">
               <Table.Thead>
                 <Table.Tr>
                   <Table.Th>Job ID</Table.Th>
