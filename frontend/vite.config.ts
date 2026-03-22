@@ -50,7 +50,7 @@ export default defineConfig(({ mode, command }) => {
           short_name: "Bazarr",
           description:
             "Bazarr is a companion application to Sonarr and Radarr. It manages and downloads subtitles based on your requirements.",
-          theme_color: "#be4bdb",
+          theme_color: "#b36b00",
           icons: [
             {
               src: `${imagesFolder}/pwa-64x64.png`,
