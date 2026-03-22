@@ -114,11 +114,17 @@ class _OpenSubtitlesSubtitle(Subtitle):
 
     @property
     def series_name(self):
-        return self.series_re.match(self.movie_name).group('series_name')
+        match = self.series_re.match(self.movie_name)
+        if match:
+            return match.group('series_name')
+        return self.movie_name
 
     @property
     def series_title(self):
-        return self.series_re.match(self.movie_name).group('series_title')
+        match = self.series_re.match(self.movie_name)
+        if match:
+            return match.group('series_title')
+        return self.movie_name
 
     def get_matches(self, video):
         matches = set()

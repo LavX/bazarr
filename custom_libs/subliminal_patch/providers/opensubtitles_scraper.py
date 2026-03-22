@@ -6,12 +6,12 @@ This module provides HTTP-based communication with OpenSubtitles scraper service
 bypassing the need for traditional API authentication.
 """
 
+import re
 import base64
 import logging
 import requests
-import json
 from subzero.language import Language
-from subliminal.exceptions import ServiceUnavailable, ConfigurationError
+from subliminal.exceptions import ServiceUnavailable
 from subliminal_patch.exceptions import APIThrottled
 
 logger = logging.getLogger(__name__)
@@ -116,7 +116,9 @@ class OpenSubtitlesScraperMixin:
             raise APIThrottled(message)
 
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        response.close()
+        return result
 
     def _parse_scraper_response(self, data, languages, only_foreign, also_foreign, video):
         """
@@ -201,14 +203,15 @@ class OpenSubtitlesScraperMixin:
                     if not movie_name and movie_release_name:
                         # Extract series name from release name if movie_name is empty
                         # e.g., "The Exchange" Bank of Tomorrow -> "The Exchange"
-                        import re
                         series_match = re.match(r'^"([^"]+)"', movie_release_name)
                         if series_match:
                             subtitle.movie_name = series_match.group(1)
                         else:
-                            # Fallback: use first part of release name
-                            subtitle.movie_name = movie_release_name.split()[0] if movie_release_name else 'Unknown'
-                    # movie_name is already set correctly from the API response
+                            # Fallback: keep quoted format for series_name property compatibility
+                            # series_name expects '"SeriesName" EpisodeTitle' format
+                            parts = movie_release_name.split()
+                            name = parts[0] if parts else 'Unknown'
+                            subtitle.movie_name = f'"{name}" {" ".join(parts[1:])}'.strip()
                 
                 logger.debug('Found subtitle %r by %s via scraper', subtitle, matched_by)
                 subtitles.append(subtitle)
