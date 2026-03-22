@@ -34,14 +34,16 @@ def authenticate(actual_method):
             return actual_method(*args, **kwargs)
 
         # Legacy: accept API key from query string or form data with deprecation warning
+        # Suppress warning for webhook endpoints (Plex webhooks use ?apikey= in callback URLs)
         apikey_get = request.args.get('apikey')
         apikey_post = request.form.get('apikey')
         if _safe_apikey_compare(apikey_get, apikey_settings) or _safe_apikey_compare(apikey_post, apikey_settings):
-            logging.warning(
-                'API key passed via query string or form data is deprecated. '
-                'Use the X-API-KEY header instead. '
-                'Endpoint: %s %s', request.method, request.path
-            )
+            if '/webhooks/' not in request.path:
+                logging.warning(
+                    'API key passed via query string or form data is deprecated. '
+                    'Use the X-API-KEY header instead. '
+                    'Endpoint: %s %s', request.method, request.path
+                )
             return actual_method(*args, **kwargs)
 
         return abort(401)
