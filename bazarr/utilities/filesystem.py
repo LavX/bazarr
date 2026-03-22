@@ -5,8 +5,10 @@ import logging
 import string
 
 # System directories that should not be browsable (Linux/macOS)
+# Note: /run is NOT blocked because /run/media is used for automounted
+# removable media on many Linux distributions (GNOME, KDE, etc.)
 _BLOCKED_PATHS = {
-    '/proc', '/sys', '/dev', '/run', '/snap',
+    '/proc', '/sys', '/dev', '/snap',
     '/boot', '/lost+found', '/swapfile',
     '/etc', '/root', '/tmp',
 }
