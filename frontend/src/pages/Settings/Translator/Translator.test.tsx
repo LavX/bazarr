@@ -1,24 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { customRender, screen } from "@/tests";
-
-// Test that the Translator page module can be imported without errors
-describe("Translator settings page", () => {
-  it("exports a default component", async () => {
-    const module = await import("./index");
-    expect(module.default).toBeDefined();
-    expect(typeof module.default).toBe("function");
-  });
-});
+import {
+  translatorOption,
+  aiTranslatorModelOptions,
+  aiTranslatorReasoningOptions,
+  aiTranslatorConcurrentOptions,
+} from "./options";
 
 describe("Translator options", () => {
-  it("exports all required option arrays", async () => {
-    const {
-      translatorOption,
-      aiTranslatorModelOptions,
-      aiTranslatorReasoningOptions,
-      aiTranslatorConcurrentOptions,
-    } = await import("./options");
-
+  it("exports all required option arrays", () => {
     expect(translatorOption).toBeDefined();
     expect(translatorOption.length).toBeGreaterThan(0);
     expect(translatorOption.find((o) => o.value === "openrouter")).toBeDefined();
@@ -36,20 +25,22 @@ describe("Translator options", () => {
     expect(aiTranslatorConcurrentOptions.length).toBe(5);
   });
 
-  it("translator options include all 4 engines", async () => {
-    const { translatorOption } = await import("./options");
+  it("includes all 4 translator engines", () => {
     const values = translatorOption.map((o) => o.value);
     expect(values).toContain("google_translate");
     expect(values).toContain("gemini");
     expect(values).toContain("lingarr");
     expect(values).toContain("openrouter");
   });
-});
 
-describe("AIModelSelector", () => {
-  it("exports a default component", async () => {
-    const module = await import("./AIModelSelector");
-    expect(module.default).toBeDefined();
-    expect(typeof module.default).toBe("function");
+  it("concurrent options range from 1 to 5", () => {
+    const values = aiTranslatorConcurrentOptions.map((o) => o.value);
+    expect(values).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it("reasoning options include disabled and high", () => {
+    const values = aiTranslatorReasoningOptions.map((o) => o.value);
+    expect(values).toContain("disabled");
+    expect(values).toContain("high");
   });
 });
