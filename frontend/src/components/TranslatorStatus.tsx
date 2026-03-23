@@ -1,6 +1,5 @@
 import { FunctionComponent, useState, useCallback } from "react";
 import {
-  ActionIcon,
   Alert,
   Badge,
   Box,
@@ -22,7 +21,6 @@ import {
   faRefresh,
   faSpinner,
   faTimes,
-  faTrash,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import classes from "./TranslatorStatus.module.css";
@@ -30,7 +28,6 @@ import {
   TranslatorJob,
   useTranslatorJobs,
   useTranslatorStatus,
-  useCancelTranslatorJob,
 } from "@/apis/hooks/translator";
 import { useSettingValue } from "@/pages/Settings/utilities/hooks";
 
@@ -66,23 +63,58 @@ const StatusBadge: FunctionComponent<StatusBadgeProps> = ({ status }) => {
 
 interface JobRowProps {
   job: TranslatorJob;
-  onCancel: (id: string) => void;
-  isDeleting: boolean;
 }
 
 const JobRow: FunctionComponent<JobRowProps> = ({
   job,
-  onCancel,
-  isDeleting,
 }) => {
-  const canCancel = job.status === "queued";
+
+  const modelUsed = job.result?.model_used || job.model;
+  const tokensUsed = job.result?.tokens_used;
+  // Build media title from job metadata — never use job.message (that's status text)
+  const langPair =
+    job.sourceLanguage && job.targetLanguage
+      ? ` (${job.sourceLanguage.toUpperCase()} → ${job.targetLanguage.toUpperCase()})`
+      : "";
+  const mediaTitle = job.title
+    ? `${job.title}${langPair}`
+    : job.filename
+      ? `${job.filename}${langPair}`
+      : langPair || "-";
+
+  // Calculate duration and TPS
+  let durationStr = "-";
+  let tpsStr = "-";
+  if (job.startedAt && job.completedAt) {
+    const durationMs =
+      new Date(job.completedAt).getTime() - new Date(job.startedAt).getTime();
+    const durationSec = durationMs / 1000;
+    if (durationSec < 60) {
+      durationStr = `${durationSec.toFixed(0)}s`;
+    } else {
+      const min = Math.floor(durationSec / 60);
+      const sec = Math.round(durationSec % 60);
+      durationStr = `${min}m ${sec}s`;
+    }
+    if (tokensUsed && durationSec > 0) {
+      tpsStr = `${(tokensUsed / durationSec).toFixed(0)} t/s`;
+    }
+  } else if (job.status === "processing" && job.startedAt) {
+    const elapsed =
+      (Date.now() - new Date(job.startedAt).getTime()) / 1000;
+    if (elapsed < 60) {
+      durationStr = `${elapsed.toFixed(0)}s...`;
+    } else {
+      durationStr = `${Math.floor(elapsed / 60)}m...`;
+    }
+  }
 
   return (
     <Table.Tr>
       <Table.Td>
         <Tooltip label={job.jobId}>
-          <Text size="sm" truncate style={{ maxWidth: 120 }}>
-            {job.jobId.substring(0, 8)}...
+          <Text size="sm" truncate style={{ maxWidth: 200 }}>
+            {mediaTitle}
           </Text>
         </Tooltip>
       </Table.Td>
@@ -97,25 +129,24 @@ const JobRow: FunctionComponent<JobRowProps> = ({
         )}
       </Table.Td>
       <Table.Td>
-        <Text size="sm" c="dimmed" truncate style={{ maxWidth: 200 }}>
-          {job.message || job.filename || "-"}
+        <Text size="xs" ff="monospace" c="dimmed" truncate style={{ maxWidth: 180 }}>
+          {modelUsed || "-"}
         </Text>
       </Table.Td>
       <Table.Td>
-        <Text size="sm">{new Date(job.createdAt).toLocaleTimeString()}</Text>
+        <Text size="xs" ff="monospace">
+          {tokensUsed ? tokensUsed.toLocaleString() : "-"}
+        </Text>
       </Table.Td>
       <Table.Td>
-        {canCancel && (
-          <ActionIcon
-            color="red"
-            variant="subtle"
-            onClick={() => onCancel(job.jobId)}
-            loading={isDeleting}
-            aria-label={`Cancel job ${job.jobId}`}
-          >
-            <FontAwesomeIcon icon={faTrash} aria-hidden="true" />
-          </ActionIcon>
-        )}
+        <Text size="xs" ff="monospace">
+          {durationStr}
+        </Text>
+      </Table.Td>
+      <Table.Td>
+        <Text size="xs" ff="monospace" c={tpsStr !== "-" ? "green.4" : "dimmed"}>
+          {tpsStr}
+        </Text>
       </Table.Td>
     </Table.Tr>
   );
@@ -171,8 +202,6 @@ export const TranslatorStatusPanel: FunctionComponent<
     isError: jobsError,
     refetch: refetchJobs,
   } = useTranslatorJobs(enabled && !statusError);
-  const cancelJob = useCancelTranslatorJob();
-
   const handleRetry = useCallback(() => {
     setRetryKey((k) => k + 1);
     void refetchStatus();
@@ -218,10 +247,6 @@ export const TranslatorStatusPanel: FunctionComponent<
       </Alert>
     );
   }
-
-  const handleCancel = (jobId: string) => {
-    cancelJob.mutate(jobId);
-  };
 
   return (
     <Stack gap="md" mt="md">
@@ -282,38 +307,6 @@ export const TranslatorStatusPanel: FunctionComponent<
           </Box>
         </Group>
 
-        {/* Service Status (Runtime State) */}
-        {status && (
-          <>
-            <Text size="xs" c="dimmed" mt="md" mb="xs" fw={600}>
-              Service Runtime State
-            </Text>
-            <Group gap="xl">
-              <Box>
-                <Text size="xs" c="dimmed">
-                  Active Model
-                </Text>
-                <Text size="sm">{status.config.model}</Text>
-              </Box>
-              <Box>
-                <Text size="xs" c="dimmed">
-                  API Key Status
-                </Text>
-                <Text size="sm">
-                  {status.config.apiKeyConfigured
-                    ? "✓ Configured"
-                    : "✗ Not Set"}
-                </Text>
-              </Box>
-              <Box>
-                <Text size="xs" c="dimmed">
-                  Max Concurrent
-                </Text>
-                <Text size="sm">{status.queue.maxConcurrent}</Text>
-              </Box>
-            </Group>
-          </>
-        )}
       </Card>
 
       {/* Queue Stats */}
@@ -344,12 +337,13 @@ export const TranslatorStatusPanel: FunctionComponent<
             <Table striped highlightOnHover aria-labelledby="translation-jobs-heading">
               <Table.Thead>
                 <Table.Tr>
-                  <Table.Th>Job ID</Table.Th>
+                  <Table.Th>Media</Table.Th>
                   <Table.Th>Status</Table.Th>
                   <Table.Th>Progress</Table.Th>
-                  <Table.Th>Message</Table.Th>
-                  <Table.Th>Created</Table.Th>
-                  <Table.Th>Actions</Table.Th>
+                  <Table.Th>Model</Table.Th>
+                  <Table.Th>Tokens</Table.Th>
+                  <Table.Th>Duration</Table.Th>
+                  <Table.Th>Speed</Table.Th>
                 </Table.Tr>
               </Table.Thead>
               <Table.Tbody>
@@ -357,8 +351,6 @@ export const TranslatorStatusPanel: FunctionComponent<
                   <JobRow
                     key={job.jobId}
                     job={job}
-                    onCancel={handleCancel}
-                    isDeleting={cancelJob.isPending}
                   />
                 ))}
               </Table.Tbody>
