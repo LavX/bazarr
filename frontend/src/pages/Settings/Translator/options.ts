@@ -1,21 +1,43 @@
 import { SelectorOption } from "@/components";
 
 export const translatorOption: SelectorOption<string>[] = [
+  { label: "AI Subtitle Translator", value: "openrouter" },
   { label: "Google Translate", value: "google_translate" },
   { label: "Gemini", value: "gemini" },
   { label: "Lingarr", value: "lingarr" },
-  { label: "AI Subtitle Translator", value: "openrouter" },
 ];
 
 export const aiTranslatorModelOptions: SelectorOption<string>[] = [
-  { label: "Gemini 2.5 Flash (Recommended)", value: "google/gemini-2.5-flash-preview-05-20" },
-  { label: "Gemini 2.5 Flash Lite (Fast & Cheap)", value: "google/gemini-2.5-flash-lite-preview-06-17" },
-  { label: "GPT-4o Mini", value: "openai/gpt-4o-mini" },
-  { label: "Claude 3 Haiku", value: "anthropic/claude-3-haiku" },
-  { label: "Claude Haiku 4.5 (Extended Thinking)", value: "anthropic/claude-haiku-4.5" },
-  { label: "LLaMA 4 Maverick", value: "meta-llama/llama-4-maverick" },
-  { label: "Grok 4.1 Fast", value: "x-ai/grok-4.1-fast" },
-  { label: "Kimi K2", value: "moonshotai/kimi-k2-0905" },
+  { label: "anthropic/claude-haiku-4.5", value: "anthropic/claude-haiku-4.5" },
+  { label: "anthropic/claude-sonnet-4.6", value: "anthropic/claude-sonnet-4.6" },
+  { label: "bytedance-seed/seed-2.0-mini", value: "bytedance-seed/seed-2.0-mini" },
+  { label: "google/gemini-2.5-flash", value: "google/gemini-2.5-flash" },
+  { label: "google/gemini-2.5-flash-lite-preview-09-2025", value: "google/gemini-2.5-flash-lite-preview-09-2025" },
+  { label: "google/gemini-2.5-pro", value: "google/gemini-2.5-pro" },
+  { label: "google/gemini-3-flash-preview", value: "google/gemini-3-flash-preview" },
+  { label: "google/gemini-3-pro-preview", value: "google/gemini-3-pro-preview" },
+  { label: "google/gemini-3.1-flash-lite-preview", value: "google/gemini-3.1-flash-lite-preview" },
+  { label: "google/gemini-3.1-pro-preview", value: "google/gemini-3.1-pro-preview" },
+  { label: "inception/mercury-2", value: "inception/mercury-2" },
+  { label: "meta-llama/llama-4-maverick", value: "meta-llama/llama-4-maverick" },
+  { label: "meta-llama/llama-4-scout", value: "meta-llama/llama-4-scout" },
+  { label: "minimax/minimax-m2.7", value: "minimax/minimax-m2.7" },
+  { label: "mistralai/mistral-small-2603", value: "mistralai/mistral-small-2603" },
+  { label: "moonshotai/kimi-k2.5", value: "moonshotai/kimi-k2.5" },
+  { label: "openai/gpt-4o-mini", value: "openai/gpt-4o-mini" },
+  { label: "openai/gpt-5", value: "openai/gpt-5" },
+  { label: "openai/gpt-5-mini", value: "openai/gpt-5-mini" },
+  { label: "openai/gpt-5-nano", value: "openai/gpt-5-nano" },
+  { label: "openai/gpt-5.4", value: "openai/gpt-5.4" },
+  { label: "openai/gpt-5.4-mini", value: "openai/gpt-5.4-mini" },
+  { label: "openai/gpt-5.4-nano", value: "openai/gpt-5.4-nano" },
+  { label: "openai/o4-mini", value: "openai/o4-mini" },
+  { label: "openrouter/auto", value: "openrouter/auto" },
+  { label: "openrouter/free", value: "openrouter/free" },
+  { label: "qwen/qwen3.5-plus-02-15", value: "qwen/qwen3.5-plus-02-15" },
+  { label: "x-ai/grok-4-fast", value: "x-ai/grok-4-fast" },
+  { label: "x-ai/grok-4.20-beta", value: "x-ai/grok-4.20-beta" },
+  { label: "z-ai/glm-4.7-flash", value: "z-ai/glm-4.7-flash" },
 ];
 
 export const aiTranslatorReasoningOptions: SelectorOption<string>[] = [
