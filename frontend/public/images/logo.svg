@@ -1,32 +1,36 @@
 <?xml version="1.0" encoding="utf-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" xmlns:bx="https://boxy-svg.com">
   <defs>
-    <linearGradient gradientUnits="userSpaceOnUse" x1="256.806" y1="132.019" x2="256.806" y2="287.514" id="gradient-0" gradientTransform="matrix(0.761309, 0, 0, 1, -0.000074, 0.000167)">
+    <linearGradient gradientUnits="userSpaceOnUse" x1="256.806" y1="132.019" x2="256.806" y2="287.514" id="gradient-0" gradientTransform="matrix(1.679181, 0, 0, 1.588063, 0.001433, 0.000182)">
       <stop offset="0" style="stop-color: rgb(255, 153, 0)"/>
       <stop offset="1" style="stop-color: rgb(63.987% 31.058% 0%)"/>
     </linearGradient>
-    <linearGradient gradientUnits="userSpaceOnUse" x1="256" y1="300" x2="256" y2="335" id="gradient-1">
+    <linearGradient gradientUnits="userSpaceOnUse" x1="256" y1="300" x2="256" y2="335" id="gradient-1" gradientTransform="matrix(1.405489, 0, 0, 1.405489, -103.806038, -109.65921)">
       <stop offset="0" style="stop-color: rgb(255, 153, 0)"/>
       <stop offset="1" style="stop-color: rgb(63.987% 31.058% 0%)"/>
     </linearGradient>
-    <linearGradient gradientUnits="userSpaceOnUse" x1="253.868" y1="333.576" x2="253.868" y2="362.776" id="gradient-2" gradientTransform="matrix(1, 0, 0, 1, 2.1325, 0)">
+    <linearGradient gradientUnits="userSpaceOnUse" x1="253.868" y1="333.576" x2="253.868" y2="362.776" id="gradient-2" gradientTransform="matrix(1.405489, 0, 0, 1.405489, -100.806808, -109.65921)">
       <stop offset="0" style="stop-color: rgb(255, 153, 0)"/>
       <stop offset="1" style="stop-color: rgb(63.987% 31.058% 0%)"/>
     </linearGradient>
-    <linearGradient gradientUnits="userSpaceOnUse" x1="256" y1="16" x2="256" y2="496" id="gradient-3">
-      <stop offset="0" style="stop-color: rgb(26, 26, 46)"/>
-      <stop offset="1" style="stop-color: rgb(7.1274% 6.8743% 14.681%)"/>
-    </linearGradient>
-    <linearGradient gradientUnits="userSpaceOnUse" x1="256.806" y1="132.019" x2="256.806" y2="287.514" id="gradient-4" gradientTransform="matrix(0.761309, 0, 0, 1, -0.000074, 0.000167)">
+    <linearGradient gradientUnits="userSpaceOnUse" x1="256.806" y1="132.019" x2="256.806" y2="287.514" id="gradient-4" gradientTransform="matrix(1.679181, 0, 0, 1.588063, 0.001433, 0.000182)">
       <stop offset="0" style="stop-color: rgb(255, 153, 0)"/>
       <stop offset="1" style="stop-color: rgb(63.987% 31.058% 0%)"/>
     </linearGradient>
     <bx:export>
       <bx:file format="png"/>
     </bx:export>
+    <radialGradient gradientUnits="userSpaceOnUse" cx="256" cy="256" r="254.821" id="gradient-5">
+      <stop offset="0" style="stop-color: rgb(26, 26, 46)"/>
+      <stop offset="1" style="stop-color: rgb(7.1274% 6.8743% 14.681%)"/>
+    </radialGradient>
+    <linearGradient gradientUnits="userSpaceOnUse" x1="256" y1="1.179" x2="256" y2="510.821" id="gradient-3">
+      <stop offset="0" style="stop-color: rgb(224, 131, 36)"/>
+      <stop offset="1" style="stop-color: rgb(57.598% 25.999% 0%)"/>
+    </linearGradient>
   </defs>
-  <circle cx="256" cy="256" r="240" style="fill: url(&quot;#gradient-3&quot;);"/>
-  <path d="M 100,300 Q 256,370 412,300" stroke-width="16" stroke-linecap="round" fill="none" style="stroke: url(&quot;#gradient-1&quot;);"/>
-  <path d="M 115.95 333.576 C 209.316 372.51 302.683 372.51 396.049 333.576" fill="none" stroke-width="16" stroke-linecap="round" style="stroke: url(&quot;#gradient-2&quot;);"/>
-  <path d="M 195.509 132.019 L 254.699 287.514 L 136.319 287.514 L 195.509 132.019 Z" bx:shape="triangle 136.319 132.019 118.38 155.495 0.5 0 1@f97fb752" style="fill: url(&quot;#gradient-0&quot;); stroke: url(&quot;#gradient-4&quot;); transform-box: fill-box; transform-origin: 50% 50%;" transform="matrix(0, 1, -1, 0, 68.491165, -4.562052)"/>
+  <circle cx="256" cy="256" r="254.821" style="fill: url(&quot;#gradient-5&quot;); stroke-width: 4px; stroke: url(&quot;#gradient-3&quot;);" transform="matrix(0.995889, 0, 0, 0.994122, 1.052414, 1.504745)"/>
+  <path d="M 36.743 311.987 C 182.916 377.577 329.084 377.577 475.256 311.987" stroke-width="16" stroke-linecap="round" fill="none" style="stroke: url(&quot;#gradient-1&quot;); stroke-width: 16.988;"/>
+  <path d="M 59.16 359.178 C 190.385 413.899 321.613 413.899 452.838 359.178" fill="none" stroke-width="16" stroke-linecap="round" style="stroke: url(&quot;#gradient-2&quot;); stroke-width: 16.988;"/>
+  <path d="M 405.112 259.041 Q 431.223 209.654 457.333 259.041 L 535.665 407.204 Q 561.775 456.591 509.554 456.591 L 352.891 456.591 Q 300.67 456.591 326.781 407.204 Z" bx:shape="triangle 300.67 209.654 261.105 246.937 0.5 0.2 1@99845abb" style="fill: url(&quot;#gradient-0&quot;); stroke: url(&quot;#gradient-4&quot;); stroke-width: 1.062; transform-box: fill-box; transform-origin: 50% 50%;" transform="matrix(0, 1, -1, 0, -158.222672, -161.80867)"/>
 </svg>
