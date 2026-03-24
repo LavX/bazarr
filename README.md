@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="frontend/public/images/logo128.png" alt="Bazarr+ Logo" width="96">
+</p>
+
 # Bazarr+
 
 <p align="center">
@@ -97,13 +101,17 @@ docker pull ghcr.io/lavx/ai-subtitle-translator:latest
 | Docker images | linuxserver.io / hotio | ghcr.io/lavx (self-built, multi-arch) |
 | Python runtime | 3.8-3.13 | 3.14 |
 
-| Wanted Movies with filters | Series with audio filter |
+| Series overview | Series detail with translate menu |
 |:---:|:---:|
-| ![Wanted Movies Filter](/screenshot/filter-wanted-movies.png?raw=true "Wanted Movies with active filters") | ![Series Filter](/screenshot/filter-series-include.png?raw=true "Series with Include Audio filter") |
+| ![Series Overview](/screenshot/series-overview.png?raw=true "Series overview with audio badges") | ![Translate Menu](/screenshot/series-translate-menu.png?raw=true "Translate from subtitle action menu") |
 
-| Mass Translate with filtered selection |
+| AI Translator settings with live status | Mass Translate dialog |
+|:---:|:---:|
+| ![Translator Settings](/screenshot/translator-settings.png?raw=true "AI Translator settings with job queue") | ![Mass Translate](/screenshot/mass-translate-dialog.png?raw=true "Mass Translate with model and language selection") |
+
+| Wanted page with advanced filters |
 |:---:|
-| ![Mass Translate](/screenshot/filter-mass-translate.png?raw=true "Mass Translate dialog with filtered items") |
+| ![Wanted Filters](/screenshot/wanted-filters.png?raw=true "Wanted page with include/exclude audio and subtitle filters") |
 
 ---
 
