@@ -168,21 +168,31 @@ const TestConnectionButton: FunctionComponent = () => {
           });
           return;
         }
-        const parts: string[] = [];
-        if (data.encryption?.status === "ok") {
-          parts.push("Encryption: OK");
+        if (data.encryption) {
+          const encOk = data.encryption.status === "ok";
+          notifications.show({
+            title: encOk ? "Encryption" : "Encryption Failed",
+            message: data.encryption.message,
+            color: encOk ? "green" : "red",
+          });
         }
-        if (data.apiKey?.status === "ok") {
-          parts.push(`API Key: ${data.apiKey.label}`);
-          if (data.apiKey.isFreeTier) {
-            parts.push("(Free tier)");
-          }
+        if (data.apiKey) {
+          const keyOk = data.apiKey.status === "ok";
+          notifications.show({
+            title: keyOk ? "API Key" : "API Key Failed",
+            message: keyOk
+              ? `${data.apiKey.label}${data.apiKey.isFreeTier ? " (Free tier)" : ""}`
+              : "API key validation failed",
+            color: keyOk ? "green" : "red",
+          });
         }
-        notifications.show({
-          title: "Connected",
-          message: parts.join(" | ") || "Connection successful",
-          color: "green",
-        });
+        if (!data.encryption && !data.apiKey) {
+          notifications.show({
+            title: "Connected",
+            message: "Service reachable",
+            color: "green",
+          });
+        }
       },
       onError: () => {
         notifications.show({
@@ -321,16 +331,15 @@ const SettingsTranslatorView: FunctionComponent = () => {
         <Stack gap="md" mt="md">
           {/* Zone 2: Connection Card */}
           <Paper withBorder radius="md" p="md">
-            <SimpleGrid cols={{ base: 1, sm: 2 }}>
+            <SimpleGrid cols={{ base: 1, sm: 3 }}>
               <div>
                 <Text
                   label="Service URL"
                   settingKey="settings-translator-openrouter_url"
                 />
                 <MantineText size="xs" c="dimmed" mt={4}>
-                  URL of the AI Subtitle Translator service.{" "}
                   <Anchor
-                    href="https://github.com/LavX/ai-subtitle-translator"
+                    href="https://github.com/LavX/ai-subtitle-translator/blob/main/docs/BAZARR-SETUP.md"
                     target="_blank"
                     rel="noopener noreferrer"
                     size="xs"
@@ -346,7 +355,6 @@ const SettingsTranslatorView: FunctionComponent = () => {
                   settingKey="settings-translator-openrouter_api_key"
                 />
                 <MantineText size="xs" c="dimmed" mt={4}>
-                  Required for AI translation.{" "}
                   <Anchor
                     href="https://openrouter.ai/keys"
                     target="_blank"
@@ -358,26 +366,25 @@ const SettingsTranslatorView: FunctionComponent = () => {
                   </Anchor>
                 </MantineText>
               </div>
+              <div>
+                <Password
+                  label="Encryption Key (optional)"
+                  settingKey="settings-translator-openrouter_encryption_key"
+                />
+                <MantineText size="xs" c="dimmed" mt={4}>
+                  <Anchor
+                    href="https://github.com/LavX/ai-subtitle-translator/blob/main/docs/BAZARR-SETUP.md#get-your-encryption-key"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    size="xs"
+                    c="yellow.6"
+                  >
+                    How to get your key
+                  </Anchor>
+                </MantineText>
+              </div>
             </SimpleGrid>
-            <div style={{ marginTop: 8 }}>
-              <Password
-                label="Encryption Key (optional)"
-                settingKey="settings-translator-openrouter_encryption_key"
-              />
-              <MantineText size="xs" c="dimmed" mt={4}>
-                Encrypts API keys in transit.{" "}
-                <Anchor
-                  href="https://github.com/LavX/ai-subtitle-translator/blob/main/docs/BAZARR-SETUP.md#get-your-encryption-key"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  size="xs"
-                  c="yellow.6"
-                >
-                  How to get your key
-                </Anchor>
-              </MantineText>
-            </div>
-            <Group mt="xs">
+            <Group mt="xs" justify="flex-end">
               <TestConnectionButton />
             </Group>
           </Paper>
