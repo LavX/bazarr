@@ -1,19 +1,44 @@
-import { FunctionComponent, useMemo } from "react";
+import { FunctionComponent, useCallback, useMemo } from "react";
+import { faSync } from "@fortawesome/free-solid-svg-icons";
 import { Checkbox } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import { ColumnDef } from "@tanstack/react-table";
 import { useMovieModification, useMovies } from "@/apis/hooks";
 import { useInstanceName } from "@/apis/hooks/site";
+import { BatchSyncItem } from "@/apis/raw/subtitles";
+import { Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import { AudioList } from "@/components/bazarr";
 import LanguageProfileName from "@/components/bazarr/LanguageProfile";
+import { MassSyncModal } from "@/components/forms/MassSyncForm";
+import { useModals } from "@/modules/modals";
 import MassEditor from "@/pages/views/MassEditor";
 
 const MovieMassEditor: FunctionComponent = () => {
   const query = useMovies();
   const mutation = useMovieModification();
+  const modals = useModals();
 
   useDocumentTitle(`Movies - ${useInstanceName()} (Mass Editor)`);
+
+  const toolbarExtras = useCallback(
+    (selections: Item.Movie[]) => (
+      <Toolbox.Button
+        icon={faSync}
+        disabled={selections.length === 0}
+        onClick={() => {
+          const items: BatchSyncItem[] = selections.map((s) => ({
+            type: "movie" as const,
+            radarrId: s.radarrId,
+          }));
+          modals.openContextModal(MassSyncModal, { items });
+        }}
+      >
+        Sync Subtitles
+      </Toolbox.Button>
+    ),
+    [modals],
+  );
 
   const columns = useMemo<ColumnDef<Item.Movie>[]>(
     () => [
@@ -76,6 +101,7 @@ const MovieMassEditor: FunctionComponent = () => {
         columns={columns}
         data={query.data ?? []}
         mutation={mutation}
+        toolbarExtras={toolbarExtras}
       ></MassEditor>
     </QueryOverlay>
   );
