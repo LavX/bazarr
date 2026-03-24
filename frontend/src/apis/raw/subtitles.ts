@@ -18,6 +18,26 @@ export interface BatchTranslateResponse {
   errors: string[];
 }
 
+export interface BatchSyncItem {
+  type: "episode" | "movie" | "series";
+  sonarrSeriesId?: number;
+  sonarrEpisodeId?: number;
+  radarrId?: number;
+}
+
+export interface BatchSyncOptions {
+  max_offset_seconds: number;
+  no_fix_framerate: boolean;
+  gss: boolean;
+  force_resync: boolean;
+}
+
+export interface BatchSyncResponse {
+  queued: number;
+  skipped: number;
+  errors: string[];
+}
+
 class SubtitlesApi extends BaseApi {
   constructor() {
     super("/subtitles");
@@ -62,6 +82,17 @@ class SubtitlesApi extends BaseApi {
     const response = await this.postRaw<BatchTranslateResponse>(
       "/translate/batch",
       { items },
+    );
+    return response.data;
+  }
+
+  async batchSync(
+    items: BatchSyncItem[],
+    options: BatchSyncOptions,
+  ): Promise<BatchSyncResponse> {
+    const response = await this.postRaw<BatchSyncResponse>(
+      "/sync/batch",
+      { items, options },
     );
     return response.data;
   }

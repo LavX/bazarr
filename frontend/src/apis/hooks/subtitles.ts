@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
-import { BatchTranslateItem } from "@/apis/raw/subtitles";
+import { BatchTranslateItem, BatchSyncItem, BatchSyncOptions } from "@/apis/raw/subtitles";
 
 export function useSubtitleAction() {
   const client = useQueryClient();
@@ -200,6 +200,26 @@ export function useBatchTranslate() {
       // Also invalidate translator jobs to show new jobs
       void client.invalidateQueries({
         queryKey: [QueryKeys.Translator],
+      });
+    },
+  });
+}
+
+export function useBatchSync() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationKey: [QueryKeys.Subtitles, "batch-sync"],
+    mutationFn: (params: { items: BatchSyncItem[]; options: BatchSyncOptions }) =>
+      api.subtitles.batchSync(params.items, params.options),
+    onSuccess: () => {
+      void client.invalidateQueries({
+        queryKey: [QueryKeys.Series],
+      });
+      void client.invalidateQueries({
+        queryKey: [QueryKeys.Movies],
+      });
+      void client.invalidateQueries({
+        queryKey: [QueryKeys.History],
       });
     },
   });
