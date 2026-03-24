@@ -11,8 +11,9 @@ import {
   Tooltip,
   UnstyledButton,
 } from "@mantine/core";
-import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faCircleInfo, faExclamationTriangle } from "@fortawesome/free-solid-svg-icons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { TranslatorStatusPanelWithFormContext } from "@/components/TranslatorStatus";
 import {
   Check,
   CollapseBox,
@@ -25,7 +26,8 @@ import {
   Slider,
   Text,
 } from "@/pages/Settings/components";
-import { TranslatorStatusPanelWithFormContext } from "@/components/TranslatorStatus";
+import { useFormActions } from "@/pages/Settings/utilities/FormValues";
+import { useSettingValue } from "@/pages/Settings/utilities/hooks";
 import AIModelSelector from "./AIModelSelector";
 import ModelDetailsCard, { useOpenRouterModelDetails } from "./ModelDetails";
 import {
@@ -33,8 +35,6 @@ import {
   aiTranslatorParallelBatchesOptions,
   aiTranslatorReasoningOptions,
 } from "./options";
-import { useSettingValue } from "@/pages/Settings/utilities/hooks";
-import { useFormActions } from "@/pages/Settings/utilities/FormValues";
 
 const engineOptions = [
   { value: "openrouter", label: "OpenRouter" },

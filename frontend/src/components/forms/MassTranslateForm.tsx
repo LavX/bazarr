@@ -1,23 +1,23 @@
 import { FunctionComponent, useMemo } from "react";
 import {
   Alert,
+  Badge,
   Button,
   Divider,
+  Group,
   Stack,
   Text,
-  Group,
-  Badge,
 } from "@mantine/core";
 import { useForm } from "@mantine/form";
+import { notifications } from "@mantine/notifications";
 import { isObject } from "lodash";
 import { useBatchTranslate, useSystemSettings } from "@/apis/hooks";
+import { BatchTranslateItem } from "@/apis/raw/subtitles";
 import { Selector } from "@/components/inputs";
 import { useModals, withModal } from "@/modules/modals";
 import { useSelectorOptions } from "@/utilities";
 import FormUtils from "@/utilities/form";
 import { useEnabledLanguages } from "@/utilities/languages";
-import { BatchTranslateItem } from "@/apis/raw/subtitles";
-import { notifications } from "@mantine/notifications";
 
 // Translations map for Google Translate compatibility
 const googleTranslations: Record<string, string> = {

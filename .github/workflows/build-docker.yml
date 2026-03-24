@@ -116,10 +116,10 @@ jobs:
           # Remove 'v' prefix for semver
           SEMVER="${VERSION#v}"
           
-          # Create LavX fork version
+          # Create Bazarr+ version
           SHORT_SHA=$(git rev-parse --short HEAD)
-          BUILD_DATE=$(date -u +%Y%m%d)
-          FORK_VERSION="${SEMVER}-lavx.${BUILD_DATE}"
+          BUILD_DATE=$(date -u +%y%m%d)
+          FORK_VERSION="${SEMVER}+${BUILD_DATE}"
           
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "semver=$SEMVER" >> $GITHUB_OUTPUT
@@ -139,15 +139,15 @@ jobs:
           tags: |
             # Latest tag on main/master branch
             type=raw,value=latest,enable={{is_default_branch}}
-            # Version tag (e.g., v1.5.3-lavx.20241214)
+            # Version tag (e.g., v1.5.7+250324)
             type=raw,value=${{ steps.version.outputs.fork_version }}
             # Short SHA tag
             type=raw,value=sha-${{ steps.version.outputs.short_sha }}
             # Branch name
             type=ref,event=branch
           labels: |
-            org.opencontainers.image.title=Bazarr (LavX Fork)
-            org.opencontainers.image.description=Bazarr with OpenSubtitles.org scraper support
+            org.opencontainers.image.title=Bazarr+
+            org.opencontainers.image.description=Bazarr+ - enhanced subtitle management
             org.opencontainers.image.vendor=LavX
             org.opencontainers.image.version=${{ steps.version.outputs.fork_version }}
 
@@ -182,7 +182,7 @@ jobs:
         run: |
           echo "## 🐳 Docker Images Published" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Bazarr (LavX Fork)" >> $GITHUB_STEP_SUMMARY
+          echo "### Bazarr+" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
           echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
           echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.fork_version }}" >> $GITHUB_STEP_SUMMARY
@@ -221,6 +221,6 @@ jobs:
             
             This release is based on upstream Bazarr with the following custom modifications:
             - OpenSubtitles.org web scraper provider (no VIP API needed)
-            - Auto-sync with upstream daily at 4 AM UTC
+            - Manual sync with upstream on major releases
             
             See the auto-generated release notes below for detailed changes.

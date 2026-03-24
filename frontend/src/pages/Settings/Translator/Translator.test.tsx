@@ -1,9 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect,it } from "vitest";
 import {
-  translatorOption,
+  aiTranslatorConcurrentOptions,
   aiTranslatorModelOptions,
   aiTranslatorReasoningOptions,
-  aiTranslatorConcurrentOptions,
+  translatorOption,
 } from "./options";
 
 describe("Translator options", () => {

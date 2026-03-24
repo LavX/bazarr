@@ -1,5 +1,5 @@
 import { FunctionComponent } from "react";
-import { Badge, Box, Group, SimpleGrid, Text, Tooltip } from "@mantine/core";
+import { Badge, Box, Group, SimpleGrid, Text } from "@mantine/core";
 import { useQuery } from "@tanstack/react-query";
 
 // Average total token usage per translation (calibrated from real data)

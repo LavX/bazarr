@@ -1,6 +1,6 @@
 import React, { FunctionComponent, useMemo } from "react";
 import { Badge, Text, TextProps } from "@mantine/core";
-import { faEllipsis, faSearch } from "@fortawesome/free-solid-svg-icons";
+import { faEllipsis } from "@fortawesome/free-solid-svg-icons";
 import { ColumnDef } from "@tanstack/react-table";
 import { isString } from "lodash";
 import { useMovieSubtitleModification } from "@/apis/hooks";
@@ -28,7 +28,7 @@ function isSubtitleMissing(path: string | undefined | null) {
   return path === missingText;
 }
 
-const Table: FunctionComponent<Props> = ({ movie, profile, disabled }) => {
+const Table: FunctionComponent<Props> = ({ movie, profile }) => {
   const onlyDesired = useShowOnlyDesired();
 
   const profileItems = useProfileItemsToLanguages(profile);

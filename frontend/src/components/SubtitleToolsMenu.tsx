@@ -26,8 +26,8 @@ import { TranslationModal } from "@/components/forms/TranslationForm";
 import { useModals } from "@/modules/modals";
 import { ModalComponent } from "@/modules/modals/WithModal";
 import { task } from "@/modules/task";
-import { SyncSubtitleModal } from "./forms/SyncSubtitleForm";
 import { toPython } from "@/utilities";
+import { SyncSubtitleModal } from "./forms/SyncSubtitleForm";
 
 export interface ToolOptions {
   key: string;

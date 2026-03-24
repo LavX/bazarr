@@ -1,13 +1,13 @@
-# Bazarr LavX Fork - Maintenance Guide
+# Bazarr+ Maintenance Guide
 
-This document describes the automated workflow for maintaining this fork of [Bazarr](https://github.com/morpheus65535/bazarr) (upstream).
+This document describes the workflow for maintaining Bazarr+, a fork of [Bazarr](https://github.com/morpheus65535/bazarr) (upstream).
 
 ## Overview
 
-This fork contains custom modifications (primarily the OpenSubtitles.org web scraper provider) that are automatically kept in sync with the upstream Bazarr repository. The workflow handles:
+Bazarr+ contains custom modifications (OpenSubtitles.org web scraper, AI subtitle translator, security hardening, UI enhancements) that are manually kept in sync with upstream releases. The workflow handles:
 
-1. **Upstream Synchronization** - Daily automatic merging of upstream changes
-2. **Conflict Resolution** - Automatic PR creation when merge conflicts occur
+1. **Upstream Synchronization** - Manual merge after upstream major releases
+2. **Conflict Resolution** - Code review every merge to preserve fork customizations
 3. **Docker Builds** - Automated multi-architecture Docker image builds
 4. **Publishing** - Images published to GitHub Container Registry
 
@@ -32,29 +32,16 @@ This fork contains custom modifications (primarily the OpenSubtitles.org web scr
 
 ## Workflows
 
-### 1. Upstream Sync (`sync-upstream.yml`)
+### 1. Upstream Sync (Manual)
 
-**Schedule:** Daily at 4:00 AM UTC (5:00 AM Budapest time)
-
-**Triggers:**
-- Scheduled cron job
-- Manual dispatch from GitHub Actions UI
+**When:** After upstream major releases (e.g. v1.5.7, v1.5.8)
 
 **Process:**
-1. Fetches latest commits from upstream `bazarr:master`
-2. Compares with current fork
-3. Attempts automatic merge
-4. If successful: pushes changes and triggers Docker build
-5. If conflicts: creates a PR with `sync-conflict` label
-
-**Manual Trigger:**
-```bash
-# Via GitHub CLI
-gh workflow run sync-upstream.yml
-
-# With force sync (even if no new commits)
-gh workflow run sync-upstream.yml -f force_sync=true
-```
+1. Fetch upstream: `git fetch upstream`
+2. Merge into development with review: `git merge upstream/master --no-commit --no-ff`
+3. Review all changes: `git diff --cached`
+4. Restore fork-specific files: `git checkout HEAD -- package_info` (and other protected files)
+5. Commit, test, then merge to master and tag
 
 ### 2. Docker Build (`build-docker.yml`)
 
@@ -66,7 +53,7 @@ gh workflow run sync-upstream.yml -f force_sync=true
 
 **Output:**
 - `ghcr.io/lavx/bazarr:latest` - Latest build
-- `ghcr.io/lavx/bazarr:vX.Y.Z-lavx.YYYYMMDD` - Versioned build
+- `ghcr.io/lavx/bazarr:vX.Y.Z+YYMMDD` - Versioned build
 - `ghcr.io/lavx/bazarr:sha-XXXXXXX` - Git SHA reference
 
 ## Using the Docker Image
@@ -165,7 +152,7 @@ This fork includes the [OpenSubtitles Scraper](https://github.com/LavX/opensubti
 ```
 ┌────────────────────┐     HTTP API     ┌─────────────────────────┐
 │      Bazarr        │ ───────────────> │  OpenSubtitles Scraper  │
-│  (LavX Fork)       │                  │    (Port 8765)          │
+│    (Bazarr+)       │                  │    (Port 8765)          │
 │                    │ <─────────────── │                         │
 │  Uses provider:    │   JSON Response  │  Scrapes:               │
 │  opensubtitles.org │                  │  - opensubtitles.org    │
@@ -206,18 +193,17 @@ git push
 
 ## Versioning
 
-This fork uses a versioning scheme that combines upstream version with fork identifier:
+Bazarr+ uses a versioning scheme that combines the upstream version with a date-based suffix:
 
 ```
-{upstream_version}-lavx.{date}
+v{upstream_version}+{YYMMDD}
 
-Example: v1.5.3-lavx.20241214
+Example: v1.5.7+250324
 ```
 
-This makes it clear:
-- Which upstream version the build is based on
-- When the fork build was created
-- That it contains fork-specific modifications
+- The upstream version indicates which Bazarr release the build is based on
+- The date suffix (YYMMDD) indicates when this Bazarr+ release was built
+- Hotfixes on the same day append a dot counter: `v1.5.7+250324.1`
 
 ## Auto-Update Behavior
 
@@ -298,7 +284,7 @@ docker pull ghcr.io/lavx/bazarr:latest
 
 ## Contributing
 
-When making changes to fork-specific files:
+See [CONTRIBUTING.md](../CONTRIBUTING.md) for the full guide. Key points for fork-specific files:
 
 1. Test changes locally first
 2. Ensure changes don't conflict with upstream structure

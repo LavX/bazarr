@@ -8,26 +8,18 @@ import React, {
 } from "react";
 import { matchPath, NavLink, RouteObject, useLocation } from "react-router";
 import {
-  Anchor,
   AppShell,
   Badge,
   Collapse,
-  Divider,
-  Group,
   Stack,
   Text,
-  useComputedColorScheme,
-  useMantineColorScheme,
 } from "@mantine/core";
 import { useHover } from "@mantine/hooks";
 import {
-  faMoon,
-  faSun,
   IconDefinition,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import clsx from "clsx";
-import { Action } from "@/components";
 import { useNavbar } from "@/contexts/Navbar";
 import { useRouteItems } from "@/Router";
 import { CustomRouteObject, Route } from "@/Router/type";
@@ -98,11 +90,6 @@ function useIsActive(parent: string, route: RouteObject) {
 const AppNavbar: FunctionComponent = () => {
   const [selection, select] = useState<string | null>(null);
 
-  const { toggleColorScheme } = useMantineColorScheme();
-  const computedColorScheme = useComputedColorScheme("light");
-
-  const dark = computedColorScheme === "dark";
-
   const routes = useRouteItems();
 
   const { pathname } = useLocation();
@@ -126,17 +113,6 @@ const AppNavbar: FunctionComponent = () => {
               ></RouteItem>
             ))}
           </Stack>
-        </AppShell.Section>
-        <Divider></Divider>
-        <AppShell.Section mt="xs">
-          <Group gap="xs">
-            <Action
-              label="Change Theme"
-              c={dark ? "yellow" : "indigo"}
-              onClick={() => toggleColorScheme()}
-              icon={dark ? faSun : faMoon}
-            ></Action>
-          </Group>
         </AppShell.Section>
       </Selection.Provider>
     </AppShell.Navbar>

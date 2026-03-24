@@ -389,7 +389,8 @@ interface ReleaseInfo {
   date: string;
   name: string;
   prerelease: boolean;
-  body: string[];
+  body: string;
+  repo?: string;
 }
 
 interface SubtitleInfo {

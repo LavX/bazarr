@@ -1,4 +1,4 @@
-import { FunctionComponent, useState, useCallback } from "react";
+import { FunctionComponent, useCallback,useState } from "react";
 import {
   Alert,
   Badge,
@@ -22,12 +22,12 @@ import {
   faTimes,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import classes from "./TranslatorStatus.module.css";
 import {
   TranslatorJob,
   useTranslatorJobs,
   useTranslatorStatus,
 } from "@/apis/hooks/translator";
+import classes from "./TranslatorStatus.module.css";
 
 interface StatusBadgeProps {
   status: TranslatorJob["status"];
@@ -220,7 +220,7 @@ interface TranslatorStatusPanelProps {
 export const TranslatorStatusPanel: FunctionComponent<
   TranslatorStatusPanelProps
 > = ({ enabled = true }) => {
-  const [retryKey, setRetryKey] = useState(0);
+  const [, setRetryKey] = useState(0);
 
   const {
     data: status,

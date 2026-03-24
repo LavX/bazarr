@@ -1,5 +1,5 @@
 # =============================================================================
-# Bazarr LavX Fork - Production Docker Image
+# Bazarr+ Production Docker Image
 # =============================================================================
 # Multi-stage build optimized for layer caching
 # Based on Debian Slim for better compatibility (unrar, etc.)
@@ -42,8 +42,8 @@ ARG BAZARR_VERSION
 ARG BUILD_DATE
 ARG VCS_REF
 
-LABEL org.opencontainers.image.title="Bazarr (LavX Fork)" \
-      org.opencontainers.image.description="Bazarr with OpenSubtitles.org scraper support" \
+LABEL org.opencontainers.image.title="Bazarr+" \
+      org.opencontainers.image.description="Bazarr+ - enhanced subtitle management" \
       org.opencontainers.image.version="${BAZARR_VERSION}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.revision="${VCS_REF}" \
@@ -94,7 +94,7 @@ COPY bazarr ./bazarr
 # Write version to VERSION file so bazarr/main.py can read it
 RUN echo "${BAZARR_VERSION}" > /app/bazarr/VERSION
 
-# Copy fork identification file (shows "LavX Fork" in System Status)
+# Copy package identification file (shows version in System Status)
 COPY package_info /app/bazarr/package_info
 
 # Copy pre-built frontend (built in GitHub Actions workflow for caching)

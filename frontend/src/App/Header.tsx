@@ -8,13 +8,17 @@ import {
   Divider,
   Group,
   Menu,
+  useComputedColorScheme,
+  useMantineColorScheme,
 } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
 import { faBell } from "@fortawesome/free-regular-svg-icons/faBell";
 import {
   faArrowRotateLeft,
   faGear,
+  faMoon,
   faPowerOff,
+  faSun,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useSystem, useSystemJobs, useSystemSettings } from "@/apis/hooks";
@@ -38,6 +42,9 @@ const AppHeader: FunctionComponent = () => {
 
   const goHome = useGotoHomepage();
 
+  const { toggleColorScheme } = useMantineColorScheme();
+  const dark = useComputedColorScheme("light") === "dark";
+
   const [
     jobsManagerOpened,
     { open: openJobsManager, close: closeJobsManager },
@@ -55,19 +62,28 @@ const AppHeader: FunctionComponent = () => {
             size="sm"
             hiddenFrom="sm"
           ></Burger>
-          <Anchor onClick={goHome}>
-            <Avatar
-              alt="brand"
-              size={32}
-              src={`${Environment.baseUrl}/images/logo64.png`}
-            ></Avatar>
+          <Anchor onClick={goHome} underline="never">
+            <Group gap={6} wrap="nowrap">
+              <Avatar
+                alt="brand"
+                size={32}
+                src={`${Environment.baseUrl}/images/logo_no_orb64.png`}
+              ></Avatar>
+              <Badge size="lg" radius="sm" variant="gradient" gradient={{ from: "brand.5", to: "brand.6", deg: 135 }} visibleFrom="sm" style={{ cursor: "pointer" }}>
+                Bazarr+
+              </Badge>
+            </Group>
           </Anchor>
-          <Badge size="lg" radius="sm" variant="gradient" gradient={{ from: "brand.5", to: "brand.6", deg: 135 }} visibleFrom="sm">
-            Bazarr
-          </Badge>
         </Group>
         <Group gap="xs" justify="right" wrap="nowrap">
           <Search></Search>
+          <Action
+            label="Change Theme"
+            tooltip={{ position: "left", openDelay: 2000 }}
+            onClick={() => toggleColorScheme()}
+            icon={dark ? faSun : faMoon}
+            size="sm"
+          ></Action>
           <Action
             label="Jobs Manager"
             tooltip={{ position: "left", openDelay: 2000 }}

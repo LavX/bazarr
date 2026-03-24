@@ -1,4 +1,4 @@
-# Bazarr (LavX Fork) - "Neon Pulse"
+# Bazarr+
 
 <p align="center">
   <a href="https://ghcr.io/lavx/bazarr"><img src="https://img.shields.io/badge/ghcr.io-lavx%2Fbazarr-blue?style=for-the-badge&logo=docker" alt="Docker"></a>
@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  Built on <a href="https://www.bazarr.media">Bazarr</a>, this fork adds:<br/>
+  Built on <a href="https://www.bazarr.media">Bazarr</a>, Bazarr+ adds:<br/>
   - OpenSubtitles.org provider that works <strong>without VIP API credentials</strong> (survives the API shutdown)<br/>
   - <strong>AI Subtitle Translator</strong> using OpenRouter LLMs for high-quality subtitle translation<br/>
   - <strong>Batch translation</strong> for entire series/movie libraries<br/>
@@ -62,22 +62,26 @@ docker pull ghcr.io/lavx/ai-subtitle-translator:latest
 
 ## 🔌 What's Different in This Fork?
 
-| Feature | Upstream Bazarr | LavX Fork |
-|---------|-----------------|-----------|
+| Feature | Upstream Bazarr | Bazarr+ |
+|---------|-----------------|---------|
 | **OpenSubtitles.org (Scraper)** | ❌ Not available | ✅ Included (API-independent) |
-| **AI Subtitle Translator** | ❌ Not available | ✅ Included (OpenRouter, Gemini, Lingarr) |
+| **AI Subtitle Translator (OpenRouter)** | ❌ Not available | ✅ 100+ LLMs via OpenRouter API |
+| **Translate from Missing Menu** | ❌ Not available | ✅ Action menu on missing subs with source language picker |
 | **Batch Translation** | ❌ Not available | ✅ Translate entire series/libraries |
+| **Dedicated Translator Settings** | ❌ Not available | ✅ Own page with model pricing, cost estimates, status panel |
+| **Security Hardening** | Basic | ✅ PBKDF2, CSRF, SSRF, brute-force, shell injection, more |
 | **Audio Language Display** | ❌ Not shown in tables | ✅ Audio languages visible in all table views |
 | **Advanced Table Filters** | ❌ Basic search only | ✅ Collapsible filter panel with active filter pills |
+| **Floating Save + Ctrl+S** | ❌ Not available | ✅ Sticky save button with unsaved changes modal |
+| **Navy + Amber Theme** | Default blue | ✅ Custom dark theme with golden/amber accents |
 | OpenSubtitles.org (API) | Shutting down | N/A (uses scraper instead) |
 | OpenSubtitles.com (API) | ✅ Available | ✅ Available |
 | Docker images | linuxserver/hotio | ghcr.io/lavx |
 | Python runtime | 3.11/3.12 | 3.14 with JIT |
-| Fork identification in UI | N/A | ✅ "LavX Fork - Neon Pulse" |
 
 ### 🎯 OpenSubtitles.org Scraper Provider
 
-This fork adds a **new subtitle provider** called "OpenSubtitles.org" that:
+Bazarr+ adds a **new subtitle provider** called "OpenSubtitles.org" that:
 
 - ✅ Works **without** API credentials or VIP subscription
 - ✅ Searches by IMDB ID for accurate results
@@ -87,13 +91,14 @@ This fork adds a **new subtitle provider** called "OpenSubtitles.org" that:
 
 ### 🤖 AI Subtitle Translator
 
-This fork includes an **LLM-powered subtitle translator** that:
+Bazarr+ adds **OpenRouter** as a new translator engine alongside Bazarr's existing Google Translate, Gemini, and Lingarr:
 
-- ✅ Uses **OpenRouter API** for access to 100+ AI models (Gemini, GPT, Claude, LLaMA, Grok, etc.)
-- ✅ Translates subtitles when no good match is found in your target language
-- ✅ **Async job queue** for handling multiple translations
-- ✅ Real-time **progress tracking** in Bazarr UI
-- ✅ Configurable directly in Bazarr Settings (API key, model, temperature, concurrent jobs)
+- ✅ Access to **100+ AI models** via OpenRouter (Gemini, GPT, Claude, LLaMA, Grok, etc.)
+- ✅ **Translate from missing subtitle menu**: click the action button (...) on a missing subtitle row, then pick an existing source subtitle to translate from
+- ✅ **Batch translation** for entire series/movie libraries via mass translate dialog
+- ✅ **Dedicated settings page** with live model pricing from OpenRouter API, per-episode/movie cost estimates, reasoning mode selector, and prompt caching indicators
+- ✅ **Status panel** with live queue stats, job progress, token usage, cost tracking, and speed metrics
+- ✅ **Async job queue** with configurable concurrent jobs (1-5) and parallel batches (1-8)
 - ✅ Runs as a separate microservice for reliability
 
 **Repository:** [github.com/LavX/ai-subtitle-translator](https://github.com/LavX/ai-subtitle-translator)
@@ -241,7 +246,7 @@ docker compose up -d
 │                                                                                   │
 │  ┌────────────────────────┐      ┌───────────────────────┐      ┌─────────────┐  │
 │  │       Bazarr           │      │ OpenSubtitles Scraper │      │   AI Sub    │  │
-│  │   (LavX Fork)          │      │     (Port 8000)       │      │ Translator  │  │
+│  │    (Bazarr+)            │      │     (Port 8000)       │      │ Translator  │  │
 │  │                        │      │                       │      │ (Port 8765) │  │
 │  │  ┌──────────────────┐  │ HTTP │  ┌─────────────────┐  │      │             │  │
 │  │  │ OpenSubtitles.org│──┼──────┼──│ Search API      │  │      │ ┌─────────┐ │  │
@@ -325,13 +330,13 @@ curl -X POST http://localhost:8000/search \
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please:
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide.
 
 1. Fork this repository
-2. Create a feature branch
-3. Submit a pull request
+2. Create a feature branch from `development`
+3. Submit a PR targeting `development`
 
-For major changes, please open an issue first.
+For major changes, please open an issue first to discuss.
 
 ---
 
@@ -388,7 +393,7 @@ Includes all upstream providers plus fork additions:
 - Napisy24
 - Nekur
 - OpenSubtitles.com
-- **OpenSubtitles.org (LavX Fork — web scraper, no API needed)**
+- **OpenSubtitles.org (Bazarr+ web scraper, no API needed)**
 - Podnapisi
 - RegieLive
 - Sous-Titres.eu

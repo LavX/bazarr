@@ -18,11 +18,12 @@ api_ns_system_releases = Namespace('System Releases', description='List Bazarr r
 @api_ns_system_releases.route('system/releases')
 class SystemReleases(Resource):
     get_response_model = api_ns_system_releases.model('SystemBackupsGetResponse', {
-        'body': fields.List(fields.String),
+        'body': fields.String(),
         'name': fields.String(),
         'date': fields.String(),
         'prerelease': fields.Boolean(),
         'current': fields.Boolean(),
+        'repo': fields.String(),
     })
 
     @authenticate
@@ -49,12 +50,12 @@ class SystemReleases(Resource):
             current_version = os.environ["BAZARR_VERSION"]
 
             for i, release in enumerate(filtered_releases):
-                body = release['body'].replace('- ', '').split('\n')[1:]
-                filtered_releases[i] = {"body": body,
+                filtered_releases[i] = {"body": release['body'] or '',
                                         "name": release['name'],
                                         "date": release['date'][:10],
                                         "prerelease": release['prerelease'],
-                                        "current": release['name'].lstrip('v') == current_version}
+                                        "current": release['name'].lstrip('v') == current_version,
+                                        "repo": release.get('repo', 'Bazarr+')}
 
         except Exception:
             logging.exception(

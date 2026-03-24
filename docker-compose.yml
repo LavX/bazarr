@@ -1,7 +1,7 @@
 # =============================================================================
-# Bazarr LavX Fork - Docker Compose
+# Bazarr+ Docker Compose
 # =============================================================================
-# Production deployment configuration with OpenSubtitles.org Scraper
+# Production deployment configuration
 #
 # Usage:
 #   docker compose up -d

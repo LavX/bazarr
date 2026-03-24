@@ -1,8 +1,7 @@
-# LavX Bazarr Fork Package Information
-# This file identifies the build as a LavX fork with OpenSubtitles.org scraper support
+# Bazarr+ Package Information
 
 # Package version identifier (shown in System Status)
-packageversion=LavX Fork v1.5.6-lavx "Neon Pulse"
+packageversion=Bazarr+ v1.5.6+250324
 
 # Package author (shown in System Status)
 packageauthor=LavX
