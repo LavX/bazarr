@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  OpenSubtitles.org web scraper · AI translation via OpenRouter (300+ LLMs) · batch translation · advanced table filters · security hardening · Python 3.14 · navy + amber dark theme
+  Provider priority · OpenSubtitles.org web scraper · AI translation via OpenRouter (300+ LLMs) · API key encryption · batch translation · advanced table filters · security hardening · Python 3.14 · navy + amber dark theme
 </p>
 
 ---
@@ -27,12 +27,19 @@ Bazarr is great at finding subtitles. Bazarr+ takes it further with features ups
 ### OpenSubtitles.org Web Scraper
 OpenSubtitles.org shut down their XML-RPC API for all third-party apps, VIP included. Bazarr+ ships a self-hosted FastAPI microservice that scrapes OpenSubtitles.org directly via CloudScraper with optional FlareSolverr fallback. It provides search, subtitle listing, and download endpoints (`/api/v1/search`, `/api/v1/subtitles`, `/api/v1/download/subtitle`) and integrates into Bazarr's provider system through a mixin class. No API key or VIP subscription needed.
 
+### Provider Priority
+Upstream Bazarr queries all subtitle providers simultaneously and picks the highest-scored result. There's no way to prefer one provider over another. This has been [requested for 6 years](https://bazarr.featureupvote.com/suggestions/112323/provider-prioritization) (62 votes), but upstream rejected it as "won't happen," calling it a "major rework" that "would take months of development."
+
+Bazarr+ solves it with a **Provider Priority toggle** in Settings > Providers. When enabled, providers are queried sequentially in the order you've arranged them. If a provider returns subtitles meeting the minimum score, Bazarr+ stops searching and uses those results. Your preferred providers (curated community sites, specialized language sources) always get first shot. When disabled, the original behavior is preserved: all providers queried simultaneously, best score wins.
+
 ### AI Subtitle Translation via OpenRouter
 Upstream has Google Translate, Gemini, and Lingarr. Bazarr+ adds **OpenRouter** as a fourth translator engine, giving access to 30+ preconfigured LLMs (Claude, Gemini, GPT, LLaMA, Grok, and more) plus any custom model ID from openrouter.ai. It runs as a separate microservice with an async job queue supporting 1-5 concurrent jobs and 1-8 parallel batches. Features include:
 - **Translate from the subtitle action menu**: click (...) on a missing subtitle row, pick an existing source subtitle to translate from
 - **Batch translation** for entire series/movie libraries from the Wanted pages
 - **Dedicated settings page** with 4 zones: engine picker, connection config, model tuning (temperature, reasoning mode, parallel batches), and a live status panel showing queue stats, job progress, token usage, cost, and speed
 - **Model details** fetched live from the OpenRouter API with per-million token pricing, per-episode/movie cost estimates, context length, and prompt caching indicators
+- **AES-256-GCM encryption** for API keys in transit between Bazarr and the translator service, with a Test Connection button that validates encryption and API key status before saving
+- **Auto disk scan** triggers Sonarr/Radarr to rescan after translation completes
 
 ### Advanced UI
 - **Table filters** on Wanted and Library pages: include/exclude audio language (multi-select), missing subtitle language filter, title search, with active filter chips and a collapsible filter panel
@@ -87,8 +94,10 @@ docker pull ghcr.io/lavx/ai-subtitle-translator:latest
 
 | Feature | Upstream Bazarr | Bazarr+ |
 |---------|-----------------|---------|
+| **Provider Priority** | ❌ [Rejected](https://bazarr.featureupvote.com/suggestions/112323/provider-prioritization) (62 votes) | ✅ Dual mode: priority order with early stop, or classic simultaneous |
 | **OpenSubtitles.org (Scraper)** | ❌ Not available | ✅ Self-hosted FastAPI microservice via CloudScraper |
 | **AI Subtitle Translator (OpenRouter)** | ❌ Not available | ✅ 30+ preconfigured LLMs + any custom model ID |
+| **API Key Encryption** | ❌ Not available | ✅ AES-256-GCM encryption for keys in transit |
 | **Translate from Missing Menu** | ❌ Not available | ✅ Action menu on missing subs with source language picker |
 | **Batch Translation** | ❌ Not available | ✅ Translate entire series/libraries from Wanted pages |
 | **Dedicated Translator Settings** | ❌ Not available | ✅ 4-zone page with pricing, cost estimates, status panel |
