@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="frontend/public/images/logo128.png" alt="Bazarr+ Logo" width="96">
+  <img src="frontend/public/images/logo128.png" alt="Bazarr+ Logo" width="120">
 </p>
 
 # <p align="center">Bazarr+
