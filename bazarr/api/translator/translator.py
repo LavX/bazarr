@@ -2,6 +2,7 @@
 
 import logging
 import requests
+from flask import request as flask_request
 from flask_restx import Resource, Namespace
 
 from app.config import settings
@@ -189,4 +190,54 @@ class TranslatorConfig(Resource):
             return {"error": "Cannot connect to AI Subtitle Translator service"}, 503
         except Exception as e:
             logger.error(f"Error getting config: {e}")
+            return {"error": str(e)}, 500
+
+
+@api_ns_translator.route('translator/test')
+class TranslatorTest(Resource):
+    @authenticate
+    @api_ns_translator.doc(
+        responses={200: 'Success', 400: 'Bad Request', 503: 'Service Unavailable'}
+    )
+    def post(self):
+        """Test connection, encryption, and API key with the translator service.
+
+        Accepts optional JSON body with current (unsaved) form values:
+        - serviceUrl: override saved service URL
+        - apiKey: override saved OpenRouter API key
+        - encryptionKey: override saved encryption key
+        """
+        data = flask_request.get_json(silent=True) or {}
+
+        service_url = data.get("serviceUrl") or get_service_url()
+        if service_url:
+            service_url = service_url.rstrip("/")
+        if not service_url:
+            return {"error": "AI Subtitle Translator service URL not configured"}, 503
+
+        api_key = data.get("apiKey") or settings.translator.openrouter_api_key
+        if not api_key:
+            return {"error": "OpenRouter API key not configured"}, 400
+
+        encryption_key = data.get("encryptionKey") if "encryptionKey" in data else settings.translator.openrouter_encryption_key
+        if encryption_key:
+            try:
+                from subtitles.tools.translate.services.encryption import encrypt_api_key
+                api_key = encrypt_api_key(api_key, encryption_key)
+            except ValueError as e:
+                return {"error": f"Invalid encryption key: {e}"}, 400
+
+        try:
+            response = requests.post(
+                f"{service_url}/api/v1/test",
+                json={"apiKey": api_key},
+                timeout=10
+            )
+            return response.json(), response.status_code
+        except requests.exceptions.ConnectionError:
+            return {"error": "Cannot connect to AI Subtitle Translator service"}, 503
+        except requests.exceptions.Timeout:
+            return {"error": "Service timeout"}, 503
+        except Exception as e:
+            logger.error(f"Error testing translator: {e}")
             return {"error": str(e)}, 500

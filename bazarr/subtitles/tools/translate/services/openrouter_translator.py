@@ -63,6 +63,19 @@ class OpenRouterTranslatorService:
             'effort': reasoning_mode,
         }
 
+    def _get_api_key_value(self):
+        """Get the API key, encrypted if an encryption key is configured."""
+        api_key = settings.translator.openrouter_api_key
+        encryption_key = settings.translator.openrouter_encryption_key
+        if encryption_key:
+            try:
+                from .encryption import encrypt_api_key
+                api_key = encrypt_api_key(api_key, encryption_key)
+            except ValueError as e:
+                logger.error(f'Invalid encryption key: {e}')
+                raise ValueError("Invalid encryption key format. Check your encryption key in Settings.")
+        return api_key
+
     def translate(self, job_id=None):
         try:
             subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
@@ -169,7 +182,7 @@ class OpenRouterTranslatorService:
                 "lines": lines_payload,
                 # Add configuration from Bazarr settings
                 "config": {
-                    "apiKey": settings.translator.openrouter_api_key,
+                    "apiKey": self._get_api_key_value(),
                     "model": settings.translator.openrouter_model,
                     "temperature": settings.translator.openrouter_temperature,
                     "maxConcurrentJobs": settings.translator.openrouter_max_concurrent,

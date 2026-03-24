@@ -3,6 +3,7 @@ import {
   Alert,
   Anchor,
   Badge,
+  Button,
   Group,
   Paper,
   SimpleGrid,
@@ -11,8 +12,10 @@ import {
   Tooltip,
   UnstyledButton,
 } from "@mantine/core";
+import { notifications } from "@mantine/notifications";
 import { faCircleInfo, faExclamationTriangle } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { useTestTranslator } from "@/apis/hooks/translator";
 import { TranslatorStatusPanelWithFormContext } from "@/components/TranslatorStatus";
 import {
   Check,
@@ -148,6 +151,72 @@ const ModelDetailsFromSetting: FunctionComponent = () => {
   return <ModelDetailsCard modelId={modelId} reasoningLevel={reasoningLevel ?? "disabled"} />;
 };
 
+const TestConnectionButton: FunctionComponent = () => {
+  const testMutation = useTestTranslator();
+  const serviceUrl = useSettingValue<string>("settings-translator-openrouter_url");
+  const apiKey = useSettingValue<string>("settings-translator-openrouter_api_key");
+  const encryptionKey = useSettingValue<string>("settings-translator-openrouter_encryption_key");
+
+  const handleTest = () => {
+    testMutation.mutate({ serviceUrl, apiKey, encryptionKey }, {
+      onSuccess: (data) => {
+        if (data.error) {
+          notifications.show({
+            title: "Connection Failed",
+            message: data.error,
+            color: "red",
+          });
+          return;
+        }
+        if (data.encryption) {
+          const encOk = data.encryption.status === "ok";
+          notifications.show({
+            title: encOk ? "Encryption" : "Encryption Failed",
+            message: data.encryption.message,
+            color: encOk ? "green" : "red",
+          });
+        }
+        if (data.apiKey) {
+          const keyOk = data.apiKey.status === "ok";
+          notifications.show({
+            title: keyOk ? "API Key" : "API Key Failed",
+            message: keyOk
+              ? `${data.apiKey.label}${data.apiKey.isFreeTier ? " (Free tier)" : ""}`
+              : "API key validation failed",
+            color: keyOk ? "green" : "red",
+          });
+        }
+        if (!data.encryption && !data.apiKey) {
+          notifications.show({
+            title: "Connected",
+            message: "Service reachable",
+            color: "green",
+          });
+        }
+      },
+      onError: () => {
+        notifications.show({
+          title: "Connection Failed",
+          message: "Could not reach the translator service",
+          color: "red",
+        });
+      },
+    });
+  };
+
+  return (
+    <Button
+      variant="default"
+      size="xs"
+      onClick={handleTest}
+      loading={testMutation.isPending}
+      disabled={!serviceUrl || !apiKey}
+    >
+      Test Connection
+    </Button>
+  );
+};
+
 const SettingsTranslatorView: FunctionComponent = () => {
   return (
     <Layout name="AI Translator">
@@ -262,16 +331,15 @@ const SettingsTranslatorView: FunctionComponent = () => {
         <Stack gap="md" mt="md">
           {/* Zone 2: Connection Card */}
           <Paper withBorder radius="md" p="md">
-            <SimpleGrid cols={{ base: 1, sm: 2 }}>
+            <SimpleGrid cols={{ base: 1, sm: 3 }}>
               <div>
                 <Text
                   label="Service URL"
                   settingKey="settings-translator-openrouter_url"
                 />
                 <MantineText size="xs" c="dimmed" mt={4}>
-                  URL of the AI Subtitle Translator service.{" "}
                   <Anchor
-                    href="https://github.com/LavX/ai-subtitle-translator"
+                    href="https://github.com/LavX/ai-subtitle-translator/blob/main/docs/BAZARR-SETUP.md"
                     target="_blank"
                     rel="noopener noreferrer"
                     size="xs"
@@ -287,7 +355,6 @@ const SettingsTranslatorView: FunctionComponent = () => {
                   settingKey="settings-translator-openrouter_api_key"
                 />
                 <MantineText size="xs" c="dimmed" mt={4}>
-                  Required for AI translation.{" "}
                   <Anchor
                     href="https://openrouter.ai/keys"
                     target="_blank"
@@ -299,7 +366,27 @@ const SettingsTranslatorView: FunctionComponent = () => {
                   </Anchor>
                 </MantineText>
               </div>
+              <div>
+                <Password
+                  label="Encryption Key (optional)"
+                  settingKey="settings-translator-openrouter_encryption_key"
+                />
+                <MantineText size="xs" c="dimmed" mt={4}>
+                  <Anchor
+                    href="https://github.com/LavX/ai-subtitle-translator/blob/main/docs/BAZARR-SETUP.md#get-your-encryption-key"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    size="xs"
+                    c="yellow.6"
+                  >
+                    How to get your key
+                  </Anchor>
+                </MantineText>
+              </div>
             </SimpleGrid>
+            <Group mt="xs" justify="flex-end">
+              <TestConnectionButton />
+            </Group>
           </Paper>
 
           {/* Zone 3: Model & Tuning Card */}
