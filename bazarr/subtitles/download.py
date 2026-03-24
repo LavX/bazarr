@@ -80,7 +80,8 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                                        min_score=int(min_score),
                                                                        hearing_impaired=hi_required,
                                                                        compute_score=ComputeScore(get_scores()),
-                                                                       use_original_format=original_format in (1, "1", "True", True))
+                                                                       use_original_format=original_format in (1, "1", "True", True),
+                                                                       use_provider_priority=settings.general.use_provider_priority)
                     except Exception as e:
                         logging.exception(f'BAZARR Error downloading Subtitles for this file {path}: {repr(e)}')
                         return None

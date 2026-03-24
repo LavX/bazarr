@@ -1,6 +1,7 @@
 import { FunctionComponent } from "react";
 import { Anchor } from "@mantine/core";
 import {
+  Check,
   CollapseBox,
   Layout,
   Message,
@@ -17,6 +18,15 @@ const SettingsProvidersView: FunctionComponent = () => {
   return (
     <Layout name="Providers">
       <Section header="Enabled Providers">
+        <Check
+          label="Provider Priority"
+          settingKey="settings-general-use_provider_priority"
+        ></Check>
+        <Message>
+          Query providers in priority order and stop when a subtitle meeting the
+          minimum score is found. When disabled, all providers are queried
+          simultaneously and the best result is selected.
+        </Message>
         <ProviderView
           availableOptions={ProviderList}
           settingsKey="settings-general-enabled_providers"

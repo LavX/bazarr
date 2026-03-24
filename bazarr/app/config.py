@@ -140,6 +140,7 @@ validators = [
               is_in=['3d', '1w', '2w', '3w', '4w']),
     Validator('general.enabled_providers', must_exist=True, default=[], is_type_of=list),
     Validator('general.provider_priorities', must_exist=True, default={}, is_type_of=dict),
+    Validator('general.use_provider_priority', must_exist=True, default=True, is_type_of=bool),
     Validator('general.enabled_integrations', must_exist=True, default=[], is_type_of=list),
     Validator('general.multithreading', must_exist=True, default=True, is_type_of=bool),
     Validator('general.chmod_enabled', must_exist=True, default=False, is_type_of=bool),
