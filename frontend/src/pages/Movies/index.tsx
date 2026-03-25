@@ -24,7 +24,7 @@ import LanguageProfileName from "@/components/bazarr/LanguageProfile";
 import { BatchModConfirmModal } from "@/components/forms/BatchModConfirmForm";
 import { ItemEditModal } from "@/components/forms/ItemEditForm";
 import { MassSyncModal } from "@/components/forms/MassSyncForm";
-import { MassTranslateModal } from "@/components/forms/MassTranslateForm";
+import { MassTranslateModal, WantedItem } from "@/components/forms/MassTranslateForm";
 import { useModals } from "@/modules/modals";
 import ItemView from "@/pages/views/ItemView";
 import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
@@ -184,6 +184,13 @@ const MovieView: FunctionComponent = () => {
         radarrId: m.radarrId,
       }));
 
+    const toWantedItems = (): WantedItem[] =>
+      selections.map((m) => ({
+        type: "movie" as const,
+        radarrId: m.radarrId,
+        title: m.title,
+      }));
+
     return (
       <Group gap="xs">
         <Toolbox.Button
@@ -231,7 +238,7 @@ const MovieView: FunctionComponent = () => {
           icon={faLanguage}
           onClick={() =>
             modals.openContextModal(MassTranslateModal, {
-              items: toBatchItems(),
+              items: toWantedItems(),
             })
           }
         >

@@ -143,7 +143,13 @@ export interface WantedMovieItem {
   title: string;
 }
 
-export type WantedItem = WantedEpisodeItem | WantedMovieItem;
+export interface WantedSeriesItem {
+  type: "series";
+  sonarrSeriesId: number;
+  title: string;
+}
+
+export type WantedItem = WantedEpisodeItem | WantedMovieItem | WantedSeriesItem;
 
 interface Props {
   items: WantedItem[];
@@ -249,6 +255,13 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
           type: "episode" as const,
           sonarrSeriesId: item.sonarrSeriesId,
           sonarrEpisodeId: item.sonarrEpisodeId,
+          sourceLanguage: values.sourceLanguage!.code2,
+          targetLanguage: values.targetLanguage!.code2,
+        };
+      } else if (item.type === "series") {
+        return {
+          type: "series" as const,
+          sonarrSeriesId: item.sonarrSeriesId,
           sourceLanguage: values.sourceLanguage!.code2,
           targetLanguage: values.targetLanguage!.code2,
         };
