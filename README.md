@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  Provider priority · OpenSubtitles.org web scraper · AI translation via OpenRouter (300+ LLMs) · API key encryption · batch translation · mass subtitle sync · advanced table filters · security hardening · Python 3.14 · navy + amber dark theme
+  No tracking · Provider priority · OpenSubtitles.org web scraper · AI translation via OpenRouter (300+ LLMs) · API key encryption · batch translation · mass subtitle sync · advanced table filters · security hardening · Python 3.14 · navy + amber dark theme
 </p>
 
 ---
@@ -56,6 +56,9 @@ Bazarr+ adds two entry points for bulk sync:
 - **Mass Edit pages**: a "Sync Subtitles" button for both Movies and Series editors, so you can select specific items and sync their subtitles in bulk
 
 Both use the existing ffsubsync engine. Already-synced subtitles are skipped by default (with a force re-sync option). Configurable max offset, Golden-Section Search, and framerate correction settings.
+
+### No Tracking / No Telemetry
+Upstream Bazarr ships two analytics systems that phone home to Google: a GA4 property (`G-3820T18GE3`) in `bazarr/utilities/analytics.py` that reports your Bazarr version, Python version, Sonarr/Radarr versions, OS, subtitle provider usage, every download action, and languages searched, plus a legacy Universal Analytics tracker (`UA-86466078-1`) in the SubZero library dependency. Bazarr+ has removed both entirely. No usage data leaves your server.
 
 ### Security Hardening
 8 areas upstream doesn't address:
@@ -111,6 +114,7 @@ docker pull ghcr.io/lavx/ai-subtitle-translator:latest
 | **Batch Translation** | ❌ Not available | ✅ Translate entire series/libraries from Wanted pages |
 | **Mass Subtitle Sync** | ❌ [Rejected](https://bazarr.featureupvote.com/suggestions/172013/mass-sync-all-subtitles) (249 votes) | ✅ Bulk sync from Tasks page or Mass Edit, skips already-synced |
 | **Dedicated Translator Settings** | ❌ Not available | ✅ 4-zone page with pricing, cost estimates, status panel |
+| **No Tracking** | GA4 + legacy UA phone home to Google | ✅ All telemetry removed, nothing phones home |
 | **Security Hardening** | MD5, no CSRF/SSRF/rate limiting | ✅ PBKDF2 (600k iter), CSRF, SSRF, brute-force, 4 more |
 | **Audio Language Display** | ❌ Not shown in tables | ✅ Badges in all table views |
 | **Advanced Table Filters** | ❌ No filters | ✅ Include/exclude audio, missing subtitle, title search |
