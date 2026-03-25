@@ -26,3 +26,4 @@ VERSION
 
 .claude/
 docs/superpowers/
+.coverage
