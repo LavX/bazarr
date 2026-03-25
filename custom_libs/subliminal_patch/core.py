@@ -23,7 +23,7 @@ from subliminal import refiner_manager
 from concurrent.futures import as_completed
 
 from .extensions import provider_registry
-from .exceptions import MustGetBlacklisted
+from .exceptions import APIThrottled, MustGetBlacklisted
 from .score import compute_score as default_compute_score
 from subliminal.utils import hash_napiprojekt, hash_opensubtitles, hash_shooter, hash_thesubdb
 from subliminal.video import VIDEO_EXTENSIONS, Video, Episode, Movie
@@ -411,6 +411,15 @@ class SZProviderPool(ProviderPool):
                     continue
 
             return out
+
+        except APIThrottled as e:
+            ids = {
+                'radarrId': video.radarrId if hasattr(video, 'radarrId') else None,
+                'sonarrSeriesId': video.sonarrSeriesId if hasattr(video, 'sonarrSeriesId') else None,
+                'sonarrEpisodeId': video.sonarrEpisodeId if hasattr(video, 'sonarrEpisodeId') else None,
+            }
+            logger.warning('Provider %r throttled: %s', provider, e)
+            self.throttle_callback(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None)
 
         except Exception as e:
             ids = {
