@@ -6,6 +6,7 @@ import { useDocumentTitle } from "@mantine/hooks";
 import { faBookmark as farBookmark } from "@fortawesome/free-regular-svg-icons";
 import {
   faArrowUp,
+  faCircleDown,
   faBookmark,
   faCheck,
   faEllipsisVertical,
@@ -183,7 +184,7 @@ const SeriesView: FunctionComponent = () => {
         cell: ({ row: { original } }) =>
           upgradableSeriesIds.has(original.sonarrSeriesId) ? (
             <Tooltip label="Subtitle match could be improved. Try re-searching.">
-              <FontAwesomeIcon icon={faArrowUp} color="var(--mantine-color-dimmed)" size="sm" />
+              <FontAwesomeIcon icon={faCircleDown} color="var(--mantine-color-dimmed)" size="sm" />
             </Tooltip>
           ) : null,
       },

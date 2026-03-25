@@ -7,6 +7,7 @@ import { faBookmark as farBookmark } from "@fortawesome/free-regular-svg-icons";
 import {
   faArrowUp,
   faBookmark,
+  faCircleDown,
   faCheck,
   faEllipsisVertical,
   faHardDrive,
@@ -178,7 +179,7 @@ const MovieView: FunctionComponent = () => {
         }) =>
           upgradableMovieIds.has(radarrId) ? (
             <Tooltip label="Subtitle match could be improved. Try re-searching.">
-              <FontAwesomeIcon icon={faArrowUp} color="var(--mantine-color-dimmed)" size="sm" />
+              <FontAwesomeIcon icon={faCircleDown} color="var(--mantine-color-dimmed)" size="sm" />
             </Tooltip>
           ) : null,
       },
