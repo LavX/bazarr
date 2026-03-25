@@ -6,7 +6,7 @@ import os
 from subliminal_patch.core import get_subtitle_path
 from subzero.language import Language
 
-from .core.translator_utils import validate_translation_params, convert_language_codes
+from .core.translator_utils import validate_translation_params, convert_language_codes, get_title
 from .services.translator_factory import TranslatorFactory
 from languages.get_languages import alpha3_from_alpha2
 from app.config import settings
@@ -21,9 +21,11 @@ from utilities.path_mappings import path_mappings
 def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, forced, hi,
                              media_type, sonarr_series_id, sonarr_episode_id, radarr_id, job_id=None):
     if not job_id:
-        jobs_queue.add_job_from_function(f'Translating from {from_lang.upper()} to {to_lang.upper()} using '
-                                         f'{settings.translator.translator_type.replace("_", " ").title()}',
-                                         is_progress=True)
+        title = get_title(media_type, radarr_id, sonarr_series_id, sonarr_episode_id)
+        translator_name = settings.translator.translator_type.replace("_", " ").title()
+        job_label = f'Translating {title} ({from_lang.upper()} to {to_lang.upper()})' if title else \
+                    f'Translating from {from_lang.upper()} to {to_lang.upper()} using {translator_name}'
+        jobs_queue.add_job_from_function(job_label, is_progress=True)
         return
 
     translator_label = settings.translator.translator_type.replace("_", " ").title()
