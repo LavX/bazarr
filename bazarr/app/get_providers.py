@@ -425,7 +425,7 @@ def provider_throttle(name, exception, ids=None, language=None):
 
     throttle_until = datetime.datetime.now() + throttle_delta
 
-    if cls_name not in VALID_COUNT_EXCEPTIONS or throttled_count(name):
+    if cls_name not in VALID_COUNT_EXCEPTIONS or throttled_count(name, exception):
         if cls_name == 'ValueError' and isinstance(exception.args, tuple) and len(exception.args) and exception.args[
             0].startswith('unsupported pickle protocol'):
             for fn in subliminal_cache_region.backend.all_filenames:
@@ -466,7 +466,7 @@ def _get_traceback_info(exc: Exception):
     return message + extra
 
 
-def throttled_count(name):
+def throttled_count(name, exception=None):
     global throttle_count
     if name in list(throttle_count.keys()):
         if 'count' in list(throttle_count[name].keys()):
@@ -484,9 +484,15 @@ def throttled_count(name):
         return True
     if throttle_count[name]['time'] <= datetime.datetime.now():
         throttle_count[name] = {"count": 1, "time": (datetime.datetime.now() + datetime.timedelta(seconds=120))}
-    logging.info("Provider %s throttle count %s of 5, waiting 5sec and trying again", name,
-                 throttle_count[name]['count'])
-    time.sleep(5)
+
+    # Respect Retry-After from the exception if available, otherwise default to 5s
+    wait_seconds = 5
+    if exception and hasattr(exception, 'retry_after') and exception.retry_after:
+        wait_seconds = min(exception.retry_after, 30)  # cap at 30s
+
+    logging.info("Provider %s throttle count %s of 5, waiting %ds and trying again", name,
+                 throttle_count[name]['count'], wait_seconds)
+    time.sleep(wait_seconds)
     return False
 
 

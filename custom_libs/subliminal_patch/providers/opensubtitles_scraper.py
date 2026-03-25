@@ -55,12 +55,13 @@ class OpenSubtitlesScraperMixin:
         response = requests.post(url, json=data, headers=headers, timeout=120)
 
         if response.status_code in (429, 503):
-            retry_after = response.headers.get("Retry-After")
+            retry_after_str = response.headers.get("Retry-After")
             response.close()
+            retry_after = int(retry_after_str) if retry_after_str and retry_after_str.isdigit() else None
             msg = "Scraper service busy"
             if retry_after:
                 msg = f"{msg}, retry after {retry_after}s"
-            raise APIThrottled(msg)
+            raise APIThrottled(msg, retry_after=retry_after)
 
         response.raise_for_status()
         result = response.json()
