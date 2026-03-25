@@ -7,6 +7,7 @@ from flask_restx import Resource, Namespace
 
 from app.config import settings
 from app.jobs_queue import jobs_queue
+from subtitles.tools.translate.services.auth import get_translator_auth_headers
 from ..utils import authenticate
 
 api_ns_translator = Namespace('Translator', description='AI Subtitle Translator service operations')
@@ -35,7 +36,7 @@ class TranslatorStatus(Resource):
             return {"error": "AI Subtitle Translator service URL not configured"}, 503
 
         try:
-            response = requests.get(f"{service_url}/api/v1/status", timeout=10)
+            response = requests.get(f"{service_url}/api/v1/status", headers=get_translator_auth_headers(), timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 # Count Bazarr-side pending translation jobs
@@ -53,7 +54,7 @@ class TranslatorStatus(Resource):
                 }
                 return data, 200
             else:
-                return {"error": f"Service returned {response.status_code}"}, response.status_code
+                return {"error": f"Service returned {response.status_code}"}, 502
         except requests.exceptions.ConnectionError:
             return {"error": "Cannot connect to AI Subtitle Translator service"}, 503
         except requests.exceptions.Timeout:
@@ -76,11 +77,11 @@ class TranslatorJobs(Resource):
             return {"error": "AI Subtitle Translator service URL not configured"}, 503
 
         try:
-            response = requests.get(f"{service_url}/api/v1/jobs", timeout=10)
+            response = requests.get(f"{service_url}/api/v1/jobs", headers=get_translator_auth_headers(), timeout=10)
             if response.status_code == 200:
                 return response.json(), 200
             else:
-                return {"error": f"Service returned {response.status_code}"}, response.status_code
+                return {"error": f"Service returned {response.status_code}"}, 502
         except requests.exceptions.ConnectionError:
             return {"error": "Cannot connect to AI Subtitle Translator service"}, 503
         except requests.exceptions.Timeout:
@@ -103,13 +104,13 @@ class TranslatorJob(Resource):
             return {"error": "AI Subtitle Translator service URL not configured"}, 503
 
         try:
-            response = requests.get(f"{service_url}/api/v1/jobs/{job_id}", timeout=10)
+            response = requests.get(f"{service_url}/api/v1/jobs/{job_id}", headers=get_translator_auth_headers(), timeout=10)
             if response.status_code == 200:
                 return response.json(), 200
             elif response.status_code == 404:
                 return {"error": "Job not found"}, 404
             else:
-                return {"error": f"Service returned {response.status_code}"}, response.status_code
+                return {"error": f"Service returned {response.status_code}"}, 502
         except requests.exceptions.ConnectionError:
             return {"error": "Cannot connect to AI Subtitle Translator service"}, 503
         except Exception as e:
@@ -127,13 +128,13 @@ class TranslatorJob(Resource):
             return {"error": "AI Subtitle Translator service URL not configured"}, 503
 
         try:
-            response = requests.delete(f"{service_url}/api/v1/jobs/{job_id}", timeout=10)
+            response = requests.delete(f"{service_url}/api/v1/jobs/{job_id}", headers=get_translator_auth_headers(), timeout=10)
             if response.status_code == 200:
                 return response.json(), 200
             elif response.status_code == 404:
                 return {"error": "Job not found"}, 404
             else:
-                return {"error": f"Service returned {response.status_code}"}, response.status_code
+                return {"error": f"Service returned {response.status_code}"}, 502
         except requests.exceptions.ConnectionError:
             return {"error": "Cannot connect to AI Subtitle Translator service"}, 503
         except Exception as e:
@@ -154,11 +155,11 @@ class TranslatorModels(Resource):
             return {"error": "AI Subtitle Translator service URL not configured"}, 503
 
         try:
-            response = requests.get(f"{service_url}/api/v1/models", timeout=10)
+            response = requests.get(f"{service_url}/api/v1/models", headers=get_translator_auth_headers(), timeout=10)
             if response.status_code == 200:
                 return response.json(), 200
             else:
-                return {"error": f"Service returned {response.status_code}"}, response.status_code
+                return {"error": f"Service returned {response.status_code}"}, 502
         except requests.exceptions.ConnectionError:
             return {"error": "Cannot connect to AI Subtitle Translator service"}, 503
         except requests.exceptions.Timeout:
@@ -181,11 +182,11 @@ class TranslatorConfig(Resource):
             return {"error": "AI Subtitle Translator service URL not configured"}, 503
 
         try:
-            response = requests.get(f"{service_url}/api/v1/config", timeout=10)
+            response = requests.get(f"{service_url}/api/v1/config", headers=get_translator_auth_headers(), timeout=10)
             if response.status_code == 200:
                 return response.json(), 200
             else:
-                return {"error": f"Service returned {response.status_code}"}, response.status_code
+                return {"error": f"Service returned {response.status_code}"}, 502
         except requests.exceptions.ConnectionError:
             return {"error": "Cannot connect to AI Subtitle Translator service"}, 503
         except Exception as e:
@@ -231,9 +232,16 @@ class TranslatorTest(Resource):
             response = requests.post(
                 f"{service_url}/api/v1/test",
                 json={"apiKey": api_key},
+                headers={"Content-Type": "application/json", **get_translator_auth_headers(encryption_key)},
                 timeout=10
             )
-            return response.json(), response.status_code
+            if response.status_code == 200:
+                return response.json(), 200
+            else:
+                try:
+                    return response.json(), 502
+                except (ValueError, requests.exceptions.JSONDecodeError):
+                    return {"error": f"Service returned {response.status_code}"}, 502
         except requests.exceptions.ConnectionError:
             return {"error": "Cannot connect to AI Subtitle Translator service"}, 503
         except requests.exceptions.Timeout:

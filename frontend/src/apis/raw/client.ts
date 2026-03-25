@@ -9,9 +9,12 @@ import { setAuthenticated } from "@/utilities/event";
 function GetErrorMessage(data: unknown, defaultMsg = "Unknown error"): string {
   if (typeof data === "string") {
     return data;
-  } else {
-    return defaultMsg;
+  } else if (typeof data === "object" && data !== null) {
+    const obj = data as Record<string, unknown>;
+    if (typeof obj.error === "string") return obj.error;
+    if (typeof obj.message === "string") return obj.message;
   }
+  return defaultMsg;
 }
 
 class BazarrClient {
