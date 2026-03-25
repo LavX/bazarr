@@ -73,11 +73,24 @@ class TestAuthHeadersInProxy:
     """Test that auth headers are used in the translator proxy module."""
 
     def test_proxy_imports_shared_auth(self):
-        """Verify translator.py uses the shared auth function, not a local copy."""
-        import inspect
-        from api.translator.translator import get_translator_auth_headers as proxy_fn
-        from subtitles.tools.translate.services.auth import get_translator_auth_headers as shared_fn
-        assert proxy_fn is shared_fn
+        """Verify translator.py imports the shared auth function (source inspection)."""
+        import ast
+        import os
+        # Read the source directly to avoid triggering api.__init__ side effects
+        translator_path = os.path.join(
+            os.path.dirname(__file__), "..", "..", "bazarr", "api", "translator", "translator.py"
+        )
+        with open(translator_path) as f:
+            tree = ast.parse(f.read())
+        # Check that there's an import of get_translator_auth_headers from the shared module
+        found = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                if (node.module == "subtitles.tools.translate.services.auth"
+                        and any(alias.name == "get_translator_auth_headers" for alias in node.names)):
+                    found = True
+                    break
+        assert found, "translator.py should import get_translator_auth_headers from shared auth module"
 
     def test_translator_service_imports_shared_auth(self):
         """Verify openrouter_translator.py uses the shared auth function."""
