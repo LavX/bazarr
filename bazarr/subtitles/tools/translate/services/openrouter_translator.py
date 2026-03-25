@@ -17,6 +17,7 @@ from app.event_handler import show_progress, hide_progress, show_message
 from app.jobs_queue import jobs_queue
 
 from ..core.translator_utils import add_translator_info, create_process_result, get_title
+from .auth import get_translator_auth_headers
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +199,7 @@ class OpenRouterTranslatorService:
             submit_response = requests.post(
                 f"{base_url}/api/v1/jobs/translate/content",
                 json=payload,
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json", **get_translator_auth_headers()},
                 timeout=30
             )
 
@@ -238,6 +239,7 @@ class OpenRouterTranslatorService:
             try:
                 status_response = requests.get(
                     f"{base_url}/api/v1/jobs/{job_id}",
+                    headers=get_translator_auth_headers(),
                     timeout=10
                 )
 
@@ -320,7 +322,7 @@ class OpenRouterTranslatorService:
         response = requests.post(
             f"{base_url}/api/v1/translate/content",
             json=payload,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **get_translator_auth_headers()},
             timeout=1800
         )
 
