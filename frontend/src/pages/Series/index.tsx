@@ -1,6 +1,6 @@
 import { FunctionComponent, useCallback, useMemo, useState } from "react";
 import { Link } from "react-router";
-import { Anchor, Checkbox, Container, Group, Menu, Progress, Tooltip } from "@mantine/core";
+import { ActionIcon, Anchor, Checkbox, Container, Group, Menu, Progress, Tooltip } from "@mantine/core";
 import { useCombobox } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import { faBookmark as farBookmark } from "@fortawesome/free-regular-svg-icons";
@@ -8,6 +8,7 @@ import {
   faArrowUp,
   faBookmark,
   faCheck,
+  faEllipsisVertical,
   faHardDrive,
   faLanguage,
   faMagnifyingGlass,
@@ -24,7 +25,7 @@ import { uniqBy } from "lodash";
 import { useLanguageProfiles, useSeriesModification, useSeriesPagination } from "@/apis/hooks";
 import { useInstanceName } from "@/apis/hooks/site";
 import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
-import { Action, GroupedSelector, GroupedSelectorOptions, Toolbox } from "@/components";
+import { GroupedSelector, GroupedSelectorOptions, Toolbox } from "@/components";
 import { AudioList } from "@/components/bazarr";
 import LanguageProfileName from "@/components/bazarr/LanguageProfile";
 import { BatchModConfirmModal } from "@/components/forms/BatchModConfirmForm";
@@ -250,26 +251,109 @@ const SeriesView: FunctionComponent = () => {
         },
       },
       {
-        id: "sonarrSeriesId",
+        id: "actions",
         cell: ({ row: { original } }) => {
+          const batchItem: BatchItem = { type: "series", sonarrSeriesId: original.sonarrSeriesId };
+          const wantedItem: WantedItem = { type: "series", sonarrSeriesId: original.sonarrSeriesId, title: original.title };
           return (
-            <Action
-              label="Edit Series"
-              tooltip={{ position: "left" }}
-              onClick={() =>
-                modals.openContextModal(
-                  ItemEditModal,
-                  {
-                    mutation,
-                    item: original,
-                  },
-                  {
-                    title: original.title,
-                  },
-                )
-              }
-              icon={faWrench}
-            ></Action>
+            <Menu shadow="md" width={220} position="bottom-end">
+              <Menu.Target>
+                <Tooltip label="Actions">
+                  <ActionIcon variant="subtle" size="sm">
+                    <FontAwesomeIcon icon={faEllipsisVertical} />
+                  </ActionIcon>
+                </Tooltip>
+              </Menu.Target>
+              <Menu.Dropdown>
+                <Menu.Item
+                  leftSection={<FontAwesomeIcon icon={faWrench} size="sm" />}
+                  onClick={() =>
+                    modals.openContextModal(
+                      ItemEditModal,
+                      { mutation, item: original },
+                      { title: original.title },
+                    )
+                  }
+                >
+                  Edit
+                </Menu.Item>
+                <Menu.Divider />
+                <Menu.Item
+                  leftSection={<FontAwesomeIcon icon={faSync} size="sm" />}
+                  onClick={() =>
+                    modals.openContextModal(MassSyncModal, { items: [batchItem] })
+                  }
+                >
+                  Sync Subtitles
+                </Menu.Item>
+                <Menu.Item
+                  leftSection={<FontAwesomeIcon icon={faLanguage} size="sm" />}
+                  onClick={() =>
+                    modals.openContextModal(MassTranslateModal, { items: [wantedItem] })
+                  }
+                >
+                  Translate
+                </Menu.Item>
+                <Menu.Divider />
+                <Menu.Label>Subtitle Tools</Menu.Label>
+                {(
+                  [
+                    ["OCR_fixes", "OCR Fixes"],
+                    ["common", "Common Fixes"],
+                    ["remove_HI", "Remove Hearing Impaired"],
+                    ["remove_tags", "Remove Style Tags"],
+                    ["fix_uppercase", "Fix Uppercase"],
+                    ["reverse_rtl", "Reverse RTL"],
+                  ] as [BatchAction, string][]
+                ).map(([action, label]) => (
+                  <Menu.Item
+                    key={action}
+                    onClick={() =>
+                      modals.openContextModal(BatchModConfirmModal, {
+                        items: [batchItem],
+                        action,
+                      })
+                    }
+                  >
+                    {label}
+                  </Menu.Item>
+                ))}
+                <Menu.Divider />
+                <Menu.Item
+                  leftSection={<FontAwesomeIcon icon={faHardDrive} size="sm" />}
+                  onClick={() =>
+                    modals.openContextModal(BatchModConfirmModal, {
+                      items: [batchItem],
+                      action: "scan-disk" as BatchAction,
+                    })
+                  }
+                >
+                  Scan Disk
+                </Menu.Item>
+                <Menu.Item
+                  leftSection={<FontAwesomeIcon icon={faMagnifyingGlass} size="sm" />}
+                  onClick={() =>
+                    modals.openContextModal(BatchModConfirmModal, {
+                      items: [batchItem],
+                      action: "search-missing" as BatchAction,
+                    })
+                  }
+                >
+                  Search Missing
+                </Menu.Item>
+                <Menu.Item
+                  leftSection={<FontAwesomeIcon icon={faArrowUp} size="sm" />}
+                  onClick={() =>
+                    modals.openContextModal(BatchModConfirmModal, {
+                      items: [batchItem],
+                      action: "upgrade" as BatchAction,
+                    })
+                  }
+                >
+                  Upgrade
+                </Menu.Item>
+              </Menu.Dropdown>
+            </Menu>
           );
         },
       },
