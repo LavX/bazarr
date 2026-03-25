@@ -178,10 +178,12 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
         isObject,
         "Please select a source language",
       ),
-      targetLanguage: FormUtils.validation(
-        isObject,
-        "Please select a target language",
-      ),
+      targetLanguage: (value: Language.Info | null, values: { sourceLanguage: Language.Info | null }) => {
+        if (!isObject(value)) return "Please select a target language";
+        if (value && values.sourceLanguage && value.code2 === values.sourceLanguage.code2)
+          return "Target language must be different from source";
+        return null;
+      },
     },
   });
 
