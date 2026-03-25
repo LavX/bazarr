@@ -45,7 +45,7 @@ window.ResizeObserver = ResizeObserver;
 window.scrollTo = () => {};
 
 beforeAll(() => {
-  server.listen({ onUnhandledRequest: "warn" });
+  server.listen({ onUnhandledRequest: "error" });
 });
 
 beforeEach(() => {
@@ -57,6 +57,12 @@ beforeEach(() => {
           theme: "auto",
         },
       });
+    }),
+    http.get("/api/system/languages/audio", () => {
+      return HttpResponse.json([]);
+    }),
+    http.get("/api/system/languages/profiles", () => {
+      return HttpResponse.json([]);
     }),
   );
 });
