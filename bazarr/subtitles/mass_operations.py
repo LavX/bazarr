@@ -15,17 +15,13 @@ from subtitles.mass_download.series import series_download_subtitles
 from subtitles.mass_download.movies import movies_download_subtitles
 from utilities.path_mappings import path_mappings
 from utilities.video_analyzer import languages_from_colon_seperated_string
+from sqlalchemy import or_
 
 logger = logging.getLogger(__name__)
 
 VALID_ACTIONS = {
     'sync', 'translate', 'OCR_fixes', 'common', 'remove_HI',
     'remove_tags', 'fix_uppercase', 'reverse_rtl', 'scan-disk', 'search-missing',
-}
-
-SUBTITLE_ACTIONS = {
-    'sync', 'translate', 'OCR_fixes', 'common', 'remove_HI',
-    'remove_tags', 'fix_uppercase', 'reverse_rtl',
 }
 
 MEDIA_ACTIONS = {'scan-disk', 'search-missing'}
@@ -142,7 +138,6 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
         TableEpisodes.subtitles,
     )
 
-    from sqlalchemy import or_
     filters = []
     if episode_ids:
         filters.append(TableEpisodes.sonarrEpisodeId.in_(episode_ids))
@@ -283,7 +278,6 @@ def _process_subtitle_item(item, action, options, job_id):
         )
     elif action == 'translate':
         from subtitles.tools.translate.main import translate_subtitles_file
-        options = options or {}
         media_type = 'series' if item['sonarr_series_id'] else 'movie'
         return translate_subtitles_file(
             video_path=item['video_path'],
@@ -337,20 +331,20 @@ def _process_media_action(items, action, job_id):
         try:
             if action == 'scan-disk':
                 if item_type in ('series', 'episode'):
-                    series_id = item.get('sonarrSeriesId') or item.get('sonarr_series_id')
+                    series_id = item.get('sonarrSeriesId')
                     series_scan_subtitles(series_id)
                 elif item_type == 'movie':
-                    radarr_id = item.get('radarrId') or item.get('radarr_id')
+                    radarr_id = item.get('radarrId')
                     movies_scan_subtitles(radarr_id)
                 else:
                     skipped += 1
                     continue
             elif action == 'search-missing':
                 if item_type in ('series', 'episode'):
-                    series_id = item.get('sonarrSeriesId') or item.get('sonarr_series_id')
+                    series_id = item.get('sonarrSeriesId')
                     series_download_subtitles(series_id)
                 elif item_type == 'movie':
-                    radarr_id = item.get('radarrId') or item.get('radarr_id')
+                    radarr_id = item.get('radarrId')
                     movies_download_subtitles(radarr_id)
                 else:
                     skipped += 1
@@ -381,13 +375,6 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
     """
     if action not in VALID_ACTIONS:
         return {'error': f'Invalid action: {action}'}
-
-    # Schedule as background job when called without job_id and no specific items
-    if not job_id and items is None:
-        jobs_queue.add_job_from_function(
-            f"Mass {action} All Subtitles", is_progress=True
-        )
-        return None
 
     options = options or {}
 

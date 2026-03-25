@@ -65,7 +65,7 @@ const BatchModConfirmForm: FunctionComponent<BatchModConfirmFormProps> = ({
 
       <Divider />
 
-      <Group justify="apart">
+      <Group justify="space-between">
         <Button variant="default" onClick={() => modals.closeSelf()}>
           Cancel
         </Button>

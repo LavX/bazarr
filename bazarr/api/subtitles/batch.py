@@ -34,7 +34,6 @@ class BatchOperation(Resource):
         'radarrId': fields.Integer(description='Radarr Movie ID'),
         'sourceLanguage': fields.String(description='Source language (translate only)'),
         'targetLanguage': fields.String(description='Target language (translate only)'),
-        'subtitlePath': fields.String(description='Subtitle path (translate only)'),
         'forced': fields.Boolean(description='Forced subtitle flag'),
         'hi': fields.Boolean(description='Hearing impaired flag'),
     })
@@ -81,6 +80,11 @@ class BatchOperation(Resource):
 
         if not items:
             return {'error': 'Empty items list'}, 400
+
+        MAX_BATCH_SIZE = 10000
+
+        if len(items) > MAX_BATCH_SIZE:
+            return {'error': f'Batch size exceeds maximum of {MAX_BATCH_SIZE}'}, 400
 
         options = data.get('options', {})
 

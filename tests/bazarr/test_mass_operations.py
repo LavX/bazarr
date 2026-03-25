@@ -578,15 +578,94 @@ class TestProcessMediaActions:
         assert result['queued'] == 0
 
 
+class TestForceResync:
+    """Test that force_resync=True collects already-synced subtitles."""
+
+    def _make_episode(self, ep_id=1, series_id=10, path='/video/ep1.mkv',
+                      subtitles="[['en', '/subs/ep1.en.srt']]"):
+        ep = MagicMock()
+        ep.sonarrEpisodeId = ep_id
+        ep.sonarrSeriesId = series_id
+        ep.path = path
+        ep.subtitles = subtitles
+        return ep
+
+    @patch('bazarr.subtitles.mass_operations.languages_from_colon_seperated_string')
+    @patch('bazarr.subtitles.mass_operations.os.path.isfile', return_value=True)
+    @patch('bazarr.subtitles.mass_operations.path_mappings')
+    @patch('bazarr.subtitles.mass_operations._get_synced_episode_paths')
+    @patch('bazarr.subtitles.mass_operations._get_synced_movie_paths', return_value=set())
+    @patch('bazarr.subtitles.mass_operations.database')
+    @patch('bazarr.subtitles.mass_operations.settings')
+    def test_force_resync_collects_already_synced(self, mock_settings, mock_db, mock_synced_mov,
+                                                   mock_synced_ep, mock_path_map, mock_isfile, mock_lang):
+        from bazarr.subtitles.mass_operations import _collect_subtitle_items
+
+        mock_settings.subsync.max_offset_seconds = 60
+        mock_settings.subsync.gss = True
+        mock_settings.subsync.no_fix_framerate = True
+        mock_path_map.path_replace.side_effect = lambda x: x
+        mock_path_map.path_replace_reverse.side_effect = lambda x: x
+        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
+        mock_synced_ep.return_value = {'/subs/ep1.en.srt'}
+
+        episode = self._make_episode()
+        mock_db.execute.return_value.all.return_value = [episode]
+
+        items_list = [{'type': 'episode', 'sonarrEpisodeId': 1}]
+        items, skipped = _collect_subtitle_items(items_list, action='sync', options={'force_resync': True})
+
+        # With force_resync=True, the already-synced subtitle should still be collected
+        assert len(items) == 1
+        assert skipped == 0
+
+
+class TestTranslateDefaultOptions:
+    """Test translate action uses defaults when options omit from_lang/to_lang."""
+
+    @patch('subtitles.tools.translate.main.translate_subtitles_file', return_value=True)
+    def test_translate_default_options(self, mock_translate):
+        from bazarr.subtitles.mass_operations import _process_subtitle_item
+        item = {
+            'video_path': '/video/test.mkv',
+            'srt_path': '/subs/test.en.srt',
+            'srt_lang': 'en',
+            'forced': False,
+            'hi': False,
+            'sonarr_series_id': 10,
+            'sonarr_episode_id': 1,
+            'radarr_id': None,
+            'max_offset_seconds': '60',
+            'no_fix_framerate': True,
+            'gss': True,
+        }
+        result = _process_subtitle_item(item, 'translate', {}, 'test_job')
+        assert result is True
+        call_kwargs = mock_translate.call_args[1]
+        # from_lang defaults to item's srt_lang
+        assert call_kwargs['from_lang'] == 'en'
+        # to_lang defaults to 'en'
+        assert call_kwargs['to_lang'] == 'en'
+
+
+class TestMediaActionEpisodeType:
+    """Test scan-disk with type='episode'."""
+
+    @patch('bazarr.subtitles.mass_operations.series_scan_subtitles')
+    @patch('bazarr.subtitles.mass_operations.jobs_queue')
+    def test_scan_disk_episode_type(self, mock_jobs_queue, mock_scan):
+        from bazarr.subtitles.mass_operations import _process_media_action
+
+        items = [{'type': 'episode', 'sonarrSeriesId': 5}]
+        result = _process_media_action(items, action='scan-disk', job_id='test')
+
+        mock_scan.assert_called_once_with(5)
+        assert result['queued'] == 1
+        assert result['skipped'] == 0
+
+
 class TestSchedulerIntegration:
     """Test scheduler integration when items=None."""
-
-    @patch('bazarr.subtitles.mass_operations.jobs_queue')
-    def test_items_none_without_job_id_schedules_job(self, mock_jobs_queue):
-        from bazarr.subtitles.mass_operations import mass_batch_operation
-        result = mass_batch_operation(items=None, action='sync', job_id=None)
-        mock_jobs_queue.add_job_from_function.assert_called_once()
-        assert result is None
 
     @patch('bazarr.subtitles.mass_operations._collect_subtitle_items')
     @patch('bazarr.subtitles.mass_operations.jobs_queue')
