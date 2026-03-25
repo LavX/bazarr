@@ -298,7 +298,7 @@ def _process_subtitle_item(item, action, options, job_id):
         )
     elif action == 'translate':
         from subtitles.tools.translate.main import translate_subtitles_file
-        media_type = 'series' if item['sonarr_series_id'] else 'movie'
+        media_type = 'series' if item['sonarr_series_id'] else 'movies'
         return translate_subtitles_file(
             video_path=item['video_path'],
             source_srt_file=item['srt_path'],

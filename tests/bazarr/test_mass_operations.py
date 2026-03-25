@@ -124,7 +124,7 @@ class TestProcessSubtitleItem:
         assert result is True
         mock_translate.assert_called_once()
         call_kwargs = mock_translate.call_args[1]
-        assert call_kwargs['media_type'] == 'movie'
+        assert call_kwargs['media_type'] == 'movies'
         assert call_kwargs['radarr_id'] == 5
 
     def test_unknown_action_returns_false(self):
