@@ -3,8 +3,22 @@
 import logging
 from flask_restx import Resource, Namespace, fields
 
+from app.jobs_queue import jobs_queue
 from subtitles.mass_operations import mass_batch_operation, VALID_ACTIONS
 from ..utils import authenticate
+
+ACTION_LABELS = {
+    'sync': 'Syncing Subtitles',
+    'translate': 'Translating Subtitles',
+    'OCR_fixes': 'Applying OCR Fixes',
+    'common': 'Applying Common Fixes',
+    'remove_HI': 'Removing Hearing Impaired Tags',
+    'remove_tags': 'Removing Style Tags',
+    'fix_uppercase': 'Fixing Uppercase',
+    'reverse_rtl': 'Reversing RTL',
+    'scan-disk': 'Scanning Disk',
+    'search-missing': 'Searching Missing Subtitles',
+}
 
 logger = logging.getLogger(__name__)
 
@@ -70,14 +84,19 @@ class BatchOperation(Resource):
 
         options = data.get('options', {})
 
-        result = mass_batch_operation(
-            items=items,
-            action=action,
-            options=options,
-            job_id=f'batch_{action}_api',
+        label = ACTION_LABELS.get(action, f'Batch {action}')
+        job_name = f"{label} ({len(items)} items)"
+
+        job_id = jobs_queue.feed_jobs_pending_queue(
+            job_name=job_name,
+            module='subtitles.mass_operations',
+            func='mass_batch_operation',
+            kwargs={
+                'items': items,
+                'action': action,
+                'options': options,
+            },
+            is_progress=True,
         )
 
-        if result is None:
-            return {'error': 'Batch operation failed'}, 500
-
-        return result, 200
+        return {'queued': len(items), 'skipped': 0, 'errors': [], 'job_id': job_id}, 200
