@@ -299,7 +299,10 @@ def _process_subtitle_item(item, action, options, job_id):
     elif action == 'translate':
         from subtitles.tools.translate.main import translate_subtitles_file
         media_type = 'series' if item['sonarr_series_id'] else 'movies'
-        return translate_subtitles_file(
+        # Don't pass the batch job_id to translate. translate_subtitles_file
+        # has its own job/progress lifecycle that would hijack the batch job.
+        # Calling without job_id makes it queue as its own separate job.
+        translate_subtitles_file(
             video_path=item['video_path'],
             source_srt_file=item['srt_path'],
             from_lang=options.get('from_lang', item['srt_lang']),
@@ -310,8 +313,8 @@ def _process_subtitle_item(item, action, options, job_id):
             sonarr_series_id=item['sonarr_series_id'],
             sonarr_episode_id=item['sonarr_episode_id'],
             radarr_id=item['radarr_id'],
-            job_id=job_id,
         )
+        return True
     elif action in MOD_ACTIONS:
         subtitles_apply_mods(
             item['srt_lang'],

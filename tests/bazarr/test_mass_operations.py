@@ -102,6 +102,7 @@ class TestProcessSubtitleItem:
         item = self._make_item()
         result = _process_subtitle_item(item, 'translate', {'from_lang': 'en', 'to_lang': 'hu'}, 'test_job')
         assert result is True
+        # translate is called without job_id so it queues as its own job
         mock_translate.assert_called_once_with(
             video_path='/video/test.mkv',
             source_srt_file='/subs/test.en.srt',
@@ -113,7 +114,6 @@ class TestProcessSubtitleItem:
             sonarr_series_id=10,
             sonarr_episode_id=1,
             radarr_id=None,
-            job_id='test_job',
         )
 
     @patch('subtitles.tools.translate.main.translate_subtitles_file', return_value=True)
@@ -126,6 +126,7 @@ class TestProcessSubtitleItem:
         call_kwargs = mock_translate.call_args[1]
         assert call_kwargs['media_type'] == 'movies'
         assert call_kwargs['radarr_id'] == 5
+        assert 'job_id' not in call_kwargs
 
     def test_unknown_action_returns_false(self):
         from bazarr.subtitles.mass_operations import _process_subtitle_item
