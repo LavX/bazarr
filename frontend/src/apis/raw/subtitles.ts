@@ -10,7 +10,8 @@ export type BatchAction =
   | "fix_uppercase"
   | "reverse_rtl"
   | "scan-disk"
-  | "search-missing";
+  | "search-missing"
+  | "upgrade";
 
 export interface BatchItem {
   type: "episode" | "movie" | "series";

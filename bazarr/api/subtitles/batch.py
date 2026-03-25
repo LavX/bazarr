@@ -18,6 +18,7 @@ ACTION_LABELS = {
     'reverse_rtl': 'Reversing RTL',
     'scan-disk': 'Scanning Disk',
     'search-missing': 'Searching Missing Subtitles',
+    'upgrade': 'Upgrading Subtitles',
 }
 
 logger = logging.getLogger(__name__)

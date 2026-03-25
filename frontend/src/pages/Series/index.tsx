@@ -5,6 +5,7 @@ import { useCombobox } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import { faBookmark as farBookmark } from "@fortawesome/free-regular-svg-icons";
 import {
+  faArrowUp,
   faBookmark,
   faCheck,
   faHardDrive,
@@ -368,6 +369,18 @@ const SeriesView: FunctionComponent = () => {
           }
         >
           Search Missing
+        </Toolbox.Button>
+
+        <Toolbox.Button
+          icon={faArrowUp}
+          onClick={() =>
+            modals.openContextModal(BatchModConfirmModal, {
+              items: toBatchItems(),
+              action: "upgrade" as BatchAction,
+            })
+          }
+        >
+          Upgrade
         </Toolbox.Button>
       </Group>
     );

@@ -14,6 +14,7 @@ const ACTION_LABELS: Record<string, string> = {
   reverse_rtl: "Reverse RTL",
   "scan-disk": "Scan Disk",
   "search-missing": "Search Missing Subtitles",
+  upgrade: "Upgrade Subtitles",
 };
 
 interface BatchModConfirmFormProps {

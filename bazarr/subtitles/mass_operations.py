@@ -13,6 +13,7 @@ from subtitles.indexer.series import series_scan_subtitles
 from subtitles.indexer.movies import movies_scan_subtitles
 from subtitles.mass_download.series import series_download_subtitles
 from subtitles.mass_download.movies import movies_download_subtitles
+from subtitles.upgrade import upgrade_episodes_subtitles, upgrade_movies_subtitles
 from utilities.path_mappings import path_mappings
 from utilities.video_analyzer import languages_from_colon_seperated_string
 from sqlalchemy import or_
@@ -21,10 +22,10 @@ logger = logging.getLogger(__name__)
 
 VALID_ACTIONS = {
     'sync', 'translate', 'OCR_fixes', 'common', 'remove_HI',
-    'remove_tags', 'fix_uppercase', 'reverse_rtl', 'scan-disk', 'search-missing',
+    'remove_tags', 'fix_uppercase', 'reverse_rtl', 'scan-disk', 'search-missing', 'upgrade',
 }
 
-MEDIA_ACTIONS = {'scan-disk', 'search-missing'}
+MEDIA_ACTIONS = {'scan-disk', 'search-missing', 'upgrade'}
 
 MOD_ACTIONS = {'OCR_fixes', 'common', 'remove_HI', 'remove_tags', 'fix_uppercase', 'reverse_rtl'}
 
@@ -323,11 +324,11 @@ def _process_subtitle_item(item, action, options, job_id):
 
 
 def _process_media_action(items, action, job_id):
-    """Handle scan-disk and search-missing actions for series/movies.
+    """Handle scan-disk, search-missing, and upgrade actions for series/movies.
 
     Args:
         items: List of dicts with 'type' and IDs.
-        action: 'scan-disk' or 'search-missing'.
+        action: 'scan-disk', 'search-missing', or 'upgrade'.
         job_id: Job ID for progress tracking.
 
     Returns:
@@ -365,6 +366,14 @@ def _process_media_action(items, action, job_id):
                 elif item_type == 'movie':
                     radarr_id = item.get('radarrId')
                     movies_download_subtitles(radarr_id)
+                else:
+                    skipped += 1
+                    continue
+            elif action == 'upgrade':
+                if item_type in ('series', 'episode'):
+                    upgrade_episodes_subtitles(job_id=job_id)
+                elif item_type == 'movie':
+                    upgrade_movies_subtitles(job_id=job_id)
                 else:
                     skipped += 1
                     continue
