@@ -1,4 +1,4 @@
-import { FunctionComponent, useMemo } from "react";
+import React, { FunctionComponent, useMemo } from "react";
 import {
   Badge,
   Card,
@@ -37,7 +37,7 @@ const SystemReleasesView: FunctionComponent = () => {
 };
 
 function renderInlineMarkdown(text: string) {
-  const parts: (string | JSX.Element)[] = [];
+  const parts: (string | React.JSX.Element)[] = [];
   const regex = /`([^`]+)`|\*\*([^*]+)\*\*|\[([^\]]+)\]\([^)]+\)/g;
   let lastIndex = 0;
   let match;
@@ -63,11 +63,12 @@ function renderInlineMarkdown(text: string) {
   return parts;
 }
 
-function MarkdownBody({ text }: { text: string }) {
+function MarkdownBody({ text }: { text: string | string[] }) {
   const elements = useMemo(() => {
-    const lines = text.split("\n");
-    const result: JSX.Element[] = [];
-    let listItems: JSX.Element[] = [];
+    const normalized = Array.isArray(text) ? text.join("\n") : text;
+    const lines = normalized.split("\n");
+    const result: React.JSX.Element[] = [];
+    let listItems: React.JSX.Element[] = [];
     let listKey = 0;
 
     const flushList = () => {

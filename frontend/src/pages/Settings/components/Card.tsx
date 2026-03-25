@@ -1,4 +1,4 @@
-import { FunctionComponent } from "react";
+import React, { FunctionComponent } from "react";
 import {
   Center,
   MantineStyleProp,
@@ -13,7 +13,7 @@ import styles from "./Card.module.scss";
 
 interface CardProps {
   description?: string;
-  header?: string;
+  header?: React.ReactNode;
   lineClamp?: number | undefined;
   onClick?: () => void;
   plus?: boolean;

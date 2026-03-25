@@ -389,7 +389,7 @@ interface ReleaseInfo {
   date: string;
   name: string;
   prerelease: boolean;
-  body: string;
+  body: string | string[];
   repo?: string;
 }
 

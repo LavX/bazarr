@@ -80,6 +80,7 @@ declare namespace Settings {
     use_scenename: boolean;
     use_sonarr: boolean;
     utf8_encode: boolean;
+    provider_priorities?: string;
     wanted_search_frequency: number;
     wanted_search_frequency_movie: number;
     use_external_webhook?: boolean;
