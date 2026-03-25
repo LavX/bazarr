@@ -90,6 +90,13 @@ class SubtitlesApi extends BaseApi {
     });
     return response.data;
   }
+
+  async upgradable(): Promise<{ movies: number[]; series: number[] }> {
+    const response = await this.get<{ movies: number[]; series: number[] }>(
+      "/upgradable",
+    );
+    return response;
+  }
 }
 
 const subtitlesApi = new SubtitlesApi();

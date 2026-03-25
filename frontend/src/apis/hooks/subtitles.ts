@@ -183,6 +183,14 @@ export function useRefTracksByMovieId(
   });
 }
 
+export function useUpgradableItems() {
+  return useQuery({
+    queryKey: [QueryKeys.Subtitles, "upgradable"],
+    queryFn: () => api.subtitles.upgradable(),
+    refetchInterval: 60000,
+  });
+}
+
 export function useBatchAction() {
   const client = useQueryClient();
   return useMutation({

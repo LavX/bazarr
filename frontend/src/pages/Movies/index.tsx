@@ -22,6 +22,7 @@ import { ColumnDef } from "@tanstack/react-table";
 import { uniqBy, uniqueId } from "lodash";
 import { useLanguageProfiles, useMovieModification, useMoviesPagination } from "@/apis/hooks";
 import { useInstanceName } from "@/apis/hooks/site";
+import { useUpgradableItems } from "@/apis/hooks/subtitles";
 import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
 import { GroupedSelector, GroupedSelectorOptions, Toolbox } from "@/components";
 import { AudioList } from "@/components/bazarr";
@@ -45,6 +46,11 @@ const MovieView: FunctionComponent = () => {
   const [excludeLanguages, setExcludeLanguages] = useState<string[]>([]);
 
   const query = useMoviesPagination(true);
+  const { data: upgradableData } = useUpgradableItems();
+  const upgradableMovieIds = useMemo(
+    () => new Set(upgradableData?.movies ?? []),
+    [upgradableData?.movies],
+  );
 
   const [selections, setSelections] = useState<Item.Movie[]>([]);
   const [dirties, setDirties] = useState<Item.Movie[]>([]);
@@ -162,6 +168,19 @@ const MovieView: FunctionComponent = () => {
             <FontAwesomeIcon icon={monitored ? faBookmark : farBookmark} />
           </Tooltip>
         ),
+      },
+      {
+        id: "upgradable",
+        cell: ({
+          row: {
+            original: { radarrId },
+          },
+        }) =>
+          upgradableMovieIds.has(radarrId) ? (
+            <Tooltip label="Upgrade available">
+              <FontAwesomeIcon icon={faArrowUp} color="var(--mantine-color-brand-5)" />
+            </Tooltip>
+          ) : null,
       },
       {
         header: "Name",
@@ -338,7 +357,7 @@ const MovieView: FunctionComponent = () => {
         },
       },
     ],
-    [modals, modifyMovie],
+    [modals, modifyMovie, upgradableMovieIds],
   );
 
   const selectionToolbar = useMemo(() => {

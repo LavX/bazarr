@@ -24,6 +24,7 @@ import { ColumnDef } from "@tanstack/react-table";
 import { uniqBy } from "lodash";
 import { useLanguageProfiles, useSeriesModification, useSeriesPagination } from "@/apis/hooks";
 import { useInstanceName } from "@/apis/hooks/site";
+import { useUpgradableItems } from "@/apis/hooks/subtitles";
 import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
 import { GroupedSelector, GroupedSelectorOptions, Toolbox } from "@/components";
 import { AudioList } from "@/components/bazarr";
@@ -46,6 +47,11 @@ const SeriesView: FunctionComponent = () => {
   const [excludeLanguages, setExcludeLanguages] = useState<string[]>([]);
 
   const query = useSeriesPagination(true);
+  const { data: upgradableData } = useUpgradableItems();
+  const upgradableSeriesIds = useMemo(
+    () => new Set(upgradableData?.series ?? []),
+    [upgradableData?.series],
+  );
 
   const [selections, setSelections] = useState<Item.Series[]>([]);
   const [dirties, setDirties] = useState<Item.Series[]>([]);
@@ -171,6 +177,15 @@ const SeriesView: FunctionComponent = () => {
             </Tooltip>
           </Group>
         ),
+      },
+      {
+        id: "upgradable",
+        cell: ({ row: { original } }) =>
+          upgradableSeriesIds.has(original.sonarrSeriesId) ? (
+            <Tooltip label="Upgrade available">
+              <FontAwesomeIcon icon={faArrowUp} color="var(--mantine-color-brand-5)" />
+            </Tooltip>
+          ) : null,
       },
       {
         header: "Name",
@@ -353,7 +368,7 @@ const SeriesView: FunctionComponent = () => {
         },
       },
     ],
-    [mutation, modals],
+    [mutation, modals, upgradableSeriesIds],
   );
 
   const selectionToolbar = useMemo(() => {
