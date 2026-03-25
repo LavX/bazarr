@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
-import { BatchTranslateItem, BatchSyncItem, BatchSyncOptions } from "@/apis/raw/subtitles";
+import { BatchItem, BatchAction, BatchOptions } from "@/apis/raw/subtitles";
 
 export function useSubtitleAction() {
   const client = useQueryClient();
@@ -183,34 +183,15 @@ export function useRefTracksByMovieId(
   });
 }
 
-export function useBatchTranslate() {
+export function useBatchAction() {
   const client = useQueryClient();
   return useMutation({
-    mutationKey: [QueryKeys.Subtitles, "batch-translate"],
-    mutationFn: (items: BatchTranslateItem[]) =>
-      api.subtitles.batchTranslate(items),
-    onSuccess: () => {
-      // Invalidate wanted queries to refresh the lists
-      void client.invalidateQueries({
-        queryKey: [QueryKeys.Series, QueryKeys.Wanted],
-      });
-      void client.invalidateQueries({
-        queryKey: [QueryKeys.Movies, QueryKeys.Wanted],
-      });
-      // Also invalidate translator jobs to show new jobs
-      void client.invalidateQueries({
-        queryKey: [QueryKeys.Translator],
-      });
-    },
-  });
-}
-
-export function useBatchSync() {
-  const client = useQueryClient();
-  return useMutation({
-    mutationKey: [QueryKeys.Subtitles, "batch-sync"],
-    mutationFn: (params: { items: BatchSyncItem[]; options: BatchSyncOptions }) =>
-      api.subtitles.batchSync(params.items, params.options),
+    mutationKey: [QueryKeys.Subtitles, "batch"],
+    mutationFn: (params: {
+      items: BatchItem[];
+      action: BatchAction;
+      options?: BatchOptions;
+    }) => api.subtitles.batch(params.items, params.action, params.options),
     onSuccess: () => {
       void client.invalidateQueries({
         queryKey: [QueryKeys.Series],
@@ -220,6 +201,9 @@ export function useBatchSync() {
       });
       void client.invalidateQueries({
         queryKey: [QueryKeys.History],
+      });
+      void client.invalidateQueries({
+        queryKey: [QueryKeys.Translator],
       });
     },
   });

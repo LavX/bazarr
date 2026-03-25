@@ -1,38 +1,37 @@
 import BaseApi from "./base";
 
-export interface BatchTranslateItem {
-  type: "episode" | "movie";
+export type BatchAction =
+  | "sync"
+  | "translate"
+  | "OCR_fixes"
+  | "common"
+  | "remove_HI"
+  | "remove_tags"
+  | "fix_uppercase"
+  | "reverse_rtl"
+  | "scan-disk"
+  | "search-missing";
+
+export interface BatchItem {
+  type: "episode" | "movie" | "series";
   sonarrSeriesId?: number;
   sonarrEpisodeId?: number;
   radarrId?: number;
-  sourceLanguage: string;
-  targetLanguage: string;
+  sourceLanguage?: string;
+  targetLanguage?: string;
   subtitlePath?: string;
   forced?: boolean;
   hi?: boolean;
 }
 
-export interface BatchTranslateResponse {
-  queued: number;
-  skipped: number;
-  errors: string[];
+export interface BatchOptions {
+  max_offset_seconds?: number;
+  no_fix_framerate?: boolean;
+  gss?: boolean;
+  force_resync?: boolean;
 }
 
-export interface BatchSyncItem {
-  type: "episode" | "movie" | "series";
-  sonarrSeriesId?: number;
-  sonarrEpisodeId?: number;
-  radarrId?: number;
-}
-
-export interface BatchSyncOptions {
-  max_offset_seconds: number;
-  no_fix_framerate: boolean;
-  gss: boolean;
-  force_resync: boolean;
-}
-
-export interface BatchSyncResponse {
+export interface BatchResponse {
   queued: number;
   skipped: number;
   errors: string[];
@@ -76,24 +75,16 @@ class SubtitlesApi extends BaseApi {
     await this.patch("", form, { action });
   }
 
-  async batchTranslate(
-    items: BatchTranslateItem[],
-  ): Promise<BatchTranslateResponse> {
-    const response = await this.postRaw<BatchTranslateResponse>(
-      "/translate/batch",
-      { items },
-    );
-    return response.data;
-  }
-
-  async batchSync(
-    items: BatchSyncItem[],
-    options: BatchSyncOptions,
-  ): Promise<BatchSyncResponse> {
-    const response = await this.postRaw<BatchSyncResponse>(
-      "/sync/batch",
-      { items, options },
-    );
+  async batch(
+    items: BatchItem[],
+    action: BatchAction,
+    options?: BatchOptions,
+  ): Promise<BatchResponse> {
+    const response = await this.postRaw<BatchResponse>("/batch", {
+      items,
+      action,
+      options,
+    });
     return response.data;
   }
 }
