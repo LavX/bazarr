@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
-import { BatchItem, BatchAction, BatchOptions } from "@/apis/raw/subtitles";
+import { BatchAction, BatchItem, BatchOptions } from "@/apis/raw/subtitles";
 
 export function useSubtitleAction() {
   const client = useQueryClient();

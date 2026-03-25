@@ -22,6 +22,7 @@ import { ColumnDef } from "@tanstack/react-table";
 import { uniqBy } from "lodash";
 import { useLanguageProfiles, useSeriesModification, useSeriesPagination } from "@/apis/hooks";
 import { useInstanceName } from "@/apis/hooks/site";
+import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
 import { Action, GroupedSelector, GroupedSelectorOptions, Toolbox } from "@/components";
 import { AudioList } from "@/components/bazarr";
 import LanguageProfileName from "@/components/bazarr/LanguageProfile";
@@ -31,7 +32,6 @@ import { MassSyncModal } from "@/components/forms/MassSyncForm";
 import { MassTranslateModal, WantedItem } from "@/components/forms/MassTranslateForm";
 import { useModals } from "@/modules/modals";
 import ItemView from "@/pages/views/ItemView";
-import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
 import { GetItemId } from "@/utilities";
 import { useSelectorOptions } from "@/utilities/hooks";
 

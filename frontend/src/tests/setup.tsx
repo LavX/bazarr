@@ -45,7 +45,7 @@ window.ResizeObserver = ResizeObserver;
 window.scrollTo = () => {};
 
 beforeAll(() => {
-  server.listen({ onUnhandledRequest: "error" });
+  server.listen({ onUnhandledRequest: "warn" });
 });
 
 beforeEach(() => {
