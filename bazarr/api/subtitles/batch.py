@@ -82,8 +82,25 @@ class BatchOperation(Resource):
         if items is None:
             return {'error': 'No items provided'}, 400
 
+        if not isinstance(items, list):
+            return {'error': 'items must be a list'}, 400
+
         if not items:
             return {'error': 'Empty items list'}, 400
+
+        VALID_ITEM_KEYS = {'type', 'sonarrSeriesId', 'sonarrEpisodeId', 'radarrId',
+                           'sourceLanguage', 'targetLanguage', 'forced', 'hi'}
+        VALID_TYPES = {'episode', 'movie', 'series'}
+
+        sanitized_items = []
+        for item in items:
+            if not isinstance(item, dict) or item.get('type') not in VALID_TYPES:
+                continue
+            sanitized_items.append({k: v for k, v in item.items() if k in VALID_ITEM_KEYS})
+        items = sanitized_items
+
+        if not items:
+            return {'error': 'No valid items after sanitization'}, 400
 
         MAX_BATCH_SIZE = 10000
 

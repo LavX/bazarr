@@ -341,6 +341,22 @@ def _process_media_action(items, action, job_id):
     skipped = 0
     errors = []
 
+    # Upgrade is a library-wide operation, not per-item. Deduplicate by running
+    # it once for episodes and once for movies based on what types are present.
+    if action == 'upgrade':
+        has_episodes = any(i.get('type') in ('series', 'episode') for i in items)
+        has_movies = any(i.get('type') == 'movie' for i in items)
+        try:
+            if has_episodes:
+                upgrade_episodes_subtitles(job_id=job_id)
+            if has_movies:
+                upgrade_movies_subtitles(job_id=job_id)
+            queued = int(has_episodes) + int(has_movies)
+        except Exception as e:
+            logger.error(f'Error during upgrade: {e}')
+            errors.append(str(e))
+        return {'queued': queued, 'skipped': 0, 'errors': errors}
+
     jobs_queue.update_job_progress(job_id=job_id, progress_max=len(items))
 
     for i, item in enumerate(items, start=1):
@@ -355,9 +371,15 @@ def _process_media_action(items, action, job_id):
             if action == 'scan-disk':
                 if item_type in ('series', 'episode'):
                     series_id = item.get('sonarrSeriesId')
+                    if not series_id:
+                        skipped += 1
+                        continue
                     series_scan_subtitles(series_id)
                 elif item_type == 'movie':
                     radarr_id = item.get('radarrId')
+                    if not radarr_id:
+                        skipped += 1
+                        continue
                     movies_scan_subtitles(radarr_id)
                 else:
                     skipped += 1
@@ -365,18 +387,16 @@ def _process_media_action(items, action, job_id):
             elif action == 'search-missing':
                 if item_type in ('series', 'episode'):
                     series_id = item.get('sonarrSeriesId')
+                    if not series_id:
+                        skipped += 1
+                        continue
                     series_download_subtitles(series_id)
                 elif item_type == 'movie':
                     radarr_id = item.get('radarrId')
+                    if not radarr_id:
+                        skipped += 1
+                        continue
                     movies_download_subtitles(radarr_id)
-                else:
-                    skipped += 1
-                    continue
-            elif action == 'upgrade':
-                if item_type in ('series', 'episode'):
-                    upgrade_episodes_subtitles(job_id=job_id)
-                elif item_type == 'movie':
-                    upgrade_movies_subtitles(job_id=job_id)
                 else:
                     skipped += 1
                     continue
@@ -405,7 +425,7 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
         Dict with queued, skipped, errors. Or None if scheduling a job.
     """
     if action not in VALID_ACTIONS:
-        return {'error': f'Invalid action: {action}'}
+        return {'queued': 0, 'skipped': 0, 'errors': [f'Invalid action: {action}']}
 
     options = options or {}
 

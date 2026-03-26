@@ -58,27 +58,29 @@ const BatchModConfirmForm: FunctionComponent<BatchModConfirmFormProps> = ({
   };
 
   return (
-    <Stack>
-      <Text size="sm">
-        Apply <strong>{label}</strong> to{" "}
-        <strong>{items.length}</strong> selected item(s)?
-      </Text>
+    <form onSubmit={(e) => { e.preventDefault(); handleSubmit(); }}>
+      <Stack>
+        <Text size="sm">
+          Apply <strong>{label}</strong> to{" "}
+          <strong>{items.length}</strong> selected item(s)?
+        </Text>
 
-      <Divider />
+        <Divider />
 
-      <Group justify="space-between">
-        <Button variant="default" onClick={() => modals.closeSelf()}>
-          Cancel
-        </Button>
-        <Button
-          onClick={handleSubmit}
-          loading={isPending}
-          disabled={items.length === 0}
-        >
-          Apply to {items.length} Item(s)
-        </Button>
-      </Group>
-    </Stack>
+        <Group justify="space-between">
+          <Button variant="default" onClick={() => modals.closeSelf()}>
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            loading={isPending}
+            disabled={items.length === 0}
+          >
+            Apply to {items.length} Item(s)
+          </Button>
+        </Group>
+      </Stack>
+    </form>
   );
 };
 

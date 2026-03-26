@@ -142,8 +142,10 @@ class TestMassBatchOperationValidation:
     def test_invalid_action_returns_error(self, mock_jobs_queue):
         from bazarr.subtitles.mass_operations import mass_batch_operation
         result = mass_batch_operation(items=[], action='invalid_action', job_id='test')
-        assert 'error' in result
-        assert 'invalid_action' in result['error'].lower() or 'invalid' in result['error'].lower()
+        assert result['queued'] == 0
+        assert result['skipped'] == 0
+        assert len(result['errors']) == 1
+        assert 'invalid' in result['errors'][0].lower()
 
     @patch('bazarr.subtitles.mass_operations.jobs_queue')
     def test_empty_items_returns_zeros(self, mock_jobs_queue):

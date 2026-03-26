@@ -25,6 +25,7 @@ import { useLanguageProfiles, useMovieModification, useMoviesPagination } from "
 import { useInstanceName } from "@/apis/hooks/site";
 import { useUpgradableItems } from "@/apis/hooks/subtitles";
 import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
+import { SUBTITLE_TOOL_ACTIONS } from "@/constants/batch";
 import { GroupedSelector, GroupedSelectorOptions, Toolbox } from "@/components";
 import { AudioList } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
@@ -142,6 +143,7 @@ const MovieView: FunctionComponent = () => {
         id: "selection",
         header: ({ table }) => (
           <Checkbox
+            aria-label="Select all"
             id="movies-select-all"
             indeterminate={table.getIsSomeRowsSelected()}
             checked={table.getIsAllRowsSelected()}
@@ -150,6 +152,7 @@ const MovieView: FunctionComponent = () => {
         ),
         cell: ({ row }) => (
           <Checkbox
+            aria-label={`Select ${row.original.title}`}
             id={`movies-select-${row.index}`}
             checked={row.getIsSelected()}
             onChange={row.getToggleSelectedHandler()}
@@ -178,7 +181,7 @@ const MovieView: FunctionComponent = () => {
           },
         }) =>
           upgradableMovieIds.has(radarrId) ? (
-            <Tooltip label="Subtitle match could be improved. Try re-searching.">
+            <Tooltip label="Subtitle match could be improved. Try to upgrade it.">
               <FontAwesomeIcon icon={faCircleDown} color="var(--mantine-color-dimmed)" size="sm" />
             </Tooltip>
           ) : null,
@@ -259,7 +262,7 @@ const MovieView: FunctionComponent = () => {
             <Menu shadow="md" width={220} position="bottom-end">
               <Menu.Target>
                 <Tooltip label="Actions">
-                  <ActionIcon variant="subtle" size="sm">
+                  <ActionIcon aria-label="Actions" variant="subtle" size="sm">
                     <FontAwesomeIcon icon={faEllipsisVertical} />
                   </ActionIcon>
                 </Tooltip>
@@ -296,16 +299,7 @@ const MovieView: FunctionComponent = () => {
                 </Menu.Item>
                 <Menu.Divider />
                 <Menu.Label>Subtitle Tools</Menu.Label>
-                {(
-                  [
-                    ["OCR_fixes", "OCR Fixes"],
-                    ["common", "Common Fixes"],
-                    ["remove_HI", "Remove Hearing Impaired"],
-                    ["remove_tags", "Remove Style Tags"],
-                    ["fix_uppercase", "Fix Uppercase"],
-                    ["reverse_rtl", "Reverse RTL"],
-                  ] as [BatchAction, string][]
-                ).map(([action, label]) => (
+                {SUBTITLE_TOOL_ACTIONS.map(([action, label]) => (
                   <Menu.Item
                     key={action}
                     onClick={() =>
@@ -395,16 +389,7 @@ const MovieView: FunctionComponent = () => {
             </div>
           </Menu.Target>
           <Menu.Dropdown>
-            {(
-              [
-                ["OCR_fixes", "OCR Fixes"],
-                ["common", "Common Fixes"],
-                ["remove_HI", "Remove Hearing Impaired"],
-                ["remove_tags", "Remove Style Tags"],
-                ["fix_uppercase", "Fix Uppercase"],
-                ["reverse_rtl", "Reverse RTL"],
-              ] as [BatchAction, string][]
-            ).map(([action, label]) => (
+            {SUBTITLE_TOOL_ACTIONS.map(([action, label]) => (
               <Menu.Item
                 key={action}
                 onClick={() =>

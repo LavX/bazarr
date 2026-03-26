@@ -488,7 +488,7 @@ def throttled_count(name, exception=None):
     # Respect Retry-After from the exception if available, otherwise default to 5s
     wait_seconds = 5
     if exception and hasattr(exception, 'retry_after') and exception.retry_after:
-        wait_seconds = min(exception.retry_after, 30)  # cap at 30s
+        wait_seconds = max(1, min(exception.retry_after, 30))  # floor at 1s, cap at 30s
 
     logging.info("Provider %s throttle count %s of 5, waiting %ds and trying again", name,
                  throttle_count[name]['count'], wait_seconds)

@@ -251,6 +251,13 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
   }) => {
     if (!values.sourceLanguage || !values.targetLanguage) return;
 
+    if (items.length >= 100) {
+      const confirmed = window.confirm(
+        `This will translate subtitles for ${items.length} items. This may take a while. Continue?`,
+      );
+      if (!confirmed) return;
+    }
+
     const batchItems: BatchItem[] = items.map((item) => {
       if (item.type === "episode") {
         return {
@@ -287,21 +294,11 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
         },
       });
 
-      if (result.queued > 0) {
-        notifications.show({
-          title: "Translation Queued",
-          message: `${result.queued} item(s) queued for translation${result.skipped > 0 ? `, ${result.skipped} skipped` : ""}`,
-          color: "green",
-        });
-      }
-
-      if (result.errors.length > 0) {
-        notifications.show({
-          title: "Some translations failed",
-          message: result.errors.slice(0, 3).join("; "),
-          color: "yellow",
-        });
-      }
+      notifications.show({
+        title: "Translation Queued",
+        message: `Queued: ${result.queued}, Skipped: ${result.skipped}${result.errors.length > 0 ? `, Errors: ${result.errors.length}` : ""}`,
+        color: result.errors.length > 0 ? "yellow" : "green",
+      });
 
       onComplete?.();
       modals.closeSelf();
@@ -383,9 +380,14 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
 
         <Divider />
 
-        <Button type="submit" loading={isPending} disabled={items.length === 0}>
-          Translate {items.length} Item(s)
-        </Button>
+        <Group justify="space-between">
+          <Button variant="default" onClick={() => modals.closeSelf()}>
+            Cancel
+          </Button>
+          <Button type="submit" loading={isPending} disabled={items.length === 0}>
+            Translate {items.length} Item(s)
+          </Button>
+        </Group>
       </Stack>
     </form>
   );
