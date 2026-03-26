@@ -256,7 +256,7 @@ class OpenSubtitlesSubtitle(_OpenSubtitlesSubtitle):
         sub_fps = None
         try:
             sub_fps = float(self.fps)
-        except ValueError:
+        except (ValueError, TypeError):
             pass
 
         # video has fps info, sub also, and sub's fps is greater than 0

@@ -186,7 +186,7 @@ const SeriesView: FunctionComponent = () => {
         id: "upgradable",
         cell: ({ row: { original } }) =>
           upgradableSeriesIds.has(original.sonarrSeriesId) ? (
-            <Tooltip label="Subtitle match could be improved. Try to upgrade it.">
+            <Tooltip label="Low match score, upgrading may find a better subtitle">
               <FontAwesomeIcon icon={faCircleDown} color="var(--mantine-color-dimmed)" size="sm" />
             </Tooltip>
           ) : null,

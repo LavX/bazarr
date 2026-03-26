@@ -6,7 +6,6 @@ Uses the scraper service's REST API directly instead of the legacy
 compatibility endpoint, passing all available metadata for best results.
 """
 
-import re
 import base64
 import logging
 import requests
@@ -107,12 +106,7 @@ class OpenSubtitlesScraperMixin:
 
             results = search_response.get('results', [])
             if not results:
-                # Fallback: try generic search endpoint
-                search_response = self._scraper_request('/api/v1/search', search_data)
-                results = search_response.get('results', [])
-
-            if not results:
-                logger.info('Scraper: no search results for %r', search_query)
+                logger.info('Scraper: no results from %s for %r', search_endpoint, search_query)
                 return []
 
             # Step 2: Select best matching result
@@ -151,7 +145,8 @@ class OpenSubtitlesScraperMixin:
             # Step 4: Convert to bazarr subtitle objects
             return self._parse_v1_subtitles(
                 subtitle_list, best_result, languages, season, episode,
-                only_foreign, also_foreign, video, imdb_id
+                only_foreign, also_foreign, video, imdb_id,
+                hash=hash, search_query=search_query
             )
 
         except APIThrottled:
@@ -201,7 +196,8 @@ class OpenSubtitlesScraperMixin:
         return scored[0][1] if scored else results[0]
 
     def _parse_v1_subtitles(self, subtitle_list, search_result, languages, season, episode,
-                            only_foreign, also_foreign, video, imdb_id):
+                            only_foreign, also_foreign, video, imdb_id,
+                            hash=None, search_query=None):
         """Convert v1 API subtitle objects to bazarr OpenSubtitlesSubtitle objects."""
         subtitles = []
         series_title = search_result.get('title', '')
@@ -261,11 +257,17 @@ class OpenSubtitlesScraperMixin:
                 if video.imdb_id and movie_imdb_id and movie_imdb_id != video.imdb_id:
                     continue
 
-                query_parameters = {}
+                query_parameters = {
+                    'query': search_query,
+                    'imdb_id': imdb_id,
+                    'season': season,
+                    'episode': episode,
+                }
 
                 subtitle = self.subtitle_class(
-                    language, hearing_impaired, download_url, subtitle_id, 'imdbid',
-                    movie_kind, '', movie_name, release_name, result_year, movie_imdb_id,
+                    language, hearing_impaired, download_url, subtitle_id,
+                    'imdbid' if imdb_id else 'query',
+                    movie_kind, hash or '', movie_name, release_name, result_year, movie_imdb_id,
                     season if is_episode else None,
                     episode if is_episode else None,
                     query_parameters, filename, None,
@@ -309,6 +311,6 @@ class OpenSubtitlesScraperMixin:
 
         except APIThrottled:
             raise
-        except requests.RequestException as e:
+        except Exception as e:
             logger.error('Failed to download subtitle from scraper: %s', e)
             raise ServiceUnavailable(f'Scraper download failed: {e}')

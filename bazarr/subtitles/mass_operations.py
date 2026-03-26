@@ -88,11 +88,17 @@ def _collect_subtitle_items(items, action, options):
         for item in items:
             item_type = item.get('type')
             if item_type == 'series':
-                series_ids.append(item.get('sonarrSeriesId'))
+                sid = item.get('sonarrSeriesId')
+                if sid is not None:
+                    series_ids.append(sid)
             elif item_type == 'episode':
-                episode_ids.append(item.get('sonarrEpisodeId'))
+                eid = item.get('sonarrEpisodeId')
+                if eid is not None:
+                    episode_ids.append(eid)
             elif item_type == 'movie':
-                movie_ids.append(item.get('radarrId'))
+                rid = item.get('radarrId')
+                if rid is not None:
+                    movie_ids.append(rid)
 
     all_items = []
     total_skipped = 0
@@ -341,17 +347,17 @@ def _process_media_action(items, action, job_id):
     skipped = 0
     errors = []
 
-    # Upgrade is a library-wide operation, not per-item. Deduplicate by running
-    # it once for episodes and once for movies based on what types are present.
     if action == 'upgrade':
-        has_episodes = any(i.get('type') in ('series', 'episode') for i in items)
-        has_movies = any(i.get('type') == 'movie' for i in items)
+        sonarr_series_ids = [i.get('sonarrSeriesId') for i in items
+                             if i.get('type') in ('series', 'episode') and i.get('sonarrSeriesId')]
+        radarr_ids = [i.get('radarrId') for i in items
+                      if i.get('type') == 'movie' and i.get('radarrId')]
         try:
-            if has_episodes:
-                upgrade_episodes_subtitles(job_id=job_id)
-            if has_movies:
-                upgrade_movies_subtitles(job_id=job_id)
-            queued = int(has_episodes) + int(has_movies)
+            if sonarr_series_ids:
+                upgrade_episodes_subtitles(job_id=job_id, sonarr_series_ids=sonarr_series_ids)
+            if radarr_ids:
+                upgrade_movies_subtitles(job_id=job_id, radarr_ids=radarr_ids)
+            queued = len(sonarr_series_ids) + len(radarr_ids)
         except Exception as e:
             logger.error(f'Error during upgrade: {e}')
             errors.append(str(e))

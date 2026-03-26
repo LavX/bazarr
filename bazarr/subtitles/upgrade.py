@@ -37,12 +37,36 @@ def upgrade_subtitles():
     logging.info('BAZARR Finished searching for Subtitles to upgrade. Check History for more information.')
 
 
-def upgrade_episodes_subtitles(job_id=None):
+def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None):
     if not job_id:
         jobs_queue.add_job_from_function("Trying to upgrade episodes subtitles", is_progress=True)
         return
 
     episodes_to_upgrade = get_upgradable_episode_subtitles()
+
+    query = select(TableHistory.id,
+               TableShows.title.label('seriesTitle'),
+               TableEpisodes.season,
+               TableEpisodes.episode,
+               TableEpisodes.title,
+               TableHistory.language,
+               TableEpisodes.audio_language,
+               TableHistory.video_path,
+               TableEpisodes.sceneName,
+               TableHistory.score,
+               TableHistory.sonarrEpisodeId,
+               TableHistory.sonarrSeriesId,
+               TableHistory.subtitles_path,
+               TableEpisodes.path,
+               TableShows.profileId,
+               TableEpisodes.subtitles.label('external_subtitles')) \
+        .select_from(TableHistory) \
+        .join(TableShows, onclause=TableHistory.sonarrSeriesId == TableShows.sonarrSeriesId) \
+        .join(TableEpisodes, onclause=TableHistory.sonarrEpisodeId == TableEpisodes.sonarrEpisodeId)
+
+    if sonarr_series_ids:
+        query = query.where(TableHistory.sonarrSeriesId.in_(sonarr_series_ids))
+
     episodes_data = [{
         'id': x.id,
         'seriesTitle': x.seriesTitle,
@@ -60,26 +84,7 @@ def upgrade_episodes_subtitles(job_id=None):
         'path': x.path,
         'profileId': x.profileId,
         'external_subtitles': [y[1] for y in ast.literal_eval(x.external_subtitles) if y[1]],
-    } for x in database.execute(
-        select(TableHistory.id,
-               TableShows.title.label('seriesTitle'),
-               TableEpisodes.season,
-               TableEpisodes.episode,
-               TableEpisodes.title,
-               TableHistory.language,
-               TableEpisodes.audio_language,
-               TableHistory.video_path,
-               TableEpisodes.sceneName,
-               TableHistory.score,
-               TableHistory.sonarrEpisodeId,
-               TableHistory.sonarrSeriesId,
-               TableHistory.subtitles_path,
-               TableEpisodes.path,
-               TableShows.profileId,
-               TableEpisodes.subtitles.label('external_subtitles'))
-        .select_from(TableHistory)
-        .join(TableShows, onclause=TableHistory.sonarrSeriesId == TableShows.sonarrSeriesId)
-        .join(TableEpisodes, onclause=TableHistory.sonarrEpisodeId == TableEpisodes.sonarrEpisodeId))
+    } for x in database.execute(query)
     .all() if _language_still_desired(x.language, x.profileId) and
               x.video_path == x.path
     ]
@@ -153,12 +158,31 @@ def upgrade_episodes_subtitles(job_id=None):
     jobs_queue.update_job_name(job_id=job_id, new_job_name='Tried to upgrade episodes subtitles')
 
 
-def upgrade_movies_subtitles(job_id=None):
+def upgrade_movies_subtitles(job_id=None, radarr_ids=None):
     if not job_id:
         jobs_queue.add_job_from_function("Trying to upgrade movies subtitles", is_progress=True)
         return
 
     movies_to_upgrade = get_upgradable_movies_subtitles()
+
+    query = select(TableHistoryMovie.id,
+               TableMovies.title,
+               TableHistoryMovie.language,
+               TableMovies.audio_language,
+               TableHistoryMovie.video_path,
+               TableMovies.sceneName,
+               TableHistoryMovie.score,
+               TableHistoryMovie.radarrId,
+               TableHistoryMovie.subtitles_path,
+               TableMovies.path,
+               TableMovies.profileId,
+               TableMovies.subtitles.label('external_subtitles')) \
+        .select_from(TableHistoryMovie) \
+        .join(TableMovies, onclause=TableHistoryMovie.radarrId == TableMovies.radarrId)
+
+    if radarr_ids:
+        query = query.where(TableHistoryMovie.radarrId.in_(radarr_ids))
+
     movies_data = [{
         'id': x.id,
         'title': x.title,
@@ -172,21 +196,7 @@ def upgrade_movies_subtitles(job_id=None):
         'profileId': x.profileId,
         'subtitles_path': x.subtitles_path,
         'external_subtitles': [y[1] for y in ast.literal_eval(x.external_subtitles) if y[1]],
-    } for x in database.execute(
-        select(TableHistoryMovie.id,
-               TableMovies.title,
-               TableHistoryMovie.language,
-               TableMovies.audio_language,
-               TableHistoryMovie.video_path,
-               TableMovies.sceneName,
-               TableHistoryMovie.score,
-               TableHistoryMovie.radarrId,
-               TableHistoryMovie.subtitles_path,
-               TableMovies.path,
-               TableMovies.profileId,
-               TableMovies.subtitles.label('external_subtitles'))
-        .select_from(TableHistoryMovie)
-        .join(TableMovies, onclause=TableHistoryMovie.radarrId == TableMovies.radarrId))
+    } for x in database.execute(query)
     .all() if _language_still_desired(x.language, x.profileId) and
               x.video_path == x.path
     ]
