@@ -36,10 +36,6 @@ class BatchOperation(Resource):
         'sonarrSeriesId': fields.Integer(description='Sonarr Series ID'),
         'sonarrEpisodeId': fields.Integer(description='Sonarr Episode ID'),
         'radarrId': fields.Integer(description='Radarr Movie ID'),
-        'sourceLanguage': fields.String(description='Source language (translate only)'),
-        'targetLanguage': fields.String(description='Target language (translate only)'),
-        'forced': fields.Boolean(description='Forced subtitle flag'),
-        'hi': fields.Boolean(description='Hearing impaired flag'),
     })
 
     post_options_model = api_ns_batch.model('BatchOptions', {
@@ -47,6 +43,8 @@ class BatchOperation(Resource):
         'no_fix_framerate': fields.Boolean(default=True),
         'gss': fields.Boolean(default=True),
         'force_resync': fields.Boolean(default=False),
+        'from_lang': fields.String(description='Source language code for translate action'),
+        'to_lang': fields.String(description='Target language code for translate action'),
     })
 
     post_request_model = api_ns_batch.model('BatchRequest', {
@@ -88,8 +86,7 @@ class BatchOperation(Resource):
         if not items:
             return {'error': 'Empty items list'}, 400
 
-        VALID_ITEM_KEYS = {'type', 'sonarrSeriesId', 'sonarrEpisodeId', 'radarrId',
-                           'sourceLanguage', 'targetLanguage', 'forced', 'hi'}
+        VALID_ITEM_KEYS = {'type', 'sonarrSeriesId', 'sonarrEpisodeId', 'radarrId'}
         VALID_TYPES = {'episode', 'movie', 'series'}
 
         sanitized_items = []

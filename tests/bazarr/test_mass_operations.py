@@ -896,6 +896,22 @@ class TestSchedulerIntegration:
         args = mock_collect.call_args
         assert args[0][0] is None  # items arg should be None
 
+    @patch('bazarr.subtitles.mass_operations.jobs_queue')
+    def test_no_job_id_requeues_via_jobs_queue(self, mock_jobs_queue):
+        """When called without job_id (e.g. from scheduler), should re-queue itself
+        via add_job_from_function instead of processing inline."""
+        from bazarr.subtitles.mass_operations import mass_batch_operation
+
+        result = mass_batch_operation(items=None, action='sync', job_id=None)
+
+        # Should return None (re-queued, no inline processing)
+        assert result is None
+        # Should have called add_job_from_function to re-queue with a real job_id
+        mock_jobs_queue.add_job_from_function.assert_called_once()
+        call_args = mock_jobs_queue.add_job_from_function.call_args
+        assert 'Mass Sync' in call_args[0][0]
+        assert call_args[1]['is_progress'] is True
+
 
 class TestMassBatchOperationProcessing:
     """Test mass_batch_operation end-to-end processing loop."""

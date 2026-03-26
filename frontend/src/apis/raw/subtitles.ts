@@ -18,11 +18,6 @@ export interface BatchItem {
   sonarrSeriesId?: number;
   sonarrEpisodeId?: number;
   radarrId?: number;
-  sourceLanguage?: string;
-  targetLanguage?: string;
-  subtitlePath?: string;
-  forced?: boolean;
-  hi?: boolean;
 }
 
 export interface BatchOptions {

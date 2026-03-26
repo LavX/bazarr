@@ -264,22 +264,16 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
           type: "episode" as const,
           sonarrSeriesId: item.sonarrSeriesId,
           sonarrEpisodeId: item.sonarrEpisodeId,
-          sourceLanguage: values.sourceLanguage!.code2,
-          targetLanguage: values.targetLanguage!.code2,
         };
       } else if (item.type === "series") {
         return {
           type: "series" as const,
           sonarrSeriesId: item.sonarrSeriesId,
-          sourceLanguage: values.sourceLanguage!.code2,
-          targetLanguage: values.targetLanguage!.code2,
         };
       } else {
         return {
           type: "movie" as const,
           radarrId: item.radarrId,
-          sourceLanguage: values.sourceLanguage!.code2,
-          targetLanguage: values.targetLanguage!.code2,
         };
       }
     });
