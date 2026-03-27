@@ -7,10 +7,21 @@ import { ModalComponent, StaticModals } from "./WithModal";
 
 const DefaultModalProps: MantineModalsProviderProps["modalProps"] = {
   centered: true,
+  radius: "lg",
   styles: {
-    // modals: {
-    //   maxWidth: "100%",
-    // },
+    content: {
+      background: "var(--bz-surface-card)",
+      border: "1px solid var(--bz-border-card)",
+    },
+    header: {
+      background: "transparent",
+    },
+    body: {
+      background: "transparent",
+    },
+    overlay: {
+      background: "rgba(0, 0, 0, 0.6)",
+    },
   },
 };
 

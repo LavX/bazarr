@@ -314,7 +314,7 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
             {translatorModel} will be used to translate{" "}
             <strong>{items.length}</strong> item(s).
           </Text>
-          <Text size="xs" c="dimmed" mt="xs">
+          <Text size="xs" c="var(--bz-text-tertiary)" mt="xs">
             You can choose translation service in the subtitles settings.
           </Text>
         </Alert>
@@ -337,7 +337,7 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
         )}
 
         {items.length > 5 && (
-          <Text size="sm" c="dimmed">
+          <Text size="sm" c="var(--bz-text-tertiary)">
             {items.length} items selected for translation
           </Text>
         )}

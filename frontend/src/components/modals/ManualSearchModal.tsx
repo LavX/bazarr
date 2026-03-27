@@ -62,7 +62,7 @@ function ManualSearchView<T extends SupportType>(props: Props<T>) {
       );
 
       if (releaseInfo.length === 0) {
-        return <Text c="dimmed">Cannot get release info</Text>;
+        return <Text c="var(--bz-text-tertiary)">Cannot get release info</Text>;
       }
 
       return (

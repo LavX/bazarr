@@ -92,10 +92,10 @@ export default function SubtitleEditor() {
           <Badge variant="outline" color="gray" size="sm">
             {data.encoding}
           </Badge>
-          <Text size="xs" c="dimmed">
+          <Text size="xs" c="var(--bz-text-tertiary)">
             {parseResult.cues.length} cues
           </Text>
-          <Text size="xs" c="dimmed">
+          <Text size="xs" c="var(--bz-text-tertiary)">
             {formatFileSize(data.size)}
           </Text>
         </Group>

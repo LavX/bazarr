@@ -153,7 +153,7 @@ const JobRow: FunctionComponent<JobRowProps> = ({
         )}
       </Table.Td>
       <Table.Td>
-        <Text size="xs" ff="monospace" c="dimmed" truncate style={{ maxWidth: 180 }}>
+        <Text size="xs" ff="monospace" c="var(--bz-text-tertiary)" truncate style={{ maxWidth: 180 }}>
           {modelUsed || "-"}
         </Text>
       </Table.Td>
@@ -207,7 +207,7 @@ const StatCard: FunctionComponent<StatCardProps> = ({
     <Text size="2rem" fw={700} lh={1}>
       {value}
     </Text>
-    <Text size="xs" c="dimmed" tt="uppercase" style={{ letterSpacing: 0.5 }} fw={600}>
+    <Text size="xs" c="var(--bz-text-tertiary)" tt="uppercase" style={{ letterSpacing: 0.5 }} fw={600}>
       {label}
     </Text>
   </Card>
@@ -246,7 +246,7 @@ export const TranslatorStatusPanel: FunctionComponent<
       <Card withBorder mt="md" p="md">
         <Group justify="center" py="md">
           <FontAwesomeIcon icon={faSpinner} spin aria-hidden="true" />
-          <Text c="dimmed">Connecting to AI Subtitle Translator...</Text>
+          <Text c="var(--bz-text-tertiary)">Connecting to AI Subtitle Translator...</Text>
         </Group>
       </Card>
     );
@@ -370,7 +370,7 @@ export const TranslatorStatusPanel: FunctionComponent<
             </Table>
           </Table.ScrollContainer>
         ) : (
-          <Text c="dimmed" ta="center" py="xl">
+          <Text c="var(--bz-text-tertiary)" ta="center" py="xl">
             No translation jobs
           </Text>
         )}

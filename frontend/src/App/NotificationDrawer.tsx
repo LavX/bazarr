@@ -227,7 +227,7 @@ const NotificationDrawer: FunctionComponent<NotificationDrawerProps> = ({
                             </Menu>
                           )}
                         </Group>
-                        <Text size="xs" c="dimmed">
+                        <Text size="xs" c="var(--bz-text-tertiary)">
                           {grouped[status as string].length} job
                           {grouped[status as string].length > 1 ? "s" : ""}
                         </Text>
@@ -479,7 +479,7 @@ const NotificationDrawer: FunctionComponent<NotificationDrawerProps> = ({
                                       </Group>
                                     </Group>
                                     {job?.progress_message && (
-                                      <Text size="xs" c="dimmed">
+                                      <Text size="xs" c="var(--bz-text-tertiary)">
                                         {job.progress_message}
                                       </Text>
                                     )}
@@ -493,14 +493,14 @@ const NotificationDrawer: FunctionComponent<NotificationDrawerProps> = ({
                   ));
               })()
             ) : (
-              <Text c="dimmed" ta="center" py="xl">
+              <Text c="var(--bz-text-tertiary)" ta="center" py="xl">
                 No jobs to display
               </Text>
             )}
           </>
         ) : (
           <Card withBorder padding="md" radius="sm">
-            <Text size="sm" c="dimmed" mb="xs">
+            <Text size="sm" c="var(--bz-text-tertiary)" mb="xs">
               Jobs
             </Text>
             <Text

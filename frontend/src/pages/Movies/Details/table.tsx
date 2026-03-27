@@ -154,7 +154,7 @@ const Table: FunctionComponent<Props> = ({ movie, profile }) => {
             );
           } else if (isSubtitleMissing(path)) {
             return (
-              <Text {...props} c="dimmed">
+              <Text {...props} c="var(--bz-text-tertiary)">
                 {path}
               </Text>
             );
@@ -169,13 +169,13 @@ const Table: FunctionComponent<Props> = ({ movie, profile }) => {
         cell: ({ row }) => {
           if (row.original.path === missingText) {
             return (
-              <Badge color="primary">
+              <Badge variant="missing">
                 <Language.Text value={row.original} long></Language.Text>
               </Badge>
             );
           } else {
             return (
-              <Badge color="secondary">
+              <Badge variant="highlight">
                 <Language.Text value={row.original} long></Language.Text>
               </Badge>
             );

@@ -53,7 +53,7 @@ export function usePrompt(
         },
         children: (
           <Stack>
-            <Text size="sm" c="dimmed">
+            <Text size="sm" c="var(--bz-text-tertiary)">
               {message}
             </Text>
             <Group justify="flex-end" mt="lg" gap="xs">

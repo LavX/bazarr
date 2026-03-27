@@ -103,7 +103,7 @@ const ModelDetailsCard: FunctionComponent<ModelDetailsProps> = ({
 
   if (loading) {
     return (
-      <Text size="xs" c="dimmed" mt="xs">
+      <Text size="xs" c="var(--bz-text-tertiary)" mt="xs">
         Loading model details...
       </Text>
     );
@@ -111,7 +111,7 @@ const ModelDetailsCard: FunctionComponent<ModelDetailsProps> = ({
 
   if (!model) {
     return (
-      <Text size="xs" c="dimmed" mt="xs">
+      <Text size="xs" c="var(--bz-text-tertiary)" mt="xs">
         Model details unavailable for {modelId}
       </Text>
     );
@@ -138,7 +138,7 @@ const ModelDetailsCard: FunctionComponent<ModelDetailsProps> = ({
     <Box mt="xs">
       <Text
         size="xs"
-        c="dimmed"
+        c="var(--bz-text-tertiary)"
         tt="uppercase"
         style={{ letterSpacing: 0.5 }}
         fw={600}
@@ -149,22 +149,22 @@ const ModelDetailsCard: FunctionComponent<ModelDetailsProps> = ({
       {/* Per-million pricing — always show all available prices */}
       <SimpleGrid cols={{ base: 2, sm: hasCache ? 4 : 2 }} spacing="xs">
         <Box>
-          <Text size="xs" c="dimmed">Input</Text>
+          <Text size="xs" c="var(--bz-text-tertiary)">Input</Text>
           <Text size="sm" fw={600}>{formatPerMillion(promptCost)}</Text>
         </Box>
         <Box>
-          <Text size="xs" c="dimmed">Output</Text>
+          <Text size="xs" c="var(--bz-text-tertiary)">Output</Text>
           <Text size="sm" fw={600}>{formatPerMillion(completionCost)}</Text>
         </Box>
         {cacheReadCost !== null && (
           <Box>
-            <Text size="xs" c="dimmed">Cache Read</Text>
+            <Text size="xs" c="var(--bz-text-tertiary)">Cache Read</Text>
             <Text size="sm" fw={600} c="cyan.4">{formatPerMillion(cacheReadCost)}</Text>
           </Box>
         )}
         {cacheWriteCost !== null && (
           <Box>
-            <Text size="xs" c="dimmed">Cache Write</Text>
+            <Text size="xs" c="var(--bz-text-tertiary)">Cache Write</Text>
             <Text size="sm" fw={600} c="cyan.4">{formatPerMillion(cacheWriteCost)}</Text>
           </Box>
         )}
@@ -172,13 +172,13 @@ const ModelDetailsCard: FunctionComponent<ModelDetailsProps> = ({
       {/* Estimations — single best estimate per type */}
       <SimpleGrid cols={{ base: 2, sm: 2 }} spacing="xs" mt="xs">
         <Box>
-          <Text size="xs" c="dimmed">Est. / Episode</Text>
+          <Text size="xs" c="var(--bz-text-tertiary)">Est. / Episode</Text>
           <Text size="sm" fw={600} c="green.4">
             {formatCost(episode.cached ?? episode.standard)}
           </Text>
         </Box>
         <Box>
-          <Text size="xs" c="dimmed">Est. / Movie</Text>
+          <Text size="xs" c="var(--bz-text-tertiary)">Est. / Movie</Text>
           <Text size="sm" fw={600} c="green.4">
             {formatCost(movie.cached ?? movie.standard)}
           </Text>

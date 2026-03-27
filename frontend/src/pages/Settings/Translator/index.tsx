@@ -230,7 +230,7 @@ const SettingsTranslatorView: FunctionComponent = () => {
         </Stack>
         <Group gap="lg" align="center">
           <Group gap="xs" align="center">
-            <MantineText size="sm" c="dimmed">
+            <MantineText size="sm" c="var(--bz-text-tertiary)">
               Score
             </MantineText>
             <Number
@@ -249,7 +249,7 @@ const SettingsTranslatorView: FunctionComponent = () => {
             >
               <MantineText
                 size="xs"
-                c="dimmed"
+                c="var(--bz-text-tertiary)"
                 style={{ cursor: "help" }}
                 component="span"
               >
@@ -270,7 +270,7 @@ const SettingsTranslatorView: FunctionComponent = () => {
             >
               <MantineText
                 size="xs"
-                c="dimmed"
+                c="var(--bz-text-tertiary)"
                 style={{ cursor: "help" }}
                 component="span"
               >
@@ -337,7 +337,7 @@ const SettingsTranslatorView: FunctionComponent = () => {
                   label="Service URL"
                   settingKey="settings-translator-openrouter_url"
                 />
-                <MantineText size="xs" c="dimmed" mt={4}>
+                <MantineText size="xs" c="var(--bz-text-tertiary)" mt={4}>
                   <Anchor
                     href="https://github.com/LavX/ai-subtitle-translator/blob/main/docs/BAZARR-SETUP.md"
                     target="_blank"
@@ -354,7 +354,7 @@ const SettingsTranslatorView: FunctionComponent = () => {
                   label="OpenRouter API Key"
                   settingKey="settings-translator-openrouter_api_key"
                 />
-                <MantineText size="xs" c="dimmed" mt={4}>
+                <MantineText size="xs" c="var(--bz-text-tertiary)" mt={4}>
                   <Anchor
                     href="https://openrouter.ai/keys"
                     target="_blank"
@@ -371,7 +371,7 @@ const SettingsTranslatorView: FunctionComponent = () => {
                   label="Encryption Key (optional)"
                   settingKey="settings-translator-openrouter_encryption_key"
                 />
-                <MantineText size="xs" c="dimmed" mt={4}>
+                <MantineText size="xs" c="var(--bz-text-tertiary)" mt={4}>
                   <Anchor
                     href="https://github.com/LavX/ai-subtitle-translator/blob/main/docs/BAZARR-SETUP.md#get-your-encryption-key"
                     target="_blank"
@@ -394,7 +394,7 @@ const SettingsTranslatorView: FunctionComponent = () => {
             <Stack gap="xs">
               <AIModelSelector />
               <FreeModelWarning />
-              <MantineText size="xs" c="dimmed">
+              <MantineText size="xs" c="var(--bz-text-tertiary)">
                 Models are fetched from the service. You can also type any model
                 ID from{" "}
                 <Anchor
@@ -416,7 +416,7 @@ const SettingsTranslatorView: FunctionComponent = () => {
                     max={1}
                     step={0.1}
                   />
-                  <MantineText size="xs" c="dimmed" mt={4} ta="center">
+                  <MantineText size="xs" c="var(--bz-text-tertiary)" mt={4} ta="center">
                     deterministic ← → creative
                   </MantineText>
                 </div>

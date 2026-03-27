@@ -212,13 +212,13 @@ const headerStyle: React.CSSProperties = {
   position: "sticky",
   top: 0,
   zIndex: 1,
-  backgroundColor: "var(--mantine-color-body)",
-  borderBottom: "2px solid var(--mantine-color-default-border)",
+  backgroundColor: "var(--bz-surface-base)",
+  borderBottom: "2px solid var(--bz-border-divider)",
   fontWeight: 700,
   fontSize: "0.7rem",
   textTransform: "uppercase",
   letterSpacing: "0.8px",
-  color: "var(--mantine-color-dimmed)",
+  color: "var(--bz-text-tertiary)",
 };
 
 const headerCellStyle: React.CSSProperties = {
@@ -251,7 +251,7 @@ const durationStyle: React.CSSProperties = {
   ...cellStyle,
   fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
   fontSize: "0.8rem",
-  color: "var(--mantine-color-dimmed)",
+  color: "var(--bz-text-tertiary)",
   textAlign: "center",
 };
 
@@ -264,7 +264,7 @@ const textCellStyle: React.CSSProperties = {
 
 const indexCellStyle: React.CSSProperties = {
   ...cellStyle,
-  color: "var(--mantine-color-dimmed)",
+  color: "var(--bz-text-tertiary)",
   fontSize: "0.75rem",
   textAlign: "right",
   fontFamily: "monospace",
@@ -297,9 +297,9 @@ export default function CueTable({ cues }: CueTableProps) {
         flex: 1,
         minHeight: 0,
         overflow: "hidden",
-        border: "1px solid var(--mantine-color-default-border)",
+        border: "1px solid var(--bz-border-divider)",
         borderRadius: "var(--mantine-radius-md)",
-        backgroundColor: "var(--mantine-color-body)",
+        backgroundColor: "var(--bz-surface-base)",
       }}
     >
       <div role="row" style={headerStyle}>

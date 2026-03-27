@@ -281,11 +281,11 @@ function WantedView<T extends Wanted.Base>({
           px="md"
           py={8}
           style={{
-            borderBottom: "1px solid var(--mantine-color-default-border)",
+            borderBottom: "1px solid var(--bz-border-divider)",
           }}
         >
           <Group gap={8}>
-            <Text size="xs" c="dimmed" fw={500}>
+            <Text size="xs" c="var(--bz-text-tertiary)" fw={500}>
               Active filters:
             </Text>
             {activeFilterChips.map((chip) => (
@@ -321,7 +321,7 @@ function WantedView<T extends Wanted.Base>({
             <UnstyledButton onClick={clearAllFilters}>
               <Group gap={4}>
                 <FontAwesomeIcon icon={faEraser} size="xs" opacity={0.6} />
-                <Text size="xs" c="dimmed" td="underline">
+                <Text size="xs" c="var(--bz-text-tertiary)" td="underline">
                   Clear all
                 </Text>
               </Group>
@@ -337,8 +337,8 @@ function WantedView<T extends Wanted.Base>({
           py="sm"
           radius={0}
           style={{
-            borderBottom: "1px solid var(--mantine-color-default-border)",
-            backgroundColor: "var(--mantine-color-body)",
+            borderBottom: "1px solid var(--bz-border-divider)",
+            backgroundColor: "var(--bz-surface-base)",
           }}
         >
           <Group gap="lg" align="flex-end" wrap="wrap">
@@ -346,7 +346,7 @@ function WantedView<T extends Wanted.Base>({
               <Box style={{ flex: "1 1 200px", maxWidth: 280 }}>
                 <Group gap={6} mb={4}>
                   <FontAwesomeIcon icon={faVolumeUp} size="xs" opacity={0.6} />
-                  <Text size="xs" fw={500} c="dimmed">
+                  <Text size="xs" fw={500} c="var(--bz-text-tertiary)">
                     Include Audio Languages
                   </Text>
                 </Group>
@@ -376,7 +376,7 @@ function WantedView<T extends Wanted.Base>({
                       size="xs"
                       opacity={0.6}
                     />
-                    <Text size="xs" fw={500} c="dimmed">
+                    <Text size="xs" fw={500} c="var(--bz-text-tertiary)">
                       Exclude Audio Languages
                     </Text>
                   </Group>
@@ -406,7 +406,7 @@ function WantedView<T extends Wanted.Base>({
                       size="xs"
                       opacity={0.6}
                     />
-                    <Text size="xs" fw={500} c="dimmed">
+                    <Text size="xs" fw={500} c="var(--bz-text-tertiary)">
                       Missing Subtitle Language
                     </Text>
                   </Group>

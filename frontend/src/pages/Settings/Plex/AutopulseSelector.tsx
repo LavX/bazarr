@@ -94,7 +94,7 @@ const AutopulseSelector: FunctionComponent<AutopulseSelectorProps> = (
         <Text fw={500} size="sm" mb={2} className={styles.labelText}>
           {label}
         </Text>
-        <Text size="xs" c="dimmed">
+        <Text size="xs" c="var(--bz-text-tertiary)">
           {description}
         </Text>
       </div>
@@ -184,7 +184,7 @@ const AutopulseSelector: FunctionComponent<AutopulseSelectorProps> = (
           </Code>
 
           <Stack gap="xs" mt="sm">
-            <Text size="xs" c="dimmed">
+            <Text size="xs" c="var(--bz-text-tertiary)">
               <Text component="span" fw={600}>
                 Server:
               </Text>{" "}
@@ -207,7 +207,7 @@ const AutopulseSelector: FunctionComponent<AutopulseSelectorProps> = (
             )}
 
             {configData.template_info && (
-              <Text size="xs" c="dimmed">
+              <Text size="xs" c="var(--bz-text-tertiary)">
                 {configData.template_info}
               </Text>
             )}

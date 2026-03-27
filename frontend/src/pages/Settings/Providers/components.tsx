@@ -171,7 +171,7 @@ export const ProviderView: FunctionComponent<ProviderViewProps> = ({
                   <MantineText fw={700}>
                     {v.name ?? capitalize(v.key)}
                   </MantineText>
-                  <MantineText size="xs" c="dimmed">
+                  <MantineText size="xs" c="var(--bz-text-tertiary)">
                     Priority: {priority}
                   </MantineText>
                 </Group>

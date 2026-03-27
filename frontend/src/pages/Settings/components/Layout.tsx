@@ -127,7 +127,7 @@ const Layout: FunctionComponent<Props> = (props) => {
                   ...styles,
                   zIndex: 100,
                   borderTop: "1px solid var(--bz-border-subtle)",
-                  backgroundColor: "var(--mantine-color-body)",
+                  backgroundColor: "var(--bz-surface-base)",
                 }}
               >
                 <Group justify="flex-end">
