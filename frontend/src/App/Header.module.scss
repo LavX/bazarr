@@ -1,9 +1,52 @@
 .header {
+  background: inherit;
+  border-bottom: 1px solid var(--bz-border-divider);
+  box-shadow: none;
+
   @include mantine.light {
-    color: var(--mantine-color-gray-0);
+    color: var(--mantine-color-gray-8);
   }
 
   @include mantine.dark {
     color: var(--mantine-color-dark-0);
+  }
+
+  // Ghost-style action buttons (theme toggle, notifications, system gear)
+  :global(.mantine-ActionIcon-root) {
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    min-height: 32px;
+    background: var(--bz-hover-bg);
+    border: 1px solid var(--bz-border-interactive);
+    border-radius: var(--bz-radius-md);
+    color: var(--bz-text-tertiary);
+    font-size: 12px;
+    font-weight: 500;
+    transition: background var(--bz-duration-normal) var(--bz-ease-standard);
+
+    &:hover {
+      background: var(--bz-hover-bg-emphasis);
+    }
+  }
+
+  // Search input
+  :global(.mantine-Select-input) {
+    background: var(--bz-hover-bg);
+    border: 1px solid var(--bz-border-interactive);
+    border-radius: var(--bz-radius-md);
+    transition: background var(--bz-duration-normal) var(--bz-ease-standard);
+
+    &::placeholder {
+      color: var(--bz-text-tertiary);
+    }
+
+    &:hover {
+      background: var(--bz-hover-bg-emphasis);
+    }
+
+    &:focus {
+      background: var(--bz-hover-bg-emphasis);
+    }
   }
 }
