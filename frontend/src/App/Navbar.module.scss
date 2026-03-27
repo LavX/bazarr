@@ -1,7 +1,7 @@
 .nav {
-  padding: 8px;
+  padding: 10px;
   background-color: var(--bz-surface-raised);
-  border-right: 1px solid var(--bz-border-divider);
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .groupLabel {
@@ -11,10 +11,10 @@
   text-transform: uppercase;
   color: var(--bz-text-disabled);
   padding: 0 10px;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 
   &:not(:first-child) {
-    margin-top: 16px;
+    margin-top: 20px;
   }
 }
 
@@ -22,6 +22,7 @@
   display: block;
   text-decoration: none;
   border-radius: var(--bz-radius-sm);
+  margin-bottom: 2px;
   transition: background var(--bz-duration-normal) var(--bz-ease-standard);
 
   &.active {

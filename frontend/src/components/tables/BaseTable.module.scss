@@ -6,7 +6,7 @@
 
 .table {
   border-collapse: separate;
-  border-spacing: 0;
+  border-spacing: 0 2px;
 
   // Column headers
   :global(.mantine-Table-th) {
