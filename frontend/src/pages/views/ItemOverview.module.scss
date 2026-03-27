@@ -1,32 +1,22 @@
 .fanartWrapper {
   position: relative;
-  margin-bottom: -60px; // bleed below into episode list area
-
-  // Bottom bleed: fanart fades OUT into the page background
-  &::after {
-    content: "";
-    position: absolute;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    height: 140px;
-    background: linear-gradient(
-      to bottom,
-      transparent 0%,
-      var(--mantine-color-body) 100%
-    );
-    z-index: 3;
-    pointer-events: none;
-  }
 }
 
 .fanartOverlay {
-  background: linear-gradient(
-    180deg,
-    rgba(0, 0, 0, 0.5) 0%,
-    rgba(0, 0, 0, 0.7) 100%
-  );
-  padding-bottom: 80px; // extra space for the bleed-out area
+  background: rgba(0, 0, 0, 0.65);
+}
+
+// Gradient strip that sits BELOW the fanart, bridging from
+// the dark overlay to the page background. Not overlapping the image.
+.fanartFade {
+  height: 60px;
+  margin-top: -60px; // pull up to overlap the bottom of the fanart
   position: relative;
-  z-index: 1;
+  z-index: 2;
+  background: linear-gradient(
+    to bottom,
+    transparent 0%,
+    var(--mantine-color-body) 100%
+  );
+  pointer-events: none;
 }
