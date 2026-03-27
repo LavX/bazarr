@@ -35,6 +35,7 @@ import {
   useLanguageProfileBy,
   useProfileItemsToLanguages,
 } from "@/utilities/languages";
+import classes from "./ItemOverview.module.scss";
 
 interface Props {
   item: Item.Base | null;
@@ -137,6 +138,7 @@ const ItemOverview: FunctionComponent<Props> = (props) => {
   }, [profile, profileItems]);
 
   return (
+    <div className={classes.fanartWrapper}>
     <BackgroundImage src={item?.fanart ?? ""}>
       <Grid
         align="flex-start"
@@ -144,9 +146,7 @@ const ItemOverview: FunctionComponent<Props> = (props) => {
         gutter="xs"
         p={24}
         m={0}
-        style={{
-          backgroundColor: "rgba(0,0,0,0.7)",
-        }}
+        className={classes.fanartOverlay}
         styles={{
           inner: { flexWrap: "nowrap" },
         }}
@@ -199,6 +199,7 @@ const ItemOverview: FunctionComponent<Props> = (props) => {
         </Grid.Col>
       </Grid>
     </BackgroundImage>
+    </div>
   );
 };
 

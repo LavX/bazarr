@@ -1,0 +1,49 @@
+.fanartWrapper {
+  position: relative;
+  overflow: hidden;
+
+  // Top gradient: subtle fade from bg into the fanart
+  &::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 60px;
+    background: linear-gradient(
+      to bottom,
+      var(--mantine-color-body) 0%,
+      transparent 100%
+    );
+    z-index: 2;
+    pointer-events: none;
+  }
+
+  // Bottom gradient: strong fade from fanart into bg + grain
+  &::after {
+    content: "";
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 120px;
+    background: linear-gradient(
+      to top,
+      var(--mantine-color-body) 0%,
+      var(--mantine-color-body) 15%,
+      transparent 100%
+    );
+    z-index: 2;
+    pointer-events: none;
+  }
+}
+
+.fanartOverlay {
+  background: linear-gradient(
+    135deg,
+    rgba(0, 0, 0, 0.75) 0%,
+    rgba(0, 0, 0, 0.55) 100%
+  );
+  position: relative;
+  z-index: 1;
+}

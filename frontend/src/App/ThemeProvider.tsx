@@ -36,16 +36,61 @@ const themeProvider = createTheme({
       styleVars.colorBrand9,
     ],
     dark: [
-      '#C1C2D3',  // dark.0
-      '#A9AABB',  // dark.1
-      '#8E8FA3',  // dark.2
-      '#6C6D85',  // dark.3
-      '#53546C',  // dark.4
-      '#3D3E55',  // dark.5
-      '#2A2A45',  // dark.6
-      '#22223A',  // dark.7
-      '#1A1A2E',  // dark.8
-      '#121125',  // dark.9
+      '#C1C2D3', '#A9AABB', '#8E8FA3', '#6C6D85', '#53546C',
+      '#3D3E55', '#2A2A45', '#22223A', '#1A1A2E', '#121125',
+    ],
+    // Atmospheric overrides for all Mantine default colors
+    gray: [
+      '#f4f4f6', '#e8e8ec', '#d0d0d8', '#b0b0be', '#9090a2',
+      '#6c6d85', '#53546c', '#3d3e55', '#2a2a45', '#1a1a2e',
+    ],
+    red: [
+      '#fff0f0', '#ffd9d9', '#ffb3b3', '#ff8a8a', '#ff6b6b',
+      '#f55050', '#e03e3e', '#c92a2a', '#ad1f1f', '#8b1515',
+    ],
+    pink: [
+      '#fff0f5', '#ffd6e7', '#faa2c1', '#f06595', '#e64980',
+      '#d6336c', '#c2255c', '#a61e4d', '#8c1941', '#6e1233',
+    ],
+    grape: [
+      '#f8f0fc', '#ebd6f5', '#d0a2e0', '#b56cc8', '#a050b5',
+      '#8b3da0', '#7b2d8e', '#6a1f7a', '#581668', '#460d55',
+    ],
+    violet: [
+      '#f3f0ff', '#e0d9f7', '#bfb3e6', '#9b8ad4', '#7c6abf',
+      '#6a52b0', '#5c3fa0', '#4c2f8a', '#3d2070', '#2e1158',
+    ],
+    indigo: [
+      '#edf2ff', '#d5dff7', '#a8bce6', '#7b96d4', '#5c7cbf',
+      '#4c6ab0', '#3d5a9e', '#2f4a8a', '#233a70', '#182a58',
+    ],
+    blue: [
+      '#e8f0ff', '#ccddf7', '#99bae6', '#6694d4', '#4078bf',
+      '#3568b0', '#2a589e', '#20488a', '#183870', '#102858',
+    ],
+    cyan: [
+      '#e3fafc', '#c5f6fa', '#99e9f2', '#66d9e8', '#3bc9db',
+      '#22b8cf', '#15aabf', '#1098ad', '#0c8599', '#0b7285',
+    ],
+    teal: [
+      '#e6fcf5', '#c3fae8', '#96f2d7', '#63e6be', '#38d9a9',
+      '#20c997', '#12b886', '#0ca678', '#099268', '#087f5b',
+    ],
+    green: [
+      '#edf7ed', '#d3ebd3', '#a8d8a8', '#7cc47c', '#5cb85c',
+      '#4caa4c', '#3d993d', '#2d882d', '#1f751f', '#146014',
+    ],
+    lime: [
+      '#f4fce3', '#e2f5b5', '#c0e078', '#a0c850', '#88b830',
+      '#74a822', '#619818', '#4e8510', '#3d700a', '#2d5c06',
+    ],
+    yellow: [
+      '#fff9db', '#fff3bf', '#ffec99', '#ffe066', '#ffd43b',
+      '#fcc419', '#fab005', '#f59f00', '#f08c00', '#e67700',
+    ],
+    orange: [
+      '#fff4e6', '#ffe8cc', '#ffd8a8', '#ffc078', '#ffa94d',
+      '#ff922b', '#fd7e14', '#e8590c', '#d54a08', '#bf3d04',
     ],
   },
   primaryColor: "brand",
