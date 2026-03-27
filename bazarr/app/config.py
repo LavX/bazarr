@@ -199,8 +199,9 @@ validators = [
 
     # translating section
     Validator('translator.default_score', must_exist=True, default=50, is_type_of=int, gte=0),
-    Validator('translator.gemini_key', must_exist=True, default='', is_type_of=str, cast=str),
+    Validator('translator.gemini_keys', must_exist=True, default=[], is_type_of=list),
     Validator('translator.gemini_model', must_exist=True, default='gemini-2.0-flash', is_type_of=str, cast=str),
+    Validator('translator.gemini_batch_size', must_exist=True, default=300, is_type_of=int, gte=1),
     Validator('translator.translator_info', must_exist=True, default=True, is_type_of=bool),
     Validator('translator.translator_type', must_exist=True, default='google_translate', is_type_of=str, cast=str),
     Validator('translator.lingarr_url', must_exist=True, default='http://lingarr:9876', is_type_of=str),
@@ -568,6 +569,7 @@ array_keys = ['excluded_tags',
               'excluded_series_types',
               'enabled_providers',
               'enabled_integrations',
+              'gemini_keys',
               'path_mappings',
               'path_mappings_movie',
               'remove_profile_tags',
@@ -612,6 +614,13 @@ if hasattr(settings, 'series_scores'):
     settings.unset('SERIES_SCORES')
 if hasattr(settings, 'movie_scores'):
     settings.unset('MOVIE_SCORES')
+
+# backward compatibility: migrate gemini_key to gemini_keys
+if hasattr(settings.translator, 'gemini_key'):
+    legacy_key = str(settings.translator.gemini_key).strip()
+    if legacy_key and not settings.translator.gemini_keys:
+        settings.translator.gemini_keys = [legacy_key]
+    del settings.translator.gemini_key
 
 # save updated settings to file
 write_config()

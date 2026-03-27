@@ -22,6 +22,7 @@ import { useTestTranslator } from "@/apis/hooks/translator";
 import { TranslatorStatusPanelWithFormContext } from "@/components/TranslatorStatus";
 import {
   Check,
+  Chips,
   CollapseBox,
   Layout,
   Message,
@@ -324,12 +325,31 @@ const SettingsTranslatorView: FunctionComponent = () => {
             label="Gemini model"
             settingKey="settings-translator-gemini_model"
           />
-          <Text
-            label="Gemini API key"
-            settingKey="settings-translator-gemini_key"
+          <Number
+            label="Gemini batch size"
+            settingKey="settings-translator-gemini_batch_size"
+            min={1}
           />
           <Message>
-            You can generate it here: https://aistudio.google.com/apikey
+            Number of subtitle lines sent in each Gemini request. Higher values
+            reduce the number of API calls and can speed up translation, but may
+            increase timeout or response-size errors. Start with 300 (default),
+            then lower it if requests fail or raise it gradually if your model
+            handles larger batches reliably.
+          </Message>
+          <Chips
+            label="Gemini API keys"
+            settingKey="settings-translator-gemini_keys"
+            sanitizeFn={(values) => {
+              const uniqueKeys = new Set(
+                (values ?? []).map((value) => value.trim()).filter(Boolean),
+              );
+              return Array.from(uniqueKeys);
+            }}
+          />
+          <Message>
+            You can generate keys here: https://aistudio.google.com/apikey. Add
+            as many keys as needed; Bazarr rotates across available keys.
           </Message>
         </Section>
       </CollapseBox>
