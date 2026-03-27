@@ -17,7 +17,7 @@ import buttonClasses from "@/assets/button.module.scss";
 import paginationClasses from "@/assets/pagination.module.scss";
 
 const themeProvider = createTheme({
-  fontFamily: "Roboto, open sans, Helvetica Neue, Helvetica, Arial, sans-serif",
+  fontFamily: "'Geist Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
   colors: {
     brand: [
       styleVars.colorBrand0,

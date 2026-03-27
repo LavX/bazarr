@@ -13,6 +13,7 @@
   },
   "private": true,
   "dependencies": {
+    "@fontsource-variable/geist": "^5.2.8",
     "@mantine/core": "^8.3.9",
     "@mantine/dropzone": "^8.3.9",
     "@mantine/form": "^8.3.9",
@@ -31,7 +32,6 @@
     "socket.io-client": "^4.7.5"
   },
   "devDependencies": {
-    "@fontsource/roboto": "^5.0.12",
     "@fortawesome/fontawesome-svg-core": "^7.1.0",
     "@fortawesome/free-brands-svg-icons": "^7.1.0",
     "@fortawesome/free-regular-svg-icons": "^7.1.0",

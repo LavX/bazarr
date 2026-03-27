@@ -6,7 +6,7 @@ import queryClient from "@/apis/queries";
 import ThemeProvider from "@/App/ThemeProvider";
 import { ModalsProvider } from "@/modules/modals";
 import { Environment } from "./utilities";
-import "@fontsource/roboto/300.css";
+import "@fontsource-variable/geist";
 
 export const AllProviders: FunctionComponent<PropsWithChildren> = ({
   children,
