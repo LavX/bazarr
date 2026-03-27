@@ -1,4 +1,14 @@
 import BaseApi from "./base";
+import client from "./client";
+
+export interface SubtitleContentResponse {
+  content: string;
+  encoding: string;
+  format: string;
+  language: string;
+  size: number;
+  lastModified: number;
+}
 
 export type BatchAction =
   | "sync"
@@ -91,6 +101,13 @@ class SubtitlesApi extends BaseApi {
       "/upgradable",
     );
     return response;
+  }
+
+  async getContent(mediaType: string, mediaId: number, language: string) {
+    const base = mediaType === "episode" ? "episodes" : "movies";
+    const url = `/${base}/${mediaId}/subtitles/${encodeURIComponent(language)}/content`;
+    const response = await client.axios.get<SubtitleContentResponse>(url);
+    return response.data;
   }
 }
 

@@ -1,9 +1,17 @@
 import { FunctionComponent, useMemo, useState } from "react";
+import { useNavigate } from "react-router";
 import { Badge, MantineColor, Tooltip } from "@mantine/core";
 import { useEpisodeSubtitleModification } from "@/apis/hooks";
 import Language from "@/components/bazarr/Language";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
 import { toPython } from "@/utilities";
+
+function buildLanguageKey(sub: Subtitle): string {
+  let key = sub.code2;
+  if (sub.hi) key += ":hi";
+  if (sub.forced) key += ":forced";
+  return key;
+}
 
 interface Props {
   seriesId: number;
@@ -20,6 +28,7 @@ export const Subtitle: FunctionComponent<Props> = ({
   subtitle,
   availableSubtitles,
 }) => {
+  const navigate = useNavigate();
   const { remove, download } = useEpisodeSubtitleModification();
 
   const [opened, setOpen] = useState(false);
@@ -82,7 +91,9 @@ export const Subtitle: FunctionComponent<Props> = ({
       mediaId={episodeId}
       mediaType="episode"
       onAction={async (action) => {
-        if (action === "search") {
+        if (action === "view") {
+          navigate(`/subtitles/preview/episode/${episodeId}/${encodeURIComponent(buildLanguageKey(subtitle))}`);
+        } else if (action === "search") {
           await download.mutateAsync({
             seriesId,
             episodeId,

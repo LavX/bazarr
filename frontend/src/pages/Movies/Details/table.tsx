@@ -1,4 +1,5 @@
 import React, { FunctionComponent, useMemo } from "react";
+import { useNavigate } from "react-router";
 import { Badge, Text, TextProps } from "@mantine/core";
 import { faEllipsis } from "@fortawesome/free-solid-svg-icons";
 import { ColumnDef } from "@tanstack/react-table";
@@ -28,6 +29,13 @@ function isSubtitleMissing(path: string | undefined | null) {
   return path === missingText;
 }
 
+function buildLanguageKey(sub: Subtitle): string {
+  let key = sub.code2;
+  if (sub.hi) key += ":hi";
+  if (sub.forced) key += ":forced";
+  return key;
+}
+
 const Table: FunctionComponent<Props> = ({ movie, profile }) => {
   const onlyDesired = useShowOnlyDesired();
 
@@ -40,6 +48,8 @@ const Table: FunctionComponent<Props> = ({ movie, profile }) => {
     () => (movie?.subtitles ?? []).filter((s) => s.path && !isSubtitleTrack(s.path)),
     [movie?.subtitles],
   );
+
+  const navigate = useNavigate();
 
   const CodeCell = React.memo(({ item }: { item: Subtitle }) => {
     const { code2, path, hi, forced } = item;
@@ -100,7 +110,9 @@ const Table: FunctionComponent<Props> = ({ movie, profile }) => {
       <SubtitleToolsMenu
         selections={selections}
         onAction={async (action) => {
-          if (action === "delete" && path) {
+          if (action === "view") {
+            navigate(`/subtitles/preview/movie/${radarrId}/${encodeURIComponent(buildLanguageKey(item))}`);
+          } else if (action === "delete" && path) {
             await remove.mutateAsync({
               radarrId,
               form: {
@@ -110,8 +122,6 @@ const Table: FunctionComponent<Props> = ({ movie, profile }) => {
                 path,
               },
             });
-          } else if (action === "search") {
-            throw new Error("This shouldn't happen, please report the bug");
           }
         }}
       >
@@ -189,12 +199,12 @@ const Table: FunctionComponent<Props> = ({ movie, profile }) => {
         path: missingText,
       })) ?? [];
 
-    let rawSubtitles = movie?.subtitles ?? [];
+    let subtitles = movie?.subtitles ?? [];
     if (onlyDesired) {
-      rawSubtitles = filterSubtitleBy(rawSubtitles, profileItems);
+      subtitles = filterSubtitleBy(subtitles, profileItems);
     }
 
-    return [...rawSubtitles, ...missing];
+    return [...subtitles, ...missing];
   }, [movie, onlyDesired, profileItems]);
 
   return (

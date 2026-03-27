@@ -216,3 +216,21 @@ export function useBatchAction() {
     },
   });
 }
+
+export function useSubtitleContent(
+  mediaType: string | undefined,
+  mediaId: number | undefined,
+  language: string | undefined,
+) {
+  return useQuery({
+    queryKey: [QueryKeys.Subtitles, "content", mediaType, mediaId, language],
+    queryFn: () => {
+      if (!mediaType || mediaId === undefined || !language) {
+        throw new Error("Missing parameters");
+      }
+      return api.subtitles.getContent(mediaType, mediaId, language);
+    },
+    enabled: !!mediaType && mediaId !== undefined && !!language,
+    staleTime: 5 * 60 * 1000, // 5 min, not Infinity - subtitle files can change
+  });
+}

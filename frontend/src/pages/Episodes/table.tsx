@@ -87,12 +87,12 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
             ></Subtitle>
           ));
 
-          let rawSubtitles = episode.subtitles;
+          let filteredSubtitles = episode.subtitles;
           if (onlyDesired) {
-            rawSubtitles = filterSubtitleBy(rawSubtitles, profileItems);
+            filteredSubtitles = filterSubtitleBy(filteredSubtitles, profileItems);
           }
 
-          const subtitles = rawSubtitles.map((val, idx) => (
+          const subtitles = filteredSubtitles.map((val, idx) => (
             <Subtitle
               key={BuildKey(idx, val.code2, "valid")}
               seriesId={seriesId}

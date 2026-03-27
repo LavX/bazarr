@@ -57,6 +57,7 @@ const HistoryStats = lazy(
   () => import("@/pages/History/Statistics/HistoryStats"),
 );
 const SystemStatusView = lazy(() => import("@/pages/System/Status"));
+const SubtitleEditor = lazy(() => import("@/pages/SubtitleEditor"));
 
 function useRoutes(): CustomRouteObject[] {
   const { data } = useBadges();
@@ -289,6 +290,15 @@ function useRoutes(): CustomRouteObject[] {
                 element: <SystemAnnouncementsView></SystemAnnouncementsView>,
               },
             ],
+          },
+          {
+            path: "subtitles/preview/:mediaType/:mediaId/:language",
+            hidden: true,
+            element: (
+              <Lazy>
+                <SubtitleEditor></SubtitleEditor>
+              </Lazy>
+            ),
           },
           {
             path: "*",

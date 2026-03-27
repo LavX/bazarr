@@ -5,6 +5,7 @@ import {
   faCode,
   faDeaf,
   faExchangeAlt,
+  faEye,
   faFaceGrinStars,
   faFilm,
   faImage,
@@ -115,7 +116,7 @@ interface Props {
   selections: FormType.ModifySubtitle[];
   children?: ReactElement;
   menu?: Omit<MenuProps, "children">;
-  onAction?: (action: "delete" | "search") => void;
+  onAction?: (action: "delete" | "search" | "view") => void;
   // For missing subtitle translation
   missingLanguage?: Subtitle;
   translationSources?: Subtitle[];
@@ -221,6 +222,15 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
             No source subtitles to translate from
           </Menu.Item>
         )}
+        <Menu.Item
+          disabled={selections.length === 0 || onAction === undefined}
+          leftSection={<FontAwesomeIcon icon={faEye}></FontAwesomeIcon>}
+          onClick={() => {
+            onAction?.("view");
+          }}
+        >
+          View
+        </Menu.Item>
         <Menu.Item
           disabled={selections.length !== 0 || onAction === undefined}
           leftSection={<FontAwesomeIcon icon={faSearch}></FontAwesomeIcon>}
