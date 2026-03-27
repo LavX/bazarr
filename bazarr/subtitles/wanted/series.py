@@ -102,9 +102,10 @@ def wanted_download_subtitles(sonarr_episode_id, job_id=None):
         logging.info("BAZARR All providers are throttled")
 
 
-def wanted_search_missing_subtitles_series(job_id=None):
+def wanted_search_missing_subtitles_series(job_id=None, wait_for_completion=False):
     if not job_id:
-        jobs_queue.add_job_from_function("Searching for missing series subtitles", is_progress=True)
+        jobs_queue.add_job_from_function("Searching for missing series subtitles", is_progress=True,
+                                         wait_for_completion=wait_for_completion)
         return
 
     conditions = [(TableEpisodes.missing_subtitles.is_not(None)),
