@@ -1,7 +1,12 @@
 @layer mantine {
   .root {
+    border-radius: var(--bz-radius-sm);
+    transition: background var(--bz-duration-normal) var(--bz-ease-standard),
+                transform var(--bz-duration-normal) var(--bz-ease-standard),
+                box-shadow var(--bz-duration-normal) var(--bz-ease-standard);
+
     @include mantine.dark {
-      color: var(--mantine-color-dark-0);
+      color: var(--bz-text-primary);
 
       &[data-variant="gradient"] {
         color: #fff;
@@ -16,7 +21,7 @@
 
   .root:disabled {
     @include mantine.dark {
-      color: var(--mantine-color-dark-9);
+      color: var(--bz-text-disabled);
     }
   }
 }

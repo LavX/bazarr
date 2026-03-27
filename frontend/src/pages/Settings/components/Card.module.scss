@@ -1,9 +1,12 @@
 .card {
-  border-radius: var(--mantine-radius-sm);
-  border: 1px solid var(--mantine-color-gray-7);
+  border-radius: var(--bz-radius-lg);
+  border: 1px solid var(--bz-border-card);
+  background: var(--bz-surface-card);
+  transition: all var(--bz-duration-normal) var(--bz-ease-standard);
 
   &:hover {
-    box-shadow: var(--mantine-shadow-md);
-    border: 1px solid bazarr.$color-brand-5;
+    box-shadow: var(--bz-shadow-float);
+    border-color: var(--bz-border-hover);
+    background: var(--bz-surface-card-hover);
   }
 }

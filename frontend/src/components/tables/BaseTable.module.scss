@@ -14,13 +14,9 @@
     font-weight: 600;
     letter-spacing: 0.05em;
     text-transform: uppercase;
-    color: #53546c;
+    color: var(--bz-text-disabled);
     border-bottom: none;
     padding: 8px 12px;
-
-    [data-mantine-color-scheme="light"] & {
-      color: var(--bz-text-disabled);
-    }
   }
 
   // All table rows
@@ -34,11 +30,7 @@
     cursor: pointer;
 
     &:hover {
-      background-color: rgba(255, 255, 255, 0.025);
-
-      [data-mantine-color-scheme="light"] & {
-        background-color: rgba(0, 0, 0, 0.025);
-      }
+      background-color: var(--bz-hover-bg);
     }
   }
 
@@ -54,11 +46,7 @@
     cursor: pointer;
 
     &:hover {
-      background-color: rgba(255, 255, 255, 0.025);
-
-      [data-mantine-color-scheme="light"] & {
-        background-color: rgba(0, 0, 0, 0.025);
-      }
+      background-color: var(--bz-hover-bg);
     }
   }
 }

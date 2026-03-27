@@ -1,16 +1,19 @@
 @layer mantine {
   .root {
     --ai-bg: transparent;
+    border-radius: var(--bz-radius-sm);
+    transition: background var(--bz-duration-normal) var(--bz-ease-standard),
+                color var(--bz-duration-normal) var(--bz-ease-standard);
 
     @include mantine.light {
-      color: var(--mantine-color-dark-2);
-      --ai-hover: var(--mantine-color-gray-1);
-      --ai-hover-color: var(--mantine-color-gray-1);
+      color: var(--bz-text-secondary);
+      --ai-hover: var(--bz-hover-bg);
+      --ai-hover-color: var(--bz-hover-bg);
     }
 
     @include mantine.dark {
-      color: var(--mantine-color-dark-0);
-      --ai-hover: var(--mantine-color-gray-8);
+      color: var(--bz-text-secondary);
+      --ai-hover: var(--bz-hover-bg);
     }
   }
 }

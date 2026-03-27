@@ -4,6 +4,7 @@ import {
   Badge,
   Button,
   createTheme,
+  Input,
   MantineProvider,
   Pagination,
   Progress,
@@ -16,6 +17,7 @@ import actionIconClasses from "@/assets/action_icon.module.scss";
 import badgeClasses from "@/assets/badge.module.scss";
 import buttonClasses from "@/assets/button.module.scss";
 import paginationClasses from "@/assets/pagination.module.scss";
+import inputClasses from "@/assets/input.module.scss";
 import progressClasses from "@/assets/progress.module.scss";
 
 const themeProvider = createTheme({
@@ -56,6 +58,9 @@ const themeProvider = createTheme({
     }),
     Button: Button.extend({
       classNames: buttonClasses,
+    }),
+    Input: Input.extend({
+      classNames: inputClasses,
     }),
     Pagination: Pagination.extend({
       classNames: paginationClasses,
