@@ -11,7 +11,7 @@ from utilities.path_mappings import path_mappings
 from utilities.video_analyzer import subtitles_sync_references
 from subtitles.tools.subsyncer import SubSyncer
 from subtitles.tools.translate.main import translate_subtitles_file
-from subtitles.tools.mods import subtitles_apply_mods
+from subtitles.tools.mods import apply_subtitle_mods
 from subtitles.indexer.series import store_subtitles
 from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.sync import sync_subtitles
@@ -193,11 +193,9 @@ class Subtitles(Resource):
                 except OSError:
                     return 'Unable to edit subtitles file. Check logs.', 409
         else:
-            try:
-                subtitles_apply_mods(language=language, subtitle_path=subtitles_path, mods=[action],
-                                     video_path=video_path)
-            except OSError:
-                return 'Unable to edit subtitles file. Check logs.', 409
+            apply_subtitle_mods(language=language, subtitle_path=subtitles_path, mods=[action],
+                                video_path=video_path, media_type=media_type, media_id=id)
+            return '', 204
 
         # apply chmod if required
         chmod = int(settings.general.chmod, 8) if not sys.platform.startswith(
