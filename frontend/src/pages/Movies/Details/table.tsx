@@ -175,7 +175,7 @@ const Table: FunctionComponent<Props> = ({ movie, profile }) => {
             );
           } else {
             return (
-              <Badge variant="highlight">
+              <Badge>
                 <Language.Text value={row.original} long></Language.Text>
               </Badge>
             );
