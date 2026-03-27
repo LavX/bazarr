@@ -70,7 +70,7 @@ const AppHeader: FunctionComponent = () => {
                 src={`${Environment.baseUrl}/images/logo128.png`}
               ></Avatar>
               <Text fw={800} fz="xl" c={dark ? "gray.5" : "gray.8"} visibleFrom="sm" style={{ cursor: "pointer", lineHeight: 1 }}>
-                Bazarr<Text component="span" fw={900} fz="xl" c="#E8910C" style={{ verticalAlign: "top", fontSize: "0.7em", lineHeight: 1, position: "relative", top: "-0.15em" }}>+</Text>
+                Bazarr<Text component="span" fw={900} fz="xl" c="brand.5" style={{ verticalAlign: "top", fontSize: "0.7em", lineHeight: 1, position: "relative", top: "-0.15em" }}>+</Text>
               </Text>
             </Group>
           </Anchor>

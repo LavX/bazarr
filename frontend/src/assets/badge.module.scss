@@ -1,12 +1,13 @@
 @layer mantine {
   .root {
-    border-radius: 5px;
+    border-radius: var(--bz-radius-xs);
     font-size: 10px;
     font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
     padding: 2px 7px;
-    transition: background 120ms ease, border-color 120ms ease;
+    transition: background var(--bz-duration-fast) var(--bz-ease-standard),
+                border-color var(--bz-duration-fast) var(--bz-ease-standard);
 
     // Default variant (ghost): neutral for audio tracks and general use
     background: rgba(255, 255, 255, 0.05);
