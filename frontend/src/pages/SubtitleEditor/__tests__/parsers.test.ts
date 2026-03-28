@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { getParser } from "../parsers";
+import { beforeEach,describe, expect, it, vi } from "vitest";
+import { getParser } from "@/pages/SubtitleEditor/parsers";
 
 // Mock crypto.randomUUID since it may not be available in test env
 beforeEach(() => {

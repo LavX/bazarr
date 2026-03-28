@@ -1,14 +1,13 @@
 import { FunctionComponent, useCallback, useMemo, useState } from "react";
 import { Link } from "react-router";
 import { ActionIcon, Anchor, Checkbox, Container, Group, Menu, Progress, Tooltip } from "@mantine/core";
-import { useCombobox } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import { faBookmark as farBookmark } from "@fortawesome/free-regular-svg-icons";
 import {
   faArrowUp,
-  faCircleDown,
   faBookmark,
   faCheck,
+  faCircleDown,
   faEllipsisVertical,
   faHardDrive,
   faLanguage,
@@ -23,22 +22,22 @@ import {
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import { uniqBy } from "lodash";
-import { useLanguageProfiles, useSeriesModification, useSeriesPagination } from "@/apis/hooks";
+import { useSeriesModification, useSeriesPagination } from "@/apis/hooks";
 import { useInstanceName } from "@/apis/hooks/site";
 import { useUpgradableItems } from "@/apis/hooks/subtitles";
 import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
-import { SUBTITLE_TOOL_ACTIONS } from "@/constants/batch";
-import { GroupedSelector, GroupedSelectorOptions, Toolbox } from "@/components";
+import { Toolbox } from "@/components";
 import { AudioList } from "@/components/bazarr";
 import LanguageProfileName from "@/components/bazarr/LanguageProfile";
 import { BatchModConfirmModal } from "@/components/forms/BatchModConfirmForm";
+import { ChangeProfileModal } from "@/components/forms/ChangeProfileForm";
 import { ItemEditModal } from "@/components/forms/ItemEditForm";
 import { MassSyncModal } from "@/components/forms/MassSyncForm";
 import { MassTranslateModal, WantedItem } from "@/components/forms/MassTranslateForm";
+import { SUBTITLE_TOOL_ACTIONS } from "@/constants/batch";
 import { useModals } from "@/modules/modals";
 import ItemView from "@/pages/views/ItemView";
 import { GetItemId } from "@/utilities";
-import { useSelectorOptions } from "@/utilities/hooks";
 
 const SeriesView: FunctionComponent = () => {
   const mutation = useSeriesModification();
@@ -57,22 +56,6 @@ const SeriesView: FunctionComponent = () => {
 
   const [selections, setSelections] = useState<Item.Series[]>([]);
   const [dirties, setDirties] = useState<Item.Series[]>([]);
-  const { data: profiles } = useLanguageProfiles();
-  const profileOptions = useSelectorOptions(profiles ?? [], (v) => v.name);
-  const combobox = useCombobox();
-
-  const profileOptionsWithAction = useMemo<GroupedSelectorOptions<string>[]>(() => [
-    { group: "Actions", items: [{ label: "Clear", value: "", profileId: null }] },
-    {
-      group: "Profiles",
-      items: profileOptions.options.map((a) => ({
-        value: a.value.profileId.toString(),
-        label: a.label,
-        profileId: a.value.profileId,
-      })),
-    },
-  ], [profileOptions.options]);
-
   const setProfiles = useCallback(
     (id: number | null) => {
       const newItems = selections.map((v) => ({ ...v, profileId: id }));
@@ -108,18 +91,17 @@ const SeriesView: FunctionComponent = () => {
     if (selections.length === 0 && dirties.length === 0) return undefined;
     return (
       <Group gap="xs">
-        <GroupedSelector
-          onClick={() => combobox.openDropdown()}
-          onDropdownClose={() => combobox.resetSelectedOption()}
-          placeholder="Change Profile"
-          withCheckIcon={false}
-          options={profileOptionsWithAction}
+        <Toolbox.Button
+          icon={faLanguage}
           disabled={selections.length === 0}
-          comboboxProps={{
-            store: combobox,
-            onOptionSubmit: (value) => setProfiles(value ? +value : null),
+          onClick={() => {
+            modals.openContextModal(ChangeProfileModal, {
+              onSelect: setProfiles,
+            });
           }}
-        />
+        >
+          Change Profile
+        </Toolbox.Button>
         {dirties.length > 0 && (
           <>
             <Toolbox.Button icon={faUndo} onClick={() => setDirties([])}>
@@ -136,7 +118,7 @@ const SeriesView: FunctionComponent = () => {
         )}
       </Group>
     );
-  }, [selections, dirties, combobox, profileOptionsWithAction, setProfiles, save]);
+  }, [selections, dirties, modals, setProfiles, save]);
 
   const columns = useMemo<ColumnDef<Item.Series>[]>(
     () => [

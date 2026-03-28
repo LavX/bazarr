@@ -5,15 +5,13 @@
     transition: background var(--bz-duration-normal) var(--bz-ease-standard),
                 color var(--bz-duration-normal) var(--bz-ease-standard);
 
-    @include mantine.light {
-      color: var(--bz-text-secondary);
-      --ai-hover: var(--bz-hover-bg);
-      --ai-hover-color: var(--bz-hover-bg);
-    }
+    color: var(--bz-text-secondary);
+    --ai-hover: var(--bz-hover-bg);
+    --ai-hover-color: var(--bz-hover-bg);
 
-    @include mantine.dark {
-      color: var(--bz-text-secondary);
-      --ai-hover: var(--bz-hover-bg);
+    &[data-variant="gradient"],
+    &[data-variant="filled"] {
+      color: #fff;
     }
   }
 }

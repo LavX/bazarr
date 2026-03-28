@@ -283,8 +283,8 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
         items: batchItems,
         action: "translate",
         options: {
-          from_lang: values.sourceLanguage!.code2,
-          to_lang: values.targetLanguage!.code2,
+          fromLang: values.sourceLanguage!.code2,
+          toLang: values.targetLanguage!.code2,
         },
       });
 

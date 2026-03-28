@@ -1,22 +1,25 @@
 .fanartWrapper {
   position: relative;
+  margin: 0 12px;
+  border-radius: var(--bz-radius-lg);
+  overflow: hidden;
 }
 
 .fanartOverlay {
   background: rgba(0, 0, 0, 0.65);
+
+  // Force dark-style colors inside overlay regardless of theme
+  @include mantine.light {
+    color: #e8e8f0;
+
+    :global(.mantine-Badge-root[data-variant="light"]) {
+      background: rgba(255, 255, 255, 0.1);
+      color: rgba(255, 255, 255, 0.85);
+      border-color: rgba(255, 255, 255, 0.15);
+    }
+  }
 }
 
-// Gradient strip that sits BELOW the fanart, bridging from
-// the dark overlay to the page background. Not overlapping the image.
 .fanartFade {
-  height: 60px;
-  margin-top: -60px; // pull up to overlap the bottom of the fanart
-  position: relative;
-  z-index: 2;
-  background: linear-gradient(
-    to bottom,
-    transparent 0%,
-    var(--mantine-color-body) 100%
-  );
-  pointer-events: none;
+  display: none;
 }

@@ -28,10 +28,10 @@ const MassSyncForm: FunctionComponent<MassSyncFormProps> = ({ items }) => {
 
   const form = useForm<BatchOptions>({
     initialValues: {
-      max_offset_seconds: settings?.subsync.max_offset_seconds ?? 60,
-      no_fix_framerate: settings?.subsync.no_fix_framerate ?? true,
+      maxOffsetSeconds: settings?.subsync.max_offset_seconds ?? 60,
+      noFixFramerate: settings?.subsync.no_fix_framerate ?? true,
       gss: settings?.subsync.gss ?? true,
-      force_resync: false,
+      forceResync: false,
     },
   });
 
@@ -79,7 +79,7 @@ const MassSyncForm: FunctionComponent<MassSyncFormProps> = ({ items }) => {
           label="Max Offset Seconds"
           min={1}
           max={600}
-          {...form.getInputProps("max_offset_seconds")}
+          {...form.getInputProps("maxOffsetSeconds")}
         />
 
         <Checkbox
@@ -89,13 +89,13 @@ const MassSyncForm: FunctionComponent<MassSyncFormProps> = ({ items }) => {
 
         <Checkbox
           label="No Fix Framerate"
-          {...form.getInputProps("no_fix_framerate", { type: "checkbox" })}
+          {...form.getInputProps("noFixFramerate", { type: "checkbox" })}
         />
 
         <Checkbox
           label="Force Re-sync"
           description="Re-sync subtitles that have already been synced"
-          {...form.getInputProps("force_resync", { type: "checkbox" })}
+          {...form.getInputProps("forceResync", { type: "checkbox" })}
         />
 
         <Divider />

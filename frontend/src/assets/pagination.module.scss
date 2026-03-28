@@ -5,9 +5,7 @@
     transition: background var(--bz-duration-normal) var(--bz-ease-standard),
                 border-color var(--bz-duration-normal) var(--bz-ease-standard);
 
-    @include mantine.dark {
-      color: var(--bz-text-secondary);
-    }
+    color: var(--bz-text-secondary);
 
     &:hover:not([data-active]) {
       background: var(--bz-hover-bg);

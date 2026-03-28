@@ -1,7 +1,17 @@
 .nav {
-  padding: 10px;
-  background-color: var(--bz-surface-raised);
-  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 8px;
+  background: transparent;
+  border-right: none;
+}
+
+.navInner {
+  background: var(--bz-surface-base);
+  border: 1px solid var(--bz-border-card);
+  border-radius: var(--bz-radius-xl);
+  padding: 12px;
+  height: 100%;
+  overflow-y: auto;
+  scrollbar-width: none;
 }
 
 .groupLabel {
@@ -10,35 +20,46 @@
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--bz-text-disabled);
-  padding: 0 10px;
-  margin-bottom: 8px;
+  padding: 0 12px;
+  margin-bottom: 6px;
 
   &:not(:first-child) {
-    margin-top: 20px;
+    margin-top: 22px;
   }
 }
 
 .anchor {
   display: block;
   text-decoration: none;
-  border-radius: var(--bz-radius-sm);
+  border-radius: var(--bz-radius-md);
   margin-bottom: 2px;
   transition: background var(--bz-duration-normal) var(--bz-ease-standard);
 
   &.active {
-    background-color: rgba(230, 138, 0, 0.10);
     position: relative;
+
+    @include mantine.dark {
+      background-color: rgba(230, 138, 0, 0.12);
+    }
+
+    @include mantine.light {
+      background-color: rgba(230, 138, 0, 0.08);
+    }
 
     &::before {
       content: "";
       position: absolute;
-      left: 2px;
+      left: 4px;
       top: 50%;
       transform: translateY(-50%);
       width: 3px;
-      height: 16px;
+      height: 18px;
       border-radius: 2px;
       background: #e68a00;
+
+      @include mantine.light {
+        background: #b36b00;
+      }
     }
 
     .text {
@@ -46,8 +67,15 @@
     }
 
     .icon {
-      color: #e68a00;
       opacity: 1;
+
+      @include mantine.dark {
+        color: #e68a00;
+      }
+
+      @include mantine.light {
+        color: #b36b00;
+      }
     }
   }
 
@@ -60,7 +88,7 @@
   display: inline-flex;
   align-items: center;
   width: 100%;
-  padding: 7px 10px;
+  padding: 8px 12px;
   font-size: 13px;
   font-weight: 450;
   color: var(--bz-text-tertiary);
@@ -75,10 +103,24 @@
 .badge {
   margin-left: auto;
   text-decoration: none;
-  background-color: rgba(230, 138, 0, 0.15) !important;
-  color: #ffca28 !important;
   border-radius: var(--bz-radius-sm);
   font-size: 10px;
   font-weight: 600;
   box-shadow: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  padding-left: 8px;
+  padding-right: 8px;
+
+  @include mantine.dark {
+    background-color: rgba(230, 138, 0, 0.15) !important;
+    color: #ffca28 !important;
+  }
+
+  @include mantine.light {
+    background-color: rgba(230, 138, 0, 0.12) !important;
+    color: #b36b00 !important;
+  }
 }

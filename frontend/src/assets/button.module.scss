@@ -5,12 +5,11 @@
                 transform var(--bz-duration-normal) var(--bz-ease-standard),
                 box-shadow var(--bz-duration-normal) var(--bz-ease-standard);
 
-    @include mantine.dark {
-      color: var(--bz-text-primary);
+    color: var(--bz-text-primary);
 
-      &[data-variant="gradient"] {
-        color: #fff;
-      }
+    &[data-variant="filled"],
+    &[data-variant="gradient"] {
+      color: #fff;
     }
 
     &[data-variant="danger"] {
@@ -20,8 +19,10 @@
   }
 
   .root:disabled {
-    @include mantine.dark {
-      color: var(--bz-text-disabled);
+    color: var(--bz-text-disabled);
+
+    @include mantine.light {
+      color: var(--bz-text-tertiary);
     }
   }
 }

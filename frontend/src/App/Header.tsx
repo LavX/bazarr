@@ -53,8 +53,9 @@ const AppHeader: FunctionComponent = () => {
   const { data: jobs } = useSystemJobs();
 
   return (
-    <AppShell.Header p="md" className={styles.header}>
-      <Group justify="space-between" wrap="nowrap">
+    <AppShell.Header p={0} className={styles.header}>
+      <div className={styles.headerInner}>
+      <Group justify="space-between" wrap="nowrap" style={{ flex: 1 }}>
         <Group wrap="nowrap">
           <Burger
             opened={showed}
@@ -67,7 +68,7 @@ const AppHeader: FunctionComponent = () => {
               <Avatar
                 alt="brand"
                 size={40}
-                src={`${Environment.baseUrl}/images/logo128.png`}
+                src={`${Environment.baseUrl}/images/logo_no_orb128.png`}
               ></Avatar>
               <Text fw={800} fz="xl" c={dark ? "gray.5" : "gray.8"} visibleFrom="sm" style={{ cursor: "pointer", lineHeight: 1 }}>
                 Bazarr<Text component="span" fw={900} fz="xl" c="brand.5" style={{ verticalAlign: "top", fontSize: "0.7em", lineHeight: 1, position: "relative", top: "-0.15em" }}>+</Text>
@@ -104,7 +105,7 @@ const AppHeader: FunctionComponent = () => {
                 loading={offline}
                 c={offline ? "yellow" : undefined}
                 icon={faGear}
-                size="lg"
+                size="sm"
               ></Action>
             </Menu.Target>
             <Menu.Dropdown>
@@ -128,6 +129,7 @@ const AppHeader: FunctionComponent = () => {
           </Menu>
         </Group>
       </Group>
+      </div>
       <NotificationDrawer
         opened={jobsManagerOpened}
         onClose={closeJobsManager}

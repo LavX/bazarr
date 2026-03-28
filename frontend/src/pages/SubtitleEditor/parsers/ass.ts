@@ -1,4 +1,4 @@
-import type { ParseResult, Cue } from "../types";
+import type { Cue,ParseResult } from "@/pages/SubtitleEditor/types";
 import type { SubtitleParser } from "./index";
 
 function parseTimestamp(raw: string): number {

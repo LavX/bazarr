@@ -7,7 +7,7 @@ import os
 from flask import make_response, jsonify, request
 from flask_restx import Resource, Namespace
 
-from app.database import TableEpisodes, TableMovies, database, select
+from app.database import TableEpisodes, TableMovies, TableShows, database, select
 from utilities.path_mappings import path_mappings
 
 from ..utils import authenticate
@@ -41,18 +41,33 @@ def resolve_subtitle_path(media_type, media_id, language_code):
     language_code can be like "en", "hu", "en:hi", "en:forced".
     Matches against the language field in the subtitles array.
 
-    Returns (path, language) on success, or (message, status_code) on failure.
+    Returns (path, language, metadata) on success, or (message, status_code) on failure.
     """
+    metadata = {}
     if media_type == 'episode':
         row = database.execute(
-            select(TableEpisodes.subtitles, TableEpisodes.path)
+            select(TableEpisodes.subtitles, TableEpisodes.path, TableEpisodes.sonarrSeriesId, TableEpisodes.title)
             .where(TableEpisodes.sonarrEpisodeId == media_id)
         ).first()
+        if row:
+            series_row = database.execute(
+                select(TableShows.title).where(TableShows.sonarrSeriesId == row.sonarrSeriesId)
+            ).first()
+            metadata = {
+                'mediaTitle': series_row.title if series_row else None,
+                'mediaId': row.sonarrSeriesId,
+                'episodeTitle': row.title,
+            }
     elif media_type == 'movie':
         row = database.execute(
-            select(TableMovies.subtitles, TableMovies.path)
+            select(TableMovies.subtitles, TableMovies.path, TableMovies.title, TableMovies.radarrId)
             .where(TableMovies.radarrId == media_id)
         ).first()
+        if row:
+            metadata = {
+                'mediaTitle': row.title,
+                'mediaId': row.radarrId,
+            }
     else:
         return 'Invalid media type', 400
 
@@ -98,7 +113,7 @@ def resolve_subtitle_path(media_type, media_id, language_code):
     if not os.path.isfile(subtitle_path):
         return 'Subtitle file not found on disk', 404
 
-    return subtitle_path, language
+    return subtitle_path, language, metadata
 
 
 def read_subtitle_file(path):
@@ -162,7 +177,7 @@ def _get_subtitle_content(media_type, media_id, language_code):
     if isinstance(result[1], int):
         return result[0], result[1]
 
-    subtitle_path, language = result
+    subtitle_path, language, metadata = result
 
     etag = generate_etag(subtitle_path)
 
@@ -179,14 +194,17 @@ def _get_subtitle_content(media_type, media_id, language_code):
     stat = os.stat(subtitle_path)
     fmt = detect_subtitle_format(subtitle_path)
 
-    response = make_response(jsonify({
+    response_data = {
         'content': content,
         'encoding': encoding,
         'format': fmt,
         'language': language,
         'size': stat.st_size,
         'lastModified': stat.st_mtime,
-    }))
+    }
+    response_data.update(metadata)
+
+    response = make_response(jsonify(response_data))
 
     response.headers['ETag'] = f'"{etag}"'
     response.headers['X-Content-Type-Options'] = 'nosniff'

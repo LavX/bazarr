@@ -229,7 +229,7 @@ function WantedView<T extends Wanted.Base>({
                 label={activeFilterCount > 0 ? activeFilterCount : undefined}
                 size={16}
                 offset={4}
-                color="blue"
+                color="brand"
                 disabled={activeFilterCount === 0}
               >
                 <ActionIcon

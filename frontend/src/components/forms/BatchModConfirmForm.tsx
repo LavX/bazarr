@@ -6,15 +6,15 @@ import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
 import { useModals, withModal } from "@/modules/modals";
 
 const ACTION_LABELS: Record<string, string> = {
-  OCR_fixes: "OCR Fixes",
-  common: "Common Fixes",
-  remove_HI: "Remove Hearing Impaired",
-  remove_tags: "Remove Style Tags",
-  fix_uppercase: "Fix Uppercase",
-  reverse_rtl: "Reverse RTL",
+  "OCR_fixes": "OCR Fixes",
+  "common": "Common Fixes",
+  "remove_HI": "Remove Hearing Impaired",
+  "remove_tags": "Remove Style Tags",
+  "fix_uppercase": "Fix Uppercase",
+  "reverse_rtl": "Reverse RTL",
   "scan-disk": "Scan Disk",
   "search-missing": "Search Missing Subtitles",
-  upgrade: "Upgrade Subtitles",
+  "upgrade": "Upgrade Subtitles",
 };
 
 interface BatchModConfirmFormProps {

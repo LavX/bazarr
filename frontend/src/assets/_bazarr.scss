@@ -12,7 +12,7 @@ $color-brand-8: #7a4900;
 $color-brand-9: #5c3700;
 
 
-$header-height: 64px;
+$header-height: 76px;
 
 :global {
   .table-long-break {
@@ -62,6 +62,11 @@ body::before {
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.7' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
   background-repeat: repeat;
   background-size: 256px 256px;
+
+  @include light {
+    opacity: 0.035;
+    mix-blend-mode: multiply;
+  }
 }
 
 // Ambient atmospheric glow (z-index above content backgrounds, below grain)
@@ -72,8 +77,13 @@ body::after {
   z-index: 9999;
   pointer-events: none;
   background:
-    radial-gradient(ellipse at 15% 10%, rgba(230, 138, 0, 0.08) 0%, transparent 55%),
-    radial-gradient(ellipse at 85% 90%, rgba(26, 138, 138, 0.05) 0%, transparent 55%);
+    radial-gradient(ellipse at 15% 10%, rgba(230, 138, 0, 0.12) 0%, transparent 50%),
+    radial-gradient(ellipse at 85% 90%, rgba(26, 138, 138, 0.08) 0%, transparent 50%),
+    radial-gradient(ellipse at 50% 50%, rgba(140, 80, 200, 0.05) 0%, transparent 60%);
+
+  @include light {
+    display: none;
+  }
 }
 
 #root {
@@ -88,13 +98,11 @@ body::after {
   --bz-surface-card: #22223a;
   --bz-surface-card-hover: #2a2a45;
   --bz-surface-overlay: #2a2a45;
-  --bz-border-subtle: #33334d;
   --bz-stat-processing: #ffca28;
   --bz-stat-queued: #4dabf7;
   --bz-stat-completed: #69db7c;
   --bz-stat-failed: #ff6b6b;
   --bz-shadow-float: 0 4px 12px rgba(0, 0, 0, 0.5);
-  --bz-transition-lift: transform 150ms ease, background-color 150ms ease;
 
   /* Text hierarchy */
   --bz-text-primary: #e8e8f0;
@@ -103,11 +111,11 @@ body::after {
   --bz-text-disabled: #6c6d85;
 
   /* Border radius scale */
-  --bz-radius-xs: 5px;
-  --bz-radius-sm: 6px;
-  --bz-radius-md: 8px;
-  --bz-radius-lg: 12px;
-  --bz-radius-xl: 16px;
+  --bz-radius-xs: 6px;
+  --bz-radius-sm: 8px;
+  --bz-radius-md: 10px;
+  --bz-radius-lg: 14px;
+  --bz-radius-xl: 20px;
 
   /* Border opacity scale */
   --bz-border-divider: rgba(255, 255, 255, 0.04);
@@ -134,16 +142,16 @@ body::after {
 }
 
 :root[data-mantine-color-scheme="light"] {
-  --bz-text-primary: #1a1a2e;
-  --bz-text-secondary: #495057;
-  --bz-text-tertiary: #868e96;
-  --bz-text-disabled: #ced4da;
+  --bz-text-primary: #12121f;
+  --bz-text-secondary: #343a40;
+  --bz-text-tertiary: #656d76;
+  --bz-text-disabled: #909aa5;
 
-  --bz-radius-xs: 5px;
-  --bz-radius-sm: 6px;
-  --bz-radius-md: 8px;
-  --bz-radius-lg: 12px;
-  --bz-radius-xl: 16px;
+  --bz-radius-xs: 6px;
+  --bz-radius-sm: 8px;
+  --bz-radius-md: 10px;
+  --bz-radius-lg: 14px;
+  --bz-radius-xl: 20px;
 
   --bz-border-divider: rgba(0, 0, 0, 0.06);
   --bz-border-card: rgba(0, 0, 0, 0.08);
@@ -156,6 +164,11 @@ body::after {
   --bz-surface-card: #ffffff;
   --bz-surface-card-hover: #f8f9fa;
   --bz-surface-overlay: #ffffff;
+  --bz-stat-processing: #e67700;
+  --bz-stat-queued: #1971c2;
+  --bz-stat-completed: #2b8a3e;
+  --bz-stat-failed: #e03131;
+  --bz-shadow-float: 0 4px 12px rgba(0, 0, 0, 0.1);
 
   --bz-ease-standard: cubic-bezier(0.2, 0, 0, 1);
   --bz-ease-enter: cubic-bezier(0, 0, 0.2, 1);
@@ -171,40 +184,63 @@ body::after {
   --bz-hover-bg-emphasis: rgba(0, 0, 0, 0.07);
 }
 
+// Floaty main content area
+:global {
+  .mantine-AppShell-main {
+    background: var(--bz-surface-base);
+    margin: 0 8px 8px 0;
+    border-radius: var(--bz-radius-xl);
+    border: 1px solid var(--bz-border-card);
+  }
+
+  .mantine-AppShell-navbar {
+    background: transparent;
+    border-right: none;
+  }
+
+  .mantine-AppShell-header {
+    background: transparent !important;
+    border: none !important;
+    padding: 8px !important;
+  }
+
+  .mantine-AppShell-root {
+    background: var(--bz-surface-ground);
+  }
+}
+
 // Global Paper/Card styling
 :global {
   .mantine-Paper-root {
-    @include dark {
-      border-radius: var(--bz-radius-lg);
+    border-radius: var(--bz-radius-lg);
 
-      &[data-with-border] {
-        border-color: var(--bz-border-card);
-      }
+    &[data-with-border] {
+      border-color: var(--bz-border-card);
     }
   }
 
-  .mantine-Card-root {
-    @include dark {
-      background: var(--bz-surface-card);
-      border-radius: var(--bz-radius-lg);
-      border: 1px solid var(--bz-border-card);
-      box-shadow: none;
-      transition: background var(--bz-duration-normal) var(--bz-ease-standard),
-                  border-color var(--bz-duration-normal) var(--bz-ease-standard);
+  .mantine-Alert-root {
+    border-radius: var(--bz-radius-lg);
+  }
 
-      &:hover {
-        border-color: var(--bz-border-hover);
-      }
+  .mantine-Card-root {
+    background: var(--bz-surface-card);
+    border-radius: var(--bz-radius-lg);
+    border: 1px solid var(--bz-border-card);
+    box-shadow: none;
+    transition: background var(--bz-duration-normal) var(--bz-ease-standard),
+                border-color var(--bz-duration-normal) var(--bz-ease-standard);
+
+    &:hover {
+      border-color: var(--bz-border-hover);
     }
   }
 
   // Tabs styling
   .mantine-Tabs-tab {
-    @include dark {
-      transition: background var(--bz-duration-normal) var(--bz-ease-standard),
-                  color var(--bz-duration-normal) var(--bz-ease-standard),
-                  border-color var(--bz-duration-normal) var(--bz-ease-standard);
-    }
+    transition: background var(--bz-duration-normal) var(--bz-ease-standard),
+                color var(--bz-duration-normal) var(--bz-ease-standard),
+                border-color var(--bz-duration-normal) var(--bz-ease-standard);
   }
 
   // Switch styling
@@ -215,6 +251,7 @@ body::after {
 
   // Checkbox styling
   .mantine-Checkbox-input {
+    border-radius: var(--bz-radius-xs);
     transition: background-color var(--bz-duration-normal) var(--bz-ease-standard),
                 border-color var(--bz-duration-normal) var(--bz-ease-standard);
   }
@@ -226,22 +263,19 @@ body::after {
 
   // Tooltip styling
   .mantine-Tooltip-tooltip {
-    @include dark {
-      background: var(--bz-surface-overlay);
-      border: 1px solid var(--bz-border-card);
-      border-radius: var(--bz-radius-sm);
-      color: var(--bz-text-primary);
-    }
+    background: var(--bz-surface-overlay);
+    border: 1px solid var(--bz-border-card);
+    border-radius: var(--bz-radius-sm);
+    color: var(--bz-text-primary);
+    box-shadow: var(--bz-shadow-float);
   }
 
   // Popover styling
   .mantine-Popover-dropdown {
-    @include dark {
-      background: var(--bz-surface-overlay);
-      border: 1px solid var(--bz-border-card);
-      border-radius: var(--bz-radius-lg);
-      box-shadow: var(--bz-shadow-float);
-    }
+    background: var(--bz-surface-overlay);
+    border: 1px solid var(--bz-border-card);
+    border-radius: var(--bz-radius-lg);
+    box-shadow: var(--bz-shadow-float);
   }
 }
 
@@ -252,7 +286,7 @@ body::after {
   .mantine-Select-dropdown,
   .mantine-MultiSelect-dropdown,
   .mantine-Autocomplete-dropdown {
-    background: var(--bz-surface-card);
+    background: var(--bz-surface-overlay);
     border: 1px solid var(--bz-border-card);
     border-radius: var(--bz-radius-lg);
     box-shadow: var(--bz-shadow-float);
@@ -301,42 +335,28 @@ body::after {
   }
 }
 
-// Page section fade-in
-@keyframes bz-fade-in {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
-// Apply card reveal to Mantine Cards and bordered Papers in dark mode
+// Apply card reveal to Mantine Cards and bordered Papers
 :global {
   .mantine-Card-root {
-    @include dark {
-      animation: bz-card-reveal var(--bz-duration-card) var(--bz-ease-enter) both;
-    }
+    animation: bz-card-reveal var(--bz-duration-card) var(--bz-ease-enter) both;
   }
 
   // Stagger cards inside Stack/SimpleGrid containers
   .mantine-Stack-root,
   .mantine-SimpleGrid-root {
-    @include dark {
-      > .mantine-Card-root,
-      > .mantine-Paper-root[data-with-border] {
-        animation: bz-card-reveal var(--bz-duration-card) var(--bz-ease-enter) both;
+    > .mantine-Card-root,
+    > .mantine-Paper-root[data-with-border] {
+      animation: bz-card-reveal var(--bz-duration-card) var(--bz-ease-enter) both;
 
-        @for $i from 1 through 6 {
-          &:nth-child(#{$i}) {
-            animation-delay: calc(#{$i - 1} * var(--bz-stagger-delay));
-          }
+      @for $i from 1 through 6 {
+        &:nth-child(#{$i}) {
+          animation-delay: calc(#{$i - 1} * var(--bz-stagger-delay));
         }
+      }
 
-        // Items beyond 6th appear without extra stagger
-        &:nth-child(n + 7) {
-          animation-delay: calc(5 * var(--bz-stagger-delay));
-        }
+      // Items beyond 6th appear without extra stagger
+      &:nth-child(n + 7) {
+        animation-delay: calc(5 * var(--bz-stagger-delay));
       }
     }
   }
@@ -346,7 +366,9 @@ body::after {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

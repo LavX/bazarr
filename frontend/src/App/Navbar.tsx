@@ -145,11 +145,8 @@ const AppNavbar: FunctionComponent = () => {
 
   return (
     <AppShell.Navbar className={styles.nav}>
-      <Selection.Provider value={{ selection, select }}>
-        <AppShell.Section
-          grow
-          style={{ overflowY: "auto", scrollbarWidth: "none" }}
-        >
+      <div className={styles.navInner}>
+        <Selection.Provider value={{ selection, select }}>
           <Stack gap={0}>
             {groups.map((group) => (
               <div key={group.label}>
@@ -164,8 +161,8 @@ const AppNavbar: FunctionComponent = () => {
               </div>
             ))}
           </Stack>
-        </AppShell.Section>
-      </Selection.Provider>
+        </Selection.Provider>
+      </div>
     </AppShell.Navbar>
   );
 };
@@ -206,7 +203,6 @@ const RouteItem: FunctionComponent<{
       return (
         <Stack gap={0}>
           <NavbarItem
-            primary
             name={name}
             link={link}
             icon={icon}
@@ -254,7 +250,6 @@ interface NavbarItemProps {
   link: string;
   icon?: IconDefinition;
   badge?: number | string;
-  primary?: boolean;
   onClick?: (event: React.MouseEvent<HTMLAnchorElement>) => void;
 }
 
@@ -264,7 +259,6 @@ const NavbarItem: FunctionComponent<NavbarItemProps> = ({
   name,
   badge,
   onClick,
-  primary = false,
 }) => {
   const { show } = useNavbar();
 

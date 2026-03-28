@@ -1,21 +1,21 @@
 @layer mantine {
   .root {
-    border-radius: var(--bz-radius-xs);
+    border-radius: var(--bz-radius-sm);
     font-size: 10px;
     font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
-    padding: 2px 7px;
+    padding: 2px 8px;
     transition: background var(--bz-duration-fast) var(--bz-ease-standard),
                 border-color var(--bz-duration-fast) var(--bz-ease-standard);
 
     // Default variant (ghost): neutral for audio tracks and general use
-    background: rgba(255, 255, 255, 0.05);
+    background-color: rgba(255, 255, 255, 0.05);
     color: #a9aabb;
     border: 1px solid rgba(255, 255, 255, 0.07);
 
     &:hover {
-      background: rgba(255, 255, 255, 0.1);
+      background-color: rgba(255, 255, 255, 0.1);
       border-color: rgba(255, 255, 255, 0.12);
     }
 
@@ -101,47 +101,87 @@
 
     // Light mode overrides
     @include mantine.light {
-      background: rgba(0, 0, 0, 0.05);
+      background-color: rgba(0, 0, 0, 0.05);
       color: #495057;
       border: 1px solid rgba(0, 0, 0, 0.08);
+
+      &:hover {
+        background-color: rgba(0, 0, 0, 0.08);
+        border-color: rgba(0, 0, 0, 0.12);
+      }
 
       &[data-variant="warning"] {
         background: rgba(230, 138, 0, 0.1);
         color: #995c00;
         border: 1px solid rgba(230, 138, 0, 0.2);
+
+        &:hover {
+          background: rgba(230, 138, 0, 0.15);
+          border-color: rgba(230, 138, 0, 0.28);
+        }
       }
 
       &[data-variant="disabled"] {
         background: rgba(0, 0, 0, 0.03);
         color: #adb5bd;
         border: 1px solid rgba(0, 0, 0, 0.06);
+
+        &:hover {
+          background: rgba(0, 0, 0, 0.05);
+          border-color: rgba(0, 0, 0, 0.1);
+        }
       }
 
       &[data-variant="highlight"] {
         background: rgba(105, 219, 124, 0.1);
         color: #2b8a3e;
         border: 1px solid rgba(105, 219, 124, 0.2);
+
+        &:hover {
+          background: rgba(105, 219, 124, 0.15);
+          border-color: rgba(105, 219, 124, 0.28);
+        }
       }
 
       &[data-variant="missing"] {
         background: rgba(255, 107, 107, 0.06);
         color: #e03131;
         border: 1px dashed rgba(255, 107, 107, 0.4);
+
+        &:hover {
+          background: rgba(255, 107, 107, 0.1);
+          border-color: rgba(255, 107, 107, 0.5);
+        }
+      }
+
+      &[data-variant="hi"] {
+        background: rgba(179, 107, 0, 0.1);
+        color: #7a4900;
+        border: 1px solid rgba(179, 107, 0, 0.2);
+
+        &:hover {
+          background: rgba(179, 107, 0, 0.15);
+          border-color: rgba(179, 107, 0, 0.28);
+        }
       }
 
       &[data-variant="light"],
       &[data-variant="outline"] {
         color: unset;
         background: unset;
+        border: unset;
       }
 
       &[data-variant="gradient"] {
         color: #fff;
+        background-color: transparent;
+        border: none;
       }
 
       &[data-variant="transparent"] {
         color: unset;
         background: unset;
+        border: unset;
       }
     }
   }

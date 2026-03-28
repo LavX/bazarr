@@ -1,15 +1,17 @@
 .header {
-  background: inherit;
-  border-bottom: 1px solid var(--bz-border-divider);
   box-shadow: none;
+}
 
-  @include mantine.light {
-    color: var(--mantine-color-gray-8);
-  }
+.headerInner {
+  background: var(--bz-surface-base);
+  border: 1px solid var(--bz-border-card);
+  border-radius: var(--bz-radius-xl);
+  padding: 10px 16px;
+  margin-right: 8px;
+  display: flex;
+  align-items: center;
 
-  @include mantine.dark {
-    color: var(--mantine-color-dark-0);
-  }
+  color: var(--bz-text-primary);
 
   // Ghost-style action buttons (theme toggle, notifications, system gear)
   :global(.mantine-ActionIcon-root) {
@@ -19,7 +21,7 @@
     min-height: 32px;
     background: var(--bz-hover-bg);
     border: 1px solid var(--bz-border-interactive);
-    border-radius: var(--bz-radius-sm);
+    border-radius: var(--bz-radius-md);
     color: var(--bz-text-tertiary);
     font-size: 12px;
     font-weight: 500;

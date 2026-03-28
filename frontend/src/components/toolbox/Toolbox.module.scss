@@ -1,9 +1,20 @@
 .group {
+  border-radius: var(--bz-radius-lg);
+  margin: 8px 12px;
+
   @include mantine.light {
     background-color: var(--mantine-color-gray-1);
+    border: 1px solid var(--bz-border-card);
   }
 
   @include mantine.dark {
-    background-color: var(--bz-surface-raised);
+    background-color: var(--bz-surface-card);
+    border: 1px solid var(--bz-border-card);
+  }
+
+  @include mantine.smaller-than(sm) {
+    overflow-x: auto;
+    flex-wrap: nowrap !important;
+    scrollbar-width: none;
   }
 }

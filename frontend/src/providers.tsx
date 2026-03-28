@@ -2,11 +2,11 @@ import { FunctionComponent, PropsWithChildren } from "react";
 import { Notifications } from "@mantine/notifications";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
+import "@fontsource-variable/geist";
 import queryClient from "@/apis/queries";
 import ThemeProvider from "@/App/ThemeProvider";
 import { ModalsProvider } from "@/modules/modals";
 import { Environment } from "./utilities";
-import "@fontsource-variable/geist";
 
 export const AllProviders: FunctionComponent<PropsWithChildren> = ({
   children,
