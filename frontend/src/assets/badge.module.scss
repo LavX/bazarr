@@ -19,15 +19,15 @@
       border-color: rgba(255, 255, 255, 0.12);
     }
 
-    // Highlight variant (teal): available subtitles
+    // Highlight variant (green): available subtitles
     &[data-variant="highlight"] {
-      background: rgba(34, 184, 207, 0.12);
-      color: #66d9e8;
-      border: 1px solid rgba(34, 184, 207, 0.18);
+      background: rgba(105, 219, 124, 0.12);
+      color: #69db7c;
+      border: 1px solid rgba(105, 219, 124, 0.18);
 
       &:hover {
-        background: rgba(34, 184, 207, 0.17);
-        border-color: rgba(34, 184, 207, 0.23);
+        background: rgba(105, 219, 124, 0.17);
+        border-color: rgba(105, 219, 124, 0.23);
       }
     }
 
@@ -118,9 +118,9 @@
       }
 
       &[data-variant="highlight"] {
-        background: rgba(34, 184, 207, 0.1);
-        color: #0c8599;
-        border: 1px solid rgba(34, 184, 207, 0.2);
+        background: rgba(105, 219, 124, 0.1);
+        color: #2b8a3e;
+        border: 1px solid rgba(105, 219, 124, 0.2);
       }
 
       &[data-variant="missing"] {
