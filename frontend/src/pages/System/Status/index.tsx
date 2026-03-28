@@ -18,7 +18,6 @@ import {
 import { useDocumentTitle } from "@mantine/hooks";
 import { IconDefinition } from "@fortawesome/fontawesome-common-types";
 import {
-  faDiscord,
   faGithub,
   faWikipediaW,
 } from "@fortawesome/free-brands-svg-icons";
@@ -174,11 +173,6 @@ const SystemStatusView: FunctionComponent = () => {
           <Row title="API documentation">
             <Label icon={faCode} link={`${Environment.baseUrl}/api/`}>
               Swagger UI
-            </Label>
-          </Row>
-          <Row title="Discord">
-            <Label icon={faDiscord} link="https://discord.gg/MH2e2eb">
-              Bazarr on Discord
             </Label>
           </Row>
         </InfoContainer>

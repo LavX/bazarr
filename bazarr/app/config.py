@@ -89,7 +89,7 @@ validators = [
     Validator('general.port', must_exist=True, default=6767, is_type_of=int, gte=1, lte=65535),
     Validator('general.hostname', must_exist=True, default=platform.node(), is_type_of=str),
     Validator('general.base_url', must_exist=True, default='', is_type_of=str),
-    Validator('general.instance_name', must_exist=True, default='Bazarr', is_type_of=str,
+    Validator('general.instance_name', must_exist=True, default='Bazarr+', is_type_of=str,
               apply_default_on_none=True),
     Validator('general.path_mappings', must_exist=True, default=[], is_type_of=list),
     Validator('general.debug', must_exist=True, default=False, is_type_of=bool),
@@ -311,9 +311,9 @@ validators = [
     Validator('opensubtitles.ssl', must_exist=True, default=False, is_type_of=bool),
     Validator('opensubtitles.timeout', must_exist=True, default=15, is_type_of=int, gte=1),
     Validator('opensubtitles.skip_wrong_fps', must_exist=True, default=False, is_type_of=bool),
-    # Web scraper mode - enabled by default, can be disabled via OPENSUBTITLES_USE_WEB_SCRAPER=false
+    # Web scraper mode - always enabled (OpenSubtitles.org login no longer available)
     Validator('opensubtitles.use_web_scraper', must_exist=True,
-              default=os.environ.get('OPENSUBTITLES_USE_WEB_SCRAPER', 'true').lower() in ('true', '1', 'yes'),
+              default=True,
               is_type_of=bool),
     # Scraper URL - can be set via OPENSUBTITLES_SCRAPER_URL environment variable
     Validator('opensubtitles.scraper_service_url', must_exist=True,

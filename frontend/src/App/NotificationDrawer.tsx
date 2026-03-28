@@ -268,8 +268,8 @@ const NotificationDrawer: FunctionComponent<NotificationDrawerProps> = ({
                                       position="right"
                                     >
                                       <RingProgress
-                                        size={status === "running" ? 72 : 52}
-                                        thickness={status === "running" ? 7 : 5}
+                                        size={status === "running" ? 76 : 58}
+                                        thickness={status === "running" ? 6 : 4}
                                         sections={[
                                           {
                                             value:

@@ -2,7 +2,9 @@
   border-radius: var(--bz-radius-lg);
   border: 1px solid var(--bz-border-card);
   background: var(--bz-surface-card);
-  transition: all var(--bz-duration-normal) var(--bz-ease-standard);
+  transition: background var(--bz-duration-normal) var(--bz-ease-standard),
+              border-color var(--bz-duration-normal) var(--bz-ease-standard),
+              box-shadow var(--bz-duration-normal) var(--bz-ease-standard);
 
   &:hover {
     box-shadow: var(--bz-shadow-float);
