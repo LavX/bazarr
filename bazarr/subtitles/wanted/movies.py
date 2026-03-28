@@ -120,6 +120,7 @@ def wanted_search_missing_subtitles_movies(job_id=None, wait_for_completion=Fals
     if count_movies == 0:
         jobs_queue.update_job_progress(job_id=job_id, progress_value='max')
 
+    throttled = False
     for i, movie in enumerate(movies, start=1):
         jobs_queue.update_job_progress(job_id=job_id, progress_value=i, progress_message=movie.title)
 
@@ -131,7 +132,11 @@ def wanted_search_missing_subtitles_movies(job_id=None, wait_for_completion=Fals
             jobs_queue.update_job_progress(job_id=job_id, progress_value=i, progress_max=count_movies)
         else:
             logging.info("BAZARR All providers are throttled")
+            throttled = True
             break
 
+    outcome_msg = ("All providers throttled" if throttled
+                   else "Search completed")
+    jobs_queue.update_job_progress(job_id=job_id, progress_message=outcome_msg)
     jobs_queue.update_job_name(job_id=job_id, new_job_name="Searched for missing movies subtitles")
     logging.info('BAZARR Finished searching for missing Movies Subtitles. Check History for more information.')

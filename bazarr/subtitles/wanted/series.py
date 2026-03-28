@@ -133,6 +133,7 @@ def wanted_search_missing_subtitles_series(job_id=None, wait_for_completion=Fals
     if count_episodes == 0:
         jobs_queue.update_job_progress(job_id=job_id, progress_value='max')
 
+    throttled = False
     for i, episode in enumerate(episodes, start=1):
         jobs_queue.update_job_progress(job_id=job_id, progress_value=i,
                                        progress_message=f'{episode.title} - S{episode.season:02d}E{episode.episode:02d}'
@@ -146,8 +147,12 @@ def wanted_search_missing_subtitles_series(job_id=None, wait_for_completion=Fals
             jobs_queue.update_job_progress(job_id=job_id, progress_value=i, progress_max=count_episodes)
         else:
             logging.info("BAZARR All providers are throttled")
+            throttled = True
             break
 
+    outcome_msg = ("All providers throttled" if throttled
+                   else "Search completed")
+    jobs_queue.update_job_progress(job_id=job_id, progress_message=outcome_msg)
     jobs_queue.update_job_name(job_id=job_id, new_job_name="Searched for missing series subtitles")
     logging.info('BAZARR Finished searching for missing Series Subtitles. Check History for more information.')
 
