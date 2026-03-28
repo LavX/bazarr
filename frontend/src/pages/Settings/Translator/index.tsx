@@ -13,7 +13,10 @@ import {
   UnstyledButton,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { faCircleInfo, faExclamationTriangle } from "@fortawesome/free-solid-svg-icons";
+import {
+  faCircleInfo,
+  faExclamationTriangle,
+} from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useTestTranslator } from "@/apis/hooks/translator";
 import { TranslatorStatusPanelWithFormContext } from "@/components/TranslatorStatus";
@@ -69,7 +72,11 @@ const TranslatorEnginePicker: FunctionComponent = () => {
             <Badge
               size="lg"
               variant={active ? "gradient" : "outline"}
-              gradient={active ? { from: "brand.5", to: "brand.6", deg: 135 } : undefined}
+              gradient={
+                active
+                  ? { from: "brand.5", to: "brand.6", deg: 135 }
+                  : undefined
+              }
               color={active ? undefined : "gray"}
               style={{
                 cursor: "pointer",
@@ -105,9 +112,9 @@ const FreeModelWarning: FunctionComponent = () => {
       p="xs"
     >
       <MantineText size="xs">
-        Free models are heavily rate-limited by their upstream providers.
-        Expect slow translations, frequent retries, and possible job failures.
-        Use a paid model for reliable results.
+        Free models are heavily rate-limited by their upstream providers. Expect
+        slow translations, frequent retries, and possible job failures. Use a
+        paid model for reliable results.
       </MantineText>
     </Alert>
   );
@@ -119,14 +126,20 @@ const ReasoningSelector: FunctionComponent = () => {
   );
   const { data: model, isLoading } = useOpenRouterModelDetails(modelId ?? "");
   const modelLoaded = !!model && !isLoading;
-  const supportsReasoning = model?.supported_parameters?.includes("reasoning") ?? false;
+  const supportsReasoning =
+    model?.supported_parameters?.includes("reasoning") ?? false;
   const { setValue } = useFormActions();
 
   // Only auto-disable after model data has loaded, not while loading
   const currentReasoning = useSettingValue<string>(
     "settings-translator-openrouter_reasoning",
   );
-  if (modelLoaded && !supportsReasoning && currentReasoning && currentReasoning !== "disabled") {
+  if (
+    modelLoaded &&
+    !supportsReasoning &&
+    currentReasoning &&
+    currentReasoning !== "disabled"
+  ) {
     setValue("disabled", "settings-translator-openrouter_reasoning");
   }
 
@@ -148,60 +161,78 @@ const ModelDetailsFromSetting: FunctionComponent = () => {
     "settings-translator-openrouter_reasoning",
   );
   if (!modelId) return null;
-  return <ModelDetailsCard modelId={modelId} reasoningLevel={reasoningLevel ?? "disabled"} />;
+  return (
+    <ModelDetailsCard
+      modelId={modelId}
+      reasoningLevel={reasoningLevel ?? "disabled"}
+    />
+  );
 };
 
 const TestConnectionButton: FunctionComponent = () => {
   const testMutation = useTestTranslator();
-  const serviceUrl = useSettingValue<string>("settings-translator-openrouter_url");
-  const apiKey = useSettingValue<string>("settings-translator-openrouter_api_key");
-  const encryptionKey = useSettingValue<string>("settings-translator-openrouter_encryption_key");
+  const serviceUrl = useSettingValue<string>(
+    "settings-translator-openrouter_url",
+  );
+  const apiKey = useSettingValue<string>(
+    "settings-translator-openrouter_api_key",
+  );
+  const encryptionKey = useSettingValue<string>(
+    "settings-translator-openrouter_encryption_key",
+  );
 
   const handleTest = () => {
-    testMutation.mutate({ serviceUrl: serviceUrl ?? undefined, apiKey: apiKey ?? undefined, encryptionKey: encryptionKey ?? undefined }, {
-      onSuccess: (data) => {
-        if (data.error) {
+    testMutation.mutate(
+      {
+        serviceUrl: serviceUrl ?? undefined,
+        apiKey: apiKey ?? undefined,
+        encryptionKey: encryptionKey ?? undefined,
+      },
+      {
+        onSuccess: (data) => {
+          if (data.error) {
+            notifications.show({
+              title: "Connection Failed",
+              message: data.error,
+              color: "red",
+            });
+            return;
+          }
+          if (data.encryption) {
+            const encOk = data.encryption.status === "ok";
+            notifications.show({
+              title: encOk ? "Encryption" : "Encryption Failed",
+              message: data.encryption.message,
+              color: encOk ? "green" : "red",
+            });
+          }
+          if (data.apiKey) {
+            const keyOk = data.apiKey.status === "ok";
+            notifications.show({
+              title: keyOk ? "API Key" : "API Key Failed",
+              message: keyOk
+                ? `${data.apiKey.label}${data.apiKey.isFreeTier ? " (Free tier)" : ""}`
+                : "API key validation failed",
+              color: keyOk ? "green" : "red",
+            });
+          }
+          if (!data.encryption && !data.apiKey) {
+            notifications.show({
+              title: "Connected",
+              message: "Service reachable",
+              color: "green",
+            });
+          }
+        },
+        onError: () => {
           notifications.show({
             title: "Connection Failed",
-            message: data.error,
+            message: "Could not reach the translator service",
             color: "red",
           });
-          return;
-        }
-        if (data.encryption) {
-          const encOk = data.encryption.status === "ok";
-          notifications.show({
-            title: encOk ? "Encryption" : "Encryption Failed",
-            message: data.encryption.message,
-            color: encOk ? "green" : "red",
-          });
-        }
-        if (data.apiKey) {
-          const keyOk = data.apiKey.status === "ok";
-          notifications.show({
-            title: keyOk ? "API Key" : "API Key Failed",
-            message: keyOk
-              ? `${data.apiKey.label}${data.apiKey.isFreeTier ? " (Free tier)" : ""}`
-              : "API key validation failed",
-            color: keyOk ? "green" : "red",
-          });
-        }
-        if (!data.encryption && !data.apiKey) {
-          notifications.show({
-            title: "Connected",
-            message: "Service reachable",
-            color: "green",
-          });
-        }
+        },
       },
-      onError: () => {
-        notifications.show({
-          title: "Connection Failed",
-          message: "Could not reach the translator service",
-          color: "red",
-        });
-      },
-    });
+    );
   };
 
   return (
@@ -416,7 +447,12 @@ const SettingsTranslatorView: FunctionComponent = () => {
                     max={1}
                     step={0.1}
                   />
-                  <MantineText size="xs" c="var(--bz-text-tertiary)" mt={4} ta="center">
+                  <MantineText
+                    size="xs"
+                    c="var(--bz-text-tertiary)"
+                    mt={4}
+                    ta="center"
+                  >
                     deterministic ← → creative
                   </MantineText>
                 </div>

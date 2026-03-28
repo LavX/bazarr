@@ -14,7 +14,7 @@ import {
 import { useSubtitleContent } from "@/apis/hooks/subtitles";
 import CueTable from "./CueTable";
 import { getParser } from "./parsers";
-import type { ParseResult,SubtitleFormat } from "./types";
+import type { ParseResult, SubtitleFormat } from "./types";
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return bytes + " B";
@@ -107,7 +107,14 @@ export default function SubtitleEditor() {
           </Text>
         </Group>
       </Group>
-      <div style={{ flex: 1, minHeight: 0, display: "flex", padding: "0 var(--mantine-spacing-md) var(--mantine-spacing-md)" }}>
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          display: "flex",
+          padding: "0 var(--mantine-spacing-md) var(--mantine-spacing-md)",
+        }}
+      >
         <CueTable cues={parseResult.cues} />
       </div>
     </Stack>

@@ -7,7 +7,7 @@ function parseTimestamp(raw: string): number {
   if (!match) return 0;
   const [, h, m, s, ms] = match;
   return (
-    (parseInt(h ?? "0", 10)) * 3600000 +
+    parseInt(h ?? "0", 10) * 3600000 +
     parseInt(m, 10) * 60000 +
     parseInt(s, 10) * 1000 +
     parseInt(ms.padEnd(3, "0").slice(0, 3), 10)
@@ -108,9 +108,7 @@ export const vttParser: SubtitleParser = {
     // Extract styles from header
     let styles: string | undefined;
     if (foundFirstCue) {
-      const styleMatch = rawHeader.match(
-        /STYLE\s*\n([\s\S]*?)(?:\n\n|$)/,
-      );
+      const styleMatch = rawHeader.match(/STYLE\s*\n([\s\S]*?)(?:\n\n|$)/);
       if (styleMatch) {
         styles = styleMatch[1].trim();
       }

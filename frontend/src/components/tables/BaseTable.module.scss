@@ -23,7 +23,8 @@
   // All table rows
   :global(.mantine-Table-tr) {
     border-radius: var(--bz-radius-md);
-    transition: background-color var(--bz-duration-normal) var(--bz-ease-standard);
+    transition: background-color var(--bz-duration-normal)
+      var(--bz-ease-standard);
   }
 
   // Data rows (non-grouped)

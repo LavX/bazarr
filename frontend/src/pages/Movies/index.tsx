@@ -1,6 +1,15 @@
 import { FunctionComponent, useCallback, useMemo, useState } from "react";
 import { Link } from "react-router";
-import { ActionIcon, Anchor, Badge, Checkbox, Container, Group, Menu, Tooltip } from "@mantine/core";
+import {
+  ActionIcon,
+  Anchor,
+  Badge,
+  Checkbox,
+  Container,
+  Group,
+  Menu,
+  Tooltip,
+} from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import { faBookmark as farBookmark } from "@fortawesome/free-regular-svg-icons";
 import {
@@ -32,7 +41,10 @@ import { BatchModConfirmModal } from "@/components/forms/BatchModConfirmForm";
 import { ChangeProfileModal } from "@/components/forms/ChangeProfileForm";
 import { ItemEditModal } from "@/components/forms/ItemEditForm";
 import { MassSyncModal } from "@/components/forms/MassSyncForm";
-import { MassTranslateModal, WantedItem } from "@/components/forms/MassTranslateForm";
+import {
+  MassTranslateModal,
+  WantedItem,
+} from "@/components/forms/MassTranslateForm";
 import { SUBTITLE_TOOL_ACTIONS } from "@/constants/batch";
 import { useModals } from "@/modules/modals";
 import ItemView from "@/pages/views/ItemView";
@@ -80,7 +92,10 @@ const MovieView: FunctionComponent = () => {
       profileIds: (number | null)[],
     ) => {
       if (ids.length === 0) return;
-      await mutateAsync({ id: ids.slice(0, chunkSize), profileid: profileIds.slice(0, chunkSize) });
+      await mutateAsync({
+        id: ids.slice(0, chunkSize),
+        profileid: profileIds.slice(0, chunkSize),
+      });
       await mutateInChunks(ids.slice(chunkSize), profileIds.slice(chunkSize));
     };
     return mutateInChunks(form.id, form.profileid);
@@ -164,7 +179,11 @@ const MovieView: FunctionComponent = () => {
         }) =>
           upgradableMovieIds.has(radarrId) ? (
             <Tooltip label="Low match score, upgrading may find a better subtitle">
-              <FontAwesomeIcon icon={faCircleDown} color="var(--bz-text-tertiary)" size="sm" />
+              <FontAwesomeIcon
+                icon={faCircleDown}
+                color="var(--bz-text-tertiary)"
+                size="sm"
+              />
             </Tooltip>
           ) : null,
       },
@@ -238,8 +257,15 @@ const MovieView: FunctionComponent = () => {
         id: "actions",
         cell: ({ row }) => {
           const item = row.original;
-          const batchItem: BatchItem = { type: "movie", radarrId: item.radarrId };
-          const wantedItem: WantedItem = { type: "movie", radarrId: item.radarrId, title: item.title };
+          const batchItem: BatchItem = {
+            type: "movie",
+            radarrId: item.radarrId,
+          };
+          const wantedItem: WantedItem = {
+            type: "movie",
+            radarrId: item.radarrId,
+            title: item.title,
+          };
           return (
             <Menu shadow="md" width={220} position="bottom-end">
               <Menu.Target>
@@ -266,7 +292,9 @@ const MovieView: FunctionComponent = () => {
                 <Menu.Item
                   leftSection={<FontAwesomeIcon icon={faSync} size="sm" />}
                   onClick={() =>
-                    modals.openContextModal(MassSyncModal, { items: [batchItem] })
+                    modals.openContextModal(MassSyncModal, {
+                      items: [batchItem],
+                    })
                   }
                 >
                   Sync Subtitles
@@ -274,7 +302,9 @@ const MovieView: FunctionComponent = () => {
                 <Menu.Item
                   leftSection={<FontAwesomeIcon icon={faLanguage} size="sm" />}
                   onClick={() =>
-                    modals.openContextModal(MassTranslateModal, { items: [wantedItem] })
+                    modals.openContextModal(MassTranslateModal, {
+                      items: [wantedItem],
+                    })
                   }
                 >
                   Translate
@@ -307,7 +337,9 @@ const MovieView: FunctionComponent = () => {
                   Scan Disk
                 </Menu.Item>
                 <Menu.Item
-                  leftSection={<FontAwesomeIcon icon={faMagnifyingGlass} size="sm" />}
+                  leftSection={
+                    <FontAwesomeIcon icon={faMagnifyingGlass} size="sm" />
+                  }
                   onClick={() =>
                     modals.openContextModal(BatchModConfirmModal, {
                       items: [batchItem],

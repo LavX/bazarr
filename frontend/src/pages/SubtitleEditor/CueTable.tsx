@@ -312,7 +312,12 @@ export default function CueTable({ cues }: CueTableProps) {
             role="columnheader"
             style={{
               ...headerCellStyle,
-              textAlign: col === "#" ? "right" : col === "DURATION" ? "center" : undefined,
+              textAlign:
+                col === "#"
+                  ? "right"
+                  : col === "DURATION"
+                    ? "center"
+                    : undefined,
               paddingRight: col === "#" ? "16px" : undefined,
             }}
           >
@@ -353,9 +358,7 @@ export default function CueTable({ cues }: CueTableProps) {
                   left: 0,
                   width: "100%",
                   transform: `translateY(${virtualRow.start}px)`,
-                  backgroundColor: isOdd
-                    ? "var(--bz-hover-bg)"
-                    : "transparent",
+                  backgroundColor: isOdd ? "var(--bz-hover-bg)" : "transparent",
                 }}
                 onMouseEnter={(e) => {
                   e.currentTarget.style.backgroundColor =

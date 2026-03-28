@@ -116,7 +116,11 @@ const WantedSeriesView: FunctionComponent = () => {
         }) => {
           const target = `/series/${sonarrSeriesId}`;
           return (
-            <Anchor className={`table-primary ${tableStyles.episodeTitle}`} component={Link} to={target}>
+            <Anchor
+              className={`table-primary ${tableStyles.episodeTitle}`}
+              component={Link}
+              to={target}
+            >
               {seriesTitle}
             </Anchor>
           );
@@ -141,7 +145,9 @@ const WantedSeriesView: FunctionComponent = () => {
             original: { episode_number: episodeNumber },
           },
         }) => {
-          return <span className={tableStyles.episodeNumber}>{episodeNumber}</span>;
+          return (
+            <span className={tableStyles.episodeNumber}>{episodeNumber}</span>
+          );
         },
       },
       {
@@ -151,7 +157,9 @@ const WantedSeriesView: FunctionComponent = () => {
             original: { episodeTitle },
           },
         }) => {
-          return <span className={tableStyles.episodeTitle}>{episodeTitle}</span>;
+          return (
+            <span className={tableStyles.episodeTitle}>{episodeTitle}</span>
+          );
         },
       },
       {

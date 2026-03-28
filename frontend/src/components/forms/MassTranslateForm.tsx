@@ -178,9 +178,16 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
         isObject,
         "Please select a source language",
       ),
-      targetLanguage: (value: Language.Info | null, values: { sourceLanguage: Language.Info | null }) => {
+      targetLanguage: (
+        value: Language.Info | null,
+        values: { sourceLanguage: Language.Info | null },
+      ) => {
         if (!isObject(value)) return "Please select a target language";
-        if (value && values.sourceLanguage && value.code2 === values.sourceLanguage.code2)
+        if (
+          value &&
+          values.sourceLanguage &&
+          value.code2 === values.sourceLanguage.code2
+        )
           return "Target language must be different from source";
         return null;
       },
@@ -378,7 +385,11 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
           <Button variant="default" onClick={() => modals.closeSelf()}>
             Cancel
           </Button>
-          <Button type="submit" loading={isPending} disabled={items.length === 0}>
+          <Button
+            type="submit"
+            loading={isPending}
+            disabled={items.length === 0}
+          >
             Translate {items.length} Item(s)
           </Button>
         </Group>

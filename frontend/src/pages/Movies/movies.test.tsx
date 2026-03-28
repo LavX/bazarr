@@ -20,4 +20,3 @@ describe("Movies page", () => {
     customRender(<MovieView />);
   });
 });
-

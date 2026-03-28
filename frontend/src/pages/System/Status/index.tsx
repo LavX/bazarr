@@ -17,10 +17,7 @@ import {
 } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import { IconDefinition } from "@fortawesome/fontawesome-common-types";
-import {
-  faGithub,
-  faWikipediaW,
-} from "@fortawesome/free-brands-svg-icons";
+import { faGithub, faWikipediaW } from "@fortawesome/free-brands-svg-icons";
 import { faCode, faPaperPlane } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useSystemHealth, useSystemStatus } from "@/apis/hooks";

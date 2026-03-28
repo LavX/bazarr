@@ -294,9 +294,7 @@ const NotificationDrawer: FunctionComponent<NotificationDrawerProps> = ({
                                           <Text
                                             ta="center"
                                             size={
-                                              status === "running"
-                                                ? "sm"
-                                                : "xs"
+                                              status === "running" ? "sm" : "xs"
                                             }
                                             fw={700}
                                             c={
@@ -479,7 +477,10 @@ const NotificationDrawer: FunctionComponent<NotificationDrawerProps> = ({
                                       </Group>
                                     </Group>
                                     {job?.progress_message && (
-                                      <Text size="xs" c="var(--bz-text-tertiary)">
+                                      <Text
+                                        size="xs"
+                                        c="var(--bz-text-tertiary)"
+                                      >
                                         {job.progress_message}
                                       </Text>
                                     )}

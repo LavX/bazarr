@@ -3,9 +3,7 @@ import type { SubtitleParser } from "./index";
 
 function parseTimestampToMs(h: string, m: string, s: string): number {
   return (
-    parseInt(h, 10) * 3600000 +
-    parseInt(m, 10) * 60000 +
-    parseInt(s, 10) * 1000
+    parseInt(h, 10) * 3600000 + parseInt(m, 10) * 60000 + parseInt(s, 10) * 1000
   );
 }
 

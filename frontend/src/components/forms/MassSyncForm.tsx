@@ -11,10 +11,7 @@ import {
 import { useForm } from "@mantine/form";
 import { notifications } from "@mantine/notifications";
 import { useBatchAction, useSystemSettings } from "@/apis/hooks";
-import {
-  BatchItem,
-  BatchOptions,
-} from "@/apis/raw/subtitles";
+import { BatchItem, BatchOptions } from "@/apis/raw/subtitles";
 import { useModals, withModal } from "@/modules/modals";
 
 interface MassSyncFormProps {
@@ -104,7 +101,11 @@ const MassSyncForm: FunctionComponent<MassSyncFormProps> = ({ items }) => {
           <Button variant="default" onClick={() => modals.closeSelf()}>
             Cancel
           </Button>
-          <Button type="submit" loading={isPending} disabled={items.length === 0}>
+          <Button
+            type="submit"
+            loading={isPending}
+            disabled={items.length === 0}
+          >
             Sync {items.length} Item(s)
           </Button>
         </Group>

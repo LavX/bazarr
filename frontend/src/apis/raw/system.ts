@@ -18,7 +18,11 @@ class SystemApi extends BaseApi {
   }
 
   async upgradePasswordHash(upgradeToken: string) {
-    await this.post("/account", { password: upgradeToken }, { action: "upgrade_hash" });
+    await this.post(
+      "/account",
+      { password: upgradeToken },
+      { action: "upgrade_hash" },
+    );
   }
 
   async logout() {

@@ -182,4 +182,3 @@ export const syncMaxOffsetSecondsOptions: SelectorOption<number>[] = [
     value: 600,
   },
 ];
-

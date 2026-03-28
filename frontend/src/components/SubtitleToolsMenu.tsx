@@ -218,7 +218,10 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
           </>
         )}
         {isMissing && !hasSources && (
-          <Menu.Item disabled leftSection={<FontAwesomeIcon icon={faLanguage} />}>
+          <Menu.Item
+            disabled
+            leftSection={<FontAwesomeIcon icon={faLanguage} />}
+          >
             No source subtitles to translate from
           </Menu.Item>
         )}

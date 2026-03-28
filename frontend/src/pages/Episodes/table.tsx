@@ -90,7 +90,10 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
 
           let filteredSubtitles = episode.subtitles;
           if (onlyDesired) {
-            filteredSubtitles = filterSubtitleBy(filteredSubtitles, profileItems);
+            filteredSubtitles = filterSubtitleBy(
+              filteredSubtitles,
+              profileItems,
+            );
           }
 
           const subtitles = filteredSubtitles.map((val, idx) => (
@@ -165,7 +168,9 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
           }) => {
             return (
               <TextPopover text={sceneName}>
-                <Text className={`table-primary ${tableStyles.episodeTitle}`}>{title}</Text>
+                <Text className={`table-primary ${tableStyles.episodeTitle}`}>
+                  {title}
+                </Text>
               </TextPopover>
             );
           },

@@ -1,4 +1,4 @@
-import { beforeEach,describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getParser } from "@/pages/SubtitleEditor/parsers";
 
 // Mock crypto.randomUUID since it may not be available in test env
@@ -70,8 +70,7 @@ describe("SRT parser", () => {
   });
 
   it("handles BOM prefix", () => {
-    const input =
-      "\uFEFF1\n00:00:01,000 --> 00:00:02,000\nWith BOM";
+    const input = "\uFEFF1\n00:00:01,000 --> 00:00:02,000\nWith BOM";
 
     const result = parser.parse(input);
     expect(result.cues).toHaveLength(1);
@@ -221,8 +220,8 @@ describe("SMI parser", () => {
     const input = [
       "<SAMI>",
       "<BODY>",
-      '<SYNC Start=1000>Hello',
-      '<SYNC Start=4000>&nbsp;',
+      "<SYNC Start=1000>Hello",
+      "<SYNC Start=4000>&nbsp;",
       "</BODY>",
       "</SAMI>",
     ].join("\n");

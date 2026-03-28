@@ -91,5 +91,13 @@ export function usePrompt(
       });
     }
     prevWhen.current = when;
-  }, [blocker, message, when, handleStay, handleDiscard, handleSaveAndLeave, onSaveAndLeave]);
+  }, [
+    blocker,
+    message,
+    when,
+    handleStay,
+    handleDiscard,
+    handleSaveAndLeave,
+    onSaveAndLeave,
+  ]);
 }

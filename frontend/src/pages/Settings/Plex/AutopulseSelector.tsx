@@ -118,12 +118,7 @@ const AutopulseSelector: FunctionComponent<AutopulseSelectorProps> = (
       </Group>
 
       {configData && (
-        <Card
-          withBorder
-          p="md"
-          mt="md"
-          className={styles.configCard}
-        >
+        <Card withBorder p="md" mt="md" className={styles.configCard}>
           <Group justify="space-between" align="center" mb="xs">
             <Group gap="xs">
               <Text size="sm" fw={600}>

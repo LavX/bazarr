@@ -2,8 +2,9 @@
   .root {
     --ai-bg: transparent;
     border-radius: var(--bz-radius-sm);
-    transition: background var(--bz-duration-normal) var(--bz-ease-standard),
-                color var(--bz-duration-normal) var(--bz-ease-standard);
+    transition:
+      background var(--bz-duration-normal) var(--bz-ease-standard),
+      color var(--bz-duration-normal) var(--bz-ease-standard);
 
     color: var(--bz-text-secondary);
     --ai-hover: var(--bz-hover-bg);

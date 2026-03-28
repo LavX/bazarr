@@ -20,4 +20,3 @@ describe("Series page", () => {
     customRender(<SeriesView />);
   });
 });
-

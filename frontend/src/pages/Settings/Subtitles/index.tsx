@@ -1,11 +1,6 @@
 import React, { FunctionComponent } from "react";
 import { Link } from "react-router";
-import {
-  Code,
-  Space,
-  Table,
-  Text as MantineText,
-} from "@mantine/core";
+import { Code, Space, Table, Text as MantineText } from "@mantine/core";
 import {
   Check,
   CollapseBox,

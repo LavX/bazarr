@@ -1,4 +1,4 @@
-import { describe, expect,it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   aiTranslatorConcurrentOptions,
   aiTranslatorModelOptions,
@@ -10,7 +10,9 @@ describe("Translator options", () => {
   it("exports all required option arrays", () => {
     expect(translatorOption).toBeDefined();
     expect(translatorOption.length).toBeGreaterThan(0);
-    expect(translatorOption.find((o) => o.value === "openrouter")).toBeDefined();
+    expect(
+      translatorOption.find((o) => o.value === "openrouter"),
+    ).toBeDefined();
 
     expect(aiTranslatorModelOptions).toBeDefined();
     expect(aiTranslatorModelOptions.length).toBeGreaterThan(0);

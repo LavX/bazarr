@@ -2,8 +2,9 @@
   .control {
     --pagination-active-bg: var(--mantine-color-brand-filled);
     border-radius: var(--bz-radius-xs);
-    transition: background var(--bz-duration-normal) var(--bz-ease-standard),
-                border-color var(--bz-duration-normal) var(--bz-ease-standard);
+    transition:
+      background var(--bz-duration-normal) var(--bz-ease-standard),
+      border-color var(--bz-duration-normal) var(--bz-ease-standard);
 
     color: var(--bz-text-secondary);
 

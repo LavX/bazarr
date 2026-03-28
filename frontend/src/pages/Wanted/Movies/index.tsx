@@ -116,7 +116,11 @@ const WantedMoviesView: FunctionComponent = () => {
         }) => {
           const target = `/movies/${radarrId}`;
           return (
-            <Anchor className={`table-primary ${tableStyles.episodeTitle}`} component={Link} to={target}>
+            <Anchor
+              className={`table-primary ${tableStyles.episodeTitle}`}
+              component={Link}
+              to={target}
+            >
               {title}
             </Anchor>
           );

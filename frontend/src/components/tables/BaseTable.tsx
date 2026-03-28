@@ -98,9 +98,7 @@ export default function BaseTable<T extends object>(props: BaseTableProps<T>) {
 
   return (
     <Box className={styles.container}>
-      <Table
-        className={styles.table}
-      >
+      <Table className={styles.table}>
         <Table.Thead hidden={tableStyles?.hideHeader}>
           {instance.getHeaderGroups().map((headerGroup) => (
             <Table.Tr key={headerGroup.id}>

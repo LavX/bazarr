@@ -6,8 +6,9 @@
     letter-spacing: 0.04em;
     text-transform: uppercase;
     padding: 2px 8px;
-    transition: background var(--bz-duration-fast) var(--bz-ease-standard),
-                border-color var(--bz-duration-fast) var(--bz-ease-standard);
+    transition:
+      background var(--bz-duration-fast) var(--bz-ease-standard),
+      border-color var(--bz-duration-fast) var(--bz-ease-standard);
 
     // Default variant (ghost): neutral for audio tracks and general use
     background-color: rgba(255, 255, 255, 0.05);
@@ -57,7 +58,7 @@
 
     // HI subs variant (warm): hearing impaired subtitles
     &[data-variant="hi"] {
-      background: rgba(179, 107, 0, 0.10);
+      background: rgba(179, 107, 0, 0.1);
       color: #ffd54f;
       border: 1px solid rgba(179, 107, 0, 0.18);
 

@@ -1,4 +1,10 @@
-import { FunctionComponent, ReactNode, useCallback, useEffect, useMemo } from "react";
+import {
+  FunctionComponent,
+  ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+} from "react";
 import {
   Badge,
   Box,
@@ -102,10 +108,7 @@ const Layout: FunctionComponent<Props> = (props) => {
   return (
     <SettingsProvider value={settings ?? null}>
       <LoadingProvider value={isLoading || isMutating}>
-        <form
-          onSubmit={form.onSubmit(submit)}
-          style={{ position: "relative" }}
-        >
+        <form onSubmit={form.onSubmit(submit)} style={{ position: "relative" }}>
           <LoadingOverlay visible={settings === undefined} />
           <FormContext.Provider value={form}>
             <Container size="xl" mx={0} pb={80}>
@@ -158,7 +161,18 @@ const Layout: FunctionComponent<Props> = (props) => {
                     style={{ boxShadow: "var(--bz-shadow-float)" }}
                   >
                     Save
-                    <Badge size="sm" circle ml={8} aria-hidden="true" variant="outline" style={{ color: "inherit", borderColor: "currentColor", opacity: 0.7 }}>
+                    <Badge
+                      size="sm"
+                      circle
+                      ml={8}
+                      aria-hidden="true"
+                      variant="outline"
+                      style={{
+                        color: "inherit",
+                        borderColor: "currentColor",
+                        opacity: 0.7,
+                      }}
+                    >
                       {totalStagedCount}
                     </Badge>
                   </Button>

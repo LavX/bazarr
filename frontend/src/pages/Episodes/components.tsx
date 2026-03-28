@@ -92,7 +92,9 @@ export const Subtitle: FunctionComponent<Props> = ({
       mediaType="episode"
       onAction={async (action) => {
         if (action === "view") {
-          navigate(`/subtitles/preview/episode/${episodeId}/${encodeURIComponent(buildLanguageKey(subtitle))}`);
+          navigate(
+            `/subtitles/preview/episode/${episodeId}/${encodeURIComponent(buildLanguageKey(subtitle))}`,
+          );
         } else if (action === "search") {
           await download.mutateAsync({
             seriesId,

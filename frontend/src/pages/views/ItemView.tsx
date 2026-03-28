@@ -177,12 +177,8 @@ function ItemView<T extends Item.Base>({
     <Stack gap={0}>
       <Toolbox>
         <Group gap="xs">
-          {selectionToolbar ? (
-            <Box>{selectionToolbar}</Box>
-          ) : null}
-          {profileToolbar ? (
-            <Box>{profileToolbar}</Box>
-          ) : null}
+          {selectionToolbar ? <Box>{selectionToolbar}</Box> : null}
+          {profileToolbar ? <Box>{profileToolbar}</Box> : null}
         </Group>
         <Group gap="xs">
           {hasAnyFilterControl && (

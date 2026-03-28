@@ -11,7 +11,6 @@ $color-brand-7: #995c00;
 $color-brand-8: #7a4900;
 $color-brand-9: #5c3700;
 
-
 $header-height: 76px;
 
 :global {
@@ -76,10 +75,21 @@ body::after {
   inset: 0;
   z-index: 9999;
   pointer-events: none;
-  background:
-    radial-gradient(ellipse at 15% 10%, rgba(230, 138, 0, 0.12) 0%, transparent 50%),
-    radial-gradient(ellipse at 85% 90%, rgba(26, 138, 138, 0.08) 0%, transparent 50%),
-    radial-gradient(ellipse at 50% 50%, rgba(140, 80, 200, 0.05) 0%, transparent 60%);
+  background: radial-gradient(
+      ellipse at 15% 10%,
+      rgba(230, 138, 0, 0.12) 0%,
+      transparent 50%
+    ),
+    radial-gradient(
+      ellipse at 85% 90%,
+      rgba(26, 138, 138, 0.08) 0%,
+      transparent 50%
+    ),
+    radial-gradient(
+      ellipse at 50% 50%,
+      rgba(140, 80, 200, 0.05) 0%,
+      transparent 60%
+    );
 
   @include light {
     display: none;
@@ -228,8 +238,9 @@ body::after {
     border-radius: var(--bz-radius-lg);
     border: 1px solid var(--bz-border-card);
     box-shadow: none;
-    transition: background var(--bz-duration-normal) var(--bz-ease-standard),
-                border-color var(--bz-duration-normal) var(--bz-ease-standard);
+    transition:
+      background var(--bz-duration-normal) var(--bz-ease-standard),
+      border-color var(--bz-duration-normal) var(--bz-ease-standard);
 
     &:hover {
       border-color: var(--bz-border-hover);
@@ -238,22 +249,25 @@ body::after {
 
   // Tabs styling
   .mantine-Tabs-tab {
-    transition: background var(--bz-duration-normal) var(--bz-ease-standard),
-                color var(--bz-duration-normal) var(--bz-ease-standard),
-                border-color var(--bz-duration-normal) var(--bz-ease-standard);
+    transition:
+      background var(--bz-duration-normal) var(--bz-ease-standard),
+      color var(--bz-duration-normal) var(--bz-ease-standard),
+      border-color var(--bz-duration-normal) var(--bz-ease-standard);
   }
 
   // Switch styling
   .mantine-Switch-track {
-    transition: background-color var(--bz-duration-normal) var(--bz-ease-standard),
-                border-color var(--bz-duration-normal) var(--bz-ease-standard);
+    transition:
+      background-color var(--bz-duration-normal) var(--bz-ease-standard),
+      border-color var(--bz-duration-normal) var(--bz-ease-standard);
   }
 
   // Checkbox styling
   .mantine-Checkbox-input {
     border-radius: var(--bz-radius-xs);
-    transition: background-color var(--bz-duration-normal) var(--bz-ease-standard),
-                border-color var(--bz-duration-normal) var(--bz-ease-standard);
+    transition:
+      background-color var(--bz-duration-normal) var(--bz-ease-standard),
+      border-color var(--bz-duration-normal) var(--bz-ease-standard);
   }
 
   // Anchor/link styling
@@ -346,7 +360,8 @@ body::after {
   .mantine-SimpleGrid-root {
     > .mantine-Card-root,
     > .mantine-Paper-root[data-with-border] {
-      animation: bz-card-reveal var(--bz-duration-card) var(--bz-ease-enter) both;
+      animation: bz-card-reveal var(--bz-duration-card) var(--bz-ease-enter)
+        both;
 
       @for $i from 1 through 6 {
         &:nth-child(#{$i}) {
@@ -364,7 +379,9 @@ body::after {
 
 // Reduced motion support
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
+  *,
+  *::before,
+  *::after {
     animation-duration: 0.01ms !important;
     animation-delay: 0ms !important;
     animation-iteration-count: 1 !important;

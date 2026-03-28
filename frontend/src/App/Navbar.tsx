@@ -7,17 +7,9 @@ import React, {
   useState,
 } from "react";
 import { matchPath, NavLink, RouteObject, useLocation } from "react-router";
-import {
-  AppShell,
-  Badge,
-  Collapse,
-  Stack,
-  Text,
-} from "@mantine/core";
+import { AppShell, Badge, Collapse, Stack, Text } from "@mantine/core";
 import { useHover } from "@mantine/hooks";
-import {
-  IconDefinition,
-} from "@fortawesome/free-solid-svg-icons";
+import { IconDefinition } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import clsx from "clsx";
 import { useNavbar } from "@/contexts/Navbar";
@@ -235,12 +227,7 @@ const RouteItem: FunctionComponent<{
     }
   } else {
     return (
-      <NavbarItem
-        name={name ?? link}
-        link={link}
-        icon={icon}
-        badge={badge}
-      />
+      <NavbarItem name={name ?? link} link={link} icon={icon} badge={badge} />
     );
   }
 };
@@ -292,18 +279,8 @@ const NavbarItem: FunctionComponent<NavbarItemProps> = ({
         )
       }
     >
-      <Text
-        ref={ref}
-        inline
-        className={styles.text}
-        span
-      >
-        {icon && (
-          <FontAwesomeIcon
-            className={styles.icon}
-            icon={icon}
-          />
-        )}
+      <Text ref={ref} inline className={styles.text} span>
+        {icon && <FontAwesomeIcon className={styles.icon} icon={icon} />}
         {name}
         {!shouldHideBadge && (
           <Badge className={styles.badge} variant="filled" radius="xs">

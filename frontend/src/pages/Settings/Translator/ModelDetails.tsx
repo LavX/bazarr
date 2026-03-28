@@ -44,9 +44,7 @@ function useOpenRouterModelDetails(modelId: string) {
     queryFn: async () => {
       const response = await fetch("https://openrouter.ai/api/v1/models");
       const data = await response.json();
-      const found = data.data?.find(
-        (m: OpenRouterModel) => m.id === modelId,
-      );
+      const found = data.data?.find((m: OpenRouterModel) => m.id === modelId);
       return (found as OpenRouterModel) || null;
     },
     enabled: !!modelId,
@@ -99,7 +97,8 @@ const ModelDetailsCard: FunctionComponent<ModelDetailsProps> = ({
   modelId,
   reasoningLevel = "disabled",
 }) => {
-  const { data: model, isLoading: loading } = useOpenRouterModelDetails(modelId);
+  const { data: model, isLoading: loading } =
+    useOpenRouterModelDetails(modelId);
 
   if (loading) {
     return (
@@ -127,12 +126,25 @@ const ModelDetailsCard: FunctionComponent<ModelDetailsProps> = ({
     : null;
   const hasCache = cacheReadCost !== null || cacheWriteCost !== null;
 
-  const supportsReasoning = model.supported_parameters?.includes("reasoning") ?? false;
+  const supportsReasoning =
+    model.supported_parameters?.includes("reasoning") ?? false;
   const effectiveReasoning = supportsReasoning ? reasoningLevel : "disabled";
   const reasoningMul = REASONING_OUTPUT_MULTIPLIER[effectiveReasoning] ?? 1;
 
-  const episode = calcCost(AVG_EPISODE_TOKENS, promptCost, completionCost, cacheReadCost, reasoningMul);
-  const movie = calcCost(AVG_MOVIE_TOKENS, promptCost, completionCost, cacheReadCost, reasoningMul);
+  const episode = calcCost(
+    AVG_EPISODE_TOKENS,
+    promptCost,
+    completionCost,
+    cacheReadCost,
+    reasoningMul,
+  );
+  const movie = calcCost(
+    AVG_MOVIE_TOKENS,
+    promptCost,
+    completionCost,
+    cacheReadCost,
+    reasoningMul,
+  );
 
   return (
     <Box mt="xs">
@@ -149,36 +161,56 @@ const ModelDetailsCard: FunctionComponent<ModelDetailsProps> = ({
       {/* Per-million pricing — always show all available prices */}
       <SimpleGrid cols={{ base: 2, sm: hasCache ? 4 : 2 }} spacing="xs">
         <Box>
-          <Text size="xs" c="var(--bz-text-tertiary)">Input</Text>
-          <Text size="sm" fw={600}>{formatPerMillion(promptCost)}</Text>
+          <Text size="xs" c="var(--bz-text-tertiary)">
+            Input
+          </Text>
+          <Text size="sm" fw={600}>
+            {formatPerMillion(promptCost)}
+          </Text>
         </Box>
         <Box>
-          <Text size="xs" c="var(--bz-text-tertiary)">Output</Text>
-          <Text size="sm" fw={600}>{formatPerMillion(completionCost)}</Text>
+          <Text size="xs" c="var(--bz-text-tertiary)">
+            Output
+          </Text>
+          <Text size="sm" fw={600}>
+            {formatPerMillion(completionCost)}
+          </Text>
         </Box>
         {cacheReadCost !== null && (
           <Box>
-            <Text size="xs" c="var(--bz-text-tertiary)">Cache Read</Text>
-            <Text size="sm" fw={600} c="cyan.4">{formatPerMillion(cacheReadCost)}</Text>
+            <Text size="xs" c="var(--bz-text-tertiary)">
+              Cache Read
+            </Text>
+            <Text size="sm" fw={600} c="cyan.4">
+              {formatPerMillion(cacheReadCost)}
+            </Text>
           </Box>
         )}
         {cacheWriteCost !== null && (
           <Box>
-            <Text size="xs" c="var(--bz-text-tertiary)">Cache Write</Text>
-            <Text size="sm" fw={600} c="cyan.4">{formatPerMillion(cacheWriteCost)}</Text>
+            <Text size="xs" c="var(--bz-text-tertiary)">
+              Cache Write
+            </Text>
+            <Text size="sm" fw={600} c="cyan.4">
+              {formatPerMillion(cacheWriteCost)}
+            </Text>
           </Box>
         )}
       </SimpleGrid>
       {/* Estimations — single best estimate per type */}
       <SimpleGrid cols={{ base: 2, sm: 2 }} spacing="xs" mt="xs">
         <Box>
-          <Text size="xs" c="var(--bz-text-tertiary)">Est. / Episode</Text>
+          <Text size="xs" c="var(--bz-text-tertiary)">
+            Est. / Episode
+          </Text>
           <Text size="sm" fw={600} c="green.4">
             {formatCost(episode.cached ?? episode.standard)}
           </Text>
         </Box>
         <Box>
-          <Text size="xs" c="var(--bz-text-tertiary)">Est. / Movie</Text>
+          <Text size="xs" c="var(--bz-text-tertiary)">
+            Est. / Movie
+          </Text>
           <Text size="sm" fw={600} c="green.4">
             {formatCost(movie.cached ?? movie.standard)}
           </Text>
@@ -190,14 +222,20 @@ const ModelDetailsCard: FunctionComponent<ModelDetailsProps> = ({
         </Badge>
         {model.top_provider?.max_completion_tokens && (
           <Badge size="xs" variant="light" color="gray">
-            Max output: {(model.top_provider.max_completion_tokens / 1024).toFixed(0)}K tokens
+            Max output:{" "}
+            {(model.top_provider.max_completion_tokens / 1024).toFixed(0)}K
+            tokens
           </Badge>
         )}
         {model.supported_parameters?.includes("reasoning") && (
-          <Badge size="xs" variant="light" color="blue">Reasoning</Badge>
+          <Badge size="xs" variant="light" color="blue">
+            Reasoning
+          </Badge>
         )}
         {hasCache && (
-          <Badge size="xs" variant="light" color="cyan">Prompt caching</Badge>
+          <Badge size="xs" variant="light" color="cyan">
+            Prompt caching
+          </Badge>
         )}
       </Group>
     </Box>

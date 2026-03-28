@@ -6,10 +6,7 @@ import { aiTranslatorModelOptions } from "./options";
 const modelData = aiTranslatorModelOptions.map((o) => o.value);
 
 const AIModelSelector: FunctionComponent = () => {
-  const { value, update } = useBaseInput<
-    { settingKey: string },
-    string
-  >({
+  const { value, update } = useBaseInput<{ settingKey: string }, string>({
     settingKey: "settings-translator-openrouter_model",
   });
 

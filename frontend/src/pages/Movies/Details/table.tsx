@@ -45,7 +45,10 @@ const Table: FunctionComponent<Props> = ({ movie, profile }) => {
 
   // Available subtitles with actual files (for translate-from source)
   const availableSources = useMemo(
-    () => (movie?.subtitles ?? []).filter((s) => s.path && !isSubtitleTrack(s.path)),
+    () =>
+      (movie?.subtitles ?? []).filter(
+        (s) => s.path && !isSubtitleTrack(s.path),
+      ),
     [movie?.subtitles],
   );
 
@@ -98,10 +101,7 @@ const Table: FunctionComponent<Props> = ({ movie, profile }) => {
             }
           }}
         >
-          <Action
-            label="Subtitle Actions"
-            icon={faEllipsis}
-          ></Action>
+          <Action label="Subtitle Actions" icon={faEllipsis}></Action>
         </SubtitleToolsMenu>
       );
     }
@@ -111,7 +111,9 @@ const Table: FunctionComponent<Props> = ({ movie, profile }) => {
         selections={selections}
         onAction={async (action) => {
           if (action === "view") {
-            navigate(`/subtitles/preview/movie/${radarrId}/${encodeURIComponent(buildLanguageKey(item))}`);
+            navigate(
+              `/subtitles/preview/movie/${radarrId}/${encodeURIComponent(buildLanguageKey(item))}`,
+            );
           } else if (action === "delete" && path) {
             await remove.mutateAsync({
               radarrId,
