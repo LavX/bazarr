@@ -1,14 +1,22 @@
 import { FunctionComponent, useCallback, useMemo, useState } from "react";
 import { Link } from "react-router";
-import { ActionIcon, Anchor, Checkbox, Container, Group, Menu, Progress, Tooltip } from "@mantine/core";
-import { useCombobox } from "@mantine/core";
+import {
+  ActionIcon,
+  Anchor,
+  Checkbox,
+  Container,
+  Group,
+  Menu,
+  Progress,
+  Tooltip,
+} from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import { faBookmark as farBookmark } from "@fortawesome/free-regular-svg-icons";
 import {
   faArrowUp,
-  faCircleDown,
   faBookmark,
   faCheck,
+  faCircleDown,
   faEllipsisVertical,
   faHardDrive,
   faLanguage,
@@ -23,22 +31,25 @@ import {
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import { uniqBy } from "lodash";
-import { useLanguageProfiles, useSeriesModification, useSeriesPagination } from "@/apis/hooks";
+import { useSeriesModification, useSeriesPagination } from "@/apis/hooks";
 import { useInstanceName } from "@/apis/hooks/site";
 import { useUpgradableItems } from "@/apis/hooks/subtitles";
 import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
-import { SUBTITLE_TOOL_ACTIONS } from "@/constants/batch";
-import { GroupedSelector, GroupedSelectorOptions, Toolbox } from "@/components";
+import { Toolbox } from "@/components";
 import { AudioList } from "@/components/bazarr";
 import LanguageProfileName from "@/components/bazarr/LanguageProfile";
 import { BatchModConfirmModal } from "@/components/forms/BatchModConfirmForm";
+import { ChangeProfileModal } from "@/components/forms/ChangeProfileForm";
 import { ItemEditModal } from "@/components/forms/ItemEditForm";
 import { MassSyncModal } from "@/components/forms/MassSyncForm";
-import { MassTranslateModal, WantedItem } from "@/components/forms/MassTranslateForm";
+import {
+  MassTranslateModal,
+  WantedItem,
+} from "@/components/forms/MassTranslateForm";
+import { SUBTITLE_TOOL_ACTIONS } from "@/constants/batch";
 import { useModals } from "@/modules/modals";
 import ItemView from "@/pages/views/ItemView";
 import { GetItemId } from "@/utilities";
-import { useSelectorOptions } from "@/utilities/hooks";
 
 const SeriesView: FunctionComponent = () => {
   const mutation = useSeriesModification();
@@ -57,22 +68,6 @@ const SeriesView: FunctionComponent = () => {
 
   const [selections, setSelections] = useState<Item.Series[]>([]);
   const [dirties, setDirties] = useState<Item.Series[]>([]);
-  const { data: profiles } = useLanguageProfiles();
-  const profileOptions = useSelectorOptions(profiles ?? [], (v) => v.name);
-  const combobox = useCombobox();
-
-  const profileOptionsWithAction = useMemo<GroupedSelectorOptions<string>[]>(() => [
-    { group: "Actions", items: [{ label: "Clear", value: "", profileId: null }] },
-    {
-      group: "Profiles",
-      items: profileOptions.options.map((a) => ({
-        value: a.value.profileId.toString(),
-        label: a.label,
-        profileId: a.value.profileId,
-      })),
-    },
-  ], [profileOptions.options]);
-
   const setProfiles = useCallback(
     (id: number | null) => {
       const newItems = selections.map((v) => ({ ...v, profileId: id }));
@@ -98,7 +93,10 @@ const SeriesView: FunctionComponent = () => {
       profileIds: (number | null)[],
     ) => {
       if (ids.length === 0) return;
-      await mutateAsync({ id: ids.slice(0, chunkSize), profileid: profileIds.slice(0, chunkSize) });
+      await mutateAsync({
+        id: ids.slice(0, chunkSize),
+        profileid: profileIds.slice(0, chunkSize),
+      });
       await mutateInChunks(ids.slice(chunkSize), profileIds.slice(chunkSize));
     };
     return mutateInChunks(form.id, form.profileid);
@@ -108,18 +106,17 @@ const SeriesView: FunctionComponent = () => {
     if (selections.length === 0 && dirties.length === 0) return undefined;
     return (
       <Group gap="xs">
-        <GroupedSelector
-          onClick={() => combobox.openDropdown()}
-          onDropdownClose={() => combobox.resetSelectedOption()}
-          placeholder="Change Profile"
-          withCheckIcon={false}
-          options={profileOptionsWithAction}
+        <Toolbox.Button
+          icon={faLanguage}
           disabled={selections.length === 0}
-          comboboxProps={{
-            store: combobox,
-            onOptionSubmit: (value) => setProfiles(value ? +value : null),
+          onClick={() => {
+            modals.openContextModal(ChangeProfileModal, {
+              onSelect: setProfiles,
+            });
           }}
-        />
+        >
+          Change Profile
+        </Toolbox.Button>
         {dirties.length > 0 && (
           <>
             <Toolbox.Button icon={faUndo} onClick={() => setDirties([])}>
@@ -136,7 +133,7 @@ const SeriesView: FunctionComponent = () => {
         )}
       </Group>
     );
-  }, [selections, dirties, combobox, profileOptionsWithAction, setProfiles, save]);
+  }, [selections, dirties, modals, setProfiles, save]);
 
   const columns = useMemo<ColumnDef<Item.Series>[]>(
     () => [
@@ -187,7 +184,11 @@ const SeriesView: FunctionComponent = () => {
         cell: ({ row: { original } }) =>
           upgradableSeriesIds.has(original.sonarrSeriesId) ? (
             <Tooltip label="Low match score, upgrading may find a better subtitle">
-              <FontAwesomeIcon icon={faCircleDown} color="var(--mantine-color-dimmed)" size="sm" />
+              <FontAwesomeIcon
+                icon={faCircleDown}
+                color="var(--bz-text-tertiary)"
+                size="sm"
+              />
             </Tooltip>
           ) : null,
       },
@@ -235,25 +236,39 @@ const SeriesView: FunctionComponent = () => {
 
           const label = `${episodeFileCount - episodeMissingCount}/${episodeFileCount}`;
           return (
-            <Progress.Root key={title} size="xl">
-              <Progress.Section
-                value={
-                  episodeFileCount === 0 || !profileId
-                    ? 0
-                    : (1.0 - episodeMissingCount / episodeFileCount) * 100.0
-                }
-                color={episodeMissingCount === 0 ? "brand" : "yellow"}
-              >
-                <Progress.Label>{label}</Progress.Label>
-              </Progress.Section>
+            <Progress.Root
+              key={title}
+              size="xl"
+              radius="xl"
+              style={{ minWidth: 80, background: "var(--bz-hover-bg)" }}
+            >
+              <Tooltip label={label} withArrow>
+                <Progress.Section
+                  value={
+                    episodeFileCount === 0 || !profileId
+                      ? 0
+                      : (1.0 - episodeMissingCount / episodeFileCount) * 100.0
+                  }
+                  color={episodeMissingCount === 0 ? "brand" : "yellow"}
+                  style={{ borderRadius: "var(--bz-radius-xl)" }}
+                >
+                  <Progress.Label
+                    style={{ fontSize: "0.75rem", fontWeight: 600 }}
+                  >
+                    {label}
+                  </Progress.Label>
+                </Progress.Section>
+              </Tooltip>
               {episodeMissingCount === episodeFileCount && (
                 <Progress.Label
                   styles={{
                     label: {
                       position: "absolute",
-                      top: "3px",
+                      top: "50%",
                       left: "50%",
-                      transform: "translateX(-50%)",
+                      transform: "translate(-50%, -50%)",
+                      fontSize: "0.75rem",
+                      fontWeight: 600,
                     },
                   }}
                 >
@@ -267,8 +282,15 @@ const SeriesView: FunctionComponent = () => {
       {
         id: "actions",
         cell: ({ row: { original } }) => {
-          const batchItem: BatchItem = { type: "series", sonarrSeriesId: original.sonarrSeriesId };
-          const wantedItem: WantedItem = { type: "series", sonarrSeriesId: original.sonarrSeriesId, title: original.title };
+          const batchItem: BatchItem = {
+            type: "series",
+            sonarrSeriesId: original.sonarrSeriesId,
+          };
+          const wantedItem: WantedItem = {
+            type: "series",
+            sonarrSeriesId: original.sonarrSeriesId,
+            title: original.title,
+          };
           return (
             <Menu shadow="md" width={220} position="bottom-end">
               <Menu.Target>
@@ -295,7 +317,9 @@ const SeriesView: FunctionComponent = () => {
                 <Menu.Item
                   leftSection={<FontAwesomeIcon icon={faSync} size="sm" />}
                   onClick={() =>
-                    modals.openContextModal(MassSyncModal, { items: [batchItem] })
+                    modals.openContextModal(MassSyncModal, {
+                      items: [batchItem],
+                    })
                   }
                 >
                   Sync Subtitles
@@ -303,7 +327,9 @@ const SeriesView: FunctionComponent = () => {
                 <Menu.Item
                   leftSection={<FontAwesomeIcon icon={faLanguage} size="sm" />}
                   onClick={() =>
-                    modals.openContextModal(MassTranslateModal, { items: [wantedItem] })
+                    modals.openContextModal(MassTranslateModal, {
+                      items: [wantedItem],
+                    })
                   }
                 >
                   Translate
@@ -336,7 +362,9 @@ const SeriesView: FunctionComponent = () => {
                   Scan Disk
                 </Menu.Item>
                 <Menu.Item
-                  leftSection={<FontAwesomeIcon icon={faMagnifyingGlass} size="sm" />}
+                  leftSection={
+                    <FontAwesomeIcon icon={faMagnifyingGlass} size="sm" />
+                  }
                   onClick={() =>
                     modals.openContextModal(BatchModConfirmModal, {
                       items: [batchItem],

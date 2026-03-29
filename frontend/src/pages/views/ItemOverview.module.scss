@@ -1,0 +1,21 @@
+.fanartWrapper {
+  position: relative;
+  margin: 0 12px;
+  border-radius: var(--bz-radius-lg);
+  overflow: hidden;
+}
+
+.fanartOverlay {
+  background: rgba(0, 0, 0, 0.65);
+
+  // Force dark-style colors inside overlay regardless of theme
+  @include mantine.light {
+    color: #e8e8f0;
+
+    :global(.mantine-Badge-root[data-variant="light"]) {
+      background: rgba(255, 255, 255, 0.1);
+      color: rgba(255, 255, 255, 0.85);
+      border-color: rgba(255, 255, 255, 0.15);
+    }
+  }
+}

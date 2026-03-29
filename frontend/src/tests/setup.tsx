@@ -64,6 +64,9 @@ beforeEach(() => {
     http.get("/api/system/languages/profiles", () => {
       return HttpResponse.json([]);
     }),
+    http.get("/api/subtitles/upgradable", () => {
+      return HttpResponse.json({ movies: [], series: [] });
+    }),
   );
 });
 

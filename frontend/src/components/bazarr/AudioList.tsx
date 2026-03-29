@@ -19,7 +19,7 @@ const AudioList: FunctionComponent<AudioListProps> = ({
   return (
     <Group gap="xs" {...group}>
       {audios.map((audio, idx) => (
-        <Badge color="blue" key={BuildKey(idx, audio.code2)} {...badgeProps}>
+        <Badge key={BuildKey(idx, audio.code2)} {...badgeProps}>
           {normalizeAudioLanguage(audio.name)}
         </Badge>
       ))}

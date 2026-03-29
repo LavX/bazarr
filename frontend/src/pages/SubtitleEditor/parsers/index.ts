@@ -1,11 +1,11 @@
-import type { ParseResult, SubtitleFormat } from "../types";
-import { srtParser } from "./srt";
+import type { ParseResult, SubtitleFormat } from "@/pages/SubtitleEditor/types";
 import { assParser } from "./ass";
-import { vttParser } from "./vtt";
-import { subParser } from "./sub";
-import { smiParser } from "./smi";
-import { txtParser } from "./txt";
 import { mplParser } from "./mpl";
+import { smiParser } from "./smi";
+import { srtParser } from "./srt";
+import { subParser } from "./sub";
+import { txtParser } from "./txt";
+import { vttParser } from "./vtt";
 
 export interface SubtitleParser {
   parse(content: string): ParseResult;

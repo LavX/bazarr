@@ -1,7 +1,7 @@
 import { http } from "msw";
 import { HttpResponse } from "msw";
-import { beforeEach, describe, it } from "vitest";
-import { customRender } from "@/tests";
+import { beforeEach, describe, expect, it } from "vitest";
+import { customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import SeriesView from ".";
 
@@ -16,8 +16,13 @@ describe("Series page", () => {
     );
   });
 
-  it("should render", () => {
+  it("should render", async () => {
     customRender(<SeriesView />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByPlaceholderText("Search by title..."),
+      ).toBeInTheDocument();
+    });
   });
 });
-

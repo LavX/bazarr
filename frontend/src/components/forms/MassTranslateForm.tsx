@@ -178,9 +178,16 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
         isObject,
         "Please select a source language",
       ),
-      targetLanguage: (value: Language.Info | null, values: { sourceLanguage: Language.Info | null }) => {
+      targetLanguage: (
+        value: Language.Info | null,
+        values: { sourceLanguage: Language.Info | null },
+      ) => {
         if (!isObject(value)) return "Please select a target language";
-        if (value && values.sourceLanguage && value.code2 === values.sourceLanguage.code2)
+        if (
+          value &&
+          values.sourceLanguage &&
+          value.code2 === values.sourceLanguage.code2
+        )
           return "Target language must be different from source";
         return null;
       },
@@ -283,8 +290,8 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
         items: batchItems,
         action: "translate",
         options: {
-          from_lang: values.sourceLanguage!.code2,
-          to_lang: values.targetLanguage!.code2,
+          fromLang: values.sourceLanguage!.code2,
+          toLang: values.targetLanguage!.code2,
         },
       });
 
@@ -314,7 +321,7 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
             {translatorModel} will be used to translate{" "}
             <strong>{items.length}</strong> item(s).
           </Text>
-          <Text size="xs" c="dimmed" mt="xs">
+          <Text size="xs" c="var(--bz-text-tertiary)" mt="xs">
             You can choose translation service in the subtitles settings.
           </Text>
         </Alert>
@@ -337,7 +344,7 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
         )}
 
         {items.length > 5 && (
-          <Text size="sm" c="dimmed">
+          <Text size="sm" c="var(--bz-text-tertiary)">
             {items.length} items selected for translation
           </Text>
         )}
@@ -378,7 +385,11 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
           <Button variant="default" onClick={() => modals.closeSelf()}>
             Cancel
           </Button>
-          <Button type="submit" loading={isPending} disabled={items.length === 0}>
+          <Button
+            type="submit"
+            loading={isPending}
+            disabled={items.length === 0}
+          >
             Translate {items.length} Item(s)
           </Button>
         </Group>

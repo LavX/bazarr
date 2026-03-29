@@ -171,7 +171,7 @@ export const ProviderView: FunctionComponent<ProviderViewProps> = ({
                   <MantineText fw={700}>
                     {v.name ?? capitalize(v.key)}
                   </MantineText>
-                  <MantineText size="xs" c="dimmed">
+                  <MantineText size="xs" c="var(--bz-text-tertiary)">
                     Priority: {priority}
                   </MantineText>
                 </Group>
@@ -276,7 +276,7 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
         resolveProviderPriorities(staged, settings)[info.key] ?? 100;
       form.setFieldValue(`settings.${priorityKey}`, priorityValue);
     }
-  }, [info?.key]);
+  }, [info?.key]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const deletePayload = useCallback(() => {
     if (payload && enabledProviders) {
@@ -463,7 +463,7 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
     });
 
     return <Stack gap="xs">{elements}</Stack>;
-  }, [info, form, form.values.settings]);
+  }, [info, form, form.values.settings]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <SettingsProvider value={settings}>

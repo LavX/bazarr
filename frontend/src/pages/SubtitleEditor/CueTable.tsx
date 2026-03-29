@@ -42,7 +42,7 @@ const TAG_COLORS: Record<string, { bg: string; text: string }> = {
   align: { bg: "rgba(251, 191, 36, 0.2)", text: "#fbbf24" },
   effect: { bg: "rgba(168, 85, 247, 0.2)", text: "#a855f7" },
   color: { bg: "rgba(96, 165, 250, 0.2)", text: "#60a5fa" },
-  font_ass: { bg: "rgba(96, 165, 250, 0.2)", text: "#60a5fa" },
+  fontAss: { bg: "rgba(96, 165, 250, 0.2)", text: "#60a5fa" },
 };
 
 const DEFAULT_TAG_COLOR = { bg: "rgba(148, 163, 184, 0.15)", text: "#94a3b8" };
@@ -105,8 +105,8 @@ function parseAssTagBlock(block: string): { label: string; colorKey: string } {
     [/\\alpha/, "alpha", "effect"],
     [/\\[1234]a&H/, "alpha", "effect"],
     // Font
-    [/\\fn/, "font", "font_ass"],
-    [/\\fs[\d.]/, "size", "font_ass"],
+    [/\\fn/, "font", "fontAss"],
+    [/\\fs[\d.]/, "size", "fontAss"],
     // Bold/italic in ASS
     [/\\b[01]/, "bold", "b"],
     [/\\i[01]/, "italic", "i"],
@@ -119,9 +119,9 @@ function parseAssTagBlock(block: string): { label: string; colorKey: string } {
     // Drawing
     [/\\p[01]/, "drawing", "effect"],
     // Letter spacing
-    [/\\fsp[\d.-]/, "spacing", "font_ass"],
+    [/\\fsp[\d.-]/, "spacing", "fontAss"],
     // Encoding
-    [/\\fe\d/, "encoding", "font_ass"],
+    [/\\fe\d/, "encoding", "fontAss"],
     // Animated transform
     [/\\t\(/, "animate", "effect"],
     // Wrap
@@ -209,16 +209,17 @@ const gridTemplate = "56px 140px 140px 72px 1fr";
 const headerStyle: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: gridTemplate,
+  minWidth: 700,
   position: "sticky",
   top: 0,
   zIndex: 1,
-  backgroundColor: "var(--mantine-color-body)",
-  borderBottom: "2px solid var(--mantine-color-default-border)",
+  backgroundColor: "var(--bz-surface-base)",
+  borderBottom: "2px solid var(--bz-border-divider)",
   fontWeight: 700,
   fontSize: "0.7rem",
   textTransform: "uppercase",
   letterSpacing: "0.8px",
-  color: "var(--mantine-color-dimmed)",
+  color: "var(--bz-text-tertiary)",
 };
 
 const headerCellStyle: React.CSSProperties = {
@@ -228,8 +229,9 @@ const headerCellStyle: React.CSSProperties = {
 const rowBaseStyle: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: gridTemplate,
+  minWidth: 700,
   alignItems: "start",
-  borderBottom: "1px solid rgba(255, 255, 255, 0.04)",
+  borderBottom: "1px solid var(--bz-border-divider)",
   transition: "background-color 0.1s ease",
 };
 
@@ -251,7 +253,7 @@ const durationStyle: React.CSSProperties = {
   ...cellStyle,
   fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
   fontSize: "0.8rem",
-  color: "var(--mantine-color-dimmed)",
+  color: "var(--bz-text-tertiary)",
   textAlign: "center",
 };
 
@@ -264,7 +266,7 @@ const textCellStyle: React.CSSProperties = {
 
 const indexCellStyle: React.CSSProperties = {
   ...cellStyle,
-  color: "var(--mantine-color-dimmed)",
+  color: "var(--bz-text-tertiary)",
   fontSize: "0.75rem",
   textAlign: "right",
   fontFamily: "monospace",
@@ -296,10 +298,11 @@ export default function CueTable({ cues }: CueTableProps) {
         flexDirection: "column",
         flex: 1,
         minHeight: 0,
-        overflow: "hidden",
-        border: "1px solid var(--mantine-color-default-border)",
+        overflow: "auto",
+        border: "1px solid var(--bz-border-divider)",
         borderRadius: "var(--mantine-radius-md)",
-        backgroundColor: "var(--mantine-color-body)",
+        backgroundColor: "var(--bz-surface-base)",
+        minWidth: 0,
       }}
     >
       <div role="row" style={headerStyle}>
@@ -309,7 +312,12 @@ export default function CueTable({ cues }: CueTableProps) {
             role="columnheader"
             style={{
               ...headerCellStyle,
-              textAlign: col === "#" ? "right" : col === "DURATION" ? "center" : undefined,
+              textAlign:
+                col === "#"
+                  ? "right"
+                  : col === "DURATION"
+                    ? "center"
+                    : undefined,
               paddingRight: col === "#" ? "16px" : undefined,
             }}
           >
@@ -350,17 +358,15 @@ export default function CueTable({ cues }: CueTableProps) {
                   left: 0,
                   width: "100%",
                   transform: `translateY(${virtualRow.start}px)`,
-                  backgroundColor: isOdd
-                    ? "rgba(255, 255, 255, 0.02)"
-                    : "transparent",
+                  backgroundColor: isOdd ? "var(--bz-hover-bg)" : "transparent",
                 }}
                 onMouseEnter={(e) => {
                   e.currentTarget.style.backgroundColor =
-                    "rgba(255, 255, 255, 0.05)";
+                    "var(--bz-hover-bg-emphasis)";
                 }}
                 onMouseLeave={(e) => {
                   e.currentTarget.style.backgroundColor = isOdd
-                    ? "rgba(255, 255, 255, 0.02)"
+                    ? "var(--bz-hover-bg)"
                     : "transparent";
                 }}
               >

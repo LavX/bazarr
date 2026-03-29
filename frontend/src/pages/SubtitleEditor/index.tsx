@@ -1,20 +1,20 @@
 import { useMemo } from "react";
-import { useParams } from "react-router";
+import { Link, useParams } from "react-router";
 import {
-  Breadcrumbs,
-  Anchor,
-  Text,
   Alert,
+  Anchor,
   Badge,
-  Group,
-  Stack,
+  Breadcrumbs,
   Center,
+  Group,
   Loader,
+  Stack,
+  Text,
 } from "@mantine/core";
 import { useSubtitleContent } from "@/apis/hooks/subtitles";
-import { getParser } from "./parsers";
 import CueTable from "./CueTable";
-import type { SubtitleFormat, ParseResult } from "./types";
+import { getParser } from "./parsers";
+import type { ParseResult, SubtitleFormat } from "./types";
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return bytes + " B";
@@ -68,16 +68,27 @@ export default function SubtitleEditor() {
     return null;
   }
 
-  const listPath =
-    mediaType === "episode" || mediaType === "series" ? "/series" : "/movies";
-  const listLabel =
-    mediaType === "episode" || mediaType === "series" ? "Series" : "Movies";
+  const isSeries = mediaType === "episode" || mediaType === "series";
+  const listPath = isSeries ? "/series" : "/movies";
+  const listLabel = isSeries ? "Series" : "Movies";
+  const detailPath = data.mediaId
+    ? isSeries
+      ? `/series/${data.mediaId}`
+      : `/movies/${data.mediaId}`
+    : undefined;
 
   return (
     <Stack gap="sm" style={{ height: "100%", padding: "0" }}>
       <Group justify="space-between" px="md" pt="xs">
         <Breadcrumbs>
-          <Anchor href={listPath}>{listLabel}</Anchor>
+          <Anchor component={Link} to={listPath}>
+            {listLabel}
+          </Anchor>
+          {data.mediaTitle && detailPath && (
+            <Anchor component={Link} to={detailPath}>
+              {data.mediaTitle}
+            </Anchor>
+          )}
           <Text>Subtitle Viewer</Text>
         </Breadcrumbs>
         <Group gap="xs">
@@ -92,15 +103,22 @@ export default function SubtitleEditor() {
           <Badge variant="outline" color="gray" size="sm">
             {data.encoding}
           </Badge>
-          <Text size="xs" c="dimmed">
+          <Text size="xs" c="var(--bz-text-tertiary)">
             {parseResult.cues.length} cues
           </Text>
-          <Text size="xs" c="dimmed">
+          <Text size="xs" c="var(--bz-text-tertiary)">
             {formatFileSize(data.size)}
           </Text>
         </Group>
       </Group>
-      <div style={{ flex: 1, minHeight: 0, display: "flex", padding: "0 var(--mantine-spacing-md) var(--mantine-spacing-md)" }}>
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          display: "flex",
+          padding: "0 var(--mantine-spacing-md) var(--mantine-spacing-md)",
+        }}
+      >
         <CueTable cues={parseResult.cues} />
       </div>
     </Stack>

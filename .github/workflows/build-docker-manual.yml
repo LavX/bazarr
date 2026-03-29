@@ -15,10 +15,6 @@ on:
         options:
           - master
           - development
-          - feature/audio-display-with-filter
-          - python_3_14
-          - ai_translate
-          - no_telemetry
         default: 'master'
       
       build_type:
@@ -33,7 +29,7 @@ on:
         default: 'dev'
       
       version_tag:
-        description: 'Version tag (e.g., v1.5.3) - used for release builds'
+        description: 'Version tag (e.g., v2.0.0) - used for release builds'
         required: false
         default: ''
         type: string
@@ -77,7 +73,7 @@ jobs:
           ref: ${{ inputs.branch }}
 
       - name: Setup NodeJS
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version-file: "${{ env.UI_DIRECTORY }}/.nvmrc"
           cache: 'npm'
@@ -161,7 +157,7 @@ jobs:
                 VERSION=$(git describe --tags --always 2>/dev/null || echo "0.0.0")
               fi
               VERSION="${VERSION#v}"  # Remove 'v' prefix
-              FORK_VERSION="${VERSION}+$(date -u +%y%m%d)"
+              FORK_VERSION="${VERSION}"
               
               TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${FORK_VERSION}"
               TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${VERSION}"

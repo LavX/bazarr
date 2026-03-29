@@ -1,0 +1,24 @@
+@layer mantine {
+  .input {
+    border-radius: var(--bz-radius-md);
+    background: var(--bz-hover-bg);
+    border: 1px solid var(--bz-border-interactive);
+    transition:
+      background var(--bz-duration-normal) var(--bz-ease-standard),
+      border-color var(--bz-duration-normal) var(--bz-ease-standard);
+
+    &::placeholder {
+      color: var(--bz-text-tertiary);
+    }
+
+    &:hover {
+      background: var(--bz-hover-bg-emphasis);
+    }
+
+    &:focus,
+    &:focus-within {
+      background: var(--bz-hover-bg-emphasis);
+      border-color: var(--bz-border-hover);
+    }
+  }
+}

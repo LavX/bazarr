@@ -23,7 +23,7 @@ export const DropContent: FunctionComponent = () => {
       </Dropzone.Reject>
       <Stack gap={0}>
         <Text size="lg">Upload Subtitles</Text>
-        <Text c="dimmed" size="sm">
+        <Text c="var(--bz-text-tertiary)" size="sm">
           Attach as many files as you like, you will need to select file
           metadata before uploading
         </Text>

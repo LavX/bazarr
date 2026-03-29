@@ -116,10 +116,10 @@ const App: FunctionComponent = () => {
           >
             <Stack>
               <Text size="sm">
-                Your password is currently stored using a weak MD5 hash.
-                Would you like to upgrade to PBKDF2-SHA256 for better security?
+                Your password is currently stored using a weak MD5 hash. Would
+                you like to upgrade to PBKDF2-SHA256 for better security?
               </Text>
-              <Text size="xs" c="dimmed">
+              <Text size="xs" c="var(--bz-text-tertiary)">
                 Note: After upgrading, reverting to upstream Bazarr will require
                 resetting your password via the config file.
               </Text>

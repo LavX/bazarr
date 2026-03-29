@@ -1,14 +1,22 @@
 import { FunctionComponent, useCallback, useMemo, useState } from "react";
 import { Link } from "react-router";
-import { ActionIcon, Anchor, Badge, Checkbox, Container, Group, Menu, Tooltip } from "@mantine/core";
-import { useCombobox } from "@mantine/core";
+import {
+  ActionIcon,
+  Anchor,
+  Badge,
+  Checkbox,
+  Container,
+  Group,
+  Menu,
+  Tooltip,
+} from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import { faBookmark as farBookmark } from "@fortawesome/free-regular-svg-icons";
 import {
   faArrowUp,
   faBookmark,
-  faCircleDown,
   faCheck,
+  faCircleDown,
   faEllipsisVertical,
   faHardDrive,
   faLanguage,
@@ -21,23 +29,26 @@ import {
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import { uniqBy, uniqueId } from "lodash";
-import { useLanguageProfiles, useMovieModification, useMoviesPagination } from "@/apis/hooks";
+import { useMovieModification, useMoviesPagination } from "@/apis/hooks";
 import { useInstanceName } from "@/apis/hooks/site";
 import { useUpgradableItems } from "@/apis/hooks/subtitles";
 import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
-import { SUBTITLE_TOOL_ACTIONS } from "@/constants/batch";
-import { GroupedSelector, GroupedSelectorOptions, Toolbox } from "@/components";
+import { Toolbox } from "@/components";
 import { AudioList } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
 import LanguageProfileName from "@/components/bazarr/LanguageProfile";
 import { BatchModConfirmModal } from "@/components/forms/BatchModConfirmForm";
+import { ChangeProfileModal } from "@/components/forms/ChangeProfileForm";
 import { ItemEditModal } from "@/components/forms/ItemEditForm";
 import { MassSyncModal } from "@/components/forms/MassSyncForm";
-import { MassTranslateModal, WantedItem } from "@/components/forms/MassTranslateForm";
+import {
+  MassTranslateModal,
+  WantedItem,
+} from "@/components/forms/MassTranslateForm";
+import { SUBTITLE_TOOL_ACTIONS } from "@/constants/batch";
 import { useModals } from "@/modules/modals";
 import ItemView from "@/pages/views/ItemView";
 import { BuildKey, GetItemId } from "@/utilities";
-import { useSelectorOptions } from "@/utilities/hooks";
 
 const MovieView: FunctionComponent = () => {
   const modifyMovie = useMovieModification();
@@ -56,22 +67,6 @@ const MovieView: FunctionComponent = () => {
 
   const [selections, setSelections] = useState<Item.Movie[]>([]);
   const [dirties, setDirties] = useState<Item.Movie[]>([]);
-  const { data: profiles } = useLanguageProfiles();
-  const profileOptions = useSelectorOptions(profiles ?? [], (v) => v.name);
-  const combobox = useCombobox();
-
-  const profileOptionsWithAction = useMemo<GroupedSelectorOptions<string>[]>(() => [
-    { group: "Actions", items: [{ label: "Clear", value: "", profileId: null }] },
-    {
-      group: "Profiles",
-      items: profileOptions.options.map((a) => ({
-        value: a.value.profileId.toString(),
-        label: a.label,
-        profileId: a.value.profileId,
-      })),
-    },
-  ], [profileOptions.options]);
-
   const setProfiles = useCallback(
     (id: number | null) => {
       const newItems = selections.map((v) => ({ ...v, profileId: id }));
@@ -97,7 +92,10 @@ const MovieView: FunctionComponent = () => {
       profileIds: (number | null)[],
     ) => {
       if (ids.length === 0) return;
-      await mutateAsync({ id: ids.slice(0, chunkSize), profileid: profileIds.slice(0, chunkSize) });
+      await mutateAsync({
+        id: ids.slice(0, chunkSize),
+        profileid: profileIds.slice(0, chunkSize),
+      });
       await mutateInChunks(ids.slice(chunkSize), profileIds.slice(chunkSize));
     };
     return mutateInChunks(form.id, form.profileid);
@@ -107,18 +105,17 @@ const MovieView: FunctionComponent = () => {
     if (selections.length === 0 && dirties.length === 0) return undefined;
     return (
       <Group gap="xs">
-        <GroupedSelector
-          onClick={() => combobox.openDropdown()}
-          onDropdownClose={() => combobox.resetSelectedOption()}
-          placeholder="Change Profile"
-          withCheckIcon={false}
-          options={profileOptionsWithAction}
+        <Toolbox.Button
+          icon={faLanguage}
           disabled={selections.length === 0}
-          comboboxProps={{
-            store: combobox,
-            onOptionSubmit: (value) => setProfiles(value ? +value : null),
+          onClick={() => {
+            modals.openContextModal(ChangeProfileModal, {
+              onSelect: setProfiles,
+            });
           }}
-        />
+        >
+          Change Profile
+        </Toolbox.Button>
         {dirties.length > 0 && (
           <>
             <Toolbox.Button icon={faUndo} onClick={() => setDirties([])}>
@@ -135,7 +132,7 @@ const MovieView: FunctionComponent = () => {
         )}
       </Group>
     );
-  }, [selections, dirties, combobox, profileOptionsWithAction, setProfiles, save]);
+  }, [selections, dirties, modals, setProfiles, save]);
 
   const columns = useMemo<ColumnDef<Item.Movie>[]>(
     () => [
@@ -182,7 +179,11 @@ const MovieView: FunctionComponent = () => {
         }) =>
           upgradableMovieIds.has(radarrId) ? (
             <Tooltip label="Low match score, upgrading may find a better subtitle">
-              <FontAwesomeIcon icon={faCircleDown} color="var(--mantine-color-dimmed)" size="sm" />
+              <FontAwesomeIcon
+                icon={faCircleDown}
+                color="var(--bz-text-tertiary)"
+                size="sm"
+              />
             </Tooltip>
           ) : null,
       },
@@ -256,8 +257,15 @@ const MovieView: FunctionComponent = () => {
         id: "actions",
         cell: ({ row }) => {
           const item = row.original;
-          const batchItem: BatchItem = { type: "movie", radarrId: item.radarrId };
-          const wantedItem: WantedItem = { type: "movie", radarrId: item.radarrId, title: item.title };
+          const batchItem: BatchItem = {
+            type: "movie",
+            radarrId: item.radarrId,
+          };
+          const wantedItem: WantedItem = {
+            type: "movie",
+            radarrId: item.radarrId,
+            title: item.title,
+          };
           return (
             <Menu shadow="md" width={220} position="bottom-end">
               <Menu.Target>
@@ -284,7 +292,9 @@ const MovieView: FunctionComponent = () => {
                 <Menu.Item
                   leftSection={<FontAwesomeIcon icon={faSync} size="sm" />}
                   onClick={() =>
-                    modals.openContextModal(MassSyncModal, { items: [batchItem] })
+                    modals.openContextModal(MassSyncModal, {
+                      items: [batchItem],
+                    })
                   }
                 >
                   Sync Subtitles
@@ -292,7 +302,9 @@ const MovieView: FunctionComponent = () => {
                 <Menu.Item
                   leftSection={<FontAwesomeIcon icon={faLanguage} size="sm" />}
                   onClick={() =>
-                    modals.openContextModal(MassTranslateModal, { items: [wantedItem] })
+                    modals.openContextModal(MassTranslateModal, {
+                      items: [wantedItem],
+                    })
                   }
                 >
                   Translate
@@ -325,7 +337,9 @@ const MovieView: FunctionComponent = () => {
                   Scan Disk
                 </Menu.Item>
                 <Menu.Item
-                  leftSection={<FontAwesomeIcon icon={faMagnifyingGlass} size="sm" />}
+                  leftSection={
+                    <FontAwesomeIcon icon={faMagnifyingGlass} size="sm" />
+                  }
                   onClick={() =>
                     modals.openContextModal(BatchModConfirmModal, {
                       items: [batchItem],

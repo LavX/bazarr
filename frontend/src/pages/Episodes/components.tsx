@@ -39,7 +39,7 @@ export const Subtitle: FunctionComponent<Props> = ({
     if (opened && (missing || !disabled)) {
       return "highlight";
     } else if (missing) {
-      return "warning";
+      return "missing";
     } else if (disabled) {
       return "disabled";
     }
@@ -81,7 +81,7 @@ export const Subtitle: FunctionComponent<Props> = ({
   return (
     <SubtitleToolsMenu
       menu={{
-        trigger: "hover",
+        trigger: "click",
         onOpen: () => setOpen(true),
         onClose: () => setOpen(false),
       }}
@@ -92,7 +92,9 @@ export const Subtitle: FunctionComponent<Props> = ({
       mediaType="episode"
       onAction={async (action) => {
         if (action === "view") {
-          navigate(`/subtitles/preview/episode/${episodeId}/${encodeURIComponent(buildLanguageKey(subtitle))}`);
+          navigate(
+            `/subtitles/preview/episode/${episodeId}/${encodeURIComponent(buildLanguageKey(subtitle))}`,
+          );
         } else if (action === "search") {
           await download.mutateAsync({
             seriesId,

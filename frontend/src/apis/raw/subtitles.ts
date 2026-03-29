@@ -8,6 +8,9 @@ export interface SubtitleContentResponse {
   language: string;
   size: number;
   lastModified: number;
+  mediaTitle?: string;
+  mediaId?: number;
+  episodeTitle?: string;
 }
 
 export type BatchAction =
@@ -31,6 +34,16 @@ export interface BatchItem {
 }
 
 export interface BatchOptions {
+  maxOffsetSeconds?: number;
+  noFixFramerate?: boolean;
+  gss?: boolean;
+  forceResync?: boolean;
+  fromLang?: string;
+  toLang?: string;
+}
+
+/* eslint-disable camelcase -- backend API contract */
+interface BatchPayload {
   max_offset_seconds?: number;
   no_fix_framerate?: boolean;
   gss?: boolean;
@@ -38,6 +51,18 @@ export interface BatchOptions {
   from_lang?: string;
   to_lang?: string;
 }
+
+function toBatchPayload(options: BatchOptions): BatchPayload {
+  return {
+    max_offset_seconds: options.maxOffsetSeconds,
+    no_fix_framerate: options.noFixFramerate,
+    gss: options.gss,
+    force_resync: options.forceResync,
+    from_lang: options.fromLang,
+    to_lang: options.toLang,
+  };
+}
+/* eslint-enable camelcase */
 
 export interface BatchResponse {
   queued: number;
@@ -91,7 +116,7 @@ class SubtitlesApi extends BaseApi {
     const response = await this.postRaw<BatchResponse>("/batch", {
       items,
       action,
-      options,
+      options: options ? toBatchPayload(options) : undefined,
     });
     return response.data;
   }

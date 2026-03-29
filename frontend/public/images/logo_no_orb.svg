@@ -1,29 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" xmlns:bx="https://boxy-svg.com">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
   <defs>
-    <linearGradient gradientUnits="userSpaceOnUse" x1="256.806" y1="132.019" x2="256.806" y2="287.514" id="gradient-0" gradientTransform="matrix(1.679181, 0, 0, 1.588063, 0.001418, 0.000182)">
-      <stop offset="0" style="stop-color: rgb(255, 153, 0)"/>
-      <stop offset="1" style="stop-color: rgb(63.987% 31.058% 0%)"/>
+    <linearGradient id="metal-orange" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0" stop-color="#ffb15a"/>
+      <stop offset="0.45" stop-color="#d96a1a"/>
+      <stop offset="1" stop-color="#7e3500"/>
     </linearGradient>
-    <linearGradient gradientUnits="userSpaceOnUse" x1="256" y1="300" x2="256" y2="335" id="gradient-1" gradientTransform="matrix(1.405489, 0, 0, 1.405489, -103.806038, -109.65921)">
-      <stop offset="0" style="stop-color: rgb(255, 153, 0)"/>
-      <stop offset="1" style="stop-color: rgb(63.987% 31.058% 0%)"/>
-    </linearGradient>
-    <linearGradient gradientUnits="userSpaceOnUse" x1="253.868" y1="333.576" x2="253.868" y2="362.776" id="gradient-2" gradientTransform="matrix(1.405489, 0, 0, 1.405489, -100.806808, -109.65921)">
-      <stop offset="0" style="stop-color: rgb(255, 153, 0)"/>
-      <stop offset="1" style="stop-color: rgb(63.987% 31.058% 0%)"/>
-    </linearGradient>
-    <linearGradient gradientUnits="userSpaceOnUse" x1="256.806" y1="132.019" x2="256.806" y2="287.514" id="gradient-4" gradientTransform="matrix(1.679181, 0, 0, 1.588063, 0.001418, 0.000182)">
-      <stop offset="0" style="stop-color: rgb(255, 153, 0)"/>
-      <stop offset="1" style="stop-color: rgb(63.987% 31.058% 0%)"/>
-    </linearGradient>
-    <bx:export>
-      <bx:file format="png"/>
-    </bx:export>
   </defs>
-  <g style="" transform="matrix(1.117351, 0, 0, 1.117351, -30.041311, -6.987485)">
-    <path d="M 36.743 311.987 C 182.916 377.577 329.084 377.577 475.256 311.987" stroke-width="16" stroke-linecap="round" fill="none" style="stroke: url(&quot;#gradient-1&quot;); stroke-width: 16.988;"/>
-    <path d="M 59.16 359.178 C 190.385 413.899 321.613 413.899 452.838 359.178" fill="none" stroke-width="16" stroke-linecap="round" style="stroke: url(&quot;#gradient-2&quot;); stroke-width: 16.988;"/>
-    <path d="M 405.112 259.041 Q 431.223 209.654 457.333 259.041 L 535.665 407.204 Q 561.775 456.591 509.554 456.591 L 352.891 456.591 Q 300.67 456.591 326.781 407.204 Z" bx:shape="triangle 300.67 209.654 261.105 246.937 0.5 0.2 1@99845abb" style="fill: url(&quot;#gradient-0&quot;); stroke: url(&quot;#gradient-4&quot;); stroke-width: 1.062; transform-box: fill-box; transform-origin: 50% 50%;" transform="matrix(0, 1, -1, 0, -158.222672, -161.80864)"/>
-  </g>
+  <path d="M 182 148.322 C 182 130.386 190.968 125.364 208.904 133.256 L 364.946 207.511 C 383.599 216.837 383.599 226.164 364.946 235.491 L 208.904 309.745 C 190.968 317.637 182 312.615 182 294.679 L 182 148.322 Z" style="" fill="url(#metal-orange)"/>
+  <path d="M 46 309 L 66 319 C 184 370 328 370 446 319 L 466 309 L 456 326 C 329 380 183 380 56 326 Z" fill="url(#metal-orange)"/>
+  <path d="M 64 353 L 83 362 C 193 409 319 409 429 362 L 448 353 L 439 369 C 320 417 192 417 73 369 Z" fill="url(#metal-orange)"/>
 </svg>

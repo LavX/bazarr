@@ -73,7 +73,7 @@ const StateIcon: FunctionComponent<StateIconProps> = ({
         </Text>
       </Popover.Target>
       <Popover.Dropdown>
-        <Text size={titleSize} fw="bold" c="white" ta="center">
+        <Text size={titleSize} fw="bold" c="var(--bz-text-primary)" ta="center">
           Scoring Criteria
         </Text>
         <Group justify="left" gap="xl" wrap="nowrap" grow>

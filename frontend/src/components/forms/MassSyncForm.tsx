@@ -11,10 +11,7 @@ import {
 import { useForm } from "@mantine/form";
 import { notifications } from "@mantine/notifications";
 import { useBatchAction, useSystemSettings } from "@/apis/hooks";
-import {
-  BatchItem,
-  BatchOptions,
-} from "@/apis/raw/subtitles";
+import { BatchItem, BatchOptions } from "@/apis/raw/subtitles";
 import { useModals, withModal } from "@/modules/modals";
 
 interface MassSyncFormProps {
@@ -28,10 +25,10 @@ const MassSyncForm: FunctionComponent<MassSyncFormProps> = ({ items }) => {
 
   const form = useForm<BatchOptions>({
     initialValues: {
-      max_offset_seconds: settings?.subsync.max_offset_seconds ?? 60,
-      no_fix_framerate: settings?.subsync.no_fix_framerate ?? true,
+      maxOffsetSeconds: settings?.subsync.max_offset_seconds ?? 60,
+      noFixFramerate: settings?.subsync.no_fix_framerate ?? true,
       gss: settings?.subsync.gss ?? true,
-      force_resync: false,
+      forceResync: false,
     },
   });
 
@@ -79,7 +76,7 @@ const MassSyncForm: FunctionComponent<MassSyncFormProps> = ({ items }) => {
           label="Max Offset Seconds"
           min={1}
           max={600}
-          {...form.getInputProps("max_offset_seconds")}
+          {...form.getInputProps("maxOffsetSeconds")}
         />
 
         <Checkbox
@@ -89,13 +86,13 @@ const MassSyncForm: FunctionComponent<MassSyncFormProps> = ({ items }) => {
 
         <Checkbox
           label="No Fix Framerate"
-          {...form.getInputProps("no_fix_framerate", { type: "checkbox" })}
+          {...form.getInputProps("noFixFramerate", { type: "checkbox" })}
         />
 
         <Checkbox
           label="Force Re-sync"
           description="Re-sync subtitles that have already been synced"
-          {...form.getInputProps("force_resync", { type: "checkbox" })}
+          {...form.getInputProps("forceResync", { type: "checkbox" })}
         />
 
         <Divider />
@@ -104,7 +101,11 @@ const MassSyncForm: FunctionComponent<MassSyncFormProps> = ({ items }) => {
           <Button variant="default" onClick={() => modals.closeSelf()}>
             Cancel
           </Button>
-          <Button type="submit" loading={isPending} disabled={items.length === 0}>
+          <Button
+            type="submit"
+            loading={isPending}
+            disabled={items.length === 0}
+          >
             Sync {items.length} Item(s)
           </Button>
         </Group>

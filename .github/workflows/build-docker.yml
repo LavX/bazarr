@@ -3,7 +3,6 @@ name: Build Docker Image
 on:
   push:
     branches:
-      - main
       - master
     paths-ignore:
       - '*.md'
@@ -12,14 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       version_tag:
-        description: 'Version tag for the image (e.g., v1.5.3)'
-        required: false
-        default: ''
-        type: string
-  workflow_call:
-    inputs:
-      version_tag:
-        description: 'Version tag for the image'
+        description: 'Version tag for the image (e.g., v2.0.0)'
         required: false
         default: ''
         type: string
@@ -39,7 +31,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Setup NodeJS
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version-file: "${{ env.UI_DIRECTORY }}/.nvmrc"
           cache: 'npm'
@@ -116,19 +108,17 @@ jobs:
           # Remove 'v' prefix for semver
           SEMVER="${VERSION#v}"
           
-          # Create Bazarr+ version
+          # Bazarr+ version is the semver tag directly
           SHORT_SHA=$(git rev-parse --short HEAD)
-          BUILD_DATE=$(date -u +%y%m%d)
-          FORK_VERSION="${SEMVER}+${BUILD_DATE}"
-          
+          FORK_VERSION="${SEMVER}"
+
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "semver=$SEMVER" >> $GITHUB_OUTPUT
           echo "fork_version=$FORK_VERSION" >> $GITHUB_OUTPUT
           echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
-          
+
           echo "## Version Info" >> $GITHUB_STEP_SUMMARY
-          echo "- **Base Version:** $VERSION" >> $GITHUB_STEP_SUMMARY
-          echo "- **Fork Version:** $FORK_VERSION" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** $FORK_VERSION" >> $GITHUB_STEP_SUMMARY
           echo "- **Short SHA:** $SHORT_SHA" >> $GITHUB_STEP_SUMMARY
 
       - name: Extract Docker Metadata
@@ -139,7 +129,7 @@ jobs:
           tags: |
             # Latest tag on main/master branch
             type=raw,value=latest,enable={{is_default_branch}}
-            # Version tag (e.g., v1.5.7+250324)
+            # Version tag (e.g., v2.0.0)
             type=raw,value=${{ steps.version.outputs.fork_version }}
             # Short SHA tag
             type=raw,value=sha-${{ steps.version.outputs.short_sha }}
@@ -221,6 +211,5 @@ jobs:
             
             This release is based on upstream Bazarr with the following custom modifications:
             - OpenSubtitles.org web scraper provider (no VIP API needed)
-            - Manual sync with upstream on major releases
             
             See the auto-generated release notes below for detailed changes.

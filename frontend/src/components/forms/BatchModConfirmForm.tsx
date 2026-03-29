@@ -5,6 +5,7 @@ import { useBatchAction } from "@/apis/hooks";
 import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
 import { useModals, withModal } from "@/modules/modals";
 
+/* eslint-disable camelcase -- keys match backend action identifiers */
 const ACTION_LABELS: Record<string, string> = {
   OCR_fixes: "OCR Fixes",
   common: "Common Fixes",
@@ -16,6 +17,7 @@ const ACTION_LABELS: Record<string, string> = {
   "search-missing": "Search Missing Subtitles",
   upgrade: "Upgrade Subtitles",
 };
+/* eslint-enable camelcase */
 
 interface BatchModConfirmFormProps {
   items: BatchItem[];
@@ -58,11 +60,16 @@ const BatchModConfirmForm: FunctionComponent<BatchModConfirmFormProps> = ({
   };
 
   return (
-    <form onSubmit={(e) => { e.preventDefault(); handleSubmit(); }}>
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        handleSubmit();
+      }}
+    >
       <Stack>
         <Text size="sm">
-          Apply <strong>{label}</strong> to{" "}
-          <strong>{items.length}</strong> selected item(s)?
+          Apply <strong>{label}</strong> to <strong>{items.length}</strong>{" "}
+          selected item(s)?
         </Text>
 
         <Divider />

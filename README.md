@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="frontend/public/images/logo128.png" alt="Bazarr+ Logo" width="120">
+  <img src="screenshot/hero_eclipse_compact.png" alt="Bazarr+ v2.0.0 - Codename: Eclipse">
+</p>
+
+<p align="center">
+  <img src="frontend/public/images/logo128.png" alt="Bazarr+ Logo" width="128">
 </p>
 
 # <p align="center">Bazarr+
@@ -15,14 +19,75 @@
 </p>
 
 <p align="center">
-  No tracking · Provider priority · OpenSubtitles.org web scraper · AI translation via OpenRouter (300+ LLMs) · API key encryption · batch translation · mass subtitle sync · 11 bulk operations · advanced table filters · security hardening · Python 3.14 · navy + amber dark theme
+  No tracking · Provider priority · OpenSubtitles.org web scraper · AI translation via OpenRouter (300+ LLMs) · API key encryption · batch translation · mass subtitle sync · 11 bulk operations · subtitle viewer · advanced table filters · security hardening · Python 3.14 · navy + amber dark theme
 </p>
 
 ---
 
-## Why Bazarr+?
+## Switching from upstream Bazarr?
 
-Bazarr is great at finding subtitles. Bazarr+ takes it further with features upstream doesn't have:
+- Migration can be as simple as replacing the container image with `ghcr.io/lavx/bazarr:latest` and starting the container
+- Back up your `/config` directory first
+- Bazarr+ uses independent versioning starting at v2.0.0, unrelated to upstream version numbers
+- Config changes made by Bazarr+ are not backwards-compatible with upstream Bazarr, so switching back requires restoring your backup
+- Recommended: test with a copy of your config before committing to the switch
+
+---
+
+## At a Glance
+
+| Feature | Upstream Bazarr | Bazarr+ |
+|---------|-----------------|---------|
+| **Provider Priority** | [Rejected](https://bazarr.featureupvote.com/suggestions/112323/provider-prioritization) (62 votes) | Dual mode: priority order with early stop, or classic simultaneous |
+| **OpenSubtitles.org (Scraper)** | Not available | Self-hosted FastAPI microservice via CloudScraper |
+| **AI Subtitle Translator (OpenRouter)** | Not available | 300+ LLMs + any custom model ID |
+| **API Key Encryption** | Not available | AES-256-GCM encryption for keys in transit |
+| **Translate from Missing Menu** | Not available | Action menu on missing subs with source language picker |
+| **Batch Translation** | Not available | Translate entire series/libraries from Wanted pages |
+| **Mass Subtitle Sync** | [Rejected](https://bazarr.featureupvote.com/suggestions/172013/mass-sync-all-subtitles) (249 votes) | Bulk sync from Tasks page or Mass Edit, skips already-synced |
+| **Bulk Operations** | One-at-a-time only | 11 batch actions: sync, translate, OCR fixes, common fixes, remove HI, remove tags, fix uppercase, reverse RTL, scan disk, search missing, upgrade (up to 10k items) |
+| **Dedicated Translator Settings** | Not available | 4-zone page with pricing, cost estimates, status panel |
+| **No Tracking** | GA4 + legacy UA phone home to Google | All telemetry removed, nothing phones home |
+| **Security Hardening** | MD5, no CSRF/SSRF/rate limiting | PBKDF2 (600k iter), CSRF, SSRF, brute-force, 4 more |
+| **Subtitle Viewer** | Not available | Read-only subtitle preview with SRT/VTT/ASS parsing, cue table, and format detection |
+| **Audio Language Display** | Not shown in tables | Badges in all table views |
+| **Advanced Table Filters** | No filters | Include/exclude audio, missing subtitle, title search |
+| **Floating Save + Ctrl+S** | Not available | Sticky save button with 3-option unsaved changes modal |
+| **Navy + Amber Theme** | Purple | `#121125` navy to `#fff8e1` cream, amber accents |
+| OpenSubtitles.com (API) | Available | Available |
+| Docker images | linuxserver.io / hotio | ghcr.io/lavx (self-built, multi-arch) |
+| Python runtime | 3.8-3.13 | 3.14 |
+
+---
+
+## Quick Start
+
+### Option 1: Docker Compose (Recommended)
+
+```bash
+# Clone with the scraper submodule
+git clone --recursive https://github.com/LavX/bazarr.git
+cd bazarr
+
+# Configure your media paths in docker-compose.yml, then:
+docker compose up -d
+
+# Access Bazarr at http://localhost:6767
+```
+
+### Option 2: Pull Pre-built Images
+
+```bash
+# Pull all images
+docker pull ghcr.io/lavx/bazarr:latest
+docker pull ghcr.io/lavx/opensubtitles-scraper:latest
+docker pull ghcr.io/lavx/ai-subtitle-translator:latest
+```
+
+---
+
+<details>
+<summary><strong>Feature Details</strong></summary>
 
 ### OpenSubtitles.org Web Scraper
 OpenSubtitles.org shut down their XML-RPC API for all third-party apps, VIP included. Bazarr+ ships a self-hosted FastAPI microservice that scrapes OpenSubtitles.org directly via CloudScraper with optional FlareSolverr fallback. It provides search, subtitle listing, and download endpoints (`/api/v1/search`, `/api/v1/subtitles`, `/api/v1/download/subtitle`) and integrates into Bazarr's provider system through a mixin class. No API key or VIP subscription needed.
@@ -33,13 +98,16 @@ Upstream Bazarr queries all subtitle providers simultaneously and picks the high
 Bazarr+ solves it with a **Provider Priority toggle** in Settings > Providers. When enabled, providers are queried sequentially in the order you've arranged them. If a provider returns subtitles meeting the minimum score, Bazarr+ stops searching and uses those results. Your preferred providers (curated community sites, specialized language sources) always get first shot. When disabled, the original behavior is preserved: all providers queried simultaneously, best score wins.
 
 ### AI Subtitle Translation via OpenRouter
-Upstream has Google Translate, Gemini, and Lingarr. Bazarr+ adds **OpenRouter** as a fourth translator engine, giving access to 30+ preconfigured LLMs (Claude, Gemini, GPT, LLaMA, Grok, and more) plus any custom model ID from openrouter.ai. It runs as a separate microservice with an async job queue supporting 1-5 concurrent jobs and 1-8 parallel batches. Features include:
+Upstream has Google Translate, Gemini, and Lingarr. Bazarr+ adds **OpenRouter** as a fourth translator engine, giving access to 300+ LLMs (Claude, Gemini, GPT, LLaMA, Grok, and more) plus any custom model ID from openrouter.ai. It runs as a separate microservice with an async job queue supporting 1-5 concurrent jobs and 1-8 parallel batches. Features include:
 - **Translate from the subtitle action menu**: click (...) on a missing subtitle row, pick an existing source subtitle to translate from
 - **Batch translation** for entire series/movie libraries from the Wanted pages
 - **Dedicated settings page** with 4 zones: engine picker, connection config, model tuning (temperature, reasoning mode, parallel batches), and a live status panel showing queue stats, job progress, token usage, cost, and speed
 - **Model details** fetched live from the OpenRouter API with per-million token pricing, per-episode/movie cost estimates, context length, and prompt caching indicators
 - **AES-256-GCM encryption** for API keys in transit between Bazarr and the translator service, with a Test Connection button that validates encryption and API key status before saving
 - **Auto disk scan** triggers Sonarr/Radarr to rescan after translation completes
+
+### Subtitle Viewer
+Read-only subtitle preview accessible from the subtitle action menu. Supports SRT, VTT, and ASS/SSA formats with automatic format detection. Shows a cue table with timestamps and text, file size, and format badge. Useful for quickly checking subtitle content and timing without downloading.
 
 ### Advanced UI
 - **Table filters** on Wanted and Library pages: include/exclude audio language (multi-select), missing subtitle language filter, title search, with active filter chips and a collapsible filter panel
@@ -68,7 +136,7 @@ Select multiple movies or series from the library pages and apply operations in 
 - **Remove Style Tags** -- remove `<i>`, `<b>`, `<font>` and other formatting tags
 - **Fix Uppercase** -- convert ALL CAPS subtitles to proper case
 - **Reverse RTL** -- fix right-to-left punctuation for Arabic, Hebrew, and similar languages
-- **Translate** -- batch translate subtitles using any configured translator engine (Google, Gemini, Lingarr, or OpenRouter with 30+ LLMs)
+- **Translate** -- batch translate subtitles using any configured translator engine (Google, Gemini, Lingarr, or OpenRouter with 300+ LLMs)
 
 **Media operations** (search and scan actions for selected items):
 - **Scan Disk** -- rescan selected items for on-disk subtitle files
@@ -95,56 +163,10 @@ Upstream Bazarr ships two analytics systems that phone home to Google: a GA4 pro
 ### Python 3.14
 Dockerfile uses `python:3.14-slim-bookworm`. Upstream supports Python 3.8-3.13 and relies on third-party Docker images (LinuxServer.io, hotio). Bazarr+ builds and publishes its own multi-arch image to GHCR.
 
----
+</details>
 
-## 🚀 Quick Start
-
-### Option 1: Docker Compose (Recommended)
-
-```bash
-# Clone with the scraper submodule
-git clone --recursive https://github.com/LavX/bazarr.git
-cd bazarr
-
-# Configure your media paths in docker-compose.yml, then:
-docker compose up -d
-
-# Access Bazarr at http://localhost:6767
-```
-
-### Option 2: Pull Pre-built Images
-
-```bash
-# Pull all images
-docker pull ghcr.io/lavx/bazarr:latest
-docker pull ghcr.io/lavx/opensubtitles-scraper:latest
-docker pull ghcr.io/lavx/ai-subtitle-translator:latest
-```
-
----
-
-## At a Glance
-
-| Feature | Upstream Bazarr | Bazarr+ |
-|---------|-----------------|---------|
-| **Provider Priority** | ❌ [Rejected](https://bazarr.featureupvote.com/suggestions/112323/provider-prioritization) (62 votes) | ✅ Dual mode: priority order with early stop, or classic simultaneous |
-| **OpenSubtitles.org (Scraper)** | ❌ Not available | ✅ Self-hosted FastAPI microservice via CloudScraper |
-| **AI Subtitle Translator (OpenRouter)** | ❌ Not available | ✅ 30+ preconfigured LLMs + any custom model ID |
-| **API Key Encryption** | ❌ Not available | ✅ AES-256-GCM encryption for keys in transit |
-| **Translate from Missing Menu** | ❌ Not available | ✅ Action menu on missing subs with source language picker |
-| **Batch Translation** | ❌ Not available | ✅ Translate entire series/libraries from Wanted pages |
-| **Mass Subtitle Sync** | ❌ [Rejected](https://bazarr.featureupvote.com/suggestions/172013/mass-sync-all-subtitles) (249 votes) | ✅ Bulk sync from Tasks page or Mass Edit, skips already-synced |
-| **Bulk Operations** | ❌ One-at-a-time only | ✅ 11 batch actions: sync, translate, OCR fixes, common fixes, remove HI, remove tags, fix uppercase, reverse RTL, scan disk, search missing, upgrade (up to 10k items) |
-| **Dedicated Translator Settings** | ❌ Not available | ✅ 4-zone page with pricing, cost estimates, status panel |
-| **No Tracking** | GA4 + legacy UA phone home to Google | ✅ All telemetry removed, nothing phones home |
-| **Security Hardening** | MD5, no CSRF/SSRF/rate limiting | ✅ PBKDF2 (600k iter), CSRF, SSRF, brute-force, 4 more |
-| **Audio Language Display** | ❌ Not shown in tables | ✅ Badges in all table views |
-| **Advanced Table Filters** | ❌ No filters | ✅ Include/exclude audio, missing subtitle, title search |
-| **Floating Save + Ctrl+S** | ❌ Not available | ✅ Sticky save button with 3-option unsaved changes modal |
-| **Navy + Amber Theme** | Purple | ✅ `#121125` navy to `#fff8e1` cream, amber accents |
-| OpenSubtitles.com (API) | ✅ Available | ✅ Available |
-| Docker images | linuxserver.io / hotio | ghcr.io/lavx (self-built, multi-arch) |
-| Python runtime | 3.8-3.13 | 3.14 |
+<details>
+<summary><strong>Screenshots</strong></summary>
 
 | Series overview | Series detail with translate menu |
 |:---:|:---:|
@@ -158,9 +180,10 @@ docker pull ghcr.io/lavx/ai-subtitle-translator:latest
 |:---:|
 | ![Wanted Filters](/screenshot/wanted-filters.png?raw=true "Wanted page with include/exclude audio and subtitle filters") |
 
----
+</details>
 
-## 📦 Installation
+<details>
+<summary><strong>Installation and Configuration</strong></summary>
 
 ### Docker Compose Setup
 
@@ -227,8 +250,6 @@ services:
       - PUID=1000
       - PGID=1000
       - TZ=Europe/Budapest
-      # Enable the web scraper mode (auto-enables "Use Web Scraper" in settings)
-      - OPENSUBTITLES_USE_WEB_SCRAPER=true
       # Point to the scraper service (port 8000)
       - OPENSUBTITLES_SCRAPER_URL=http://opensubtitles-scraper:8000
     volumes:
@@ -249,32 +270,40 @@ docker compose up -d
 
 ### Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `PUID` | User ID for file permissions | `1000` |
-| `PGID` | Group ID for file permissions | `1000` |
-| `TZ` | Timezone | `UTC` |
-| `OPENSUBTITLES_USE_WEB_SCRAPER` | Enable web scraper mode | `true` |
-| `OPENSUBTITLES_SCRAPER_URL` | URL of the scraper service | `http://localhost:8000` |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PUID` | `1000` | User ID for file permissions |
+| `PGID` | `1000` | Group ID for file permissions |
+| `TZ` | `UTC` | Timezone (e.g., `Europe/Budapest`) |
+| `OPENSUBTITLES_SCRAPER_URL` | `http://opensubtitles-scraper:8000` | OpenSubtitles.org scraper service URL (port 8000, not 8765) |
+
+### Volumes
+
+| Path | Description |
+|------|-------------|
+| `/config` | Bazarr configuration and database |
+| `/movies` | Movies library (match your Radarr path) |
+| `/tv` | TV shows library (match your Sonarr path) |
 
 ### Enabling the Provider
 
-1. Go to **Settings** → **Providers**
-2. Enable **"OpenSubtitles.org"** (not OpenSubtitles.com - that's the API version)
-3. If `OPENSUBTITLES_USE_WEB_SCRAPER=true` is set, "Use Web Scraper" will auto-enable
+1. Go to **Settings** > **Providers**
+2. Enable **"OpenSubtitles.org"** (not OpenSubtitles.com, that's the API version)
+3. Set the scraper service URL (or use the `OPENSUBTITLES_SCRAPER_URL` env var)
 4. Save and test with a manual search
 
 ### Enabling AI Translation
 
-1. Go to **Settings** → **AI Translator**
+1. Go to **Settings** > **AI Translator**
 2. Select **"AI Subtitle Translator"** as the translator engine
 3. Enter your **OpenRouter API Key** (get one at [openrouter.ai/keys](https://openrouter.ai/keys))
 4. Choose your preferred **AI Model** (Google: Gemini 2.5 Flash Lite Preview 09-2025 recommended)
 5. Save and test with a manual translation
 
----
+</details>
 
-## 🏗️ Architecture
+<details>
+<summary><strong>Architecture</strong></summary>
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
@@ -301,33 +330,12 @@ docker compose up -d
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-> **Note:** The scraper service uses [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) (port 8191) to handle browser challenges. See the Docker Compose example above for the full setup.
+> **Note:** The scraper service can optionally use [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) (port 8191) to handle browser challenges. See the Docker Compose example above for the full setup.
 
----
+</details>
 
-## 🛠️ Configuration Options
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PUID` | `1000` | User ID for file permissions |
-| `PGID` | `1000` | Group ID for file permissions |
-| `TZ` | `UTC` | Timezone (e.g., `Europe/Budapest`) |
-| `OPENSUBTITLES_USE_WEB_SCRAPER` | `true` | Enable the OpenSubtitles.org web scraper provider |
-| `OPENSUBTITLES_SCRAPER_URL` | `http://opensubtitles-scraper:8000` | Scraper service URL (port 8000, not 8765) |
-
-### Volumes
-
-| Path | Description |
-|------|-------------|
-| `/config` | Bazarr configuration and database |
-| `/movies` | Movies library (match your Radarr path) |
-| `/tv` | TV shows library (match your Sonarr path) |
-
----
-
-## 🔧 Troubleshooting
+<details>
+<summary><strong>Troubleshooting</strong></summary>
 
 ### Scraper Connection Issues
 
@@ -350,60 +358,13 @@ curl -X POST http://localhost:8000/search \
 |-------|----------|
 | "Connection refused" | Ensure scraper is running and healthy |
 | "No subtitles found" | Check IMDB ID is correct, try different language |
-| Provider not showing | Enable it in Settings → Providers |
+| Provider not showing | Enable it in Settings > Providers |
 | Wrong file permissions | Check PUID/PGID match your user |
 
----
-
-## 📚 Documentation
-
-- [Fork Maintenance Guide](docs/FORK_MAINTENANCE.md) - How sync works
-- [OpenSubtitles Scraper](https://github.com/LavX/opensubtitles-scraper) - Scraper docs
-- [AI Subtitle Translator](https://github.com/LavX/ai-subtitle-translator) - AI translator docs
-- [Bazarr Wiki](https://wiki.bazarr.media) - General Bazarr documentation
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide.
-
-1. Fork this repository
-2. Create a feature branch from `development`
-3. Submit a PR targeting `development`
-
-For major changes, please open an issue first to discuss.
-
----
-
-## 🌐 About the Maintainer
-
-This fork is maintained by **LavX**. Explore more of my projects and services:
-
-### 🚀 Services
-- **[LavX Managed Systems](https://lavx.hu)** – Enterprise AI solutions, RAG systems, and LLMOps.
-- **[LavX News](https://news.lavx.hu)** – Latest insights on AI, Open Source, and emerging tech.
-- **[LMS Tools](https://tools.lavx.hu)** – 140+ free, privacy-focused online tools for developers and researchers.
-
-### 🛠️ Open Source Projects
-- **[AI Subtitle Translator](https://github.com/LavX/ai-subtitle-translator)** – LLM-powered subtitle translator using OpenRouter API.
-- **[OpenSubtitles Scraper](https://github.com/LavX/opensubtitles-scraper)** – Web scraper for OpenSubtitles.org (no VIP required).
-- **[JFrog to Nexus OSS](https://github.com/LavX/jfrogtonexusoss)** – Automated migration tool for repository managers.
-- **[WeatherFlow](https://github.com/LavX/weatherflow)** – Multi-platform weather data forwarding (WU to Windy/Idokep).
-- **[Like4Like Suite](https://github.com/LavX/Like4Like-Suite)** – Social media automation and engagement toolkit.
-
----
-
-## 📄 License
-
-- [GNU GPL v3](http://www.gnu.org/licenses/gpl.html)
-- Original Bazarr: [upstream repository](https://github.com/morpheus65535/bazarr)
-- Fork modifications Copyright 2025-2026 LavX
-
----
+</details>
 
 <details>
-<summary><h2>📜 Supported Subtitle Providers</h2></summary>
+<summary><strong>Supported Subtitle Providers</strong></summary>
 
 Includes all upstream providers plus fork additions:
 
@@ -461,3 +422,47 @@ Includes all upstream providers plus fork additions:
 - Zimuku
 
 </details>
+
+<details>
+<summary><strong>About the Maintainer</strong></summary>
+
+This fork is maintained by **LavX**. Explore more projects and services:
+
+### Services
+- **[LavX Managed Systems](https://lavx.hu)** -- Enterprise AI solutions, RAG systems, and LLMOps.
+- **[LavX News](https://news.lavx.hu)** -- Latest insights on AI, Open Source, and emerging tech.
+- **[LMS Tools](https://tools.lavx.hu)** -- 140+ free, privacy-focused online tools for developers and researchers.
+
+### Open Source Projects
+- **[AI Subtitle Translator](https://github.com/LavX/ai-subtitle-translator)** -- LLM-powered subtitle translator using OpenRouter API.
+- **[OpenSubtitles Scraper](https://github.com/LavX/opensubtitles-scraper)** -- Web scraper for OpenSubtitles.org (no VIP required).
+- **[JFrog to Nexus OSS](https://github.com/LavX/jfrogtonexusoss)** -- Automated migration tool for repository managers.
+- **[WeatherFlow](https://github.com/LavX/weatherflow)** -- Multi-platform weather data forwarding (WU to Windy/Idokep).
+- **[Like4Like Suite](https://github.com/LavX/Like4Like-Suite)** -- Social media automation and engagement toolkit.
+
+</details>
+
+---
+
+## Documentation
+
+- [Fork Maintenance Guide](docs/FORK_MAINTENANCE.md) - How sync works
+- [OpenSubtitles Scraper](https://github.com/LavX/opensubtitles-scraper) - Scraper docs
+- [AI Subtitle Translator](https://github.com/LavX/ai-subtitle-translator) - AI translator docs
+- [Bazarr Wiki](https://wiki.bazarr.media) - General Bazarr documentation
+
+## Contributing
+
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide.
+
+1. Fork this repository
+2. Create a feature branch from `development`
+3. Submit a PR targeting `development`
+
+For major changes, please open an issue first to discuss.
+
+## License
+
+- [GNU GPL v3](http://www.gnu.org/licenses/gpl.html)
+- Based on [Bazarr](https://github.com/morpheus65535/bazarr) by morpheus65535
+- Fork modifications Copyright 2025-2026 LavX

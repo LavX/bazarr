@@ -65,7 +65,11 @@ export default function QueryPageTable<T extends object>(props: Props<T>) {
 
   return (
     <LoadingProvider value={isPageLoading}>
-      <SimpleTable {...remain} data={displayData} key={`page-${page}-${effectivePageSize}`}></SimpleTable>
+      <SimpleTable
+        {...remain}
+        data={displayData}
+        key={`page-${page}-${effectivePageSize}`}
+      ></SimpleTable>
       <PageControl
         count={effectivePageCount}
         index={page}

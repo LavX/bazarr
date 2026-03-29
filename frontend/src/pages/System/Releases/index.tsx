@@ -49,7 +49,11 @@ function renderInlineMarkdown(text: string) {
     if (match[1]) {
       parts.push(<Code key={match.index}>{match[1]}</Code>);
     } else if (match[2]) {
-      parts.push(<Text key={match.index} span fw="bold">{match[2]}</Text>);
+      parts.push(
+        <Text key={match.index} span fw="bold">
+          {match[2]}
+        </Text>,
+      );
     } else if (match[3]) {
       parts.push(match[3]);
     }
@@ -73,7 +77,11 @@ function MarkdownBody({ text }: { text: string | string[] }) {
 
     const flushList = () => {
       if (listItems.length > 0) {
-        result.push(<List key={`list-${listKey++}`} size="sm" spacing={4}>{listItems}</List>);
+        result.push(
+          <List key={`list-${listKey++}`} size="sm" spacing={4}>
+            {listItems}
+          </List>,
+        );
         listItems = [];
       }
     };
@@ -87,16 +95,30 @@ function MarkdownBody({ text }: { text: string | string[] }) {
 
       if (trimmed.startsWith("### ")) {
         flushList();
-        result.push(<Title key={idx} order={5} mt="sm">{trimmed.slice(4)}</Title>);
+        result.push(
+          <Title key={idx} order={5} mt="sm">
+            {trimmed.slice(4)}
+          </Title>,
+        );
       } else if (trimmed.startsWith("## ")) {
         flushList();
-        result.push(<Title key={idx} order={4} mt="sm">{trimmed.slice(3)}</Title>);
+        result.push(
+          <Title key={idx} order={4} mt="sm">
+            {trimmed.slice(3)}
+          </Title>,
+        );
       } else if (/^[-*] /.test(trimmed)) {
         const content = trimmed.replace(/^[-*] /, "");
-        listItems.push(<List.Item key={idx}>{renderInlineMarkdown(content)}</List.Item>);
+        listItems.push(
+          <List.Item key={idx}>{renderInlineMarkdown(content)}</List.Item>,
+        );
       } else {
         flushList();
-        result.push(<Text key={idx} size="sm">{renderInlineMarkdown(trimmed)}</Text>);
+        result.push(
+          <Text key={idx} size="sm">
+            {renderInlineMarkdown(trimmed)}
+          </Text>,
+        );
       }
     });
 
@@ -116,7 +138,7 @@ const ReleaseCard: FunctionComponent<ReleaseInfo> = ({
   repo,
 }) => {
   return (
-    <Card shadow="md" p="lg">
+    <Card p="lg">
       <Group>
         {repo && <Badge color="grape">{repo}</Badge>}
         <Text fw="bold">{name}</Text>

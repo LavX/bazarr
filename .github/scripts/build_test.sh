@@ -7,7 +7,7 @@ sleep 30
 
 if kill -s 0 $PID
 then
-  echo "Bazarr is still running. We'll test if UI is working..."
+  echo "Bazarr+ is still running. We'll test if UI is working..."
 else
   exit 1
 fi

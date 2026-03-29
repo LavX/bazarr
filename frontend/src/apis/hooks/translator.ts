@@ -4,7 +4,13 @@ import client from "@/apis/raw/client";
 
 export interface TranslatorJob {
   jobId: string;
-  status: "queued" | "processing" | "completed" | "partial" | "failed" | "cancelled";
+  status:
+    | "queued"
+    | "processing"
+    | "completed"
+    | "partial"
+    | "failed"
+    | "cancelled";
   progress: number;
   message?: string;
   createdAt: string;

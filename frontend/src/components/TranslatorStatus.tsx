@@ -1,4 +1,4 @@
-import { FunctionComponent, useCallback,useState } from "react";
+import { FunctionComponent, useCallback, useState } from "react";
 import {
   Alert,
   Badge,
@@ -77,9 +77,7 @@ function formatCostValue(cost: number): string {
   return `$${cost.toFixed(2)}`;
 }
 
-const JobRow: FunctionComponent<JobRowProps> = ({
-  job,
-}) => {
+const JobRow: FunctionComponent<JobRowProps> = ({ job }) => {
   const modelUsed = job.result?.model_used || job.model;
   // Prefer top-level tokensUsed (live from API), fall back to result
   const tokensUsed = job.tokensUsed || job.result?.tokens_used;
@@ -103,7 +101,9 @@ const JobRow: FunctionComponent<JobRowProps> = ({
     durationStr = formatDuration(durationSec);
   } else if (job.startedAt && job.completedAt) {
     durationSec =
-      (new Date(job.completedAt).getTime() - new Date(job.startedAt).getTime()) / 1000;
+      (new Date(job.completedAt).getTime() -
+        new Date(job.startedAt).getTime()) /
+      1000;
     durationStr = formatDuration(durationSec);
   } else if (job.status === "processing" && job.startedAt) {
     const elapsed = (Date.now() - new Date(job.startedAt).getTime()) / 1000;
@@ -111,19 +111,22 @@ const JobRow: FunctionComponent<JobRowProps> = ({
   }
 
   // TPS
-  const tpsStr = tokensUsed && durationSec > 0
-    ? `${(tokensUsed / durationSec).toFixed(0)} t/s`
-    : "-";
+  const tpsStr =
+    tokensUsed && durationSec > 0
+      ? `${(tokensUsed / durationSec).toFixed(0)} t/s`
+      : "-";
 
   // Progress — show lines if available
-  const progressLabel = job.completedLines && job.totalLines
-    ? `${job.completedLines}/${job.totalLines} lines`
-    : `${job.progress}%`;
+  const progressLabel =
+    job.completedLines && job.totalLines
+      ? `${job.completedLines}/${job.totalLines} lines`
+      : `${job.progress}%`;
 
   // Batch info for tooltip
-  const batchInfo = job.completedBatches && job.totalBatches
-    ? `Batch ${job.completedBatches}/${job.totalBatches}`
-    : undefined;
+  const batchInfo =
+    job.completedBatches && job.totalBatches
+      ? `Batch ${job.completedBatches}/${job.totalBatches}`
+      : undefined;
 
   return (
     <Table.Tr>
@@ -137,7 +140,9 @@ const JobRow: FunctionComponent<JobRowProps> = ({
       <Table.Td>
         {job.error ? (
           <Tooltip label={job.error} multiline w={350} withArrow>
-            <span><StatusBadge status={job.status} /></span>
+            <span>
+              <StatusBadge status={job.status} />
+            </span>
           </Tooltip>
         ) : (
           <StatusBadge status={job.status} />
@@ -145,7 +150,10 @@ const JobRow: FunctionComponent<JobRowProps> = ({
       </Table.Td>
       <Table.Td>
         {job.status === "processing" ? (
-          <Tooltip label={[progressLabel, batchInfo].filter(Boolean).join(" · ")} withArrow>
+          <Tooltip
+            label={[progressLabel, batchInfo].filter(Boolean).join(" · ")}
+            withArrow
+          >
             <Progress value={job.progress} size="sm" animated />
           </Tooltip>
         ) : (
@@ -153,7 +161,13 @@ const JobRow: FunctionComponent<JobRowProps> = ({
         )}
       </Table.Td>
       <Table.Td>
-        <Text size="xs" ff="monospace" c="dimmed" truncate style={{ maxWidth: 180 }}>
+        <Text
+          size="xs"
+          ff="monospace"
+          c="var(--bz-text-tertiary)"
+          truncate
+          style={{ maxWidth: 180 }}
+        >
           {modelUsed || "-"}
         </Text>
       </Table.Td>
@@ -165,12 +179,17 @@ const JobRow: FunctionComponent<JobRowProps> = ({
       <Table.Td>
         <Text size="xs" ff="monospace">
           {job.totalCost != null && job.totalCost > 0 ? (
-            <Tooltip label={`${formatCostValue(job.totalCost)} total cost`} withArrow>
+            <Tooltip
+              label={`${formatCostValue(job.totalCost)} total cost`}
+              withArrow
+            >
               <Text component="span" size="xs" ff="monospace" c="green.4">
                 {formatCostValue(job.totalCost)}
               </Text>
             </Tooltip>
-          ) : "-"}
+          ) : (
+            "-"
+          )}
         </Text>
       </Table.Td>
       <Table.Td>
@@ -179,7 +198,11 @@ const JobRow: FunctionComponent<JobRowProps> = ({
         </Text>
       </Table.Td>
       <Table.Td>
-        <Text size="xs" ff="monospace" c={tpsStr !== "-" ? "green.4" : "dimmed"}>
+        <Text
+          size="xs"
+          ff="monospace"
+          c={tpsStr !== "-" ? "green.4" : "dimmed"}
+        >
           {tpsStr}
         </Text>
       </Table.Td>
@@ -207,7 +230,13 @@ const StatCard: FunctionComponent<StatCardProps> = ({
     <Text size="2rem" fw={700} lh={1}>
       {value}
     </Text>
-    <Text size="xs" c="dimmed" tt="uppercase" style={{ letterSpacing: 0.5 }} fw={600}>
+    <Text
+      size="xs"
+      c="var(--bz-text-tertiary)"
+      tt="uppercase"
+      style={{ letterSpacing: 0.5 }}
+      fw={600}
+    >
       {label}
     </Text>
   </Card>
@@ -246,7 +275,9 @@ export const TranslatorStatusPanel: FunctionComponent<
       <Card withBorder mt="md" p="md">
         <Group justify="center" py="md">
           <FontAwesomeIcon icon={faSpinner} spin aria-hidden="true" />
-          <Text c="dimmed">Connecting to AI Subtitle Translator...</Text>
+          <Text c="var(--bz-text-tertiary)">
+            Connecting to AI Subtitle Translator...
+          </Text>
         </Group>
       </Card>
     );
@@ -263,7 +294,9 @@ export const TranslatorStatusPanel: FunctionComponent<
         color="yellow"
         title="AI Subtitle Translator Unavailable"
         mt="md"
-        icon={<FontAwesomeIcon icon={faExclamationTriangle} aria-hidden="true" />}
+        icon={
+          <FontAwesomeIcon icon={faExclamationTriangle} aria-hidden="true" />
+        }
       >
         <Text size="sm" mb="sm">
           {errorMessage}
@@ -286,17 +319,16 @@ export const TranslatorStatusPanel: FunctionComponent<
       <Card withBorder>
         <Group justify="space-between" mb="md">
           <Title order={5}>AI Subtitle Translator Service</Title>
-          <div
-            role="status"
-            aria-live="assertive"
-          >
+          <div role="status" aria-live="assertive">
             <Group gap={6}>
               <Text
                 c={status?.healthy ? "green.5" : "red.5"}
                 fw={700}
                 size="sm"
                 component="span"
-                className={status?.healthy ? classes.promptConnected : undefined}
+                className={
+                  status?.healthy ? classes.promptConnected : undefined
+                }
               >
                 ❯
               </Text>
@@ -312,7 +344,6 @@ export const TranslatorStatusPanel: FunctionComponent<
             </Group>
           </div>
         </Group>
-
       </Card>
 
       {/* Queue Stats */}
@@ -346,7 +377,11 @@ export const TranslatorStatusPanel: FunctionComponent<
         </Title>
         {jobsData && jobsData.jobs.length > 0 ? (
           <Table.ScrollContainer minWidth={600}>
-            <Table striped highlightOnHover aria-labelledby="translation-jobs-heading">
+            <Table
+              striped
+              highlightOnHover
+              aria-labelledby="translation-jobs-heading"
+            >
               <Table.Thead>
                 <Table.Tr>
                   <Table.Th>Media</Table.Th>
@@ -361,16 +396,13 @@ export const TranslatorStatusPanel: FunctionComponent<
               </Table.Thead>
               <Table.Tbody>
                 {jobsData.jobs.map((job) => (
-                  <JobRow
-                    key={job.jobId}
-                    job={job}
-                  />
+                  <JobRow key={job.jobId} job={job} />
                 ))}
               </Table.Tbody>
             </Table>
           </Table.ScrollContainer>
         ) : (
-          <Text c="dimmed" ta="center" py="xl">
+          <Text c="var(--bz-text-tertiary)" ta="center" py="xl">
             No translation jobs
           </Text>
         )}

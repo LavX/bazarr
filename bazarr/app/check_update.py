@@ -49,7 +49,12 @@ def _fetch_repo_releases(repo, label=None):
     except requests.exceptions.RequestException:
         logging.exception(f"Error trying to get releases from Github ({repo}).")
     else:
-        for release in r.json():
+        try:
+            releases_data = r.json()
+        except ValueError:
+            logging.error(f"Error parsing JSON from Github releases response ({repo}). Skipping.")
+            return releases
+        for release in releases_data:
             download_link = None
             for asset in release.get('assets', []):
                 download_link = asset['browser_download_url']
@@ -88,6 +93,13 @@ def check_releases(job_id=None, startup=False):
 
 
 def check_if_new_update():
+    # Skip auto-update when running from source (no BAZARR_VERSION set)
+    bazarr_version = os.environ.get("BAZARR_VERSION", "")
+    if not bazarr_version:
+        logging.debug('BAZARR running from source, skipping auto-update')
+        check_releases(startup=True)
+        return
+
     if settings.general.branch == 'master':
         use_prerelease = False
     elif settings.general.branch == 'development':
@@ -151,6 +163,9 @@ def check_if_new_update():
 
 
 def download_release(url):
+    if not url:
+        logging.debug('BAZARR release has no download URL, skipping update')
+        return
     r = None
     update_dir = os.path.join(args.config_dir, 'update')
     try:
@@ -159,7 +174,7 @@ def download_release(url):
         logging.debug(f'BAZARR unable to create update directory {update_dir}')
     else:
         logging.debug(f'BAZARR downloading release from Github: {url}')
-        r = requests.get(url, allow_redirects=True)
+        r = requests.get(url, allow_redirects=True, timeout=300)
     if r:
         try:
             with open(os.path.join(update_dir, 'bazarr.zip'), 'wb') as f:

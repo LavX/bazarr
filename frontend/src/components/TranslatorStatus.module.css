@@ -1,14 +1,34 @@
 @keyframes heartbeat {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  14% { opacity: 1; transform: scale(1.15); }
-  28% { opacity: 1; transform: scale(1); }
-  42% { opacity: 1; transform: scale(1.1); }
-  56% { opacity: 1; transform: scale(1); }
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  14% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+  28% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  42% {
+    opacity: 1;
+    transform: scale(1.1);
+  }
+  56% {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 @keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .promptConnected {

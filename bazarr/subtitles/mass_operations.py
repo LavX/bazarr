@@ -456,9 +456,11 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
     # downstream functions like sync_subtitles run inline instead of re-queuing
     # themselves as individual jobs.
     if not job_id:
-        label = action.replace('_', ' ').replace('-', ' ').title()
-        scope = 'Library' if items is None else f'{len(items)} items'
-        jobs_queue.add_job_from_function(f"Mass {label} ({scope})", is_progress=True)
+        jobs_queue.add_job_from_function(
+            f"Mass {action.replace('_', ' ').replace('-', ' ').title()} "
+            f"({'Library' if items is None else f'{len(items)} items'})",
+            is_progress=True,
+        )
         return
 
     # Media actions (scan-disk, search-missing) work on media items directly

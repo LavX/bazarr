@@ -1,4 +1,10 @@
-import { FunctionComponent, ReactNode, useCallback, useEffect, useMemo } from "react";
+import {
+  FunctionComponent,
+  ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+} from "react";
 import {
   Badge,
   Box,
@@ -102,10 +108,7 @@ const Layout: FunctionComponent<Props> = (props) => {
   return (
     <SettingsProvider value={settings ?? null}>
       <LoadingProvider value={isLoading || isMutating}>
-        <form
-          onSubmit={form.onSubmit(submit)}
-          style={{ position: "relative" }}
-        >
+        <form onSubmit={form.onSubmit(submit)} style={{ position: "relative" }}>
           <LoadingOverlay visible={settings === undefined} />
           <FormContext.Provider value={form}>
             <Container size="xl" mx={0} pb={80}>
@@ -120,17 +123,17 @@ const Layout: FunctionComponent<Props> = (props) => {
             {(styles) => (
               <Box
                 pos="sticky"
-                bottom={0}
-                py="sm"
-                px="md"
+                bottom={16}
                 style={{
                   ...styles,
                   zIndex: 100,
-                  borderTop: "1px solid var(--bz-border-subtle)",
-                  backgroundColor: "var(--mantine-color-body)",
+                  display: "flex",
+                  justifyContent: "flex-end",
+                  paddingRight: 24,
+                  pointerEvents: "none",
                 }}
               >
-                <Group justify="flex-end">
+                <Group justify="flex-end" style={{ pointerEvents: "auto" }}>
                   <div
                     aria-live="polite"
                     role="status"
@@ -158,7 +161,18 @@ const Layout: FunctionComponent<Props> = (props) => {
                     style={{ boxShadow: "var(--bz-shadow-float)" }}
                   >
                     Save
-                    <Badge size="sm" circle ml={8} aria-hidden="true" variant="outline" style={{ color: "#fff", borderColor: "rgba(255,255,255,0.5)" }}>
+                    <Badge
+                      size="sm"
+                      circle
+                      ml={8}
+                      aria-hidden="true"
+                      variant="outline"
+                      style={{
+                        color: "inherit",
+                        borderColor: "currentColor",
+                        opacity: 0.7,
+                      }}
+                    >
                       {totalStagedCount}
                     </Badge>
                   </Button>

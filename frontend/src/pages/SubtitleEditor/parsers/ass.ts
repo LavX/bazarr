@@ -1,4 +1,4 @@
-import type { ParseResult, Cue } from "../types";
+import type { Cue, ParseResult } from "@/pages/SubtitleEditor/types";
 import type { SubtitleParser } from "./index";
 
 function parseTimestamp(raw: string): number {
@@ -35,7 +35,8 @@ export const assParser: SubtitleParser = {
     }
 
     // Determine format variant
-    const isSSA = !text.includes("[V4+ Styles]") && text.includes("[V4 Styles]");
+    const isSSA =
+      !text.includes("[V4+ Styles]") && text.includes("[V4 Styles]");
     const format = isSSA ? "ssa" : "ass";
 
     // Split into sections
@@ -74,9 +75,7 @@ export const assParser: SubtitleParser = {
     const eventsLines = eventsText.split("\n").filter((l) => l.trim());
 
     // Find Format line to determine column order
-    const formatLine = eventsLines.find((l) =>
-      l.trim().startsWith("Format:"),
-    );
+    const formatLine = eventsLines.find((l) => l.trim().startsWith("Format:"));
     let formatColumns: string[] = [];
     if (formatLine) {
       formatColumns = formatLine
@@ -91,9 +90,7 @@ export const assParser: SubtitleParser = {
     const startColIdx = formatColumns.findIndex(
       (c) => c.toLowerCase() === "start",
     );
-    const endColIdx = formatColumns.findIndex(
-      (c) => c.toLowerCase() === "end",
-    );
+    const endColIdx = formatColumns.findIndex((c) => c.toLowerCase() === "end");
 
     const cues: Cue[] = [];
 

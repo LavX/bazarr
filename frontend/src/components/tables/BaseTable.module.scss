@@ -5,5 +5,81 @@
 }
 
 .table {
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0 2px;
+  min-width: 700px;
+
+  // Column headers
+  :global(.mantine-Table-th) {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--bz-text-disabled);
+    border-bottom: none;
+    padding: 8px 12px;
+  }
+
+  // All table rows
+  :global(.mantine-Table-tr) {
+    border-radius: var(--bz-radius-md);
+    transition: background-color var(--bz-duration-normal)
+      var(--bz-ease-standard);
+  }
+
+  // Data rows (non-grouped)
+  :global(.mantine-Table-tr):not(.groupRow) {
+    cursor: pointer;
+
+    &:hover {
+      background-color: var(--bz-hover-bg);
+    }
+  }
+
+  // All table cells
+  :global(.mantine-Table-td) {
+    padding: 8px 12px;
+    border-bottom: none;
+    border-top: none;
+  }
+
+  // Group header row
+  .groupRow {
+    cursor: pointer;
+
+    &:hover {
+      background-color: var(--bz-hover-bg);
+    }
+  }
+}
+
+// Episode number styling
+.episodeNumber {
+  font-variant-numeric: tabular-nums;
+  color: var(--bz-text-disabled);
+}
+
+// Episode title styling
+.episodeTitle {
+  font-weight: 450;
+  color: var(--bz-text-secondary);
+}
+
+// Action icon styling
+.actionIcon {
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  min-height: 24px;
+  border-radius: var(--bz-radius-sm);
+  background: transparent;
+  color: var(--bz-text-disabled);
+  transition:
+    background-color var(--bz-duration-normal) var(--bz-ease-standard),
+    color var(--bz-duration-normal) var(--bz-ease-standard);
+
+  &:hover {
+    background-color: var(--bz-hover-bg);
+    color: var(--bz-text-tertiary);
+  }
 }

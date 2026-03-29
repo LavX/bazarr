@@ -21,7 +21,7 @@ A clear and concise description of what you expected to happen.
 If applicable, add screenshots to help explain your problem.
 
 **Software (please complete the following information):**
- - Bazarr: [e.g. v 0.6.1]
+ - Bazarr+: [e.g. v2.0.0]
  - Radarr version [e.g. v 0.2.0.0001]
  - Sonarr version [e.g. v 2.0.0.0001]
  - OS: [e.g. Windows 10]

@@ -12,7 +12,7 @@
 
 ### Branch model
 
-- `master` contains stable releases, tagged with `v{upstream}+{YYMMDD}` versions
+- `master` contains stable releases, tagged with semver versions (e.g., `v2.0.0`, `v2.1.0`)
 - `development` is the integration branch where upstream merges and new features land
 - Feature branches are created from `development` and merged back via PR
 
@@ -20,18 +20,11 @@
 
 - `master` is not merged back to `development`
 - All feature branches are branched from `development`
-- Upstream sync merges go into `development` first, never directly to `master`
+- Cherry-picked upstream fixes go into `development` first, never directly to `master`
 
-## Upstream sync
+## Upstream relationship
 
-Bazarr+ syncs with [upstream Bazarr](https://github.com/morpheus65535/bazarr) manually after major releases. Upstream merges are always done with `--no-commit --no-ff` and reviewed before committing, to avoid reintroducing removed telemetry, overwriting branding, or conflicting with fork-specific features.
-
-Files that are always kept as the Bazarr+ version during upstream merges:
-- `package_info`
-- `Dockerfile`, `docker-compose.yml`
-- `README.md`
-- Logo and branding assets
-- Any telemetry/analytics code (removed in Bazarr+)
+Bazarr+ is a hard fork of [upstream Bazarr](https://github.com/morpheus65535/bazarr). There is no automatic synchronization. Bug fixes from upstream may be cherry-picked selectively when relevant, but upstream releases are not merged wholesale.
 
 ## Contribution workflow
 
@@ -65,7 +58,7 @@ Fix all errors before submitting. Warnings should be addressed when practical.
 PRs should include tests when the change is testable. We use:
 
 - **Backend:** pytest for Python tests
-- **Frontend:** Jest for React component and page tests
+- **Frontend:** Vitest for React component and page tests
 
 ```bash
 # Run backend tests
@@ -76,7 +69,7 @@ cd frontend
 npm test
 
 # Run a specific test file
-npm test -- --testPathPattern=Translator
+npm test -- Translator
 ```
 
 When to include tests:

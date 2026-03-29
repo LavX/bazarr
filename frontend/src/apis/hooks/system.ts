@@ -275,7 +275,12 @@ export function useSystem() {
       api.system.login(param.username, param.password),
 
     onSuccess: (data) => {
-      if (data && typeof data === "object" && "upgrade_token" in data && data.upgrade_token) {
+      if (
+        data &&
+        typeof data === "object" &&
+        "upgrade_token" in data &&
+        data.upgrade_token
+      ) {
         // Store opaque token (not password) for upgrade prompt
         sessionStorage.setItem("password_upgrade_token", data.upgrade_token);
       }
