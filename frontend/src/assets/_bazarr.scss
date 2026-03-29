@@ -75,7 +75,8 @@ body::after {
   inset: 0;
   z-index: 9999;
   pointer-events: none;
-  background: radial-gradient(
+  background:
+    radial-gradient(
       ellipse at 15% 10%,
       rgba(230, 138, 0, 0.12) 0%,
       transparent 50%
