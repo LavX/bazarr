@@ -43,7 +43,16 @@ export interface BatchOptions {
 }
 
 /* eslint-disable camelcase -- backend API contract */
-function toBatchPayload(options: BatchOptions): Record<string, unknown> {
+interface BatchPayload {
+  max_offset_seconds?: number;
+  no_fix_framerate?: boolean;
+  gss?: boolean;
+  force_resync?: boolean;
+  from_lang?: string;
+  to_lang?: string;
+}
+
+function toBatchPayload(options: BatchOptions): BatchPayload {
   return {
     max_offset_seconds: options.maxOffsetSeconds,
     no_fix_framerate: options.noFixFramerate,

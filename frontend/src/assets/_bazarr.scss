@@ -101,6 +101,29 @@ body::after {
   z-index: 1;
 }
 
+/* Shared tokens (scheme-independent) */
+:root {
+  /* Border radius scale */
+  --bz-radius-xs: 6px;
+  --bz-radius-sm: 8px;
+  --bz-radius-md: 10px;
+  --bz-radius-lg: 14px;
+  --bz-radius-xl: 20px;
+
+  /* Animation tokens */
+  --bz-ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --bz-ease-enter: cubic-bezier(0, 0, 0.2, 1);
+  --bz-ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  --bz-duration-fast: 120ms;
+  --bz-duration-normal: 150ms;
+  --bz-duration-slow: 250ms;
+  --bz-duration-card: 300ms;
+  --bz-duration-page: 200ms;
+
+  /* Stagger tokens */
+  --bz-stagger-delay: 40ms;
+}
+
 :root[data-mantine-color-scheme="dark"] {
   --bz-surface-ground: #0c0b1a;
   --bz-surface-base: #121125;
@@ -120,31 +143,11 @@ body::after {
   --bz-text-tertiary: #8e8fa3;
   --bz-text-disabled: #6c6d85;
 
-  /* Border radius scale */
-  --bz-radius-xs: 6px;
-  --bz-radius-sm: 8px;
-  --bz-radius-md: 10px;
-  --bz-radius-lg: 14px;
-  --bz-radius-xl: 20px;
-
   /* Border opacity scale */
   --bz-border-divider: rgba(255, 255, 255, 0.04);
   --bz-border-card: rgba(255, 255, 255, 0.05);
   --bz-border-interactive: rgba(255, 255, 255, 0.06);
   --bz-border-hover: rgba(255, 255, 255, 0.07);
-
-  /* Animation tokens */
-  --bz-ease-standard: cubic-bezier(0.2, 0, 0, 1);
-  --bz-ease-enter: cubic-bezier(0, 0, 0.2, 1);
-  --bz-ease-exit: cubic-bezier(0.4, 0, 1, 1);
-  --bz-duration-fast: 120ms;
-  --bz-duration-normal: 150ms;
-  --bz-duration-slow: 250ms;
-  --bz-duration-card: 300ms;
-  --bz-duration-page: 200ms;
-
-  /* Stagger tokens */
-  --bz-stagger-delay: 40ms;
 
   /* Hover tokens */
   --bz-hover-bg: rgba(255, 255, 255, 0.04);
@@ -156,12 +159,6 @@ body::after {
   --bz-text-secondary: #343a40;
   --bz-text-tertiary: #656d76;
   --bz-text-disabled: #909aa5;
-
-  --bz-radius-xs: 6px;
-  --bz-radius-sm: 8px;
-  --bz-radius-md: 10px;
-  --bz-radius-lg: 14px;
-  --bz-radius-xl: 20px;
 
   --bz-border-divider: rgba(0, 0, 0, 0.06);
   --bz-border-card: rgba(0, 0, 0, 0.08);
@@ -179,16 +176,6 @@ body::after {
   --bz-stat-completed: #2b8a3e;
   --bz-stat-failed: #e03131;
   --bz-shadow-float: 0 4px 12px rgba(0, 0, 0, 0.1);
-
-  --bz-ease-standard: cubic-bezier(0.2, 0, 0, 1);
-  --bz-ease-enter: cubic-bezier(0, 0, 0.2, 1);
-  --bz-ease-exit: cubic-bezier(0.4, 0, 1, 1);
-  --bz-duration-fast: 120ms;
-  --bz-duration-normal: 150ms;
-  --bz-duration-slow: 250ms;
-  --bz-duration-card: 300ms;
-  --bz-duration-page: 200ms;
-  --bz-stagger-delay: 40ms;
 
   --bz-hover-bg: rgba(0, 0, 0, 0.04);
   --bz-hover-bg-emphasis: rgba(0, 0, 0, 0.07);
@@ -387,5 +374,9 @@ body::after {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+
+  body::after {
+    display: none !important;
   }
 }

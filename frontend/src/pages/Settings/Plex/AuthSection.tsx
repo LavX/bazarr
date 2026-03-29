@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Alert, Button, Paper, Stack, Text, Title } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { useQueryClient } from "@tanstack/react-query";
@@ -35,21 +35,23 @@ const AuthSection = () => {
   );
 
   // Handle successful authentication - stop polling and close window
-  if (pinData?.authenticated && isPolling) {
-    setPin(null);
-    if (authWindowRef.current) {
-      authWindowRef.current.close();
-      authWindowRef.current = null;
+  useEffect(() => {
+    if (pinData?.authenticated && isPolling) {
+      setPin(null);
+      if (authWindowRef.current) {
+        authWindowRef.current.close();
+        authWindowRef.current = null;
+      }
+      // Trigger refetch and invalidate server queries
+      void refetchAuth();
+      void queryClient.invalidateQueries({
+        queryKey: [QueryKeys.Plex, "servers"],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: [QueryKeys.Plex, "selectedServer"],
+      });
     }
-    // Trigger refetch and invalidate server queries
-    void refetchAuth();
-    void queryClient.invalidateQueries({
-      queryKey: [QueryKeys.Plex, "servers"],
-    });
-    void queryClient.invalidateQueries({
-      queryKey: [QueryKeys.Plex, "selectedServer"],
-    });
-  }
+  }, [pinData?.authenticated, isPolling, refetchAuth, queryClient]);
 
   const isAuthenticated = Boolean(
     // eslint-disable-next-line camelcase

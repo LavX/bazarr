@@ -202,7 +202,6 @@ const ItemOverview: FunctionComponent<Props> = (props) => {
           </Grid.Col>
         </Grid>
       </BackgroundImage>
-      <div className={classes.fanartFade} />
     </div>
   );
 };

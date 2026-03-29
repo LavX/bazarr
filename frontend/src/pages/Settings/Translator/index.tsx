@@ -1,4 +1,4 @@
-import { FunctionComponent } from "react";
+import { FunctionComponent, useEffect } from "react";
 import {
   Alert,
   Anchor,
@@ -134,14 +134,16 @@ const ReasoningSelector: FunctionComponent = () => {
   const currentReasoning = useSettingValue<string>(
     "settings-translator-openrouter_reasoning",
   );
-  if (
-    modelLoaded &&
-    !supportsReasoning &&
-    currentReasoning &&
-    currentReasoning !== "disabled"
-  ) {
-    setValue("disabled", "settings-translator-openrouter_reasoning");
-  }
+  useEffect(() => {
+    if (
+      modelLoaded &&
+      !supportsReasoning &&
+      currentReasoning &&
+      currentReasoning !== "disabled"
+    ) {
+      setValue("disabled", "settings-translator-openrouter_reasoning");
+    }
+  }, [modelLoaded, supportsReasoning, currentReasoning, setValue]);
 
   return (
     <Selector

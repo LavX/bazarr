@@ -28,12 +28,3 @@ export interface ParseResult {
   metadata: SubtitleMetadata;
   cues: Cue[];
 }
-
-export interface SubtitleContentResponse {
-  content: string;
-  encoding: string;
-  format: string;
-  language: string;
-  size: number;
-  lastModified: number;
-}

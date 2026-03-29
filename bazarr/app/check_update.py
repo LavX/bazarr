@@ -49,7 +49,12 @@ def _fetch_repo_releases(repo, label=None):
     except requests.exceptions.RequestException:
         logging.exception(f"Error trying to get releases from Github ({repo}).")
     else:
-        for release in r.json():
+        try:
+            releases_data = r.json()
+        except ValueError:
+            logging.error(f"Error parsing JSON from Github releases response ({repo}). Skipping.")
+            return releases
+        for release in releases_data:
             download_link = None
             for asset in release.get('assets', []):
                 download_link = asset['browser_download_url']
@@ -169,7 +174,7 @@ def download_release(url):
         logging.debug(f'BAZARR unable to create update directory {update_dir}')
     else:
         logging.debug(f'BAZARR downloading release from Github: {url}')
-        r = requests.get(url, allow_redirects=True)
+        r = requests.get(url, allow_redirects=True, timeout=300)
     if r:
         try:
             with open(os.path.join(update_dir, 'bazarr.zip'), 'wb') as f:

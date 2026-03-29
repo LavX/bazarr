@@ -118,12 +118,12 @@ const commandOptions: CommandOption[] = [
 
 const commandOptionElements: React.JSX.Element[] = commandOptions.map(
   (op, idx) => (
-    <tr key={idx}>
-      <td>
+    <Table.Tr key={idx}>
+      <Table.Td>
         <Code>{op.option}</Code>
-      </td>
-      <td>{op.description}</td>
-    </tr>
+      </Table.Td>
+      <Table.Td>{op.description}</Table.Td>
+    </Table.Tr>
   ),
 );
 
@@ -524,7 +524,7 @@ const SettingsSubtitlesView: FunctionComponent = () => {
             settingKey="settings-general-postprocessing_cmd"
           ></Text>
           <Table highlightOnHover fs="sm">
-            <tbody>{commandOptionElements}</tbody>
+            <Table.Tbody>{commandOptionElements}</Table.Tbody>
           </Table>
         </CollapseBox>
       </Section>

@@ -8,7 +8,7 @@
 
     color: var(--bz-text-secondary);
     --ai-hover: var(--bz-hover-bg);
-    --ai-hover-color: var(--bz-hover-bg);
+    --ai-hover-color: var(--bz-text-primary);
 
     &[data-variant="gradient"],
     &[data-variant="filled"] {

@@ -25,5 +25,6 @@ VERSION
 !*.dll
 
 .claude/
+.superpowers/
 docs/superpowers/
 .coverage

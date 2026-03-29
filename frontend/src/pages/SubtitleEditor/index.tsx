@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { useParams } from "react-router";
+import { Link, useParams } from "react-router";
 import {
   Alert,
   Anchor,
@@ -81,9 +81,9 @@ export default function SubtitleEditor() {
     <Stack gap="sm" style={{ height: "100%", padding: "0" }}>
       <Group justify="space-between" px="md" pt="xs">
         <Breadcrumbs>
-          <Anchor href={listPath}>{listLabel}</Anchor>
+          <Anchor component={Link} to={listPath}>{listLabel}</Anchor>
           {data.mediaTitle && detailPath && (
-            <Anchor href={detailPath}>{data.mediaTitle}</Anchor>
+            <Anchor component={Link} to={detailPath}>{data.mediaTitle}</Anchor>
           )}
           <Text>Subtitle Viewer</Text>
         </Breadcrumbs>
