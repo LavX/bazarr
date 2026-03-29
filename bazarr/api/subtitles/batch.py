@@ -19,6 +19,7 @@ ACTION_LABELS = {
     'remove_tags': 'Removing Style Tags',
     'fix_uppercase': 'Fixing Uppercase',
     'reverse_rtl': 'Reversing RTL',
+    'emoji': 'Removing Emoji',
     'scan-disk': 'Scanning Disk',
     'search-missing': 'Searching Missing Subtitles',
     'upgrade': 'Upgrading Subtitles',

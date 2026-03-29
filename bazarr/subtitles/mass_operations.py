@@ -22,12 +22,13 @@ logger = logging.getLogger(__name__)
 
 VALID_ACTIONS = {
     'sync', 'translate', 'OCR_fixes', 'common', 'remove_HI',
-    'remove_tags', 'fix_uppercase', 'reverse_rtl', 'scan-disk', 'search-missing', 'upgrade',
+    'remove_tags', 'fix_uppercase', 'reverse_rtl', 'emoji',
+    'scan-disk', 'search-missing', 'upgrade',
 }
 
 MEDIA_ACTIONS = {'scan-disk', 'search-missing', 'upgrade'}
 
-MOD_ACTIONS = {'OCR_fixes', 'common', 'remove_HI', 'remove_tags', 'fix_uppercase', 'reverse_rtl'}
+MOD_ACTIONS = {'OCR_fixes', 'common', 'remove_HI', 'remove_tags', 'fix_uppercase', 'reverse_rtl', 'emoji'}
 
 
 def _parse_subtitles_column(subtitles_raw):
