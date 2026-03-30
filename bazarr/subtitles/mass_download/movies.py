@@ -122,7 +122,7 @@ def movies_download_subtitles(no, job_id=None, job_sub_function=False):
 
 def movie_download_specific_subtitles(radarr_id, language, hi, forced, job_id=None):
     if not job_id:
-        return jobs_queue.add_job_from_function("Searching subtitles", progress_max=1, is_progress=False)
+        return jobs_queue.add_job_from_function("Searching subtitles", is_progress=True)
 
     movieInfo = database.execute(
         select(
@@ -153,6 +153,7 @@ def movie_download_specific_subtitles(radarr_id, language, hi, forced, job_id=No
         language_str = language
 
     jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Searching {language_str.upper()} for {title}")
+    jobs_queue.update_job_progress(job_id=job_id, progress_message="Preparing search...")
 
     audio_language_list = get_audio_profile_languages(movieInfo.audio_language)
     if len(audio_language_list) > 0:
@@ -171,7 +172,11 @@ def movie_download_specific_subtitles(radarr_id, language, hi, forced, job_id=No
             history_log_movie(1, radarr_id, result)
             send_notifications_movie(radarr_id, result.message)
             store_subtitles_movie(result.path, moviePath)
+            jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
+                                           progress_message="Subtitle downloaded")
         else:
+            jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
+                                           progress_message="No subtitles found")
             event_stream(type='movie', payload=radarr_id)
             return '', 204
     except OSError:

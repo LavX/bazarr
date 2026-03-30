@@ -62,6 +62,21 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
         saved_any = False
 
         if providers:
+            if job_id:
+                from app.jobs_queue import jobs_queue as _jq
+                active_providers = [p for p in providers if p not in pool.discarded_providers]
+                _provider_count = len(active_providers)
+
+                def _on_provider(provider_name):
+                    try:
+                        idx = active_providers.index(provider_name) + 1
+                    except ValueError:
+                        idx = 0
+                    _jq.update_job_progress(job_id=job_id,
+                                            progress_message=f"Searching {provider_name} ({idx}/{_provider_count})")
+
+                pool.provider_progress_callback = _on_provider
+
             if forced_minimum_score:
                 min_score = int(forced_minimum_score) + 1
             for language in language_set:

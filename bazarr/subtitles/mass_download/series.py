@@ -183,7 +183,7 @@ def episode_download_subtitles(no, job_id=None, job_sub_function=False, provider
 
 def episode_download_specific_subtitles(sonarr_series_id, sonarr_episode_id, language, hi, forced, job_id=None):
     if not job_id:
-        return jobs_queue.add_job_from_function("Searching subtitles", progress_max=1, is_progress=False)
+        return jobs_queue.add_job_from_function("Searching subtitles", is_progress=True)
 
     episodeInfo = database.execute(
         select(TableEpisodes.path,
@@ -221,6 +221,7 @@ def episode_download_specific_subtitles(sonarr_series_id, sonarr_episode_id, lan
 
     jobs_queue.update_job_name(job_id=job_id,
                                new_job_name=f"Searching {language_str.upper()} for {episode_long_title}")
+    jobs_queue.update_job_progress(job_id=job_id, progress_message="Preparing search...")
 
     audio_language_list = get_audio_profile_languages(episodeInfo.audio_language)
     if len(audio_language_list) > 0:
@@ -239,7 +240,11 @@ def episode_download_specific_subtitles(sonarr_series_id, sonarr_episode_id, lan
             history_log(1, sonarr_series_id, sonarr_episode_id, result)
             send_notifications(sonarr_series_id, sonarr_episode_id, result.message)
             store_subtitles(result.path, episodePath)
+            jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
+                                           progress_message="Subtitle downloaded")
         else:
+            jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
+                                           progress_message="No subtitles found")
             event_stream(type='episode', payload=sonarr_episode_id)
             return '', 204
     except OSError:

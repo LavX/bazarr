@@ -238,6 +238,8 @@ class SZProviderPool(ProviderPool):
 
         self._born = time.time()
 
+        self.provider_progress_callback = None
+
         if not self.throttle_callback:
             self.throttle_callback = lambda x, y, ids=None, language=None: x
 
@@ -375,6 +377,9 @@ class SZProviderPool(ProviderPool):
         to_request = self.lang_equals.translate(provider_languages) & set(provider_registry[provider].languages)
 
         logger.info('Listing subtitles with provider %r and languages %r', provider, to_request)
+
+        if self.provider_progress_callback:
+            self.provider_progress_callback(provider)
 
         try:
             results = self[provider].list_subtitles(video, to_request)
