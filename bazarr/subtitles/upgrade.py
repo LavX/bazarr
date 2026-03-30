@@ -93,7 +93,14 @@ def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, wait_for_com
     for item in episodes_data:
         # do not consider subtitles that do not exist on disk anymore
         if item['subtitles_path'] not in item['external_subtitles']:
-            continue
+            current_sub = _find_current_subtitle_for_language(item['language'], item['external_subtitles'])
+            if current_sub:
+                logging.debug(f"Upgrade candidate {item['id']} ({item['seriesTitle']} S{item['season']:02d}E"
+                              f"{item['episode']:02d}): history path no longer on disk, using current subtitle "
+                              f"for same language ({current_sub})")
+                item['subtitles_path'] = current_sub
+            else:
+                continue
 
         # Mark upgradable and get original_id
         item.update({'original_id': episodes_to_upgrade.get(item['id'])})
@@ -140,7 +147,7 @@ def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, wait_for_com
                                          episode['seriesTitle'],
                                          'series',
                                          episode['profileId'],
-                                         forced_minimum_score=int(episode['score']) + 1,
+                                         forced_minimum_score=int(episode['score'] or 0) + 1,
                                          is_upgrade=True,
                                          previous_subtitles_to_delete=path_mappings.path_replace(
                                              episode['subtitles_path']),
@@ -185,28 +192,48 @@ def upgrade_movies_subtitles(job_id=None, radarr_ids=None, wait_for_completion=F
     if radarr_ids:
         query = query.where(TableHistoryMovie.radarrId.in_(radarr_ids))
 
-    movies_data = [{
-        'id': x.id,
-        'title': x.title,
-        'language': x.language,
-        'audio_language': x.audio_language,
-        'video_path': x.video_path,
-        'sceneName': x.sceneName,
-        'score': x.score,
-        'radarrId': x.radarrId,
-        'path': x.path,
-        'profileId': x.profileId,
-        'subtitles_path': x.subtitles_path,
-        'external_subtitles': [y[1] for y in ast.literal_eval(x.external_subtitles) if y[1]],
-    } for x in database.execute(query)
-    .all() if _language_still_desired(x.language, x.profileId) and
-              x.video_path == x.path
-    ]
+    all_rows = database.execute(query).all()
+    movies_data = []
+    for x in all_rows:
+        if not _language_still_desired(x.language, x.profileId):
+            if x.id in movies_to_upgrade:
+                logging.debug(f"Upgrade candidate {x.id} ({x.title}) dropped: language {x.language} no longer desired "
+                              f"in profile {x.profileId}")
+            continue
+        if x.video_path != x.path:
+            if x.id in movies_to_upgrade:
+                logging.debug(f"Upgrade candidate {x.id} ({x.title}) dropped: video_path mismatch "
+                              f"(history={x.video_path} != current={x.path})")
+            continue
+        movies_data.append({
+            'id': x.id,
+            'title': x.title,
+            'language': x.language,
+            'audio_language': x.audio_language,
+            'video_path': x.video_path,
+            'sceneName': x.sceneName,
+            'score': x.score,
+            'radarrId': x.radarrId,
+            'path': x.path,
+            'profileId': x.profileId,
+            'subtitles_path': x.subtitles_path,
+            'external_subtitles': [y[1] for y in ast.literal_eval(x.external_subtitles) if y[1]],
+        })
 
     for item in movies_data:
         # do not consider subtitles that do not exist on disk anymore
         if item['subtitles_path'] not in item['external_subtitles']:
-            continue
+            # try to find a current subtitle for the same language (file may have been renamed/re-downloaded)
+            current_sub = _find_current_subtitle_for_language(item['language'], item['external_subtitles'])
+            if current_sub:
+                logging.debug(f"Upgrade candidate {item['id']} ({item['title']}): history path no longer on disk, "
+                              f"using current subtitle for same language ({current_sub})")
+                item['subtitles_path'] = current_sub
+            else:
+                if item['id'] in movies_to_upgrade:
+                    logging.debug(f"Upgrade candidate {item['id']} ({item['title']}) dropped: no subtitle for language "
+                                  f"{item['language']} found on disk")
+                continue
 
         # Mark upgradable and get original_id
         item.update({'original_id': movies_to_upgrade.get(item['id'])})
@@ -251,7 +278,7 @@ def upgrade_movies_subtitles(job_id=None, radarr_ids=None, wait_for_completion=F
                                          movie['title'],
                                          'movie',
                                          movie['profileId'],
-                                         forced_minimum_score=int(movie['score']) + 1,
+                                         forced_minimum_score=int(movie['score'] or 0) + 1,
                                          is_upgrade=True,
                                          previous_subtitles_to_delete=path_mappings.path_replace_movie(
                                              movie['subtitles_path']),
@@ -279,6 +306,33 @@ def get_queries_condition_parameters():
         query_actions = [1, 3]
 
     return [minimum_timestamp, query_actions]
+
+
+def _find_current_subtitle_for_language(language_string, external_subtitles):
+    """Find a current subtitle file on disk that matches the language from history.
+
+    When a subtitle was re-downloaded or renamed (e.g. .hu.hi.srt -> .hu.srt),
+    the history still references the old path. This finds the current file for
+    the same language so upgrades can still proceed.
+    """
+    lang_code = language_string.split(':')[0]
+    is_hi = language_string.endswith(':hi')
+    is_forced = language_string.endswith(':forced')
+
+    for sub_path in external_subtitles:
+        sub_lower = sub_path.lower()
+        # Check if language code is in the filename
+        if f'.{lang_code.lower()}.' not in sub_lower and not sub_lower.endswith(f'.{lang_code.lower()}'):
+            continue
+        # Match HI/forced flags
+        has_hi = '.hi.' in sub_lower or sub_lower.endswith('.hi.srt')
+        has_forced = '.forced.' in sub_lower or sub_lower.endswith('.forced.srt')
+        if is_hi == has_hi and is_forced == has_forced:
+            return sub_path
+        # If we wanted HI but only non-HI exists (or vice versa), still a candidate
+        if not is_forced and not has_forced and lang_code.lower() in sub_lower:
+            return sub_path
+    return None
 
 
 def parse_language_string(language_string):
