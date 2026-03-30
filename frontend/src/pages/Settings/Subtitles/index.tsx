@@ -1,17 +1,14 @@
-import React, { FunctionComponent, useMemo } from "react";
-import {
-  Code,
-  Divider,
-  Space,
-  Table,
-  Text as MantineText,
-} from "@mantine/core";
+import React, { FunctionComponent } from "react";
+import { Link } from "react-router";
+import { Code, Space, Table, Text as MantineText } from "@mantine/core";
 import {
   Check,
+  Chips,
   CollapseBox,
   Layout,
   Message,
   MultiSelector,
+  Number,
   Section,
   Selector,
   Slider,
@@ -21,22 +18,15 @@ import {
   SubzeroColorModification,
   SubzeroModification,
 } from "@/pages/Settings/utilities/modifications";
-import { TranslatorStatusPanelWithFormContext } from "@/components/TranslatorStatus";
-import { useTranslatorModels } from "@/apis/hooks/translator";
-import { SelectorOption } from "@/components";
 import {
   adaptiveSearchingDelayOption,
   adaptiveSearchingDeltaOption,
-  aiTranslatorConcurrentOptions,
-  aiTranslatorModelOptions,
-  aiTranslatorReasoningOptions,
   colorOptions,
   embeddedSubtitlesParserOption,
   folderOptions,
   hiExtensionOptions,
   providerOptions,
   syncMaxOffsetSecondsOptions,
-  translatorOption,
 } from "./options";
 
 interface CommandOption {
@@ -130,44 +120,14 @@ const commandOptions: CommandOption[] = [
 
 const commandOptionElements: React.JSX.Element[] = commandOptions.map(
   (op, idx) => (
-    <tr key={idx}>
-      <td>
+    <Table.Tr key={idx}>
+      <Table.Td>
         <Code>{op.option}</Code>
-      </td>
-      <td>{op.description}</td>
-    </tr>
+      </Table.Td>
+      <Table.Td>{op.description}</Table.Td>
+    </Table.Tr>
   ),
 );
-
-/**
- * AI Model Selector that fetches available models from the translator service.
- * Falls back to static options if the service is unavailable.
- */
-const AIModelSelector: FunctionComponent = () => {
-  const { data: modelsResponse, isLoading, isError } = useTranslatorModels();
-
-  const modelOptions = useMemo((): SelectorOption<string>[] => {
-    // If we have data from the service, use it
-    if (modelsResponse?.models && modelsResponse.models.length > 0) {
-      return modelsResponse.models.map((model) => ({
-        label: model.name + (model.is_default ? " (Recommended)" : ""),
-        value: model.id,
-      }));
-    }
-    // Fall back to static options
-    return aiTranslatorModelOptions;
-  }, [modelsResponse]);
-
-  return (
-    <Selector
-      label="AI Model"
-      options={modelOptions}
-      settingKey="settings-translator-openrouter_model"
-      placeholder={isLoading ? "Loading models..." : "Select a model..."}
-      disabled={isLoading}
-    />
-  );
-};
 
 const SettingsSubtitlesView: FunctionComponent = () => {
   return (
@@ -566,146 +526,15 @@ const SettingsSubtitlesView: FunctionComponent = () => {
             settingKey="settings-general-postprocessing_cmd"
           ></Text>
           <Table highlightOnHover fs="sm">
-            <tbody>{commandOptionElements}</tbody>
+            <Table.Tbody>{commandOptionElements}</Table.Tbody>
           </Table>
         </CollapseBox>
       </Section>
       <Section header="Translating">
-        <Slider
-          label="Score for Translated Episode and Movie Subtitles"
-          settingKey="settings-translator-default_score"
-        ></Slider>
-        <Selector
-          label="Translator"
-          clearable
-          options={translatorOption}
-          placeholder="Default translator"
-          settingKey="settings-translator-translator_type"
-        ></Selector>
-        <CollapseBox
-          settingKey="settings-translator-translator_type"
-          on={(val) => val === "gemini"}
-        >
-          <Text
-            label="Gemini model"
-            settingKey="settings-translator-gemini_model"
-          />
-          <Text
-            label="Gemini API key"
-            settingKey="settings-translator-gemini_key"
-          ></Text>
-          <Message>
-            You can generate it here: https://aistudio.google.com/apikey
-          </Message>
-        </CollapseBox>
-        <CollapseBox
-          settingKey="settings-translator-translator_type"
-          on={(val) => val === "lingarr"}
-        >
-          <Text
-            label="Lingarr endpoint"
-            settingKey="settings-translator-lingarr_url"
-          />
-          <Message>Base URL of Lingarr (e.g., http://localhost:9876)</Message>
-          <Text
-            label="Lingarr API Key (optional)"
-            settingKey="settings-translator-lingarr_token"
-          />
-          <Message>
-            Optional API key for authentication. Leave empty if your Lingarr
-            instance doesn't require authentication.
-          </Message>
-        </CollapseBox>
-        <CollapseBox
-          settingKey="settings-translator-translator_type"
-          on={(val) => val === "openrouter"}
-        >
-          <Text
-            label="Service URL"
-            settingKey="settings-translator-openrouter_url"
-          />
-          <Message>
-            URL of the AI Subtitle Translator service.
-            <br />
-            <a
-              href="https://github.com/LavX/ai-subtitle-translator"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              https://github.com/LavX/ai-subtitle-translator
-            </a>
-          </Message>
-          <Text
-            label="OpenRouter API Key"
-            settingKey="settings-translator-openrouter_api_key"
-          />
-          <Message>
-            Get your API key at{" "}
-            <a
-              href="https://openrouter.ai/keys"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              https://openrouter.ai/keys
-            </a>
-          </Message>
-          <Text
-            label="AI Model"
-            settingKey="settings-translator-openrouter_model"
-            placeholder="Select or type a model..."
-          />
-          <Message>
-            Models are fetched from the AI Subtitle Translator service. You can
-            also type any model ID from{" "}
-            <a
-              href="https://openrouter.ai/models"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              https://openrouter.ai/models
-            </a>{" "}
-            in the field above.
-          </Message>
-          <Slider
-            label="Temperature"
-            settingKey="settings-translator-openrouter_temperature"
-            min={0}
-            max={1}
-            step={0.1}
-          />
-          <Message>
-            Lower = more deterministic, higher = more creative. Default: 0.3
-          </Message>
-          <Selector
-            label="Max Concurrent Jobs"
-            options={aiTranslatorConcurrentOptions}
-            settingKey="settings-translator-openrouter_max_concurrent"
-          />
-          <Message>
-            Maximum number of translations to process simultaneously. Higher
-            values use more API quota.
-          </Message>
-          <Selector
-            label="Reasoning Mode"
-            options={aiTranslatorReasoningOptions}
-            settingKey="settings-translator-openrouter_reasoning"
-          />
-          <Message>
-            Enable extended thinking for supported models (Gemini, Claude Haiku
-            4.5, Grok). Higher levels improve translation quality but increase
-            cost and time.
-          </Message>
-          <Divider
-            my="md"
-            label="Service Status & Jobs"
-            labelPosition="center"
-          />
-          <TranslatorStatusPanelWithFormContext />
-        </CollapseBox>
-        <Check
-          label="Add translation info at the beginning"
-          settingKey="settings-translator-translator_info"
-        ></Check>
+        <Message>
+          Translator configuration has moved to its own page.{" "}
+          <Link to="/settings/translator">Go to AI Translator →</Link>
+        </Message>
       </Section>
     </Layout>
   );

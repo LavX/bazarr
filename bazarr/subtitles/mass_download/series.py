@@ -50,6 +50,7 @@ def series_download_subtitles(no, job_id=None, job_sub_function=False):
         .join(TableShows)
         .where(reduce(operator.and_, conditions))) \
         .all()
+    throttled = False
     if not episodes_details:
         logging.debug(f"BAZARR no episode for that sonarrSeriesId have been found in database or they have all been "
                       f"ignored because of monitored status, series type or series tags: {no}")
@@ -70,8 +71,12 @@ def series_download_subtitles(no, job_id=None, job_sub_function=False):
             else:
                 jobs_queue.update_job_progress(job_id=job_id, progress_value=count_episodes_details)
                 logging.info("BAZARR All providers are throttled")
+                throttled = True
                 break
 
+    outcome_msg = ("All providers throttled" if throttled
+                   else "Search completed")
+    jobs_queue.update_job_progress(job_id=job_id, progress_message=outcome_msg)
     jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Downloaded missing subtitles for {series_row.title}")
 
 
@@ -126,6 +131,7 @@ def episode_download_subtitles(no, job_id=None, job_sub_function=False, provider
     if not providers_list:
         providers_list = get_providers()
 
+    downloaded_count = 0
     if providers_list:
         audio_language_list = get_audio_profile_languages(episode.audio_language)
         if len(audio_language_list) > 0:
@@ -162,17 +168,22 @@ def episode_download_subtitles(no, job_id=None, job_sub_function=False, provider
                     store_subtitles(episode.path, path_mappings.path_replace(episode.path))
                     history_log(1, episode.sonarrSeriesId, episode.sonarrEpisodeId, result)
                     send_notifications(episode.sonarrSeriesId, episode.sonarrEpisodeId, result.message)
+                    downloaded_count += 1
+        outcome_msg = (f"{downloaded_count} subtitle(s) downloaded"
+                       if downloaded_count else "No subtitles found")
     else:
         logging.info("BAZARR All providers are throttled")
+        outcome_msg = "All providers throttled"
 
     if not job_sub_function and job_id:
-        jobs_queue.update_job_progress(job_id=job_id, progress_value='max')
+        jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
+                                       progress_message=outcome_msg)
         jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Downloaded missing subtitles for {episode.title}")
 
 
 def episode_download_specific_subtitles(sonarr_series_id, sonarr_episode_id, language, hi, forced, job_id=None):
     if not job_id:
-        return jobs_queue.add_job_from_function("Searching subtitles", progress_max=1, is_progress=False)
+        return jobs_queue.add_job_from_function("Searching subtitles", is_progress=True)
 
     episodeInfo = database.execute(
         select(TableEpisodes.path,
@@ -210,6 +221,7 @@ def episode_download_specific_subtitles(sonarr_series_id, sonarr_episode_id, lan
 
     jobs_queue.update_job_name(job_id=job_id,
                                new_job_name=f"Searching {language_str.upper()} for {episode_long_title}")
+    jobs_queue.update_job_progress(job_id=job_id, progress_message="Preparing search...")
 
     audio_language_list = get_audio_profile_languages(episodeInfo.audio_language)
     if len(audio_language_list) > 0:
@@ -228,7 +240,11 @@ def episode_download_specific_subtitles(sonarr_series_id, sonarr_episode_id, lan
             history_log(1, sonarr_series_id, sonarr_episode_id, result)
             send_notifications(sonarr_series_id, sonarr_episode_id, result.message)
             store_subtitles(result.path, episodePath)
+            jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
+                                           progress_message="Subtitle downloaded")
         else:
+            jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
+                                           progress_message="No subtitles found")
             event_stream(type='episode', payload=sonarr_episode_id)
             return '', 204
     except OSError:

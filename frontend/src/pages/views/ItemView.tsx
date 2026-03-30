@@ -1,5 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
-import { useNavigate } from "react-router";
+import { ReactNode, useCallback, useMemo, useState } from "react";
 import {
   ActionIcon,
   Badge,
@@ -19,14 +18,13 @@ import {
 import {
   faEraser,
   faFilter,
-  faList,
   faSearch,
   faTimes,
   faVolumeUp,
   faVolumeXmark,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { ColumnDef } from "@tanstack/react-table";
+import { ColumnDef, Row } from "@tanstack/react-table";
 import { useAudioLanguages } from "@/apis/hooks";
 import { UsePaginationQueryResult } from "@/apis/queries/hooks";
 import { QueryPageTable, Toolbox } from "@/components";
@@ -40,6 +38,10 @@ interface Props<T extends Item.Base = Item.Base> {
   onAudioLanguagesChange?: (values: string[]) => void;
   excludeLanguages?: string[];
   onExcludeLanguagesChange?: (values: string[]) => void;
+  enableRowSelection?: boolean;
+  onSelectionChanged?: (selections: T[]) => void;
+  selectionToolbar?: ReactNode;
+  profileToolbar?: ReactNode;
 }
 
 function ItemView<T extends Item.Base>({
@@ -51,8 +53,11 @@ function ItemView<T extends Item.Base>({
   onAudioLanguagesChange,
   excludeLanguages = [],
   onExcludeLanguagesChange,
+  enableRowSelection,
+  onSelectionChanged,
+  selectionToolbar,
+  profileToolbar,
 }: Props<T>) {
-  const navigate = useNavigate();
   const { data: audioLangs = [] } = useAudioLanguages();
   const [filtersOpen, setFiltersOpen] = useState(false);
 
@@ -171,13 +176,10 @@ function ItemView<T extends Item.Base>({
   return (
     <Stack gap={0}>
       <Toolbox>
-        <Toolbox.Button
-          disabled={query.paginationStatus.totalCount === 0 && !hasActiveFilter}
-          icon={faList}
-          onClick={() => navigate("edit")}
-        >
-          Mass Edit
-        </Toolbox.Button>
+        <Group gap="xs">
+          {selectionToolbar ? <Box>{selectionToolbar}</Box> : null}
+          {profileToolbar ? <Box>{profileToolbar}</Box> : null}
+        </Group>
         <Group gap="xs">
           {hasAnyFilterControl && (
             <Tooltip
@@ -189,15 +191,16 @@ function ItemView<T extends Item.Base>({
                 label={activeFilterCount > 0 ? activeFilterCount : undefined}
                 size={16}
                 offset={4}
-                color="blue"
+                color="brand"
                 disabled={activeFilterCount === 0}
               >
                 <ActionIcon
-                  variant={filtersOpen ? "filled" : "subtle"}
-                  color={activeFilterCount > 0 ? "blue" : "gray"}
+                  variant="gradient"
+                  gradient={{ from: "brand.5", to: "brand.6", deg: 135 }}
                   size="lg"
                   onClick={() => setFiltersOpen((v) => !v)}
                   aria-label="Toggle filters"
+                  style={{ opacity: filtersOpen ? 1 : 0.9 }}
                 >
                   <FontAwesomeIcon icon={faFilter} />
                 </ActionIcon>
@@ -241,11 +244,11 @@ function ItemView<T extends Item.Base>({
           px="md"
           py={8}
           style={{
-            borderBottom: "1px solid var(--mantine-color-default-border)",
+            borderBottom: "1px solid var(--bz-border-divider)",
           }}
         >
           <Group gap={8}>
-            <Text size="xs" c="dimmed" fw={500}>
+            <Text size="xs" c="var(--bz-text-tertiary)" fw={500}>
               Active filters:
             </Text>
             {activeFilterChips.map((chip) => (
@@ -281,7 +284,7 @@ function ItemView<T extends Item.Base>({
             <UnstyledButton onClick={clearAllFilters}>
               <Group gap={4}>
                 <FontAwesomeIcon icon={faEraser} size="xs" opacity={0.6} />
-                <Text size="xs" c="dimmed" td="underline">
+                <Text size="xs" c="var(--bz-text-tertiary)" td="underline">
                   Clear all
                 </Text>
               </Group>
@@ -297,8 +300,8 @@ function ItemView<T extends Item.Base>({
           py="sm"
           radius={0}
           style={{
-            borderBottom: "1px solid var(--mantine-color-default-border)",
-            backgroundColor: "var(--mantine-color-body)",
+            borderBottom: "1px solid var(--bz-border-divider)",
+            backgroundColor: "var(--bz-surface-base)",
           }}
         >
           <Group gap="lg" align="flex-end" wrap="wrap">
@@ -306,7 +309,7 @@ function ItemView<T extends Item.Base>({
               <Box style={{ flex: "1 1 200px", maxWidth: 280 }}>
                 <Group gap={6} mb={4}>
                   <FontAwesomeIcon icon={faVolumeUp} size="xs" opacity={0.6} />
-                  <Text size="xs" fw={500} c="dimmed">
+                  <Text size="xs" fw={500} c="var(--bz-text-tertiary)">
                     Include Audio Languages
                   </Text>
                 </Group>
@@ -336,7 +339,7 @@ function ItemView<T extends Item.Base>({
                       size="xs"
                       opacity={0.6}
                     />
-                    <Text size="xs" fw={500} c="dimmed">
+                    <Text size="xs" fw={500} c="var(--bz-text-tertiary)">
                       Exclude Audio Languages
                     </Text>
                   </Group>
@@ -366,6 +369,10 @@ function ItemView<T extends Item.Base>({
         query={query}
         dataFilter={hasActiveFilter ? dataFilter : undefined}
         tableStyles={{ emptyText: "No items found" }}
+        enableRowSelection={enableRowSelection}
+        onRowSelectionChanged={(rows: Row<T>[]) => {
+          onSelectionChanged?.(rows.map((r) => r.original));
+        }}
       ></QueryPageTable>
     </Stack>
   );

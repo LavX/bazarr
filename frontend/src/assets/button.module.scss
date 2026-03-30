@@ -1,7 +1,16 @@
 @layer mantine {
   .root {
-    @include mantine.dark {
-      color: var(--mantine-color-dark-0);
+    border-radius: var(--bz-radius-sm);
+    transition:
+      background var(--bz-duration-normal) var(--bz-ease-standard),
+      transform var(--bz-duration-normal) var(--bz-ease-standard),
+      box-shadow var(--bz-duration-normal) var(--bz-ease-standard);
+
+    color: var(--bz-text-primary);
+
+    &[data-variant="filled"],
+    &[data-variant="gradient"] {
+      color: #fff;
     }
 
     &[data-variant="danger"] {
@@ -11,8 +20,10 @@
   }
 
   .root:disabled {
-    @include mantine.dark {
-      color: var(--mantine-color-dark-9);
+    color: var(--bz-text-disabled);
+
+    @include mantine.light {
+      color: var(--bz-text-tertiary);
     }
   }
 }

@@ -1,13 +1,15 @@
 # coding=utf-8
 
 import os
+import ipaddress
+import socket
 import requests
 import mimetypes
 
 from flask import (request, abort, render_template, Response, session, send_file, stream_with_context, Blueprint,
                    redirect)
 from functools import wraps
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 from constants import HEADERS
 from literals import FILE_LOG
@@ -16,7 +18,7 @@ from radarr.info import url_api_radarr
 from utilities.helper import check_credentials
 from utilities.central import get_log_file_path
 
-from .config import settings, base_url
+from .config import settings, base_url, get_ssl_verify
 from .database import database, System
 from .get_args import args
 
@@ -132,7 +134,7 @@ def series_images(url):
     baseUrl = settings.sonarr.base_url
     url_image = f'{url_api_sonarr()}{url.lstrip(baseUrl)}?apikey={apikey}'.replace('poster-250', 'poster-500')
     try:
-        req = requests.get(url_image, stream=True, timeout=15, verify=False, headers=HEADERS)
+        req = requests.get(url_image, stream=True, timeout=15, verify=get_ssl_verify('sonarr'), headers=HEADERS)
     except Exception:
         return '', 404
     else:
@@ -146,7 +148,7 @@ def movies_images(url):
     baseUrl = settings.radarr.base_url
     url_image = f'{url_api_radarr()}{url.lstrip(baseUrl)}?apikey={apikey}'
     try:
-        req = requests.get(url_image, stream=True, timeout=15, verify=False, headers=HEADERS)
+        req = requests.get(url_image, stream=True, timeout=15, verify=get_ssl_verify('radarr'), headers=HEADERS)
     except Exception:
         return '', 404
     else:
@@ -175,6 +177,30 @@ def swaggerui_static(filename):
         return send_file(fullpath)
 
 
+def _resolve_and_validate(url_str):
+    """Resolve DNS once and validate resolved IPs. Pick a safe address to pin to.
+    Returns (resolved_ip, hostname, parsed) or raises ValueError."""
+    parsed = urlparse(url_str)
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("No hostname in URL")
+    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    addrs = socket.getaddrinfo(hostname, port)
+    if not addrs:
+        raise ValueError("DNS resolution returned no results")
+    # Find a safe (non-link-local, non-loopback) address to pin to.
+    # Dual-stack hosts may resolve to both private LAN and link-local IPv6.
+    safe_ip = None
+    for _, _, _, _, sockaddr in addrs:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if not ip.is_link_local and not ip.is_loopback:
+            if safe_ip is None:
+                safe_ip = sockaddr[0]
+    if safe_ip is None:
+        raise ValueError("All resolved addresses are link-local or loopback")
+    return safe_ip, hostname, parsed
+
+
 @check_login
 @ui_bp.route('/test', methods=['GET'])
 @ui_bp.route('/test/<protocol>/<path:url>', methods=['GET'])
@@ -182,9 +208,19 @@ def proxy(protocol, url):
     if protocol.lower() not in ['http', 'https']:
         return dict(status=False, error='Unsupported protocol', code=0)
     url = f'{protocol}://{unquote(url)}'
+    try:
+        resolved_ip, hostname, parsed = _resolve_and_validate(url)
+    except (ValueError, socket.gaierror) as e:
+        return dict(status=False, error=f'Request blocked: {e}', code=0)
+    # Pin request to resolved IP to prevent DNS rebinding
+    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    pinned_netloc = f'{resolved_ip}:{port}'
+    pinned_url = parsed._replace(netloc=pinned_netloc).geturl()
+    pinned_headers = dict(HEADERS)
+    pinned_headers['Host'] = hostname
     params = request.args
     try:
-        result = requests.get(url, params, allow_redirects=False, verify=False, timeout=5, headers=HEADERS)
+        result = requests.get(pinned_url, params, allow_redirects=False, verify=False, timeout=5, headers=pinned_headers)
     except Exception as e:
         return dict(status=False, error=repr(e))
     else:

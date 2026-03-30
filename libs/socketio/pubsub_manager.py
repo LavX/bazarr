@@ -1,10 +1,9 @@
+import base64
 from functools import partial
 import uuid
 
-from engineio import json
-import pickle
-
 from .manager import Manager
+from .packet import Packet
 
 
 class PubSubManager(Manager):
@@ -20,15 +19,31 @@ class PubSubManager(Manager):
 
     :param channel: The channel name on which the server sends and receives
                     notifications.
+    :param write_only: If set to ``True``, only initialize to emit events. The
+                       default of ``False`` initializes the class for emitting
+                       and receiving. A write-only instance can be used
+                       independently of the server to emit to clients from an
+                       external process.
+    :param logger: a custom logger to log it. If not given, the server logger
+                   is used.
+    :param json: An alternative JSON module to use for encoding and decoding
+                 packets. Custom json modules must have ``dumps`` and ``loads``
+                 functions that are compatible with the standard library
+                 versions. This setting is only used when ``write_only`` is set
+                 to ``True``. Otherwise the JSON module configured in the
+                 server is used.
     """
     name = 'pubsub'
 
-    def __init__(self, channel='socketio', write_only=False, logger=None):
+    def __init__(self, channel='socketio', write_only=False, logger=None,
+                 json=None):
         super().__init__()
         self.channel = channel
         self.write_only = write_only
         self.host_id = uuid.uuid4().hex
         self.logger = logger
+        if json is not None:
+            self.json = json
 
     def initialize(self):
         super().initialize()
@@ -62,8 +77,16 @@ class PubSubManager(Manager):
             callback = (room, namespace, id)
         else:
             callback = None
+        if isinstance(data, tuple):
+            data = list(data)
+        else:
+            data = [data]
+        binary = Packet.data_is_binary(data)
+        if binary:
+            data, attachments = Packet.deconstruct_binary(data)
+            data = [data, *[base64.b64encode(a).decode() for a in attachments]]
         message = {'method': 'emit', 'event': event, 'data': data,
-                   'namespace': namespace, 'room': room,
+                   'binary': binary, 'namespace': namespace, 'room': room,
                    'skip_sid': skip_sid, 'callback': callback,
                    'host_id': self.host_id}
         self._handle_emit(message)  # handle in this host
@@ -142,7 +165,16 @@ class PubSubManager(Manager):
                                *remote_callback)
         else:
             callback = None
-        super().emit(message['event'], message['data'],
+        data = message['data']
+        if message.get('binary'):
+            attachments = [base64.b64decode(a) for a in data[1:]]
+            data = Packet.reconstruct_binary(data[0], attachments)
+        if isinstance(data, list):
+            if len(data) == 1:
+                data = data[0]
+            else:
+                data = tuple(data)
+        super().emit(message['event'], data,
                      namespace=message.get('namespace'),
                      room=message.get('room'),
                      skip_sid=message.get('skip_sid'), callback=callback)
@@ -196,16 +228,10 @@ class PubSubManager(Manager):
                     if isinstance(message, dict):
                         data = message
                     else:
-                        if isinstance(message, bytes):  # pragma: no cover
-                            try:
-                                data = pickle.loads(message)
-                            except:
-                                pass
-                        if data is None:
-                            try:
-                                data = json.loads(message)
-                            except:
-                                pass
+                        try:
+                            data = self.json.loads(message)
+                        except:
+                            pass
                     if data and 'method' in data:
                         self._get_logger().debug('pubsub message: {}'.format(
                             data['method']))

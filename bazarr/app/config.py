@@ -89,7 +89,7 @@ validators = [
     Validator('general.port', must_exist=True, default=6767, is_type_of=int, gte=1, lte=65535),
     Validator('general.hostname', must_exist=True, default=platform.node(), is_type_of=str),
     Validator('general.base_url', must_exist=True, default='', is_type_of=str),
-    Validator('general.instance_name', must_exist=True, default='Bazarr', is_type_of=str,
+    Validator('general.instance_name', must_exist=True, default='Bazarr+', is_type_of=str,
               apply_default_on_none=True),
     Validator('general.path_mappings', must_exist=True, default=[], is_type_of=list),
     Validator('general.debug', must_exist=True, default=False, is_type_of=bool),
@@ -97,7 +97,7 @@ validators = [
               is_in=['master', 'development']),
     Validator('general.auto_update', must_exist=True, default=True, is_type_of=bool),
     Validator('general.single_language', must_exist=True, default=False, is_type_of=bool),
-    Validator('general.minimum_score', must_exist=True, default=90, is_type_of=int, gte=0, lte=100),
+    Validator('general.minimum_score', must_exist=True, default=80, is_type_of=int, gte=0, lte=100),
     Validator('general.use_scenename', must_exist=True, default=True, is_type_of=bool),
     Validator('general.use_postprocessing', must_exist=True, default=False, is_type_of=bool),
     Validator('general.postprocessing_cmd', must_exist=True, default='', is_type_of=str),
@@ -140,6 +140,7 @@ validators = [
               is_in=['3d', '1w', '2w', '3w', '4w']),
     Validator('general.enabled_providers', must_exist=True, default=[], is_type_of=list),
     Validator('general.provider_priorities', must_exist=True, default={}, is_type_of=dict),
+    Validator('general.use_provider_priority', must_exist=True, default=True, is_type_of=bool),
     Validator('general.enabled_integrations', must_exist=True, default=[], is_type_of=list),
     Validator('general.multithreading', must_exist=True, default=True, is_type_of=bool),
     Validator('general.chmod_enabled', must_exist=True, default=False, is_type_of=bool),
@@ -198,8 +199,9 @@ validators = [
 
     # translating section
     Validator('translator.default_score', must_exist=True, default=50, is_type_of=int, gte=0),
-    Validator('translator.gemini_key', must_exist=True, default='', is_type_of=str, cast=str),
+    Validator('translator.gemini_keys', must_exist=True, default=[], is_type_of=list),
     Validator('translator.gemini_model', must_exist=True, default='gemini-2.0-flash', is_type_of=str, cast=str),
+    Validator('translator.gemini_batch_size', must_exist=True, default=300, is_type_of=int, gte=1),
     Validator('translator.translator_info', must_exist=True, default=True, is_type_of=bool),
     Validator('translator.translator_type', must_exist=True, default='google_translate', is_type_of=str, cast=str),
     Validator('translator.lingarr_url', must_exist=True, default='http://lingarr:9876', is_type_of=str),
@@ -210,6 +212,8 @@ validators = [
     Validator('translator.openrouter_max_concurrent', must_exist=True, default=2, is_type_of=int, gte=1, lte=10),
     Validator('translator.openrouter_reasoning', must_exist=True, default='disabled', is_type_of=str,
               is_in=['disabled', 'low', 'medium', 'high']),
+    Validator('translator.openrouter_parallel_batches', must_exist=True, default=4, is_type_of=int, gte=1, lte=8),
+    Validator('translator.openrouter_encryption_key', must_exist=True, default='', is_type_of=str, cast=str),
     Validator('translator.lingarr_token', must_exist=True, default='', is_type_of=str, cast=str),
 
     # sonarr section
@@ -235,6 +239,7 @@ validators = [
     Validator('sonarr.defer_search_signalr', must_exist=True, default=False, is_type_of=bool),
     Validator('sonarr.sync_only_monitored_series', must_exist=True, default=False, is_type_of=bool),
     Validator('sonarr.sync_only_monitored_episodes', must_exist=True, default=False, is_type_of=bool),
+    Validator('sonarr.verify_ssl', must_exist=True, default=False, is_type_of=bool),
 
     # radarr section
     Validator('radarr.ip', must_exist=True, default='127.0.0.1', is_type_of=str),
@@ -256,6 +261,7 @@ validators = [
     Validator('radarr.use_ffprobe_cache', must_exist=True, default=True, is_type_of=bool),
     Validator('radarr.defer_search_signalr', must_exist=True, default=False, is_type_of=bool),
     Validator('radarr.sync_only_monitored_movies', must_exist=True, default=False, is_type_of=bool),
+    Validator('radarr.verify_ssl', must_exist=True, default=False, is_type_of=bool),
 
     # plex section
     Validator('plex.ip', must_exist=True, default='127.0.0.1', is_type_of=str),
@@ -277,6 +283,7 @@ validators = [
     Validator('plex.user_id', must_exist=True, default='', is_type_of=(int, str)),
     Validator('plex.auth_method', must_exist=True, default='apikey', is_type_of=str, is_in=['apikey', 'oauth']),
     Validator('plex.encryption_key', must_exist=True, default='', is_type_of=str),
+    Validator('plex.verify_ssl', must_exist=True, default=False, is_type_of=bool),
     Validator('plex.server_machine_id', must_exist=True, default='', is_type_of=str),
     Validator('plex.server_name', must_exist=True, default='', is_type_of=str),
     Validator('plex.server_url', must_exist=True, default='', is_type_of=str),
@@ -305,9 +312,9 @@ validators = [
     Validator('opensubtitles.ssl', must_exist=True, default=False, is_type_of=bool),
     Validator('opensubtitles.timeout', must_exist=True, default=15, is_type_of=int, gte=1),
     Validator('opensubtitles.skip_wrong_fps', must_exist=True, default=False, is_type_of=bool),
-    # Web scraper mode - can be enabled via OPENSUBTITLES_USE_WEB_SCRAPER=true environment variable
+    # Web scraper mode - always enabled (OpenSubtitles.org login no longer available)
     Validator('opensubtitles.use_web_scraper', must_exist=True,
-              default=os.environ.get('OPENSUBTITLES_USE_WEB_SCRAPER', 'false').lower() in ('true', '1', 'yes'),
+              default=True,
               is_type_of=bool),
     # Scraper URL - can be set via OPENSUBTITLES_SCRAPER_URL environment variable
     Validator('opensubtitles.scraper_service_url', must_exist=True,
@@ -451,33 +458,6 @@ validators = [
     Validator('subsync.max_offset_seconds', must_exist=True, default=60, is_type_of=int,
               is_in=[60, 120, 300, 600]),
 
-    # series_scores section
-    Validator('series_scores.hash', must_exist=True, default=359, is_type_of=int),
-    Validator('series_scores.series', must_exist=True, default=180, is_type_of=int),
-    Validator('series_scores.year', must_exist=True, default=90, is_type_of=int),
-    Validator('series_scores.season', must_exist=True, default=30, is_type_of=int),
-    Validator('series_scores.episode', must_exist=True, default=30, is_type_of=int),
-    Validator('series_scores.release_group', must_exist=True, default=14, is_type_of=int),
-    Validator('series_scores.source', must_exist=True, default=7, is_type_of=int),
-    Validator('series_scores.audio_codec', must_exist=True, default=3, is_type_of=int),
-    Validator('series_scores.resolution', must_exist=True, default=2, is_type_of=int),
-    Validator('series_scores.video_codec', must_exist=True, default=2, is_type_of=int),
-    Validator('series_scores.streaming_service', must_exist=True, default=1, is_type_of=int),
-    Validator('series_scores.hearing_impaired', must_exist=True, default=1, is_type_of=int),
-
-    # movie_scores section
-    Validator('movie_scores.hash', must_exist=True, default=119, is_type_of=int),
-    Validator('movie_scores.title', must_exist=True, default=60, is_type_of=int),
-    Validator('movie_scores.year', must_exist=True, default=30, is_type_of=int),
-    Validator('movie_scores.release_group', must_exist=True, default=13, is_type_of=int),
-    Validator('movie_scores.source', must_exist=True, default=7, is_type_of=int),
-    Validator('movie_scores.audio_codec', must_exist=True, default=3, is_type_of=int),
-    Validator('movie_scores.resolution', must_exist=True, default=2, is_type_of=int),
-    Validator('movie_scores.video_codec', must_exist=True, default=2, is_type_of=int),
-    Validator('movie_scores.streaming_service', must_exist=True, default=1, is_type_of=int),
-    Validator('movie_scores.edition', must_exist=True, default=1, is_type_of=int),
-    Validator('movie_scores.hearing_impaired', must_exist=True, default=1, is_type_of=int),
-
     # postgresql section
     Validator('postgresql.enabled', must_exist=True, default=False, is_type_of=bool),
     Validator('postgresql.host', must_exist=True, default='localhost', is_type_of=str),
@@ -589,6 +569,7 @@ array_keys = ['excluded_tags',
               'excluded_series_types',
               'enabled_providers',
               'enabled_integrations',
+              'gemini_keys',
               'path_mappings',
               'path_mappings_movie',
               'remove_profile_tags',
@@ -627,6 +608,20 @@ if hasattr(settings.embeddedsubtitles, 'unknown_as_english'):
         settings.embeddedsubtitles.unknown_as_fallback = True
         settings.embeddedsubtitles.fallback_lang = 'en'
     del settings.embeddedsubtitles.unknown_as_english
+
+# delete custom scores sections since we don't use this anymore
+if hasattr(settings, 'series_scores'):
+    settings.unset('SERIES_SCORES')
+if hasattr(settings, 'movie_scores'):
+    settings.unset('MOVIE_SCORES')
+
+# backward compatibility: migrate gemini_key to gemini_keys
+if hasattr(settings.translator, 'gemini_key'):
+    legacy_key = str(settings.translator.gemini_key).strip()
+    if legacy_key and not settings.translator.gemini_keys:
+        settings.translator.gemini_keys = [legacy_key]
+    del settings.translator.gemini_key
+
 # save updated settings to file
 write_config()
 
@@ -704,12 +699,15 @@ def save_settings(settings_items):
             if value in empty_values and value != '':
                 value = None
 
-        # try to cast string as integer
+        # try to cast string as integer or float
         if isinstance(value, str) and settings_keys[-1] not in str_keys:
             try:
                 value = int(value)
             except ValueError:
-                pass
+                try:
+                    value = float(value)
+                except ValueError:
+                    pass
 
         # Make sure empty language list are stored correctly
         if settings_keys[-1] in array_keys and value[0] in empty_values:
@@ -752,7 +750,8 @@ def save_settings(settings_items):
 
         if key == 'settings-auth-password':
             if value != settings.auth.password and value is not None:
-                value = hashlib.md5(f"{value}".encode('utf-8')).hexdigest()
+                from utilities.helper import hash_password
+                value = hash_password(value)
 
         if key == 'settings-general-debug':
             configure_debug = True
@@ -1017,9 +1016,15 @@ def configure_proxy_func():
         os.environ['NO_PROXY'] = exclude
 
 
-def get_scores():
-    settings = get_settings()
-    return {"movie": settings["movie_scores"], "episode": settings["series_scores"]}
+_SSL_VERIFY_SERVICES = frozenset({'sonarr', 'radarr', 'plex'})
+
+
+def get_ssl_verify(service):
+    """Return the verify parameter for requests calls to a service."""
+    if service not in _SSL_VERIFY_SERVICES:
+        raise ValueError(f"Unknown service for SSL verify: {service}")
+    return settings.get(f'{service}.verify_ssl', False)
+
 
 
 def sync_checker(subtitle):

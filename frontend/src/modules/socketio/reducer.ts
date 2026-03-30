@@ -41,6 +41,10 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
             queryKey: [QueryKeys.Series, id],
           });
         });
+        // Invalidate series list so Missing Subtitles column refreshes
+        void queryClient.invalidateQueries({
+          queryKey: [QueryKeys.Series],
+        });
       },
       delete: (ids) => {
         LOG("info", "Invalidating series", ids);
@@ -59,6 +63,10 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
           void queryClient.invalidateQueries({
             queryKey: [QueryKeys.Movies, id],
           });
+        });
+        // Invalidate movies list so Missing Subtitles column refreshes
+        void queryClient.invalidateQueries({
+          queryKey: [QueryKeys.Movies],
         });
       },
       delete: (ids) => {

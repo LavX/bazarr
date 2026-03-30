@@ -114,11 +114,17 @@ class _OpenSubtitlesSubtitle(Subtitle):
 
     @property
     def series_name(self):
-        return self.series_re.match(self.movie_name).group('series_name')
+        match = self.series_re.match(self.movie_name)
+        if match:
+            return match.group('series_name')
+        return self.movie_name
 
     @property
     def series_title(self):
-        return self.series_re.match(self.movie_name).group('series_title')
+        match = self.series_re.match(self.movie_name)
+        if match:
+            return match.group('series_title')
+        return self.movie_name
 
     def get_matches(self, video):
         matches = set()
@@ -132,7 +138,7 @@ class _OpenSubtitlesSubtitle(Subtitle):
             if video.series and sanitize(self.series_name) == sanitize(video.series):
                 matches.add('series')
             # year
-            if video.original_series and self.movie_year is None or video.year and video.year == self.movie_year:
+            if (video.original_series and self.movie_year is None) or (video.year and video.year == self.movie_year):
                 matches.add('year')
             # season
             if video.season and self.series_season == video.season:
@@ -224,7 +230,7 @@ class OpenSubtitlesSubtitle(_OpenSubtitlesSubtitle):
     def get_fps(self):
         try:
             return float(self.fps)
-        except:
+        except (ValueError, TypeError):
             return None
 
     def get_matches(self, video, hearing_impaired=False):
@@ -250,7 +256,7 @@ class OpenSubtitlesSubtitle(_OpenSubtitlesSubtitle):
         sub_fps = None
         try:
             sub_fps = float(self.fps)
-        except ValueError:
+        except (ValueError, TypeError):
             pass
 
         # video has fps info, sub also, and sub's fps is greater than 0
@@ -397,8 +403,18 @@ class OpenSubtitlesProvider(ProviderRetryMixin, OpenSubtitlesScraperMixin, Provi
 
     def initialize(self):
         if self.use_web_scraper:
-            # Skip authentication for scraper mode
-            logger.debug("Web scraper mode - skipping authentication")
+            # Verify scraper service is reachable before searching
+            try:
+                base_url = self.scraper_service_url.rstrip('/')
+                if not base_url.startswith(('http://', 'https://')):
+                    base_url = f'http://{base_url}'
+                resp = requests.get(f'{base_url}/health', timeout=5)
+                resp.raise_for_status()
+                logger.info("Scraper service at %s is healthy", self.scraper_service_url)
+            except Exception as e:
+                raise ServiceUnavailable(
+                    f'OpenSubtitles scraper at {self.scraper_service_url} is not reachable: {e}'
+                )
             self.server = None
             self.token = None
             return
@@ -610,7 +626,7 @@ def checked(fn, raise_api_limit=False):
                 status_code = 506
         else:
             status_code = int(response['status'][:3])
-    except:
+    except Exception:
         status_code = None
 
     if status_code == 401:

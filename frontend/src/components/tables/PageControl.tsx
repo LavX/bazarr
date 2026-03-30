@@ -1,5 +1,5 @@
 import { FunctionComponent } from "react";
-import { Group, Pagination, Text } from "@mantine/core";
+import { Group, NativeSelect, Pagination, Text } from "@mantine/core";
 import { useIsLoading } from "@/contexts";
 
 interface Props {
@@ -8,6 +8,7 @@ interface Props {
   size: number;
   total: number;
   goto: (idx: number) => void;
+  onPageSizeChange?: (size: number) => void;
 }
 
 const PageControl: FunctionComponent<Props> = ({
@@ -16,6 +17,7 @@ const PageControl: FunctionComponent<Props> = ({
   size,
   total,
   goto,
+  onPageSizeChange,
 }) => {
   const empty = total === 0;
   const start = empty ? 0 : size * index + 1;
@@ -25,9 +27,34 @@ const PageControl: FunctionComponent<Props> = ({
 
   return (
     <Group p={16} justify="space-between">
-      <Text size="sm">
-        Show {start} to {end} of {total} entries
-      </Text>
+      <Group gap="md">
+        <Text size="sm">
+          Show {start} to {end} of {total} entries
+        </Text>
+        {onPageSizeChange && (
+          <NativeSelect
+            size="xs"
+            value={size >= total && total > 0 ? "all" : String(size)}
+            onChange={(e) => {
+              const val = e.currentTarget.value;
+              if (val === "all") {
+                onPageSizeChange(total);
+              } else {
+                onPageSizeChange(Number(val));
+              }
+              goto(0);
+            }}
+            data={[
+              { value: "25", label: "25 per page" },
+              { value: "50", label: "50 per page" },
+              { value: "100", label: "100 per page" },
+              { value: "250", label: "250 per page" },
+              { value: "all", label: "All" },
+            ]}
+            w={130}
+          />
+        )}
+      </Group>
       <Pagination
         size="sm"
         color={isLoading ? "gray" : "primary"}

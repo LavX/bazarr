@@ -1,0 +1,63 @@
+@keyframes heartbeat {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  14% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+  28% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  42% {
+    opacity: 1;
+    transform: scale(1.1);
+  }
+  56% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.promptConnected {
+  animation: heartbeat 1.5s ease-in-out infinite;
+  display: inline-block;
+}
+
+.statCard {
+  transition: var(--bz-transition-lift);
+  cursor: default;
+  border-left-width: 3px;
+  border-left-style: solid;
+}
+
+.statCard:hover {
+  transform: translateY(-2px);
+  background-color: var(--bz-surface-card-hover);
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .promptConnected,
+  .spin {
+    animation: none;
+  }
+  .statCard:hover {
+    transform: none;
+  }
+}

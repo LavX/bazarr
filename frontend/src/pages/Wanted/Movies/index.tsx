@@ -16,6 +16,7 @@ import Language from "@/components/bazarr/Language";
 import { WantedItem } from "@/components/forms/MassTranslateForm";
 import WantedView from "@/pages/views/WantedView";
 import { BuildKey } from "@/utilities";
+import tableStyles from "@/components/tables/BaseTable.module.scss";
 
 const WantedMoviesView: FunctionComponent = () => {
   const { download } = useMovieSubtitleModification();
@@ -115,7 +116,11 @@ const WantedMoviesView: FunctionComponent = () => {
         }) => {
           const target = `/movies/${radarrId}`;
           return (
-            <Anchor component={Link} to={target}>
+            <Anchor
+              className={`table-primary ${tableStyles.episodeTitle}`}
+              component={Link}
+              to={target}
+            >
               {title}
             </Anchor>
           );

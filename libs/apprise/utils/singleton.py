@@ -1,8 +1,7 @@
-# -*- coding: utf-8 -*-
 # BSD 2-Clause License
 #
 # Apprise - Push Notification Library.
-# Copyright (c) 2025, Chris Caron <lead2gold@gmail.com>
+# Copyright (c) 2026, Chris Caron <lead2gold@gmail.com>
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -28,15 +27,12 @@
 
 
 class Singleton(type):
-    """
-    Our Singleton MetaClass
-    """
+    """Our Singleton MetaClass."""
+
     _instances = {}
 
     def __call__(cls, *args, **kwargs):
-        """
-        instantiate our singleton meta entry
-        """
+        """Instantiate our singleton meta entry."""
         if cls not in cls._instances:
             # we have not every built an instance before.  Build one now.
             cls._instances[cls] = super().__call__(*args, **kwargs)

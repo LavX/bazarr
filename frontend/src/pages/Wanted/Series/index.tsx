@@ -16,6 +16,7 @@ import Language from "@/components/bazarr/Language";
 import { WantedItem } from "@/components/forms/MassTranslateForm";
 import WantedView from "@/pages/views/WantedView";
 import { BuildKey } from "@/utilities";
+import tableStyles from "@/components/tables/BaseTable.module.scss";
 
 const WantedSeriesView: FunctionComponent = () => {
   const { download } = useEpisodeSubtitleModification();
@@ -115,7 +116,11 @@ const WantedSeriesView: FunctionComponent = () => {
         }) => {
           const target = `/series/${sonarrSeriesId}`;
           return (
-            <Anchor className="table-primary" component={Link} to={target}>
+            <Anchor
+              className={`table-primary ${tableStyles.episodeTitle}`}
+              component={Link}
+              to={target}
+            >
               {seriesTitle}
             </Anchor>
           );
@@ -135,9 +140,27 @@ const WantedSeriesView: FunctionComponent = () => {
       {
         header: "Episode",
         accessorKey: "episode_number",
+        cell: ({
+          row: {
+            original: { episode_number: episodeNumber },
+          },
+        }) => {
+          return (
+            <span className={tableStyles.episodeNumber}>{episodeNumber}</span>
+          );
+        },
       },
       {
         accessorKey: "episodeTitle",
+        cell: ({
+          row: {
+            original: { episodeTitle },
+          },
+        }) => {
+          return (
+            <span className={tableStyles.episodeTitle}>{episodeTitle}</span>
+          );
+        },
       },
       {
         header: "Missing",

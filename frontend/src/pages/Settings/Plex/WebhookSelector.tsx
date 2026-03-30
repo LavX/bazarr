@@ -158,7 +158,7 @@ const WebhookSelector: FunctionComponent<WebhookSelectorProps> = (props) => {
                 {label}
               </Text>
               {description && (
-                <Text size="sm" c="dimmed">
+                <Text size="sm" c="var(--bz-text-tertiary)">
                   {description}
                 </Text>
               )}
@@ -209,7 +209,7 @@ const WebhookSelector: FunctionComponent<WebhookSelectorProps> = (props) => {
           <Text fw={500} className={styles.labelText}>
             {label}
           </Text>
-          <Text size="sm" c="dimmed">
+          <Text size="sm" c="var(--bz-text-tertiary)">
             {description ||
               "Create or remove webhooks in Plex to trigger subtitle searches. In this list you can find your current webhooks."}
           </Text>

@@ -33,6 +33,8 @@ from typing import TYPE_CHECKING, Sequence
 if TYPE_CHECKING:  # pragma: no cover
     from markdown import Markdown
 
+# Included for versions which do not have current comment fix
+commentclose = re.compile(r'--!?>')
 
 # Import a copy of the html.parser lib as `htmlparser` so we can monkeypatch it.
 # Users can still do `from html import parser` and get the default behavior.
@@ -40,6 +42,12 @@ spec = importlib.util.find_spec('html.parser')
 htmlparser = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(htmlparser)
 sys.modules['htmlparser'] = htmlparser
+
+# This is a hack. We are sneaking in `</>` so we can capture it without the HTML parser
+# throwing it away. When we see it, we will process it as data.
+htmlparser.starttagopen = re.compile('<[a-zA-Z]|</>')
+
+htmlparser.endtagopen = re.compile('</[a-zA-Z]?')
 
 # Monkeypatch `HTMLParser` to only accept `?>` to close Processing Instructions.
 htmlparser.piclose = re.compile(r'\?>')
@@ -65,10 +73,48 @@ htmlparser.locatestarttagend_tolerant = re.compile(r"""
    )?
   \s*                                 # trailing whitespace
 """, re.VERBOSE)
+htmlparser.locatetagend = re.compile(r"""
+  [a-zA-Z][^`\t\n\r\f />]*           # tag name
+  [\t\n\r\f /]*                     # optional whitespace before attribute name
+  (?:(?<=['"\t\n\r\f /])[^`\t\n\r\f />][^\t\n\r\f /=>]*  # attribute name
+    (?:=                            # value indicator
+      (?:'[^']*'                    # LITA-enclosed value
+        |"[^"]*"                    # LIT-enclosed value
+        |(?!['"])[^>\t\n\r\f ]*     # bare value
+       )
+     )?
+    [\t\n\r\f /]*                   # possibly followed by a space
+   )*
+   >?
+""", re.VERBOSE)
 
 # Match a blank line at the start of a block of text (two newlines).
 # The newlines may be preceded by additional whitespace.
 blank_line_re = re.compile(r'^([ ]*\n){2}')
+
+
+class _HTMLParser(htmlparser.HTMLParser):
+    """Handle special start and end tags."""
+
+    def parse_endtag(self, i):
+        start = self.rawdata[i:i+3]
+        c = ord(start[-1])
+        if len(start) < 3 or not (65 <= c <= 90 or 97 <= c <= 122):
+            self.handle_data(self.rawdata[i:i + 2])
+            return i + 2
+        return super().parse_endtag(i)
+
+    def parse_starttag(self, i: int) -> int:  # pragma: no cover
+        # Treat `</>` as normal data as it is not a real tag.
+        if self.rawdata[i:i + 3] == '</>':
+            self.handle_data(self.rawdata[i:i + 3])
+            return i + 3
+
+        return super().parse_starttag(i)
+
+
+# Overwrite our custom one for people like MkDocs that pull it in
+htmlparser.HTMLParser = _HTMLParser
 
 
 class HTMLExtractor(htmlparser.HTMLParser):
@@ -249,6 +295,7 @@ class HTMLExtractor(htmlparser.HTMLParser):
         self.handle_empty_tag('&{};'.format(name), is_block=False)
 
     def handle_comment(self, data: str):
+        # Check if the comment is unclosed, if so, we need to override position
         self.handle_empty_tag('<!--{}-->'.format(data), is_block=True)
 
     def handle_decl(self, data: str):
@@ -269,8 +316,30 @@ class HTMLExtractor(htmlparser.HTMLParser):
         self.handle_data('<?')
         return i + 2
 
+    # Internal -- parse comment, return length or -1 if not terminated
+    # see https://html.spec.whatwg.org/multipage/parsing.html#comment-start-state
+    def parse_comment(self, i, report=True):
+        rawdata = self.rawdata
+        assert rawdata.startswith('<!--', i), 'unexpected call to parse_comment()'
+        match = commentclose.search(rawdata, i+4)
+        if not match:
+            self.handle_data('<')
+            return i + 1
+        if report:
+            j = match.start()
+            self.handle_comment(rawdata[i+4: j])
+        return match.end()
+
     def parse_html_declaration(self, i: int) -> int:
         if self.at_line_start() or self.intail:
+            if self.rawdata[i:i+3] == '<![' and not self.rawdata[i:i+9] == '<![CDATA[':
+                # We have encountered the bug in #1534 (Python bug `gh-77057`).
+                # Provide an override until we drop support for Python < 3.13.
+                result = self.parse_bogus_comment(i)
+                if result == -1:
+                    self.handle_data(self.rawdata[i:i + 1])
+                    return i + 1
+                return result
             return super().parse_html_declaration(i)
         # This is not the beginning of a raw block so treat as plain data
         # and avoid consuming any tags which may follow (see #1066).
@@ -297,10 +366,16 @@ class HTMLExtractor(htmlparser.HTMLParser):
         return self.__starttag_text
 
     def parse_starttag(self, i: int) -> int:  # pragma: no cover
+        # Treat `</>` as normal data as it is not a real tag.
+        if self.rawdata[i:i + 3] == '</>':
+            self.handle_data(self.rawdata[i:i + 3])
+            return i + 3
+
         self.__starttag_text = None
         endpos = self.check_for_whole_start_tag(i)
         if endpos < 0:
-            return endpos
+            self.handle_data(self.rawdata[i:i + 1])
+            return i + 1
         rawdata = self.rawdata
         self.__starttag_text = rawdata[i:endpos]
 

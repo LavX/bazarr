@@ -1,23 +1,23 @@
 import { FunctionComponent, useMemo } from "react";
 import {
   Alert,
+  Badge,
   Button,
   Divider,
+  Group,
   Stack,
   Text,
-  Group,
-  Badge,
 } from "@mantine/core";
 import { useForm } from "@mantine/form";
+import { notifications } from "@mantine/notifications";
 import { isObject } from "lodash";
-import { useBatchTranslate, useSystemSettings } from "@/apis/hooks";
+import { useBatchAction, useSystemSettings } from "@/apis/hooks";
+import { BatchItem } from "@/apis/raw/subtitles";
 import { Selector } from "@/components/inputs";
 import { useModals, withModal } from "@/modules/modals";
 import { useSelectorOptions } from "@/utilities";
 import FormUtils from "@/utilities/form";
 import { useEnabledLanguages } from "@/utilities/languages";
-import { BatchTranslateItem } from "@/apis/raw/subtitles";
-import { notifications } from "@mantine/notifications";
 
 // Translations map for Google Translate compatibility
 const googleTranslations: Record<string, string> = {
@@ -143,7 +143,13 @@ export interface WantedMovieItem {
   title: string;
 }
 
-export type WantedItem = WantedEpisodeItem | WantedMovieItem;
+export interface WantedSeriesItem {
+  type: "series";
+  sonarrSeriesId: number;
+  title: string;
+}
+
+export type WantedItem = WantedEpisodeItem | WantedMovieItem | WantedSeriesItem;
 
 interface Props {
   items: WantedItem[];
@@ -157,7 +163,7 @@ interface TranslationConfig {
 
 const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
   const settings = useSystemSettings();
-  const { mutateAsync, isPending } = useBatchTranslate();
+  const { mutateAsync, isPending } = useBatchAction();
   const modals = useModals();
 
   const { data: languages } = useEnabledLanguages();
@@ -172,10 +178,19 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
         isObject,
         "Please select a source language",
       ),
-      targetLanguage: FormUtils.validation(
-        isObject,
-        "Please select a target language",
-      ),
+      targetLanguage: (
+        value: Language.Info | null,
+        values: { sourceLanguage: Language.Info | null },
+      ) => {
+        if (!isObject(value)) return "Please select a target language";
+        if (
+          value &&
+          values.sourceLanguage &&
+          value.code2 === values.sourceLanguage.code2
+        )
+          return "Target language must be different from source";
+        return null;
+      },
     },
   });
 
@@ -243,43 +258,48 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
   }) => {
     if (!values.sourceLanguage || !values.targetLanguage) return;
 
-    const batchItems: BatchTranslateItem[] = items.map((item) => {
+    if (items.length >= 100) {
+      const confirmed = window.confirm(
+        `This will translate subtitles for ${items.length} items. This may take a while. Continue?`,
+      );
+      if (!confirmed) return;
+    }
+
+    const batchItems: BatchItem[] = items.map((item) => {
       if (item.type === "episode") {
         return {
           type: "episode" as const,
           sonarrSeriesId: item.sonarrSeriesId,
           sonarrEpisodeId: item.sonarrEpisodeId,
-          sourceLanguage: values.sourceLanguage!.code2,
-          targetLanguage: values.targetLanguage!.code2,
+        };
+      } else if (item.type === "series") {
+        return {
+          type: "series" as const,
+          sonarrSeriesId: item.sonarrSeriesId,
         };
       } else {
         return {
           type: "movie" as const,
           radarrId: item.radarrId,
-          sourceLanguage: values.sourceLanguage!.code2,
-          targetLanguage: values.targetLanguage!.code2,
         };
       }
     });
 
     try {
-      const result = await mutateAsync(batchItems);
+      const result = await mutateAsync({
+        items: batchItems,
+        action: "translate",
+        options: {
+          fromLang: values.sourceLanguage!.code2,
+          toLang: values.targetLanguage!.code2,
+        },
+      });
 
-      if (result.queued > 0) {
-        notifications.show({
-          title: "Translation Queued",
-          message: `${result.queued} item(s) queued for translation${result.skipped > 0 ? `, ${result.skipped} skipped` : ""}`,
-          color: "green",
-        });
-      }
-
-      if (result.errors.length > 0) {
-        notifications.show({
-          title: "Some translations failed",
-          message: result.errors.slice(0, 3).join("; "),
-          color: "yellow",
-        });
-      }
+      notifications.show({
+        title: "Translation Queued",
+        message: `Queued: ${result.queued}, Skipped: ${result.skipped}${result.errors.length > 0 ? `, Errors: ${result.errors.length}` : ""}`,
+        color: result.errors.length > 0 ? "yellow" : "green",
+      });
 
       onComplete?.();
       modals.closeSelf();
@@ -301,7 +321,7 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
             {translatorModel} will be used to translate{" "}
             <strong>{items.length}</strong> item(s).
           </Text>
-          <Text size="xs" c="dimmed" mt="xs">
+          <Text size="xs" c="var(--bz-text-tertiary)" mt="xs">
             You can choose translation service in the subtitles settings.
           </Text>
         </Alert>
@@ -324,7 +344,7 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
         )}
 
         {items.length > 5 && (
-          <Text size="sm" c="dimmed">
+          <Text size="sm" c="var(--bz-text-tertiary)">
             {items.length} items selected for translation
           </Text>
         )}
@@ -361,9 +381,18 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
 
         <Divider />
 
-        <Button type="submit" loading={isPending} disabled={items.length === 0}>
-          Translate {items.length} Item(s)
-        </Button>
+        <Group justify="space-between">
+          <Button variant="default" onClick={() => modals.closeSelf()}>
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            loading={isPending}
+            disabled={items.length === 0}
+          >
+            Translate {items.length} Item(s)
+          </Button>
+        </Group>
       </Stack>
     </form>
   );

@@ -3,7 +3,7 @@
 import requests
 import logging
 
-from app.config import settings
+from app.config import settings, get_ssl_verify
 from sonarr.info import url_api_sonarr
 from constants import HEADERS
 
@@ -14,7 +14,7 @@ def browse_sonarr_filesystem(path='#'):
     url_sonarr_api_filesystem = (f"{url_api_sonarr()}filesystem?path={path}&allowFoldersWithoutTrailingSlashes=true&"
                                  f"includeFiles=false&apikey={settings.sonarr.apikey}")
     try:
-        r = requests.get(url_sonarr_api_filesystem, timeout=int(settings.sonarr.http_timeout), verify=False,
+        r = requests.get(url_sonarr_api_filesystem, timeout=int(settings.sonarr.http_timeout), verify=get_ssl_verify('sonarr'),
                          headers=HEADERS)
         r.raise_for_status()
     except requests.exceptions.HTTPError:

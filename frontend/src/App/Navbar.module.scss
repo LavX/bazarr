@@ -1,46 +1,86 @@
-.anchor {
-  border-color: var(--mantine-color-gray-5);
-  text-decoration: none;
+.nav {
+  padding: 8px;
+  background: transparent;
+  border-right: none;
+}
 
-  @include mantine.dark {
-    border-color: var(--mantine-color-dark-5);
+.navInner {
+  background: var(--bz-surface-base);
+  border: 1px solid var(--bz-border-card);
+  border-radius: var(--bz-radius-xl);
+  padding: 12px;
+  height: 100%;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.groupLabel {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--bz-text-disabled);
+  padding: 0 12px;
+  margin-bottom: 6px;
+
+  &:not(:first-child) {
+    margin-top: 22px;
   }
+}
+
+.anchor {
+  display: block;
+  text-decoration: none;
+  border-radius: var(--bz-radius-md);
+  margin-bottom: 2px;
+  transition: background var(--bz-duration-normal) var(--bz-ease-standard);
 
   &.active {
-    border-left: 2px solid bazarr.$color-brand-4;
-    background-color: var(--mantine-color-gray-1);
+    position: relative;
 
     @include mantine.dark {
-      border-left: 2px solid bazarr.$color-brand-8;
-      background-color: var(--mantine-color-dark-8);
+      background-color: rgba(230, 138, 0, 0.12);
+    }
+
+    @include mantine.light {
+      background-color: rgba(230, 138, 0, 0.08);
+    }
+
+    &::before {
+      content: "";
+      position: absolute;
+      left: 4px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 3px;
+      height: 18px;
+      border-radius: 2px;
+      background: #e68a00;
+
+      @include mantine.light {
+        background: #b36b00;
+      }
+    }
+
+    .text {
+      color: var(--bz-text-primary);
+    }
+
+    .icon {
+      opacity: 1;
+
+      @include mantine.dark {
+        color: #e68a00;
+      }
+
+      @include mantine.light {
+        color: #b36b00;
+      }
     }
   }
 
-  &.hover {
-    background-color: var(--mantine-color-gray-0);
-
-    @include mantine.dark {
-      background-color: var(--mantine-color-dark-7);
-    }
-  }
-}
-
-.badge {
-  margin-left: auto;
-  text-decoration: none;
-  box-shadow: var(--mantine-shadow-xs);
-}
-
-.icon {
-  width: 1.4rem;
-  margin-right: var(--mantine-spacing-xs);
-}
-
-.nav {
-  background-color: var(--mantine-color-gray-2);
-
-  @include mantine.dark {
-    background-color: var(--mantine-color-dark-8);
+  &.hover:not(.active) {
+    background-color: var(--bz-hover-bg);
   }
 }
 
@@ -48,9 +88,39 @@
   display: inline-flex;
   align-items: center;
   width: 100%;
-  color: var(--mantine-color-gray-8);
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 450;
+  color: var(--bz-text-tertiary);
+}
+
+.icon {
+  width: 1rem;
+  margin-right: var(--mantine-spacing-xs);
+  opacity: 0.7;
+}
+
+.badge {
+  margin-left: auto;
+  text-decoration: none;
+  border-radius: var(--bz-radius-sm);
+  font-size: 10px;
+  font-weight: 600;
+  box-shadow: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  padding-left: 8px;
+  padding-right: 8px;
 
   @include mantine.dark {
-    color: var(--mantine-color-gray-5);
+    background-color: rgba(230, 138, 0, 0.15) !important;
+    color: #ffca28 !important;
+  }
+
+  @include mantine.light {
+    background-color: rgba(230, 138, 0, 0.12) !important;
+    color: #b36b00 !important;
   }
 }

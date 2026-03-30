@@ -1,17 +1,13 @@
 .connectionIndicator {
   &.success {
-    color: var(--mantine-color-green-6);
+    color: var(--bz-stat-completed);
   }
 
   &.error {
-    color: var(--mantine-color-red-6);
+    color: var(--bz-stat-failed);
   }
 }
 
 .serverConnectionCard {
-  background: var(--mantine-color-gray-0);
-
-  [data-mantine-color-scheme="dark"] & {
-    background: var(--mantine-color-dark-6);
-  }
+  background: var(--bz-surface-card);
 }

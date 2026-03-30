@@ -1,167 +1,224 @@
 # coding=utf-8
 """
-OpenSubtitles Web Scraper Implementation
+OpenSubtitles Web Scraper Integration (v1 API)
 
-This module provides HTTP-based communication with OpenSubtitles scraper services,
-bypassing the need for traditional API authentication.
+Uses the scraper service's REST API directly instead of the legacy
+compatibility endpoint, passing all available metadata for best results.
 """
 
 import base64
 import logging
 import requests
-import json
+from subliminal.video import Episode
 from subzero.language import Language
-from subliminal.exceptions import ServiceUnavailable, ConfigurationError
+from subliminal.exceptions import ServiceUnavailable
 from subliminal_patch.exceptions import APIThrottled
 
 logger = logging.getLogger(__name__)
 
+# Map opensubtitles 3-letter codes to 2-letter codes for the scraper
+_LANG_3_TO_2 = {
+    'eng': 'en', 'hun': 'hu', 'spa': 'es', 'fre': 'fr', 'ger': 'de',
+    'ita': 'it', 'por': 'pt', 'rus': 'ru', 'chi': 'zh', 'jpn': 'ja',
+    'kor': 'ko', 'ara': 'ar', 'dut': 'nl', 'pol': 'pl', 'tur': 'tr',
+    'swe': 'sv', 'nor': 'no', 'dan': 'da', 'fin': 'fi', 'cze': 'cs',
+    'rum': 'ro', 'hrv': 'hr', 'srp': 'sr', 'bul': 'bg', 'gre': 'el',
+    'heb': 'he', 'tha': 'th', 'vie': 'vi', 'ind': 'id', 'may': 'ms',
+    'per': 'fa', 'ukr': 'uk', 'est': 'et', 'lav': 'lv', 'lit': 'lt',
+    'slv': 'sl', 'slo': 'sk', 'ice': 'is', 'cat': 'ca', 'bos': 'bs',
+    'glg': 'gl', 'baq': 'eu', 'geo': 'ka', 'mac': 'mk', 'alb': 'sq',
+}
+
 
 class OpenSubtitlesScraperMixin:
     """
-    Mixin class that provides web scraper functionality for OpenSubtitles provider.
-    This allows communication with scraper services that provide OpenSubtitles-compatible APIs.
+    Mixin class providing web scraper functionality via the v1 REST API.
     """
-    
-    def _query_scraper(self, video, languages, hash=None, size=None, imdb_id=None, query=None, season=None, 
-                      episode=None, tag=None, use_tag_search=False, only_foreign=False, also_foreign=False):
-        """
-        Query the scraper service for subtitles.
-        
-        This method converts the traditional OpenSubtitles XML-RPC format to HTTP requests
-        that are compatible with scraper services.
-        """
-        logger.info('Querying scraper service at %s', self.scraper_service_url)
-        
-        # Build search criteria similar to the API version
-        criteria = []
-        if hash and size:
-            criteria.append({'moviehash': hash, 'moviebytesize': str(size)})
-        if use_tag_search and tag:
-            criteria.append({'tag': tag})
-        if imdb_id:
-            if season and episode:
-                criteria.append({'imdbid': imdb_id[2:], 'season': season, 'episode': episode})
-            else:
-                criteria.append({'imdbid': imdb_id[2:]})
-                
-        if not criteria:
-            raise ValueError('Not enough information')
 
-        # Add language information
-        for criterion in criteria:
-            criterion['sublanguageid'] = ','.join(sorted(l.opensubtitles for l in languages))
+    def _get_scraper_base_url(self):
+        base_url = self.scraper_service_url.rstrip('/')
+        if not base_url.startswith(('http://', 'https://')):
+            base_url = f'http://{base_url}'
+        return base_url
+
+    def _scraper_request(self, endpoint, data):
+        """Make a POST request to the scraper service."""
+        url = f"{self._get_scraper_base_url()}{endpoint}"
+        headers = {
+            'Content-Type': 'application/json',
+            'User-Agent': 'Bazarr-OpenSubtitles-Scraper/2.0'
+        }
+
+        logger.debug('Scraper request: %s %s', url, data)
+
+        response = requests.post(url, json=data, headers=headers, timeout=120)
+
+        if response.status_code in (429, 503):
+            retry_after_str = response.headers.get("Retry-After")
+            response.close()
+            retry_after = int(retry_after_str) if retry_after_str and retry_after_str.isdigit() else None
+            msg = "Scraper service busy"
+            if retry_after:
+                msg = f"{msg}, retry after {retry_after}s"
+            raise APIThrottled(msg, retry_after=retry_after)
+
+        response.raise_for_status()
+        result = response.json()
+        response.close()
+        return result
+
+    def _query_scraper(self, video, languages, hash=None, size=None, imdb_id=None, query=None,
+                       season=None, episode=None, tag=None, use_tag_search=False,
+                       only_foreign=False, also_foreign=False):
+        """Query the scraper v1 API with full metadata."""
+        logger.info('Querying scraper v1 API at %s', self.scraper_service_url)
+
+        is_episode = isinstance(video, Episode)
+
+        # Build the best possible query string from available info
+        search_query = ''
+        if query and isinstance(query, list) and query[0]:
+            search_query = query[0]
+        elif query and isinstance(query, str):
+            search_query = query
+        elif hasattr(video, 'series') and video.series:
+            search_query = video.series
+        elif hasattr(video, 'title') and video.title:
+            search_query = video.title
+
+        # Get year from video
+        year = getattr(video, 'year', None)
 
         try:
-            # Make HTTP request to scraper service
-            response = self._make_scraper_request('/search', {
-                'criteria': criteria,
-                'only_foreign': only_foreign,
-                'also_foreign': also_foreign
-            })
-            
-            if not response or not response.get('data'):
-                logger.info('No subtitles found from scraper service')
+            # Step 1: Search for the movie/show
+            search_endpoint = '/api/v1/search/tv' if is_episode else '/api/v1/search/movies'
+            search_data = {
+                'query': search_query,
+                'imdb_id': imdb_id if imdb_id else None,
+                'year': year,
+                'kind': 'episode' if is_episode else 'movie',
+            }
+
+            logger.info('Scraper search: %s query=%r imdb=%s year=%s',
+                         search_endpoint, search_query, imdb_id, year)
+
+            search_response = self._scraper_request(search_endpoint, search_data)
+
+            results = search_response.get('results', [])
+            if not results:
+                logger.info('Scraper: no results from %s for %r', search_endpoint, search_query)
                 return []
-                
-            return self._parse_scraper_response(response['data'], languages, only_foreign, also_foreign, video)
-            
+
+            # Step 2: Select best matching result
+            best_result = self._select_best_result(results, imdb_id, search_query, year)
+            if not best_result:
+                logger.info('Scraper: no matching result for imdb=%s query=%r', imdb_id, search_query)
+                return []
+
+            movie_url = best_result.get('url')
+            if not movie_url:
+                logger.warning('Scraper: search result has no URL')
+                return []
+
+            logger.info('Scraper: selected result: %s (%s) - %s',
+                         best_result.get('title'), best_result.get('year'), movie_url)
+
+            # Step 3: Get subtitle listings
+            lang_codes = []
+            for lang in languages:
+                code_3 = lang.opensubtitles
+                code_2 = _LANG_3_TO_2.get(code_3, code_3)
+                lang_codes.append(code_2)
+
+            subs_response = self._scraper_request('/api/v1/subtitles', {
+                'movie_url': movie_url,
+                'languages': lang_codes,
+            })
+
+            subtitle_list = subs_response.get('subtitles', [])
+            if not subtitle_list:
+                logger.info('Scraper: no subtitles found at %s', movie_url)
+                return []
+
+            logger.info('Scraper: found %d subtitles, parsing...', len(subtitle_list))
+
+            # Step 4: Convert to bazarr subtitle objects
+            return self._parse_v1_subtitles(
+                subtitle_list, best_result, languages, season, episode,
+                only_foreign, also_foreign, video, imdb_id,
+                hash=hash, search_query=search_query
+            )
+
         except APIThrottled:
             raise
         except requests.RequestException as e:
             logger.error('Scraper service request failed: %s', e)
             raise ServiceUnavailable(f'Scraper service unavailable: {e}')
         except Exception as e:
-            logger.error('Unexpected error querying scraper service: %s', e)
+            logger.error('Unexpected error querying scraper: %s', e)
             raise ServiceUnavailable(f'Scraper service error: {e}')
 
-    def _make_scraper_request(self, endpoint, data):
-        """
-        Make an HTTP request to the scraper service.
-        
-        Args:
-            endpoint: API endpoint (e.g., '/search', '/download')
-            data: Request payload
-            
-        Returns:
-            dict: JSON response from scraper service
-        """
-        # Ensure URL has proper protocol scheme
-        base_url = self.scraper_service_url.rstrip('/')
-        if not base_url.startswith(('http://', 'https://')):
-            base_url = f'http://{base_url}'
-            
-        url = f"{base_url}{endpoint}"
-        
-        headers = {
-            'Content-Type': 'application/json',
-            'User-Agent': 'Bazarr-OpenSubtitles-Scraper/1.0'
-        }
-        
-        logger.debug('Making scraper request to %s with data: %s', url, data)
-        
-        response = requests.post(
-            url,
-            json=data,
-            headers=headers,
-            timeout=120  # Increased timeout for scraper service (IMDB lookups + page navigation)
-        )
+    def _select_best_result(self, results, imdb_id, query, year):
+        """Select the best search result by matching IMDB ID, title, and year."""
+        if not results:
+            return None
 
-        if response.status_code in (429, 503):
-            retry_after = response.headers.get("Retry-After")
-            response.close()
-            message = "Scraper service busy"
-            if retry_after:
-                message = f"{message}, retry after {retry_after}s"
-            raise APIThrottled(message)
+        # Exact IMDB match is best
+        if imdb_id:
+            for r in results:
+                if r.get('imdb_id') == imdb_id:
+                    return r
 
-        response.raise_for_status()
-        return response.json()
+        # Score remaining results
+        scored = []
+        query_lower = (query or '').lower().strip()
+        for r in results:
+            score = 0
+            title_lower = (r.get('title') or '').lower().strip()
 
-    def _parse_scraper_response(self, data, languages, only_foreign, also_foreign, video):
-        """
-        Parse the scraper service response and create subtitle objects.
-        
-        Args:
-            data: Response data from scraper service
-            languages: Requested languages
-            only_foreign: Only foreign/forced subtitles
-            also_foreign: Include foreign/forced subtitles
-            video: Video object for matching
-            
-        Returns:
-            list: List of OpenSubtitlesSubtitle objects
-        """
+            # Title matching
+            if query_lower and title_lower:
+                if title_lower == query_lower:
+                    score += 10
+                elif query_lower in title_lower or title_lower in query_lower:
+                    score += 5
+
+            # Year matching
+            if year and r.get('year') == year:
+                score += 3
+
+            # Prefer results with more subtitles
+            score += min(r.get('subtitle_count', 0) / 100, 2)
+
+            scored.append((score, r))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return scored[0][1] if scored else results[0]
+
+    def _parse_v1_subtitles(self, subtitle_list, search_result, languages, season, episode,
+                            only_foreign, also_foreign, video, imdb_id,
+                            hash=None, search_query=None):
+        """Convert v1 API subtitle objects to bazarr OpenSubtitlesSubtitle objects."""
         subtitles = []
-        
-        for subtitle_item in data:
+        series_title = search_result.get('title', '')
+        result_year = search_result.get('year')
+        result_imdb = search_result.get('imdb_id', '')
+
+        for sub in subtitle_list:
             try:
-                # Parse subtitle item (similar to API version)
-                language = Language.fromopensubtitles(subtitle_item['SubLanguageID'])
-                hearing_impaired = bool(int(subtitle_item.get('SubHearingImpaired', 0)))
-                page_link = subtitle_item.get('SubtitlesLink', '')
-                subtitle_id = int(subtitle_item['IDSubtitleFile'])
-                matched_by = subtitle_item.get('MatchedBy', 'hash')
-                movie_kind = subtitle_item.get('MovieKind', 'movie')
-                hash = subtitle_item.get('MovieHash', '')
-                movie_name = subtitle_item.get('MovieName', '')
-                movie_release_name = subtitle_item.get('MovieReleaseName', '')
-                movie_year = int(subtitle_item['MovieYear']) if subtitle_item.get('MovieYear') else None
-                
-                # Handle IMDB ID
-                if subtitle_item.get('SeriesIMDBParent'):
-                    movie_imdb_id = 'tt' + subtitle_item['SeriesIMDBParent']
-                elif subtitle_item.get('IDMovieImdb'):
-                    movie_imdb_id = 'tt' + subtitle_item['IDMovieImdb']
-                else:
-                    movie_imdb_id = None
-                    
-                movie_fps = subtitle_item.get('MovieFPS')
-                series_season = int(subtitle_item['SeriesSeason']) if subtitle_item.get('SeriesSeason') else None
-                series_episode = int(subtitle_item['SeriesEpisode']) if subtitle_item.get('SeriesEpisode') else None
-                filename = subtitle_item.get('SubFileName', '')
-                encoding = subtitle_item.get('SubEncoding')
-                foreign_parts_only = bool(int(subtitle_item.get('SubForeignPartsOnly', 0)))
+                # Map 2-letter language back to opensubtitles format
+                lang_2 = sub.get('language', '')
+                try:
+                    language = Language.fromietf(lang_2)
+                except Exception:
+                    try:
+                        language = Language(lang_2)
+                    except Exception:
+                        logger.debug('Skipping subtitle with unknown language: %s', lang_2)
+                        continue
+
+                hearing_impaired = sub.get('hearing_impaired', False)
+                foreign_parts_only = sub.get('forced', False)
 
                 # Apply foreign/forced filtering
                 if only_foreign and not foreign_parts_only:
@@ -171,76 +228,89 @@ class OpenSubtitlesScraperMixin:
                 elif (also_foreign or only_foreign) and foreign_parts_only:
                     language = Language.rebuild(language, forced=True)
 
-                # Set hearing impaired language
                 if hearing_impaired:
                     language = Language.rebuild(language, hi=True)
 
                 if language not in languages:
                     continue
 
+                subtitle_id = int(sub['subtitle_id'])
+                filename = sub.get('filename', '')
+                release_name = sub.get('release_name', '')
+                fps = sub.get('fps')
+                download_url = sub.get('download_url', '')
+
+                # Build movie_name in the format bazarr expects
+                is_episode = season is not None and episode is not None
+                if is_episode and series_title:
+                    movie_name = f'"{series_title}" {release_name}'
+                    movie_kind = 'episode'
+                else:
+                    movie_name = series_title or release_name
+                    movie_kind = 'movie'
+
+                movie_imdb_id = result_imdb if result_imdb else (imdb_id or None)
+                if movie_imdb_id and not movie_imdb_id.startswith('tt'):
+                    movie_imdb_id = f'tt{movie_imdb_id}'
+
                 # IMDB ID matching
-                if video.imdb_id and movie_imdb_id and (movie_imdb_id != video.imdb_id):
+                if video.imdb_id and movie_imdb_id and movie_imdb_id != video.imdb_id:
                     continue
 
-                query_parameters = subtitle_item.get("QueryParameters", {})
+                query_parameters = {
+                    'query': search_query,
+                    'imdb_id': imdb_id,
+                    'season': season,
+                    'episode': episode,
+                }
 
-                # Create subtitle object
                 subtitle = self.subtitle_class(
-                    language, hearing_impaired, page_link, subtitle_id, matched_by,
-                    movie_kind, hash, movie_name, movie_release_name, movie_year, movie_imdb_id,
-                    series_season, series_episode, query_parameters, filename, encoding,
-                    movie_fps, skip_wrong_fps=self.skip_wrong_fps
+                    language, hearing_impaired, download_url, subtitle_id,
+                    'imdbid' if imdb_id else 'query',
+                    movie_kind, hash or '', movie_name, release_name, result_year, movie_imdb_id,
+                    season if is_episode else None,
+                    episode if is_episode else None,
+                    query_parameters, filename, None,
+                    fps, skip_wrong_fps=self.skip_wrong_fps
                 )
-                
-                # Set additional attributes needed for matching
-                subtitle.uploader = subtitle_item.get('UserNickName', 'anonymous')
-                
-                # For TV series, set movie_name which is used as series_name in matching
-                # The series_name property uses movie_name internally
-                if movie_kind == 'episode':
-                    if not movie_name and movie_release_name:
-                        # Extract series name from release name if movie_name is empty
-                        # e.g., "The Exchange" Bank of Tomorrow -> "The Exchange"
-                        import re
-                        series_match = re.match(r'^"([^"]+)"', movie_release_name)
-                        if series_match:
-                            subtitle.movie_name = series_match.group(1)
-                        else:
-                            # Fallback: use first part of release name
-                            subtitle.movie_name = movie_release_name.split()[0] if movie_release_name else 'Unknown'
-                    # movie_name is already set correctly from the API response
-                
-                logger.debug('Found subtitle %r by %s via scraper', subtitle, matched_by)
+
+                subtitle.uploader = sub.get('uploader', 'anonymous')
+                # Store download_url for the download step
+                subtitle.scraper_download_url = download_url
+
+                logger.debug('Found scraper subtitle: %s [%s] by %s (%d downloads)',
+                             filename, lang_2, subtitle.uploader, sub.get('download_count', 0))
                 subtitles.append(subtitle)
-                
+
             except (KeyError, ValueError, TypeError) as e:
-                logger.warning('Failed to parse subtitle item from scraper: %s', e)
+                logger.warning('Failed to parse scraper subtitle: %s', e)
                 continue
 
+        logger.info('Scraper: returning %d subtitles after filtering', len(subtitles))
         return subtitles
 
     def _download_subtitle_scraper(self, subtitle):
-        """
-        Download subtitle content from scraper service.
-        
-        Args:
-            subtitle: OpenSubtitlesSubtitle object
-        """
-        logger.info('Downloading subtitle %r via scraper', subtitle)
-        
+        """Download subtitle content via the v1 API."""
+        logger.info('Downloading subtitle %d via scraper', subtitle.subtitle_id)
+
+        download_url = getattr(subtitle, 'scraper_download_url', None)
+        if not download_url:
+            download_url = f'https://www.opensubtitles.org/en/subtitles/{subtitle.subtitle_id}'
+
         try:
-            response = self._make_scraper_request('/download', {
-                'subtitle_id': str(subtitle.subtitle_id)
+            response = self._scraper_request('/api/v1/download/subtitle', {
+                'subtitle_id': str(subtitle.subtitle_id),
+                'download_url': download_url,
             })
-            
-            if response and response.get('data'):
-                # The scraper returns base64-encoded subtitle content
-                subtitle.content = base64.b64decode(response['data'])
+
+            content = response.get('content')
+            if content:
+                subtitle.content = base64.b64decode(content)
             else:
                 raise ServiceUnavailable('No subtitle content received from scraper')
-                
+
         except APIThrottled:
             raise
-        except requests.RequestException as e:
+        except Exception as e:
             logger.error('Failed to download subtitle from scraper: %s', e)
             raise ServiceUnavailable(f'Scraper download failed: {e}')

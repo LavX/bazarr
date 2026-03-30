@@ -5,11 +5,11 @@ import requests
 import datetime
 import semver
 
-from requests.exceptions import JSONDecodeError
+from requests.exceptions import JSONDecodeError, RequestException
 
 from dogpile.cache import make_region
 
-from app.config import settings, empty_values
+from app.config import settings, empty_values, get_ssl_verify
 from constants import HEADERS
 
 region = make_region().configure('dogpile.cache.memory')
@@ -31,7 +31,7 @@ class GetRadarrInfo:
         if settings.general.use_radarr:
             try:
                 rv = f"{url_radarr()}/api/system/status?apikey={settings.radarr.apikey}"
-                radarr_json = requests.get(rv, timeout=int(settings.radarr.http_timeout), verify=False,
+                radarr_json = requests.get(rv, timeout=int(settings.radarr.http_timeout), verify=get_ssl_verify('radarr'),
                                            headers=HEADERS).json()
                 if 'version' in radarr_json:
                     radarr_version = radarr_json['version']
@@ -40,9 +40,9 @@ class GetRadarrInfo:
             except JSONDecodeError:
                 try:
                     rv = f"{url_radarr()}/api/v3/system/status?apikey={settings.radarr.apikey}"
-                    radarr_version = requests.get(rv, timeout=int(settings.radarr.http_timeout), verify=False,
+                    radarr_version = requests.get(rv, timeout=int(settings.radarr.http_timeout), verify=get_ssl_verify('radarr'),
                                                   headers=HEADERS).json()['version']
-                except JSONDecodeError:
+                except (RequestException, JSONDecodeError, KeyError):
                     logging.debug('BAZARR cannot get Radarr version')
                     radarr_version = 'unknown'
             except Exception:

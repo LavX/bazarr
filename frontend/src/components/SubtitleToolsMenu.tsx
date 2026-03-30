@@ -1,10 +1,12 @@
 import { FunctionComponent, ReactElement, useCallback, useMemo } from "react";
 import { Divider, List, Menu, MenuProps, ScrollArea } from "@mantine/core";
 import {
+  faAlignJustify,
   faClock,
   faCode,
   faDeaf,
   faExchangeAlt,
+  faEye,
   faFaceGrinStars,
   faFilm,
   faImage,
@@ -26,7 +28,9 @@ import { TranslationModal } from "@/components/forms/TranslationForm";
 import { useModals } from "@/modules/modals";
 import { ModalComponent } from "@/modules/modals/WithModal";
 import { task } from "@/modules/task";
+import { toPython } from "@/utilities";
 import { SyncSubtitleModal } from "./forms/SyncSubtitleForm";
+import { TwoPointFitModal } from "./forms/TwoPointFit";
 
 export interface ToolOptions {
   key: string;
@@ -100,6 +104,12 @@ export function useTools() {
         modal: TimeOffsetModal,
       },
       {
+        key: "two_point_fit",
+        icon: faAlignJustify,
+        name: "Two-Point Fit...",
+        modal: TwoPointFitModal,
+      },
+      {
         key: "translation",
         icon: faLanguage,
         name: "Translate...",
@@ -114,7 +124,12 @@ interface Props {
   selections: FormType.ModifySubtitle[];
   children?: ReactElement;
   menu?: Omit<MenuProps, "children">;
-  onAction?: (action: "delete" | "search") => void;
+  onAction?: (action: "delete" | "search" | "view") => void;
+  // For missing subtitle translation
+  missingLanguage?: Subtitle;
+  translationSources?: Subtitle[];
+  mediaId?: number;
+  mediaType?: "episode" | "movie";
 }
 
 const SubtitleToolsMenu: FunctionComponent<Props> = ({
@@ -122,6 +137,10 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
   children,
   menu,
   onAction,
+  missingLanguage,
+  translationSources,
+  mediaId,
+  mediaType,
 }) => {
   const { mutateAsync } = useSubtitleAction();
 
@@ -146,30 +165,83 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
   const modals = useModals();
 
   const disabledTools = selections.length === 0;
+  const isMissing = !!missingLanguage;
+  const hasSources = (translationSources ?? []).length > 0;
 
   return (
     <Menu withArrow withinPortal position="left-end" {...menu}>
       <Menu.Target>{children}</Menu.Target>
       <Menu.Dropdown>
         <Menu.Label>Tools</Menu.Label>
-        {tools.map((tool) => (
-          <Menu.Item
-            key={tool.key}
-            disabled={disabledTools}
-            leftSection={<FontAwesomeIcon icon={tool.icon}></FontAwesomeIcon>}
-            onClick={() => {
-              if (tool.modal) {
-                modals.openContextModal(tool.modal, { selections });
-              } else {
-                process(tool.key, tool.name);
-              }
-            }}
-          >
-            {tool.name}
-          </Menu.Item>
-        ))}
+        {tools.map((tool) => {
+          // "Translate" for missing subs: show as submenu with source options
+          if (tool.key === "translation" && isMissing) {
+            return null; // handled below in Actions
+          }
+
+          return (
+            <Menu.Item
+              key={tool.key}
+              disabled={disabledTools}
+              leftSection={<FontAwesomeIcon icon={tool.icon}></FontAwesomeIcon>}
+              onClick={() => {
+                if (tool.modal) {
+                  modals.openContextModal(tool.modal, { selections });
+                } else {
+                  process(tool.key, tool.name);
+                }
+              }}
+            >
+              {tool.name}
+            </Menu.Item>
+          );
+        })}
         <Divider></Divider>
         <Menu.Label>Actions</Menu.Label>
+        {/* Translate from source — for missing subtitles */}
+        {isMissing && hasSources && (
+          <>
+            {translationSources!.map((source) => (
+              <Menu.Item
+                key={`translate-${source.path}`}
+                leftSection={<FontAwesomeIcon icon={faLanguage} />}
+                onClick={async () => {
+                  await mutateAsync({
+                    action: "translate",
+                    form: {
+                      id: mediaId!,
+                      type: mediaType!,
+                      language: missingLanguage.code2,
+                      path: source.path!,
+                      forced: toPython(missingLanguage.forced),
+                      hi: toPython(missingLanguage.hi),
+                    },
+                  });
+                }}
+              >
+                Translate from {source.name || source.code2}
+                {source.hi ? " (HI)" : ""}
+              </Menu.Item>
+            ))}
+          </>
+        )}
+        {isMissing && !hasSources && (
+          <Menu.Item
+            disabled
+            leftSection={<FontAwesomeIcon icon={faLanguage} />}
+          >
+            No source subtitles to translate from
+          </Menu.Item>
+        )}
+        <Menu.Item
+          disabled={selections.length === 0 || onAction === undefined}
+          leftSection={<FontAwesomeIcon icon={faEye}></FontAwesomeIcon>}
+          onClick={() => {
+            onAction?.("view");
+          }}
+        >
+          View
+        </Menu.Item>
         <Menu.Item
           disabled={selections.length !== 0 || onAction === undefined}
           leftSection={<FontAwesomeIcon icon={faSearch}></FontAwesomeIcon>}

@@ -54,8 +54,8 @@ class Server(base_server.BaseServer):
     :param cors_allowed_origins: Origin or list of origins that are allowed to
                                  connect to this server. Only the same origin
                                  is allowed by default. Set this argument to
-                                 ``'*'`` to allow all origins, or to ``[]`` to
-                                 disable CORS handling.
+                                 ``'*'`` or ``['*']`` to allow all origins, or
+                                 to ``[]`` to disable CORS handling.
     :param cors_credentials: Whether credentials (cookies, authentication) are
                              allowed in requests to this server. The default
                              is ``True``.
@@ -63,10 +63,11 @@ class Server(base_server.BaseServer):
                    use. To disable logging set to ``False``. The default is
                    ``False``. Note that fatal errors are logged even when
                    ``logger`` is ``False``.
-    :param json: An alternative json module to use for encoding and decoding
-                 packets. Custom json modules must have ``dumps`` and ``loads``
+    :param json: An alternative JSON module to use for encoding and decoding
+                 packets. Custom JSON modules must have ``dumps`` and ``loads``
                  functions that are compatible with the standard library
-                 versions.
+                 versions. This is a process-wide setting, all instantiated
+                 servers and clients must use the same JSON module.
     :param async_handlers: If set to ``True``, run message event handlers in
                            non-blocking threads. To run handlers synchronously,
                            set to ``False``. The default is ``True``.

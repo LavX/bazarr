@@ -80,6 +80,7 @@ declare namespace Settings {
     use_scenename: boolean;
     use_sonarr: boolean;
     utf8_encode: boolean;
+    provider_priorities?: string;
     wanted_search_frequency: number;
     wanted_search_frequency_movie: number;
     use_external_webhook?: boolean;
@@ -176,8 +177,9 @@ declare namespace Settings {
 
   interface Translator {
     default_score: number;
-    gemini_key: string;
+    gemini_keys: string[];
     gemini_model: string;
+    gemini_batch_size: number;
     lingarr_url: string;
     lingarr_token: string;
     translator_info: boolean;

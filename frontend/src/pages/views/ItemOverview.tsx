@@ -35,6 +35,7 @@ import {
   useLanguageProfileBy,
   useProfileItemsToLanguages,
 } from "@/utilities/languages";
+import classes from "./ItemOverview.module.scss";
 
 interface Props {
   item: Item.Base | null;
@@ -137,68 +138,71 @@ const ItemOverview: FunctionComponent<Props> = (props) => {
   }, [profile, profileItems]);
 
   return (
-    <BackgroundImage src={item?.fanart ?? ""}>
-      <Grid
-        align="flex-start"
-        grow
-        gutter="xs"
-        p={24}
-        m={0}
-        style={{
-          backgroundColor: "rgba(0,0,0,0.7)",
-        }}
-        styles={{
-          inner: { flexWrap: "nowrap" },
-        }}
-      >
-        <Grid.Col span={1} visibleFrom="sm">
-          <Image src={item?.poster} mx="auto" maw="250px"></Image>
-        </Grid.Col>
-        <Grid.Col span={8} maw="100%" style={{ overflow: "hidden" }}>
-          <Stack align="flex-start" gap="xs" mx={6}>
-            <Group align="flex-start" wrap="nowrap" maw="100%">
-              <Title my={0}>
-                <Text inherit c="white">
-                  <Box component="span" mr={12}>
-                    <FontAwesomeIcon
-                      title={item?.monitored ? "monitored" : "unmonitored"}
-                      icon={item?.monitored ? faBookmark : farBookmark}
-                    ></FontAwesomeIcon>
-                  </Box>
-                  {item?.title}
-                </Text>
-              </Title>
-              <HoverCard position="bottom" withArrow>
-                <HoverCard.Target>
-                  <Text hidden={item?.alternativeTitles.length === 0} c="white">
-                    <FontAwesomeIcon icon={faClone} />
+    <div className={classes.fanartWrapper}>
+      <BackgroundImage src={item?.fanart ?? ""}>
+        <Grid
+          align="flex-start"
+          grow
+          gutter="xs"
+          p={24}
+          m={0}
+          className={classes.fanartOverlay}
+          styles={{
+            inner: { flexWrap: "nowrap" },
+          }}
+        >
+          <Grid.Col span={1} visibleFrom="sm">
+            <Image src={item?.poster} mx="auto" maw="250px"></Image>
+          </Grid.Col>
+          <Grid.Col span={8} maw="100%" style={{ overflow: "hidden" }}>
+            <Stack align="flex-start" gap="xs" mx={6}>
+              <Group align="flex-start" wrap="nowrap" maw="100%">
+                <Title my={0}>
+                  <Text inherit c="white">
+                    <Box component="span" mr={12}>
+                      <FontAwesomeIcon
+                        title={item?.monitored ? "monitored" : "unmonitored"}
+                        icon={item?.monitored ? faBookmark : farBookmark}
+                      ></FontAwesomeIcon>
+                    </Box>
+                    {item?.title}
                   </Text>
-                </HoverCard.Target>
-                <HoverCard.Dropdown>
-                  <List>
-                    {item?.alternativeTitles.map((v, idx) => (
-                      <List.Item key={BuildKey(idx, v)}>{v}</List.Item>
-                    ))}
-                  </List>
-                </HoverCard.Dropdown>
-              </HoverCard>
-            </Group>
-            <Group gap="xs" maw="100%">
-              {detailBadges}
-            </Group>
-            <Group gap="xs" maw="100%">
-              {audioBadges}
-            </Group>
-            <Group gap="xs" maw="100%">
-              {languageBadges}
-            </Group>
-            <Text size="sm" c="white">
-              {item?.overview}
-            </Text>
-          </Stack>
-        </Grid.Col>
-      </Grid>
-    </BackgroundImage>
+                </Title>
+                <HoverCard position="bottom" withArrow>
+                  <HoverCard.Target>
+                    <Text
+                      hidden={item?.alternativeTitles.length === 0}
+                      c="white"
+                    >
+                      <FontAwesomeIcon icon={faClone} />
+                    </Text>
+                  </HoverCard.Target>
+                  <HoverCard.Dropdown>
+                    <List>
+                      {item?.alternativeTitles.map((v, idx) => (
+                        <List.Item key={BuildKey(idx, v)}>{v}</List.Item>
+                      ))}
+                    </List>
+                  </HoverCard.Dropdown>
+                </HoverCard>
+              </Group>
+              <Group gap="xs" maw="100%">
+                {detailBadges}
+              </Group>
+              <Group gap="xs" maw="100%">
+                {audioBadges}
+              </Group>
+              <Group gap="xs" maw="100%">
+                {languageBadges}
+              </Group>
+              <Text size="sm" c="white">
+                {item?.overview}
+              </Text>
+            </Stack>
+          </Grid.Col>
+        </Grid>
+      </BackgroundImage>
+    </div>
   );
 };
 

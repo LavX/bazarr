@@ -10,7 +10,9 @@ class TooManyRequests(ProviderError):
 
 
 class APIThrottled(ProviderError):
-    pass
+    def __init__(self, *args, retry_after=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.retry_after = retry_after
 
 
 class ForbiddenError(ProviderError):

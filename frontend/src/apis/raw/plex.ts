@@ -11,10 +11,10 @@ class NewPlexApi extends BaseApi {
     return response.data;
   }
 
-  async checkPin(pinId: string) {
-    // TODO: Can this be replaced with params instead of passing a variable in the path?
+  async checkPin(pinId: string, state?: string) {
     const response = await this.get<DataWrapper<Plex.PinCheckResult>>(
       `/oauth/pin/${pinId}/check`,
+      state ? { state } : undefined,
     );
 
     return response.data;

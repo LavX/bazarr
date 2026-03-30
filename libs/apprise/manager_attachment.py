@@ -1,8 +1,7 @@
-# -*- coding: utf-8 -*-
 # BSD 2-Clause License
 #
 # Apprise - Push Notification Library.
-# Copyright (c) 2025, Chris Caron <lead2gold@gmail.com>
+# Copyright (c) 2026, Chris Caron <lead2gold@gmail.com>
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -26,34 +25,32 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
+from os.path import abspath, dirname, join
 import re
-from os.path import dirname
-from os.path import abspath
-from os.path import join
+
 from .manager import PluginManager
 
 
 class AttachmentManager(PluginManager):
-    """
-    Designed to be a singleton object to maintain all initialized
-    attachment plugins/modules in memory.
-    """
+    """Designed to be a singleton object to maintain all initialized attachment
+    plugins/modules in memory."""
 
     # Description (used for logging)
-    name = 'Attachment Plugin'
+    name = "Attachment Plugin"
 
     # Filename Prefix to filter on
-    fname_prefix = 'Attach'
+    fname_prefix = "Attach"
 
     # Memory Space
-    _id = 'attachment'
+    _id = "attachment"
 
     # Our Module Python path name
-    module_name_prefix = f'apprise.{_id}'
+    module_name_prefix = f"apprise.{_id}"
 
     # The module path to scan
     module_path = join(abspath(dirname(__file__)), _id)
 
     # For filtering our result set
     module_filter_re = re.compile(
-        r'^(?P<name>' + fname_prefix + r'(?!Base)[A-Za-z0-9]+)$')
+        r"^(?P<name>" + fname_prefix + r"(?!Base)[A-Za-z0-9]+)$"
+    )

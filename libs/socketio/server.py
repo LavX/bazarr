@@ -30,10 +30,11 @@ class Server(base_server.BaseServer):
                        of the ``encode()`` and ``decode()`` methods can be
                        provided. Client and server must use compatible
                        serializers.
-    :param json: An alternative json module to use for encoding and decoding
+    :param json: An alternative JSON module to use for encoding and decoding
                  packets. Custom json modules must have ``dumps`` and ``loads``
                  functions that are compatible with the standard library
-                 versions.
+                 versions. This is a process-wide setting, all instantiated
+                 servers and clients must use the same JSON module.
     :param async_handlers: If set to ``True``, event handlers for a client are
                            executed in separate threads. To run handlers for a
                            client synchronously, set to ``False``. The default
@@ -542,6 +543,9 @@ class Server(base_server.BaseServer):
                         'connect', namespace, sid, self.environ[eio_sid], None)
         except exceptions.ConnectionRefusedError as exc:
             fail_reason = exc.error_args
+            success = False
+        except ConnectionRefusedError:
+            fail_reason = {"message": "Connection refused by server"}
             success = False
 
         if success is False:

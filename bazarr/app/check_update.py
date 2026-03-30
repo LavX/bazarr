@@ -17,63 +17,103 @@ from app.config import settings
 
 # Fork configuration - allows overriding via environment variable
 # Default: LavX/bazarr (this fork)
-# To use upstream releases, set BAZARR_UPSTREAM_REPO=morpheus65535/Bazarr
+# To use upstream releases, set BAZARR_RELEASES_REPO to the upstream repo
 RELEASES_REPO = os.environ.get('BAZARR_RELEASES_REPO', 'LavX/bazarr')
+
+# Microservice repositories to include in releases page
+MICROSERVICE_REPOS = [
+    ('LavX/opensubtitles-scraper', 'OpenSubtitles Scraper'),
+    ('LavX/ai-subtitle-translator', 'AI Subtitle Translator'),
+]
 
 
 def deprecated_python_version():
     # return True if Python version is deprecated
-    return sys.version_info.major == 2 or (sys.version_info.major == 3 and sys.version_info.minor < 8)
+    return sys.version_info.major == 2 or (sys.version_info.major == 3 and sys.version_info.minor < 10)
 
 
-def check_releases(job_id=None, startup=False):
-    # startup is used to prevent trying to create a job before the jobs queue is initialized
-    if not startup and not job_id:
-        jobs_queue.add_job_from_function("Updating Release Info", is_progress=False)
-        return
-
+def _fetch_repo_releases(repo, label=None):
+    """Fetch releases from a single GitHub repo. Returns list of release dicts."""
     releases = []
-    url_releases = f'https://api.github.com/repos/{RELEASES_REPO}/releases?per_page=100'
+    url = f'https://api.github.com/repos/{repo}/releases?per_page=100'
     try:
-        logging.debug(f'BAZARR getting releases from Github: {url_releases}')
-        r = requests.get(url_releases, allow_redirects=True, timeout=15)
+        logging.debug(f'BAZARR getting releases from Github: {url}')
+        r = requests.get(url, allow_redirects=True, timeout=15)
         r.raise_for_status()
     except requests.exceptions.HTTPError:
-        logging.exception("Error trying to get releases from Github. Http error.")
+        logging.exception(f"Error trying to get releases from Github ({repo}). Http error.")
     except requests.exceptions.ConnectionError:
-        logging.exception("Error trying to get releases from Github. Connection Error.")
+        logging.exception(f"Error trying to get releases from Github ({repo}). Connection Error.")
     except requests.exceptions.Timeout:
-        logging.exception("Error trying to get releases from Github. Timeout Error.")
+        logging.exception(f"Error trying to get releases from Github ({repo}). Timeout Error.")
     except requests.exceptions.RequestException:
-        logging.exception("Error trying to get releases from Github.")
+        logging.exception(f"Error trying to get releases from Github ({repo}).")
     else:
-        for release in r.json():
+        try:
+            releases_data = r.json()
+        except ValueError:
+            logging.error(f"Error parsing JSON from Github releases response ({repo}). Skipping.")
+            return releases
+        for release in releases_data:
             download_link = None
-            for asset in release['assets']:
-                if asset['name'] == 'bazarr.zip':
-                    download_link = asset['browser_download_url']
-            if not download_link:
-                continue
-            releases.append({'name': release['name'],
-                             'body': release['body'],
-                             'date': release['published_at'],
-                             'prerelease': release['prerelease'],
-                             'download_link': download_link})
-        with open(os.path.join(args.config_dir, 'config', 'releases.txt'), 'w') as f:
-            json.dump(releases, f)
-        logging.debug(f'BAZARR saved {len(r.json())} releases to releases.txt')
-    finally:
-        if not startup:
-            jobs_queue.update_job_name(job_id=job_id, new_job_name="Updated Release Info")
+            for asset in release.get('assets', []):
+                download_link = asset['browser_download_url']
+                break
+            entry = {'name': release['name'],
+                     'body': release['body'] or '',
+                     'date': release['published_at'],
+                     'prerelease': release['prerelease'],
+                     'download_link': download_link}
+            if label:
+                entry['repo'] = label
+            releases.append(entry)
+        logging.debug(f'BAZARR fetched {len(releases)} releases from {repo}')
+    return releases
 
 
-def check_if_new_update():
+def check_releases(job_id=None, startup=False, wait_for_completion=False):
+    # startup is used to prevent trying to create a job before the jobs queue is initialized
+    if not startup and not job_id:
+        jobs_queue.add_job_from_function("Updating Release Info", is_progress=False,
+                                         wait_for_completion=wait_for_completion)
+        return
+
+    releases = _fetch_repo_releases(RELEASES_REPO, label='Bazarr+')
+
+    for repo, label in MICROSERVICE_REPOS:
+        releases.extend(_fetch_repo_releases(repo, label=label))
+
+    releases.sort(key=lambda r: r['date'], reverse=True)
+
+    with open(os.path.join(args.config_dir, 'config', 'releases.txt'), 'w') as f:
+        json.dump(releases, f)
+    logging.debug(f'BAZARR saved {len(releases)} releases to releases.txt')
+
+    if job_id:
+        jobs_queue.update_job_name(job_id=job_id, new_job_name="Updated Release Info")
+
+
+def check_if_new_update(startup=False, job_id=None, wait_for_completion=False):
+    if not startup and not job_id:
+        jobs_queue.add_job_from_function("Checking for Bazarr update", is_progress=False,
+                                         wait_for_completion=wait_for_completion)
+        return
+
+    # Skip auto-update when running from source (no BAZARR_VERSION set)
+    bazarr_version = os.environ.get("BAZARR_VERSION", "")
+    if not bazarr_version:
+        logging.debug('BAZARR running from source, skipping auto-update')
+        check_releases(startup=True)
+        return
+
     if settings.general.branch == 'master':
         use_prerelease = False
     elif settings.general.branch == 'development':
         use_prerelease = True
     else:
         logging.error(f'BAZARR unknown branch provided to updater: {settings.general.branch}')
+        if job_id:
+            jobs_queue.update_job_name(job_id=job_id, new_job_name="Failed to check for Bazarr update")
         return
     logging.debug(f'BAZARR updater is using {settings.general.branch} branch')
 
@@ -128,9 +168,14 @@ def check_if_new_update():
             logging.debug('BAZARR no release found')
     else:
         logging.debug('BAZARR --no_update have been used as an argument')
+    if job_id:
+        jobs_queue.update_job_name(job_id=job_id, new_job_name="Checked for Bazarr update")
 
 
 def download_release(url):
+    if not url:
+        logging.debug('BAZARR release has no download URL, skipping update')
+        return
     r = None
     update_dir = os.path.join(args.config_dir, 'update')
     try:
@@ -139,7 +184,7 @@ def download_release(url):
         logging.debug(f'BAZARR unable to create update directory {update_dir}')
     else:
         logging.debug(f'BAZARR downloading release from Github: {url}')
-        r = requests.get(url, allow_redirects=True)
+        r = requests.get(url, allow_redirects=True, timeout=300)
     if r:
         try:
             with open(os.path.join(update_dir, 'bazarr.zip'), 'wb') as f:

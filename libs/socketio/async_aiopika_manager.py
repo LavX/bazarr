@@ -1,5 +1,4 @@
 import asyncio
-import pickle
 
 from .async_pubsub_manager import AsyncPubSubManager
 
@@ -32,23 +31,34 @@ class AsyncAioPikaManager(AsyncPubSubManager):  # pragma: no cover
                     in rabbitmq
     :param write_only: If set to ``True``, only initialize to emit events. The
                        default of ``False`` initializes the class for emitting
-                       and receiving.
+                       and receiving. A write-only instance can be used
+                       independently of the server to emit to clients from an
+                       external process.
+    :param logger: a custom logger to log it. If not given, the server logger
+                   is used.
+    :param json: An alternative JSON module to use for encoding and decoding
+                 packets. Custom json modules must have ``dumps`` and ``loads``
+                 functions that are compatible with the standard library
+                 versions. This setting is only used when ``write_only`` is set
+                 to ``True``. Otherwise the JSON module configured in the
+                 server is used.
     """
 
     name = 'asyncaiopika'
 
     def __init__(self, url='amqp://guest:guest@localhost:5672//',
-                 channel='socketio', write_only=False, logger=None):
+                 channel='socketio', write_only=False, logger=None, json=None):
         if aio_pika is None:
             raise RuntimeError('aio_pika package is not installed '
                                '(Run "pip install aio_pika" in your '
                                'virtualenv).')
+        super().__init__(channel=channel, write_only=write_only, logger=logger,
+                         json=json)
         self.url = url
         self._lock = asyncio.Lock()
         self.publisher_connection = None
         self.publisher_channel = None
         self.publisher_exchange = None
-        super().__init__(channel=channel, write_only=write_only, logger=logger)
 
     async def _connection(self):
         return await aio_pika.connect_robust(self.url)
@@ -82,7 +92,7 @@ class AsyncAioPikaManager(AsyncPubSubManager):  # pragma: no cover
             try:
                 await self.publisher_exchange.publish(
                     aio_pika.Message(
-                        body=pickle.dumps(data),
+                        body=self.json.dumps(data).encode(),
                         delivery_mode=aio_pika.DeliveryMode.PERSISTENT
                     ), routing_key='*',
                 )
@@ -101,26 +111,26 @@ class AsyncAioPikaManager(AsyncPubSubManager):  # pragma: no cover
                 raise asyncio.CancelledError()
 
     async def _listen(self):
-        async with (await self._connection()) as connection:
-            channel = await self._channel(connection)
-            await channel.set_qos(prefetch_count=1)
-            exchange = await self._exchange(channel)
-            queue = await self._queue(channel, exchange)
+        retry_sleep = 1
+        while True:
+            try:
+                async with (await self._connection()) as connection:
+                    channel = await self._channel(connection)
+                    await channel.set_qos(prefetch_count=1)
+                    exchange = await self._exchange(channel)
+                    queue = await self._queue(channel, exchange)
 
-            retry_sleep = 1
-            while True:
-                try:
                     async with queue.iterator() as queue_iter:
                         async for message in queue_iter:
                             async with message.process():
-                                yield pickle.loads(message.body)
+                                yield message.body
                                 retry_sleep = 1
-                except aio_pika.AMQPException:
-                    self._get_logger().error(
-                        'Cannot receive from rabbitmq... '
-                        'retrying in {} secs'.format(retry_sleep))
-                    await asyncio.sleep(retry_sleep)
-                    retry_sleep = min(retry_sleep * 2, 60)
-                except aio_pika.exceptions.ChannelInvalidStateError:
-                    # aio_pika raises this exception when the task is cancelled
-                    raise asyncio.CancelledError()
+            except aio_pika.AMQPException:
+                self._get_logger().error(
+                    'Cannot receive from rabbitmq... '
+                    'retrying in {} secs'.format(retry_sleep))
+                await asyncio.sleep(retry_sleep)
+                retry_sleep = min(retry_sleep * 2, 60)
+            except aio_pika.exceptions.ChannelInvalidStateError:
+                # aio_pika raises this exception when the task is cancelled
+                raise asyncio.CancelledError()

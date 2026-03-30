@@ -1,6 +1,8 @@
 # coding=utf-8
 
 import ast
+import hmac
+import logging
 
 from functools import wraps
 from flask import request, abort
@@ -16,17 +18,32 @@ None_Keys = ['null', 'undefined', '', None]
 False_Keys = ['False', 'false', '0']
 
 
+def _safe_apikey_compare(provided, expected):
+    if not provided:
+        return False
+    return hmac.compare_digest(str(provided), str(expected))
+
+
 def authenticate(actual_method):
     @wraps(actual_method)
     def wrapper(*args, **kwargs):
         apikey_settings = settings.auth.apikey
+        apikey_header = request.headers.get('X-API-KEY')
+
+        if _safe_apikey_compare(apikey_header, apikey_settings):
+            return actual_method(*args, **kwargs)
+
+        # Legacy: accept API key from query string or form data with deprecation warning
+        # Suppress warning for webhook endpoints (Plex webhooks use ?apikey= in callback URLs)
         apikey_get = request.args.get('apikey')
         apikey_post = request.form.get('apikey')
-        apikey_header = None
-        if 'X-API-KEY' in request.headers:
-            apikey_header = request.headers['X-API-KEY']
-
-        if apikey_settings in [apikey_get, apikey_post, apikey_header]:
+        if _safe_apikey_compare(apikey_get, apikey_settings) or _safe_apikey_compare(apikey_post, apikey_settings):
+            if '/webhooks/' not in request.path:
+                logging.warning(
+                    'API key passed via query string or form data is deprecated. '
+                    'Use the X-API-KEY header instead. '
+                    'Endpoint: %s %s', request.method, request.path
+                )
             return actual_method(*args, **kwargs)
 
         return abort(401)

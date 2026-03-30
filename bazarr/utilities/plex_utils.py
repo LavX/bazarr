@@ -2,7 +2,7 @@
 
 import logging
 import requests
-from app.config import settings
+from app.config import settings, get_ssl_verify
 
 
 def get_plex_libraries_with_paths():
@@ -30,7 +30,7 @@ def get_plex_libraries_with_paths():
             f"{server_url}/library/sections",
             headers={'X-Plex-Token': decrypted_token, 'Accept': 'application/json'},
             timeout=5,
-            verify=False
+            verify=get_ssl_verify('plex')
         )
         
         if response.status_code != 200:
@@ -73,7 +73,7 @@ def _get_library_locations(server_url, section_key, token):
             f"{server_url}/library/sections/{section_key}",
             headers={'X-Plex-Token': token, 'Accept': 'application/json'},
             timeout=5,
-            verify=False
+            verify=get_ssl_verify('plex')
         )
         
         if response.status_code == 200:

@@ -11,6 +11,7 @@ import {
   Row,
 } from "@tanstack/react-table";
 import SimpleTable, { SimpleTableProps } from "@/components/tables/SimpleTable";
+import styles from "@/components/tables/BaseTable.module.scss";
 
 function renderCell<T extends object = object>(
   cell: Cell<T, unknown>,
@@ -35,7 +36,11 @@ function renderRow<T extends object>(row: Row<T>) {
       const rotation = row.getIsExpanded() ? 90 : undefined;
 
       return (
-        <Table.Tr key={row.id} style={{ cursor: "pointer" }}>
+        <Table.Tr
+          key={row.id}
+          className={styles.groupRow}
+          style={{ cursor: "pointer" }}
+        >
           <Table.Td key={cell.id} colSpan={row.getVisibleCells().length}>
             <Text p={2} onClick={() => row.toggleExpanded()}>
               {flexRender(cell.column.columnDef.cell, cell.getContext())}

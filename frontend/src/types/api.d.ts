@@ -269,6 +269,7 @@ declare namespace Plex {
     pinId: string;
     code: string;
     clientId: string;
+    state: string;
     authUrl: string;
   }
 
@@ -388,13 +389,35 @@ interface ReleaseInfo {
   date: string;
   name: string;
   prerelease: boolean;
-  body: string[];
+  body: string | string[];
+  repo?: string;
 }
 
 interface SubtitleInfo {
   filename: string;
   episode: number;
   season: number;
+}
+
+declare namespace SubtitleContents {
+  interface LineTime {
+    hours: number;
+    minutes: number;
+    seconds: number;
+    total_seconds: number;
+    microseconds: number;
+  }
+
+  interface Line {
+    index: number;
+    content: string;
+    proprietary: string;
+    start: LineTime;
+    end: LineTime;
+    // duration: LineTime;
+  }
+
+  // interface Contents extends Array<Line> {}
 }
 
 type ItemSearchResult = Partial<SeriesIdType> &

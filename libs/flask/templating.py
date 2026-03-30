@@ -22,8 +22,8 @@ if t.TYPE_CHECKING:  # pragma: no cover
 
 
 def _default_template_ctx_processor() -> dict[str, t.Any]:
-    """Default template context processor.  Injects `request`,
-    `session` and `g`.
+    """Default template context processor.  Replaces the ``request`` and ``g``
+    proxies with their concrete objects for faster access.
     """
     appctx = _cv_app.get(None)
     reqctx = _cv_request.get(None)
@@ -32,12 +32,13 @@ def _default_template_ctx_processor() -> dict[str, t.Any]:
         rv["g"] = appctx.g
     if reqctx is not None:
         rv["request"] = reqctx.request
-        rv["session"] = reqctx.session
+        # The session proxy cannot be replaced, accessing it gets
+        # RequestContext.session, which sets session.accessed.
     return rv
 
 
 class Environment(BaseEnvironment):
-    """Works like a regular Jinja2 environment but has some additional
+    """Works like a regular Jinja environment but has some additional
     knowledge of how Flask's blueprint works so that it can prepend the
     name of the blueprint to referenced templates if necessary.
     """

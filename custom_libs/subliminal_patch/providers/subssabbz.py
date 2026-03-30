@@ -6,12 +6,13 @@ import io
 import os
 import codecs
 import unicodedata
+import time
 from hashlib import sha1
 from random import randint
 from bs4 import BeautifulSoup
 from zipfile import ZipFile, is_zipfile
 from rarfile import RarFile, is_rarfile
-from requests import Session
+from requests import Session, HTTPError
 from guessit import guessit
 from dogpile.cache.api import NO_VALUE
 from subliminal_patch.providers import Provider
@@ -49,6 +50,27 @@ def fix_tv_naming(title):
 def fix_movie_naming(title):
     return fix_inconsistent_naming(title, {"Back to the Future Part": "Back to the Future",
                                            }, True)
+
+
+def _retry_on_403(method):
+    def retry(self, *args, **kwargs):
+        retries = 0
+        while 3 > retries:
+            try:
+                return method(self, *args, **kwargs)
+            except HTTPError as error:
+                if error.response.status_code != 403:
+                    raise
+
+                retries += 1
+
+                logger.debug("403 returned. Retrying in 10 seconds")
+                time.sleep(10)
+
+        logger.debug("Retries limit exceeded. Ignoring query")
+        return []
+
+    return retry
 
 
 class SubsSabBzSubtitle(Subtitle):
@@ -140,6 +162,7 @@ class SubsSabBzProvider(Provider):
     def terminate(self):
         self.session.close()
 
+    @_retry_on_403
     def query(self, language, video):
         subtitles = []
         isEpisode = isinstance(video, Episode)

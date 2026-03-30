@@ -1,45 +1,120 @@
-# How to Contribute
+# Contributing to Bazarr+
 
 ## Tools required
 
-- Python 3.8.x to 3.12.x (3.10.x is highly recommended and 3.13 or greater is proscribed).
-- Pycharm or Visual Studio code IDE are recommended but if you're happy with VIM, enjoy it!
-- Git.
-- UI testing must be done using Chrome latest version.
-
-## Warning
-
-As we're using Git in the development process, you better disable automatic update of Bazarr in UI or you may get your changes overwritten. Alternatively, you can completely disable the update module by running Bazarr with `--no-update` command line argument.
+- Python 3.12+ (3.14 recommended, matches Docker image)
+- Node.js (version in `frontend/.nvmrc`)
+- Git
+- Docker and Docker Compose (for integration testing)
+- UI testing should be done in Chrome latest version
 
 ## Branching
 
-### Basic rules
+### Branch model
 
-- `master` contains only stable releases (which have been merged to `master`) and is intended for end-users.
-- `development` is the target for testing (around 10% of users) and is not intended for end-users looking for stability.
-- `feature` is a temporary feature branch based on `development`.
+- `master` contains stable releases, tagged with semver versions (e.g., `v2.0.0`, `v2.1.0`)
+- `development` is the integration branch where upstream merges and new features land
+- Feature branches are created from `development` and merged back via PR
 
-### Conditions
+### Rules
 
-- `master` is not merged back to `development`.
-- `development` is not re-based on `master`.
-- all `feature` branches are branched from `development` only.
-- Bugfixes created specifically for a feature branch are done there (because they are specific, they're not cherry-picked to `development`).
-- We will not release a patch (1.0.x) if a newer minor (1.x.0) has already been released. We only go forward.
+- `master` is not merged back to `development`
+- All feature branches are branched from `development`
+- Cherry-picked upstream fixes go into `development` first, never directly to `master`
 
-## Typical contribution workflow
+## Upstream relationship
 
-### Community devs
+Bazarr+ is a hard fork of [upstream Bazarr](https://github.com/morpheus65535/bazarr). There is no automatic synchronization. Bug fixes from upstream may be cherry-picked selectively when relevant, but upstream releases are not merged wholesale.
 
-- Fork the repository or pull the latest changes if you already have forked it.
-- Checkout `development` branch.
-- Make the desired changes.
-- Submit a PR to Bazarr `development` branch.
-- Once reviewed, your PR will be merged using Squash and Merge with a meaningful commit message matching our standards.
+## Contribution workflow
 
-### Official devs team
+1. Fork the repository
+2. Create a feature branch from `development`
+3. Make your changes
+4. Write or update tests for your changes
+5. Run linting and tests, verify they pass
+6. Submit a PR targeting the `development` branch
 
-- All commits must have a meaningful commit message (ex.: Fixed issue with this, Improved process abc, Added input field to UI, etc.).
-- Fixes can be made directly to `development` branch but keep in mind that a pre-release with a beta versioning will be created every day a new push is made.
-- Features must be developed in dedicated feature branch and merged back to `development` branch using PR.
-- Once reviewed, your PR will be merged by morpheus65535 using Squash and Merge with a meaningful message.
+For major changes, open an issue first to discuss the approach.
+
+## Linting
+
+All frontend code must pass ESLint before submitting a PR.
+
+```bash
+cd frontend
+
+# Check for lint errors
+npm run check
+
+# Auto-fix import sorting and formatting
+npx eslint --fix --ext .ts,.tsx src/
+```
+
+Fix all errors before submitting. Warnings should be addressed when practical.
+
+## Testing
+
+PRs should include tests when the change is testable. We use:
+
+- **Backend:** pytest for Python tests
+- **Frontend:** Vitest for React component and page tests
+
+```bash
+# Run backend tests
+pytest tests/
+
+# Run frontend tests
+cd frontend
+npm test
+
+# Run a specific test file
+npm test -- Translator
+```
+
+When to include tests:
+- New features: add tests covering the core behavior
+- Bug fixes: add a test that reproduces the bug and verifies the fix
+- Refactors: ensure existing tests still pass, add tests if coverage gaps exist
+
+When tests are optional:
+- Pure styling/CSS changes
+- Documentation updates
+- Config file changes
+
+## Commit messages
+
+Use conventional commit style:
+
+```
+feat(translator): add batch retry for failed jobs
+fix(ui): search field not clearing on page change
+refactor(scraper): simplify response parsing
+```
+
+## Submodules
+
+Bazarr+ includes two submodules:
+- `opensubtitles-scraper` - OpenSubtitles.org web scraper service
+- `ai-subtitle-translator` - AI-powered subtitle translator
+
+Changes to these should be submitted to their respective repositories:
+- [LavX/opensubtitles-scraper](https://github.com/LavX/opensubtitles-scraper)
+- [LavX/ai-subtitle-translator](https://github.com/LavX/ai-subtitle-translator)
+
+## Running locally
+
+```bash
+# Clone with submodules
+git clone --recursive https://github.com/LavX/bazarr.git
+cd bazarr
+
+# Backend
+pip install -r requirements.txt
+python bazarr.py --no-update --config ./config
+
+# Frontend (separate terminal)
+cd frontend
+npm ci
+npm start
+```

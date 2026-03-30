@@ -87,6 +87,8 @@ else:
     def set_sqlite_pragma(dbapi_connection, connection_record):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
         cursor.close()
 
 session_factory = sessionmaker(bind=engine)
@@ -188,6 +190,7 @@ class TableHistory(Base):
     language = mapped_column(Text)
     provider = mapped_column(Text)
     score = mapped_column(Integer)
+    score_out_of = mapped_column(Integer, nullable=True)
     sonarrEpisodeId = mapped_column(Integer, ForeignKey('table_episodes.sonarrEpisodeId', ondelete='CASCADE'))
     sonarrSeriesId = mapped_column(Integer, ForeignKey('table_shows.sonarrSeriesId', ondelete='CASCADE'))
     subs_id = mapped_column(Text)
@@ -209,6 +212,7 @@ class TableHistoryMovie(Base):
     provider = mapped_column(Text)
     radarrId = mapped_column(Integer, ForeignKey('table_movies.radarrId', ondelete='CASCADE'))
     score = mapped_column(Integer)
+    score_out_of = mapped_column(Integer, nullable=True)
     subs_id = mapped_column(Text)
     subtitles_path = mapped_column(Text)
     timestamp = mapped_column(DateTime, nullable=False, default=datetime.now)

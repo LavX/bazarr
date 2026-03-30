@@ -15,10 +15,6 @@ on:
         options:
           - master
           - development
-          - feature/audio-display-with-filter
-          - python_3_14
-          - ai_translate
-          - no_telemetry
         default: 'master'
       
       build_type:
@@ -33,7 +29,7 @@ on:
         default: 'dev'
       
       version_tag:
-        description: 'Version tag (e.g., v1.5.3) - used for release builds'
+        description: 'Version tag (e.g., v2.0.0) - used for release builds'
         required: false
         default: ''
         type: string
@@ -60,82 +56,11 @@ on:
           - linux/arm64
         default: 'linux/amd64,linux/arm64'
       
-      skip_scraper:
-        description: 'Skip building scraper image'
-        required: false
-        type: boolean
-        default: false
-
 env:
   REGISTRY: ghcr.io
-  # Note: IMAGE_NAME and SCRAPER_IMAGE_NAME are set dynamically in jobs to ensure lowercase
   UI_DIRECTORY: ./frontend
 
 jobs:
-  # ==========================================================================
-  # Build Scraper Image (optional)
-  # ==========================================================================
-  build-scraper:
-    if: ${{ !inputs.skip_scraper }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Set lowercase image names
-        run: |
-          echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
-          echo "SCRAPER_IMAGE_NAME=${GITHUB_REPOSITORY_OWNER,,}/opensubtitles-scraper" >> $GITHUB_ENV
-
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          ref: ${{ inputs.branch }}
-          submodules: recursive
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Determine Scraper Tags
-        id: scraper-tags
-        run: |
-          TAGS="${{ env.REGISTRY }}/${{ env.SCRAPER_IMAGE_NAME }}:sha-$(git rev-parse --short HEAD)"
-          
-          case "${{ inputs.build_type }}" in
-            release)
-              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.SCRAPER_IMAGE_NAME }}:latest"
-              ;;
-            nightly)
-              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.SCRAPER_IMAGE_NAME }}:nightly"
-              ;;
-            dev)
-              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.SCRAPER_IMAGE_NAME }}:dev"
-              ;;
-          esac
-          
-          echo "tags=$TAGS" >> $GITHUB_OUTPUT
-
-      - name: Build and Push Scraper Image
-        uses: docker/build-push-action@v6
-        with:
-          context: ./opensubtitles-scraper
-          file: ./opensubtitles-scraper/Dockerfile
-          platforms: ${{ inputs.platforms }}
-          push: true
-          tags: ${{ steps.scraper-tags.outputs.tags }}
-          cache-from: type=gha,scope=scraper
-          cache-to: type=gha,mode=max,scope=scraper
-
   # ==========================================================================
   # Build Frontend
   # ==========================================================================
@@ -148,7 +73,7 @@ jobs:
           ref: ${{ inputs.branch }}
 
       - name: Setup NodeJS
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version-file: "${{ env.UI_DIRECTORY }}/.nvmrc"
           cache: 'npm'
@@ -185,7 +110,6 @@ jobs:
       - name: Set lowercase image names
         run: |
           echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
-          echo "SCRAPER_IMAGE_NAME=${GITHUB_REPOSITORY_OWNER,,}/opensubtitles-scraper" >> $GITHUB_ENV
 
       - name: Checkout
         uses: actions/checkout@v5
@@ -233,7 +157,7 @@ jobs:
                 VERSION=$(git describe --tags --always 2>/dev/null || echo "0.0.0")
               fi
               VERSION="${VERSION#v}"  # Remove 'v' prefix
-              FORK_VERSION="${VERSION}-lavx"
+              FORK_VERSION="${VERSION}"
               
               TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${FORK_VERSION}"
               TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${VERSION}"
@@ -277,11 +201,16 @@ jobs:
               if [ -z "$CUSTOM_TAG" ]; then
                 CUSTOM_TAG="custom-${SHORT_SHA}"
               fi
-              FORK_VERSION="${CUSTOM_TAG}"
-              
+              # Use version_tag for display if provided, otherwise custom tag
+              if [ -n "${{ inputs.version_tag }}" ]; then
+                FORK_VERSION="${{ inputs.version_tag }}"
+              else
+                FORK_VERSION="${CUSTOM_TAG}"
+              fi
+
               TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${CUSTOM_TAG}"
               TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}"
-              
+
               echo "display_version=${FORK_VERSION}" >> $GITHUB_OUTPUT
               ;;
           esac
@@ -322,8 +251,8 @@ jobs:
           push: true
           tags: ${{ steps.version.outputs.tags }}
           labels: |
-            org.opencontainers.image.title=Bazarr (LavX Fork)
-            org.opencontainers.image.description=Bazarr with OpenSubtitles.org scraper support
+            org.opencontainers.image.title=Bazarr+
+            org.opencontainers.image.description=Bazarr+ - enhanced subtitle management
             org.opencontainers.image.vendor=LavX
             org.opencontainers.image.version=${{ steps.version.outputs.fork_version }}
             org.opencontainers.image.revision=${{ github.sha }}

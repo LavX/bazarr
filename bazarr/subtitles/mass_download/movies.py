@@ -84,6 +84,7 @@ def movies_download_subtitles(no, job_id=None, job_sub_function=False):
 
     providers_list = get_providers()
 
+    downloaded_count = 0
     if providers_list:
         for language in ast.literal_eval(movie.missing_subtitles):
             if language is not None:
@@ -107,16 +108,21 @@ def movies_download_subtitles(no, job_id=None, job_sub_function=False):
                     store_subtitles_movie(movie.path, moviePath)
                     history_log_movie(1, no, result)
                     send_notifications_movie(no, result.message)
+                    downloaded_count += 1
+        outcome_msg = (f"{downloaded_count} subtitle(s) downloaded"
+                       if downloaded_count else "No subtitles found")
     else:
         logging.info("BAZARR All providers are throttled")
+        outcome_msg = "All providers throttled"
 
-    jobs_queue.update_job_progress(job_id=job_id, progress_value="max")
+    jobs_queue.update_job_progress(job_id=job_id, progress_value="max",
+                                   progress_message=outcome_msg)
     jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Downloaded missing subtitles for {movie.title} ({movie.year})")
 
 
 def movie_download_specific_subtitles(radarr_id, language, hi, forced, job_id=None):
     if not job_id:
-        return jobs_queue.add_job_from_function("Searching subtitles", progress_max=1, is_progress=False)
+        return jobs_queue.add_job_from_function("Searching subtitles", is_progress=True)
 
     movieInfo = database.execute(
         select(
@@ -147,6 +153,7 @@ def movie_download_specific_subtitles(radarr_id, language, hi, forced, job_id=No
         language_str = language
 
     jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Searching {language_str.upper()} for {title}")
+    jobs_queue.update_job_progress(job_id=job_id, progress_message="Preparing search...")
 
     audio_language_list = get_audio_profile_languages(movieInfo.audio_language)
     if len(audio_language_list) > 0:
@@ -165,7 +172,11 @@ def movie_download_specific_subtitles(radarr_id, language, hi, forced, job_id=No
             history_log_movie(1, radarr_id, result)
             send_notifications_movie(radarr_id, result.message)
             store_subtitles_movie(result.path, moviePath)
+            jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
+                                           progress_message="Subtitle downloaded")
         else:
+            jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
+                                           progress_message="No subtitles found")
             event_stream(type='movie', payload=radarr_id)
             return '', 204
     except OSError:

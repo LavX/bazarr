@@ -1,9 +1,7 @@
-import { FunctionComponent, useState, useCallback } from "react";
+import { FunctionComponent, useCallback, useState } from "react";
 import {
-  ActionIcon,
   Alert,
   Badge,
-  Box,
   Button,
   Card,
   Group,
@@ -17,22 +15,19 @@ import {
 } from "@mantine/core";
 import {
   faCheck,
-  faCircle,
   faClock,
   faExclamationTriangle,
   faRefresh,
   faSpinner,
   faTimes,
-  faTrash,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   TranslatorJob,
   useTranslatorJobs,
   useTranslatorStatus,
-  useCancelTranslatorJob,
 } from "@/apis/hooks/translator";
-import { useSettingValue } from "@/pages/Settings/utilities/hooks";
+import classes from "./TranslatorStatus.module.css";
 
 interface StatusBadgeProps {
   status: TranslatorJob["status"];
@@ -43,6 +38,7 @@ const StatusBadge: FunctionComponent<StatusBadgeProps> = ({ status }) => {
     queued: { color: "gray", icon: faClock, label: "Queued" },
     processing: { color: "blue", icon: faSpinner, label: "Processing" },
     completed: { color: "green", icon: faCheck, label: "Completed" },
+    partial: { color: "yellow", icon: faExclamationTriangle, label: "Partial" },
     failed: { color: "red", icon: faExclamationTriangle, label: "Failed" },
     cancelled: { color: "orange", icon: faTimes, label: "Cancelled" },
   }[status];
@@ -55,6 +51,7 @@ const StatusBadge: FunctionComponent<StatusBadgeProps> = ({ status }) => {
           icon={config.icon}
           spin={status === "processing"}
           size="xs"
+          aria-hidden="true"
         />
       }
     >
@@ -65,55 +62,150 @@ const StatusBadge: FunctionComponent<StatusBadgeProps> = ({ status }) => {
 
 interface JobRowProps {
   job: TranslatorJob;
-  onCancel: (id: string) => void;
-  isDeleting: boolean;
 }
 
-const JobRow: FunctionComponent<JobRowProps> = ({
-  job,
-  onCancel,
-  isDeleting,
-}) => {
-  const canCancel = job.status === "queued";
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds.toFixed(0)}s`;
+  const min = Math.floor(seconds / 60);
+  const sec = Math.round(seconds % 60);
+  return `${min}m ${sec}s`;
+}
+
+function formatCostValue(cost: number): string {
+  if (cost === 0) return "Free";
+  if (cost < 0.01) return `$${cost.toFixed(4)}`;
+  return `$${cost.toFixed(2)}`;
+}
+
+const JobRow: FunctionComponent<JobRowProps> = ({ job }) => {
+  const modelUsed = job.result?.model_used || job.model;
+  // Prefer top-level tokensUsed (live from API), fall back to result
+  const tokensUsed = job.tokensUsed || job.result?.tokens_used;
+
+  // Build media title
+  const langPair =
+    job.sourceLanguage && job.targetLanguage
+      ? ` (${job.sourceLanguage.toUpperCase()} → ${job.targetLanguage.toUpperCase()})`
+      : "";
+  const mediaTitle = job.title
+    ? `${job.title}${langPair}`
+    : job.filename
+      ? `${job.filename}${langPair}`
+      : langPair || "-";
+
+  // Duration — prefer server-side elapsedSeconds
+  let durationStr = "-";
+  let durationSec = 0;
+  if (job.elapsedSeconds) {
+    durationSec = job.elapsedSeconds;
+    durationStr = formatDuration(durationSec);
+  } else if (job.startedAt && job.completedAt) {
+    durationSec =
+      (new Date(job.completedAt).getTime() -
+        new Date(job.startedAt).getTime()) /
+      1000;
+    durationStr = formatDuration(durationSec);
+  } else if (job.status === "processing" && job.startedAt) {
+    // eslint-disable-next-line react-hooks/purity
+    const elapsed = (Date.now() - new Date(job.startedAt).getTime()) / 1000;
+    durationStr = `${formatDuration(elapsed)}...`;
+  }
+
+  // TPS
+  const tpsStr =
+    tokensUsed && durationSec > 0
+      ? `${(tokensUsed / durationSec).toFixed(0)} t/s`
+      : "-";
+
+  // Progress — show lines if available
+  const progressLabel =
+    job.completedLines && job.totalLines
+      ? `${job.completedLines}/${job.totalLines} lines`
+      : `${job.progress}%`;
+
+  // Batch info for tooltip
+  const batchInfo =
+    job.completedBatches && job.totalBatches
+      ? `Batch ${job.completedBatches}/${job.totalBatches}`
+      : undefined;
 
   return (
     <Table.Tr>
       <Table.Td>
-        <Tooltip label={job.jobId}>
-          <Text size="sm" truncate style={{ maxWidth: 120 }}>
-            {job.jobId.substring(0, 8)}...
+        <Tooltip label={job.jobName || job.jobId} openDelay={300}>
+          <Text size="sm" truncate style={{ maxWidth: 200 }}>
+            {mediaTitle}
           </Text>
         </Tooltip>
       </Table.Td>
       <Table.Td>
-        <StatusBadge status={job.status} />
+        {job.error ? (
+          <Tooltip label={job.error} multiline w={350} withArrow>
+            <span>
+              <StatusBadge status={job.status} />
+            </span>
+          </Tooltip>
+        ) : (
+          <StatusBadge status={job.status} />
+        )}
       </Table.Td>
       <Table.Td>
         {job.status === "processing" ? (
-          <Progress value={job.progress} size="sm" animated />
+          <Tooltip
+            label={[progressLabel, batchInfo].filter(Boolean).join(" · ")}
+            withArrow
+          >
+            <Progress value={job.progress} size="sm" animated />
+          </Tooltip>
         ) : (
-          <Text size="sm">{job.progress}%</Text>
+          <Text size="sm">{progressLabel}</Text>
         )}
       </Table.Td>
       <Table.Td>
-        <Text size="sm" c="dimmed" truncate style={{ maxWidth: 200 }}>
-          {job.message || job.filename || "-"}
+        <Text
+          size="xs"
+          ff="monospace"
+          c="var(--bz-text-tertiary)"
+          truncate
+          style={{ maxWidth: 180 }}
+        >
+          {modelUsed || "-"}
         </Text>
       </Table.Td>
       <Table.Td>
-        <Text size="sm">{new Date(job.createdAt).toLocaleTimeString()}</Text>
+        <Text size="xs" ff="monospace">
+          {tokensUsed ? tokensUsed.toLocaleString() : "-"}
+        </Text>
       </Table.Td>
       <Table.Td>
-        {canCancel && (
-          <ActionIcon
-            color="red"
-            variant="subtle"
-            onClick={() => onCancel(job.jobId)}
-            loading={isDeleting}
-          >
-            <FontAwesomeIcon icon={faTrash} />
-          </ActionIcon>
-        )}
+        <Text size="xs" ff="monospace">
+          {job.totalCost != null && job.totalCost > 0 ? (
+            <Tooltip
+              label={`${formatCostValue(job.totalCost)} total cost`}
+              withArrow
+            >
+              <Text component="span" size="xs" ff="monospace" c="green.4">
+                {formatCostValue(job.totalCost)}
+              </Text>
+            </Tooltip>
+          ) : (
+            "-"
+          )}
+        </Text>
+      </Table.Td>
+      <Table.Td>
+        <Text size="xs" ff="monospace">
+          {durationStr}
+        </Text>
+      </Table.Td>
+      <Table.Td>
+        <Text
+          size="xs"
+          ff="monospace"
+          c={tpsStr !== "-" ? "green.4" : "dimmed"}
+        >
+          {tpsStr}
+        </Text>
       </Table.Td>
     </Table.Tr>
   );
@@ -130,27 +222,35 @@ const StatCard: FunctionComponent<StatCardProps> = ({
   value,
   color,
 }) => (
-  <Card withBorder p="sm">
-    <Text size="xs" c="dimmed">
-      {label}
-    </Text>
-    <Text size="xl" fw={700} c={color}>
+  <Card
+    withBorder
+    p="xs"
+    className={classes.statCard}
+    style={{ borderLeftColor: `var(--bz-stat-${color})` }}
+  >
+    <Text size="2rem" fw={700} lh={1}>
       {value}
+    </Text>
+    <Text
+      size="xs"
+      c="var(--bz-text-tertiary)"
+      tt="uppercase"
+      style={{ letterSpacing: 0.5 }}
+      fw={600}
+    >
+      {label}
     </Text>
   </Card>
 );
 
 interface TranslatorStatusPanelProps {
   enabled?: boolean;
-  savedApiKey?: string;
-  savedModel?: string;
-  savedMaxConcurrent?: number;
 }
 
 export const TranslatorStatusPanel: FunctionComponent<
   TranslatorStatusPanelProps
-> = ({ enabled = true, savedApiKey, savedModel, savedMaxConcurrent }) => {
-  const [retryKey, setRetryKey] = useState(0);
+> = ({ enabled = true }) => {
+  const [, setRetryKey] = useState(0);
 
   const {
     data: status,
@@ -164,8 +264,6 @@ export const TranslatorStatusPanel: FunctionComponent<
     isError: jobsError,
     refetch: refetchJobs,
   } = useTranslatorJobs(enabled && !statusError);
-  const cancelJob = useCancelTranslatorJob();
-
   const handleRetry = useCallback(() => {
     setRetryKey((k) => k + 1);
     void refetchStatus();
@@ -177,8 +275,10 @@ export const TranslatorStatusPanel: FunctionComponent<
     return (
       <Card withBorder mt="md" p="md">
         <Group justify="center" py="md">
-          <FontAwesomeIcon icon={faSpinner} spin />
-          <Text c="dimmed">Connecting to AI Subtitle Translator...</Text>
+          <FontAwesomeIcon icon={faSpinner} spin aria-hidden="true" />
+          <Text c="var(--bz-text-tertiary)">
+            Connecting to AI Subtitle Translator...
+          </Text>
         </Group>
       </Card>
     );
@@ -195,7 +295,9 @@ export const TranslatorStatusPanel: FunctionComponent<
         color="yellow"
         title="AI Subtitle Translator Unavailable"
         mt="md"
-        icon={<FontAwesomeIcon icon={faExclamationTriangle} />}
+        icon={
+          <FontAwesomeIcon icon={faExclamationTriangle} aria-hidden="true" />
+        }
       >
         <Text size="sm" mb="sm">
           {errorMessage}
@@ -203,7 +305,7 @@ export const TranslatorStatusPanel: FunctionComponent<
         <Button
           size="xs"
           variant="light"
-          leftSection={<FontAwesomeIcon icon={faRefresh} />}
+          leftSection={<FontAwesomeIcon icon={faRefresh} aria-hidden="true" />}
           onClick={handleRetry}
         >
           Retry Connection
@@ -212,137 +314,96 @@ export const TranslatorStatusPanel: FunctionComponent<
     );
   }
 
-  const handleCancel = (jobId: string) => {
-    cancelJob.mutate(jobId);
-  };
-
   return (
     <Stack gap="md" mt="md">
       {/* Service Status */}
       <Card withBorder>
         <Group justify="space-between" mb="md">
           <Title order={5}>AI Subtitle Translator Service</Title>
-          {status?.healthy ? (
-            <Badge
-              color="green"
-              leftSection={<FontAwesomeIcon icon={faCircle} size="xs" />}
-            >
-              Connected
-            </Badge>
-          ) : (
-            <Badge color="red">Disconnected</Badge>
-          )}
-        </Group>
-
-        {/* Bazarr Configuration (Saved Settings) */}
-        <Text size="xs" c="dimmed" mt="md" mb="xs" fw={600}>
-          Bazarr Configuration
-        </Text>
-        <Group gap="xl">
-          <Box>
-            <Text size="xs" c="dimmed">
-              API Key
-            </Text>
-            <Text size="sm">{savedApiKey ? "✓ Set" : "✗ Not Set"}</Text>
-          </Box>
-          <Box>
-            <Text size="xs" c="dimmed">
-              Model
-            </Text>
-            <Text size="sm">{savedModel || "Not configured"}</Text>
-          </Box>
-          <Box>
-            <Text size="xs" c="dimmed">
-              Max Concurrent
-            </Text>
-            <Text size="sm">{savedMaxConcurrent ?? "Not set"}</Text>
-          </Box>
-        </Group>
-
-        {/* Service Status (Runtime State) */}
-        {status && (
-          <>
-            <Text size="xs" c="dimmed" mt="md" mb="xs" fw={600}>
-              Service Runtime State
-            </Text>
-            <Group gap="xl">
-              <Box>
-                <Text size="xs" c="dimmed">
-                  Active Model
-                </Text>
-                <Text size="sm">{status.config.model}</Text>
-              </Box>
-              <Box>
-                <Text size="xs" c="dimmed">
-                  API Key Status
-                </Text>
-                <Text size="sm">
-                  {status.config.apiKeyConfigured
-                    ? "✓ Configured"
-                    : "✗ Not Set"}
-                </Text>
-              </Box>
-              <Box>
-                <Text size="xs" c="dimmed">
-                  Max Concurrent
-                </Text>
-                <Text size="sm">{status.queue.maxConcurrent}</Text>
-              </Box>
+          <div role="status" aria-live="assertive">
+            <Group gap={6}>
+              <Text
+                c={status?.healthy ? "green.5" : "red.5"}
+                fw={700}
+                size="sm"
+                component="span"
+                className={
+                  status?.healthy ? classes.promptConnected : undefined
+                }
+              >
+                ❯
+              </Text>
+              <Text
+                c={status?.healthy ? "green.5" : "red.5"}
+                fw={600}
+                size="sm"
+                tt="uppercase"
+                style={{ letterSpacing: 0.5 }}
+              >
+                {status?.healthy ? "Connected" : "Disconnected"}
+              </Text>
             </Group>
-          </>
-        )}
+          </div>
+        </Group>
       </Card>
 
       {/* Queue Stats */}
       {status && (
-        <SimpleGrid cols={4}>
+        <SimpleGrid cols={{ base: 2, sm: 3 }}>
+          {(status.bazarr_queue?.pending ?? 0) > 0 && (
+            <StatCard
+              label="Pending"
+              value={status.bazarr_queue!.pending}
+              color="queued"
+            />
+          )}
           <StatCard
             label="Processing"
             value={status.queue.processing}
-            color="blue"
+            color="processing"
           />
-          <StatCard label="Queued" value={status.queue.queued} color="gray" />
           <StatCard
             label="Completed"
             value={status.queue.completed}
-            color="green"
+            color="completed"
           />
-          <StatCard label="Failed" value={status.queue.failed} color="red" />
+          <StatCard label="Failed" value={status.queue.failed} color="failed" />
         </SimpleGrid>
       )}
 
       {/* Jobs Table */}
       <Card withBorder>
-        <Title order={5} mb="md">
+        <Title order={5} mb="md" id="translation-jobs-heading">
           Translation Jobs
         </Title>
         {jobsData && jobsData.jobs.length > 0 ? (
           <Table.ScrollContainer minWidth={600}>
-            <Table striped highlightOnHover>
+            <Table
+              striped
+              highlightOnHover
+              aria-labelledby="translation-jobs-heading"
+            >
               <Table.Thead>
                 <Table.Tr>
-                  <Table.Th>Job ID</Table.Th>
+                  <Table.Th>Media</Table.Th>
                   <Table.Th>Status</Table.Th>
                   <Table.Th>Progress</Table.Th>
-                  <Table.Th>Message</Table.Th>
-                  <Table.Th>Created</Table.Th>
-                  <Table.Th>Actions</Table.Th>
+                  <Table.Th>Model</Table.Th>
+                  <Table.Th>Tokens</Table.Th>
+                  <Table.Th>Cost</Table.Th>
+                  <Table.Th>Duration</Table.Th>
+                  <Table.Th>Speed</Table.Th>
                 </Table.Tr>
               </Table.Thead>
               <Table.Tbody>
                 {jobsData.jobs.map((job) => (
-                  <JobRow
-                    key={job.jobId}
-                    job={job}
-                    onCancel={handleCancel}
-                    isDeleting={cancelJob.isPending}
-                  />
+                  <JobRow key={job.jobId} job={job} />
                 ))}
               </Table.Tbody>
             </Table>
           </Table.ScrollContainer>
         ) : (
-          <Text c="dimmed" ta="center" py="xl">
+          <Text c="var(--bz-text-tertiary)" ta="center" py="xl">
             No translation jobs
           </Text>
         )}
@@ -356,24 +417,7 @@ export const TranslatorStatusPanel: FunctionComponent<
  * This must be rendered inside a FormContext (i.e., inside Layout component).
  */
 export const TranslatorStatusPanelWithFormContext: FunctionComponent = () => {
-  // Use useSettingValue which properly merges saved settings with staged overrides
-  const savedApiKey = useSettingValue<string>(
-    "settings-translator-openrouter_api_key",
-  );
-  const savedModel = useSettingValue<string>(
-    "settings-translator-openrouter_model",
-  );
-  const savedMaxConcurrent = useSettingValue<number>(
-    "settings-translator-openrouter_max_concurrent",
-  );
-
-  return (
-    <TranslatorStatusPanel
-      savedApiKey={savedApiKey ?? undefined}
-      savedModel={savedModel ?? undefined}
-      savedMaxConcurrent={savedMaxConcurrent ?? undefined}
-    />
-  );
+  return <TranslatorStatusPanel />;
 };
 
 export default TranslatorStatusPanel;

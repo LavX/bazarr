@@ -1,22 +1,54 @@
-import { FunctionComponent, useMemo, useState } from "react";
+import { FunctionComponent, useCallback, useMemo, useState } from "react";
 import { Link } from "react-router";
-import { Anchor, Badge, Container, Tooltip } from "@mantine/core";
+import {
+  ActionIcon,
+  Anchor,
+  Badge,
+  Checkbox,
+  Container,
+  Group,
+  Menu,
+  Tooltip,
+} from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import { faBookmark as farBookmark } from "@fortawesome/free-regular-svg-icons";
-import { faBookmark, faWrench } from "@fortawesome/free-solid-svg-icons";
+import {
+  faArrowUp,
+  faBookmark,
+  faCheck,
+  faCircleDown,
+  faEllipsisVertical,
+  faHardDrive,
+  faLanguage,
+  faMagnifyingGlass,
+  faSync,
+  faToolbox,
+  faUndo,
+  faWrench,
+} from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
-import { uniqueId } from "lodash";
+import { uniqBy, uniqueId } from "lodash";
 import { useMovieModification, useMoviesPagination } from "@/apis/hooks";
 import { useInstanceName } from "@/apis/hooks/site";
-import { Action } from "@/components";
+import { useUpgradableItems } from "@/apis/hooks/subtitles";
+import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
+import { Toolbox } from "@/components";
 import { AudioList } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
 import LanguageProfileName from "@/components/bazarr/LanguageProfile";
+import { BatchModConfirmModal } from "@/components/forms/BatchModConfirmForm";
+import { ChangeProfileModal } from "@/components/forms/ChangeProfileForm";
 import { ItemEditModal } from "@/components/forms/ItemEditForm";
+import { MassSyncModal } from "@/components/forms/MassSyncForm";
+import {
+  MassTranslateModal,
+  WantedItem,
+} from "@/components/forms/MassTranslateForm";
+import { SUBTITLE_TOOL_ACTIONS } from "@/constants/batch";
 import { useModals } from "@/modules/modals";
 import ItemView from "@/pages/views/ItemView";
-import { BuildKey } from "@/utilities";
+import { BuildKey, GetItemId } from "@/utilities";
 
 const MovieView: FunctionComponent = () => {
   const modifyMovie = useMovieModification();
@@ -26,15 +58,104 @@ const MovieView: FunctionComponent = () => {
   const [audioLanguages, setAudioLanguages] = useState<string[]>([]);
   const [excludeLanguages, setExcludeLanguages] = useState<string[]>([]);
 
-  const hasActiveFilter =
-    search.length > 0 ||
-    audioLanguages.length > 0 ||
-    excludeLanguages.length > 0;
+  const query = useMoviesPagination(true);
+  const { data: upgradableData } = useUpgradableItems();
+  const upgradableMovieIds = useMemo(
+    () => new Set(upgradableData?.movies ?? []),
+    [upgradableData?.movies],
+  );
 
-  const query = useMoviesPagination(hasActiveFilter);
+  const [selections, setSelections] = useState<Item.Movie[]>([]);
+  const [dirties, setDirties] = useState<Item.Movie[]>([]);
+  const setProfiles = useCallback(
+    (id: number | null) => {
+      const newItems = selections.map((v) => ({ ...v, profileId: id }));
+      setDirties((dirty) => uniqBy([...newItems, ...dirty], GetItemId));
+    },
+    [selections],
+  );
+
+  const { mutateAsync } = modifyMovie;
+
+  const save = useCallback(() => {
+    const chunkSize = 1000;
+    const form: FormType.ModifyItem = { id: [], profileid: [] };
+    dirties.forEach((v) => {
+      const id = GetItemId(v);
+      if (id) {
+        form.id.push(id);
+        form.profileid.push(v.profileId);
+      }
+    });
+    const mutateInChunks = async (
+      ids: number[],
+      profileIds: (number | null)[],
+    ) => {
+      if (ids.length === 0) return;
+      await mutateAsync({
+        id: ids.slice(0, chunkSize),
+        profileid: profileIds.slice(0, chunkSize),
+      });
+      await mutateInChunks(ids.slice(chunkSize), profileIds.slice(chunkSize));
+    };
+    return mutateInChunks(form.id, form.profileid);
+  }, [dirties, mutateAsync]);
+
+  const profileToolbar = useMemo(() => {
+    if (selections.length === 0 && dirties.length === 0) return undefined;
+    return (
+      <Group gap="xs">
+        <Toolbox.Button
+          icon={faLanguage}
+          disabled={selections.length === 0}
+          onClick={() => {
+            modals.openContextModal(ChangeProfileModal, {
+              onSelect: setProfiles,
+            });
+          }}
+        >
+          Change Profile
+        </Toolbox.Button>
+        {dirties.length > 0 && (
+          <>
+            <Toolbox.Button icon={faUndo} onClick={() => setDirties([])}>
+              Cancel
+            </Toolbox.Button>
+            <Toolbox.MutateButton
+              icon={faCheck}
+              promise={save}
+              onSuccess={() => setDirties([])}
+            >
+              Save
+            </Toolbox.MutateButton>
+          </>
+        )}
+      </Group>
+    );
+  }, [selections, dirties, modals, setProfiles, save]);
 
   const columns = useMemo<ColumnDef<Item.Movie>[]>(
     () => [
+      {
+        id: "selection",
+        header: ({ table }) => (
+          <Checkbox
+            aria-label="Select all"
+            id="movies-select-all"
+            indeterminate={table.getIsSomeRowsSelected()}
+            checked={table.getIsAllRowsSelected()}
+            onChange={table.getToggleAllRowsSelectedHandler()}
+          />
+        ),
+        cell: ({ row }) => (
+          <Checkbox
+            aria-label={`Select ${row.original.title}`}
+            id={`movies-select-${row.index}`}
+            checked={row.getIsSelected()}
+            onChange={row.getToggleSelectedHandler()}
+          />
+        ),
+      },
       {
         id: "monitored",
         cell: ({
@@ -48,6 +169,23 @@ const MovieView: FunctionComponent = () => {
             <FontAwesomeIcon icon={monitored ? faBookmark : farBookmark} />
           </Tooltip>
         ),
+      },
+      {
+        id: "upgradable",
+        cell: ({
+          row: {
+            original: { radarrId },
+          },
+        }) =>
+          upgradableMovieIds.has(radarrId) ? (
+            <Tooltip label="Low match score, upgrading may find a better subtitle">
+              <FontAwesomeIcon
+                icon={faCircleDown}
+                color="var(--bz-text-tertiary)"
+                size="sm"
+              />
+            </Tooltip>
+          ) : null,
       },
       {
         header: "Name",
@@ -116,32 +254,220 @@ const MovieView: FunctionComponent = () => {
         },
       },
       {
-        id: "radarrId",
+        id: "actions",
         cell: ({ row }) => {
+          const item = row.original;
+          const batchItem: BatchItem = {
+            type: "movie",
+            radarrId: item.radarrId,
+          };
+          const wantedItem: WantedItem = {
+            type: "movie",
+            radarrId: item.radarrId,
+            title: item.title,
+          };
           return (
-            <Action
-              label="Edit Movie"
-              tooltip={{ position: "left" }}
-              onClick={() =>
-                modals.openContextModal(
-                  ItemEditModal,
-                  {
-                    mutation: modifyMovie,
-                    item: row.original,
-                  },
-                  {
-                    title: row.original.title,
-                  },
-                )
-              }
-              icon={faWrench}
-            ></Action>
+            <Menu shadow="md" width={220} position="bottom-end">
+              <Menu.Target>
+                <Tooltip label="Actions">
+                  <ActionIcon aria-label="Actions" variant="subtle" size="sm">
+                    <FontAwesomeIcon icon={faEllipsisVertical} />
+                  </ActionIcon>
+                </Tooltip>
+              </Menu.Target>
+              <Menu.Dropdown>
+                <Menu.Item
+                  leftSection={<FontAwesomeIcon icon={faWrench} size="sm" />}
+                  onClick={() =>
+                    modals.openContextModal(
+                      ItemEditModal,
+                      { mutation: modifyMovie, item },
+                      { title: item.title },
+                    )
+                  }
+                >
+                  Edit
+                </Menu.Item>
+                <Menu.Divider />
+                <Menu.Item
+                  leftSection={<FontAwesomeIcon icon={faSync} size="sm" />}
+                  onClick={() =>
+                    modals.openContextModal(MassSyncModal, {
+                      items: [batchItem],
+                    })
+                  }
+                >
+                  Sync Subtitles
+                </Menu.Item>
+                <Menu.Item
+                  leftSection={<FontAwesomeIcon icon={faLanguage} size="sm" />}
+                  onClick={() =>
+                    modals.openContextModal(MassTranslateModal, {
+                      items: [wantedItem],
+                    })
+                  }
+                >
+                  Translate
+                </Menu.Item>
+                <Menu.Divider />
+                <Menu.Label>Subtitle Tools</Menu.Label>
+                {SUBTITLE_TOOL_ACTIONS.map(([action, label]) => (
+                  <Menu.Item
+                    key={action}
+                    onClick={() =>
+                      modals.openContextModal(BatchModConfirmModal, {
+                        items: [batchItem],
+                        action,
+                      })
+                    }
+                  >
+                    {label}
+                  </Menu.Item>
+                ))}
+                <Menu.Divider />
+                <Menu.Item
+                  leftSection={<FontAwesomeIcon icon={faHardDrive} size="sm" />}
+                  onClick={() =>
+                    modals.openContextModal(BatchModConfirmModal, {
+                      items: [batchItem],
+                      action: "scan-disk" as BatchAction,
+                    })
+                  }
+                >
+                  Scan Disk
+                </Menu.Item>
+                <Menu.Item
+                  leftSection={
+                    <FontAwesomeIcon icon={faMagnifyingGlass} size="sm" />
+                  }
+                  onClick={() =>
+                    modals.openContextModal(BatchModConfirmModal, {
+                      items: [batchItem],
+                      action: "search-missing" as BatchAction,
+                    })
+                  }
+                >
+                  Search Missing
+                </Menu.Item>
+                <Menu.Item
+                  leftSection={<FontAwesomeIcon icon={faArrowUp} size="sm" />}
+                  onClick={() =>
+                    modals.openContextModal(BatchModConfirmModal, {
+                      items: [batchItem],
+                      action: "upgrade" as BatchAction,
+                    })
+                  }
+                >
+                  Upgrade
+                </Menu.Item>
+              </Menu.Dropdown>
+            </Menu>
           );
         },
       },
     ],
-    [modals, modifyMovie],
+    [modals, modifyMovie, upgradableMovieIds],
   );
+
+  const selectionToolbar = useMemo(() => {
+    if (selections.length === 0) return undefined;
+
+    const toBatchItems = (): BatchItem[] =>
+      selections.map((m) => ({
+        type: "movie" as const,
+        radarrId: m.radarrId,
+      }));
+
+    const toWantedItems = (): WantedItem[] =>
+      selections.map((m) => ({
+        type: "movie" as const,
+        radarrId: m.radarrId,
+        title: m.title,
+      }));
+
+    return (
+      <Group gap="xs">
+        <Toolbox.Button
+          icon={faSync}
+          onClick={() =>
+            modals.openContextModal(MassSyncModal, { items: toBatchItems() })
+          }
+        >
+          Sync Subtitles
+        </Toolbox.Button>
+
+        <Menu shadow="md" width={220}>
+          <Menu.Target>
+            <div>
+              <Toolbox.Button icon={faToolbox}>Subtitle Tools</Toolbox.Button>
+            </div>
+          </Menu.Target>
+          <Menu.Dropdown>
+            {SUBTITLE_TOOL_ACTIONS.map(([action, label]) => (
+              <Menu.Item
+                key={action}
+                onClick={() =>
+                  modals.openContextModal(BatchModConfirmModal, {
+                    items: toBatchItems(),
+                    action,
+                  })
+                }
+              >
+                {label}
+              </Menu.Item>
+            ))}
+          </Menu.Dropdown>
+        </Menu>
+
+        <Toolbox.Button
+          icon={faLanguage}
+          onClick={() =>
+            modals.openContextModal(MassTranslateModal, {
+              items: toWantedItems(),
+            })
+          }
+        >
+          Translate
+        </Toolbox.Button>
+
+        <Toolbox.Button
+          icon={faHardDrive}
+          onClick={() =>
+            modals.openContextModal(BatchModConfirmModal, {
+              items: toBatchItems(),
+              action: "scan-disk" as BatchAction,
+            })
+          }
+        >
+          Scan Disk
+        </Toolbox.Button>
+
+        <Toolbox.Button
+          icon={faMagnifyingGlass}
+          onClick={() =>
+            modals.openContextModal(BatchModConfirmModal, {
+              items: toBatchItems(),
+              action: "search-missing" as BatchAction,
+            })
+          }
+        >
+          Search Missing
+        </Toolbox.Button>
+
+        <Toolbox.Button
+          icon={faArrowUp}
+          onClick={() =>
+            modals.openContextModal(BatchModConfirmModal, {
+              items: toBatchItems(),
+              action: "upgrade" as BatchAction,
+            })
+          }
+        >
+          Upgrade
+        </Toolbox.Button>
+      </Group>
+    );
+  }, [selections, modals]);
 
   useDocumentTitle(`Movies - ${useInstanceName()}`);
 
@@ -156,6 +482,10 @@ const MovieView: FunctionComponent = () => {
         onAudioLanguagesChange={setAudioLanguages}
         excludeLanguages={excludeLanguages}
         onExcludeLanguagesChange={setExcludeLanguages}
+        enableRowSelection
+        onSelectionChanged={setSelections}
+        selectionToolbar={selectionToolbar}
+        profileToolbar={profileToolbar}
       ></ItemView>
     </Container>
   );

@@ -4,7 +4,7 @@ import os
 import requests
 import logging
 
-from app.config import settings
+from app.config import settings, get_ssl_verify
 from app.database import TableShowsRootfolder, TableShows, database, insert, update, delete, select
 from utilities.path_mappings import path_mappings
 from sonarr.info import url_api_sonarr
@@ -19,7 +19,7 @@ def get_sonarr_rootfolder():
     url_sonarr_api_rootfolder = f"{url_api_sonarr()}rootfolder?apikey={apikey_sonarr}"
 
     try:
-        rootfolder = requests.get(url_sonarr_api_rootfolder, timeout=int(settings.sonarr.http_timeout), verify=False, headers=HEADERS)
+        rootfolder = requests.get(url_sonarr_api_rootfolder, timeout=int(settings.sonarr.http_timeout), verify=get_ssl_verify('sonarr'), headers=HEADERS)
     except requests.exceptions.ConnectionError:
         logging.exception("BAZARR Error trying to get rootfolder from Sonarr. Connection Error.")
         return []

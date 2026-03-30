@@ -28,9 +28,7 @@ import MoviesHistoryView from "@/pages/History/Movies";
 import SeriesHistoryView from "@/pages/History/Series";
 import MovieView from "@/pages/Movies";
 import MovieDetailView from "@/pages/Movies/Details";
-import MovieMassEditor from "@/pages/Movies/Editor";
 import SeriesView from "@/pages/Series";
-import SeriesMassEditor from "@/pages/Series/Editor";
 import SettingsGeneralView from "@/pages/Settings/General";
 import SettingsLanguagesView from "@/pages/Settings/Languages";
 import SettingsNotificationsView from "@/pages/Settings/Notifications";
@@ -40,6 +38,7 @@ import SettingsRadarrView from "@/pages/Settings/Radarr";
 import SettingsSchedulerView from "@/pages/Settings/Scheduler";
 import SettingsSonarrView from "@/pages/Settings/Sonarr";
 import SettingsSubtitlesView from "@/pages/Settings/Subtitles";
+import SettingsTranslatorView from "@/pages/Settings/Translator";
 import SettingsUIView from "@/pages/Settings/UI";
 import SystemAnnouncementsView from "@/pages/System/Announcements";
 import SystemBackupsView from "@/pages/System/Backups";
@@ -58,6 +57,7 @@ const HistoryStats = lazy(
   () => import("@/pages/History/Statistics/HistoryStats"),
 );
 const SystemStatusView = lazy(() => import("@/pages/System/Status"));
+const SubtitleEditor = lazy(() => import("@/pages/SubtitleEditor"));
 
 function useRoutes(): CustomRouteObject[] {
   const { data } = useBadges();
@@ -85,11 +85,6 @@ function useRoutes(): CustomRouteObject[] {
                 element: <SeriesView></SeriesView>,
               },
               {
-                path: "edit",
-                hidden: true,
-                element: <SeriesMassEditor></SeriesMassEditor>,
-              },
-              {
                 path: ":id",
                 element: <Episodes></Episodes>,
               },
@@ -105,11 +100,6 @@ function useRoutes(): CustomRouteObject[] {
               {
                 index: true,
                 element: <MovieView></MovieView>,
-              },
-              {
-                path: "edit",
-                hidden: true,
-                element: <MovieMassEditor></MovieMassEditor>,
               },
               {
                 path: ":id",
@@ -229,6 +219,11 @@ function useRoutes(): CustomRouteObject[] {
                 element: <SettingsPlexView></SettingsPlexView>,
               },
               {
+                path: "translator",
+                name: "AI Translator",
+                element: <SettingsTranslatorView></SettingsTranslatorView>,
+              },
+              {
                 path: "notifications",
                 name: "Notifications",
                 element: (
@@ -295,6 +290,15 @@ function useRoutes(): CustomRouteObject[] {
                 element: <SystemAnnouncementsView></SystemAnnouncementsView>,
               },
             ],
+          },
+          {
+            path: "subtitles/preview/:mediaType/:mediaId/:language",
+            hidden: true,
+            element: (
+              <Lazy>
+                <SubtitleEditor></SubtitleEditor>
+              </Lazy>
+            ),
           },
           {
             path: "*",

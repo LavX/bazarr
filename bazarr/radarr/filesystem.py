@@ -3,7 +3,7 @@
 import requests
 import logging
 
-from app.config import settings
+from app.config import settings, get_ssl_verify
 from radarr.info import url_api_radarr
 from constants import HEADERS
 
@@ -15,7 +15,7 @@ def browse_radarr_filesystem(path='#'):
     url_radarr_api_filesystem = (f"{url_api_radarr()}filesystem?path={path}&allowFoldersWithoutTrailingSlashes=true&"
                                  f"includeFiles=false&apikey={settings.radarr.apikey}")
     try:
-        r = requests.get(url_radarr_api_filesystem, timeout=int(settings.radarr.http_timeout), verify=False,
+        r = requests.get(url_radarr_api_filesystem, timeout=int(settings.radarr.http_timeout), verify=get_ssl_verify('radarr'),
                          headers=HEADERS)
         r.raise_for_status()
     except requests.exceptions.HTTPError:

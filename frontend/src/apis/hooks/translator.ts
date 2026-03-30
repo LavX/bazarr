@@ -4,7 +4,13 @@ import client from "@/apis/raw/client";
 
 export interface TranslatorJob {
   jobId: string;
-  status: "queued" | "processing" | "completed" | "failed" | "cancelled";
+  status:
+    | "queued"
+    | "processing"
+    | "completed"
+    | "partial"
+    | "failed"
+    | "cancelled";
   progress: number;
   message?: string;
   createdAt: string;
@@ -14,6 +20,21 @@ export interface TranslatorJob {
   sourceLanguage?: string;
   targetLanguage?: string;
   filename?: string;
+  title?: string;
+  mediaType?: string;
+  model?: string;
+  jobName?: string;
+  totalLines?: number;
+  completedLines?: number;
+  totalBatches?: number;
+  completedBatches?: number;
+  tokensUsed?: number;
+  totalCost?: number;
+  elapsedSeconds?: number;
+  result?: {
+    model_used?: string;
+    tokens_used?: number;
+  };
 }
 
 export interface TranslatorStatus {
@@ -31,6 +52,10 @@ export interface TranslatorStatus {
     completed: number;
     failed: number;
     total: number;
+  };
+  bazarr_queue?: {
+    pending: number;
+    running: number;
   };
 }
 
@@ -150,5 +175,38 @@ export function useTranslatorModels(enabled = true) {
     enabled,
     staleTime: 60000, // Cache for 1 minute
     throwOnError: false,
+  });
+}
+
+export interface TranslatorTestResponse {
+  encryption?: {
+    status: string;
+    message: string;
+  } | null;
+  apiKey?: {
+    status: string;
+    label: string;
+    limitRemaining: number;
+    usage: number;
+    isFreeTier: boolean;
+  } | null;
+  error?: string;
+}
+
+export interface TranslatorTestParams {
+  serviceUrl?: string;
+  apiKey?: string;
+  encryptionKey?: string;
+}
+
+export function useTestTranslator() {
+  return useMutation({
+    mutationFn: async (params?: TranslatorTestParams) => {
+      const response = await client.axios.post<TranslatorTestResponse>(
+        "/translator/test",
+        params,
+      );
+      return response.data;
+    },
   });
 }

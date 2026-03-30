@@ -49,8 +49,8 @@ def download_best_subtitles(
     min_score=0,
     hearing_impaired=False,
     only_one=False,
-    compute_score=None,
     use_original_format=False,
+    use_provider_priority=True,
     **kwargs
 ):
     downloaded_subtitles = defaultdict(list)
@@ -70,14 +70,17 @@ def download_best_subtitles(
     # download best subtitles
     for video in checked_videos:
         logger.info("Downloading best subtitles for %r", video)
+        if use_provider_priority:
+            listed = pool_instance.list_subtitles_prioritized(video, languages - video.subtitle_languages, min_score=min_score)
+        else:
+            listed = pool_instance.list_subtitles(video, languages - video.subtitle_languages)
         subtitles = pool_instance.download_best_subtitles(
-            pool_instance.list_subtitles_prioritized(video, languages - video.subtitle_languages, min_score=min_score),
+            listed,
             video,
             languages,
             min_score=min_score,
             hearing_impaired=hearing_impaired,
             only_one=only_one,
-            compute_score=compute_score,
             use_original_format=use_original_format,
         )
         logger.info("Downloaded %d subtitle(s)", len(subtitles))

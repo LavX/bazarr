@@ -1,9 +1,8 @@
 import { http } from "msw";
 import { HttpResponse } from "msw";
-import { beforeEach, describe, it } from "vitest";
-import { customRender, screen } from "@/tests";
+import { beforeEach, describe, expect, it } from "vitest";
+import { customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
-import MovieMassEditor from "./Editor";
 import MovieView from ".";
 
 describe("Movies page", () => {
@@ -17,30 +16,13 @@ describe("Movies page", () => {
     );
   });
 
-  it("should render", () => {
+  it("should render", async () => {
     customRender(<MovieView />);
-  });
-});
 
-describe("Movies editor page", () => {
-  beforeEach(() => {
-    server.use(
-      http.get("/api/movies", () => {
-        return HttpResponse.json({
-          data: [],
-        });
-      }),
-    );
-    server.use(
-      http.get("/api/system/languages/profiles", () => {
-        return HttpResponse.json([]);
-      }),
-    );
-  });
-
-  it("should render", () => {
-    customRender(<MovieMassEditor />);
-
-    expect(screen.getByText("Actions")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.getByPlaceholderText("Search by title..."),
+      ).toBeInTheDocument();
+    });
   });
 });

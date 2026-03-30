@@ -8,6 +8,7 @@ import logging
 from subzero.language import Language
 from subliminal_patch.core import save_subtitles
 from subliminal_patch.subtitle import Subtitle
+from subliminal_patch.score import MAX_SCORES
 from pysubs2.formats import get_format_identifier
 
 from languages.get_languages import language_from_alpha3, alpha2_from_alpha3, alpha3_from_alpha2
@@ -197,14 +198,13 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
             result = result[0]
         provider = "manual"
         if media_type == 'series':
-            score = 360
-            history_log(4, sonarrSeriesId, sonarrEpisodeId, result, fake_provider=provider, fake_score=score)
+            history_log(4, sonarrSeriesId, sonarrEpisodeId, result, fake_provider=provider,
+                        fake_score=MAX_SCORES['episode'])
             if not settings.general.dont_notify_manual_actions:
                 send_notifications(sonarrSeriesId, sonarrEpisodeId, result.message)
             store_subtitles(result.path, path)
         else:
-            score = 120
-            history_log_movie(4, radarrId, result, fake_provider=provider, fake_score=score)
+            history_log_movie(4, radarrId, result, fake_provider=provider, fake_score=MAX_SCORES['movie'])
             if not settings.general.dont_notify_manual_actions:
                 send_notifications_movie(radarrId, result.message)
             store_subtitles_movie(result.path, path)

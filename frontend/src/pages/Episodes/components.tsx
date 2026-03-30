@@ -1,15 +1,24 @@
 import { FunctionComponent, useMemo, useState } from "react";
+import { useNavigate } from "react-router";
 import { Badge, MantineColor, Tooltip } from "@mantine/core";
 import { useEpisodeSubtitleModification } from "@/apis/hooks";
 import Language from "@/components/bazarr/Language";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
 import { toPython } from "@/utilities";
 
+function buildLanguageKey(sub: Subtitle): string {
+  let key = sub.code2;
+  if (sub.hi) key += ":hi";
+  if (sub.forced) key += ":forced";
+  return key;
+}
+
 interface Props {
   seriesId: number;
   episodeId: number;
   missing?: boolean;
   subtitle: Subtitle;
+  availableSubtitles?: Subtitle[];
 }
 
 export const Subtitle: FunctionComponent<Props> = ({
@@ -17,7 +26,9 @@ export const Subtitle: FunctionComponent<Props> = ({
   episodeId,
   missing = false,
   subtitle,
+  availableSubtitles,
 }) => {
+  const navigate = useNavigate();
   const { remove, download } = useEpisodeSubtitleModification();
 
   const [opened, setOpen] = useState(false);
@@ -25,10 +36,10 @@ export const Subtitle: FunctionComponent<Props> = ({
   const disabled = subtitle.path === null;
 
   const variant: MantineColor | undefined = useMemo(() => {
-    if (opened && !disabled) {
+    if (opened && (missing || !disabled)) {
       return "highlight";
     } else if (missing) {
-      return "warning";
+      return "missing";
     } else if (disabled) {
       return "disabled";
     }
@@ -51,26 +62,40 @@ export const Subtitle: FunctionComponent<Props> = ({
     return list;
   }, [episodeId, subtitle.code2, subtitle.path, subtitle.forced, subtitle.hi]);
 
+  // For missing subs: translation sources from available subtitles
+  const translationSources = useMemo(
+    () => (availableSubtitles ?? []).filter((s) => s.path),
+    [availableSubtitles],
+  );
+
   const ctx = (
     <Badge variant={variant}>
       <Language.Text value={subtitle} long={false}></Language.Text>
     </Badge>
   );
 
-  if (disabled) {
+  if (disabled && !missing) {
     return <Tooltip.Floating label="Embedded Subtitle">{ctx}</Tooltip.Floating>;
   }
 
   return (
     <SubtitleToolsMenu
       menu={{
-        trigger: "hover",
+        trigger: "click",
         onOpen: () => setOpen(true),
         onClose: () => setOpen(false),
       }}
       selections={selections}
+      missingLanguage={missing ? subtitle : undefined}
+      translationSources={missing ? translationSources : undefined}
+      mediaId={episodeId}
+      mediaType="episode"
       onAction={async (action) => {
-        if (action === "search") {
+        if (action === "view") {
+          navigate(
+            `/subtitles/preview/episode/${episodeId}/${encodeURIComponent(buildLanguageKey(subtitle))}`,
+          );
+        } else if (action === "search") {
           await download.mutateAsync({
             seriesId,
             episodeId,

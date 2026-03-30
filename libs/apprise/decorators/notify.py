@@ -1,8 +1,7 @@
-# -*- coding: utf-8 -*-
 # BSD 2-Clause License
 #
 # Apprise - Push Notification Library.
-# Copyright (c) 2025, Chris Caron <lead2gold@gmail.com>
+# Copyright (c) 2026, Chris Caron <lead2gold@gmail.com>
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -113,14 +112,14 @@ def notify(on, name=None):
     treated as as success (True).
 
     """
+
     def wrapper(func):
-        """
-        Instantiate our custom (notification) plugin
-        """
+        """Instantiate our custom (notification) plugin."""
 
         # Generate
         CustomNotifyPlugin.instantiate_plugin(
-            url=on, send_func=func, name=name)
+            url=on, send_func=func, name=name
+        )
 
         return func
 

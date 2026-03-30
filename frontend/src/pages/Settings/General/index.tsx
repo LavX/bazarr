@@ -252,7 +252,7 @@ const SettingsGeneralView: FunctionComponent = () => {
           settingKey="settings-backup-retention"
           rightSection={
             <Box w="4rem" style={{ justifyContent: "flex-end" }}>
-              <MantineText size="xs" px="sm" c="dimmed">
+              <MantineText size="xs" px="sm" c="var(--bz-text-tertiary)">
                 Days
               </MantineText>
             </Box>

@@ -3,7 +3,6 @@ name: Build Docker Image
 on:
   push:
     branches:
-      - main
       - master
     paths-ignore:
       - '*.md'
@@ -12,82 +11,16 @@ on:
   workflow_dispatch:
     inputs:
       version_tag:
-        description: 'Version tag for the image (e.g., v1.5.3)'
-        required: false
-        default: ''
-        type: string
-  workflow_call:
-    inputs:
-      version_tag:
-        description: 'Version tag for the image'
+        description: 'Version tag for the image (e.g., v2.0.0)'
         required: false
         default: ''
         type: string
 
 env:
   REGISTRY: ghcr.io
-  # Note: IMAGE_NAME and SCRAPER_IMAGE_NAME are set dynamically in jobs to ensure lowercase
   UI_DIRECTORY: ./frontend
 
 jobs:
-  # ==========================================================================
-  # Build Scraper Image (separate job with its own cache)
-  # ==========================================================================
-  build-scraper:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Set lowercase image names
-        run: |
-          echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
-          echo "SCRAPER_IMAGE_NAME=${GITHUB_REPOSITORY_OWNER,,}/opensubtitles-scraper" >> $GITHUB_ENV
-
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          submodules: recursive
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract Scraper Metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.SCRAPER_IMAGE_NAME }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix=sha-
-            type=ref,event=branch
-          labels: |
-            org.opencontainers.image.title=OpenSubtitles.org Scraper
-            org.opencontainers.image.description=Web scraper service for OpenSubtitles.org
-            org.opencontainers.image.vendor=LavX
-
-      - name: Build and Push Scraper Image
-        uses: docker/build-push-action@v6
-        with:
-          context: ./opensubtitles-scraper
-          file: ./opensubtitles-scraper/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=scraper
-          cache-to: type=gha,mode=max,scope=scraper
-
   # ==========================================================================
   # Build Frontend (cached via GitHub Actions cache)
   # ==========================================================================
@@ -98,7 +31,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Setup NodeJS
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version-file: "${{ env.UI_DIRECTORY }}/.nvmrc"
           cache: 'npm'
@@ -123,7 +56,7 @@ jobs:
   # Build and Push Bazarr Image
   # ==========================================================================
   build-and-push:
-    needs: [build-frontend, build-scraper]
+    needs: [build-frontend]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -132,10 +65,9 @@ jobs:
       id-token: write
 
     steps:
-      - name: Set lowercase image names
+      - name: Set lowercase image name
         run: |
           echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
-          echo "SCRAPER_IMAGE_NAME=${GITHUB_REPOSITORY_OWNER,,}/opensubtitles-scraper" >> $GITHUB_ENV
 
       - name: Checkout
         uses: actions/checkout@v5
@@ -176,19 +108,17 @@ jobs:
           # Remove 'v' prefix for semver
           SEMVER="${VERSION#v}"
           
-          # Create LavX fork version
+          # Bazarr+ version is the semver tag directly
           SHORT_SHA=$(git rev-parse --short HEAD)
-          BUILD_DATE=$(date -u +%Y%m%d)
-          FORK_VERSION="${SEMVER}-lavx.${BUILD_DATE}"
-          
+          FORK_VERSION="${SEMVER}"
+
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "semver=$SEMVER" >> $GITHUB_OUTPUT
           echo "fork_version=$FORK_VERSION" >> $GITHUB_OUTPUT
           echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
-          
+
           echo "## Version Info" >> $GITHUB_STEP_SUMMARY
-          echo "- **Base Version:** $VERSION" >> $GITHUB_STEP_SUMMARY
-          echo "- **Fork Version:** $FORK_VERSION" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** $FORK_VERSION" >> $GITHUB_STEP_SUMMARY
           echo "- **Short SHA:** $SHORT_SHA" >> $GITHUB_STEP_SUMMARY
 
       - name: Extract Docker Metadata
@@ -199,15 +129,15 @@ jobs:
           tags: |
             # Latest tag on main/master branch
             type=raw,value=latest,enable={{is_default_branch}}
-            # Version tag (e.g., v1.5.3-lavx.20241214)
+            # Version tag (e.g., v2.0.0)
             type=raw,value=${{ steps.version.outputs.fork_version }}
             # Short SHA tag
             type=raw,value=sha-${{ steps.version.outputs.short_sha }}
             # Branch name
             type=ref,event=branch
           labels: |
-            org.opencontainers.image.title=Bazarr (LavX Fork)
-            org.opencontainers.image.description=Bazarr with OpenSubtitles.org scraper support
+            org.opencontainers.image.title=Bazarr+
+            org.opencontainers.image.description=Bazarr+ - enhanced subtitle management
             org.opencontainers.image.vendor=LavX
             org.opencontainers.image.version=${{ steps.version.outputs.fork_version }}
 
@@ -242,15 +172,10 @@ jobs:
         run: |
           echo "## 🐳 Docker Images Published" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Bazarr (LavX Fork)" >> $GITHUB_STEP_SUMMARY
+          echo "### Bazarr+" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
           echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
           echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.fork_version }}" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### OpenSubtitles Scraper" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-          echo "docker pull ${{ env.REGISTRY }}/${{ env.SCRAPER_IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Image Details" >> $GITHUB_STEP_SUMMARY
@@ -279,17 +204,12 @@ jobs:
             ## 🐳 Docker Images
             
             ```bash
-            # Bazarr (LavX Fork)
             docker pull ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-            
-            # OpenSubtitles Scraper
-            docker pull ghcr.io/${{ github.repository_owner }}/opensubtitles-scraper:latest
             ```
             
             ## 📝 Changes
             
             This release is based on upstream Bazarr with the following custom modifications:
             - OpenSubtitles.org web scraper provider (no VIP API needed)
-            - Auto-sync with upstream daily at 4 AM UTC
             
             See the auto-generated release notes below for detailed changes.

@@ -18,7 +18,7 @@ const ConnectionsCard: FC<ConnectionsCardProps> = ({
   if (!server) return null;
 
   return (
-    <Card withBorder p="md" radius="md" className={styles.serverConnectionCard}>
+    <Card withBorder p="md" className={styles.serverConnectionCard}>
       <Text size="sm" fw={600} mb="xs">
         Verified Connections:
       </Text>

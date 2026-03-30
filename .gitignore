@@ -24,3 +24,7 @@ VERSION
 # Allow
 !*.dll
 
+.claude/
+.superpowers/
+docs/superpowers/
+.coverage

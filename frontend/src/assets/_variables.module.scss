@@ -1,5 +1,7 @@
 $navbar-width: 200;
 
+$surface-ground: #0c0b1a;
+
 :export {
   colorBrand0: bazarr.$color-brand-0;
   colorBrand1: bazarr.$color-brand-1;
@@ -15,4 +17,6 @@ $navbar-width: 200;
   headerHeight: bazarr.$header-height;
 
   navBarWidth: $navbar-width;
+
+  surfaceGround: $surface-ground;
 }

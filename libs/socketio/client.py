@@ -39,10 +39,11 @@ class Client(base_client.BaseClient):
                        of the ``encode()`` and ``decode()`` methods can be
                        provided. Client and server must use compatible
                        serializers.
-    :param json: An alternative json module to use for encoding and decoding
+    :param json: An alternative JSON module to use for encoding and decoding
                  packets. Custom json modules must have ``dumps`` and ``loads``
                  functions that are compatible with the standard library
-                 versions.
+                 versions. This is a process-wide setting, all instantiated
+                 servers and clients must use the same JSON module.
     :param handle_sigint: Set to ``True`` to automatically handle disconnection
                           when the process is interrupted, or to ``False`` to
                           leave interrupt handling to the calling application.
@@ -137,6 +138,7 @@ class Client(base_client.BaseClient):
             namespaces = [namespaces]
         self.connection_namespaces = namespaces
         self.namespaces = {}
+        self.failed_namespaces = []
         if self._connect_event is None:
             self._connect_event = self.eio.create_event()
         else:
@@ -156,17 +158,19 @@ class Client(base_client.BaseClient):
                 self._handle_reconnect()
                 if self.eio.state == 'connected':
                     return
-            raise exceptions.ConnectionError(exc.args[0]) from None
+            raise exceptions.ConnectionError(exc.args[0]) from exc
 
         if wait:
             while self._connect_event.wait(timeout=wait_timeout):
                 self._connect_event.clear()
-                if set(self.namespaces) == set(self.connection_namespaces):
+                if len(self.namespaces) + len(self.failed_namespaces) == \
+                        len(self.connection_namespaces):
                     break
             if set(self.namespaces) != set(self.connection_namespaces):
                 self.disconnect()
                 raise exceptions.ConnectionError(
-                    'One or more namespaces failed to connect')
+                    'One or more namespaces failed to connect: '
+                    + ', '.join(self.failed_namespaces))
 
         self.connected = True
 
@@ -306,7 +310,7 @@ class Client(base_client.BaseClient):
         for n in self.namespaces:
             self._send_packet(self.packet_class(
                 packet.DISCONNECT, namespace=n))
-        self.eio.disconnect(abort=True)
+        self.eio.disconnect()
 
     def shutdown(self):
         """Stop the client.
@@ -384,7 +388,7 @@ class Client(base_client.BaseClient):
             del self.namespaces[namespace]
         if not self.namespaces:
             self.connected = False
-            self.eio.disconnect(abort=True)
+            self.eio.disconnect()
 
     def _handle_event(self, namespace, id, data):
         namespace = namespace or '/'
@@ -425,6 +429,7 @@ class Client(base_client.BaseClient):
         elif not isinstance(data, (tuple, list)):
             data = (data,)
         self._trigger_event('connect_error', namespace, *data)
+        self.failed_namespaces.append(namespace)
         self._connect_event.set()
         if namespace in self.namespaces:
             del self.namespaces[namespace]
@@ -439,7 +444,7 @@ class Client(base_client.BaseClient):
         if handler:
             try:
                 return handler(*args)
-            except TypeError:
+            except TypeError:  # pragma: no cover
                 # the legacy disconnect event does not take a reason argument
                 if event == 'disconnect':
                     return handler(*args[:-1])

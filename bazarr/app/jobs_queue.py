@@ -4,6 +4,7 @@ import logging
 import importlib
 import inspect
 import os
+import time
 
 from time import sleep
 from datetime import datetime
@@ -233,6 +234,14 @@ class JobsQueue:
                 return True
         return False
 
+    def get_job_name(self, job_id: int) -> str:
+        """Get the current name of a job by its ID."""
+        queues = self.jobs_pending_queue + self.jobs_running_queue + self.jobs_failed_queue + self.jobs_completed_queue
+        for job in queues:
+            if job.job_id == job_id:
+                return job.job_name
+        return ""
+
     def get_job_returned_value(self, job_id: int):
         """
         Fetches the returned value of a job from the queue provided its unique identifier.
@@ -335,7 +344,8 @@ class JobsQueue:
                 return True
         return False
 
-    def add_job_from_function(self, job_name: str, is_progress: bool, progress_max: int = 0) -> int:
+    def add_job_from_function(self, job_name: str, is_progress: bool, progress_max: int = 0,
+                              wait_for_completion: bool = False) -> int:
         """
         Adds a job to the pending queue using the details of the calling function. The job is then executed.
 
@@ -345,6 +355,8 @@ class JobsQueue:
         :type is_progress: bool
         :param progress_max: Maximum progress value for the job, default is 0.
         :type progress_max: int
+        :param wait_for_completion: Flag indicating whether to wait for the job to complete before returning.
+        :type wait_for_completion: bool
         :return: ID of the added job.
         :rtype: int
         """
@@ -379,6 +391,11 @@ class JobsQueue:
         # Feed the job to the pending queue
         job_id = self.feed_jobs_pending_queue(job_name=job_name, module=parent_function_path, func=parent_function_name,
                                               kwargs=arguments, is_progress=is_progress, progress_max=progress_max)
+
+        if wait_for_completion:
+            time.sleep(1)
+            while jobs_queue.get_job_status(job_id) in ['queued', 'running']:
+                time.sleep(1)
 
         return job_id
 
@@ -500,8 +517,21 @@ class JobsQueue:
             try:
                 if self.jobs_pending_queue:
                     with self._queue_lock:
-                        can_run_job = (len(self.jobs_running_queue) < settings.general.concurrent_jobs
-                                       and len(self.jobs_pending_queue) > 0)
+                        next_job = self.jobs_pending_queue[0] if self.jobs_pending_queue else None
+                        if next_job:
+                            is_translation = 'translat' in (next_job.job_name or '').lower()
+                            if is_translation:
+                                # Translation jobs respect their own concurrency limit
+                                running_translations = sum(
+                                    1 for j in self.jobs_running_queue
+                                    if 'translat' in (j.job_name or '').lower()
+                                )
+                                max_translations = settings.translator.openrouter_max_concurrent
+                                can_run_job = running_translations < max_translations
+                            else:
+                                can_run_job = len(self.jobs_running_queue) < settings.general.concurrent_jobs
+                        else:
+                            can_run_job = False
 
                     if can_run_job:
                         job_thread = Thread(target=self._run_job)

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Alert, Button, Paper, Stack, Text, Title } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { useQueryClient } from "@tanstack/react-query";
@@ -29,26 +29,29 @@ const AuthSection = () => {
 
   const { data: pinData } = usePlexPinCheckQuery(
     pin?.pinId ?? null,
+    pin?.state ?? null,
     isPolling,
     pin?.pinId ? PLEX_AUTH_CONFIG.POLLING_INTERVAL_MS : false,
   );
 
   // Handle successful authentication - stop polling and close window
-  if (pinData?.authenticated && isPolling) {
-    setPin(null);
-    if (authWindowRef.current) {
-      authWindowRef.current.close();
-      authWindowRef.current = null;
+  useEffect(() => {
+    if (pinData?.authenticated && isPolling) {
+      setPin(null);
+      if (authWindowRef.current) {
+        authWindowRef.current.close();
+        authWindowRef.current = null;
+      }
+      // Trigger refetch and invalidate server queries
+      void refetchAuth();
+      void queryClient.invalidateQueries({
+        queryKey: [QueryKeys.Plex, "servers"],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: [QueryKeys.Plex, "selectedServer"],
+      });
     }
-    // Trigger refetch and invalidate server queries
-    void refetchAuth();
-    void queryClient.invalidateQueries({
-      queryKey: [QueryKeys.Plex, "servers"],
-    });
-    void queryClient.invalidateQueries({
-      queryKey: [QueryKeys.Plex, "selectedServer"],
-    });
-  }
+  }, [pinData?.authenticated, isPolling, refetchAuth, queryClient]);
 
   const isAuthenticated = Boolean(
     // eslint-disable-next-line camelcase
@@ -99,7 +102,7 @@ const AuthSection = () => {
 
   if (isPolling && !pinData?.authenticated) {
     return (
-      <Paper withBorder radius="md" p="lg" className={styles.authSection}>
+      <Paper withBorder p="lg" className={styles.authSection}>
         <Stack gap="md">
           <Title order={4}>Plex OAuth</Title>
           <Stack gap="sm">
@@ -132,7 +135,7 @@ const AuthSection = () => {
 
   if (!isAuthenticated) {
     return (
-      <Paper withBorder radius="md" p="lg" className={styles.authSection}>
+      <Paper withBorder p="lg" className={styles.authSection}>
         <Stack gap="md">
           <Title order={4}>Plex OAuth</Title>
           <Stack gap="sm">
@@ -140,7 +143,7 @@ const AuthSection = () => {
               Connect your Plex account to enable secure, automated integration
               with Bazarr.
             </Text>
-            <Text size="xs" c="dimmed">
+            <Text size="xs" c="var(--bz-text-tertiary)">
               Advanced users: Manual configuration is available via config.yaml
               if OAuth is not suitable.
             </Text>
@@ -166,7 +169,7 @@ const AuthSection = () => {
 
   // Authenticated state
   return (
-    <Paper withBorder radius="md" p="lg" className={styles.authSection}>
+    <Paper withBorder p="lg" className={styles.authSection}>
       <Stack gap="md">
         <Title order={4}>Plex OAuth</Title>
         <Alert color="brand" variant="light" className={styles.authAlert}>

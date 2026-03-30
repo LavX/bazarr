@@ -203,45 +203,58 @@ M_INFO = {
 }
 
 
+from subzero.language import Language
+
+
 @pytest.fixture
 def video_file():
     return "tests/subliminal_patch/data/file_1.mkv"
 
 
 @pytest.fixture
-def mediainfo_data(mocker, video_file):
-    mocker.patch(
-        "knowit.providers.mediainfo.MediaInfoCTypesExecutor._execute",
-        return_value=M_INFO,
-    )
-    data = video_analyzer.know(
-        video_path=video_file,
-        context={"provider": "mediainfo"},
-    )
-    yield data
+def mediainfo_data():
+    """Pre-parsed mediainfo data in the format that embedded_subs_reader expects.
+
+    Mirrors the M_INFO tracks: es-419 (spa MX), es-ES, fr-CA, pt-BR, zh-Hans, zh-Hant.
+    Uses real Language objects so CustomLanguage detection works correctly.
+    """
+    return {
+        "subtitle": [
+            {"language": Language("spa", "MX"), "format": "SubRip", "forced": False, "hearing_impaired": False},
+            {"language": Language("spa", "ES"), "format": "SubRip", "forced": False, "hearing_impaired": False},
+            {"language": Language("fra", "CA"), "format": "SubRip", "forced": False, "hearing_impaired": False},
+            {"language": Language("por", "BR"), "format": "SubRip", "forced": False, "hearing_impaired": False},
+            {"language": Language.fromietf("zh-Hans"), "format": "SubRip", "forced": False, "hearing_impaired": False},
+            {"language": Language.fromietf("zh-Hant"), "format": "SubRip", "forced": False, "hearing_impaired": False},
+        ],
+        "audio": [
+            {"language": Language("por", "BR"), "format": "E-AC-3"},
+            {"language": Language("por"), "format": "E-AC-3"},
+        ],
+    }
 
 
-def test_embedded_subs_reader(mocker, mediainfo_data, video_file):
-    mocker.patch(
+def test_embedded_subs_reader(mediainfo_data, video_file):
+    from unittest.mock import patch
+    with patch(
         "bazarr.utilities.video_analyzer.parse_video_metadata",
         return_value={"mediainfo": mediainfo_data},
-    )
-    mocker.patch(
+    ), patch(
         "bazarr.utilities.video_analyzer.alpha3_from_alpha2", return_value=None
-    )
-    result = video_analyzer.embedded_subs_reader(1e6, video_file)
-    assert ["spl", False, False, "SubRip"] in result
-    assert ["pob", False, False, "SubRip"] in result
-    assert ["zht", False, False, "SubRip"] in result
+    ):
+        result = video_analyzer.embedded_subs_reader(video_file, 1e6)
+        assert ["spl", False, False, "SubRip"] in result
+        assert ["pob", False, False, "SubRip"] in result
+        assert ["zht", False, False, "SubRip"] in result
 
 
-def test_embedded_audio_reader(mocker, mediainfo_data, video_file):
-    mocker.patch(
+def test_embedded_audio_reader(mediainfo_data, video_file):
+    from unittest.mock import patch
+    with patch(
         "bazarr.utilities.video_analyzer.parse_video_metadata",
         return_value={"mediainfo": mediainfo_data},
-    )
-    mocker.patch(
-        "bazarr.utilities.video_analyzer.language_from_alpha3", lambda alpha3: alpha3
-    )
-    result = video_analyzer.embedded_audio_reader(1e6, video_file)
-    assert {"pob", "por"} == set(result)
+    ), patch(
+        "bazarr.utilities.video_analyzer.language_from_alpha3", side_effect=lambda alpha3: alpha3
+    ):
+        result = video_analyzer.embedded_audio_reader(video_file, 1e6)
+        assert {"pob", "por"} == set(result)

@@ -348,9 +348,10 @@ class OpenSubtitlesComProvider(ProviderRetryMixin, Provider):
                 params.append(('episode_number', self.video.episode))
             if self.video.season:
                 params.append(('season_number', self.video.season))
+
             if self.video.series_imdb_id:
                 params.append(('parent_imdb_id', self.sanitize_external_ids(self.video.series_imdb_id)))
-            if title_id:
+            elif title_id:
                 params.append(('parent_feature_id', title_id))
         else:
             if not imdb_id and not title_id:

@@ -20,7 +20,7 @@ const SettingsPlexView = () => {
       </Section>
 
       <CollapseBox settingKey={plexEnabledKey}>
-        <Paper p="xl" radius="md">
+        <Paper p="xl">
           <Box>
             <PlexSettings />
           </Box>

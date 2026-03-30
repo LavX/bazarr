@@ -18,6 +18,7 @@ from . import api_ns_plex
 from .exceptions import *
 from .security import (TokenManager, sanitize_log_data, pin_cache, get_or_create_encryption_key, sanitize_server_url,
                        encrypt_api_key)
+from app.config import get_ssl_verify
 from app.config import settings, write_config
 from app.logger import logger
 from utilities.plex_utils import _get_library_locations
@@ -223,7 +224,7 @@ def test_plex_connection(uri, token):
             f"{uri}/identity",
             headers=headers,
             timeout=3,
-            verify=False
+            verify=get_ssl_verify('plex')
         )
         latency_ms = int((time.time() - start_time) * 1000)
 
@@ -318,10 +319,11 @@ class PlexPinCheck(Resource):
             if not cached_pin:
                 raise PlexPinExpiredError("PIN not found or expired")
 
-            if state_param:
-                stored_state = cached_pin.get('state_token')
-                if not stored_state or not get_token_manager().validate_state_token(state_param, stored_state):
+            stored_state = cached_pin.get('state_token')
+            if stored_state:
+                if not state_param or not get_token_manager().validate_state_token(state_param, stored_state):
                     logger.warning(f"CSRF state validation failed for PIN {pin_id}")
+                    abort(403, "Request validation failed")
 
             headers = {
                 'Accept': 'application/json',
@@ -625,7 +627,7 @@ class PlexLibraries(Resource):
                         f"{server_url}/library/sections",
                         headers=headers,
                         timeout=10,
-                        verify=False
+                        verify=get_ssl_verify('plex')
                     )
 
                     if lib_response.status_code in (401, 403):
@@ -691,7 +693,7 @@ class PlexLibraries(Resource):
                             f"{successful_server_url}/library/sections/{section_key}/all",
                             headers={'X-Plex-Token': decrypted_token, 'Accept': 'application/json'},
                             timeout=5,
-                            verify=False
+                            verify=get_ssl_verify('plex')
                         )
                         
                         actual_count = 0
@@ -840,7 +842,7 @@ class PlexTestConnection(Resource):
                 f"{uri}/identity",
                 headers=headers,
                 timeout=3,
-                verify=False
+                verify=get_ssl_verify('plex')
             )
 
             if response.status_code == 200:

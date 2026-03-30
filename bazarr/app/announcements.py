@@ -1,7 +1,6 @@
 # coding=utf-8
 
 import os
-import sys
 import hashlib
 import requests
 import logging
@@ -11,19 +10,10 @@ import pretty
 from datetime import datetime
 from operator import itemgetter
 
-from app.get_providers import get_enabled_providers
 from app.database import TableAnnouncements, database, insert, select
 
-from app.config import settings
 from app.get_args import args
-from sonarr.info import get_sonarr_info
-from radarr.info import get_radarr_info
 from app.jobs_queue import jobs_queue
-
-
-def upcoming_deprecated_python_version():
-    # return True if Python version is deprecated
-    return sys.version_info.major == 2 or (sys.version_info.major == 3 and sys.version_info.minor < 10)
 
 
 # Announcements as receive by browser must be in the form of a list of dicts converted to JSON
@@ -49,32 +39,33 @@ def parse_announcement_dict(announcement_dict):
     return announcement_dict
 
 
-def get_announcements_to_file(job_id=None, startup=False):
+def get_announcements_to_file(job_id=None, startup=False, wait_for_completion=False):
     if not startup and not job_id:
-        jobs_queue.add_job_from_function("Updating Announcements File", is_progress=False)
+        jobs_queue.add_job_from_function("Updating Announcements File", is_progress=False,
+                                         wait_for_completion=wait_for_completion)
         return
 
     try:
         r = requests.get(
-            url="https://cdn.jsdelivr.net/gh/morpheus65535/bazarr-binaries@latest/announcements.json",
+            url="https://cdn.jsdelivr.net/gh/LavX/bazarr-binaries@master/announcements.json",
             timeout=30
         )
+        r.raise_for_status()
     except Exception:
         try:
             logging.exception("Error trying to get announcements from jsdelivr.net, falling back to Github.")
             r = requests.get(
-                url="https://raw.githubusercontent.com/morpheus65535/bazarr-binaries/refs/heads/master/announcements.json",
+                url="https://raw.githubusercontent.com/LavX/bazarr-binaries/refs/heads/master/announcements.json",
                 timeout=30
             )
+            r.raise_for_status()
         except Exception:
             logging.exception("Error trying to get announcements from Github.")
             return
-    else:
-        with open(os.path.join(args.config_dir, 'config', 'announcements.json'), 'wb') as f:
-            f.write(r.content)
-    finally:
-        if not startup:
-            jobs_queue.update_job_name(job_id=job_id, new_job_name="Updated Announcements File")
+    with open(os.path.join(args.config_dir, 'config', 'announcements.json'), 'wb') as f:
+        f.write(r.content)
+    if not startup:
+        jobs_queue.update_job_name(job_id=job_id, new_job_name="Updated Announcements File")
 
 
 def get_online_announcements():
@@ -94,65 +85,7 @@ def get_online_announcements():
 
 
 def get_local_announcements():
-    announcements = []
-
-    # opensubtitles.org end-of-life
-    enabled_providers = get_enabled_providers()
-    if enabled_providers and 'opensubtitles' in enabled_providers and not settings.opensubtitles.vip:
-        announcements.append({
-            'text': 'Opensubtitles.org is deprecated for non-VIP users, migrate to Opensubtitles.com ASAP and disable '
-                    'this provider to remove this announcement.',
-            'link': 'https://wiki.bazarr.media/Troubleshooting/OpenSubtitles-migration/',
-            'dismissible': True,
-            'timestamp': 1676236978,
-        })
-
-    # opensubtitles-scraper alternative announcement
-    if enabled_providers and 'opensubtitles' in enabled_providers:
-        announcements.append({
-            'text': 'An alternative OpenSubtitles scraper service is available that bypasses API limitations. '
-                    'Consider using opensubtitles-scraper for improved subtitle downloads.',
-            'link': 'https://github.com/morpheus65535/bazarr/tree/master/opensubtitles-scraper',
-            'dismissible': True,
-            'timestamp': 1765805148,
-        })
-
-
-    # deprecated Sonarr and Radarr versions
-    if get_sonarr_info.is_deprecated():
-        announcements.append({
-            'text': f'Sonarr {get_sonarr_info.version()} is deprecated and unsupported. You should consider upgrading '
-                    f'as Bazarr will eventually drop support for deprecated Sonarr version.',
-            'link': 'https://forums.sonarr.tv/t/v3-is-now-officially-stable-v2-is-eol/27858',
-            'dismissible': False,
-            'timestamp': 1679606061,
-        })
-    if get_radarr_info.is_deprecated():
-        announcements.append({
-            'text': f'Radarr {get_radarr_info.version()} is deprecated and unsupported. You should consider upgrading '
-                    f'as Bazarr will eventually drop support for deprecated Radarr version.',
-            'link': 'https://discord.com/channels/264387956343570434/264388019585286144/1051567458697363547',
-            'dismissible': False,
-            'timestamp': 1679606309,
-        })
-
-    # upcoming deprecated Python versions
-    if upcoming_deprecated_python_version():
-        announcements.append({
-            'text': 'Starting with Bazarr 1.6, support for Python 3.8 and 3.9 will get dropped. Upgrade your current '
-                    'version of Python ASAP to get further updates.',
-            'link': 'https://wiki.bazarr.media/Troubleshooting/Windows_installer_reinstall/',
-            'dismissible': False,
-            'timestamp': 1744469706,
-        })
-
-    for announcement in announcements:
-        if 'enabled' not in announcement:
-            announcement['enabled'] = True
-        if 'dismissible' not in announcement:
-            announcement['dismissible'] = True
-
-    return announcements
+    return []
 
 
 def get_all_announcements():

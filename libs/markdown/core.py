@@ -335,6 +335,12 @@ class Markdown:
            [`ElementTree`][xml.etree.ElementTree.ElementTree] object has been serialized into text.
         5. The output is returned as a string.
 
+        !!! warning
+            The Python-Markdown library does ***not*** sanitize its HTML output.
+            If you are processing Markdown input from an untrusted source, it is your
+            responsibility to ensure that it is properly sanitized. For more
+            information see [Sanitizing HTML Output](../../sanitization.md).
+
         """
 
         # Fix up the source text
@@ -392,9 +398,9 @@ class Markdown:
         encoding: str | None = None,
     ) -> Markdown:
         """
-        Converts a Markdown file and returns the HTML as a Unicode string.
+        Read Markdown text from a file or stream and write HTML output to a file or stream.
 
-        Decodes the file using the provided encoding (defaults to `utf-8`),
+        Decodes the input file using the provided encoding (defaults to `utf-8`),
         passes the file content to markdown, and outputs the HTML to either
         the provided stream or the file with provided name, using the same
         encoding as the source file. The
@@ -410,6 +416,14 @@ class Markdown:
             output: File object or path. Writes to `stdout` if `None`.
             encoding: Encoding of input and output files. Defaults to `utf-8`.
 
+        !!! warning
+            The Python-Markdown library does ***not*** sanitize its HTML output.
+            As `Markdown.convertFile` writes directly to the file system, there is no
+            easy way to sanitize the output from Python code. Therefore, it is
+            recommended that the `Markdown.convertFile` method not be used on input
+            from an untrusted source.  For more information see [Sanitizing HTML
+            Output](../../sanitization.md).
+
         """
 
         encoding = encoding or "utf-8"
@@ -417,7 +431,7 @@ class Markdown:
         # Read the source
         if input:
             if isinstance(input, str):
-                input_file = codecs.open(input, mode="r", encoding=encoding)
+                input_file = open(input, mode="r", encoding=encoding)
             else:
                 input_file = codecs.getreader(encoding)(input)
             text = input_file.read()
@@ -477,6 +491,12 @@ def markdown(text: str, **kwargs: Any) -> str:
     Returns:
         A string in the specified output format.
 
+    !!! warning
+        The Python-Markdown library does ***not*** sanitize its HTML output.
+        If you are processing Markdown input from an untrusted source, it is your
+        responsibility to ensure that it is properly sanitized. For more
+        information see [Sanitizing HTML Output](../../sanitization.md).
+
     """
     md = Markdown(**kwargs)
     return md.convert(text)
@@ -484,7 +504,7 @@ def markdown(text: str, **kwargs: Any) -> str:
 
 def markdownFromFile(**kwargs: Any):
     """
-    Read Markdown text from a file and write output to a file or a stream.
+    Read Markdown text from a file or stream and write HTML output to a file or stream.
 
     This is a shortcut function which initializes an instance of [`Markdown`][markdown.Markdown],
     and calls the [`convertFile`][markdown.Markdown.convertFile] method rather than
@@ -495,6 +515,14 @@ def markdownFromFile(**kwargs: Any):
         output (str | BinaryIO): A file name or writable object.
         encoding (str): Encoding of input and output.
         **kwargs: Any arguments accepted by the `Markdown` class.
+
+    !!! warning
+        The Python-Markdown library does ***not*** sanitize its HTML output.
+        As `markdown.markdownFromFile` writes directly to the file system, there is no
+        easy way to sanitize the output from Python code. Therefore, it is
+        recommended that the `markdown.markdownFromFile` function not be used on input
+        from an untrusted source.  For more information see [Sanitizing HTML
+        Output](../../sanitization.md).
 
     """
     md = Markdown(**kwargs)

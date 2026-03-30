@@ -14,8 +14,10 @@ from languages.get_languages import language_from_alpha2, language_from_alpha3
 from radarr.history import history_log_movie
 from sonarr.history import history_log
 from app.event_handler import show_progress, hide_progress, show_message
+from app.jobs_queue import jobs_queue
 
 from ..core.translator_utils import add_translator_info, create_process_result, get_title
+from .auth import get_translator_auth_headers
 
 logger = logging.getLogger(__name__)
 
@@ -51,26 +53,29 @@ class OpenRouterTranslatorService:
     def _build_reasoning_config(self):
         """
         Build reasoning configuration based on Bazarr settings.
-        Maps effort levels to max_tokens for the AI Subtitle Translator service.
+        Sends effort level directly to the AI Subtitle Translator service.
         """
         reasoning_mode = getattr(settings.translator, 'openrouter_reasoning', 'disabled')
-        
+
         if reasoning_mode == 'disabled':
             return None
-        
-        # Map effort levels to max_tokens for reasoning
-        effort_to_tokens = {
-            'low': 1000,      # Minimal thinking
-            'medium': 2000,   # Default balanced
-            'high': 4000,     # Extended thinking
-        }
-        
-        max_tokens = effort_to_tokens.get(reasoning_mode, 2000)
-        
+
         return {
-            'enabled': True,
-            'maxTokens': max_tokens,
+            'effort': reasoning_mode,
         }
+
+    def _get_api_key_value(self):
+        """Get the API key, encrypted if an encryption key is configured."""
+        api_key = settings.translator.openrouter_api_key
+        encryption_key = settings.translator.openrouter_encryption_key
+        if encryption_key:
+            try:
+                from .encryption import encrypt_api_key
+                api_key = encrypt_api_key(api_key, encryption_key)
+            except ValueError as e:
+                logger.error(f'Invalid encryption key: {e}')
+                raise ValueError("Invalid encryption key format. Check your encryption key in Settings.")
+        return api_key
 
     def translate(self, job_id=None):
         try:
@@ -85,7 +90,7 @@ class OpenRouterTranslatorService:
             logger.debug(f'Starting AI translation for {self.source_srt_file}')
 
             # Submit job and poll for completion
-            translated_lines = self._submit_and_poll(lines_list)
+            translated_lines = self._submit_and_poll(lines_list, bazarr_job_id=job_id)
 
             if translated_lines is None:
                 logger.error(f'Translation failed for {self.source_srt_file}')
@@ -132,7 +137,7 @@ class OpenRouterTranslatorService:
             hide_progress(id=f'translate_progress_{self.dest_srt_file}')
             return False
 
-    def _submit_and_poll(self, lines_list: List[str]) -> Optional[List[Dict[str, Any]]]:
+    def _submit_and_poll(self, lines_list: List[str], bazarr_job_id=None) -> Optional[List[Dict[str, Any]]]:
         """Submit translation job and poll for completion with progress updates"""
         try:
             # Prepare language codes
@@ -145,6 +150,10 @@ class OpenRouterTranslatorService:
             # Apply any special language code conversions
             source_lang = self.language_code_convert_dict.get(source_lang, source_lang)
             target_lang = self.language_code_convert_dict.get(target_lang, target_lang)
+
+            # Resolve alpha2 codes to full language names for the AI translator prompt
+            source_lang = language_from_alpha2(source_lang) or source_lang
+            target_lang = language_from_alpha2(target_lang) or target_lang
 
             logger.debug(f'BAZARR translation language codes: from_lang={self.from_lang}, to_lang={self.to_lang}, '
                          f'orig_to_lang={self.orig_to_lang}, final source={source_lang}, final target={target_lang}')
@@ -174,10 +183,11 @@ class OpenRouterTranslatorService:
                 "lines": lines_payload,
                 # Add configuration from Bazarr settings
                 "config": {
-                    "apiKey": settings.translator.openrouter_api_key,
+                    "apiKey": self._get_api_key_value(),
                     "model": settings.translator.openrouter_model,
                     "temperature": settings.translator.openrouter_temperature,
                     "maxConcurrentJobs": settings.translator.openrouter_max_concurrent,
+                    "parallelBatches": settings.translator.openrouter_parallel_batches,
                     "reasoning": self._build_reasoning_config(),
                 }
             }
@@ -189,7 +199,7 @@ class OpenRouterTranslatorService:
             submit_response = requests.post(
                 f"{base_url}/api/v1/jobs/translate/content",
                 json=payload,
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json", **get_translator_auth_headers()},
                 timeout=30
             )
 
@@ -207,7 +217,7 @@ class OpenRouterTranslatorService:
             logger.debug(f'BAZARR translation job submitted: {job_id}')
 
             # Poll for completion
-            return self._poll_job(base_url, job_id, len(lines_payload))
+            return self._poll_job(base_url, job_id, len(lines_payload), bazarr_job_id=bazarr_job_id)
 
         except requests.exceptions.Timeout:
             logger.error('AI Subtitle Translator request timed out')
@@ -219,7 +229,7 @@ class OpenRouterTranslatorService:
             logger.error(f'AI Subtitle Translator error: {str(e)}')
             return None
 
-    def _poll_job(self, base_url: str, job_id: str, total_lines: int) -> Optional[Any]:
+    def _poll_job(self, base_url: str, job_id: str, total_lines: int, bazarr_job_id=None) -> Optional[Any]:
         """Poll job status until completion"""
         poll_interval = 2  # seconds
         max_wait_time = 1800  # 30 minutes
@@ -229,6 +239,7 @@ class OpenRouterTranslatorService:
             try:
                 status_response = requests.get(
                     f"{base_url}/api/v1/jobs/{job_id}",
+                    headers=get_translator_auth_headers(),
                     timeout=10
                 )
 
@@ -252,6 +263,16 @@ class OpenRouterTranslatorService:
                     count=100
                 )
 
+                # Sync progress to bazarr jobs queue (for NotificationDrawer)
+                if bazarr_job_id:
+                    model_used = job_status.get("model_used", settings.translator.openrouter_model or "")
+                    jobs_queue.update_job_progress(
+                        job_id=bazarr_job_id,
+                        progress_value=progress,
+                        progress_max=100,
+                        progress_message=f'{message} [{model_used}]' if model_used else message
+                    )
+
                 if status == "completed":
                     hide_progress(id=f'translate_progress_{self.dest_srt_file}')
                     result = job_status.get("result")
@@ -271,6 +292,13 @@ class OpenRouterTranslatorService:
                     error = job_status.get("error", "Unknown error")
                     logger.error(f"Translation job failed: {error}")
                     show_message(f"Translation failed: {error}")
+                    return None
+
+                elif status == "partial":
+                    hide_progress(id=f'translate_progress_{self.dest_srt_file}')
+                    error = job_status.get("error", message or "Partial translation")
+                    logger.error(f"Translation partially failed: {error}")
+                    show_message(f"Translation failed (partial): {error}")
                     return None
 
                 elif status == "cancelled":
@@ -301,7 +329,7 @@ class OpenRouterTranslatorService:
         response = requests.post(
             f"{base_url}/api/v1/translate/content",
             json=payload,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **get_translator_auth_headers()},
             timeout=1800
         )
 

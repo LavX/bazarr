@@ -73,7 +73,7 @@ const SeriesHistoryView: FunctionComponent = () => {
         }) => {
           if (language) {
             return (
-              <Badge color="secondary">
+              <Badge>
                 <Language.Text value={language} long></Language.Text>
               </Badge>
             );

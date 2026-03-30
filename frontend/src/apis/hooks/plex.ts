@@ -70,6 +70,7 @@ export const usePlexPinMutation = () => {
 
 export const usePlexPinCheckQuery = (
   pinId: string | null,
+  state: string | null,
   enabled: boolean,
   refetchInterval: number | false,
 ) => {
@@ -77,7 +78,7 @@ export const usePlexPinCheckQuery = (
     queryKey: [QueryKeys.Plex, "pinCheck", pinId],
     queryFn: () => {
       if (!pinId) throw new Error("Pin ID is required");
-      return api.plex.checkPin(pinId);
+      return api.plex.checkPin(pinId, state ?? undefined);
     },
     enabled: enabled && !!pinId,
     retry: false,

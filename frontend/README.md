@@ -14,7 +14,7 @@
 1. Clone or download this repository
 
    ```
-   $ git clone https://github.com/morpheus65535/bazarr.git
+   $ git clone https://github.com/LavX/bazarr.git
    $ cd bazarr/frontend
    ```
 
