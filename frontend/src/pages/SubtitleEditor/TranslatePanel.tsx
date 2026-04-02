@@ -19,6 +19,8 @@ import client from "@/apis/raw/client";
 interface TranslatePanelProps {
   open: boolean;
   cues: Array<{ id: string; text: string }>;
+  referenceCues?: Array<{ startMs: number; endMs: number; text: string }>;
+  availableSubtitles?: Array<{ language: string; format: string }>;
   mediaType?: string;
   mediaId?: number;
   currentLanguage: string;
@@ -192,6 +194,8 @@ async function submitTranslationJob(params: {
 export default function TranslatePanel({
   open,
   cues,
+  referenceCues,
+  availableSubtitles,
   currentLanguage,
   mediaTitle,
   onApplyTranslation,
@@ -257,7 +261,10 @@ export default function TranslatePanel({
           map.set(item.position, item.line);
         }
         setTranslatedLines(map);
-        onSetReference(map);
+        // Only set reference when translating from editor cues, not from loaded reference
+        if (!referenceCues || referenceCues.length === 0) {
+          onSetReference(map);
+        }
         setPhase("completed");
         onTranslatingChange?.(false);
         setApplied(false);
@@ -278,17 +285,19 @@ export default function TranslatePanel({
   }, [phase, jobData]);
 
   const handleSubmit = useCallback(async () => {
-    if (cues.length === 0 || !targetLanguage) return;
+    if (!targetLanguage) return;
+    // Use reference cues as source when available, otherwise use editor cues
+    const sourceLines = referenceCues && referenceCues.length > 0
+      ? referenceCues.map((r, i) => ({ position: i, line: r.text }))
+      : cues.map((cue, i) => ({ position: i, line: cue.text }));
+    if (sourceLines.length === 0) return;
 
     setPhase("submitting");
     setErrorMsg("");
     setTranslatedLines(new Map());
     setApplied(false);
 
-    const lines = cues.map((cue, i) => ({
-      position: i,
-      line: cue.text,
-    }));
+    const lines = sourceLines;
 
     // Resolve language codes to full names for better translation
     const sourceLangName =
@@ -324,7 +333,7 @@ export default function TranslatePanel({
           "Failed to submit translation job.",
       );
     }
-  }, [cues, sourceLanguage, targetLanguage, mediaTitle, languageOptions]);
+  }, [cues, referenceCues, sourceLanguage, targetLanguage, mediaTitle, languageOptions]);
 
   const handleCancel = useCallback(() => {
     if (jobId) {
@@ -386,11 +395,22 @@ export default function TranslatePanel({
           disabled={isWorking}
         >
           <option value="">Load existing subtitle...</option>
-          {languageOptions.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              {opt.label}
-            </option>
-          ))}
+          {availableSubtitles && availableSubtitles.length > 0
+            ? availableSubtitles
+                .filter((s) => s.language !== currentLanguage)
+                .map((s) => {
+                  const langName = (serverLanguages ?? []).find((l) => l.code2 === s.language.split(":")[0])?.name ?? s.language;
+                  const modifier = s.language.includes(":") ? ` (${s.language.split(":")[1].toUpperCase()})` : "";
+                  return (
+                    <option key={s.language} value={s.language}>
+                      {langName}{modifier} [{s.format}]
+                    </option>
+                  );
+                })
+            : languageOptions.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))
+          }
         </select>
         <button
           type="button"
@@ -449,7 +469,7 @@ export default function TranslatePanel({
       )}
 
       {/* Cue count */}
-      <div style={styles.statusText}>{cues.length} cues to translate</div>
+      <div style={styles.statusText}>{referenceCues && referenceCues.length > 0 ? referenceCues.length : cues.length} cues to translate{referenceCues && referenceCues.length > 0 ? " (from reference)" : ""}</div>
 
       {/* Progress section */}
       {phase === "translating" && (
@@ -474,9 +494,9 @@ export default function TranslatePanel({
       {/* Success */}
       {phase === "completed" && (
         <div style={styles.successText}>
-          Translation complete. {translatedLines.size}/{cues.length} lines
+          Translation complete. {translatedLines.size}/{referenceCues && referenceCues.length > 0 ? referenceCues.length : cues.length} lines
           translated.
-          {translatedLines.size < cues.length && (
+          {translatedLines.size < (referenceCues && referenceCues.length > 0 ? referenceCues.length : cues.length) && (
             <span style={{ color: "#fbbf24" }}>
               {" "}
               {cues.length - translatedLines.size} lines were not translated.
@@ -492,12 +512,12 @@ export default function TranslatePanel({
             type="button"
             style={{
               ...styles.btnPrimary,
-              ...((cues.length === 0 || !targetLanguage)
+              ...(((!referenceCues || referenceCues.length === 0) && cues.length === 0) || !targetLanguage
                 ? { opacity: 0.5, cursor: "not-allowed" }
                 : {}),
             }}
             disabled={
-              cues.length === 0 ||
+              ((!referenceCues || referenceCues.length === 0) && cues.length === 0) ||
               !targetLanguage
             }
             onClick={handleSubmit}

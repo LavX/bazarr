@@ -18,6 +18,7 @@ import {
   Center,
   Group,
   Loader,
+  Menu,
   Modal,
   Button,
   Stack,
@@ -31,6 +32,7 @@ import {
   useSubtitleCreate,
 } from "@/apis/hooks/subtitles";
 import api from "@/apis/raw";
+import client from "@/apis/raw/client";
 import {
   subtitleDocumentReducer,
   createInitialDocumentState,
@@ -49,6 +51,7 @@ import {
 import { getParser, detectFormat } from "./parsers";
 import { getSerializer } from "./serializers";
 import type { Cue, SubtitleFormat, ParseResult } from "./types";
+import { Environment } from "@/utilities/env";
 import EditorToolbar from "./EditorToolbar";
 import EditableCueTable from "./EditableCueTable";
 import DetailPane, { type DetailPaneHandle } from "./DetailPane";
@@ -104,6 +107,15 @@ export default function EditorPage() {
   const loadedRef = useRef(false);
   const etagRef = useRef<string>("");
 
+  // Reset when switching to a different subtitle
+  const prevLangRef = useRef(language);
+  useEffect(() => {
+    if (prevLangRef.current !== language) {
+      loadedRef.current = false;
+      prevLangRef.current = language;
+    }
+  }, [language]);
+
   // Load cues into document state when data arrives
   useEffect(() => {
     if (parseResult && !loadedRef.current) {
@@ -112,14 +124,14 @@ export default function EditorPage() {
     }
   }, [parseResult]);
 
-  // Auto-save to localStorage every 30s when dirty
+  // Auto-save to localStorage on every change (debounced 2s)
   const autoSaveKey = mediaType && mediaId && language
     ? `bazarr-editor-${mediaType}-${mediaId}-${language}`
     : null;
 
   useEffect(() => {
-    if (!autoSaveKey || !docState.dirty || docState.cues.length === 0) return;
-    const timer = setInterval(() => {
+    if (!autoSaveKey || docState.cues.length === 0) return;
+    const timer = setTimeout(() => {
       try {
         const serialized = getSerializer(format).serialize({
           metadata: parseResult?.metadata ?? { format },
@@ -132,9 +144,9 @@ export default function EditorPage() {
           timestamp: Date.now(),
         }));
       } catch { /* quota exceeded */ }
-    }, 30000);
-    return () => clearInterval(timer);
-  }, [autoSaveKey, docState.dirty, docState.cues, format, parseResult?.metadata]);
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, [autoSaveKey, docState.cues, format, parseResult?.metadata]);
 
   // Auto-save recovery: check on load if there's a newer draft in localStorage
   const [recoveryAvailable, setRecoveryAvailable] = useState<{ content: string; format: string; cueCount: number; timestamp: number } | null>(null);
@@ -200,6 +212,23 @@ export default function EditorPage() {
   const [referenceOpen, setReferenceOpen] = useState(false);
   const [translatingLineIdx, setTranslatingLineIdx] = useState<number | null>(null);
   const refFileInputRef = useRef<HTMLInputElement>(null);
+
+  // Audio track selection
+  const [audioTracks, setAudioTracks] = useState<Array<{ index: number; codec: string; language: string; title: string; channels: number; label: string }>>([]);
+  const [selectedAudioTrack, setSelectedAudioTrack] = useState(0);
+
+  // Available subtitles for this media (for reference subtitle dropdown)
+  const [availableSubtitles, setAvailableSubtitles] = useState<Array<{ language: string; format: string }>>([]);
+  useEffect(() => {
+    if (!mediaType || !mediaId) return;
+    const apiKey = Environment.apiKey ?? "";
+    fetch(`${Environment.baseUrl}/api/editor/subtitles?mediaType=${mediaType}&mediaId=${mediaId}&apikey=${encodeURIComponent(apiKey)}`)
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => {
+        if (data?.subtitles) setAvailableSubtitles(data.subtitles);
+      })
+      .catch(() => {});
+  }, [mediaType, mediaId]);
 
 
   const toggleBookmark = useCallback((cueId: string) => {
@@ -415,6 +444,37 @@ export default function EditorPage() {
     }
   }, [mediaType, mediaId, language, format, encoding, isNewSubtitle, buildParseResult, saveMutation, createMutation, autoSaveKey, selectedIndex, docState.cues, parseResult?.metadata, queryClient]);
 
+  // Subtitle language switcher
+  const [pendingLangSwitch, setPendingLangSwitch] = useState<string | null>(null);
+  const switchToLanguage = useCallback((targetLang: string) => {
+    if (targetLang === language) return;
+    if (docState.dirty) {
+      setPendingLangSwitch(targetLang);
+    } else {
+      navigate(`/subtitles/edit/${mediaType}/${mediaId}/${targetLang}`, { replace: true });
+    }
+  }, [language, mediaType, mediaId, docState.dirty, navigate]);
+
+  const handleSwitchSave = useCallback(() => {
+    if (!pendingLangSwitch) return;
+    handleSave();
+    setPendingLangSwitch(null);
+    // Delay to let save mutation complete and dirty clear
+    setTimeout(() => {
+      navigate(`/subtitles/edit/${mediaType}/${mediaId}/${pendingLangSwitch}`, { replace: true });
+    }, 1000);
+  }, [pendingLangSwitch, handleSave, mediaType, mediaId, navigate]);
+
+  const handleSwitchDrop = useCallback(() => {
+    if (!pendingLangSwitch) return;
+    dispatch({ type: "MARK_SAVED" });
+    setPendingLangSwitch(null);
+    // Defer navigation so React processes MARK_SAVED first (dirty=false), avoiding the blocker
+    requestAnimationFrame(() => {
+      navigate(`/subtitles/edit/${mediaType}/${mediaId}/${pendingLangSwitch}`, { replace: true });
+    });
+  }, [pendingLangSwitch, mediaType, mediaId, navigate]);
+
   // Save As handler (create new subtitle with different language)
   // State for overwrite confirmation
   const [overwriteConfirm, setOverwriteConfirm] = useState<{ lang: string; content: string } | null>(null);
@@ -570,20 +630,24 @@ export default function EditorPage() {
           setReferenceOpen((v) => !v);
           break;
         case "addCue": {
-          const isEmpty = docState.cues.length === 0;
-          const afterIdx = isEmpty ? -1 : Math.max(0, selectedIndex);
-          const prevCue = isEmpty ? null : docState.cues[afterIdx];
-          const startMs = prevCue ? prevCue.endMs + 100 : 0;
+          const currentPos = playbackTimeMs;
+          const startMs = currentPos > 0 ? currentPos : (
+            docState.cues.length > 0
+              ? docState.cues[Math.max(0, selectedIndex)].endMs + 100
+              : 0
+          );
           const newCue: Cue = {
             id: crypto.randomUUID(),
             startMs,
             endMs: startMs + 3000,
             text: "",
           };
-          dispatch({ type: "APPLY_OP", op: createAddCue(afterIdx, newCue) });
-          // Select the new cue so the detail pane shows up
-          setSelectedIndex(afterIdx + 1);
-          // Trigger auto-focus on the textarea for the new cue
+          // Insert at the right position based on time
+          let insertIdx = docState.cues.findIndex((c) => c.startMs > startMs);
+          if (insertIdx === -1) insertIdx = docState.cues.length;
+          // addCue inserts after afterIdx, so we need afterIdx = insertIdx - 1
+          dispatch({ type: "APPLY_OP", op: createAddCue(insertIdx - 1, newCue) });
+          setSelectedIndex(insertIdx);
           setShouldFocusTextarea(true);
           break;
         }
@@ -774,20 +838,47 @@ export default function EditorPage() {
 
   const handleApplyTranslation = useCallback(
     (translations: Map<number, string>) => {
-      const ops = Array.from(translations.entries())
-        .filter(([idx]) => idx >= 0 && idx < docState.cues.length)
-        .map(([idx, text]) => createEditText(idx, text));
-      if (ops.length > 0) {
-        dispatch({ type: "BATCH_OPS", ops });
-        showNotification({
-          title: "Translation applied",
-          message: `Updated ${ops.length} cue(s)`,
-          color: "green",
+      // If translating from reference cues, create all cues with reference timing
+      if (referenceCueList.length > 0 && translations.size > docState.cues.length) {
+        const newCues: Cue[] = [];
+        translations.forEach((text, idx) => {
+          if (idx < referenceCueList.length) {
+            newCues.push({
+              id: crypto.randomUUID(),
+              startMs: referenceCueList[idx].startMs,
+              endMs: referenceCueList[idx].endMs,
+              text,
+            });
+          }
         });
+        if (newCues.length > 0) {
+          // Sort by time to ensure correct order regardless of Map iteration order
+          newCues.sort((a, b) => a.startMs - b.startMs);
+          dispatch({ type: "LOAD", cues: newCues });
+          dispatch({ type: "MARK_DIRTY" });
+          showNotification({
+            title: "Translation applied",
+            message: `Created ${newCues.length} translated cue(s)`,
+            color: "green",
+          });
+        }
+      } else {
+        // Normal case: update existing editor cues
+        const ops = Array.from(translations.entries())
+          .filter(([idx]) => idx >= 0 && idx < docState.cues.length)
+          .map(([idx, text]) => createEditText(idx, text));
+        if (ops.length > 0) {
+          dispatch({ type: "BATCH_OPS", ops });
+          showNotification({
+            title: "Translation applied",
+            message: `Updated ${ops.length} cue(s)`,
+            color: "green",
+          });
+        }
       }
       setTranslating(false);
     },
-    [docState.cues],
+    [docState.cues, referenceCueList],
   );
 
   // Load reference subtitle from server
@@ -832,58 +923,91 @@ export default function EditorPage() {
     e.target.value = "";
   }, []);
 
-  // Use reference text for current cue
+  // Use reference text: create new cue at reference timing, or update selected cue if it overlaps
   const handleUseReference = useCallback(() => {
+    if (referenceCueList.length === 0) return;
+
+    const pos = playbackTimeMs;
     const cue = selectedIndex >= 0 && selectedIndex < docState.cues.length ? docState.cues[selectedIndex] : null;
-    if (!cue || referenceCueList.length === 0) return;
-    const matches = referenceCueList.filter(
-      (r) => r.startMs < cue.endMs && r.endMs > cue.startMs,
-    );
-    const text = matches.map((r) => r.text).join("\n");
-    if (text) {
-      dispatch({ type: "APPLY_OP", op: createEditText(selectedIndex, text) });
+    let matches = referenceCueList.filter((r) => r.startMs <= pos && r.endMs >= pos);
+    if (matches.length === 0 && cue) {
+      matches = referenceCueList.filter((r) => r.startMs < cue.endMs && r.endMs > cue.startMs);
     }
-  }, [selectedIndex, docState.cues, referenceCueList]);
+    const text = matches.map((r) => r.text).join("\n");
+    if (!text || matches.length === 0) return;
+
+    const refStartMs = Math.min(...matches.map((r) => r.startMs));
+    const refEndMs = Math.max(...matches.map((r) => r.endMs));
+
+    // If selected cue overlaps the reference, update it in place
+    if (cue && cue.startMs < refEndMs && cue.endMs > refStartMs) {
+      dispatch({ type: "APPLY_OP", op: createEditText(selectedIndex, text) });
+    } else {
+      // Create new cue at reference timing
+      const newCue: Cue = { id: crypto.randomUUID(), startMs: refStartMs, endMs: refEndMs, text };
+      let insertIdx = docState.cues.findIndex((c) => c.startMs > refStartMs);
+      if (insertIdx === -1) insertIdx = docState.cues.length;
+      dispatch({ type: "APPLY_OP", op: createAddCue(insertIdx - 1, newCue) });
+      setSelectedIndex(insertIdx);
+    }
+  }, [selectedIndex, docState.cues, referenceCueList, playbackTimeMs]);
 
   // Translate single line via API
   const handleTranslateLine = useCallback(async () => {
-    if (selectedIndex < 0 || selectedIndex >= docState.cues.length) return;
-    const cue = docState.cues[selectedIndex];
-    if (!cue.text.trim()) return;
+    const cue = selectedIndex >= 0 && selectedIndex < docState.cues.length ? docState.cues[selectedIndex] : null;
 
-    setTranslatingLineIdx(selectedIndex);
+    // Find reference at playback position first, then cue overlap
+    const pos = playbackTimeMs;
+    let refMatches = referenceCueList.filter((r) => r.startMs <= pos && r.endMs >= pos);
+    if (refMatches.length === 0 && cue) {
+      refMatches = referenceCueList.filter((r) => r.startMs < cue.endMs && r.endMs > cue.startMs);
+    }
+
+    const sourceText = refMatches.length > 0
+      ? refMatches.map((r) => r.text).join("\n")
+      : cue?.text || "";
+    if (!sourceText.trim()) return;
+
+    // Create cue at reference timing if no selected cue overlaps the reference
+    let targetIdx = selectedIndex;
+    if (refMatches.length > 0) {
+      const refStartMs = Math.min(...refMatches.map((r) => r.startMs));
+      const refEndMs = Math.max(...refMatches.map((r) => r.endMs));
+      const overlaps = cue && cue.startMs < refEndMs && cue.endMs > refStartMs;
+      if (!overlaps) {
+        const newCue: Cue = { id: crypto.randomUUID(), startMs: refStartMs, endMs: refEndMs, text: "" };
+        let insertIdx = docState.cues.findIndex((c) => c.startMs > refStartMs);
+        if (insertIdx === -1) insertIdx = docState.cues.length;
+        dispatch({ type: "APPLY_OP", op: createAddCue(insertIdx - 1, newCue) });
+        setSelectedIndex(insertIdx);
+        targetIdx = insertIdx;
+      }
+    }
+
+    setTranslatingLineIdx(targetIdx);
     try {
       const sourceLangName = referenceLanguage || "";
-      const result = await fetch("/api/translator/jobs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          lines: [{ position: 0, line: cue.text }],
+      const result = await client.axios.post("/translator/jobs", {
+          lines: [{ position: 0, line: sourceText }],
           sourceLanguage: sourceLangName,
           targetLanguage: language || "",
           title: data?.mediaTitle || "",
           mediaType: mediaType || "",
-        }),
       });
-      const jobResult = await result.json();
+      const jobResult = result.data;
       if (!jobResult.jobId) {
         setTranslatingLineIdx(null);
         return;
       }
-      // Poll for completion
       const poll = async () => {
         for (let i = 0; i < 120; i++) {
           await new Promise(r => setTimeout(r, 2000));
-          const resp = await fetch(`/api/translator/jobs/${jobResult.jobId}`);
-          const job = await resp.json();
+          const resp = await client.axios.get(`/translator/jobs/${jobResult.jobId}`);
+          const job = resp.data;
           if (job.status === "completed" || job.status === "partial") {
             const lines = (job.result as any)?.lines;
             if (lines?.[0]?.line) {
-              const cueRef = docState.cues[selectedIndex];
-              setReferenceCueList(prev => [
-                ...prev,
-                { startMs: cueRef.startMs, endMs: cueRef.endMs, text: lines[0].line },
-              ]);
+              dispatch({ type: "APPLY_OP", op: createEditText(targetIdx, lines[0].line) });
             }
             break;
           } else if (job.status === "failed" || job.status === "cancelled") {
@@ -896,7 +1020,7 @@ export default function EditorPage() {
     } catch {
       setTranslatingLineIdx(null);
     }
-  }, [selectedIndex, docState.cues, referenceLanguage, language, data?.mediaTitle, mediaType]);
+  }, [selectedIndex, docState.cues, referenceCueList, playbackTimeMs, referenceLanguage, language, data?.mediaTitle, mediaType]);
 
   // Clear auto-focus flag after it fires
   useEffect(() => {
@@ -1166,16 +1290,26 @@ export default function EditorPage() {
     [handleSave, handleToolbarAction, nudgeTiming, selectedIndex, docState.cues, toggleBookmark, bookmarkedIds],
   );
 
-  // Find reference text aligned by time to the selected cue
+  // Find reference text aligned by time to the current playback position
   const selectedRefText = useMemo(() => {
-    const cue = selectedIndex >= 0 && selectedIndex < docState.cues.length ? docState.cues[selectedIndex] : null;
-    if (!cue || referenceCueList.length === 0) return undefined;
+    if (referenceCueList.length === 0) return undefined;
+    // Use playback position to find matching reference cues
+    const pos = playbackTimeMs;
     const matches = referenceCueList.filter(
-      (r) => r.startMs < cue.endMs && r.endMs > cue.startMs,
+      (r) => r.startMs <= pos && r.endMs >= pos,
     );
-    if (matches.length === 0) return undefined;
+    // Fall back to selected cue overlap if nothing at exact position
+    if (matches.length === 0) {
+      const cue = selectedIndex >= 0 && selectedIndex < docState.cues.length ? docState.cues[selectedIndex] : null;
+      if (!cue) return undefined;
+      const cueMatches = referenceCueList.filter(
+        (r) => r.startMs < cue.endMs && r.endMs > cue.startMs,
+      );
+      if (cueMatches.length === 0) return undefined;
+      return cueMatches.map((r) => r.text).join("\n");
+    }
     return matches.map((r) => r.text).join("\n");
-  }, [selectedIndex, docState.cues, referenceCueList]);
+  }, [playbackTimeMs, selectedIndex, docState.cues, referenceCueList]);
 
   // Start with empty cues for new subtitle if not yet loaded
   useEffect(() => {
@@ -1260,7 +1394,53 @@ export default function EditorPage() {
           {data?.episodeTitle && (
             <Text>{data.episodeTitle}</Text>
           )}
-          <Text>{isNewSubtitle ? "New Subtitle" : "Subtitle Editor"}</Text>
+          <Menu shadow="md" width={260} position="bottom-start" withinPortal>
+            <Menu.Target>
+              <Anchor component="button" type="button" style={{ cursor: "pointer", fontSize: "inherit", fontFamily: "inherit" }}>
+                {(() => {
+                  const sub = availableSubtitles.find((s) => s.language === language);
+                  if (sub) {
+                    const name = (serverLanguages ?? []).find((l) => l.code2 === sub.language.split(":")[0])?.name ?? sub.language;
+                    const mod = sub.language.includes(":") ? ` (${sub.language.split(":")[1].toUpperCase()})` : "";
+                    return `${name}${mod} [${sub.format}]`;
+                  }
+                  const name = (serverLanguages ?? []).find((l) => l.code2 === language?.split(":")[0])?.name ?? language;
+                  return isNewSubtitle ? `${name} (new)` : name;
+                })()}
+                {" \u25BE"}
+              </Anchor>
+            </Menu.Target>
+            <Menu.Dropdown>
+              <Menu.Label>Existing subtitles</Menu.Label>
+              {availableSubtitles.map((s) => {
+                const langName = (serverLanguages ?? []).find((l) => l.code2 === s.language.split(":")[0])?.name ?? s.language;
+                const modifier = s.language.includes(":") ? ` (${s.language.split(":")[1].toUpperCase()})` : "";
+                return (
+                  <Menu.Item
+                    key={s.language}
+                    onClick={() => switchToLanguage(s.language)}
+                    style={s.language === language ? { background: "rgba(230,138,0,0.12)" } : undefined}
+                  >
+                    {langName}{modifier} [{s.format}]
+                  </Menu.Item>
+                );
+              })}
+              {availableSubtitles.length === 0 && (
+                <Menu.Item disabled>No subtitles found</Menu.Item>
+              )}
+              <Menu.Divider />
+              <Menu.Label>Create new</Menu.Label>
+              {languageOptions
+                .filter((opt) => !availableSubtitles.some((s) => s.language === opt.value) && opt.value !== language)
+                .slice(0, 20)
+                .map((opt) => (
+                  <Menu.Item key={opt.value} onClick={() => switchToLanguage(opt.value)}>
+                    {opt.label}
+                  </Menu.Item>
+                ))
+              }
+            </Menu.Dropdown>
+          </Menu>
         </Breadcrumbs>
         <Group gap="xs">
           {isNewSubtitle && (
@@ -1268,14 +1448,6 @@ export default function EditorPage() {
               NEW
             </Badge>
           )}
-          {(data?.language ?? language) && (
-            <Badge variant="light" color="teal" size="sm">
-              {data?.language ?? language}
-            </Badge>
-          )}
-          <Badge variant="outline" color="gray" size="sm">
-            {encoding}
-          </Badge>
         </Group>
       </Group>
 
@@ -1288,6 +1460,7 @@ export default function EditorPage() {
         format={format}
         language={data?.language ?? language ?? ""}
         bookmarkFilterActive={bookmarkFilterActive}
+        bookmarkCount={bookmarkedIds.size}
         onToggleBookmarkFilter={() => setBookmarkFilterActive((v) => !v)}
         onShowShortcuts={() => setShortcutsOpen(true)}
         translating={translating}
@@ -1422,12 +1595,35 @@ export default function EditorPage() {
                 mediaId={mediaId ? Number(mediaId) : undefined}
                 language={language}
                 onApplyBatch={handleTimingApplyBatch}
-                onReloadAfterSync={handleReloadAfterSync}
+                onGetContent={() => {
+                  const pr = buildParseResult();
+                  const serialized = getSerializer(format).serialize(pr);
+                  return { content: serialized, format, encoding };
+                }}
+                onApplySyncedContent={(syncedContent: string) => {
+                  try {
+                    const parsed = getParser(format).parse(syncedContent);
+                    if (parsed.cues.length === 0) {
+                      showNotification({ title: "Sync", message: "Synced content has no cues", color: "yellow" });
+                      return;
+                    }
+                    dispatch({ type: "LOAD", cues: parsed.cues });
+                    showNotification({
+                      message: `Loaded ${parsed.cues.length} synced cues into editor`,
+                      color: "green",
+                      autoClose: 3000,
+                    });
+                  } catch (err) {
+                    showNotification({ title: "Error", message: `Failed to parse synced content: ${(err as Error).message}`, color: "red" });
+                  }
+                }}
                 onClose={() => setTimingOpen(false)}
               />
               <TranslatePanel
                 open={translateOpen}
                 cues={docState.cues}
+                referenceCues={referenceCueList}
+                availableSubtitles={availableSubtitles}
                 mediaType={mediaType}
                 mediaId={mediaId ? Number(mediaId) : undefined}
                 currentLanguage={language ?? ""}
@@ -1495,9 +1691,22 @@ export default function EditorPage() {
                       onChange={(e) => { if (e.target.value) handleLoadReference(e.target.value); }}
                     >
                       <option value="">Select language...</option>
-                      {(languageOptions ?? []).map((opt) => (
-                        <option key={opt.value} value={opt.value}>{opt.label}</option>
-                      ))}
+                      {availableSubtitles.length > 0
+                        ? availableSubtitles
+                            .filter((s) => s.language !== language)
+                            .map((s) => {
+                              const langName = (serverLanguages ?? []).find((l) => l.code2 === s.language.split(":")[0])?.name ?? s.language;
+                              const modifier = s.language.includes(":") ? ` (${s.language.split(":")[1].toUpperCase()})` : "";
+                              return (
+                                <option key={s.language} value={s.language}>
+                                  {langName}{modifier} [{s.format}]
+                                </option>
+                              );
+                            })
+                        : (languageOptions ?? []).map((opt) => (
+                            <option key={opt.value} value={opt.value}>{opt.label}</option>
+                          ))
+                      }
                     </select>
                     <button
                       type="button"
@@ -1574,7 +1783,45 @@ export default function EditorPage() {
               }
             }}
             onPlayStateChange={setVideoPlaying}
+            onAudioTracksLoaded={setAudioTracks}
+            audioTrack={selectedAudioTrack}
           />
+          {/* Audio track selector */}
+          {audioTracks.length > 1 && (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "3px 8px",
+                background: "var(--bz-surface-base)",
+                borderBottom: "1px solid var(--bz-border-card)",
+                fontSize: 11,
+              }}
+            >
+              <span style={{ color: "var(--bz-text-tertiary)", whiteSpace: "nowrap" }}>Audio:</span>
+              <select
+                value={selectedAudioTrack}
+                onChange={(e) => setSelectedAudioTrack(Number(e.target.value))}
+                style={{
+                  flex: 1,
+                  background: "var(--bz-surface-raised)",
+                  border: "1px solid var(--bz-border-interactive)",
+                  borderRadius: "var(--bz-radius-xs)",
+                  color: "var(--bz-text-primary)",
+                  fontSize: 11,
+                  padding: "2px 4px",
+                  cursor: "pointer",
+                }}
+              >
+                {audioTracks.map((t) => (
+                  <option key={t.index} value={t.index}>
+                    {t.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           <DetailPane
             ref={detailPaneRef}
             cue={selectedCue}
@@ -1588,6 +1835,7 @@ export default function EditorPage() {
             onUseReference={selectedRefText ? handleUseReference : undefined}
             onTranslateLine={handleTranslateLine}
             translatingLine={translatingLineIdx === selectedIndex}
+            currentTimeMs={playbackTimeMs}
           />
         </div>
       </div>
@@ -1602,6 +1850,7 @@ export default function EditorPage() {
         onSelect={handleUserSelect}
         onTimingChange={handleWaveformTimingChange}
         onSeek={handleWaveformSeek}
+        audioTrack={selectedAudioTrack}
       />
 
       {/* Status bar */}
@@ -1638,6 +1887,30 @@ export default function EditorPage() {
         style={{ display: "none" }}
         onChange={handleRefFileSelected}
       />
+
+      {/* Switch subtitle language confirmation */}
+      <Modal
+        opened={!!pendingLangSwitch}
+        onClose={() => setPendingLangSwitch(null)}
+        withCloseButton={false}
+        centered
+        size="xs"
+        padding="md"
+        overlayProps={{ backgroundOpacity: 0.4 }}
+      >
+        <Text size="sm" mb="md">Save changes before switching subtitle?</Text>
+        <Group justify="flex-end" gap="xs">
+          <Button size="xs" variant="subtle" color="gray" onClick={() => setPendingLangSwitch(null)}>
+            Cancel
+          </Button>
+          <Button size="xs" variant="light" color="red" onClick={handleSwitchDrop}>
+            Discard
+          </Button>
+          <Button size="xs" color="green" onClick={handleSwitchSave}>
+            Save
+          </Button>
+        </Group>
+      </Modal>
 
       {/* Unsaved changes confirmation modal */}
       <Modal

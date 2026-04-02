@@ -7,10 +7,7 @@ import {
   type CSSProperties,
 } from "react";
 import { showNotification } from "@mantine/notifications";
-import { useQueryClient } from "@tanstack/react-query";
-import { QueryKeys } from "@/apis/queries/keys";
-import { useBatchAction } from "@/apis/hooks/subtitles";
-import type { BatchOptions } from "@/apis/raw/subtitles";
+import { Environment } from "@/utilities/env";
 import { createEditTiming, type CueOperation } from "./document";
 import type { Cue } from "./types";
 
@@ -22,7 +19,8 @@ interface TimingToolsPanelProps {
   mediaId?: number;
   language?: string;
   onApplyBatch: (ops: CueOperation[]) => void;
-  onReloadAfterSync: () => void;
+  onGetContent: () => { content: string; format: string; encoding: string } | null;
+  onApplySyncedContent: (content: string) => void;
   onClose: () => void;
 }
 
@@ -481,83 +479,127 @@ function AutoSyncTab({
   mediaType,
   mediaId,
   language,
-  onReloadAfterSync,
+  onGetContent,
+  onApplySyncedContent,
 }: {
   mediaType?: string;
   mediaId?: number;
   language?: string;
-  onReloadAfterSync: () => void;
+  onGetContent: () => { content: string; format: string; encoding: string } | null;
+  onApplySyncedContent: (content: string) => void;
 }) {
-  const queryClient = useQueryClient();
-  const batchAction = useBatchAction();
   const [maxOffset, setMaxOffset] = useState("120");
   const [gss, setGss] = useState(false);
+  const [noFixFramerate, setNoFixFramerate] = useState(true);
+  const [vad, setVad] = useState("");
   const [syncing, setSyncing] = useState(false);
+  const [progressMsg, setProgressMsg] = useState("");
 
   const canSync =
     !!mediaType && mediaId !== undefined && !!language && !syncing;
 
   const handleSync = useCallback(async () => {
     if (!canSync || mediaId === undefined) return;
+
+    const editorData = onGetContent();
+    if (!editorData) {
+      showNotification({ title: "Sync", message: "No content to sync", color: "yellow" });
+      return;
+    }
+
     setSyncing(true);
-
-    const itemType =
-      mediaType === "episode" ? "episode" : "movie";
-    const item =
-      mediaType === "episode"
-        ? { type: itemType as "episode", sonarrEpisodeId: mediaId }
-        : { type: itemType as "movie", radarrId: mediaId };
-
-    const options: BatchOptions = {
-      maxOffsetSeconds: parseInt(maxOffset, 10) || 120,
-      gss,
-    };
+    setProgressMsg("Submitting sync job...");
 
     try {
-      await batchAction.mutateAsync({
-        items: [item],
-        action: "sync",
-        options,
+      // Submit sync job
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "X-API-KEY": Environment.apiKey ?? "",
+      };
+      const submitResp = await fetch(`${Environment.baseUrl}/api/editor/sync`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          mediaType,
+          mediaId,
+          content: editorData.content,
+          format: editorData.format,
+          encoding: editorData.encoding,
+          maxOffsetSeconds: parseInt(maxOffset, 10) || 120,
+          gss,
+          noFixFramerate: noFixFramerate,
+          ...(vad ? { vad } : {}),
+        }),
       });
 
-      await queryClient.invalidateQueries({
-        queryKey: [QueryKeys.Subtitles, "content", mediaType, mediaId, language],
-      });
+      const submitResult = await submitResp.json();
+      if (!submitResp.ok || !submitResult.jobKey) {
+        showNotification({ title: "Sync Failed", message: submitResult.message || "Failed to start sync", color: "red" });
+        setSyncing(false);
+        return;
+      }
 
-      showNotification({
-        message: "Sync complete. Reloading subtitle content.",
-        color: "green",
-        autoClose: 3000,
-      });
+      const jobKey = submitResult.jobKey;
+      setProgressMsg("ffsubsync running (check Jobs Manager for progress)...");
 
-      onReloadAfterSync();
+      // Poll for completion
+      for (let i = 0; i < 600; i++) {
+        await new Promise((r) => setTimeout(r, 2000));
+
+        try {
+          const pollResp = await fetch(
+            `${Environment.baseUrl}/api/editor/sync?jobKey=${encodeURIComponent(jobKey)}&apikey=${encodeURIComponent(Environment.apiKey ?? "")}`,
+            { headers: { "X-API-KEY": Environment.apiKey ?? "" } },
+          );
+          const pollResult = await pollResp.json();
+
+          if (pollResult.status === "completed" && pollResult.content) {
+            onApplySyncedContent(pollResult.content);
+            showNotification({ message: "Sync complete, cues updated", color: "green", autoClose: 3000 });
+            setProgressMsg("");
+            setSyncing(false);
+            return;
+          }
+
+          if (pollResult.status === "failed") {
+            showNotification({ title: "Sync Failed", message: pollResult.message || "ffsubsync error", color: "red", autoClose: 5000 });
+            setProgressMsg("");
+            setSyncing(false);
+            return;
+          }
+
+          if (pollResult.status === "not_found") {
+            showNotification({ title: "Sync", message: "Sync job lost. It may have completed or been cleaned up.", color: "yellow" });
+            setProgressMsg("");
+            setSyncing(false);
+            return;
+          }
+
+          if (pollResult.message) {
+            setProgressMsg(pollResult.message);
+          }
+        } catch {
+          // Network hiccup, keep polling
+        }
+      }
+
+      showNotification({ title: "Sync", message: "Timed out waiting for sync", color: "yellow" });
     } catch (err) {
-      showNotification({
-        title: "Sync Failed",
-        message: (err as Error).message || "ffsubsync returned an error",
-        color: "red",
-        autoClose: 5000,
-      });
+      showNotification({ title: "Sync Failed", message: (err as Error).message || "Network error", color: "red" });
     } finally {
       setSyncing(false);
+      setProgressMsg("");
     }
-  }, [
-    canSync,
-    mediaType,
-    mediaId,
-    language,
-    maxOffset,
-    gss,
-    batchAction,
-    queryClient,
-    onReloadAfterSync,
-  ]);
+  }, [canSync, mediaType, mediaId, maxOffset, gss, noFixFramerate, vad, onGetContent, onApplySyncedContent]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ fontSize: 11, padding: "4px 8px", borderRadius: 4, background: "rgba(245, 158, 11, 0.15)", color: "#f59e0b", marginBottom: 2 }}>
+        Experimental: results may vary depending on audio quality and subtitle timing.
+      </div>
       <div style={styles.hint}>
         Runs ffsubsync on the server to align this subtitle to the audio track.
-        The file on disk will be modified and reloaded into the editor.
+        Synced cues will be loaded into the editor (save manually to write to disk).
       </div>
 
       <div style={styles.row}>
@@ -566,6 +608,7 @@ function AutoSyncTab({
           value={maxOffset}
           onChange={(e) => setMaxOffset(e.target.value)}
           style={styles.select}
+          disabled={syncing}
         >
           <option value="60">60 seconds</option>
           <option value="120">120 seconds</option>
@@ -590,10 +633,50 @@ function AutoSyncTab({
             type="checkbox"
             checked={gss}
             onChange={(e) => setGss(e.target.checked)}
+            disabled={syncing}
             style={styles.checkbox}
           />
           Golden-Section Search (slower, more accurate)
         </label>
+      </div>
+
+      <div style={styles.row}>
+        <span style={styles.label}>No Fix Framerate</span>
+        <label
+          style={{
+            fontSize: 12,
+            color: "var(--bz-text-primary)",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={noFixFramerate}
+            onChange={(e) => setNoFixFramerate(e.target.checked)}
+            disabled={syncing}
+            style={styles.checkbox}
+          />
+          Assume identical framerates
+        </label>
+      </div>
+
+      <div style={styles.row}>
+        <span style={styles.label}>VAD</span>
+        <select
+          value={vad}
+          onChange={(e) => setVad(e.target.value)}
+          style={styles.select}
+          disabled={syncing}
+        >
+          <option value="">Default</option>
+          <option value="subs_then_webrtc">subs_then_webrtc</option>
+          <option value="subs_then_auditok">subs_then_auditok</option>
+          <option value="webrtc">webrtc</option>
+          <option value="auditok">auditok</option>
+        </select>
       </div>
 
       {!mediaId && (
@@ -602,16 +685,31 @@ function AutoSyncTab({
         </div>
       )}
 
-      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, alignItems: "center" }}>
-        {syncing && (
-          <>
-            <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-            <div style={styles.spinner} />
-            <span style={{ fontSize: 12, color: "var(--bz-text-secondary)" }}>
-              Syncing...
-            </span>
-          </>
-        )}
+      {/* Progress */}
+      {syncing && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <div style={{
+            height: 6,
+            borderRadius: 3,
+            background: "var(--bz-surface-base)",
+            overflow: "hidden",
+          }}>
+            <div style={{
+              height: "100%",
+              borderRadius: 3,
+              background: "var(--mantine-color-brand-5)",
+              width: "100%",
+              animation: "pulse 1.5s ease-in-out infinite",
+            }} />
+          </div>
+          <div style={{ fontSize: 11, color: "var(--bz-text-secondary)" }}>
+            {progressMsg}
+          </div>
+          <style>{`@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }`}</style>
+        </div>
+      )}
+
+      <div style={{ display: "flex", justifyContent: "flex-end" }}>
         <button
           type="button"
           style={{
@@ -621,7 +719,7 @@ function AutoSyncTab({
           disabled={!canSync}
           onClick={handleSync}
         >
-          Sync
+          {syncing ? "Syncing..." : "Sync"}
         </button>
       </div>
     </div>
@@ -636,7 +734,8 @@ export default function TimingToolsPanel({
   mediaId,
   language,
   onApplyBatch,
-  onReloadAfterSync,
+  onGetContent,
+  onApplySyncedContent,
   onClose,
 }: TimingToolsPanelProps) {
   const [activeTab, setActiveTab] = useState<TabId>("shift");
@@ -707,7 +806,8 @@ export default function TimingToolsPanel({
           mediaType={mediaType}
           mediaId={mediaId}
           language={language}
-          onReloadAfterSync={onReloadAfterSync}
+          onGetContent={onGetContent}
+          onApplySyncedContent={onApplySyncedContent}
         />
       )}
     </div>

@@ -48,6 +48,7 @@ interface EditorToolbarProps {
   translating?: boolean;
   referenceActive?: boolean;
   bookmarkFilterActive?: boolean;
+  bookmarkCount?: number;
   onToggleBookmarkFilter?: () => void;
   onShowShortcuts?: () => void;
 }
@@ -75,6 +76,7 @@ export default function EditorToolbar({
   translating,
   referenceActive,
   bookmarkFilterActive,
+  bookmarkCount = 0,
   onToggleBookmarkFilter,
   onShowShortcuts,
 }: EditorToolbarProps) {
@@ -306,12 +308,13 @@ export default function EditorToolbar({
 
       {/* Right side: filters, shortcuts, badges */}
       <Group gap="xs" wrap="nowrap">
-        <Tooltip label="Show bookmarked only (Ctrl+B to bookmark)" position="bottom" withArrow>
+        <Tooltip label={bookmarkCount > 0 ? `Show bookmarked only (${bookmarkCount})` : "No bookmarks (Ctrl+B to bookmark)"} position="bottom" withArrow>
           <ActionIcon
             size="sm"
             variant="subtle"
             color={bookmarkFilterActive ? "yellow" : "gray"}
             onClick={onToggleBookmarkFilter}
+            disabled={bookmarkCount === 0}
             aria-label="Filter bookmarked"
             aria-pressed={bookmarkFilterActive}
           >

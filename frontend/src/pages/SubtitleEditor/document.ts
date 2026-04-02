@@ -403,6 +403,10 @@ export function subtitleDocumentReducer(
       return createInitialDocumentState(action.cues);
     }
 
+    case "MARK_DIRTY": {
+      return { ...state, dirty: true };
+    }
+
     case "MARK_SAVED": {
       return {
         ...state,

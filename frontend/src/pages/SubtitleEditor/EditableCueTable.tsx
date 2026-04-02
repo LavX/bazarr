@@ -151,9 +151,15 @@ const WARNING_COLORS: Record<CueWarning["level"], string> = {
   yellow: "#EAB308",
 };
 
+const WARNING_SYMBOLS: Record<CueWarning["level"], string> = {
+  red: "\u2716",     // heavy X
+  orange: "\u26A0",  // warning triangle
+  yellow: "\u25CF",  // filled circle
+};
+
 // ---- Grid template ----
 
-const gridTemplate = "4px 24px 40px 140px 140px 72px 1fr";
+const gridTemplate = "20px 24px 40px 140px 140px 72px 1fr";
 
 // ---- Styles ----
 
@@ -300,7 +306,7 @@ export default function EditableCueTable({
   const displayRows = useMemo(() => {
     if (!visibleCueIds) return mergedRows;
     return mergedRows.filter(
-      (r) => r.type === "ghost" || visibleCueIds.has(r.cue.id),
+      (r) => r.type === "cue" && visibleCueIds.has(r.cue.id),
     );
   }, [mergedRows, visibleCueIds]);
 
@@ -489,7 +495,7 @@ export default function EditableCueTable({
                     e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.01)";
                   }}
                 >
-                  <div style={{ width: 4 }} />
+                  <div style={{ width: 20 }} />
                   <div role="gridcell" style={{ width: 24 }} />
                   <div role="gridcell" style={{ ...indexCellStyle, fontStyle: "italic", color: "var(--bz-text-disabled)" }}>+</div>
                   <div role="gridcell" style={{ ...monoStyle, fontStyle: "italic", color: "var(--bz-text-disabled)" }}>{formatTimestamp(row.ghost.startMs)}</div>
@@ -567,16 +573,23 @@ export default function EditableCueTable({
                   }
                 }}
               >
-                {/* Quality gutter */}
+                {/* Quality marker */}
                 <div
                   title={warning?.message}
                   style={{
-                    width: 4,
-                    backgroundColor: gutterColor,
-                    borderRadius: "0 2px 2px 0",
+                    width: 20,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: warning ? 12 : 0,
+                    color: gutterColor,
+                    cursor: warning ? "help" : "default",
                     alignSelf: "stretch",
+                    userSelect: "none",
                   }}
-                />
+                >
+                  {warning ? WARNING_SYMBOLS[warning.level] : ""}
+                </div>
                 {/* Bookmark */}
                 <div
                   role="gridcell"

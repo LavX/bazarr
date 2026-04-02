@@ -23,6 +23,7 @@ interface WaveformTimelineProps {
   onSelect: (index: number) => void;
   onTimingChange?: (index: number, startMs: number, endMs: number) => void;
   onSeek?: (ms: number) => void;
+  audioTrack?: number;
 }
 
 function formatMs(ms: number): string {
@@ -75,6 +76,7 @@ export default function WaveformTimeline({
   currentTimeMs,
   onTimingChange,
   onSeek,
+  audioTrack = 0,
 }: WaveformTimelineProps) {
   const waveformRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WaveSurfer | null>(null);
@@ -87,7 +89,7 @@ export default function WaveformTimeline({
 
   const apiKey = Environment.apiKey ?? "";
   const peaksUrl = mediaType && mediaId
-    ? `${Environment.baseUrl}/api/editor/peaks?mediaType=${mediaType}&mediaId=${mediaId}&apikey=${encodeURIComponent(apiKey)}`
+    ? `${Environment.baseUrl}/api/editor/peaks?mediaType=${mediaType}&mediaId=${mediaId}&audioTrack=${audioTrack}&apikey=${encodeURIComponent(apiKey)}`
     : null;
 
   // Initialize wavesurfer once, load peaks separately
@@ -178,7 +180,12 @@ export default function WaveformTimeline({
     }
   }, [ready, zoom]);
 
-  // Sync regions with cues
+  // Build a stable key from cue timings + selected index (ignore text changes)
+  const regionKey = useMemo(() => {
+    return cues.map((c) => `${c.id}:${c.startMs}:${c.endMs}`).join("|") + `|sel:${selectedIndex}`;
+  }, [cues, selectedIndex]);
+
+  // Sync regions with cues (only when timing or selection changes, not on text edits)
   useEffect(() => {
     const regions = regionsRef.current;
     if (!regions || !ready) return;
@@ -196,7 +203,7 @@ export default function WaveformTimeline({
         resize: true,
       });
     });
-  }, [cues, selectedIndex, ready]);
+  }, [regionKey, ready]);
 
   // Region event handlers
   useEffect(() => {
@@ -230,7 +237,7 @@ export default function WaveformTimeline({
       regions.un("region-clicked", handleClick);
       regions.un("region-updated", handleUpdate);
     };
-  }, [cues, onSelect, onTimingChange]);
+  }, [cues, onSelect, onTimingChange, ready]);
 
   // Scroll waveform to selected cue
   useEffect(() => {
@@ -296,15 +303,26 @@ export default function WaveformTimeline({
             right: 0,
             height: 110,
             display: "flex",
+            flexDirection: "column",
             alignItems: "center",
             justifyContent: "center",
-            background: "rgba(12, 11, 26, 0.8)",
-            color: "var(--bz-text-tertiary)",
-            fontSize: 12,
-            pointerEvents: "none",
+            gap: 8,
+            background: "rgba(12, 11, 26, 0.92)",
+            zIndex: 5,
           }}
         >
-          Loading waveform...
+          <div style={{
+            width: 24,
+            height: 24,
+            border: "3px solid rgba(230, 138, 0, 0.3)",
+            borderTop: "3px solid #e68a00",
+            borderRadius: "50%",
+            animation: "waveform-spin 0.8s linear infinite",
+          }} />
+          <div style={{ color: "#e68a00", fontSize: 13, fontWeight: 600 }}>
+            Loading waveform, please wait...
+          </div>
+          <style>{`@keyframes waveform-spin { to { transform: rotate(360deg); } }`}</style>
         </div>
       )}
       <div style={controlsStyle}>

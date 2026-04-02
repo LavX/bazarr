@@ -9,9 +9,10 @@ import subprocess
 from flask import Response, request, send_file
 from flask_restx import Namespace, Resource
 
-from app.database import TableEpisodes, TableMovies, database, select
+from app.database import TableEpisodes, TableMovies, TableShows, database, select
 from app.get_args import args
 from utilities.path_mappings import path_mappings
+from api.subtitles.content import resolve_subtitle_path
 
 from ..utils import authenticate
 
@@ -286,11 +287,19 @@ class EditorVideo(Resource):
             except (ValueError, TypeError):
                 pass
 
+        audio_track = request.args.get('audioTrack', '0')
+        try:
+            audio_track_idx = int(audio_track)
+        except (ValueError, TypeError):
+            audio_track_idx = 0
+
         cmd = [
             ffmpeg,
             *pre_seek,
             '-i', video_path,
             *post_seek,
+            '-map', '0:v:0',
+            '-map', f'0:a:{audio_track_idx}',
             *video_args,
             '-c:a', 'aac',
             '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
@@ -314,12 +323,18 @@ class EditorAudio(Resource):
 
         import hashlib
         import threading
+        audio_track = request.args.get('audioTrack', '0')
+        try:
+            audio_track_idx = int(audio_track)
+        except (ValueError, TypeError):
+            audio_track_idx = 0
         file_stat = os.stat(video_path)
         path_hash = hashlib.md5(video_path.encode()).hexdigest()
         audio_cache_dir = os.path.join(PEAKS_CACHE_DIR, 'audio')
         os.makedirs(audio_cache_dir, exist_ok=True)
-        cache_file = os.path.join(audio_cache_dir, f'{path_hash}_{int(file_stat.st_mtime)}.m4a')
-        tmp_file = os.path.join(audio_cache_dir, f'{path_hash}_{int(file_stat.st_mtime)}.extracting.m4a')
+        track_suffix = f'_t{audio_track_idx}' if audio_track_idx > 0 else ''
+        cache_file = os.path.join(audio_cache_dir, f'{path_hash}_{int(file_stat.st_mtime)}{track_suffix}.m4a')
+        tmp_file = os.path.join(audio_cache_dir, f'{path_hash}_{int(file_stat.st_mtime)}{track_suffix}.extracting.m4a')
 
         # Already cached: serve immediately
         if os.path.isfile(cache_file):
@@ -337,7 +352,7 @@ class EditorAudio(Resource):
                     ffmpeg,
                     '-i', video_path,
                     '-vn',
-                    '-map', '0:a:0',
+                    '-map', f'0:a:{audio_track_idx}',
                     '-c:a', 'aac',
                     '-b:a', '24k',
                     '-ac', '1',
@@ -380,12 +395,19 @@ class EditorPeaks(Resource):
 
         video_path = resolved[0]
 
+        audio_track = request.args.get('audioTrack', '0')
+        try:
+            audio_track_idx = int(audio_track)
+        except (ValueError, TypeError):
+            audio_track_idx = 0
+
         # Build a cache key from the file path and modification time
         stat = os.stat(video_path)
         # Use a stable filename derived from the video path
         import hashlib
         path_hash = hashlib.md5(video_path.encode()).hexdigest()
-        cache_file = os.path.join(PEAKS_CACHE_DIR, f'{path_hash}_{int(stat.st_mtime)}.json')
+        track_suffix = f'_t{audio_track_idx}' if audio_track_idx > 0 else ''
+        cache_file = os.path.join(PEAKS_CACHE_DIR, f'{path_hash}_{int(stat.st_mtime)}{track_suffix}.json')
 
         # Check cache
         if os.path.isfile(cache_file):
@@ -428,7 +450,7 @@ class EditorPeaks(Resource):
         cmd = [
             ffmpeg,
             '-i', video_path,
-            '-map', '0:a:0',
+            '-map', f'0:a:{audio_track_idx}',
             '-ac', '1',
             '-ar', str(sample_rate),
             '-f', 'f32le',
@@ -512,6 +534,8 @@ class EditorInfo(Resource):
         video_codec = None
         audio_codec = None
         resolution = None
+        audio_tracks = []
+        audio_index = 0
 
         for stream in probe_data.get('streams', []):
             codec_type = stream.get('codec_type')
@@ -521,8 +545,32 @@ class EditorInfo(Resource):
                 height = stream.get('height')
                 if width and height:
                     resolution = f'{width}x{height}'
-            elif codec_type == 'audio' and audio_codec is None:
-                audio_codec = stream.get('codec_name')
+            elif codec_type == 'audio':
+                if audio_codec is None:
+                    audio_codec = stream.get('codec_name')
+                tags = stream.get('tags', {})
+                lang = tags.get('language', '')
+                title = tags.get('title', '')
+                codec = stream.get('codec_name', '')
+                channels = stream.get('channels', 0)
+                label_parts = []
+                if lang:
+                    label_parts.append(lang)
+                if title:
+                    label_parts.append(title)
+                label_parts.append(codec)
+                if channels:
+                    ch_label = {1: 'Mono', 2: 'Stereo', 6: '5.1', 8: '7.1'}.get(channels, f'{channels}ch')
+                    label_parts.append(ch_label)
+                audio_tracks.append({
+                    'index': audio_index,
+                    'codec': codec,
+                    'language': lang,
+                    'title': title,
+                    'channels': channels,
+                    'label': ' - '.join(label_parts),
+                })
+                audio_index += 1
 
         container = os.path.splitext(video_path)[1].lstrip('.').lower()
 
@@ -532,4 +580,232 @@ class EditorInfo(Resource):
             'audioCodec': audio_codec,
             'resolution': resolution,
             'container': container,
+            'audioTracks': audio_tracks,
         }
+
+
+@api_ns_editor.route('editor/subtitles')
+class EditorSubtitles(Resource):
+    @authenticate
+    def get(self):
+        """Return available subtitle files for a media item."""
+        import ast
+        params = _validate_params()
+        if isinstance(params[0], str) and params[0] not in ('episode', 'movie'):
+            return params
+
+        media_type, media_id = params
+
+        if media_type == 'episode':
+            row = database.execute(
+                select(TableEpisodes.subtitles)
+                .where(TableEpisodes.sonarrEpisodeId == media_id)
+            ).first()
+        else:
+            row = database.execute(
+                select(TableMovies.subtitles)
+                .where(TableMovies.radarrId == media_id)
+            ).first()
+
+        if not row or not row.subtitles:
+            return {'subtitles': []}
+
+        try:
+            subtitles_list = ast.literal_eval(row.subtitles)
+        except (ValueError, SyntaxError):
+            return {'subtitles': []}
+
+        if not isinstance(subtitles_list, list):
+            return {'subtitles': []}
+
+        result = []
+        for item in subtitles_list:
+            if isinstance(item, list) and len(item) >= 2 and item[1]:
+                lang_code = item[0]  # e.g. "en", "en:hi", "hu"
+                file_path = item[1]
+                ext = os.path.splitext(file_path)[1].lower().lstrip('.')
+                result.append({
+                    'language': lang_code,
+                    'format': ext,
+                })
+
+        return {'subtitles': result}
+
+
+_editor_sync_jobs = {}  # job_key -> {status, content, message}
+
+
+def run_editor_sync(job_key, video_path, tmp_in, tmp_out, encoding, max_offset, gss, reference,
+                    no_fix_framerate=True, vad=None, job_id=None):
+    """Background sync worker. Called by jobs_queue."""
+    from app.jobs_queue import jobs_queue
+
+    def update_progress(name, value, count):
+        _editor_sync_jobs[job_key]['message'] = name
+        if job_id:
+            jobs_queue.update_job_progress(job_id, progress_value=value, progress_max=count, progress_message=name)
+
+    try:
+        update_progress('Extracting audio...', 0, 3)
+        logger.info('Editor sync starting: video=%s, srt=%s, max_offset=%s, gss=%s, ref=%s, vad=%s, no_fix_framerate=%s',
+                     video_path, tmp_in, max_offset, gss, reference, vad, no_fix_framerate)
+        from subtitles.tools.subsyncer import SubSyncer
+        subsync = SubSyncer()
+        if vad:
+            subsync.vad = vad
+        try:
+            update_progress('Running ffsubsync...', 1, 3)
+            subsync.sync(
+                video_path=video_path,
+                srt_path=tmp_in,
+                srt_lang='und',
+                forced=False,
+                hi=False,
+                max_offset_seconds=max_offset,
+                no_fix_framerate=no_fix_framerate,
+                gss=gss,
+                reference=reference,
+                force_sync=True,
+            )
+        finally:
+            del subsync
+
+        logger.info('Editor sync ffsubsync finished, reading result...')
+        update_progress('Reading result...', 2, 3)
+        synced_path = tmp_out if os.path.isfile(tmp_out) else tmp_in
+        logger.info('Editor sync result path: %s (exists=%s)', synced_path, os.path.isfile(synced_path))
+        if not os.path.isfile(synced_path):
+            raise FileNotFoundError(f'Synced subtitle file not found (expected at {synced_path})')
+        with open(synced_path, 'r', encoding=encoding, errors='replace') as f:
+            synced_content = f.read()
+
+        if not synced_content.strip():
+            raise ValueError('Synced subtitle file is empty')
+
+        update_progress('Sync complete', 3, 3)
+        _editor_sync_jobs[job_key] = {'status': 'completed', 'content': synced_content, 'message': 'Sync complete'}
+
+    except Exception as e:
+        logger.exception('Editor sync failed')
+        _editor_sync_jobs[job_key] = {'status': 'failed', 'content': None, 'message': str(e)[:500]}
+    finally:
+        # Clean up in-memory result after 10 minutes
+        import threading
+        def cleanup():
+            _editor_sync_jobs.pop(job_key, None)
+            # Clean up temp files only after result has been consumed
+            for p in (tmp_in, tmp_out):
+                if p and os.path.isfile(p):
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
+        threading.Timer(600, cleanup).start()
+
+
+@api_ns_editor.route('editor/sync')
+class EditorSync(Resource):
+    @authenticate
+    def post(self):
+        """Start syncing editor content via ffsubsync. Returns a job key to poll."""
+        import tempfile
+        import hashlib
+
+        from app.jobs_queue import jobs_queue
+
+        data = request.get_json(silent=True) or {}
+        media_type = data.get('mediaType')
+        media_id = data.get('mediaId')
+        content = data.get('content', '')
+        encoding = data.get('encoding', 'utf-8')
+        fmt = data.get('format', 'srt')
+        max_offset = str(data.get('maxOffsetSeconds', 120))
+        gss = data.get('gss', False)
+        reference = data.get('reference', 'a:0')
+        no_fix_framerate = data.get('noFixFramerate', True)
+        vad = data.get('vad', None)
+        if vad and vad not in ('subs_then_webrtc', 'subs_then_auditok', 'webrtc', 'auditok'):
+            return 'Invalid vad option', 400
+
+        if not media_type or media_type not in ('episode', 'movie'):
+            return 'mediaType must be "episode" or "movie"', 400
+        if not media_id:
+            return 'mediaId is required', 400
+        if not content:
+            return 'content is required', 400
+
+        try:
+            media_id = int(media_id)
+        except (ValueError, TypeError):
+            return 'mediaId must be an integer', 400
+
+        video_path = _resolve_video_path(media_type, media_id)
+        if isinstance(video_path, tuple):
+            return video_path
+
+        if not os.path.isfile(video_path):
+            return 'Video file not found', 404
+
+        ext = f'.{fmt}' if fmt else '.srt'
+        fd, tmp_in = tempfile.mkstemp(suffix=ext, prefix='bazarr_sync_')
+        os.write(fd, content.encode(encoding))
+        os.close(fd)
+        tmp_out = tmp_in.replace(ext, f'.synced{ext}')
+
+        import threading
+
+        job_key = f'editor_sync_{hashlib.md5(tmp_in.encode()).hexdigest()[:8]}'
+        _editor_sync_jobs[job_key] = {'status': 'running', 'content': None, 'message': 'Starting sync...'}
+
+        # Submit to the jobs queue for visibility in Jobs Manager
+        queue_job_id = jobs_queue.feed_jobs_pending_queue(
+            job_name='Editor Sync',
+            module='api.editor.editor',
+            func='run_editor_sync',
+            kwargs={
+                'job_key': job_key,
+                'video_path': video_path,
+                'tmp_in': tmp_in,
+                'tmp_out': tmp_out,
+                'encoding': encoding,
+                'max_offset': max_offset,
+                'gss': gss,
+                'reference': reference,
+                'no_fix_framerate': no_fix_framerate,
+                'vad': vad,
+            },
+            is_progress=True,
+            progress_max=3,
+        )
+
+        # Force-start in a separate thread so it doesn't wait behind other queued jobs
+        threading.Thread(
+            target=jobs_queue.force_start_pending_job,
+            args=(queue_job_id,),
+            daemon=True,
+        ).start()
+
+        return {'jobKey': job_key, 'status': 'running'}, 202
+
+    @authenticate
+    def get(self):
+        """Poll sync job status. Returns synced content when complete."""
+        job_key = request.args.get('jobKey')
+        if not job_key or job_key not in _editor_sync_jobs:
+            logger.debug('Editor sync poll: key=%s not found (known keys: %s)', job_key, list(_editor_sync_jobs.keys()))
+            return {'status': 'not_found'}, 404
+
+        job = _editor_sync_jobs[job_key]
+        if job['status'] == 'running':
+            return {'status': 'running', 'message': job.get('message', '')}, 200
+
+        if job['status'] == 'completed':
+            content = job['content']
+            logger.info('Editor sync poll: returning completed content (%d chars) for key=%s', len(content) if content else 0, job_key)
+            _editor_sync_jobs.pop(job_key, None)
+            return {'status': 'completed', 'content': content}, 200
+
+        # Failed
+        msg = job.get('message', 'Unknown error')
+        _editor_sync_jobs.pop(job_key, None)
+        return {'status': 'failed', 'message': msg}, 200

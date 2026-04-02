@@ -69,6 +69,7 @@ export interface BatchResponse {
   queued: number;
   skipped: number;
   errors: string[];
+  job_id?: number;
 }
 
 class SubtitlesApi extends BaseApi {

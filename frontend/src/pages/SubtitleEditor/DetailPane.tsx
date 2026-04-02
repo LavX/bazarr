@@ -19,6 +19,7 @@ interface DetailPaneProps {
   onUseReference?: () => void;
   onTranslateLine?: () => void;
   translatingLine?: boolean;
+  currentTimeMs?: number;
 }
 
 function formatTimestamp(ms: number): string {
@@ -78,6 +79,7 @@ const DetailPane = forwardRef<DetailPaneHandle, DetailPaneProps>(function Detail
   onUseReference,
   onTranslateLine,
   translatingLine,
+  currentTimeMs = 0,
 }, ref) {
   const [textDraft, setTextDraft] = useState("");
   const [startDraft, setStartDraft] = useState("");
@@ -126,13 +128,23 @@ const DetailPane = forwardRef<DetailPaneHandle, DetailPaneProps>(function Detail
   }, [cue]);
 
   // Sync timing fields when timing changes externally (e.g. nudge shortcuts)
-  // but NOT text, to avoid cursor jumps.
   useEffect(() => {
     if (cue && cue.id === prevCueIdRef.current) {
       setStartDraft(formatTimestamp(cue.startMs));
       setEndDraft(formatTimestamp(cue.endMs));
     }
   }, [cue?.startMs, cue?.endMs, cue?.id]);
+
+  // Sync text when it changes externally (e.g. AI translate, sync, use reference)
+  // Only if the textarea is not focused (user is not typing)
+  const textareaFocusedRef = useRef(false);
+  useEffect(() => {
+    if (cue && cue.id === prevCueIdRef.current && !textareaFocusedRef.current) {
+      if (cue.text !== textDraft) {
+        setTextDraft(cue.text);
+      }
+    }
+  }, [cue?.text, cue?.id]);
 
   const handleTextKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -189,18 +201,129 @@ const DetailPane = forwardRef<DetailPaneHandle, DetailPaneProps>(function Detail
       <div
         style={{
           background: "var(--bz-surface-ground)",
-          borderTop: "2px solid var(--bz-border-card)",
-          padding: 12,
+          borderTop: "1px solid var(--bz-border-card)",
+          padding: "8px 10px",
           display: "flex",
-          alignItems: "center",
+          flexDirection: "column",
+          gap: 6,
           flexShrink: 0,
-          justifyContent: "center",
-          minHeight: 100,
+          overflow: "auto",
+          flex: 1,
+          minHeight: 0,
         }}
       >
-        <span style={{ color: "var(--bz-text-disabled)", fontSize: 14 }}>
-          Select a cue to edit
-        </span>
+        {/* Empty timing row */}
+        <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+          <input
+            type="text"
+            value={formatTimestamp(currentTimeMs)}
+            readOnly
+            title="Start time (no cue selected)"
+            style={{ ...timeInputStyle, padding: "4px 6px", fontSize: 12, flex: 1, opacity: 0.5 }}
+          />
+          <span style={{ color: "var(--bz-text-disabled)", fontSize: 10 }}>to</span>
+          <input
+            type="text"
+            value={formatTimestamp(currentTimeMs + 3000)}
+            readOnly
+            title="End time (no cue selected)"
+            style={{ ...timeInputStyle, padding: "4px 6px", fontSize: 12, flex: 1, opacity: 0.5 }}
+          />
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "var(--bz-text-tertiary)", flexShrink: 0 }}>
+            --
+          </span>
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "var(--bz-text-tertiary)", fontWeight: 600, flexShrink: 0 }}>
+            --
+          </span>
+        </div>
+        {/* Empty text area */}
+        <div style={{ minWidth: 0 }}>
+          <div style={labelStyle}>No Cue Selected</div>
+          <textarea
+            value=""
+            readOnly
+            placeholder="No cue at current position. Press Ctrl+Shift+Enter to create one."
+            style={{
+              fontFamily: "'JetBrains Mono', monospace",
+              fontSize: 14,
+              lineHeight: 1.6,
+              background: "var(--bz-surface-raised)",
+              border: "1px solid var(--bz-border-interactive)",
+              borderRadius: "var(--bz-radius-xs)",
+              padding: "10px 12px",
+              minHeight: 60,
+              color: "var(--bz-text-disabled)",
+              resize: "vertical",
+              width: "100%",
+              boxSizing: "border-box",
+              outline: "none",
+              opacity: 0.6,
+            }}
+          />
+          {/* Reference text */}
+          {referenceText !== undefined && (
+            <div style={{ marginTop: 6 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3 }}>
+                <span style={labelStyle}>Reference</span>
+                <div style={{ display: "flex", gap: 4, marginLeft: "auto" }}>
+                  {onTranslateLine && (
+                    <button
+                      type="button"
+                      onClick={onTranslateLine}
+                      disabled={translatingLine}
+                      title="Translate and create cue"
+                      style={{
+                        background: "var(--mantine-color-brand-5)",
+                        border: "none",
+                        borderRadius: 3,
+                        padding: "2px 6px",
+                        cursor: translatingLine ? "wait" : "pointer",
+                        fontSize: 10,
+                        color: "#fff",
+                        opacity: translatingLine ? 0.5 : 1,
+                      }}
+                    >
+                      {translatingLine ? "..." : "AI"}
+                    </button>
+                  )}
+                  {onUseReference && referenceText && (
+                    <button
+                      type="button"
+                      onClick={onUseReference}
+                      title="Create cue with reference text"
+                      style={{
+                        background: "#059669",
+                        border: "none",
+                        borderRadius: 3,
+                        padding: "2px 6px",
+                        cursor: "pointer",
+                        fontSize: 10,
+                        color: "#fff",
+                      }}
+                    >
+                      &#x2192; Use
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div
+                style={{
+                  fontFamily: "'JetBrains Mono', monospace",
+                  fontSize: 12,
+                  lineHeight: 1.5,
+                  background: "var(--bz-surface-base)",
+                  border: "1px solid var(--bz-border-card)",
+                  borderRadius: "var(--bz-radius-xs)",
+                  padding: "6px 8px",
+                  color: "var(--bz-text-secondary)",
+                  whiteSpace: "pre-wrap",
+                }}
+              >
+                {referenceText || <span style={{ color: "var(--bz-text-disabled)", fontStyle: "italic" }}>No reference at current position</span>}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     );
   }
@@ -319,10 +442,12 @@ const DetailPane = forwardRef<DetailPaneHandle, DetailPaneProps>(function Detail
           onSelect={updateCursorPos}
           onFocus={(e) => {
             e.currentTarget.style.borderColor = "#e68a00";
+            textareaFocusedRef.current = true;
             updateCursorPos();
           }}
           onBlur={(e) => {
             e.currentTarget.style.borderColor = "var(--bz-border-interactive)";
+            textareaFocusedRef.current = false;
           }}
         />
         <div style={{ marginTop: 2, display: "flex", gap: 8, flexWrap: "wrap" }}>

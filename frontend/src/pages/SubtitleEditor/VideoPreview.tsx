@@ -15,6 +15,15 @@ export interface VideoPreviewHandle {
   togglePlay(): void;
 }
 
+export interface AudioTrack {
+  index: number;
+  codec: string;
+  language: string;
+  title: string;
+  channels: number;
+  label: string;
+}
+
 interface VideoPreviewProps {
   mediaType?: string;
   mediaId?: number;
@@ -23,6 +32,8 @@ interface VideoPreviewProps {
   currentSubtitleText?: string;
   onTimeUpdate?: (ms: number) => void;
   onPlayStateChange?: (playing: boolean) => void;
+  onAudioTracksLoaded?: (tracks: AudioTrack[]) => void;
+  audioTrack?: number;
 }
 
 function formatTime(ms: number): string {
@@ -169,6 +180,8 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(function 
   currentSubtitleText,
   onTimeUpdate,
   onPlayStateChange,
+  onAudioTracksLoaded,
+  audioTrack = 0,
 }, ref) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -200,6 +213,9 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(function 
       .then((data) => {
         if (!data) { setDirectPlay(false); return; }
         if (data.duration) setDuration(Math.round(data.duration * 1000));
+        if (data.audioTracks && onAudioTracksLoaded) {
+          onAudioTracksLoaded(data.audioTracks);
+        }
 
         // Ask the browser if it can play this codec/container combo
         const testVideo = document.createElement("video");
@@ -222,7 +238,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(function 
         const vCodecStr = codecMap[vCodec] || "";
         const aCodecStr = audioCodecMap[aCodec] || "";
         const container = ext === "webm" ? "webm" : "mp4";
-        const servableContainer = [".mp4", ".m4v", ".webm"].includes(`.${ext}`);
+        const servableContainer = [".mp4", ".m4v", ".webm", ".mkv"].includes(`.${ext}`);
 
         // Test video codec independently (audio will be transcoded to AAC by backend if needed)
         const canPlayVideo = vCodecStr
@@ -234,8 +250,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(function 
         const canPlayBoth = canPlayVideo && canPlayAudio;
 
         // Direct play: browser handles both codecs AND file container is directly servable.
-        // Remux: browser handles video codec, audio needs transcode. Works with any container
-        // since ffmpeg outputs fragmented mp4 anyway.
+        // Remux: browser handles video codec but not audio. Copy video, transcode audio to AAC.
         const isDirect = canPlayBoth && servableContainer;
         const isRemux = canPlayVideo && !isDirect;
         setDirectPlay(isDirect);
@@ -280,17 +295,23 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(function 
   const seekOffsetSecRef = useRef(0);
   useEffect(() => { seekOffsetSecRef.current = seekOffsetSec; }, [seekOffsetSec]);
 
+  // Video URL never changes when switching audio tracks. Video always uses direct play
+  // or remux based on codec support. Audio track switching is handled by a separate
+  // audio element only.
   const baseVideoUrl = hasMedia
-    ? `${Environment.baseUrl}/api/editor/video?mediaType=${encodeURIComponent(mediaType)}&mediaId=${mediaId}&apikey=${encodeURIComponent(apiKey)}`
+    ? `${Environment.baseUrl}/api/editor/video?mediaType=${encodeURIComponent(mediaType)}&mediaId=${mediaId}&audioTrack=0&apikey=${encodeURIComponent(apiKey)}`
     : "";
-  // Remux mode: serve file directly (native video seeking), use separate audio element
   const nativeSeek = directPlay || remuxMode;
   const videoSrc = !baseVideoUrl ? "" : nativeSeek
     ? `${baseVideoUrl}&direct=1`
     : `${baseVideoUrl}${seekOffsetSec > 0 ? `&t=${seekOffsetSec.toFixed(1)}` : ""}`;
-  // Separate audio for remux mode: poll until the cached AAC file is ready
-  const audioBaseUrl = remuxMode && hasMedia
-    ? `${Environment.baseUrl}/api/editor/audio?mediaType=${mediaType}&mediaId=${mediaId}&apikey=${encodeURIComponent(apiKey)}`
+
+  // When a non-default audio track is selected, mute the video and play a separate
+  // audio element extracted from the selected track. For track 0, use the video's
+  // own audio (no separate element needed).
+  const useExternalAudio = audioTrack > 0 || remuxMode;
+  const audioBaseUrl = useExternalAudio && hasMedia
+    ? `${Environment.baseUrl}/api/editor/audio?mediaType=${mediaType}&mediaId=${mediaId}&audioTrack=${audioTrack}&apikey=${encodeURIComponent(apiKey)}`
     : "";
   const [audioReady, setAudioReady] = useState(false);
   const [audioExtracting, setAudioExtracting] = useState(false);
@@ -357,18 +378,23 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(function 
       if (video) {
         video.currentTime = targetSec;
         setCurrentMs(currentTimeMs);
-        if (audioRef.current && remuxMode) {
+        if (audioRef.current && useExternalAudio) {
           audioRef.current.currentTime = targetSec;
         }
       }
     } else {
-      // Transcode: reload the stream with ?t= parameter
+      // Remux/transcode: reload the video stream with ?t= parameter
       if (Math.abs(targetSec - seekOffsetSec) > 1) {
         autoPlayAfterSeekRef.current = isPlayingRef.current;
         const video = videoRef.current;
         if (video && isPlayingRef.current) {
           video.pause();
         }
+        // Seek the separate audio element directly (it's a cached file, supports range requests)
+        if (audioRef.current && useExternalAudio) {
+          audioRef.current.currentTime = targetSec;
+        }
+        seekOffsetSecRef.current = targetSec;
         setSeekOffsetSec(targetSec);
         setCurrentMs(currentTimeMs);
       }
@@ -379,9 +405,9 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(function 
   useEffect(() => {
     const video = videoRef.current;
     const audio = audioRef.current;
-    if (video) { video.volume = remuxMode ? 0 : volume; video.playbackRate = playbackRate; }
+    if (video) { video.volume = useExternalAudio ? 0 : volume; video.playbackRate = playbackRate; }
     if (audio) { audio.volume = volume; audio.playbackRate = playbackRate; }
-  }, [volume, remuxMode, playbackRate]);
+  }, [volume, useExternalAudio, playbackRate]);
 
   const togglePlayPause = useCallback(() => {
     const video = videoRef.current;
@@ -389,12 +415,12 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(function 
     if (!video) return;
     if (video.paused) {
       video.play().catch(() => {});
-      if (audio && remuxMode) audio.play().catch(() => {});
+      if (audio && useExternalAudio) audio.play().catch(() => {});
     } else {
       video.pause();
-      if (audio && remuxMode) audio.pause();
+      if (audio && useExternalAudio) audio.pause();
     }
-  }, [remuxMode]);
+  }, [useExternalAudio]);
 
   useImperativeHandle(ref, () => ({
     togglePlay: togglePlayPause,
@@ -412,7 +438,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(function 
     setPlaying(false);
     onPlayStateChange?.(false);
     stopTimeReporting();
-    if (audioRef.current && remuxMode) audioRef.current.pause();
+    if (audioRef.current && useExternalAudio) audioRef.current.pause();
     const video = videoRef.current;
     if (video && onTimeUpdate) {
       const absoluteMs = nativeSeek
@@ -430,14 +456,14 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(function 
         ? Math.round(video.duration * 1000)
         : Math.round((seekOffsetSecRef.current + video.duration) * 1000));
       setVideoError(false);
-      video.volume = volume;
+      video.volume = useExternalAudio ? 0 : volume;
       // Auto-play if user was playing before the seek (transcode mode only)
       if (autoPlayAfterSeekRef.current) {
         autoPlayAfterSeekRef.current = false;
         video.play().catch(() => {});
       }
     }
-  }, [volume, directPlay]);
+  }, [volume, directPlay, useExternalAudio]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -482,7 +508,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(function 
         <video
           ref={videoRef}
           src={videoSrc}
-          muted={remuxMode}
+          muted={useExternalAudio}
           style={{ width: "100%", display: "block" }}
           preload="metadata"
           onPlay={handlePlay}
@@ -499,11 +525,14 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(function 
             preload="auto"
             onLoadedData={() => {
               const audio = audioRef.current;
-              const video = videoRef.current;
               if (audio) {
                 audio.volume = volume;
+                // Sync audio to video position
+                const video = videoRef.current;
                 if (video) {
-                  audio.currentTime = video.currentTime;
+                  audio.currentTime = nativeSeek
+                    ? video.currentTime
+                    : seekOffsetSecRef.current + video.currentTime;
                 }
                 if (isPlayingRef.current) {
                   audio.play().catch(() => {});

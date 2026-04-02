@@ -27,12 +27,6 @@ const barStyle: React.CSSProperties = {
   flexShrink: 0,
 };
 
-const pillStyle: React.CSSProperties = {
-  padding: "1px 5px",
-  borderRadius: 2,
-  background: "var(--bz-surface-raised)",
-};
-
 const dotStyle: React.CSSProperties = {
   width: 6,
   height: 6,
@@ -40,15 +34,6 @@ const dotStyle: React.CSSProperties = {
   background: "#f59e0b",
   flexShrink: 0,
 };
-
-function formatTotalDuration(ms: number): string {
-  const totalSec = Math.floor(ms / 1000);
-  const h = Math.floor(totalSec / 3600);
-  const m = Math.floor((totalSec % 3600) / 60);
-  const s = totalSec % 60;
-  if (h > 0) return `${h}h ${String(m).padStart(2, "0")}m ${String(s).padStart(2, "0")}s`;
-  return `${m}m ${String(s).padStart(2, "0")}s`;
-}
 
 function computeCps(cue: Cue): { value: number | null; color: string } {
   const durationMs = cue.endMs - cue.startMs;
@@ -65,11 +50,9 @@ export default function StatusBar({
   format,
   encoding,
   dirty,
-  cursorPosition,
   selectedCue,
   multiSelectCount,
   bookmarkCount,
-  totalDurationMs,
 }: StatusBarProps) {
   const cps = selectedCue ? computeCps(selectedCue) : null;
 
@@ -78,7 +61,6 @@ export default function StatusBar({
       <span>
         Cue {cueIndex >= 0 ? cueIndex + 1 : "-"}/{cueCount}
       </span>
-      <span>{cueCount} cues</span>
       {cps && (
         <span style={{ color: cps.color }}>
           {cps.value !== null ? `${cps.value.toFixed(1)} CPS` : "-- CPS"}
@@ -92,15 +74,9 @@ export default function StatusBar({
           {bookmarkCount} bookmarked
         </span>
       )}
-      <span style={pillStyle}>{format.toUpperCase()}</span>
-      <span>{encoding}</span>
-      <span style={pillStyle}>{formatTotalDuration(totalDurationMs)}</span>
-      {cursorPosition && (
-        <span>
-          Ln {cursorPosition.line}, Col {cursorPosition.col}
-        </span>
-      )}
       <span style={{ flex: 1 }} />
+      <span>{format.toUpperCase()}</span>
+      <span>{encoding}</span>
       {dirty && (
         <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
           <span style={dotStyle} />
