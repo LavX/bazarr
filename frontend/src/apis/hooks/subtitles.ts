@@ -242,7 +242,8 @@ export function useSubtitleContent(
     staleTime: 5 * 60 * 1000,
     retry: (failureCount, error) => {
       // Don't retry 404s (subtitle doesn't exist yet)
-      if ("response" in error && (error as any).response?.status === 404) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if ("response" in error && (error as unknown as { response?: { status?: number } }).response?.status === 404) {
         return false;
       }
       return failureCount < 3;

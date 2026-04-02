@@ -380,6 +380,7 @@ describe("DetailPane", () => {
       );
 
       // Multiple textboxes exist (timing inputs + textarea), select the textarea specifically
+      // eslint-disable-next-line testing-library/no-node-access
       const textarea = document.querySelector("textarea")!;
 
       await user.type(textarea, "Hi");
