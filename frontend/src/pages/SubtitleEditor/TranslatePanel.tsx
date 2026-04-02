@@ -206,6 +206,7 @@ export default function TranslatePanel({
   referenceLanguage,
   onClose,
 }: TranslatePanelProps) {
+  const [translateSource, setTranslateSource] = useState<"auto" | "reference" | "editor">("auto");
   const [sourceLanguage, setSourceLanguage] = useState("");
   const [targetLanguage, setTargetLanguage] = useState("");
   const [phase, setPhase] = useState<TranslatePhase>("idle");
@@ -262,7 +263,7 @@ export default function TranslatePanel({
         }
         setTranslatedLines(map);
         // Only set reference when translating from editor cues, not from loaded reference
-        if (!referenceCues || referenceCues.length === 0) {
+        if (!useRef) {
           onSetReference(map);
         }
         setPhase("completed");
@@ -284,11 +285,15 @@ export default function TranslatePanel({
     }
   }, [phase, jobData]);
 
+  const effectiveSource = translateSource === "auto"
+    ? (referenceCues && referenceCues.length > 0 ? "reference" : "editor")
+    : translateSource;
+  const useRef = effectiveSource === "reference" && referenceCues && referenceCues.length > 0;
+
   const handleSubmit = useCallback(async () => {
     if (!targetLanguage) return;
-    // Use reference cues as source when available, otherwise use editor cues
-    const sourceLines = referenceCues && referenceCues.length > 0
-      ? referenceCues.map((r, i) => ({ position: i, line: r.text }))
+    const sourceLines = useRef
+      ? referenceCues!.map((r, i) => ({ position: i, line: r.text }))
       : cues.map((cue, i) => ({ position: i, line: cue.text }));
     if (sourceLines.length === 0) return;
 
@@ -333,7 +338,7 @@ export default function TranslatePanel({
           "Failed to submit translation job.",
       );
     }
-  }, [cues, referenceCues, sourceLanguage, targetLanguage, mediaTitle, languageOptions]);
+  }, [cues, referenceCues, useRef, sourceLanguage, targetLanguage, mediaTitle, languageOptions]);
 
   const handleCancel = useCallback(() => {
     if (jobId) {
@@ -423,6 +428,39 @@ export default function TranslatePanel({
         </button>
       </div>
 
+      {/* Source toggle: reference vs editor cues */}
+      <div style={{ ...styles.row, gap: 6 }}>
+        <span style={styles.label}>Source</span>
+        <div style={{ display: "flex", gap: 2, flex: 1 }}>
+          {([
+            { value: "auto" as const, label: "Auto" },
+            { value: "reference" as const, label: "Reference", disabled: !referenceCues || referenceCues.length === 0 },
+            { value: "editor" as const, label: "Editor cues", disabled: cues.length === 0 },
+          ] as const).map((opt) => (
+            <button
+              key={opt.value}
+              type="button"
+              disabled={isWorking || opt.disabled}
+              onClick={() => setTranslateSource(opt.value)}
+              style={{
+                flex: 1,
+                fontSize: 11,
+                padding: "3px 6px",
+                border: "1px solid var(--bz-border-interactive)",
+                borderRadius: 3,
+                cursor: opt.disabled ? "not-allowed" : "pointer",
+                background: translateSource === opt.value ? "var(--mantine-color-brand-5)" : "var(--bz-surface-raised)",
+                color: translateSource === opt.value ? "#fff" : "var(--bz-text-secondary)",
+                opacity: opt.disabled ? 0.4 : 1,
+                fontWeight: translateSource === opt.value ? 600 : 400,
+              }}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       <div style={{ borderTop: "1px solid var(--bz-border-divider)", margin: "4px 0" }} />
 
       {/* Source language */}
@@ -469,7 +507,10 @@ export default function TranslatePanel({
       )}
 
       {/* Cue count */}
-      <div style={styles.statusText}>{referenceCues && referenceCues.length > 0 ? referenceCues.length : cues.length} cues to translate{referenceCues && referenceCues.length > 0 ? " (from reference)" : ""}</div>
+      <div style={styles.statusText}>
+        {useRef ? referenceCues!.length : cues.length} cues to translate
+        {useRef ? " (from reference)" : " (editor cues)"}
+      </div>
 
       {/* Progress section */}
       {phase === "translating" && (
@@ -494,14 +535,7 @@ export default function TranslatePanel({
       {/* Success */}
       {phase === "completed" && (
         <div style={styles.successText}>
-          Translation complete. {translatedLines.size}/{referenceCues && referenceCues.length > 0 ? referenceCues.length : cues.length} lines
-          translated.
-          {translatedLines.size < (referenceCues && referenceCues.length > 0 ? referenceCues.length : cues.length) && (
-            <span style={{ color: "#fbbf24" }}>
-              {" "}
-              {cues.length - translatedLines.size} lines were not translated.
-            </span>
-          )}
+          Translation complete. {translatedLines.size}/{useRef ? referenceCues!.length : cues.length} lines translated.
         </div>
       )}
 
@@ -512,12 +546,12 @@ export default function TranslatePanel({
             type="button"
             style={{
               ...styles.btnPrimary,
-              ...(((!referenceCues || referenceCues.length === 0) && cues.length === 0) || !targetLanguage
+              ...((useRef ? referenceCues!.length === 0 : cues.length === 0) || !targetLanguage
                 ? { opacity: 0.5, cursor: "not-allowed" }
                 : {}),
             }}
             disabled={
-              ((!referenceCues || referenceCues.length === 0) && cues.length === 0) ||
+              (useRef ? referenceCues!.length === 0 : cues.length === 0) ||
               !targetLanguage
             }
             onClick={handleSubmit}

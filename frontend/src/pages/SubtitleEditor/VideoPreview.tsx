@@ -7,12 +7,13 @@ import {
   forwardRef,
   type CSSProperties,
 } from "react";
-import { faPlay, faPause, faVideoSlash } from "@fortawesome/free-solid-svg-icons";
+import { faPlay, faPause, faVideoSlash, faBackward, faForward } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { Environment } from "@/utilities/env";
 
 export interface VideoPreviewHandle {
   togglePlay(): void;
+  seekRelative(deltaMs: number): void;
 }
 
 export interface AudioTrack {
@@ -422,9 +423,57 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(function 
     }
   }, [useExternalAudio]);
 
+  const seekRelative = useCallback((deltaMs: number) => {
+    const video = videoRef.current;
+    if (!video) return;
+    const absoluteMs = nativeSeek
+      ? Math.round(video.currentTime * 1000)
+      : Math.round((seekOffsetSecRef.current + video.currentTime) * 1000);
+    const targetMs = Math.max(0, Math.min(duration, absoluteMs + deltaMs));
+    const targetSec = targetMs / 1000;
+    if (nativeSeek) {
+      video.currentTime = targetSec;
+      if (audioRef.current && useExternalAudio) audioRef.current.currentTime = targetSec;
+      setCurrentMs(targetMs);
+      onTimeUpdate?.(targetMs);
+    } else {
+      const wasPlaying = isPlayingRef.current;
+      if (wasPlaying) video.pause();
+      if (audioRef.current && useExternalAudio) audioRef.current.currentTime = targetSec;
+      seekOffsetSecRef.current = targetSec;
+      setSeekOffsetSec(targetSec);
+      setCurrentMs(targetMs);
+      onTimeUpdate?.(targetMs);
+      if (wasPlaying) autoPlayAfterSeekRef.current = true;
+    }
+  }, [nativeSeek, duration, useExternalAudio, onTimeUpdate]);
+
+  const seekTo = useCallback((ms: number) => {
+    const targetMs = Math.max(0, Math.min(duration, ms));
+    const targetSec = targetMs / 1000;
+    const video = videoRef.current;
+    if (!video) return;
+    if (nativeSeek) {
+      video.currentTime = targetSec;
+      if (audioRef.current && useExternalAudio) audioRef.current.currentTime = targetSec;
+      setCurrentMs(targetMs);
+      onTimeUpdate?.(targetMs);
+    } else {
+      const wasPlaying = isPlayingRef.current;
+      if (wasPlaying) video.pause();
+      if (audioRef.current && useExternalAudio) audioRef.current.currentTime = targetSec;
+      seekOffsetSecRef.current = targetSec;
+      setSeekOffsetSec(targetSec);
+      setCurrentMs(targetMs);
+      onTimeUpdate?.(targetMs);
+      if (wasPlaying) autoPlayAfterSeekRef.current = true;
+    }
+  }, [nativeSeek, duration, useExternalAudio, onTimeUpdate]);
+
   useImperativeHandle(ref, () => ({
     togglePlay: togglePlayPause,
-  }), [togglePlayPause]);
+    seekRelative,
+  }), [togglePlayPause, seekRelative]);
 
   const handlePlay = useCallback(() => {
     isPlayingRef.current = true;
@@ -470,6 +519,14 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(function 
       if (e.key === " " || e.key === "Spacebar") {
         e.preventDefault();
         togglePlayPause();
+      }
+      if (e.key === "ArrowLeft" && e.altKey) {
+        e.preventDefault();
+        seekRelative(-5000);
+      }
+      if (e.key === "ArrowRight" && e.altKey) {
+        e.preventDefault();
+        seekRelative(5000);
       }
     },
     [togglePlayPause],
@@ -593,8 +650,39 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(function 
         )}
       </div>
 
+      {/* Seek bar */}
+      {duration > 0 && (
+        <div style={{ padding: "0 8px", flexShrink: 0 }}>
+          <input
+            type="range"
+            min={0}
+            max={duration}
+            step={100}
+            value={currentMs}
+            onChange={(e) => seekTo(parseInt(e.target.value, 10))}
+            style={{
+              width: "100%",
+              height: 4,
+              cursor: "pointer",
+              accentColor: "var(--mantine-color-brand-5)",
+            }}
+            aria-label="Seek"
+          />
+        </div>
+      )}
+
       {/* Controls bar */}
       <div style={controlsBarStyle}>
+        <button
+          type="button"
+          style={playBtnStyle}
+          onClick={() => seekRelative(-5000)}
+          aria-label="Back 5s"
+          title="Back 5s (Alt+Left)"
+        >
+          <FontAwesomeIcon icon={faBackward} style={{ fontSize: 9 }} />
+        </button>
+
         <button
           type="button"
           style={playBtnStyle}
@@ -603,6 +691,16 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(function 
           title={playing ? "Pause" : "Play"}
         >
           <FontAwesomeIcon icon={playing ? faPause : faPlay} />
+        </button>
+
+        <button
+          type="button"
+          style={playBtnStyle}
+          onClick={() => seekRelative(5000)}
+          aria-label="Forward 5s"
+          title="Forward 5s (Alt+Right)"
+        >
+          <FontAwesomeIcon icon={faForward} style={{ fontSize: 9 }} />
         </button>
 
         <span style={timeDisplayStyle}>

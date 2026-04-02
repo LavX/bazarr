@@ -192,6 +192,7 @@ export default function EditorPage() {
 
   // Selection state
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const selectedCueIdRef = useRef<string | null>(null);
   const [multiSelect, setMultiSelect] = useState<Set<number>>(new Set());
   const [searchOpen, setSearchOpen] = useState(false);
   const [jumpOpen, setJumpOpen] = useState(false);
@@ -285,7 +286,7 @@ export default function EditorPage() {
   }, [docState.cues, qcPreset]);
 
   // Ghost cues (gap detection)
-  const ghostCues = useMemo(() => detectGaps(docState.cues), [docState.cues]);
+  const ghostCues = useMemo(() => detectGaps(docState.cues, 1000), [docState.cues]);
 
   // Navigation blocker for unsaved changes
   const blocker = useBlocker(docState.dirty);
@@ -497,10 +498,12 @@ export default function EditorPage() {
           setSaveAsOpen(false);
           setSaveAsLang(null);
           dispatch({ type: "MARK_SAVED" });
-          navigate(
-            `/subtitles/edit/${mediaType}/${mediaId}/${encodeURIComponent(targetLang)}`,
-            { replace: true },
-          );
+          requestAnimationFrame(() => {
+            navigate(
+              `/subtitles/edit/${mediaType}/${mediaId}/${encodeURIComponent(targetLang)}`,
+              { replace: true },
+            );
+          });
         },
         onError: (err) => {
           const status = (err as any)?.response?.status;
@@ -536,10 +539,12 @@ export default function EditorPage() {
             etagRef.current = result.etag.replace(/^"|"$/g, "");
           }
           showNotification({ message: `Overwritten ${lang} subtitle`, color: "green", autoClose: 2000 });
-          navigate(
-            `/subtitles/edit/${mediaType}/${mediaId}/${encodeURIComponent(lang)}`,
-            { replace: true },
-          );
+          requestAnimationFrame(() => {
+            navigate(
+              `/subtitles/edit/${mediaType}/${mediaId}/${encodeURIComponent(lang)}`,
+              { replace: true },
+            );
+          });
         },
         onError: (err) => {
           setOverwriteConfirm(null);
@@ -1089,8 +1094,8 @@ export default function EditorPage() {
         return;
       }
 
-      // Ctrl+Shift+T: translate panel
-      if (e.key === "T" && ctrl && e.shiftKey) {
+      // Alt+T: translate panel
+      if (e.key === "t" && e.altKey && !ctrl && !e.shiftKey) {
         e.preventDefault();
         setTranslateOpen((v) => !v);
         return;
@@ -1107,6 +1112,18 @@ export default function EditorPage() {
       if (e.key === " " && ctrl && e.shiftKey) {
         e.preventDefault();
         videoPreviewRef.current?.togglePlay();
+        return;
+      }
+
+      // Alt+Left/Right: seek -5/+5 seconds
+      if (e.key === "ArrowLeft" && e.altKey && !ctrl && !e.shiftKey) {
+        e.preventDefault();
+        videoPreviewRef.current?.seekRelative(-5000);
+        return;
+      }
+      if (e.key === "ArrowRight" && e.altKey && !ctrl && !e.shiftKey) {
+        e.preventDefault();
+        videoPreviewRef.current?.seekRelative(5000);
         return;
       }
 
@@ -1361,10 +1378,24 @@ export default function EditorPage() {
       : `/movies/${data.mediaId}`
     : undefined;
 
+  // Track selected cue by id so selection survives re-sorting
   const selectedCue =
     selectedIndex >= 0 && selectedIndex < docState.cues.length
       ? docState.cues[selectedIndex]
       : null;
+  // Update the id ref when selection changes
+  if (selectedCue) selectedCueIdRef.current = selectedCue.id;
+  // If the cue at selectedIndex has a different id, find the right index
+  useEffect(() => {
+    if (!selectedCueIdRef.current || docState.cues.length === 0) return;
+    const cueAtIndex = selectedIndex >= 0 && selectedIndex < docState.cues.length
+      ? docState.cues[selectedIndex] : null;
+    if (cueAtIndex && cueAtIndex.id === selectedCueIdRef.current) return;
+    const newIdx = docState.cues.findIndex((c) => c.id === selectedCueIdRef.current);
+    if (newIdx >= 0 && newIdx !== selectedIndex) {
+      setSelectedIndex(newIdx);
+    }
+  }, [docState.cues, selectedIndex]);
 
 
   return (

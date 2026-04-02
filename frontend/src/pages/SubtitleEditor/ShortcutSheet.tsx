@@ -68,8 +68,10 @@ const SHORTCUTS: ShortcutCategory[] = [
   {
     title: "Tools",
     entries: [
-      { keys: ["Ctrl", "Shift", "T"], description: "AI Translate" },
+      { keys: ["Alt", "T"], description: "AI Translate" },
       { keys: ["Ctrl", "Shift", "Space"], description: "Play / Pause video" },
+      { keys: ["Alt", "\u2190"], description: "Seek back 5s" },
+      { keys: ["Alt", "\u2192"], description: "Seek forward 5s" },
       { keys: ["?"], description: "This shortcut sheet" },
     ],
   },

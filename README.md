@@ -1,8 +1,4 @@
 <p align="center">
-  <img src="screenshot/hero_eclipse_compact.png" alt="Bazarr+ v2.0.0 - Codename: Eclipse">
-</p>
-
-<p align="center">
   <img src="frontend/public/images/logo128.png" alt="Bazarr+ Logo" width="128">
 </p>
 

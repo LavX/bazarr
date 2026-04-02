@@ -284,6 +284,8 @@ export function subtitleDocumentReducer(
     case "APPLY_OP": {
       const inv = action.op.inverse(state.cues);
       const newCues = action.op.apply(state.cues);
+      // Keep cues sorted by start time
+      newCues.sort((a, b) => a.startMs - b.startMs);
       const changed = affectedCueIds(state.cues, newCues);
       const newModified = new Set(state.modifiedCueIds);
       for (const id of changed) newModified.add(id);
@@ -353,6 +355,9 @@ export function subtitleDocumentReducer(
       if (undoStack.length > MAX_UNDO) {
         undoStack.splice(0, undoStack.length - MAX_UNDO);
       }
+
+      // Keep cues sorted by start time
+      cues.sort((a, b) => a.startMs - b.startMs);
 
       return {
         cues,

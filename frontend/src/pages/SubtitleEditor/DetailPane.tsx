@@ -146,6 +146,36 @@ const DetailPane = forwardRef<DetailPaneHandle, DetailPaneProps>(function Detail
     }
   }, [cue?.text, cue?.id]);
 
+  const wrapSelection = useCallback((prefix: string, suffix: string) => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    const start = ta.selectionStart;
+    const end = ta.selectionEnd;
+    const text = textDraft;
+    const selected = text.substring(start, end);
+    const newText = text.substring(0, start) + prefix + selected + suffix + text.substring(end);
+    setTextDraft(newText);
+    onTextChange(newText);
+    requestAnimationFrame(() => {
+      ta.focus();
+      ta.setSelectionRange(start + prefix.length, end + prefix.length);
+    });
+  }, [textDraft, onTextChange]);
+
+  const insertAtCursor = useCallback((chars: string) => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    const start = ta.selectionStart;
+    const text = textDraft;
+    const newText = text.substring(0, start) + chars + text.substring(start);
+    setTextDraft(newText);
+    onTextChange(newText);
+    requestAnimationFrame(() => {
+      ta.focus();
+      ta.setSelectionRange(start + chars.length, start + chars.length);
+    });
+  }, [textDraft, onTextChange]);
+
   const handleTextKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (e.key === "Enter" && !e.ctrlKey && !e.shiftKey && !e.altKey) {
@@ -154,9 +184,24 @@ const DetailPane = forwardRef<DetailPaneHandle, DetailPaneProps>(function Detail
         onTextChange(textDraft);
         onAdvance();
       }
+      // Ctrl+I: wrap in italic tags
+      if (e.key === "i" && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        wrapSelection("<i>", "</i>");
+      }
+      // Ctrl+B: wrap in bold tags
+      if (e.key === "b" && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        wrapSelection("<b>", "</b>");
+      }
+      // Ctrl+U: wrap in underline tags
+      if (e.key === "u" && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        wrapSelection("<u>", "</u>");
+      }
       // Ctrl+Enter / Shift+Enter: browser default inserts newline
     },
-    [textDraft, onTextChange, onAdvance],
+    [textDraft, onTextChange, onAdvance, wrapSelection],
   );
 
   const handleStartBlur = useCallback(() => {
@@ -330,10 +375,11 @@ const DetailPane = forwardRef<DetailPaneHandle, DetailPaneProps>(function Detail
 
   const durationMs = cue.endMs - cue.startMs;
   const durationSec = (durationMs / 1000).toFixed(3);
+  const stripTags = (s: string) => s.replace(/<[^>]+>/g, "");
   const lines = textDraft.split("\n");
 
   const cpsValue = durationMs > 0
-    ? textDraft.replace(/\n/g, "").length / (durationMs / 1000)
+    ? stripTags(textDraft).replace(/\n/g, "").length / (durationMs / 1000)
     : null;
   const cpsDisplay = cpsValue !== null ? cpsValue.toFixed(1) : "--";
   const cpsColor = cpsValue === null
@@ -450,18 +496,56 @@ const DetailPane = forwardRef<DetailPaneHandle, DetailPaneProps>(function Detail
             textareaFocusedRef.current = false;
           }}
         />
-        <div style={{ marginTop: 2, display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {lines.map((line, i) => (
-            <span
-              key={i}
+        <div style={{ marginTop: 2, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          {lines.map((line, i) => {
+            const visLen = stripTags(line).length;
+            return (
+              <span
+                key={i}
+                style={{
+                  fontSize: 10,
+                  color: visLen > 42 ? "#EF4444" : "var(--bz-text-tertiary)",
+                  fontFamily: "'JetBrains Mono', monospace",
+                }}
+              >
+                L{i + 1}: {visLen}
+              </span>
+            );
+          })}
+          <span style={{ flex: 1 }} />
+          {/* Quick style & insert buttons */}
+          {[
+            { label: "I", title: "Italic (Ctrl+I)", action: () => wrapSelection("<i>", "</i>") },
+            { label: "B", title: "Bold (Ctrl+B in text)", action: () => wrapSelection("<b>", "</b>") },
+            { label: "U", title: "Underline", action: () => wrapSelection("<u>", "</u>") },
+            { label: "\u266A", title: "Music note", action: () => insertAtCursor("\u266A ") },
+            { label: "\u2026", title: "Ellipsis", action: () => insertAtCursor("\u2026") },
+            { label: "\u2014", title: "Em dash", action: () => insertAtCursor("\u2014") },
+            { label: "\u00BF", title: "Inverted question mark", action: () => insertAtCursor("\u00BF") },
+            { label: "\u00A1", title: "Inverted exclamation", action: () => insertAtCursor("\u00A1") },
+          ].map((btn) => (
+            <button
+              key={btn.label}
+              type="button"
+              title={btn.title}
+              onClick={btn.action}
               style={{
-                fontSize: 10,
-                color: line.length > 42 ? "#EF4444" : "var(--bz-text-tertiary)",
-                fontFamily: "'JetBrains Mono', monospace",
+                background: "var(--bz-surface-raised)",
+                border: "1px solid var(--bz-border-interactive)",
+                borderRadius: 3,
+                padding: "0 5px",
+                height: 20,
+                fontSize: 11,
+                color: "var(--bz-text-secondary)",
+                cursor: "pointer",
+                fontWeight: btn.label.length === 1 && btn.label.match(/[BIU]/) ? 600 : 400,
+                fontStyle: btn.label === "I" ? "italic" : "normal",
+                textDecoration: btn.label === "U" ? "underline" : "none",
+                lineHeight: "18px",
               }}
             >
-              L{i + 1}: {line.length}
-            </span>
+              {btn.label}
+            </button>
           ))}
         </div>
         {/* Reference text */}
