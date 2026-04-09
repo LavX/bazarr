@@ -487,6 +487,19 @@ export const ProviderList: Readonly<ProviderInfo[]> = [
     ],
   },
   {
+    key: "subsarr",
+    name: "Subsarr",
+    description:
+      "Self-hosted Subscene subtitle provider. (requires slimcdk/subsarr https://github.com/slimcdk/subsarr)",
+    inputs: [
+      {
+        type: "text",
+        key: "base_url",
+        name: "Base URL",
+      },
+    ],
+  },
+  {
     key: "subssabbz",
     name: "Subs.sab.bz",
     description: "Bulgarian Subtitles Provider",
@@ -505,8 +518,17 @@ export const ProviderList: Readonly<ProviderInfo[]> = [
   { key: "subscenter", description: "Hebrew Subtitles Provider" },
   {
     key: "subsro",
-    name: "subs.ro",
+    name: "Subs.ro",
     description: "Romanian Subtitles Provider",
+    message:
+      "API key required. Get your key from Subs.ro website: https://subs.ro/api",
+    inputs: [
+      {
+        type: "text",
+        key: "api_key",
+        name: "API Key",
+      },
+    ],
   },
   {
     key: "subsunacs",

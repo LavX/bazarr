@@ -91,7 +91,7 @@ class LingarrTranslatorService:
             result = create_process_result(message, self.video_path, self.orig_to_lang, self.forced, self.hi,
                                            self.dest_srt_file, self.media_type)
 
-            if self.media_type == 'series':
+            if self.media_type == 'episode':
                 history_log(action=6,
                             sonarr_series_id=self.sonarr_series_id,
                             sonarr_episode_id=self.sonarr_episode_id,
@@ -131,7 +131,7 @@ class LingarrTranslatorService:
                 sonarr_episode_id=self.sonarr_episode_id
             )
 
-            if self.media_type == 'series':
+            if self.media_type == 'episode':
                 api_media_type = "Episode"
                 arr_media_id = self.sonarr_series_id or 0
             else:

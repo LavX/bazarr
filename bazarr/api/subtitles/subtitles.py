@@ -188,7 +188,7 @@ class Subtitles(Resource):
                 try:
                     translate_subtitles_file(video_path=video_path, source_srt_file=subtitles_path,
                                              from_lang=from_language, to_lang=dest_language, forced=forced, hi=hi,
-                                             media_type="series" if media_type == "episode" else "movies",
+                                             media_type=media_type,
                                              sonarr_series_id=metadata.sonarrSeriesId if media_type == "episode" else None,
                                              sonarr_episode_id=id,
                                              radarr_id=id,

@@ -5,7 +5,6 @@ import time
 import uuid
 import requests
 import xml.etree.ElementTree as ET
-import logging
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote_plus
@@ -22,6 +21,7 @@ from app.config import get_ssl_verify
 from app.config import settings, write_config
 from app.logger import logger
 from utilities.plex_utils import _get_library_locations
+from ..utils import authenticate
 
 def _update_plexapi_headers():
     """Update plexapi headers to show Bazarr identity in Plex.
@@ -242,6 +242,7 @@ class PlexPin(Resource):
     post_request_parser = reqparse.RequestParser()
     post_request_parser.add_argument('clientId', type=str, required=False, help='Client ID')
 
+    @authenticate
     @api_ns_plex.doc(parser=post_request_parser)
     def post(self):
         try:
@@ -305,12 +306,14 @@ class PlexPin(Resource):
                 'code': 'PLEX_CONNECTION_ERROR'
             }, 503
 
+    @authenticate
     def get(self):
         abort(405, "Method not allowed. Use POST.")
 
 
 @api_ns_plex.route('plex/oauth/pin/<string:pin_id>/check')
 class PlexPinCheck(Resource):
+    @authenticate
     def get(self, pin_id):
         try:
             state_param = request.args.get('state')
@@ -408,6 +411,7 @@ class PlexPinCheck(Resource):
 
 @api_ns_plex.route('plex/oauth/validate')
 class PlexValidate(Resource):
+    @authenticate
     def get(self):
         try:
             auth_method = settings.plex.get('auth_method', 'apikey')
@@ -443,6 +447,7 @@ class PlexValidate(Resource):
 
 @api_ns_plex.route('plex/oauth/servers')
 class PlexServers(Resource):
+    @authenticate
     def get(self):
         try:
             decrypted_token = get_decrypted_token()
@@ -584,6 +589,7 @@ class PlexServers(Resource):
 
 @api_ns_plex.route('plex/oauth/libraries')
 class PlexLibraries(Resource):
+    @authenticate
     def get(self):
         try:
             decrypted_token = get_decrypted_token()
@@ -739,6 +745,7 @@ class PlexLibraries(Resource):
 class PlexLogout(Resource):
     post_request_parser = reqparse.RequestParser()
 
+    @authenticate
     @api_ns_plex.doc(parser=post_request_parser)
     def post(self):
         try:
@@ -771,6 +778,7 @@ class PlexLogout(Resource):
 class PlexEncryptApiKey(Resource):
     post_request_parser = reqparse.RequestParser()
 
+    @authenticate
     @api_ns_plex.doc(parser=post_request_parser)
     def post(self):
         try:
@@ -789,6 +797,7 @@ class PlexApiKey(Resource):
     post_request_parser = reqparse.RequestParser()
     post_request_parser.add_argument('apikey', type=str, required=True, help='API key')
 
+    @authenticate
     @api_ns_plex.doc(parser=post_request_parser)
     def post(self):
         try:
@@ -819,6 +828,7 @@ class PlexTestConnection(Resource):
     post_request_parser = reqparse.RequestParser()
     post_request_parser.add_argument('uri', type=str, required=True, help='Server URI')
 
+    @authenticate
     @api_ns_plex.doc(parser=post_request_parser)
     def post(self):
         args = self.post_request_parser.parse_args()
@@ -855,12 +865,14 @@ class PlexTestConnection(Resource):
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
+    @authenticate
     def get(self):
         abort(405, "Method not allowed. Use POST.")
 
 
 @api_ns_plex.route('plex/select-server')
 class PlexSelectServer(Resource):
+    @authenticate
     def get(self):
         try:
             server_info = {
@@ -885,6 +897,7 @@ class PlexSelectServer(Resource):
     post_request_parser.add_argument('local', type=str, required=False, default='false', help='Is local connection')
     post_request_parser.add_argument('connections', type=list, location='json', required=False, help='All available connection URIs')
 
+    @authenticate
     @api_ns_plex.doc(parser=post_request_parser)
     def post(self):
         args = self.post_request_parser.parse_args()
@@ -919,6 +932,7 @@ class PlexSelectServer(Resource):
 class PlexWebhookCreate(Resource):
     post_request_parser = reqparse.RequestParser()
 
+    @authenticate
     @api_ns_plex.doc(parser=post_request_parser)
     def post(self):
         try:
@@ -1037,6 +1051,7 @@ class PlexWebhookCreate(Resource):
 
 @api_ns_plex.route('plex/webhook/list')
 class PlexWebhookList(Resource):
+    @authenticate
     def get(self):
         try:
             decrypted_token = get_decrypted_token()
@@ -1092,6 +1107,7 @@ class PlexWebhookDelete(Resource):
     post_request_parser = reqparse.RequestParser()
     post_request_parser.add_argument('webhook_url', type=str, required=True, help='Webhook URL to delete')
 
+    @authenticate
     @api_ns_plex.doc(parser=post_request_parser)
     def post(self):
         try:
@@ -1135,6 +1151,7 @@ class PlexWebhookDelete(Resource):
 class PlexAutopulseConfig(Resource):
     get_request_parser = reqparse.RequestParser()
 
+    @authenticate
     @api_ns_plex.doc(parser=get_request_parser)
     def get(self):
         try:

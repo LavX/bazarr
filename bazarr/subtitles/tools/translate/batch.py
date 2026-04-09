@@ -59,7 +59,7 @@ def process_episode_translation(item, source_language, target_language, forced, 
     detected_source_lang = None
     if not source_subtitle_path:
         source_subtitle_path, detected_source_lang = find_subtitle_by_language(
-            episode.subtitles, source_language, video_path, media_type='series'
+            episode.subtitles, source_language, video_path, media_type='episode'
         )
 
     if not source_subtitle_path:
@@ -79,7 +79,7 @@ def process_episode_translation(item, source_language, target_language, forced, 
             to_lang=target_language,
             forced=forced,
             hi=hi,
-            media_type="series",
+            media_type="episode",
             sonarr_series_id=sonarr_series_id,
             sonarr_episode_id=sonarr_episode_id,
             radarr_id=None,
@@ -197,7 +197,7 @@ def find_subtitle_by_language(subtitles, language_code, video_path, media_type='
     # Helper function to resolve and validate subtitle path
     def resolve_subtitle_path(sub_path):
         # Apply path mapping based on media type
-        if media_type == 'series':
+        if media_type == 'episode':
             mapped_path = path_mappings.path_replace(sub_path)
         else:
             mapped_path = path_mappings.path_replace_movie(sub_path)
@@ -292,7 +292,7 @@ def extract_embedded_subtitle(video_path, language_code2, media_type):
         return None
 
     # Look up file metadata needed by parse_video_metadata
-    if media_type == 'series':
+    if media_type == 'episode':
         db_path = path_mappings.path_replace_reverse(video_path)
         media = database.execute(
             select(TableEpisodes.episode_file_id, TableEpisodes.file_size)

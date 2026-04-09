@@ -86,6 +86,8 @@ else:
     @event.listens_for(Engine, "connect")
     def set_sqlite_pragma(dbapi_connection, connection_record):
         cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=FULL")
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA busy_timeout=5000")
@@ -174,6 +176,7 @@ class TableEpisodes(Base):
     sonarrSeriesId = mapped_column(Integer, ForeignKey('table_shows.sonarrSeriesId', ondelete='CASCADE'))
     subtitles = mapped_column(Text)
     title = mapped_column(Text, nullable=False)
+    tvdbId = mapped_column(Integer)
     updated_at_timestamp = mapped_column(DateTime)
     video_codec = mapped_column(Text)
 

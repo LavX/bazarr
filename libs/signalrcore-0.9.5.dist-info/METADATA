@@ -1,23 +1,17 @@
 Metadata-Version: 2.4
 Name: signalrcore
-Version: 0.9.71
-Summary: A Python SignalR Core client(json and messagepack),with invocation auth and two way streaming.Compatible with azure / serverless functions.Also with automatic reconnect and manually reconnect.
+Version: 0.9.5
+Summary: A Python SignalR Core client(json and messagepack), with invocation auth and two way streaming. Compatible with azure / serverless functions. Also with automatic reconnect and manually reconnect.
 Home-page: https://github.com/mandrewcito/signalrcore
 Author: mandrewcito
-Author-email: signalrcore@mandrewcito.dev
+Author-email: anbaalo@gmail.com
 Keywords: signalr core client 3.1
-Classifier: Programming Language :: Python :: 3.8
-Classifier: License :: OSI Approved :: MIT License
-Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python :: 3.6
 Description-Content-Type: text/markdown
 License-File: LICENSE
+Requires-Dist: requests>=2.22.0
+Requires-Dist: websocket-client==1.0.0
 Requires-Dist: msgpack==1.0.2
-Provides-Extra: dev
-Requires-Dist: requests; extra == "dev"
-Requires-Dist: flake8; extra == "dev"
-Requires-Dist: coverage; extra == "dev"
-Requires-Dist: pytest; extra == "dev"
-Requires-Dist: pytest-cov; extra == "dev"
 Dynamic: author
 Dynamic: author-email
 Dynamic: classifier
@@ -26,7 +20,6 @@ Dynamic: description-content-type
 Dynamic: home-page
 Dynamic: keywords
 Dynamic: license-file
-Dynamic: provides-extra
 Dynamic: requires-dist
 Dynamic: summary
 
@@ -52,15 +45,23 @@ Dynamic: summary
 
 # Develop
 
-Test server will be available in [here](https://github.com/mandrewcito/signalrcore-containertestservers) and docker compose is required.
+Test server will be avaiable in [here](https://github.com/mandrewcito/signalrcore-containertestservers) and docker compose is required.
 
 ```bash
 git clone https://github.com/mandrewcito/signalrcore-containertestservers
 cd signalrcore-containertestservers
-docker compose up
+docker-compose up
 cd ../signalrcore
 make tests
 ```
+
+## Known Issues
+
+Issues related with closing sockets are inherited from the websocket-client library. Due to these problems i can't update the library to versions higher than websocket-client 0.54.0. 
+I'm working to solve it but for now its patched (Error number 1. Raises an exception, and then exception is treated for prevent errors). 
+If I update the websocket library I fall into error number 2, on local machine I can't reproduce it but travis builds fail (sometimes and randomly :()
+* [1. Closing socket error](https://github.com/slackapi/python-slackclient/issues/171)
+* [2. Random errors closing socket](https://github.com/websocket-client/websocket-client/issues/449)
 
 # A Tiny How To
 
@@ -169,7 +170,7 @@ connection = HubConnectionBuilder()\
             })\
             .build()
 ```
-## Configuring skip negotiation
+## Congfiguring skip negotiation
 ```python
 hub_connection = HubConnectionBuilder() \
         .with_url("ws://"+server_url, options={

@@ -35,7 +35,7 @@ rarfile==4.2
 referencing<=0.23.0  # newer version requires other compiled dependency
 requests==2.32.5
 semver==3.0.4
-signalrcore<=0.9.71  # newer version have a bug with Sonarr signalr implementation
+signalrcore<=0.9.5  # newer version are unstable with Sonarr and Radarr SignalR implementation
 simple-websocket==1.1.0
 sqlalchemy==2.0.48
 textdistance==4.6.3
