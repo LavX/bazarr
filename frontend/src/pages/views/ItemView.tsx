@@ -294,7 +294,7 @@ function ItemView<T extends Item.Base>({
       )}
 
       {/* Collapsible filter panel */}
-      <Collapse in={filtersOpen}>
+      <Collapse expanded={filtersOpen}>
         <Paper
           px="md"
           py="sm"

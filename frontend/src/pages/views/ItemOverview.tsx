@@ -143,7 +143,7 @@ const ItemOverview: FunctionComponent<Props> = (props) => {
         <Grid
           align="flex-start"
           grow
-          gutter="xs"
+          gap="xs"
           p={24}
           m={0}
           className={classes.fanartOverlay}
