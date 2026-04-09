@@ -23,6 +23,15 @@ api_ns_subtitle_content = Namespace('SubtitleContent', description='Read subtitl
 
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
 
+
+def _is_safe_path(path):
+    """Validate that a resolved path doesn't traverse outside expected directories."""
+    normalized = os.path.normpath(path)
+    # Block obvious traversal patterns
+    if '..' in normalized.split(os.sep):
+        return False
+    return True
+
 SUBTITLE_EXTENSIONS = {
     '.srt', '.ass', '.ssa', '.sub', '.idx', '.sup',
     '.vtt', '.dfxp', '.ttml', '.smi', '.mpl', '.txt',
@@ -158,6 +167,9 @@ def resolve_subtitle_path(media_type, media_id, language_code):
         if not found:
             return f'No subtitle found for language "{language_code}"', 404
 
+    if not _is_safe_path(subtitle_path):
+        return 'Invalid subtitle path', 400
+
     ext = os.path.splitext(subtitle_path)[1].lower()
     if ext not in SUBTITLE_EXTENSIONS:
         return f'File does not have a recognized subtitle extension: {ext}', 400
@@ -172,8 +184,11 @@ def read_subtitle_file(path):
     """Read a subtitle file and detect its encoding.
 
     Returns (content_str, encoding) on success.
-    Raises ValueError if the file exceeds MAX_FILE_SIZE.
+    Raises ValueError if the file exceeds MAX_FILE_SIZE or path is unsafe.
     """
+    if not _is_safe_path(path):
+        raise ValueError('Invalid subtitle path')
+
     file_size = os.path.getsize(path)
     if file_size > MAX_FILE_SIZE:
         raise ValueError(f'Subtitle file too large ({file_size} bytes, max {MAX_FILE_SIZE})')
