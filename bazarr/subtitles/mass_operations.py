@@ -322,7 +322,7 @@ def _process_subtitle_item(item, action, options, job_id):
         )
     elif action == 'translate':
         from subtitles.tools.translate.main import translate_subtitles_file
-        media_type = 'series' if item['sonarr_series_id'] else 'movies'
+        media_type = 'episode' if item['sonarr_series_id'] else 'movies'
         # Don't pass the batch job_id to translate. translate_subtitles_file
         # has its own job/progress lifecycle that would hijack the batch job.
         # Calling without job_id makes it queue as its own separate job.

@@ -119,7 +119,7 @@ class OpenRouterTranslatorService:
             message = f"{language_from_alpha2(self.from_lang)} subtitles translated to {language_from_alpha3(self.to_lang)} using AI Subtitle Translator."
             result = create_process_result(message, self.video_path, self.orig_to_lang, self.forced, self.hi, self.dest_srt_file, self.media_type)
 
-            if self.media_type == 'series':
+            if self.media_type == 'episode':
                 history_log(action=6,
                             sonarr_series_id=self.sonarr_series_id,
                             sonarr_episode_id=self.sonarr_episode_id,
@@ -171,8 +171,8 @@ class OpenRouterTranslatorService:
                 sonarr_episode_id=self.sonarr_episode_id
             )
 
-            api_media_type = "Episode" if self.media_type == 'series' else "Movie"
-            arr_media_id = self.sonarr_series_id if self.media_type == 'series' else self.radarr_id or 0
+            api_media_type = "Episode" if self.media_type == 'episode' else "Movie"
+            arr_media_id = self.sonarr_series_id if self.media_type == 'episode' else self.radarr_id or 0
 
             payload = {
                 "arrMediaId": arr_media_id,
