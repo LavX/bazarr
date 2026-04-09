@@ -2,9 +2,14 @@ import type { ParseResult } from "@/pages/SubtitleEditor/types";
 import type { SubtitleParser } from "./index";
 
 function stripHtml(html: string): string {
-  return html
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<[^>]+>/g, "")
+  let result = html.replace(/<br\s*\/?>/gi, "\n");
+  // Loop to handle nested/malformed tags like <<script>
+  let prev = "";
+  while (prev !== result) {
+    prev = result;
+    result = result.replace(/<[^>]+>/g, "");
+  }
+  return result
     .replace(/&nbsp;/gi, " ")
     .replace(/&lt;/gi, "<")
     .replace(/&gt;/gi, ">")

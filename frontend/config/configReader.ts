@@ -47,7 +47,7 @@ export default function overrideEnv(env: Record<string, string>) {
     try {
       const apiKey = reader.getValue("auth", "apikey");
 
-      console.log(`Using API key: ${apiKey}`);
+      console.log("Using API key from config");
 
       env["VITE_API_KEY"] = apiKey;
       process.env["VITE_API_KEY"] = apiKey;

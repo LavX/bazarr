@@ -16,6 +16,9 @@ on:
   pull_request:
     branches: [master, development]
 
+permissions:
+  contents: read
+
 env:
   ROOT_DIRECTORY: .
   UI_DIRECTORY: ./frontend
