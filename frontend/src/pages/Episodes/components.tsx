@@ -74,21 +74,30 @@ export const Subtitle: FunctionComponent<Props> = ({
     [availableSubtitles],
   );
 
-  const ctx = (
-    <Tooltip.Floating label={badgeTooltip}>
-      <UnstyledButton
-        aria-label={`${subtitle.name || subtitle.code2}${missing ? " (missing)" : ""}`}
-      >
-        <Badge variant={variant}>
-          <Language.Text value={subtitle} long={false}></Language.Text>
-        </Badge>
-      </UnstyledButton>
-    </Tooltip.Floating>
+  const badgeEl = (
+    <Badge variant={variant}>
+      <Language.Text value={subtitle} long={false}></Language.Text>
+    </Badge>
   );
 
   if (disabled && !missing) {
-    return ctx;
+    return (
+      <Tooltip.Floating label={badgeTooltip}>
+        <UnstyledButton
+          aria-label={`${subtitle.name || subtitle.code2} (embedded)`}
+          tabIndex={-1}
+        >
+          {badgeEl}
+        </UnstyledButton>
+      </Tooltip.Floating>
+    );
   }
+
+  // For interactive badges (inside Menu.Target), don't wrap in UnstyledButton
+  // as Menu.Target already provides button semantics and click handling
+  const ctx = (
+    <Tooltip.Floating label={badgeTooltip}>{badgeEl}</Tooltip.Floating>
+  );
 
   return (
     <SubtitleToolsMenu
