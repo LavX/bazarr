@@ -126,7 +126,7 @@ const MovieHistoryView: FunctionComponent<MovieHistoryViewProps> = ({
           if (subs_id && provider && language) {
             return (
               <MutateAction
-                label="Add to Blacklist"
+                label="Exclude"
                 disabled={blacklisted}
                 icon={faFileExcel}
                 mutation={addMovieToBlacklist}
@@ -285,7 +285,7 @@ const EpisodeHistoryView: FunctionComponent<EpisodeHistoryViewProps> = ({
           if (subs_id && provider && language) {
             return (
               <MutateAction
-                label="Add to Blacklist"
+                label="Exclude"
                 disabled={blacklisted}
                 icon={faFileExcel}
                 mutation={addEpisodeToBlacklist}

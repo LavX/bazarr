@@ -81,7 +81,7 @@ const Table: FunctionComponent<Props> = ({ blacklist }) => {
         }) => {
           return (
             <MutateAction
-              label="Remove from Blacklist"
+              label="Remove from Excluded"
               icon={faTrash}
               mutation={remove}
               args={() => ({

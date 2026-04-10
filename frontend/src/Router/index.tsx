@@ -141,7 +141,7 @@ function useRoutes(): CustomRouteObject[] {
           },
           {
             icon: faExclamationTriangle,
-            name: "Wanted",
+            name: "Missing Subtitles",
             path: "wanted",
             hidden: !sonarr && !radarr,
             children: [
@@ -163,7 +163,7 @@ function useRoutes(): CustomRouteObject[] {
           },
           {
             icon: faFileExcel,
-            name: "Blacklist",
+            name: "Excluded",
             path: "blacklist",
             hidden: !sonarr && !radarr,
             children: [

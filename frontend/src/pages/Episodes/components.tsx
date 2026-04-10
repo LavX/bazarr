@@ -1,6 +1,6 @@
 import { FunctionComponent, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
-import { Badge, MantineColor, Tooltip } from "@mantine/core";
+import { Badge, MantineColor, Tooltip, UnstyledButton } from "@mantine/core";
 import { useEpisodeSubtitleModification } from "@/apis/hooks";
 import Language from "@/components/bazarr/Language";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
@@ -45,6 +45,12 @@ export const Subtitle: FunctionComponent<Props> = ({
     }
   }, [disabled, missing, opened]);
 
+  const badgeTooltip = useMemo(() => {
+    if (missing) return "Missing subtitle";
+    if (disabled) return "Embedded subtitle";
+    return "Available subtitle";
+  }, [missing, disabled]);
+
   const selections = useMemo<FormType.ModifySubtitle[]>(() => {
     const list: FormType.ModifySubtitle[] = [];
 
@@ -69,13 +75,19 @@ export const Subtitle: FunctionComponent<Props> = ({
   );
 
   const ctx = (
-    <Badge variant={variant}>
-      <Language.Text value={subtitle} long={false}></Language.Text>
-    </Badge>
+    <Tooltip.Floating label={badgeTooltip}>
+      <UnstyledButton
+        aria-label={`${subtitle.name || subtitle.code2}${missing ? " (missing)" : ""}`}
+      >
+        <Badge variant={variant}>
+          <Language.Text value={subtitle} long={false}></Language.Text>
+        </Badge>
+      </UnstyledButton>
+    </Tooltip.Floating>
   );
 
   if (disabled && !missing) {
-    return <Tooltip.Floating label="Embedded Subtitle">{ctx}</Tooltip.Floating>;
+    return ctx;
   }
 
   return (

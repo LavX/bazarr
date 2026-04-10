@@ -12,10 +12,11 @@ import {
   useMantineColorScheme,
 } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
-import { faListCheck } from "@fortawesome/free-solid-svg-icons";
+import { openConfirmModal } from "@mantine/modals";
 import {
   faArrowRotateLeft,
-  faGear,
+  faEllipsisVertical,
+  faListCheck,
   faMoon,
   faPowerOff,
   faSun,
@@ -103,14 +104,14 @@ const AppHeader: FunctionComponent = () => {
           <Group gap="xs" justify="right" wrap="nowrap">
             <Action
               label="Change Theme"
-              tooltip={{ position: "left", openDelay: 2000 }}
+              tooltip={{ position: "left", openDelay: 500 }}
               onClick={() => toggleColorScheme()}
               icon={dark ? faSun : faMoon}
               size="sm"
             ></Action>
             <Action
               label="Jobs Manager"
-              tooltip={{ position: "left", openDelay: 2000 }}
+              tooltip={{ position: "left", openDelay: 500 }}
               icon={faListCheck}
               size="sm"
               isLoading={Boolean(
@@ -121,24 +122,51 @@ const AppHeader: FunctionComponent = () => {
             <Menu>
               <Menu.Target>
                 <Action
-                  label="System"
-                  tooltip={{ position: "left", openDelay: 2000 }}
+                  label="Power"
+                  tooltip={{ position: "left", openDelay: 500 }}
                   loading={offline}
                   c={offline ? "yellow" : undefined}
-                  icon={faGear}
+                  icon={faEllipsisVertical}
                   size="sm"
                 ></Action>
               </Menu.Target>
               <Menu.Dropdown>
                 <Menu.Item
                   leftSection={<FontAwesomeIcon icon={faArrowRotateLeft} />}
-                  onClick={() => restart()}
+                  onClick={() =>
+                    openConfirmModal({
+                      title: "Restart Bazarr+",
+                      children: (
+                        <Text size="sm">
+                          Are you sure you want to restart Bazarr+? The service
+                          will be temporarily unavailable.
+                        </Text>
+                      ),
+                      labels: { confirm: "Restart", cancel: "Cancel" },
+                      confirmProps: { color: "yellow" },
+                      onConfirm: () => restart(),
+                    })
+                  }
                 >
                   Restart
                 </Menu.Item>
                 <Menu.Item
+                  color="red"
                   leftSection={<FontAwesomeIcon icon={faPowerOff} />}
-                  onClick={() => shutdown()}
+                  onClick={() =>
+                    openConfirmModal({
+                      title: "Shutdown Bazarr+",
+                      children: (
+                        <Text size="sm">
+                          Are you sure you want to shut down Bazarr+? You will
+                          need to manually restart the service.
+                        </Text>
+                      ),
+                      labels: { confirm: "Shutdown", cancel: "Cancel" },
+                      confirmProps: { color: "red" },
+                      onConfirm: () => shutdown(),
+                    })
+                  }
                 >
                   Shutdown
                 </Menu.Item>

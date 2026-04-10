@@ -348,28 +348,42 @@ export const TranslatorStatusPanel: FunctionComponent<
       </Card>
 
       {/* Queue Stats */}
-      {status && (
-        <SimpleGrid cols={{ base: 2, sm: 3 }}>
-          {(status.bazarr_queue?.pending ?? 0) > 0 && (
-            <StatCard
-              label="Pending"
-              value={status.bazarr_queue!.pending}
-              color="queued"
-            />
-          )}
-          <StatCard
-            label="Processing"
-            value={status.queue.processing}
-            color="processing"
-          />
-          <StatCard
-            label="Completed"
-            value={status.queue.completed}
-            color="completed"
-          />
-          <StatCard label="Failed" value={status.queue.failed} color="failed" />
-        </SimpleGrid>
-      )}
+      {status &&
+        (status.queue.processing > 0 ||
+          status.queue.completed > 0 ||
+          status.queue.failed > 0 ||
+          (status.bazarr_queue?.pending ?? 0) > 0) && (
+          <SimpleGrid cols={{ base: 2, sm: 4 }}>
+            {(status.bazarr_queue?.pending ?? 0) > 0 && (
+              <StatCard
+                label="Pending"
+                value={status.bazarr_queue!.pending}
+                color="queued"
+              />
+            )}
+            {status.queue.processing > 0 && (
+              <StatCard
+                label="Processing"
+                value={status.queue.processing}
+                color="processing"
+              />
+            )}
+            {status.queue.completed > 0 && (
+              <StatCard
+                label="Completed"
+                value={status.queue.completed}
+                color="completed"
+              />
+            )}
+            {status.queue.failed > 0 && (
+              <StatCard
+                label="Failed"
+                value={status.queue.failed}
+                color="failed"
+              />
+            )}
+          </SimpleGrid>
+        )}
 
       {/* Jobs Table */}
       <Card withBorder>

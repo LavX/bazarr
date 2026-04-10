@@ -12,7 +12,7 @@ const BlacklistSeriesView: FunctionComponent = () => {
   const blacklist = useEpisodeBlacklist();
   const { mutateAsync } = useEpisodeDeleteBlacklist();
 
-  useDocumentTitle(`Series Blacklist - ${useInstanceName()}`);
+  useDocumentTitle(`Series Excluded - ${useInstanceName()}`);
 
   const { data } = blacklist;
   return (

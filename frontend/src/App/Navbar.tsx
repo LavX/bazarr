@@ -140,18 +140,28 @@ const AppNavbar: FunctionComponent = () => {
       <div className={styles.navInner}>
         <Selection.Provider value={{ selection, select }}>
           <Stack gap={0}>
-            {groups.map((group) => (
-              <div key={group.label}>
-                <div className={styles.groupLabel}>{group.label}</div>
-                {group.items.map((route, idx) => (
-                  <RouteItem
-                    key={BuildKey("nav", group.label, idx)}
-                    parent="/"
-                    route={route}
-                  />
-                ))}
-              </div>
-            ))}
+            {groups.map((group) => {
+              const groupId = `nav-group-${group.label.toLowerCase().replace(/\s+/g, "-")}`;
+              return (
+                <div key={group.label} role="group" aria-labelledby={groupId}>
+                  <div
+                    id={groupId}
+                    role="heading"
+                    aria-level={2}
+                    className={styles.groupLabel}
+                  >
+                    {group.label}
+                  </div>
+                  {group.items.map((route, idx) => (
+                    <RouteItem
+                      key={BuildKey("nav", group.label, idx)}
+                      parent="/"
+                      route={route}
+                    />
+                  ))}
+                </div>
+              );
+            })}
           </Stack>
         </Selection.Provider>
       </div>

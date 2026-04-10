@@ -5,8 +5,15 @@ import {
   useRef,
   useState,
 } from "react";
-import { Navigate, useParams } from "react-router";
-import { Container, Group, Stack } from "@mantine/core";
+import { Link, Navigate, useParams } from "react-router";
+import {
+  Anchor,
+  Breadcrumbs,
+  Container,
+  Group,
+  Stack,
+  Text,
+} from "@mantine/core";
 import { Dropzone } from "@mantine/dropzone";
 import { useDocumentTitle } from "@mantine/hooks";
 import { showNotification } from "@mantine/notifications";
@@ -131,6 +138,16 @@ const SeriesEpisodesView: FunctionComponent = () => {
 
   return (
     <Container px={0} fluid>
+      <nav aria-label="Breadcrumb">
+        <Breadcrumbs mb="md" ml="xs">
+          <Anchor component={Link} to="/series" size="sm">
+            Series
+          </Anchor>
+          <Text size="sm" c="var(--bz-text-primary)">
+            {series?.title ?? "Loading..."}
+          </Text>
+        </Breadcrumbs>
+      </nav>
       <QueryOverlay result={seriesQuery}>
         <Dropzone.FullScreen
           openRef={openDropzone}
