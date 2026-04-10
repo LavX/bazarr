@@ -11,6 +11,8 @@ import {
   Stack,
   Text,
 } from "@mantine/core";
+import { useWindowEvent } from "@mantine/hooks";
+import { showNotification } from "@mantine/notifications";
 import {
   faCheck,
   faCircle,
@@ -18,13 +20,12 @@ import {
   faSpinner,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { useWindowEvent } from "@mantine/hooks";
-import { showNotification } from "@mantine/notifications";
-import { useSystemSettings } from "@/apis/hooks";
 import { useQueryClient } from "@tanstack/react-query";
+import { useSystemSettings } from "@/apis/hooks";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import AppNavbar from "@/App/Navbar";
+import logoSrc from "@/assets/images/logo_no_orb128.png";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import NavbarProvider from "@/contexts/Navbar";
 import OnlineProvider from "@/contexts/Online";
@@ -34,7 +35,6 @@ import { RouterNames } from "@/Router/RouterNames";
 import { Environment } from "@/utilities";
 import AppHeader from "./Header";
 import styleVars from "@/assets/_variables.module.scss";
-import logoSrc from "@/assets/images/logo_no_orb128.png";
 
 interface SupervisorStatus {
   state: "starting" | "running" | "crashed" | "stopping";
@@ -86,7 +86,7 @@ const App: FunctionComponent = () => {
   });
 
   useWindowEvent("app-auth-changed", (ev) => {
-    if (!ev.detail.authenticated && hasConnected) {
+    if (!ev.detail.authenticated) {
       navigate(RouterNames.Auth);
     }
   });

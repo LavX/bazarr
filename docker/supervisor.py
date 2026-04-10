@@ -377,13 +377,19 @@ def create_supervisor_sse_handler(backend: BackendManager):
 def create_app(config_dir: str, backend: BackendManager) -> web.Application:
     app = web.Application()
 
+    config = _read_bazarr_config(config_dir)
+    base = config.get("baseUrl", "/").strip("/")
+
     # Supervisor-handled endpoints (not proxied)
     app.router.add_route("GET", "/_supervisor/status", create_supervisor_status_handler(backend))
     app.router.add_route("GET", "/_supervisor/events", create_supervisor_sse_handler(backend))
 
-    # API/image proxy routes (must be registered before the catch-all)
+    # API/image proxy routes: register both root and base_url-prefixed versions
+    # so deployments with general.base_url (e.g. /bazarr) work correctly
     for prefix in PROXY_PREFIXES:
         app.router.add_route("*", prefix + "{path:.*}", proxy_handler)
+        if base:
+            app.router.add_route("*", f"/{base}{prefix}" + "{path:.*}", proxy_handler)
 
     # Static file catch-all
     app.router.add_route("GET", "/{path:.*}", create_static_handler(config_dir))
