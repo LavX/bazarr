@@ -1,5 +1,5 @@
 import { FunctionComponent } from "react";
-import { Group, NativeSelect, Pagination, Text } from "@mantine/core";
+import { Group, Pagination, Select, Text } from "@mantine/core";
 import { useIsLoading } from "@/contexts";
 
 interface Props {
@@ -32,11 +32,10 @@ const PageControl: FunctionComponent<Props> = ({
           Show {start} to {end} of {total} entries
         </Text>
         {onPageSizeChange && (
-          <NativeSelect
+          <Select
             size="xs"
             value={size >= total && total > 0 ? "all" : String(size)}
-            onChange={(e) => {
-              const val = e.currentTarget.value;
+            onChange={(val) => {
               if (val === "all") {
                 onPageSizeChange(total);
               } else {
@@ -52,6 +51,7 @@ const PageControl: FunctionComponent<Props> = ({
               { value: "all", label: "All" },
             ]}
             w={130}
+            allowDeselect={false}
           />
         )}
       </Group>

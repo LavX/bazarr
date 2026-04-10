@@ -126,7 +126,7 @@ body::after {
 }
 
 :root[data-mantine-color-scheme="dark"] {
-  --bz-surface-ground: #0c0b1a;
+  --bz-surface-ground: #121125;
   --bz-surface-base: #121125;
   --bz-surface-raised: #1a1a2e;
   --bz-surface-card: #22223a;
@@ -189,6 +189,7 @@ body::after {
     margin: 0 8px 8px 0;
     border-radius: var(--bz-radius-xl);
     border: 1px solid var(--bz-border-card);
+    min-height: calc(100dvh - var(--app-shell-header-height, 76px) - 8px);
   }
 
   .mantine-AppShell-navbar {

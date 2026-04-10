@@ -1960,229 +1960,227 @@ export default function EditorPage() {
                 onCreateFromGap={handleCreateFromGap}
                 onToggleBookmark={toggleBookmark}
               />
-              <SearchReplace
-                open={searchOpen}
-                cues={docState.cues}
-                onNavigate={handleSearchNavigate}
-                onReplace={handleSearchReplace}
-                onReplaceAll={handleSearchReplaceAll}
-                onClose={() => setSearchOpen(false)}
-              />
-              <JumpToCue
-                open={jumpOpen}
-                cueCount={docState.cues.length}
-                onJump={handleJumpToCue}
-                onClose={() => setJumpOpen(false)}
-              />
-              <QCPanel
-                open={qcOpen}
-                cues={docState.cues}
-                preset={qcPreset}
-                onPresetChange={setQcPreset}
-                onApplyFixes={handleQCApplyFixes}
-                onNavigate={handleQCNavigate}
-                onClose={() => setQcOpen(false)}
-              />
-              <TimingToolsPanel
-                open={timingOpen}
-                cues={docState.cues}
-                selectedIndices={multiSelect}
-                mediaType={mediaType}
-                mediaId={mediaId ? Number(mediaId) : undefined}
-                language={language}
-                onApplyBatch={handleTimingApplyBatch}
-                onGetContent={() => {
-                  const pr = buildParseResult();
-                  const serialized = getSerializer(format).serialize(pr);
-                  return { content: serialized, format, encoding };
+            </>
+          )}
+          <SearchReplace
+            open={searchOpen}
+            cues={docState.cues}
+            onNavigate={handleSearchNavigate}
+            onReplace={handleSearchReplace}
+            onReplaceAll={handleSearchReplaceAll}
+            onClose={() => setSearchOpen(false)}
+          />
+          <JumpToCue
+            open={jumpOpen}
+            cueCount={docState.cues.length}
+            onJump={handleJumpToCue}
+            onClose={() => setJumpOpen(false)}
+          />
+          <QCPanel
+            open={qcOpen}
+            cues={docState.cues}
+            preset={qcPreset}
+            onPresetChange={setQcPreset}
+            onApplyFixes={handleQCApplyFixes}
+            onNavigate={handleQCNavigate}
+            onClose={() => setQcOpen(false)}
+          />
+          <TimingToolsPanel
+            open={timingOpen}
+            cues={docState.cues}
+            selectedIndices={multiSelect}
+            mediaType={mediaType}
+            mediaId={mediaId ? Number(mediaId) : undefined}
+            language={language}
+            onApplyBatch={handleTimingApplyBatch}
+            onGetContent={() => {
+              const pr = buildParseResult();
+              const serialized = getSerializer(format).serialize(pr);
+              return { content: serialized, format, encoding };
+            }}
+            onApplySyncedContent={(syncedContent: string) => {
+              try {
+                const parsed = getParser(format).parse(syncedContent);
+                if (parsed.cues.length === 0) {
+                  showNotification({
+                    title: "Sync",
+                    message: "Synced content has no cues",
+                    color: "yellow",
+                  });
+                  return;
+                }
+                dispatch({ type: "LOAD", cues: parsed.cues });
+                showNotification({
+                  message: `Loaded ${parsed.cues.length} synced cues into editor`,
+                  color: "green",
+                  autoClose: 3000,
+                });
+              } catch (err) {
+                showNotification({
+                  title: "Error",
+                  message: `Failed to parse synced content: ${(err as Error).message}`,
+                  color: "red",
+                });
+              }
+            }}
+            onClose={() => setTimingOpen(false)}
+          />
+          <TranslatePanel
+            open={translateOpen}
+            cues={docState.cues}
+            referenceCues={referenceCueList}
+            availableSubtitles={availableSubtitles}
+            mediaType={mediaType}
+            mediaId={mediaId ? Number(mediaId) : undefined}
+            currentLanguage={language ?? ""}
+            mediaTitle={data?.mediaTitle}
+            onApplyTranslation={handleApplyTranslation}
+            onSetReference={(map) => {
+              const arr = Array.from(map.entries())
+                .filter(([idx]) => idx >= 0 && idx < docState.cues.length)
+                .map(([idx, text]) => ({
+                  startMs: docState.cues[idx].startMs,
+                  endMs: docState.cues[idx].endMs,
+                  text,
+                }));
+              setReferenceCueList(arr);
+            }}
+            onTranslatingChange={setTranslating}
+            onLoadReference={handleLoadReference}
+            onImportReference={handleImportReference}
+            referenceLanguage={referenceLanguage}
+            onClose={() => setTranslateOpen(false)}
+          />
+          {/* Reference panel */}
+          {referenceOpen && (
+            <div
+              style={{
+                position: "absolute",
+                top: 8,
+                right: 8,
+                zIndex: 10,
+                minWidth: 320,
+                background: "var(--bz-surface-raised)",
+                border: "1px solid var(--bz-border-card)",
+                borderRadius: "var(--bz-radius-sm)",
+                padding: "10px 14px",
+                boxShadow: "var(--bz-shadow-float)",
+                display: "flex",
+                flexDirection: "column",
+                gap: 8,
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
                 }}
-                onApplySyncedContent={(syncedContent: string) => {
-                  try {
-                    const parsed = getParser(format).parse(syncedContent);
-                    if (parsed.cues.length === 0) {
-                      showNotification({
-                        title: "Sync",
-                        message: "Synced content has no cues",
-                        color: "yellow",
-                      });
-                      return;
-                    }
-                    dispatch({ type: "LOAD", cues: parsed.cues });
-                    showNotification({
-                      message: `Loaded ${parsed.cues.length} synced cues into editor`,
-                      color: "green",
-                      autoClose: 3000,
-                    });
-                  } catch (err) {
-                    showNotification({
-                      title: "Error",
-                      message: `Failed to parse synced content: ${(err as Error).message}`,
-                      color: "red",
-                    });
-                  }
-                }}
-                onClose={() => setTimingOpen(false)}
-              />
-              <TranslatePanel
-                open={translateOpen}
-                cues={docState.cues}
-                referenceCues={referenceCueList}
-                availableSubtitles={availableSubtitles}
-                mediaType={mediaType}
-                mediaId={mediaId ? Number(mediaId) : undefined}
-                currentLanguage={language ?? ""}
-                mediaTitle={data?.mediaTitle}
-                onApplyTranslation={handleApplyTranslation}
-                onSetReference={(map) => {
-                  const arr = Array.from(map.entries())
-                    .filter(([idx]) => idx >= 0 && idx < docState.cues.length)
-                    .map(([idx, text]) => ({
-                      startMs: docState.cues[idx].startMs,
-                      endMs: docState.cues[idx].endMs,
-                      text,
-                    }));
-                  setReferenceCueList(arr);
-                }}
-                onTranslatingChange={setTranslating}
-                onLoadReference={handleLoadReference}
-                onImportReference={handleImportReference}
-                referenceLanguage={referenceLanguage}
-                onClose={() => setTranslateOpen(false)}
-              />
-              {/* Reference panel */}
-              {referenceOpen && (
-                <div
+              >
+                <span
                   style={{
-                    position: "absolute",
-                    top: 8,
-                    right: 8,
-                    zIndex: 10,
-                    minWidth: 320,
-                    background: "var(--bz-surface-raised)",
-                    border: "1px solid var(--bz-border-card)",
-                    borderRadius: "var(--bz-radius-sm)",
-                    padding: "10px 14px",
-                    boxShadow: "var(--bz-shadow-float)",
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: 8,
+                    fontSize: 13,
+                    fontWeight: 600,
+                    color: "var(--bz-text-primary)",
                   }}
                 >
-                  <div
+                  Reference Subtitle
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setReferenceOpen(false)}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    color: "var(--bz-text-tertiary)",
+                    cursor: "pointer",
+                    fontSize: 14,
+                  }}
+                >
+                  x
+                </button>
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <select
+                  style={{
+                    flex: 1,
+                    background: "var(--bz-surface-base)",
+                    border: "1px solid var(--bz-border-interactive)",
+                    borderRadius: "var(--bz-radius-xs)",
+                    color: "var(--bz-text-primary)",
+                    fontSize: 12,
+                    padding: "4px 6px",
+                  }}
+                  value={referenceLanguage ?? ""}
+                  onChange={(e) => {
+                    if (e.target.value) handleLoadReference(e.target.value);
+                  }}
+                >
+                  <option value="">Select language...</option>
+                  {availableSubtitles.length > 0
+                    ? availableSubtitles
+                        .filter((s) => s.language !== language)
+                        .map((s) => {
+                          const langName =
+                            (serverLanguages ?? []).find(
+                              (l) => l.code2 === s.language.split(":")[0],
+                            )?.name ?? s.language;
+                          const modifier = s.language.includes(":")
+                            ? ` (${s.language.split(":")[1].toUpperCase()})`
+                            : "";
+                          return (
+                            <option key={s.language} value={s.language}>
+                              {langName}
+                              {modifier} [{s.format}]
+                            </option>
+                          );
+                        })
+                    : (languageOptions ?? []).map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={handleImportReference}
+                  style={{
+                    background: "var(--bz-surface-base)",
+                    border: "1px solid var(--bz-border-interactive)",
+                    borderRadius: "var(--bz-radius-xs)",
+                    color: "var(--bz-text-secondary)",
+                    fontSize: 11,
+                    padding: "4px 8px",
+                    cursor: "pointer",
+                  }}
+                >
+                  Import file
+                </button>
+              </div>
+              {referenceCueList.length > 0 && (
+                <div style={{ fontSize: 11, color: "var(--bz-text-tertiary)" }}>
+                  {referenceCueList.length} cues loaded
+                  {referenceLanguage && <span> ({referenceLanguage})</span>}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setReferenceCueList([]);
+                      setReferenceLanguage(undefined);
+                    }}
                     style={{
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "space-between",
+                      background: "none",
+                      border: "none",
+                      color: "var(--bz-stat-failed)",
+                      cursor: "pointer",
+                      fontSize: 10,
+                      marginLeft: 8,
                     }}
                   >
-                    <span
-                      style={{
-                        fontSize: 13,
-                        fontWeight: 600,
-                        color: "var(--bz-text-primary)",
-                      }}
-                    >
-                      Reference Subtitle
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setReferenceOpen(false)}
-                      style={{
-                        background: "none",
-                        border: "none",
-                        color: "var(--bz-text-tertiary)",
-                        cursor: "pointer",
-                        fontSize: 14,
-                      }}
-                    >
-                      x
-                    </button>
-                  </div>
-                  <div style={{ display: "flex", gap: 6 }}>
-                    <select
-                      style={{
-                        flex: 1,
-                        background: "var(--bz-surface-base)",
-                        border: "1px solid var(--bz-border-interactive)",
-                        borderRadius: "var(--bz-radius-xs)",
-                        color: "var(--bz-text-primary)",
-                        fontSize: 12,
-                        padding: "4px 6px",
-                      }}
-                      value={referenceLanguage ?? ""}
-                      onChange={(e) => {
-                        if (e.target.value) handleLoadReference(e.target.value);
-                      }}
-                    >
-                      <option value="">Select language...</option>
-                      {availableSubtitles.length > 0
-                        ? availableSubtitles
-                            .filter((s) => s.language !== language)
-                            .map((s) => {
-                              const langName =
-                                (serverLanguages ?? []).find(
-                                  (l) => l.code2 === s.language.split(":")[0],
-                                )?.name ?? s.language;
-                              const modifier = s.language.includes(":")
-                                ? ` (${s.language.split(":")[1].toUpperCase()})`
-                                : "";
-                              return (
-                                <option key={s.language} value={s.language}>
-                                  {langName}
-                                  {modifier} [{s.format}]
-                                </option>
-                              );
-                            })
-                        : (languageOptions ?? []).map((opt) => (
-                            <option key={opt.value} value={opt.value}>
-                              {opt.label}
-                            </option>
-                          ))}
-                    </select>
-                    <button
-                      type="button"
-                      onClick={handleImportReference}
-                      style={{
-                        background: "var(--bz-surface-base)",
-                        border: "1px solid var(--bz-border-interactive)",
-                        borderRadius: "var(--bz-radius-xs)",
-                        color: "var(--bz-text-secondary)",
-                        fontSize: 11,
-                        padding: "4px 8px",
-                        cursor: "pointer",
-                      }}
-                    >
-                      Import file
-                    </button>
-                  </div>
-                  {referenceCueList.length > 0 && (
-                    <div
-                      style={{ fontSize: 11, color: "var(--bz-text-tertiary)" }}
-                    >
-                      {referenceCueList.length} cues loaded
-                      {referenceLanguage && <span> ({referenceLanguage})</span>}
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setReferenceCueList([]);
-                          setReferenceLanguage(undefined);
-                        }}
-                        style={{
-                          background: "none",
-                          border: "none",
-                          color: "var(--bz-stat-failed)",
-                          cursor: "pointer",
-                          fontSize: 10,
-                          marginLeft: 8,
-                        }}
-                      >
-                        Clear
-                      </button>
-                    </div>
-                  )}
+                    Clear
+                  </button>
                 </div>
               )}
-            </>
+            </div>
           )}
         </div>
 

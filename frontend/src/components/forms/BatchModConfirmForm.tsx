@@ -33,13 +33,6 @@ const BatchModConfirmForm: FunctionComponent<BatchModConfirmFormProps> = ({
   const label = ACTION_LABELS[action] ?? action;
 
   const handleSubmit = async () => {
-    if (items.length >= 100) {
-      const confirmed = window.confirm(
-        `This will apply "${label}" to ${items.length} items. This may take a while. Continue?`,
-      );
-      if (!confirmed) return;
-    }
-
     try {
       const result = await mutateAsync({ items, action });
 
