@@ -23,8 +23,12 @@ import signal
 import sys
 from pathlib import Path
 
-import yaml
 from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
+
+# Add bundled libs to path so we can import yaml (PyYAML)
+APP_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(APP_DIR / "libs"))
+import yaml  # noqa: E402
 
 # Unbuffered print so logs appear immediately when redirected to a file
 _print = print
@@ -37,7 +41,6 @@ def print(*args, **kwargs):
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-APP_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = APP_DIR / "frontend" / "build"
 BACKEND_HOST = "127.0.0.1"
 BACKEND_PORT = 6768  # internal port for bazarr backend

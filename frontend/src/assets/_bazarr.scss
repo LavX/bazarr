@@ -68,7 +68,7 @@ body::before {
   }
 }
 
-// Ambient atmospheric glow (z-index above content backgrounds, below grain)
+// Ambient atmospheric glow
 body::after {
   content: "";
   position: fixed;
@@ -100,6 +100,12 @@ body::after {
 #root {
   position: relative;
   z-index: 1;
+}
+
+// Mantine portal node sits outside #root and can add layout height,
+// causing a visible strip below the main content area.
+[data-mantine-shared-portal-node] {
+  position: fixed;
 }
 
 /* Shared tokens (scheme-independent) */
@@ -186,10 +192,14 @@ body::after {
 :global {
   .mantine-AppShell-main {
     background: var(--bz-surface-base);
-    margin: 0 8px 8px 0;
-    border-radius: var(--bz-radius-xl);
+    margin: 0 8px 0 0;
+    border-radius: var(--bz-radius-xl) var(--bz-radius-xl) 0 0;
     border: 1px solid var(--bz-border-card);
-    min-height: calc(100dvh - var(--app-shell-header-height, 76px) - 8px);
+    border-bottom: none;
+  }
+
+  .mantine-AppShell-root {
+    background: var(--bz-surface-ground);
   }
 
   .mantine-AppShell-navbar {
@@ -201,10 +211,6 @@ body::after {
     background: transparent !important;
     border: none !important;
     padding: 8px !important;
-  }
-
-  .mantine-AppShell-root {
-    background: var(--bz-surface-ground);
   }
 }
 

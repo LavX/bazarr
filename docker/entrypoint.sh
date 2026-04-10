@@ -41,12 +41,16 @@ if [ "$(id -g bazarr)" != "$PGID" ]; then
     groupmod -g $PGID bazarr
 fi
 
-# Fix ownership of config directory
+# Fix ownership of key config paths synchronously (fast, only top-level)
 echo "Setting permissions on /config..."
-chown -R bazarr:bazarr /config
+chown bazarr:bazarr /config
+chown -R bazarr:bazarr /config/config 2>/dev/null || true
+chown -R bazarr:bazarr /config/db 2>/dev/null || true
+chown -R bazarr:bazarr /config/log 2>/dev/null || true
+chown bazarr:bazarr /app/bazarr
 
-# Fix ownership of application directory
-chown -R bazarr:bazarr /app/bazarr
+# Deep permission fix runs in background (large config dirs can take minutes)
+(chown -R bazarr:bazarr /config /app/bazarr 2>/dev/null &)
 
 # Run as bazarr user using gosu
 echo "Starting Bazarr..."

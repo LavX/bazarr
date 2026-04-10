@@ -73,7 +73,7 @@ services:
       # - /path/to/downloads:/downloads
     
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:6767/_supervisor/status | grep -q '\"state\"'"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:6767/_supervisor/status | grep -q '\"running\"'"]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -1717,8 +1717,8 @@ export default function EditorPage() {
       onKeyDown={handleKeyDown}
       tabIndex={-1}
       style={{
-        height: "calc(100vh - 76px)",
-        maxHeight: "calc(100vh - 76px)",
+        height: "calc(100dvh - var(--app-shell-header-offset, 76px) - 1px)",
+        maxHeight: "calc(100dvh - var(--app-shell-header-offset, 76px) - 1px)",
         overflow: "hidden",
         display: "flex",
         flexDirection: "column",

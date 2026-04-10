@@ -115,7 +115,7 @@ EXPOSE 6767
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -sf http://localhost:6767/_supervisor/status | grep -q '"state"' || exit 1
+    CMD curl -sf http://localhost:6767/_supervisor/status | grep -q '"running"' || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["python", "docker/supervisor.py", "--no-update", "--config", "/config"]

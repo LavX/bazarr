@@ -81,6 +81,35 @@ docker pull ghcr.io/lavx/opensubtitles-scraper:latest
 docker pull ghcr.io/lavx/ai-subtitle-translator:latest
 ```
 
+### Option 3: Run without Docker
+
+Requires Python 3.12+ and Node.js 18+ (for building the frontend).
+
+```bash
+# Clone with submodules
+git clone --recursive https://github.com/LavX/bazarr.git
+cd bazarr
+
+# Install Python dependencies
+pip install -r requirements.txt
+
+# Build the frontend
+cd frontend && npm ci && npm run build && cd ..
+
+# Run
+python3 docker/supervisor.py --config ./data --port 6767
+```
+
+**System dependencies** (install via your package manager):
+- `ffmpeg` (subtitle sync, video analysis)
+- `mediainfo` (media file metadata)
+- `unrar` (compressed subtitle extraction)
+
+**Notes:**
+- The `--config` flag sets where the database, logs, and settings are stored
+- The supervisor runs a lightweight aiohttp server on the same port, serving the frontend instantly and proxying API requests to the backend. You get a startup screen with progress stages while the backend initializes, and automatic restart on crashes.
+- Media paths are configured in the web UI under Settings > Sonarr/Radarr
+
 ---
 
 ### Screenshots
