@@ -8,6 +8,8 @@ declare namespace Route {
     badge?: number | string;
     hidden?: boolean;
     children?: Item[];
+    /** Render a labeled divider above this item in the nav */
+    divider?: string;
   };
 }
 

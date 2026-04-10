@@ -7,7 +7,7 @@ import React, {
   useState,
 } from "react";
 import { matchPath, NavLink, RouteObject, useLocation } from "react-router";
-import { AppShell, Badge, Collapse, Stack, Text } from "@mantine/core";
+import { AppShell, Badge, Collapse, Divider, Stack, Text } from "@mantine/core";
 import { useHover } from "@mantine/hooks";
 import { IconDefinition } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
@@ -173,7 +173,7 @@ const RouteItem: FunctionComponent<{
   route: CustomRouteObject;
   parent: string;
 }> = ({ route, parent }) => {
-  const { children, name, path, icon, hidden, element } = route;
+  const { children, name, path, icon, hidden, element, divider } = route;
 
   const { select } = useSelection();
 
@@ -237,7 +237,10 @@ const RouteItem: FunctionComponent<{
     }
   } else {
     return (
-      <NavbarItem name={name ?? link} link={link} icon={icon} badge={badge} />
+      <>
+        {divider && <div className={styles.subGroupLabel}>{divider}</div>}
+        <NavbarItem name={name ?? link} link={link} icon={icon} badge={badge} />
+      </>
     );
   }
 };

@@ -186,8 +186,8 @@ function useRoutes(): CustomRouteObject[] {
             name: "Settings",
             path: "settings",
             children: [
-              // Connections
               {
+                divider: "Connections",
                 path: "sonarr",
                 name: "Sonarr",
                 element: <SettingsSonarrView></SettingsSonarrView>,
@@ -202,8 +202,8 @@ function useRoutes(): CustomRouteObject[] {
                 name: "Plex",
                 element: <SettingsPlexView></SettingsPlexView>,
               },
-              // Subtitles
               {
+                divider: "Subtitles",
                 path: "languages",
                 name: "Languages",
                 element: <SettingsLanguagesView></SettingsLanguagesView>,
@@ -223,8 +223,8 @@ function useRoutes(): CustomRouteObject[] {
                 name: "AI Translator",
                 element: <SettingsTranslatorView></SettingsTranslatorView>,
               },
-              // Application
               {
+                divider: "Application",
                 path: "general",
                 name: "General",
                 element: <SettingsGeneralView></SettingsGeneralView>,
