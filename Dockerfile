@@ -75,8 +75,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # Copy Python packages from builder (changes rarely)
 COPY --from=python-builder /install /usr/local
 
-# Copy entrypoint script (changes rarely)
+# Copy entrypoint and supervisor scripts (changes rarely)
 COPY docker/entrypoint.sh /entrypoint.sh
+COPY docker/supervisor.py /app/bazarr/docker/supervisor.py
 RUN chmod +x /entrypoint.sh
 
 # Set work directory
@@ -113,8 +114,8 @@ VOLUME /config
 EXPOSE 6767
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:6767/api/system/ping || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -sf http://localhost:6767/_supervisor/status | grep -q '"state"' || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["python", "bazarr.py", "--no-update", "--config", "/config"]
+CMD ["python", "docker/supervisor.py", "--no-update", "--config", "/config"]

@@ -1,8 +1,28 @@
 import { FunctionComponent, useCallback, useEffect, useState } from "react";
 import { Outlet, useNavigate } from "react-router";
-import { AppShell, Button, Group, Modal, Stack, Text } from "@mantine/core";
+import {
+  Alert,
+  AppShell,
+  Button,
+  Center,
+  Group,
+  Loader,
+  Modal,
+  Stack,
+  Text,
+} from "@mantine/core";
+import {
+  faCheck,
+  faCircle,
+  faExclamationTriangle,
+  faSpinner,
+} from "@fortawesome/free-solid-svg-icons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useWindowEvent } from "@mantine/hooks";
 import { showNotification } from "@mantine/notifications";
+import { useSystemSettings } from "@/apis/hooks";
+import { useQueryClient } from "@tanstack/react-query";
+import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import AppNavbar from "@/App/Navbar";
 import ErrorBoundary from "@/components/ErrorBoundary";
@@ -14,26 +34,68 @@ import { RouterNames } from "@/Router/RouterNames";
 import { Environment } from "@/utilities";
 import AppHeader from "./Header";
 import styleVars from "@/assets/_variables.module.scss";
+import logoSrc from "@/assets/images/logo_no_orb128.png";
+
+interface SupervisorStatus {
+  state: "starting" | "running" | "crashed" | "stopping";
+  stage: string;
+  stage_index: number;
+  stage_total: number;
+  stages: string[];
+}
 
 const App: FunctionComponent = () => {
   const navigate = useNavigate();
 
   const [criticalError, setCriticalError] = useState<string | null>(null);
   const [navbar, setNavbar] = useState(false);
-  const [online, setOnline] = useState(true);
+  const [online, setOnline] = useState(false);
+  const [hasConnected, setHasConnected] = useState(false);
+  const [supervisor, setSupervisor] = useState<SupervisorStatus | null>(null);
+
+  const queryClient = useQueryClient();
+  const settings = useSystemSettings();
+  const settingsLoaded = settings.data !== undefined;
+
+  // Stream supervisor status via SSE during startup.
+  // When backend reports "running", invalidate the settings cache to trigger
+  // an immediate refetch (bypasses any retry/backoff state).
+  useEffect(() => {
+    if (settingsLoaded) return;
+
+    const url = `${Environment.baseUrl}/_supervisor/events`;
+    const es = new EventSource(url);
+    es.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        setSupervisor(data);
+        if (data.state === "running") {
+          void queryClient.invalidateQueries({
+            queryKey: [QueryKeys.System, QueryKeys.Settings],
+          });
+        }
+      } catch {
+        // ignore parse errors
+      }
+    };
+    return () => es.close();
+  }, [settingsLoaded, queryClient]);
 
   useWindowEvent("app-critical-error", ({ detail }) => {
     setCriticalError(detail.message);
   });
 
   useWindowEvent("app-auth-changed", (ev) => {
-    if (!ev.detail.authenticated) {
+    if (!ev.detail.authenticated && hasConnected) {
       navigate(RouterNames.Auth);
     }
   });
 
   useWindowEvent("app-online-status", ({ detail }) => {
     setOnline(detail.online);
+    if (detail.online) {
+      setHasConnected(true);
+    }
   });
 
   const [upgradeModalOpen, setUpgradeModalOpen] = useState(false);
@@ -89,6 +151,87 @@ const App: FunctionComponent = () => {
     return <CriticalError message={criticalError}></CriticalError>;
   }
 
+  // Startup screen: settings not loaded yet (backend not ready)
+  if (!settingsLoaded) {
+    const isCrashed = supervisor?.state === "crashed";
+    const stages = supervisor?.stages ?? [];
+    const stageIndex = supervisor?.stage_index ?? -1;
+    // Add "Loading configuration" as final frontend-only stage
+    const allStages =
+      stages.length > 0
+        ? [...stages.slice(0, -1), "Loading configuration"]
+        : [];
+    const currentIndex =
+      supervisor?.state === "running" && !settingsLoaded
+        ? allStages.length - 1
+        : stageIndex;
+
+    return (
+      <Center
+        style={{
+          height: "100dvh",
+          background: "var(--bz-surface-ground, #121125)",
+        }}
+      >
+        <Stack align="center" gap="lg">
+          <img
+            src={logoSrc}
+            alt="Bazarr+"
+            width={64}
+            height={64}
+            style={{ opacity: 0.8 }}
+          />
+          <Text size="lg" fw={600} c="var(--bz-text-primary)">
+            Bazarr+ is starting up
+          </Text>
+          {isCrashed ? (
+            <Text size="sm" c="red">
+              Backend process crashed. Restarting...
+            </Text>
+          ) : (
+            <Stack gap={4} style={{ minWidth: 220 }}>
+              {allStages.map((stage, i) => {
+                const done = i < currentIndex;
+                const active = i === currentIndex;
+                return (
+                  <Group key={stage} gap="xs" wrap="nowrap">
+                    <FontAwesomeIcon
+                      icon={done ? faCheck : active ? faSpinner : faCircle}
+                      size="xs"
+                      spin={active}
+                      style={{
+                        width: 14,
+                        color: done
+                          ? "var(--mantine-color-green-6)"
+                          : active
+                            ? "var(--mantine-color-orange-5)"
+                            : "var(--bz-text-disabled, #555)",
+                      }}
+                    />
+                    <Text
+                      size="xs"
+                      c={
+                        done
+                          ? "var(--bz-text-tertiary)"
+                          : active
+                            ? "var(--bz-text-primary)"
+                            : "var(--bz-text-disabled)"
+                      }
+                      fw={active ? 500 : 400}
+                    >
+                      {stage}
+                    </Text>
+                  </Group>
+                );
+              })}
+            </Stack>
+          )}
+          <Loader size="sm" color={isCrashed ? "red" : "orange"} />
+        </Stack>
+      </Center>
+    );
+  }
+
   return (
     <ErrorBoundary>
       <NavbarProvider value={{ showed: navbar, show: setNavbar }}>
@@ -105,6 +248,19 @@ const App: FunctionComponent = () => {
             <AppHeader></AppHeader>
             <AppNavbar></AppNavbar>
             <AppShell.Main>
+              {!online && hasConnected && (
+                <Alert
+                  color="yellow"
+                  icon={<FontAwesomeIcon icon={faExclamationTriangle} />}
+                  mx="md"
+                  mt="md"
+                  radius="md"
+                >
+                  <Text size="sm">
+                    Connection to backend lost. Reconnecting...
+                  </Text>
+                </Alert>
+              )}
               <Outlet></Outlet>
             </AppShell.Main>
           </AppShell>
