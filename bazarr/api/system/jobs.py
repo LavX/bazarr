@@ -43,7 +43,7 @@ class SystemJobs(Resource):
     post_request_parser = reqparse.RequestParser()
     post_request_parser.add_argument('id', type=int, required=True, help='Job ID act onto')
     post_request_parser.add_argument('action', type=str, required=True,
-                                     help='Action to perform from ["force_start", "move_top", "move_bottom"]')
+                                     help='Action to perform from ["force_start", "move_top", "move_bottom", "cancel"]')
 
     @authenticate
     @api_ns_system_jobs.doc(parser=post_request_parser)
@@ -60,6 +60,8 @@ class SystemJobs(Resource):
             jobs_queue.move_job_in_pending_queue(job_id=job_id, move_destination="top")
         elif action == "move_bottom":
             jobs_queue.move_job_in_pending_queue(job_id=job_id, move_destination="bottom")
+        elif action == "cancel":
+            jobs_queue.cancel_running_job(job_id=job_id)
         return '', 204
 
     patch_request_parser = reqparse.RequestParser()
