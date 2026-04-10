@@ -130,7 +130,9 @@ const JobRow: FunctionComponent<JobRowProps> = ({ job }) => {
       : undefined;
 
   return (
-    <Table.Tr>
+    <Table.Tr
+      className={job.status === "completed" ? classes.completedRow : undefined}
+    >
       <Table.Td>
         <Tooltip label={job.jobName || job.jobId} openDelay={300}>
           <Text size="sm" truncate style={{ maxWidth: 200 }}>
@@ -288,7 +290,7 @@ export const TranslatorStatusPanel: FunctionComponent<
     const errorMessage =
       statusErr instanceof Error
         ? statusErr.message
-        : "Cannot connect to the AI Subtitle Translator service. Make sure it is running at the configured URL.";
+        : "The translation service isn't responding. Check that it's running at the configured URL, then hit retry.";
 
     return (
       <Alert
@@ -417,9 +419,14 @@ export const TranslatorStatusPanel: FunctionComponent<
             </Table>
           </Table.ScrollContainer>
         ) : (
-          <Text c="var(--bz-text-tertiary)" ta="center" py="xl">
-            No translation jobs
-          </Text>
+          <Stack align="center" py="xl" gap="xs">
+            <Text c="var(--bz-text-tertiary)" ta="center">
+              No translations in progress
+            </Text>
+            <Text c="var(--bz-text-disabled)" ta="center" size="xs">
+              Start one from the Series or Movies page
+            </Text>
+          </Stack>
         )}
       </Card>
     </Stack>

@@ -186,11 +186,23 @@ function useRoutes(): CustomRouteObject[] {
             name: "Settings",
             path: "settings",
             children: [
+              // Connections
               {
-                path: "general",
-                name: "General",
-                element: <SettingsGeneralView></SettingsGeneralView>,
+                path: "sonarr",
+                name: "Sonarr",
+                element: <SettingsSonarrView></SettingsSonarrView>,
               },
+              {
+                path: "radarr",
+                name: "Radarr",
+                element: <SettingsRadarrView></SettingsRadarrView>,
+              },
+              {
+                path: "plex",
+                name: "Plex",
+                element: <SettingsPlexView></SettingsPlexView>,
+              },
+              // Subtitles
               {
                 path: "languages",
                 name: "Languages",
@@ -207,24 +219,15 @@ function useRoutes(): CustomRouteObject[] {
                 element: <SettingsSubtitlesView></SettingsSubtitlesView>,
               },
               {
-                path: "sonarr",
-                name: "Sonarr",
-                element: <SettingsSonarrView></SettingsSonarrView>,
-              },
-              {
-                path: "radarr",
-                name: "Radarr",
-                element: <SettingsRadarrView></SettingsRadarrView>,
-              },
-              {
-                path: "plex",
-                name: "Plex",
-                element: <SettingsPlexView></SettingsPlexView>,
-              },
-              {
                 path: "translator",
                 name: "AI Translator",
                 element: <SettingsTranslatorView></SettingsTranslatorView>,
+              },
+              // Application
+              {
+                path: "general",
+                name: "General",
+                element: <SettingsGeneralView></SettingsGeneralView>,
               },
               {
                 path: "notifications",
