@@ -8,7 +8,7 @@ import {
   faLanguage,
   faRecycle,
   faTrash,
-  faUser,
+  faMagnifyingGlass,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 
@@ -38,7 +38,7 @@ const HistoryIcon: FunctionComponent<{
       label = "Download";
       break;
     case HistoryAction.Manual:
-      icon = faUser;
+      icon = faMagnifyingGlass;
       label = "Manual";
       break;
     case HistoryAction.Sync:

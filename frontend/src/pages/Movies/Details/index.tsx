@@ -20,7 +20,7 @@ import {
   faSearch,
   faSync,
   faToolbox,
-  faUser,
+  faMagnifyingGlass,
   faWrench,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
@@ -190,7 +190,7 @@ const MovieDetailView: FunctionComponent = () => {
               Search
             </Toolbox.Button>
             <Toolbox.Button
-              icon={faUser}
+              icon={faMagnifyingGlass}
               disabled={!isNumber(movie?.profileId) || hasTask}
               onClick={() => {
                 if (movie) {
@@ -202,7 +202,7 @@ const MovieDetailView: FunctionComponent = () => {
                 }
               }}
             >
-              Manual
+              Manual Search
             </Toolbox.Button>
           </Group>
           <Group gap="xs">
