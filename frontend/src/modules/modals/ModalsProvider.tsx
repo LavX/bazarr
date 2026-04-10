@@ -26,14 +26,13 @@ const DefaultModalProps: MantineModalsProviderProps["modalProps"] = {
 };
 
 const ModalsProvider: FunctionComponent<PropsWithChildren> = ({ children }) => {
-  // Rebuild on every render because StaticModals is populated via side effects
-  // when lazy-loaded modules call withModal() after initial mount
-  const modals = StaticModals.reduce<Record<string, ModalComponent>>(
-    (prev, curr) => {
-      prev[curr.modalKey] = curr;
-      return prev;
-    },
-    {},
+  const modals = useMemo(
+    () =>
+      StaticModals.reduce<Record<string, ModalComponent>>((prev, curr) => {
+        prev[curr.modalKey] = curr;
+        return prev;
+      }, {}),
+    [],
   );
 
   return (
