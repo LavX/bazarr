@@ -200,9 +200,17 @@ install_docker() {
     run_with_spinner "Updating package index" sudo apt-get update -qq || return 1
     run_with_spinner "Installing Docker" sudo apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin || return 1
   elif [[ "$DISTRO_FAMILY" == "amzn" ]]; then
-    # Amazon Linux 2023 is Fedora-based. Use the Fedora repo with releasever forced to 40.
-    run_with_spinner "Adding Docker repository" sudo dnf config-manager --add-repo "https://download.docker.com/linux/fedora/docker-ce.repo" || return 1
-    run_with_spinner "Installing Docker" sudo dnf install -y --releasever=40 --allowerasing docker-ce docker-ce-cli containerd.io docker-compose-plugin || return 1
+    # Amazon Linux 2023: use Amazon's own docker package, then install compose plugin manually
+    run_with_spinner "Installing Docker" sudo dnf install -y docker || return 1
+    info "Installing Docker Compose plugin..."
+    sudo mkdir -p /usr/local/lib/docker/cli-plugins
+    local arch; arch=$(uname -m)
+    [[ "$arch" == "aarch64" ]] && arch="aarch64" || arch="x86_64"
+    if ! sudo curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-${arch}" -o /usr/local/lib/docker/cli-plugins/docker-compose; then
+      fatal "Failed to download Docker Compose plugin"
+    fi
+    sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+    success "Docker Compose plugin installed"
   elif [[ "$DISTRO_FAMILY" == "dnf" ]]; then
     local distro_id; distro_id=$(. /etc/os-release && echo "$ID")
     # Map derivative distros to their Docker repo parent
