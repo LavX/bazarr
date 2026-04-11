@@ -167,6 +167,7 @@ detect_distro() {
   id_like=$(. /etc/os-release && echo "${ID_LIKE:-}")
   case "$id" in
     ubuntu|debian|pop|linuxmint|raspbian) DISTRO_FAMILY="apt" ;;
+    amzn)                                 DISTRO_FAMILY="amzn" ;;
     fedora|rhel|centos|rocky|alma|ol)     DISTRO_FAMILY="dnf" ;;
     *)
       case "$id_like" in
@@ -198,6 +199,10 @@ install_docker() {
       sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
     run_with_spinner "Updating package index" sudo apt-get update -qq || return 1
     run_with_spinner "Installing Docker" sudo apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin || return 1
+  elif [[ "$DISTRO_FAMILY" == "amzn" ]]; then
+    # Amazon Linux: use Docker's CentOS repo with releasever forced to 7
+    run_with_spinner "Adding Docker repository" sudo dnf config-manager --add-repo "https://download.docker.com/linux/centos/docker-ce.repo" || return 1
+    run_with_spinner "Installing Docker" sudo dnf install -y --releasever=7 docker-ce docker-ce-cli containerd.io docker-compose-plugin || return 1
   elif [[ "$DISTRO_FAMILY" == "dnf" ]]; then
     local distro_id; distro_id=$(. /etc/os-release && echo "$ID")
     # Map derivative distros to their Docker repo parent
