@@ -200,9 +200,9 @@ install_docker() {
     run_with_spinner "Updating package index" sudo apt-get update -qq || return 1
     run_with_spinner "Installing Docker" sudo apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin || return 1
   elif [[ "$DISTRO_FAMILY" == "amzn" ]]; then
-    # Amazon Linux: use Docker's CentOS repo with releasever forced to 7
-    run_with_spinner "Adding Docker repository" sudo dnf config-manager --add-repo "https://download.docker.com/linux/centos/docker-ce.repo" || return 1
-    run_with_spinner "Installing Docker" sudo dnf install -y --releasever=7 docker-ce docker-ce-cli containerd.io docker-compose-plugin || return 1
+    # Amazon Linux 2023 is Fedora-based. Use the Fedora repo with releasever forced to 40.
+    run_with_spinner "Adding Docker repository" sudo dnf config-manager --add-repo "https://download.docker.com/linux/fedora/docker-ce.repo" || return 1
+    run_with_spinner "Installing Docker" sudo dnf install -y --releasever=40 --allowerasing docker-ce docker-ce-cli containerd.io docker-compose-plugin || return 1
   elif [[ "$DISTRO_FAMILY" == "dnf" ]]; then
     local distro_id; distro_id=$(. /etc/os-release && echo "$ID")
     # Map derivative distros to their Docker repo parent
