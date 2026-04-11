@@ -671,8 +671,15 @@ success "Created docker-compose.yml"
 
 printf '%s\n' ".env" "*.key" > .gitignore
 
-run_with_spinner "Pulling images" docker compose pull || fatal "Failed to pull images"
-run_with_spinner "Starting services" docker compose up -d || fatal "Failed to start services"
+# Use sudo for docker commands if the current user can't access the daemon yet
+# (happens when user was just added to the docker group in this session)
+DOCKER_CMD="docker"
+if ! docker info >/dev/null 2>&1 && sudo docker info >/dev/null 2>&1; then
+  DOCKER_CMD="sudo docker"
+fi
+
+run_with_spinner "Pulling images" $DOCKER_CMD compose pull || fatal "Failed to pull images"
+run_with_spinner "Starting services" $DOCKER_CMD compose up -d || fatal "Failed to start services"
 
 # Wait for bazarr health
 info "Waiting for Bazarr+ to become healthy..."
