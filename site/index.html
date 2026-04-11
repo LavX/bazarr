@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bazarr+ - Self-Hosted Subtitle Management for Sonarr, Radarr, Plex &amp; Jellyfin</title>
+  <meta name="description" content="Bazarr+ is a drop-in replacement for Bazarr with provider priority, AI translation, bulk operations, a subtitle editor, and zero telemetry.">
+  <link rel="canonical" href="https://lavx.github.io/bazarr">
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://lavx.github.io/bazarr">
+  <meta property="og:title" content="Bazarr+ - Self-Hosted Subtitle Management">
+  <meta property="og:description" content="Provider priority, AI translation, bulk operations, subtitle editor, zero telemetry. Drop-in replacement for Bazarr.">
+  <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/logo128.png">
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Bazarr+ - Self-Hosted Subtitle Management">
+  <meta name="twitter:description" content="Provider priority, AI translation, bulk operations, subtitle editor, zero telemetry. Drop-in replacement for Bazarr.">
+  <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/logo128.png">
+
+  <!-- JSON-LD -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Bazarr+",
+    "applicationCategory": "MultimediaApplication",
+    "operatingSystem": "Linux, Docker",
+    "description": "Self-hosted subtitle management for Sonarr and Radarr with provider priority, AI translation, bulk operations, and zero telemetry.",
+    "url": "https://lavx.github.io/bazarr",
+    "downloadUrl": "https://github.com/LavX/bazarr",
+    "softwareVersion": "2.1.0-rc1",
+    "author": {
+      "@type": "Person",
+      "name": "LavX"
+    },
+    "license": "https://github.com/LavX/bazarr/blob/master/LICENSE",
+    "offers": {
+      "@type": "Offer",
+      "price": "0",
+      "priceCurrency": "USD"
+    }
+  }
+  </script>
+
+  <!-- Geist font: async preload -->
+  <link rel="preload" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" as="style" crossorigin>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" media="print" onload="this.media='all'">
+  <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css"></noscript>
+
+  <link rel="icon" href="screenshots/logo128.png" type="image/png">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<a href="#main-content" class="skip-link">Skip to content</a>
+
+<!-- Grain overlay -->
+<svg class="grain" aria-hidden="true">
+  <filter id="grain-filter">
+    <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/>
+  </filter>
+  <rect width="100%" height="100%" filter="url(#grain-filter)"/>
+</svg>
+
+<!-- Ambient gradients -->
+<div class="ambient" aria-hidden="true"></div>
+
+<!-- ====== HERO ====== -->
+<header class="hero">
+  <div class="hero-glow" aria-hidden="true"></div>
+  <div class="container">
+    <img src="screenshots/logo128.png" alt="Bazarr+ logo" class="hero-logo" width="80" height="80">
+    <h1>Your Bazarr, <span class="hero-accent">upgraded.</span></h1>
+    <p class="hero-sub">Same config, same database. Provider priority, AI translation, subtitle editor, bulk operations, no telemetry. Just swap the container image.</p>
+
+    <div class="stats" role="list">
+      <div class="stat" role="listitem"><span class="stat-value">Zero</span> Telemetry</div>
+      <div class="stat" role="listitem"><span class="stat-value">300+</span> AI Models</div>
+      <div class="stat" role="listitem"><span class="stat-value">11</span> Bulk Operations</div>
+    </div>
+
+    <nav class="ctas" aria-label="Primary actions">
+      <a href="#quick-start" class="btn btn-primary">Get the Docker Image</a>
+      <a href="https://github.com/LavX/bazarr" class="btn btn-outline" target="_blank" rel="noopener">View on GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<nav class="sticky-nav" aria-label="Site navigation">
+  <div class="container">
+    <img src="screenshots/logo128.png" alt="Bazarr+" class="nav-logo" width="22" height="22">
+    <a href="./" class="nav-active">Home</a>
+    <a href="#comparison-heading">Compare</a>
+    <a href="#quick-start">Install</a>
+    <a href="#screenshots-heading">Screenshots</a>
+    <a href="guides/">Guides</a>
+    <a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a>
+  </div>
+</nav>
+
+<main id="main-content">
+
+  <!-- ====== COMPARISON ====== -->
+  <section aria-labelledby="comparison-heading" class="fade-section">
+    <div class="container">
+      <p class="section-label">Comparison</p>
+      <h2 id="comparison-heading">Bazarr+ vs Upstream Bazarr</h2>
+      <p class="section-desc">Here is what changed and why.</p>
+
+      <div class="table-wrap" tabindex="0" role="region" aria-label="Feature comparison between Bazarr and Bazarr+">
+        <div class="table-scroll-hint" aria-hidden="true"></div>
+        <table class="comparison-table">
+          <thead>
+            <tr>
+              <th scope="col">Feature</th>
+              <th scope="col">Upstream Bazarr</th>
+              <th scope="col">Bazarr+</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Provider Priority</td>
+              <td class="cell-rejected"><span class="icon-x" aria-hidden="true">&#x2717;</span> <a href="https://bazarr.featureupvote.com/suggestions/112323/provider-prioritization" target="_blank" rel="noopener">Requested</a> (62 votes)</td>
+              <td class="cell-plus"><span class="icon-check" aria-hidden="true">&#x2713;</span> Priority order with early stop</td>
+            </tr>
+            <tr>
+              <td>OpenSubtitles.org</td>
+              <td class="cell-na"><span class="icon-dash" aria-hidden="true">&ndash;</span></td>
+              <td class="cell-plus"><span class="icon-check" aria-hidden="true">&#x2713;</span> Self-hosted scraper</td>
+            </tr>
+            <tr>
+              <td>AI Translation</td>
+              <td class="cell-na"><span class="icon-dash" aria-hidden="true">&ndash;</span></td>
+              <td class="cell-plus"><span class="icon-check" aria-hidden="true">&#x2713;</span> Any OpenRouter model (free tiers available)</td>
+            </tr>
+            <tr>
+              <td>Mass Sync</td>
+              <td class="cell-rejected"><span class="icon-x" aria-hidden="true">&#x2717;</span> <a href="https://bazarr.featureupvote.com/suggestions/172013/mass-sync-all-subtitles" target="_blank" rel="noopener">Requested</a> (249 votes)</td>
+              <td class="cell-plus"><span class="icon-check" aria-hidden="true">&#x2713;</span> Bulk sync from Tasks page</td>
+            </tr>
+            <tr>
+              <td>Bulk Operations</td>
+              <td class="cell-na"><span class="icon-dash" aria-hidden="true">&ndash;</span> One at a time</td>
+              <td class="cell-plus"><span class="icon-check" aria-hidden="true">&#x2713;</span> 11 batch actions (up to 10k items)</td>
+            </tr>
+            <tr>
+              <td>Subtitle Editor</td>
+              <td class="cell-na"><span class="icon-dash" aria-hidden="true">&ndash;</span></td>
+              <td class="cell-plus"><span class="icon-check" aria-hidden="true">&#x2713;</span> Full editor with video, waveform, AI</td>
+            </tr>
+            <tr>
+              <td>Telemetry</td>
+              <td class="cell-rejected"><span class="icon-x" aria-hidden="true">&#x2717;</span> GA4 + UA to Google</td>
+              <td class="cell-plus"><span class="icon-check" aria-hidden="true">&#x2713;</span> Removed entirely</td>
+            </tr>
+            <tr>
+              <td>Password Security</td>
+              <td class="cell-rejected"><span class="icon-x" aria-hidden="true">&#x2717;</span> MD5</td>
+              <td class="cell-plus"><span class="icon-check" aria-hidden="true">&#x2713;</span> PBKDF2 (600k iterations)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="section-cta">
+        <a href="#quick-start" class="btn btn-primary">Get the Docker Image</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ====== QUICK START ====== -->
+  <section id="quick-start" aria-labelledby="quickstart-heading" class="fade-section">
+    <div class="container">
+      <p class="section-label">Quick Start</p>
+      <h2 id="quickstart-heading">Up and running in under a minute</h2>
+      <p class="section-desc">One command to install everything, or copy the compose file below.</p>
+
+      <div class="code-wrap" style="margin-bottom: 24px;">
+        <div class="code-header">
+          <span class="code-lang">One-liner install</span>
+          <button class="copy-btn" data-copy="curl -fsSL https://lavx.github.io/bazarr/install.sh | bash" aria-label="Copy install command">Copy</button>
+        </div>
+        <pre><code>curl -fsSL https://lavx.github.io/bazarr/install.sh | bash</code></pre>
+      </div>
+      <p style="margin-top: 8px; font-size: 0.82rem; color: var(--text-3);">Want to inspect first? <a href="https://github.com/LavX/bazarr/blob/master/site/install.sh" target="_blank" rel="noopener">View the script source</a>.</p>
+
+      <div class="code-wrap">
+        <div class="code-header">
+          <span class="code-lang">docker-compose.yml</span>
+          <button class="copy-btn" data-copy-from="quickstart-code" aria-label="Copy Docker Compose configuration">Copy</button>
+        </div>
+        <pre id="quickstart-code"><code>services:
+  bazarr:
+    image: ghcr.io/lavx/bazarr:latest
+    container_name: bazarr
+    restart: unless-stopped
+    depends_on:
+      opensubtitles-scraper:
+        condition: service_healthy
+    ports:
+      - 6767:6767
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+      - OPENSUBTITLES_SCRAPER_URL=http://opensubtitles-scraper:8000
+    volumes:
+      - ./config:/config
+      - /path/to/movies:/movies
+      - /path/to/tv:/tv
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:6767/_supervisor/status | grep -q '\"running\"'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  opensubtitles-scraper:
+    image: ghcr.io/lavx/opensubtitles-scraper:latest
+    container_name: opensubtitles-scraper
+    restart: unless-stopped
+    depends_on:
+      flaresolverr:
+        condition: service_healthy
+    ports:
+      - 8000:8000
+    environment:
+      - FLARESOLVERR_URL=http://flaresolverr:8191/v1
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Handles Cloudflare challenges for the scraper
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    restart: unless-stopped
+    environment:
+      - LOG_LEVEL=info
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8191/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # AI translation via OpenRouter (free tiers available)
+  # Configure the API key in Settings > AI Translator
+  ai-subtitle-translator:
+    image: ghcr.io/lavx/ai-subtitle-translator:latest
+    container_name: ai-subtitle-translator
+    restart: unless-stopped
+    ports:
+      - 8765:8765
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8765/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s</code></pre>
+      </div>
+
+      <p style="margin-top: 20px; font-size: 0.9rem; color: var(--text-3);">For environment variables, volume mappings, and Sonarr/Radarr setup, see the <a href="guides/getting-started.html">Getting Started guide</a>.</p>
+
+      <div class="migration-note">
+        <strong>Switching from upstream?</strong> Same database, same config. Back up your <code class="inline">config</code> directory, swap the container image, and start. Settings, history, and provider accounts carry over.
+      </div>
+    </div>
+  </section>
+
+  <!-- ====== SCREENSHOTS ====== -->
+  <section aria-labelledby="screenshots-heading" class="fade-section">
+    <div class="container">
+      <p class="section-label">Screenshots</p>
+      <h2 id="screenshots-heading">See it in action</h2>
+
+      <div class="screenshots-grid">
+        <div class="screenshot-frame">
+          <div class="screenshot-chrome" aria-hidden="true">
+            <span class="chrome-dot"></span>
+            <span class="chrome-dot"></span>
+            <span class="chrome-dot"></span>
+            <span class="chrome-title">Subtitle editor with AI translate</span>
+          </div>
+          <img src="screenshots/editor-translate.png" alt="Subtitle editor showing video preview, waveform timeline, and AI translation panel" loading="lazy" decoding="async" width="1280" height="800">
+        </div>
+        <div class="screenshot-frame">
+          <div class="screenshot-chrome" aria-hidden="true">
+            <span class="chrome-dot"></span>
+            <span class="chrome-dot"></span>
+            <span class="chrome-dot"></span>
+            <span class="chrome-title">Series with batch actions</span>
+          </div>
+          <img src="screenshots/series-batch-actions.png" alt="Series page showing batch action toolbar with checkboxes for selecting episodes and bulk operation controls" loading="lazy" decoding="async" width="1280" height="800">
+        </div>
+      </div>
+
+      <div class="section-cta">
+        <a href="#quick-start" class="btn btn-primary">Switch to Bazarr+</a>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ====== FOOTER ====== -->
+<footer>
+  <div class="container">
+    <div class="footer-inner">
+      <p class="footer-credit">Built by <a href="https://github.com/LavX" target="_blank" rel="noopener">LavX</a>. Based on <a href="https://github.com/morpheus65535/bazarr" target="_blank" rel="noopener">Bazarr</a> by morpheus65535.</p>
+      <ul class="footer-links">
+        <li><a href="guides/">Guides</a></li>
+        <li><a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a></li>
+        <li><a href="https://github.com/LavX/bazarr/issues" target="_blank" rel="noopener">Issues</a></li>
+        <li><a href="https://github.com/LavX/bazarr/wiki" target="_blank" rel="noopener">Wiki</a></li>
+      </ul>
+    </div>
+  </div>
+</footer>
+
+<script src="js/site.js"></script>
+
+</body>
+</html>

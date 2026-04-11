@@ -266,17 +266,14 @@ services:
       timeout: 10s
       retries: 3
 
-  # AI Subtitle Translator Service (required for AI translation)
+  # AI Subtitle Translator Service (optional, for AI translation)
+  # Configure the API key in Bazarr+ Settings > AI Translator
   ai-subtitle-translator:
     image: ghcr.io/lavx/ai-subtitle-translator:latest
     container_name: ai-subtitle-translator
     restart: unless-stopped
     ports:
       - "8765:8765"
-    environment:
-      # OpenRouter API key (can also be configured in Bazarr UI)
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
-      - OPENROUTER_DEFAULT_MODEL=google/gemini-2.5-flash-lite-preview-09-2025
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8765/health"]
       interval: 30s
@@ -298,7 +295,7 @@ services:
     environment:
       - PUID=1000
       - PGID=1000
-      - TZ=Europe/Budapest
+      - TZ=UTC
       # Point to the scraper service (port 8000)
       - OPENSUBTITLES_SCRAPER_URL=http://opensubtitles-scraper:8000
     volumes:
