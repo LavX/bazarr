@@ -246,10 +246,10 @@ ensure_docker() {
     info "Starting Docker daemon..."
     sudo systemctl start docker 2>/dev/null || fatal "Cannot start Docker. Is the daemon installed?"
   fi
-  if ! docker compose version >/dev/null 2>&1; then
+  if ! sudo docker compose version >/dev/null 2>&1; then
     fatal "docker compose v2 is required but not available. Install docker-compose-plugin."
   fi
-  success "Docker $(docker --version | grep -oP '\d+\.\d+\.\d+')"
+  success "Docker $(sudo docker --version | grep -oP '\d+\.\d+\.\d+')"
 }
 
 # --- Banner ---
@@ -299,8 +299,8 @@ do_upgrade() {
   local dir="$1"
   do_backup "$dir"
   cd "$dir"
-  run_with_spinner "Pulling latest images" docker compose pull || fatal "Pull failed"
-  run_with_spinner "Restarting services" docker compose up -d || fatal "Restart failed"
+  run_with_spinner "Pulling latest images" sudo docker compose pull || fatal "Pull failed"
+  run_with_spinner "Restarting services" sudo docker compose up -d || fatal "Restart failed"
   printf "\n"
   success "Upgrade complete."
   printf "  ${DIM}Logs:${RST}    docker compose -f %s/docker-compose.yml logs -f\n" "$dir"
@@ -671,15 +671,10 @@ success "Created docker-compose.yml"
 
 printf '%s\n' ".env" "*.key" > .gitignore
 
-# Use sudo for docker commands if the current user can't access the daemon yet
-# (happens when user was just added to the docker group in this session)
-DOCKER_CMD="docker"
-if ! docker info >/dev/null 2>&1 && sudo docker info >/dev/null 2>&1; then
-  DOCKER_CMD="sudo docker"
-fi
-
-run_with_spinner "Pulling images" $DOCKER_CMD compose pull || fatal "Failed to pull images"
-run_with_spinner "Starting services" $DOCKER_CMD compose up -d || fatal "Failed to start services"
+# Always use sudo for docker pull/up to avoid group membership issues
+# (user may have been added to docker group but not yet logged out/in)
+run_with_spinner "Pulling images" sudo docker compose pull || fatal "Failed to pull images"
+run_with_spinner "Starting services" sudo docker compose up -d || fatal "Failed to start services"
 
 # Wait for bazarr health
 info "Waiting for Bazarr+ to become healthy..."
