@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Getting Started - Bazarr+ Guides</title>
+  <meta name="description" content="Install Bazarr+ with Docker, connect to Sonarr and Radarr, and start downloading subtitles automatically.">
+  <link rel="canonical" href="https://lavx.github.io/bazarr/guides/getting-started.html">
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Getting Started - Bazarr+ Guides">
+  <meta property="og:description" content="Install Bazarr+ with Docker, connect to Sonarr and Radarr, and start downloading subtitles automatically.">
+  <meta property="og:url" content="https://lavx.github.io/bazarr/guides/getting-started.html">
+  <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/logo128.png">
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Getting Started - Bazarr+ Guides">
+  <meta name="twitter:description" content="Install Bazarr+ with Docker, connect to Sonarr and Radarr, and start downloading subtitles automatically.">
+  <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/logo128.png">
+
+  <!-- Geist font: async preload -->
+  <link rel="preload" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" as="style" crossorigin>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" media="print" onload="this.media='all'">
+  <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css"></noscript>
+
+  <link rel="icon" href="../screenshots/logo128.png" type="image/png">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+
+<a href="#main-content" class="skip-link">Skip to content</a>
+
+<!-- Grain overlay -->
+<svg class="grain" aria-hidden="true">
+  <filter id="grain-filter">
+    <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/>
+  </filter>
+  <rect width="100%" height="100%" filter="url(#grain-filter)"/>
+</svg>
+
+<!-- Ambient gradients -->
+<div class="ambient" aria-hidden="true"></div>
+
+<nav class="sticky-nav" aria-label="Site navigation">
+  <div class="container">
+    <img src="../screenshots/logo128.png" alt="Bazarr+" class="nav-logo" width="22" height="22">
+    <a href="../">Home</a>
+    <a href="../#comparison-heading">Compare</a>
+    <a href="../#quick-start">Install</a>
+    <a href="../#screenshots-heading">Screenshots</a>
+    <a href="./" class="nav-active">Guides</a>
+    <a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a>
+  </div>
+</nav>
+
+<main id="main-content" class="guide-page">
+  <div class="container">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <a href="../">Home</a><span class="sep">/</span><a href="./">Guides</a><span class="sep">/</span><span>Getting Started</span>
+    </nav>
+    <h1>Getting Started</h1>
+
+    <article class="content">
+
+      <h2 id="prerequisites">Prerequisites</h2>
+      <p>You need Docker and Docker Compose installed on your server. Any Linux distribution with Docker CE works. Bazarr+ also runs on macOS and Windows via Docker Desktop, though Linux is recommended for production.</p>
+      <p>Make sure your Sonarr and/or Radarr instances are accessible from the machine where you will run Bazarr+.</p>
+
+      <h2 id="one-liner-install">One-liner install</h2>
+      <p>The fastest way to get running. This script creates a <code>bazarr</code> directory, writes a <code>docker-compose.yml</code>, and starts the containers.</p>
+
+      <div class="code-wrap">
+        <div class="code-header">
+          <span class="code-lang">Shell</span>
+          <button class="copy-btn" data-copy="curl -fsSL https://lavx.github.io/bazarr/install.sh | bash" aria-label="Copy install command">Copy</button>
+        </div>
+        <pre><code>curl -fsSL https://lavx.github.io/bazarr/install.sh | bash</code></pre>
+      </div>
+
+      <p>The script is interactive. It will ask for your media paths, timezone, and whether you want to enable the AI translation service. You can review the script source <a href="https://github.com/LavX/bazarr/blob/master/site/install.sh" target="_blank" rel="noopener">on GitHub</a> before running it.</p>
+
+      <h2 id="docker-compose-setup">Docker Compose setup</h2>
+      <p>If you prefer to set things up manually, create a <code>docker-compose.yml</code> with the following content. Adjust the volume paths to match your media library locations.</p>
+
+      <div class="code-wrap">
+        <div class="code-header">
+          <span class="code-lang">docker-compose.yml</span>
+          <button class="copy-btn" data-copy-from="compose-code" aria-label="Copy Docker Compose configuration">Copy</button>
+        </div>
+        <pre id="compose-code"><code>services:
+  bazarr:
+    image: ghcr.io/lavx/bazarr:latest
+    container_name: bazarr
+    restart: unless-stopped
+    depends_on:
+      opensubtitles-scraper:
+        condition: service_healthy
+    ports:
+      - 6767:6767
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+      - OPENSUBTITLES_SCRAPER_URL=http://opensubtitles-scraper:8000
+    volumes:
+      - ./config:/config
+      - /path/to/movies:/movies
+      - /path/to/tv:/tv
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:6767/_supervisor/status | grep -q '\"running\"'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  opensubtitles-scraper:
+    image: ghcr.io/lavx/opensubtitles-scraper:latest
+    container_name: opensubtitles-scraper
+    restart: unless-stopped
+    depends_on:
+      flaresolverr:
+        condition: service_healthy
+    ports:
+      - 8000:8000
+    environment:
+      - FLARESOLVERR_URL=http://flaresolverr:8191/v1
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Handles Cloudflare challenges for the scraper
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    restart: unless-stopped
+    environment:
+      - LOG_LEVEL=info
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8191/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # AI translation via OpenRouter (free tiers available)
+  # Configure the API key in Settings > AI Translator
+  ai-subtitle-translator:
+    image: ghcr.io/lavx/ai-subtitle-translator:latest
+    container_name: ai-subtitle-translator
+    restart: unless-stopped
+    ports:
+      - 8765:8765
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8765/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s</code></pre>
+      </div>
+
+      <p>Then start it:</p>
+
+      <div class="code-wrap">
+        <div class="code-header">
+          <span class="code-lang">Shell</span>
+          <button class="copy-btn" data-copy="docker compose up -d" aria-label="Copy docker compose command">Copy</button>
+        </div>
+        <pre><code>docker compose up -d</code></pre>
+      </div>
+
+      <h2 id="first-login">First login</h2>
+      <p>Open <code>http://localhost:6767</code> in your browser. Go to <strong>Settings</strong> to configure your language profile, subtitle providers, and Sonarr/Radarr connections.</p>
+
+      <ol class="steps">
+        <li><strong>Set a password.</strong> Bazarr+ uses PBKDF2 with 600k iterations, a significant upgrade from upstream's MD5 hashing. Pick something strong.</li>
+        <li><strong>Choose your languages.</strong> Select the subtitle languages you want Bazarr+ to search for. You can set defaults per profile or override per series/movie later.</li>
+        <li><strong>Add subtitle providers.</strong> Enable OpenSubtitles.org in the provider list. The bundled scraper is already connected, so no credentials are needed. Add any additional providers you have accounts with: Addic7ed, Podnapisi, Subscene, and so on.</li>
+        <li><strong>Set provider priority.</strong> Enable the priority toggle in Settings > Subtitle Sources and assign numeric priority values to each provider. Bazarr+ will try them in priority order and can stop early once it finds a match, saving time and API calls.</li>
+      </ol>
+
+      <h2 id="connecting-to-sonarr-and-radarr">Connecting to Sonarr and Radarr</h2>
+      <p>Go to <strong>Settings &gt; Sonarr</strong> (or <strong>Radarr</strong>) and fill in:</p>
+
+      <ul>
+        <li><strong>Host and port</strong> of your Sonarr/Radarr instance (e.g., <code>192.168.1.10:8989</code>)</li>
+        <li><strong>API key</strong>, found in Sonarr/Radarr under Settings &gt; General</li>
+        <li><strong>Base URL</strong>, only needed if you run Sonarr/Radarr behind a reverse proxy with a path prefix</li>
+      </ul>
+
+      <p>Click <strong>Test</strong> to verify the connection, then <strong>Save</strong>. Bazarr+ will sync your library and start searching for missing subtitles on the next scheduled scan.</p>
+
+      <div class="note">
+        <strong>Tip:</strong> If Sonarr/Radarr and Bazarr+ share the same Docker network, use the container name as the host (e.g., <code>sonarr</code> instead of an IP address). This avoids issues when IP addresses change.
+      </div>
+
+      <h2 id="next-steps">Next steps</h2>
+      <ul>
+        <li><a href="ai-translation.html">Set up AI translation</a> to translate subtitles into any language using OpenRouter models</li>
+        <li><a href="migration.html">Migrating from upstream?</a> Your existing config and database carry over</li>
+      </ul>
+
+    </article>
+  </div>
+</main>
+
+<!-- Footer -->
+<footer>
+  <div class="container">
+    <div class="footer-inner">
+      <p class="footer-credit">Built by <a href="https://github.com/LavX" target="_blank" rel="noopener">LavX</a>. Based on <a href="https://github.com/morpheus65535/bazarr" target="_blank" rel="noopener">Bazarr</a> by morpheus65535.</p>
+      <ul class="footer-links">
+        <li><a href="./">Guides</a></li>
+        <li><a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a></li>
+        <li><a href="https://github.com/LavX/bazarr/issues" target="_blank" rel="noopener">Issues</a></li>
+        <li><a href="https://github.com/LavX/bazarr/wiki" target="_blank" rel="noopener">Wiki</a></li>
+      </ul>
+    </div>
+  </div>
+</footer>
+
+<script src="../js/site.js"></script>
+
+</body>
+</html>

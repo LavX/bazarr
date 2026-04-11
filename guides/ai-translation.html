@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Translation Setup - Bazarr+ Guides</title>
+  <meta name="description" content="Set up AI-powered subtitle translation in Bazarr+ using OpenRouter language models, including free tiers.">
+  <link rel="canonical" href="https://lavx.github.io/bazarr/guides/ai-translation.html">
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="AI Translation Setup - Bazarr+ Guides">
+  <meta property="og:description" content="Set up AI-powered subtitle translation in Bazarr+ using OpenRouter language models, including free tiers.">
+  <meta property="og:url" content="https://lavx.github.io/bazarr/guides/ai-translation.html">
+  <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/logo128.png">
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="AI Translation Setup - Bazarr+ Guides">
+  <meta name="twitter:description" content="Set up AI-powered subtitle translation in Bazarr+ using OpenRouter language models, including free tiers.">
+  <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/logo128.png">
+
+  <!-- Geist font: async preload -->
+  <link rel="preload" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" as="style" crossorigin>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" media="print" onload="this.media='all'">
+  <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css"></noscript>
+
+  <link rel="icon" href="../screenshots/logo128.png" type="image/png">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+
+<a href="#main-content" class="skip-link">Skip to content</a>
+
+<!-- Grain overlay -->
+<svg class="grain" aria-hidden="true">
+  <filter id="grain-filter">
+    <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/>
+  </filter>
+  <rect width="100%" height="100%" filter="url(#grain-filter)"/>
+</svg>
+
+<!-- Ambient gradients -->
+<div class="ambient" aria-hidden="true"></div>
+
+<nav class="sticky-nav" aria-label="Site navigation">
+  <div class="container">
+    <img src="../screenshots/logo128.png" alt="Bazarr+" class="nav-logo" width="22" height="22">
+    <a href="../">Home</a>
+    <a href="../#comparison-heading">Compare</a>
+    <a href="../#quick-start">Install</a>
+    <a href="../#screenshots-heading">Screenshots</a>
+    <a href="./" class="nav-active">Guides</a>
+    <a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a>
+  </div>
+</nav>
+
+<main id="main-content" class="guide-page">
+  <div class="container">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <a href="../">Home</a><span class="sep">/</span><a href="./">Guides</a><span class="sep">/</span><span>AI Translation</span>
+    </nav>
+    <h1>AI Translation Setup</h1>
+
+    <article class="content">
+
+      <h2 id="what-is-openrouter">What is OpenRouter</h2>
+      <p><a href="https://openrouter.ai" target="_blank" rel="noopener">OpenRouter</a> is a unified API gateway that gives you access to language models from OpenAI, Anthropic, Google, Meta, Mistral, and many others through a single API key. Instead of managing separate accounts with each provider, you use one key and pick whichever model fits your needs.</p>
+      <p>Bazarr+ uses OpenRouter through a companion service called <strong>AI Subtitle Translator</strong>. This service handles the translation prompts, subtitle parsing, and batch processing. You just provide the API key and choose a model.</p>
+
+      <h2 id="getting-an-api-key">Getting an API key</h2>
+
+      <ol class="steps">
+        <li>Go to <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a> and create an account (or sign in with Google/GitHub).</li>
+        <li>Click <strong>Create Key</strong>. Give it a name like "bazarr" so you can identify it later.</li>
+        <li>Copy the key. It starts with <code>sk-or-</code>. You will paste this into Bazarr+ under <strong>Settings &gt; AI Translator</strong>.</li>
+      </ol>
+
+      <div class="note">
+        <strong>Free tiers available.</strong> Several models on OpenRouter have free usage tiers with generous limits. You can start translating without spending anything. Check the <a href="https://openrouter.ai/models?q=free" target="_blank" rel="noopener">free models list</a> for current options.
+      </div>
+
+      <h2 id="configuring-the-translator-service">Configuring the translator service</h2>
+      <p>Add the AI Subtitle Translator container to your <code>docker-compose.yml</code>. If you used the install script and chose to enable AI translation, this is already done.</p>
+
+      <div class="code-wrap">
+        <div class="code-header">
+          <span class="code-lang">docker-compose.yml (add to existing file)</span>
+          <button class="copy-btn" data-copy-from="translator-code" aria-label="Copy translator configuration">Copy</button>
+        </div>
+        <pre id="translator-code"><code>  ai-subtitle-translator:
+    image: ghcr.io/lavx/ai-subtitle-translator:latest
+    container_name: ai-subtitle-translator
+    restart: unless-stopped
+    ports:
+      - 8765:8765
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8765/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s</code></pre>
+      </div>
+
+      <p>Then restart your stack:</p>
+
+      <div class="code-wrap">
+        <div class="code-header">
+          <span class="code-lang">Shell</span>
+          <button class="copy-btn" data-copy="docker compose up -d" aria-label="Copy command">Copy</button>
+        </div>
+        <pre><code>docker compose up -d</code></pre>
+      </div>
+
+      <p>Bazarr+ auto-detects the translator service when it is running on the same Docker network. The OpenRouter API key is configured inside Bazarr+ under <strong>Settings &gt; AI Translator</strong>, not as a container environment variable.</p>
+
+      <h2 id="choosing-a-model">Choosing a model</h2>
+      <p>Go to <strong>Settings &gt; AI Translator</strong> in Bazarr+. You will see a model selector with all available models from OpenRouter. Some things to consider:</p>
+
+      <ul>
+        <li><strong>Quality vs. speed.</strong> Larger models (Claude Opus 4.6, GPT-4.1) produce better translations but cost more. Mid-range models (Gemini 2.5 Flash, Claude Sonnet 4.5) hit a good balance. Lightweight models (Gemini 2.5 Flash Lite, Claude Haiku 4.5) are fast and cheap.</li>
+        <li><strong>Free models.</strong> OpenRouter offers free tiers for select models (look for the "free" badge). Great for testing the workflow or large batches where perfect quality is not critical.</li>
+        <li><strong>Context window.</strong> Subtitle files can be large. Models with bigger context windows (200k+ tokens) handle full-length movies in fewer chunks, producing more consistent translations.</li>
+      </ul>
+
+      <div class="note">
+        <strong>Recommendation:</strong> Start with <code class="inline">google/gemini-2.5-flash-lite-preview-09-2025</code>. It handles subtitle translation well and costs fractions of a cent per episode. Switch to Claude Sonnet 4.5 if you need higher quality for difficult content.
+      </div>
+
+      <h2 id="batch-translation-from-missing-pages">Batch translation from Missing pages</h2>
+      <p>The Missing pages (Episodes and Movies) show episodes and films that are missing subtitles in your configured languages. With AI translation, you can handle these in bulk:</p>
+
+      <ol class="steps">
+        <li>Go to <strong>Missing &gt; Episodes</strong> or <strong>Missing &gt; Movies</strong>.</li>
+        <li>Select the items you want to translate using the checkboxes (or use "Select All").</li>
+        <li>Click <strong>Mass Translate</strong> in the batch action toolbar.</li>
+        <li>Choose the source language (the existing subtitle language) and target language.</li>
+        <li>Confirm. Bazarr+ queues the translation jobs and processes them in the background.</li>
+      </ol>
+
+      <p>You can monitor progress in the editor's translate panel or in <strong>Settings &gt; AI Translator</strong>, which shows active jobs, their status, and any errors.</p>
+
+      <h2 id="using-the-editors-ai-translate-feature">Using the editor's AI translate feature</h2>
+      <p>For individual files where you want more control, open a subtitle in the built-in editor. The editor has a dedicated AI translation panel where you can:</p>
+
+      <ul>
+        <li>Translate the entire file at once</li>
+        <li>Review the translation count and apply to the editor cues, then edit as needed</li>
+      </ul>
+
+      <p>This is useful for spot-checking quality or handling files that need special attention, like subtitles with heavy slang or technical terminology.</p>
+
+      <h2 id="cost-estimates">Cost estimates</h2>
+      <p>Translation costs depend entirely on the model and subtitle length. Here are rough estimates for a typical 90-minute movie (~1,500 subtitle lines):</p>
+
+      <ul>
+        <li><strong>Free models</strong> (free-tier Gemini, Llama, Qwen): $0.00</li>
+        <li><strong>Budget models</strong> (Gemini 2.5 Flash Lite, Claude Haiku 4.5): ~$0.001 to $0.01</li>
+        <li><strong>Mid-range models</strong> (Gemini 2.5 Flash, Claude Sonnet 4.5): ~$0.02 to $0.10</li>
+        <li><strong>Premium models</strong> (Claude Opus 4.6, GPT-4.1): ~$0.15 to $0.50</li>
+      </ul>
+
+      <p>These are ballpark figures. Actual costs vary with subtitle density and the length of each line. OpenRouter shows your usage and spending on their dashboard in real time.</p>
+
+      <div class="note note-warning">
+        <strong>Watch your spending.</strong> Batch-translating hundreds of episodes with a premium model can add up. Set a spending limit on your OpenRouter account if you want a safety net. The setting is under Account &gt; Credits on their site.
+      </div>
+
+      <h2 id="next-steps">Next steps</h2>
+      <ul>
+        <li><a href="getting-started.html">Getting Started</a> if you have not installed Bazarr+ yet</li>
+        <li><a href="migration.html">Migration from upstream</a> if you are switching from stock Bazarr</li>
+      </ul>
+
+    </article>
+  </div>
+</main>
+
+<!-- Footer -->
+<footer>
+  <div class="container">
+    <div class="footer-inner">
+      <p class="footer-credit">Built by <a href="https://github.com/LavX" target="_blank" rel="noopener">LavX</a>. Based on <a href="https://github.com/morpheus65535/bazarr" target="_blank" rel="noopener">Bazarr</a> by morpheus65535.</p>
+      <ul class="footer-links">
+        <li><a href="./">Guides</a></li>
+        <li><a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a></li>
+        <li><a href="https://github.com/LavX/bazarr/issues" target="_blank" rel="noopener">Issues</a></li>
+        <li><a href="https://github.com/LavX/bazarr/wiki" target="_blank" rel="noopener">Wiki</a></li>
+      </ul>
+    </div>
+  </div>
+</footer>
+
+<script src="../js/site.js"></script>
+
+</body>
+</html>
