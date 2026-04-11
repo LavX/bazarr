@@ -103,6 +103,42 @@ def wanted_download_subtitles(sonarr_episode_id, job_id=None):
         logging.info("BAZARR All providers are throttled")
 
 
+def wanted_scan_subtitles_series(job_id=None):
+    if not job_id:
+        jobs_queue.add_job_from_function("Scanning disk for missing series subtitles", is_progress=True)
+        return
+
+    conditions = [(TableEpisodes.missing_subtitles.is_not(None)),
+                  (TableEpisodes.missing_subtitles != '[]')]
+    conditions += get_exclusion_clause('series')
+    episodes = database.execute(
+        select(TableEpisodes.sonarrSeriesId,
+               TableEpisodes.sonarrEpisodeId,
+               TableEpisodes.path,
+               TableShows.title,
+               TableEpisodes.season,
+               TableEpisodes.episode,
+               TableEpisodes.title.label('episodeTitle'))
+        .select_from(TableEpisodes)
+        .join(TableShows)
+        .where(reduce(operator.and_, conditions))) \
+        .all()
+
+    count_episodes = len(episodes)
+    jobs_queue.update_job_progress(job_id=job_id, progress_max=count_episodes)
+
+    if count_episodes == 0:
+        jobs_queue.update_job_progress(job_id=job_id, progress_value='max')
+
+    for i, episode in enumerate(episodes, start=1):
+        jobs_queue.update_job_progress(job_id=job_id, progress_value=i,
+                                       progress_message=f'{episode.title} - S{episode.season:02d}E{episode.episode:02d}'
+                                                        f' - {episode.episodeTitle}')
+        store_subtitles(episode.path, path_mappings.path_replace(episode.path), use_cache=False)
+
+    jobs_queue.update_job_progress(job_id=job_id, progress_message="Scan completed")
+
+
 def wanted_search_missing_subtitles_series(job_id=None, wait_for_completion=False):
     if not job_id:
         jobs_queue.add_job_from_function("Searching for missing series subtitles", is_progress=True,

@@ -7,21 +7,29 @@ import {
   useState,
 } from "react";
 import {
+  ActionIcon,
   Anchor,
   Container,
   Divider,
   Grid,
+  Group,
   Space,
   Stack,
   Text,
+  Tooltip,
 } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import { IconDefinition } from "@fortawesome/fontawesome-common-types";
 import { faGithub, faWikipediaW } from "@fortawesome/free-brands-svg-icons";
-import { faCode, faPaperPlane } from "@fortawesome/free-solid-svg-icons";
+import {
+  faCode,
+  faPaperPlane,
+  faRefresh,
+} from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useSystemHealth, useSystemStatus } from "@/apis/hooks";
 import { useInstanceName } from "@/apis/hooks/site";
+import api from "@/apis/raw";
 import { QueryOverlay } from "@/components/async";
 import { GithubRepoRoot } from "@/constants";
 import { Environment, useInterval } from "@/utilities";
@@ -128,11 +136,35 @@ const SystemStatusView: FunctionComponent = () => {
   return (
     <Container fluid>
       <Stack>
-        <InfoContainer title="Health">
+        <Stack>
+          <Divider
+            labelPosition="left"
+            label={
+              <Group gap="xs">
+                <Text size="md" fw="bold">
+                  Health
+                </Text>
+                <Tooltip label="Re-check health" position="right">
+                  <ActionIcon
+                    variant="subtle"
+                    size="sm"
+                    onClick={async () => {
+                      await api.system.recheckHealth();
+                      health.refetch();
+                    }}
+                    loading={health.isFetching}
+                  >
+                    <FontAwesomeIcon icon={faRefresh} size="sm" />
+                  </ActionIcon>
+                </Tooltip>
+              </Group>
+            }
+          ></Divider>
           <QueryOverlay result={health}>
             <Table health={health.data ?? []}></Table>
           </QueryOverlay>
-        </InfoContainer>
+          <Space />
+        </Stack>
         <InfoContainer title="About">
           <Row title="Bazarr Version">{status?.bazarr_version}</Row>
           {status?.package_version !== "" && (

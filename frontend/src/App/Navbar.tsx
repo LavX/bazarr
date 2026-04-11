@@ -7,7 +7,7 @@ import React, {
   useState,
 } from "react";
 import { matchPath, NavLink, RouteObject, useLocation } from "react-router";
-import { AppShell, Badge, Collapse, Stack, Text } from "@mantine/core";
+import { AppShell, Badge, Collapse, Divider, Stack, Text } from "@mantine/core";
 import { useHover } from "@mantine/hooks";
 import { IconDefinition } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
@@ -140,18 +140,28 @@ const AppNavbar: FunctionComponent = () => {
       <div className={styles.navInner}>
         <Selection.Provider value={{ selection, select }}>
           <Stack gap={0}>
-            {groups.map((group) => (
-              <div key={group.label}>
-                <div className={styles.groupLabel}>{group.label}</div>
-                {group.items.map((route, idx) => (
-                  <RouteItem
-                    key={BuildKey("nav", group.label, idx)}
-                    parent="/"
-                    route={route}
-                  />
-                ))}
-              </div>
-            ))}
+            {groups.map((group) => {
+              const groupId = `nav-group-${group.label.toLowerCase().replace(/\s+/g, "-")}`;
+              return (
+                <div key={group.label} role="group" aria-labelledby={groupId}>
+                  <div
+                    id={groupId}
+                    role="heading"
+                    aria-level={2}
+                    className={styles.groupLabel}
+                  >
+                    {group.label}
+                  </div>
+                  {group.items.map((route, idx) => (
+                    <RouteItem
+                      key={BuildKey("nav", group.label, idx)}
+                      parent="/"
+                      route={route}
+                    />
+                  ))}
+                </div>
+              );
+            })}
           </Stack>
         </Selection.Provider>
       </div>
@@ -163,7 +173,7 @@ const RouteItem: FunctionComponent<{
   route: CustomRouteObject;
   parent: string;
 }> = ({ route, parent }) => {
-  const { children, name, path, icon, hidden, element } = route;
+  const { children, name, path, icon, hidden, element, divider } = route;
 
   const { select } = useSelection();
 
@@ -227,7 +237,10 @@ const RouteItem: FunctionComponent<{
     }
   } else {
     return (
-      <NavbarItem name={name ?? link} link={link} icon={icon} badge={badge} />
+      <>
+        {divider && <div className={styles.subGroupLabel}>{divider}</div>}
+        <NavbarItem name={name ?? link} link={link} icon={icon} badge={badge} />
+      </>
     );
   }
 };

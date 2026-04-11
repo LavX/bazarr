@@ -135,7 +135,7 @@ const MoviesHistoryView: FunctionComponent = () => {
         },
       },
       {
-        header: "Blacklist",
+        header: "Excluded",
         accessorKey: "blacklisted",
         cell: ({ row }) => {
           const {
@@ -150,7 +150,7 @@ const MoviesHistoryView: FunctionComponent = () => {
           if (subs_id && provider && language) {
             return (
               <MutateAction
-                label="Add to Blacklist"
+                label="Exclude"
                 disabled={blacklisted}
                 icon={faFileExcel}
                 mutation={addToBlacklist}

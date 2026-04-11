@@ -67,7 +67,7 @@ describe("History Movies", () => {
     expect(screen.getByText("Date")).toBeInTheDocument();
     expect(screen.getByText("Info")).toBeInTheDocument();
     expect(screen.getByText("Upgradable")).toBeInTheDocument();
-    expect(screen.getByText("Blacklist")).toBeInTheDocument();
+    expect(screen.getByText("Excluded")).toBeInTheDocument();
   });
 
   it("should display movie information correctly", async () => {
@@ -89,7 +89,7 @@ describe("History Movies", () => {
     customRender(<MoviesHistoryView />);
 
     await waitFor(() => {
-      expect(screen.getByLabelText("Add to Blacklist")).toBeInTheDocument();
+      expect(screen.getByLabelText("Exclude")).toBeInTheDocument();
     });
   });
 

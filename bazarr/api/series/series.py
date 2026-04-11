@@ -10,7 +10,7 @@ from app.database import get_exclusion_clause, TableEpisodes, TableShows, databa
 from sonarr.sync.series import update_one_series
 from subtitles.indexer.series import list_missing_subtitles, series_scan_subtitles
 from subtitles.mass_download import series_download_subtitles
-from subtitles.wanted import wanted_search_missing_subtitles_series
+from subtitles.wanted import wanted_search_missing_subtitles_series, wanted_scan_subtitles_series
 from app.event_handler import event_stream
 from api.swaggerui import subtitles_model, subtitles_language_model, audio_language_model
 
@@ -242,6 +242,9 @@ class Series(Resource):
                 return '', 204
         elif action == "search-wanted":
             wanted_search_missing_subtitles_series()
+            return '', 204
+        elif action == "scan-wanted":
+            wanted_scan_subtitles_series()
             return '', 204
         elif action == "sync":
             update_one_series(seriesid, 'updated')

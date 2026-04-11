@@ -20,6 +20,7 @@ import { useDocumentTitle } from "@mantine/hooks";
 import {
   faEraser,
   faFilter,
+  faHardDrive,
   faLanguage,
   faSearch,
   faTimes,
@@ -57,6 +58,7 @@ interface Props<T extends Wanted.Base> {
   missingLangOptions?: LangOption[];
   dataFilter?: (item: T) => boolean;
   searchAll: () => Promise<void>;
+  scanAll: () => Promise<void>;
   getWantedItem: (row: T) => WantedItem;
 }
 
@@ -76,6 +78,7 @@ function WantedView<T extends Wanted.Base>({
   missingLangOptions = [],
   dataFilter,
   searchAll,
+  scanAll,
   getWantedItem,
 }: Props<T>) {
   const dataCount = query.paginationStatus.totalCount;
@@ -209,6 +212,13 @@ function WantedView<T extends Wanted.Base>({
             icon={faSearch}
           >
             Search All
+          </Toolbox.Button>
+          <Toolbox.Button
+            disabled={hasTask || dataCount === 0}
+            onClick={scanAll}
+            icon={faHardDrive}
+          >
+            Scan All
           </Toolbox.Button>
           <Toolbox.Button
             disabled={hasTask || selectedRows.length === 0}

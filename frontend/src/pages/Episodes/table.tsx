@@ -4,7 +4,7 @@ import { faBookmark as farBookmark } from "@fortawesome/free-regular-svg-icons";
 import {
   faBookmark,
   faHistory,
-  faUser,
+  faMagnifyingGlass,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef, Table as TableInstance } from "@tanstack/react-table";
@@ -207,7 +207,7 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
                       query: useEpisodesProvider,
                     });
                   }}
-                  icon={faUser}
+                  icon={faMagnifyingGlass}
                 ></Action>
                 <Action
                   label="History"

@@ -97,6 +97,34 @@ def wanted_download_subtitles_movie(radarr_id, job_id=None):
         logging.info("BAZARR All providers are throttled")
 
 
+def wanted_scan_subtitles_movies(job_id=None):
+    if not job_id:
+        jobs_queue.add_job_from_function("Scanning disk for missing movies subtitles", is_progress=True)
+        return
+
+    conditions = [(TableMovies.missing_subtitles.is_not(None)),
+                  (TableMovies.missing_subtitles != '[]')]
+    conditions += get_exclusion_clause('movie')
+    movies = database.execute(
+        select(TableMovies.radarrId,
+               TableMovies.path,
+               TableMovies.title)
+        .where(reduce(operator.and_, conditions))) \
+        .all()
+
+    count_movies = len(movies)
+    jobs_queue.update_job_progress(job_id=job_id, progress_max=count_movies)
+
+    if count_movies == 0:
+        jobs_queue.update_job_progress(job_id=job_id, progress_value='max')
+
+    for i, movie in enumerate(movies, start=1):
+        jobs_queue.update_job_progress(job_id=job_id, progress_value=i, progress_message=movie.title)
+        store_subtitles_movie(movie.path, path_mappings.path_replace_movie(movie.path), use_cache=False)
+
+    jobs_queue.update_job_progress(job_id=job_id, progress_message="Scan completed")
+
+
 def wanted_search_missing_subtitles_movies(job_id=None, wait_for_completion=False):
     if not job_id:
         jobs_queue.add_job_from_function("Searching for missing movies subtitles", is_progress=True,

@@ -85,6 +85,20 @@ class BazarrClient {
 
   handleError(error: BackendError) {
     const { code, message } = error;
+
+    // Backend not ready yet: suppress everything, don't trigger auth changes
+    if (
+      code === 0 ||
+      code === 502 ||
+      code === 503 ||
+      message === "You have disconnected from the server" ||
+      message === "Network Error" ||
+      message === "Backend is starting up"
+    ) {
+      LOG("warning", "Backend unreachable, suppressing error");
+      return;
+    }
+
     switch (code) {
       case 401:
         this.bIsAuthenticated = false;
@@ -95,8 +109,8 @@ class BazarrClient {
         // Skip notification, let the caller handle via onError / .catch()
         return;
     }
-    LOG("error", "A error has occurred", code);
 
+    LOG("error", "A error has occurred", code);
     showNotification(notification.error(`Error ${code}`, message));
   }
 }

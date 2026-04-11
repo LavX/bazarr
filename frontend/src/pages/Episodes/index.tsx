@@ -5,8 +5,16 @@ import {
   useRef,
   useState,
 } from "react";
-import { Navigate, useParams } from "react-router";
-import { Container, Group, Stack } from "@mantine/core";
+import { Link, Navigate, useParams } from "react-router";
+import {
+  Anchor,
+  Breadcrumbs,
+  Container,
+  Group,
+  Menu,
+  Stack,
+  Text,
+} from "@mantine/core";
 import { Dropzone } from "@mantine/dropzone";
 import { useDocumentTitle } from "@mantine/hooks";
 import { showNotification } from "@mantine/notifications";
@@ -17,6 +25,7 @@ import {
   faCircleChevronDown,
   faCircleChevronRight,
   faCloudUploadAlt,
+  faEllipsisVertical,
   faHardDrive,
   faHdd,
   faPlay,
@@ -26,6 +35,7 @@ import {
   faTriangleExclamation,
   faWrench,
 } from "@fortawesome/free-solid-svg-icons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { Table as TableInstance } from "@tanstack/table-core/build/lib/types";
 import {
   useEpisodesBySeriesId,
@@ -131,6 +141,16 @@ const SeriesEpisodesView: FunctionComponent = () => {
 
   return (
     <Container px={0} fluid>
+      <nav aria-label="Breadcrumb">
+        <Breadcrumbs mb="md" ml="xs">
+          <Anchor component={Link} to="/series" size="sm">
+            Series
+          </Anchor>
+          <Text size="sm" c="var(--bz-text-primary)">
+            {series?.title ?? "Loading..."}
+          </Text>
+        </Breadcrumbs>
+      </nav>
       <QueryOverlay result={seriesQuery}>
         <Dropzone.FullScreen
           openRef={openDropzone}
@@ -156,20 +176,6 @@ const SeriesEpisodesView: FunctionComponent = () => {
               Sync
             </Toolbox.Button>
             <Toolbox.Button
-              icon={faHardDrive}
-              disabled={!available || hasTask}
-              onClick={() => {
-                if (series) {
-                  task.create(series.title, TaskGroup.ScanDisk, action, {
-                    action: "scan-disk",
-                    seriesid: id,
-                  });
-                }
-              }}
-            >
-              Scan Disk
-            </Toolbox.Button>
-            <Toolbox.Button
               icon={faSearch}
               onClick={async () => {
                 if (series) {
@@ -189,8 +195,6 @@ const SeriesEpisodesView: FunctionComponent = () => {
             >
               Search
             </Toolbox.Button>
-          </Group>
-          <Group gap="xs">
             <Toolbox.Button
               disabled={
                 series === undefined ||
@@ -222,24 +226,8 @@ const SeriesEpisodesView: FunctionComponent = () => {
             >
               Upload
             </Toolbox.Button>
-            <Toolbox.Button
-              icon={faWrench}
-              disabled={hasTask}
-              onClick={() => {
-                if (series) {
-                  modals.openContextModal(
-                    ItemEditModal,
-                    {
-                      item: series,
-                      mutation,
-                    },
-                    { title: series.title },
-                  );
-                }
-              }}
-            >
-              Edit Series
-            </Toolbox.Button>
+          </Group>
+          <Group gap="xs">
             <Toolbox.Button
               icon={
                 isAllRowExpanded ? faCircleChevronRight : faCircleChevronDown
@@ -250,6 +238,49 @@ const SeriesEpisodesView: FunctionComponent = () => {
             >
               {isAllRowExpanded ? "Collapse All" : "Expand All"}
             </Toolbox.Button>
+            <Menu shadow="md" width={200}>
+              <Menu.Target>
+                <div>
+                  <Toolbox.Button icon={faEllipsisVertical}>
+                    More
+                  </Toolbox.Button>
+                </div>
+              </Menu.Target>
+              <Menu.Dropdown>
+                <Menu.Item
+                  leftSection={<FontAwesomeIcon icon={faHardDrive} size="sm" />}
+                  disabled={!available || hasTask}
+                  onClick={() => {
+                    if (series) {
+                      task.create(series.title, TaskGroup.ScanDisk, action, {
+                        action: "scan-disk",
+                        seriesid: id,
+                      });
+                    }
+                  }}
+                >
+                  Scan Disk
+                </Menu.Item>
+                <Menu.Item
+                  leftSection={<FontAwesomeIcon icon={faWrench} size="sm" />}
+                  disabled={hasTask}
+                  onClick={() => {
+                    if (series) {
+                      modals.openContextModal(
+                        ItemEditModal,
+                        {
+                          item: series,
+                          mutation,
+                        },
+                        { title: series.title },
+                      );
+                    }
+                  }}
+                >
+                  Edit Series
+                </Menu.Item>
+              </Menu.Dropdown>
+            </Menu>
           </Group>
         </Toolbox>
         <Stack>

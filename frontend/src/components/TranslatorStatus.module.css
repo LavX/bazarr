@@ -52,9 +52,25 @@
   animation: spin 1s linear infinite;
 }
 
+@keyframes completionGlow {
+  from {
+    border-left-color: #69db7c;
+    box-shadow: inset 3px 0 8px rgba(105, 219, 124, 0.3);
+  }
+  to {
+    border-left-color: var(--bz-stat-completed);
+    box-shadow: none;
+  }
+}
+
+.completedRow {
+  animation: completionGlow 1.5s ease-out;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .promptConnected,
-  .spin {
+  .spin,
+  .completedRow {
     animation: none;
   }
   .statCard:hover {

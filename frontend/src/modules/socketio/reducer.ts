@@ -16,8 +16,7 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
     {
       key: "connect_error",
       any: () => {
-        setCriticalError("Cannot connect to backend");
-        cleanNotifications();
+        setOnlineStatus(false);
       },
     },
     {

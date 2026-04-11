@@ -11,7 +11,7 @@ const ThemeProvider = () => {
   const settings = useSystemSettings();
 
   const settingsColorScheme = settings.data?.general
-    .theme as MantineColorScheme;
+    ?.theme as MantineColorScheme;
 
   const setScheme = useCallback(
     (colorScheme: MantineColorScheme) => {

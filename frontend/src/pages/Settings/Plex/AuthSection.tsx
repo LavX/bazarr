@@ -54,7 +54,6 @@ const AuthSection = () => {
   }, [pinData?.authenticated, isPolling, refetchAuth, queryClient]);
 
   const isAuthenticated = Boolean(
-    // eslint-disable-next-line camelcase
     authData?.valid && authData?.auth_method === "oauth",
   );
 

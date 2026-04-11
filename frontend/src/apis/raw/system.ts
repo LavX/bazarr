@@ -91,6 +91,10 @@ class SystemApi extends BaseApi {
     return response.data;
   }
 
+  async recheckHealth() {
+    await this.post("/health");
+  }
+
   async logs() {
     const response = await this.get<DataWrapper<System.Log[]>>("/logs");
     return response.data;

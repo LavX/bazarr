@@ -6,7 +6,7 @@ from app.database import TableMovies, database, update, select, func
 from radarr.sync.movies import update_one_movie
 from subtitles.indexer.movies import list_missing_subtitles_movies, movies_scan_subtitles
 from app.event_handler import event_stream
-from subtitles.wanted import wanted_search_missing_subtitles_movies
+from subtitles.wanted import wanted_search_missing_subtitles_movies, wanted_scan_subtitles_movies
 from subtitles.mass_download import movies_download_subtitles
 from api.swaggerui import subtitles_model, subtitles_language_model, audio_language_model
 
@@ -184,6 +184,9 @@ class Movies(Resource):
                 return '', 204
         elif action == "search-wanted":
             wanted_search_missing_subtitles_movies()
+            return '', 204
+        elif action == "scan-wanted":
+            wanted_scan_subtitles_movies()
             return '', 204
         elif action == "sync":
             update_one_movie(radarrid, 'updated', True)
