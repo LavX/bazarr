@@ -20,7 +20,7 @@ from ..adaptive_searching import is_search_active, updateFailedAttempts
 from ..download import generate_subtitles
 
 
-def _wanted_movie(movie, job_id=None):
+def _wanted_movie(movie, providers_list, job_id=None):
     audio_language_list = get_audio_profile_languages(movie.audio_language)
     if len(audio_language_list) > 0:
         audio_language = audio_language_list[0]['name']
@@ -28,23 +28,20 @@ def _wanted_movie(movie, job_id=None):
         audio_language = 'None'
 
     languages = []
+    languages_to_stamp = []
 
     for language in ast.literal_eval(movie.missing_subtitles):
         if is_search_active(desired_language=language, attempt_string=movie.failedAttempts):
-            database.execute(
-                update(TableMovies)
-                .values(failedAttempts=updateFailedAttempts(desired_language=language,
-                                                            attempt_string=movie.failedAttempts))
-                .where(TableMovies.radarrId == movie.radarrId))
-
             hi_ = "True" if language.endswith(':hi') else "False"
             forced_ = "True" if language.endswith(':forced') else "False"
             languages.append((language.split(":")[0], hi_, forced_))
+            languages_to_stamp.append(language)
 
         else:
             logging.info(f"BAZARR Search is throttled by adaptive search for this movie {movie.path} and "
                          f"language: {language}")
 
+    found_any = False
     for result in generate_subtitles(path_mappings.path_replace_movie(movie.path),
                                      languages,
                                      audio_language,
@@ -56,12 +53,23 @@ def _wanted_movie(movie, job_id=None):
                                      job_id=job_id):
 
         if result:
+            found_any = True
             if isinstance(result, tuple) and len(result):
                 result = result[0]
             store_subtitles_movie(movie.path, path_mappings.path_replace_movie(movie.path))
             history_log_movie(1, movie.radarrId, result)
             event_stream(type='movie-wanted', action='delete', payload=movie.radarrId)
             send_notifications_movie(movie.radarrId, result.message)
+
+    if not found_any and providers_list:
+        for language in languages_to_stamp:
+            updated = updateFailedAttempts(
+                desired_language=language,
+                attempt_string=movie.failedAttempts)
+            database.execute(
+                update(TableMovies)
+                .values(failedAttempts=updated)
+                .where(TableMovies.radarrId == movie.radarrId))
 
 
 def wanted_download_subtitles_movie(radarr_id, job_id=None):
@@ -92,7 +100,7 @@ def wanted_download_subtitles_movie(radarr_id, job_id=None):
     providers_list = get_providers()
 
     if providers_list:
-        _wanted_movie(movie, job_id=job_id)
+        _wanted_movie(movie, providers_list, job_id=job_id)
     else:
         logging.info("BAZARR All providers are throttled")
 
