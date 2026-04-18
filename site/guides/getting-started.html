@@ -12,13 +12,15 @@
   <meta property="og:title" content="Getting Started - Bazarr+ Guides">
   <meta property="og:description" content="Install Bazarr+ with Docker, connect to Sonarr and Radarr, and start downloading subtitles automatically.">
   <meta property="og:url" content="https://lavx.github.io/bazarr/guides/getting-started.html">
-  <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/logo128.png">
+  <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
 
   <!-- Twitter Card -->
-  <meta name="twitter:card" content="summary">
+  <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Getting Started - Bazarr+ Guides">
   <meta name="twitter:description" content="Install Bazarr+ with Docker, connect to Sonarr and Radarr, and start downloading subtitles automatically.">
-  <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/logo128.png">
+  <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
 
   <!-- Geist font: async preload -->
   <link rel="preload" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" as="style" crossorigin>
@@ -50,6 +52,7 @@
     <a href="../#comparison-heading">Compare</a>
     <a href="../#quick-start">Install</a>
     <a href="../#screenshots-heading">Screenshots</a>
+    <a href="../#faq-heading">FAQ</a>
     <a href="./" class="nav-active">Guides</a>
     <a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a>
   </div>
@@ -79,7 +82,7 @@
         <pre><code>curl -fsSL https://lavx.github.io/bazarr/install.sh | bash</code></pre>
       </div>
 
-      <p>The script is interactive. It will ask for your media paths, timezone, and whether you want to enable the AI translation service. You can review the script source <a href="https://github.com/LavX/bazarr/blob/master/site/install.sh" target="_blank" rel="noopener">on GitHub</a> before running it.</p>
+      <p>The script is interactive. It will ask for your media paths, timezone, and whether you want to enable the AI translation service. You can review the script source <a href="https://github.com/LavX/bazarr/blob/gh-pages/install.sh" target="_blank" rel="noopener">on GitHub</a> before running it.</p>
 
       <h2 id="docker-compose-setup">Docker Compose setup</h2>
       <p>If you prefer to set things up manually, create a <code>docker-compose.yml</code> with the following content. Adjust the volume paths to match your media library locations.</p>
