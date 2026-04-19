@@ -453,6 +453,11 @@ export const ProviderList: Readonly<ProviderInfo[]> = [
         type: "text",
         key: "api_key",
       },
+      {
+        type: "switch",
+        key: "anime_mode",
+        name: "Anime mode (extra searches for absolute episode numbers and subtitle packs, uses more API calls)",
+      },
     ],
   },
   {

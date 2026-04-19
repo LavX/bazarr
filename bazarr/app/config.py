@@ -438,6 +438,7 @@ validators = [
 
     # subdl section
     Validator('subdl.api_key', must_exist=True, default='', is_type_of=str, cast=str),
+    Validator('subdl.anime_mode', must_exist=True, default=False, is_type_of=bool),
 
     # turkcealtyaziorg section
     Validator('turkcealtyaziorg.cookies', must_exist=True, default='', is_type_of=str),

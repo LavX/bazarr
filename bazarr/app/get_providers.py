@@ -372,6 +372,7 @@ def get_providers_auth():
         },
         "subdl": {
             'api_key': settings.subdl.api_key,
+            'anime_mode': settings.subdl.anime_mode,
         },
         'turkcealtyaziorg': {
             'cookies': settings.turkcealtyaziorg.cookies,
