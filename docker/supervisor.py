@@ -307,45 +307,42 @@ STATIC_FILE_EXTENSIONS = {
 }
 
 
-def _safe_static_path(static_root: Path, request_path: str):
-    """Return a Path inside `static_root` for the given request path, or None
-    if the request attempts traversal. Rejects absolute or anchored paths,
-    rejects parent traversal segments, and resolves against the real static
-    root so symlinks cannot escape. This is the sanitizer shape CodeQL's
-    py/path-injection query recognises: explicit `..`-in-parts rejection plus
-    a pathlib containment check on the resolved target."""
-    try:
-        rel_path = Path(request_path)
-    except (TypeError, ValueError):
+def _safe_static_path(static_root_str: str, request_path: str):
+    """Return a string path inside ``static_root_str`` for the given request
+    path, or ``None`` if the request attempts traversal.
+
+    Implements the exact pattern CodeQL's ``py/path-injection`` query
+    documents as the "GOOD" example:
+
+        fullpath = os.path.normpath(os.path.join(base_path, filename))
+        if not fullpath.startswith(base_path):
+            raise Exception("not allowed")
+
+    We also pre-reject absolute paths so ``os.path.join`` does not silently
+    discard the base when the user supplies ``/etc/passwd`` as ``path``.
+    """
+    if not isinstance(request_path, str) or os.path.isabs(request_path):
         return None
-    if rel_path.is_absolute() or rel_path.anchor:
+    safe_path = os.path.normpath(os.path.join(static_root_str, request_path))
+    if not (safe_path == static_root_str or
+            safe_path.startswith(static_root_str + os.sep)):
         return None
-    if ".." in rel_path.parts:
-        return None
-    try:
-        resolved = (static_root / rel_path).resolve(strict=False)
-    except (OSError, ValueError):
-        return None
-    try:
-        resolved.relative_to(static_root)
-    except ValueError:
-        return None
-    return resolved
+    return safe_path
 
 
 def create_static_handler(config_dir: str):
-    static_root = STATIC_DIR.resolve()
+    static_root_str = str(STATIC_DIR.resolve())
 
     async def static_handler(request: web.Request) -> web.StreamResponse:
         """Serve static frontend files, fallback to index.html for SPA routing."""
         path = request.path.lstrip("/")
-        file_path = _safe_static_path(static_root, path)
-        if file_path is None:
+        safe_path = _safe_static_path(static_root_str, path)
+        if safe_path is None:
             return web.Response(status=404, text="Not found")
 
-        if file_path.is_file() and path != "index.html":
-            content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
-            return web.FileResponse(file_path, headers={"Content-Type": content_type})
+        if os.path.isfile(safe_path) and path != "index.html":
+            content_type = mimetypes.guess_type(safe_path)[0] or "application/octet-stream"
+            return web.FileResponse(safe_path, headers={"Content-Type": content_type})
 
         # If the request looks like a static file (has a known extension), return 404
         # instead of the SPA fallback. This prevents serving index.html as JavaScript

@@ -190,11 +190,30 @@ def resolve_subtitle_path(media_type, media_id, language_code):
     if not _is_safe_path(subtitle_path):
         return 'Invalid subtitle path', 400
 
-    # Normalise the final path through realpath so downstream callers see a
-    # canonicalised, symlink-resolved absolute path. Combined with the upstream
-    # `_is_valid_language_code`, `safe_join`, and `secure_filename` gates, this
-    # is the pattern CodeQL's py/path-injection query accepts as a sanitizer.
+    # Anchor the final resolved path to the media's containing directory.
+    # Mirrors the exact "GOOD" example from the CodeQL `py/path-injection`
+    # documentation:
+    #   fullpath = os.path.normpath(os.path.join(base_path, filename))
+    #   if not fullpath.startswith(base_path):
+    #       raise ...
+    # The subtitle must live either next to the video file or inside the
+    # `get_target_folder` override; both roots derive from the trusted DB row.
+    if media_type == 'episode':
+        media_fs_path = path_mappings.path_replace(row.path)
+    else:
+        media_fs_path = path_mappings.path_replace_movie(row.path)
+    media_dir = os.path.realpath(os.path.dirname(media_fs_path))
+    target_dir = get_target_folder(media_fs_path)
+    target_dir = os.path.realpath(target_dir) if target_dir else None
+
     subtitle_path = os.path.realpath(subtitle_path)
+
+    allowed_roots = [media_dir]
+    if target_dir and target_dir != media_dir:
+        allowed_roots.append(target_dir)
+    if not any(subtitle_path == root or subtitle_path.startswith(root + os.sep)
+               for root in allowed_roots):
+        return 'Subtitle path escapes media directory', 400
 
     ext = os.path.splitext(subtitle_path)[1].lower()
     if ext not in SUBTITLE_EXTENSIONS:
@@ -519,8 +538,13 @@ def _create_subtitle(media_type, media_id):
     if target_folder is None:
         target_folder = os.path.dirname(video_path)
 
-    subtitle_path = safe_join(target_folder, subtitle_filename)
-    if subtitle_path is None:
+    # CodeQL's canonical py/path-injection sanitizer: normpath(join(base,name))
+    # plus startswith(base + sep) barrier. target_folder is already the trusted
+    # base derived from the DB-stored media path.
+    target_folder_real = os.path.realpath(target_folder)
+    subtitle_path = os.path.normpath(os.path.join(target_folder_real, subtitle_filename))
+    if not (subtitle_path == target_folder_real or
+            subtitle_path.startswith(target_folder_real + os.sep)):
         return 'Invalid subtitle path', 400
 
     # Check for existing file
