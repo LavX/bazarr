@@ -1,17 +1,17 @@
-import { stripTags } from "@/pages/SubtitleEditor/stripTags";
 import type { ParseResult } from "@/pages/SubtitleEditor/types";
 import type { SubtitleParser } from "./index";
 import { cueId } from "./uuid";
 
 function stripHtml(html: string): string {
-  // Normalise <br> to newlines before stripping the rest of the tags.
+  // Normalise <br> to newlines, then let the browser's HTML parser handle
+  // tag removal and entity decoding. DOMParser is the CodeQL-recognised
+  // robust sanitizer for js/incomplete-multi-character-sanitization: no
+  // regex can survive nested/malformed tag bypasses, but a real HTML
+  // parser cannot be tricked. The result is only used for display text
+  // and character counts, never reinjected as HTML.
   const withBreaks = html.replace(/<br\s*\/?>/gi, "\n");
-  return stripTags(withBreaks)
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&amp;/gi, "&")
-    .trim();
+  const doc = new DOMParser().parseFromString(withBreaks, "text/html");
+  return (doc.body.textContent ?? "").replace(/\u00a0/g, " ").trim();
 }
 
 export const smiParser: SubtitleParser = {

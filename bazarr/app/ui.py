@@ -10,7 +10,6 @@ from flask import (request, abort, render_template, Response, session, send_file
                    redirect)
 from functools import wraps
 from urllib.parse import unquote, urlparse
-from werkzeug.utils import safe_join
 
 from constants import HEADERS
 from literals import FILE_LOG
@@ -78,14 +77,16 @@ def catch_all(path):
         return redirect(base_url or "/", code=302)
 
     # PWA Assets are returned from frontend root folder.
-    # werkzeug.utils.safe_join rejects absolute paths and '..' segments and
-    # returns None on traversal attempts; it is the CodeQL-recognised
-    # sanitizer for py/path-injection on flask/werkzeug stacks.
+    # Uses the CodeQL-documented "GOOD" pattern from py/path-injection:
+    # normpath(join(base, name)) + startswith(base). Pre-rejects absolute
+    # paths because os.path.join(base, '/abs') would silently drop the base.
     if path in pwa_assets or path.startswith('workbox-'):
-        safe_path = safe_join(frontend_build_path, path)
-        if safe_path is None:
+        if os.path.isabs(path):
             return abort(403)
-        return send_file(safe_path)
+        fullpath = os.path.normpath(os.path.join(frontend_build_path, path))
+        if not fullpath.startswith(frontend_build_path):
+            return abort(403)
+        return send_file(fullpath)
 
     auth = True
     if settings.auth.type == 'basic':

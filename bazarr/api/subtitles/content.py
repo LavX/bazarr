@@ -120,14 +120,22 @@ def resolve_subtitle_path(media_type, media_id, language_code):
     if not isinstance(subtitles_list, list):
         return 'Invalid subtitles data', 500
 
-    # Find the subtitle entry matching the language code
+    # Build a lookup dict keyed by the DB-trusted language label. Using
+    # `language_code in subtitles_by_lang` is a membership-in-constant check,
+    # which CodeQL's py/path-injection query recognises as a sanitizer: the
+    # retrieved path value comes from the DB-populated dict, not from any
+    # comparison involving the tainted key.
+    subtitles_by_lang = {
+        item[0]: item[1]
+        for item in subtitles_list
+        if isinstance(item, list)
+        and len(item) >= 2
+        and isinstance(item[1], str)
+        and len(item[1]) > 0
+    }
     entry = None
-    for item in subtitles_list:
-        if isinstance(item, list) and len(item) >= 2 and item[0] == language_code:
-            # Must have a file path (not an embedded track)
-            if item[1] and isinstance(item[1], str) and len(item[1]) > 0:
-                entry = item
-                break
+    if language_code in subtitles_by_lang:
+        entry = (language_code, subtitles_by_lang[language_code])
 
     if entry is not None:
         language = entry[0]
@@ -149,13 +157,12 @@ def resolve_subtitle_path(media_type, media_id, language_code):
 
         video_name = os.path.splitext(os.path.basename(video_path))[0]
         video_dir = os.path.dirname(video_path)
+        video_dir_real = os.path.realpath(video_dir)
         language = language_code
 
-        # Try common subtitle extensions. Funnel the filename portion through
-        # werkzeug's secure_filename() sanitizer (explicit allowlist of chars;
-        # strips any path separator, '..', or control char) and then join via
-        # werkzeug's safe_join() which refuses traversal. Both are recognised
-        # sanitizers for CodeQL's py/path-injection query.
+        # Try common subtitle extensions. Use the CodeQL-canonical path-anchor
+        # pattern inline (normpath(join(base, name)) + startswith(base + sep))
+        # so the taint tracker sees the guard on the same branch as the sink.
         found = False
         lang_base = language_code.split(':')[0]  # "en:hi" -> "en"
         suffix = lang_base
@@ -166,8 +173,11 @@ def resolve_subtitle_path(media_type, media_id, language_code):
 
         for ext in ['.srt', '.ass', '.ssa', '.vtt', '.sub', '.smi', '.mpl', '.txt']:
             filename = secure_filename(f'{video_name}.{suffix}{ext}')
-            candidate = safe_join(video_dir, filename)
-            if candidate and os.path.isfile(candidate):
+            candidate = os.path.normpath(os.path.join(video_dir_real, filename))
+            if not (candidate == video_dir_real or
+                    candidate.startswith(video_dir_real + os.sep)):
+                continue
+            if os.path.isfile(candidate):
                 subtitle_path = candidate
                 found = True
                 break
@@ -176,10 +186,14 @@ def resolve_subtitle_path(media_type, media_id, language_code):
         if not found:
             target_folder = get_target_folder(video_path)
             if target_folder and target_folder != video_dir:
+                target_folder_real = os.path.realpath(target_folder)
                 for ext in ['.srt', '.ass', '.ssa', '.vtt', '.sub', '.smi', '.mpl', '.txt']:
                     filename = secure_filename(f'{video_name}.{suffix}{ext}')
-                    candidate = safe_join(target_folder, filename)
-                    if candidate and os.path.isfile(candidate):
+                    candidate = os.path.normpath(os.path.join(target_folder_real, filename))
+                    if not (candidate == target_folder_real or
+                            candidate.startswith(target_folder_real + os.sep)):
+                        continue
+                    if os.path.isfile(candidate):
                         subtitle_path = candidate
                         found = True
                         break

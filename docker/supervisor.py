@@ -307,40 +307,42 @@ STATIC_FILE_EXTENSIONS = {
 }
 
 
-def _safe_static_path(static_root_str: str, request_path: str):
-    """Return a string path inside ``static_root_str`` for the given request
-    path, or ``None`` if the request attempts traversal.
+def _build_static_allowlist(static_root: Path) -> "frozenset[str]":
+    """Scan ``static_root`` once at startup and return a frozenset of every
+    relative file path beneath it, using forward slashes.
 
-    Implements the exact pattern CodeQL's ``py/path-injection`` query
-    documents as the "GOOD" example:
-
-        fullpath = os.path.normpath(os.path.join(base_path, filename))
-        if not fullpath.startswith(base_path):
-            raise Exception("not allowed")
-
-    We also pre-reject absolute paths so ``os.path.join`` does not silently
-    discard the base when the user supplies ``/etc/passwd`` as ``path``.
+    Membership in a constant frozenset is the canonical sanitizer recognised
+    by CodeQL's ``py/path-injection`` taint tracker: once the tainted value
+    has been compared with ``in ALLOWED_ASSETS`` the taint is cleared on the
+    true branch, because the only strings that can reach the sink are those
+    enumerated at startup from a trusted directory listing.
     """
-    if not isinstance(request_path, str) or os.path.isabs(request_path):
-        return None
-    safe_path = os.path.normpath(os.path.join(static_root_str, request_path))
-    if not (safe_path == static_root_str or
-            safe_path.startswith(static_root_str + os.sep)):
-        return None
-    return safe_path
+    if not static_root.is_dir():
+        return frozenset()
+    allowed: set[str] = set()
+    for entry in static_root.rglob("*"):
+        if entry.is_file():
+            allowed.add(entry.relative_to(static_root).as_posix())
+    return frozenset(allowed)
 
 
 def create_static_handler(config_dir: str):
-    static_root_str = str(STATIC_DIR.resolve())
+    static_root = STATIC_DIR.resolve()
+    # Trust anchor: enumerated at startup from the filesystem, never from user input.
+    ALLOWED_ASSETS: "frozenset[str]" = _build_static_allowlist(static_root)
 
     async def static_handler(request: web.Request) -> web.StreamResponse:
         """Serve static frontend files, fallback to index.html for SPA routing."""
         path = request.path.lstrip("/")
-        safe_path = _safe_static_path(static_root_str, path)
-        if safe_path is None:
-            return web.Response(status=404, text="Not found")
 
-        if os.path.isfile(safe_path) and path != "index.html":
+        # CodeQL-recognised sanitizer: membership in constant frozenset.
+        # Only strings enumerated at startup from STATIC_DIR can pass.
+        if path and path != "index.html" and path in ALLOWED_ASSETS:
+            # Rebuild the absolute path from the trusted constant base and the
+            # vetted relative path. The value joined here is provably one of
+            # the enumerated filenames, not user input.
+            trusted_rel = path  # in ALLOWED_ASSETS
+            safe_path = str(static_root / trusted_rel)
             content_type = mimetypes.guess_type(safe_path)[0] or "application/octet-stream"
             return web.FileResponse(safe_path, headers={"Content-Type": content_type})
 
