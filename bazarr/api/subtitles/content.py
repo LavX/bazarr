@@ -337,6 +337,10 @@ def _sanitize_media_path(media_type, media_id, subtitle_path):
     # Reject any separator-like chars in the basename.
     if '/' in basename or '\\' in basename or os.sep in basename:
         return None
+    # Enforce a strict filename policy for user-influenced values.
+    # If canonicalization changes the value, reject it.
+    if basename != secure_filename(basename):
+        return None
 
     candidate_bases = []
     if media_type == 'episode':
