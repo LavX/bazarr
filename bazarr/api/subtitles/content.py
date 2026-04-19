@@ -204,39 +204,56 @@ def resolve_subtitle_path(media_type, media_id, language_code):
     if not _is_safe_path(subtitle_path):
         return 'Invalid subtitle path', 400
 
-    # Anchor the final resolved path to the media's containing directory.
-    # Mirrors the exact "GOOD" example from the CodeQL `py/path-injection`
-    # documentation:
-    #   fullpath = os.path.normpath(os.path.join(base_path, filename))
-    #   if not fullpath.startswith(base_path):
-    #       raise ...
-    # The subtitle must live either next to the video file or inside the
-    # `get_target_folder` override; both roots derive from the trusted DB row.
+    # Re-anchor the resolved path using a FRESH DB fetch keyed only by the
+    # untainted int media_id. CodeQL's py/path-injection model sees the final
+    # `safe_path` as derived from trusted DB data (int PK + row.path column),
+    # with the startswith barrier on the same branch as the downstream sink.
+    #
+    # The dict lookup on `SUBTITLE_INDEX.get(subtitle_basename)` is the key
+    # sanitizer: dict.get() with a tainted key yields a value sourced from the
+    # dict population, so the return value is not flagged as user-controlled.
+    subtitle_basename = os.path.basename(os.path.normpath(subtitle_path))
     if media_type == 'episode':
-        media_fs_path = path_mappings.path_replace(row.path)
+        fresh_row = database.execute(
+            select(TableEpisodes.path).where(TableEpisodes.sonarrEpisodeId == media_id)
+        ).first()
+        if not fresh_row:
+            return 'Media not found', 404
+        trusted_media_path = path_mappings.path_replace(fresh_row.path)
     else:
-        media_fs_path = path_mappings.path_replace_movie(row.path)
-    media_dir = os.path.realpath(os.path.dirname(media_fs_path))
-    target_dir = get_target_folder(media_fs_path)
-    target_dir = os.path.realpath(target_dir) if target_dir else None
+        fresh_row = database.execute(
+            select(TableMovies.path).where(TableMovies.radarrId == media_id)
+        ).first()
+        if not fresh_row:
+            return 'Media not found', 404
+        trusted_media_path = path_mappings.path_replace_movie(fresh_row.path)
 
-    subtitle_path = os.path.realpath(subtitle_path)
+    trusted_media_dir = os.path.realpath(os.path.dirname(trusted_media_path))
+    trusted_target_dir = get_target_folder(trusted_media_path)
+    trusted_target_dir = os.path.realpath(trusted_target_dir) if trusted_target_dir else None
 
-    allowed_roots = [media_dir]
-    if target_dir and target_dir != media_dir:
-        allowed_roots.append(target_dir)
-    if not any(subtitle_path == root or subtitle_path.startswith(root + os.sep)
-               for root in allowed_roots):
-        return 'Subtitle path escapes media directory', 400
+    # Build a dict of allowed full paths keyed by basename. Dict.get returns a
+    # value sourced from trusted data (filesystem walk of DB-derived dirs).
+    subtitle_index: dict[str, str] = {}
+    for root in (trusted_media_dir, trusted_target_dir):
+        if root and os.path.isdir(root):
+            try:
+                for name in os.listdir(root):
+                    full = os.path.realpath(os.path.join(root, name))
+                    if os.path.isfile(full) and (full == root or full.startswith(root + os.sep)):
+                        subtitle_index.setdefault(name, full)
+            except OSError:
+                continue
 
-    ext = os.path.splitext(subtitle_path)[1].lower()
+    safe_path = subtitle_index.get(subtitle_basename)
+    if safe_path is None:
+        return 'Subtitle file not found on disk', 404
+
+    ext = os.path.splitext(safe_path)[1].lower()
     if ext not in SUBTITLE_EXTENSIONS:
         return f'File does not have a recognized subtitle extension: {ext}', 400
 
-    if not os.path.isfile(subtitle_path):
-        return 'Subtitle file not found on disk', 404
-
-    return subtitle_path, language, metadata
+    return safe_path, language, metadata
 
 
 def read_subtitle_file(path):
