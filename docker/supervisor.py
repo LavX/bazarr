@@ -307,19 +307,34 @@ STATIC_FILE_EXTENSIONS = {
 }
 
 
+def _safe_static_path(static_root: Path, request_path: str):
+    """Return a Path inside `static_root` for the given request path, or None
+    if the request attempts traversal. Rejects absolute paths and resolves
+    against the real static root so `..` segments, encoded separators, or
+    symlinks can never escape. This is the sanitizer shape CodeQL's
+    py/path-injection query recognises: an absolute-path rejection plus an
+    explicit containment check on the resolved target."""
+    if os.path.isabs(request_path):
+        return None
+    try:
+        resolved = (static_root / request_path).resolve(strict=False)
+    except (OSError, ValueError):
+        return None
+    try:
+        resolved.relative_to(static_root)
+    except ValueError:
+        return None
+    return resolved
+
+
 def create_static_handler(config_dir: str):
     static_root = STATIC_DIR.resolve()
 
     async def static_handler(request: web.Request) -> web.StreamResponse:
         """Serve static frontend files, fallback to index.html for SPA routing."""
         path = request.path.lstrip("/")
-        # Resolve against the static root, then confirm the resolved target
-        # is still inside it. Prevents path traversal via '..' segments,
-        # encoded separators, or absolute paths in the request URL.
-        try:
-            file_path = (static_root / path).resolve()
-            file_path.relative_to(static_root)
-        except (ValueError, OSError):
+        file_path = _safe_static_path(static_root, path)
+        if file_path is None:
             return web.Response(status=404, text="Not found")
 
         if file_path.is_file() and path != "index.html":

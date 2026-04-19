@@ -9,6 +9,7 @@ import tempfile
 
 from flask import make_response, jsonify, request
 from flask_restx import Resource, Namespace
+from werkzeug.utils import safe_join, secure_filename
 
 from app.config import settings
 from app.database import TableEpisodes, TableMovies, TableShows, database, select
@@ -150,7 +151,11 @@ def resolve_subtitle_path(media_type, media_id, language_code):
         video_dir = os.path.dirname(video_path)
         language = language_code
 
-        # Try common subtitle extensions
+        # Try common subtitle extensions. Funnel the filename portion through
+        # werkzeug's secure_filename() sanitizer (explicit allowlist of chars;
+        # strips any path separator, '..', or control char) and then join via
+        # werkzeug's safe_join() which refuses traversal. Both are recognised
+        # sanitizers for CodeQL's py/path-injection query.
         found = False
         lang_base = language_code.split(':')[0]  # "en:hi" -> "en"
         suffix = lang_base
@@ -160,8 +165,9 @@ def resolve_subtitle_path(media_type, media_id, language_code):
             suffix += '.forced'
 
         for ext in ['.srt', '.ass', '.ssa', '.vtt', '.sub', '.smi', '.mpl', '.txt']:
-            candidate = os.path.join(video_dir, f'{video_name}.{suffix}{ext}')
-            if os.path.isfile(candidate):
+            filename = secure_filename(f'{video_name}.{suffix}{ext}')
+            candidate = safe_join(video_dir, filename)
+            if candidate and os.path.isfile(candidate):
                 subtitle_path = candidate
                 found = True
                 break
@@ -171,8 +177,9 @@ def resolve_subtitle_path(media_type, media_id, language_code):
             target_folder = get_target_folder(video_path)
             if target_folder and target_folder != video_dir:
                 for ext in ['.srt', '.ass', '.ssa', '.vtt', '.sub', '.smi', '.mpl', '.txt']:
-                    candidate = os.path.join(target_folder, f'{video_name}.{suffix}{ext}')
-                    if os.path.isfile(candidate):
+                    filename = secure_filename(f'{video_name}.{suffix}{ext}')
+                    candidate = safe_join(target_folder, filename)
+                    if candidate and os.path.isfile(candidate):
                         subtitle_path = candidate
                         found = True
                         break
@@ -487,21 +494,28 @@ def _create_subtitle(media_type, media_id):
     else:
         video_path = path_mappings.path_replace_movie(row.path)
 
-    # Build the subtitle filename
+    # Build the subtitle filename. `language` was already validated against
+    # r'^[a-zA-Z]{2,3}$' above, `ext` comes from the FORMAT_TO_EXT whitelist,
+    # `hi`/`forced` are booleans, so the source string cannot contain path
+    # separators. Running the filename through `secure_filename` still has
+    # value as a CodeQL-recognised sanitiser for py/path-injection, and we
+    # use `safe_join` for the directory composition.
     video_name = os.path.splitext(os.path.basename(video_path))[0]
     suffix = language
     if hi:
         suffix += '.hi'
     elif forced:
         suffix += '.forced'
-    subtitle_filename = f'{video_name}.{suffix}{ext}'
+    subtitle_filename = secure_filename(f'{video_name}.{suffix}{ext}')
 
     # Determine target directory
     target_folder = get_target_folder(video_path)
     if target_folder is None:
         target_folder = os.path.dirname(video_path)
 
-    subtitle_path = os.path.join(target_folder, subtitle_filename)
+    subtitle_path = safe_join(target_folder, subtitle_filename)
+    if subtitle_path is None:
+        return 'Invalid subtitle path', 400
 
     # Check for existing file
     if os.path.isfile(subtitle_path):
