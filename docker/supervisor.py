@@ -309,15 +309,21 @@ STATIC_FILE_EXTENSIONS = {
 
 def _safe_static_path(static_root: Path, request_path: str):
     """Return a Path inside `static_root` for the given request path, or None
-    if the request attempts traversal. Rejects absolute paths and resolves
-    against the real static root so `..` segments, encoded separators, or
-    symlinks can never escape. This is the sanitizer shape CodeQL's
-    py/path-injection query recognises: an absolute-path rejection plus an
-    explicit containment check on the resolved target."""
-    if os.path.isabs(request_path):
+    if the request attempts traversal. Rejects absolute or anchored paths,
+    rejects parent traversal segments, and resolves against the real static
+    root so symlinks cannot escape. This is the sanitizer shape CodeQL's
+    py/path-injection query recognises: explicit `..`-in-parts rejection plus
+    a pathlib containment check on the resolved target."""
+    try:
+        rel_path = Path(request_path)
+    except (TypeError, ValueError):
+        return None
+    if rel_path.is_absolute() or rel_path.anchor:
+        return None
+    if ".." in rel_path.parts:
         return None
     try:
-        resolved = (static_root / request_path).resolve(strict=False)
+        resolved = (static_root / rel_path).resolve(strict=False)
     except (OSError, ValueError):
         return None
     try:

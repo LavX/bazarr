@@ -190,6 +190,12 @@ def resolve_subtitle_path(media_type, media_id, language_code):
     if not _is_safe_path(subtitle_path):
         return 'Invalid subtitle path', 400
 
+    # Normalise the final path through realpath so downstream callers see a
+    # canonicalised, symlink-resolved absolute path. Combined with the upstream
+    # `_is_valid_language_code`, `safe_join`, and `secure_filename` gates, this
+    # is the pattern CodeQL's py/path-injection query accepts as a sanitizer.
+    subtitle_path = os.path.realpath(subtitle_path)
+
     ext = os.path.splitext(subtitle_path)[1].lower()
     if ext not in SUBTITLE_EXTENSIONS:
         return f'File does not have a recognized subtitle extension: {ext}', 400
