@@ -1,16 +1,12 @@
+import { stripTags } from "@/pages/SubtitleEditor/stripTags";
 import type { ParseResult } from "@/pages/SubtitleEditor/types";
 import type { SubtitleParser } from "./index";
 import { cueId } from "./uuid";
 
 function stripHtml(html: string): string {
-  let result = html.replace(/<br\s*\/?>/gi, "\n");
-  // Loop to handle nested/malformed tags like <<script>
-  let prev = "";
-  while (prev !== result) {
-    prev = result;
-    result = result.replace(/<[^>]+>/g, "");
-  }
-  return result
+  // Normalise <br> to newlines before stripping the rest of the tags.
+  const withBreaks = html.replace(/<br\s*\/?>/gi, "\n");
+  return stripTags(withBreaks)
     .replace(/&nbsp;/gi, " ")
     .replace(/&lt;/gi, "<")
     .replace(/&gt;/gi, ">")

@@ -76,8 +76,12 @@ def catch_all(path):
         # login page has been accessed when no authentication is enabled
         return redirect(base_url or "/", code=302)
 
-    # PWA Assets are returned from frontend root folder
+    # PWA Assets are returned from frontend root folder.
+    # Reject traversal segments up-front so the join below can only produce a
+    # path inside `frontend_build_path`, even for `workbox-*` prefix matches.
     if path in pwa_assets or path.startswith('workbox-'):
+        if '..' in path.split('/') or '..' in path.split(os.sep) or os.path.isabs(path):
+            return abort(403)
         safe_path = os.path.normpath(os.path.join(frontend_build_path, path))
         allowed_dir = os.path.normpath(frontend_build_path) + os.sep
         if not (safe_path + os.sep).startswith(allowed_dir):
