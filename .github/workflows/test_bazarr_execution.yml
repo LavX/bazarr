@@ -1,6 +1,9 @@
 name: test_bazarr_execution
 on: workflow_dispatch
 
+permissions:
+  contents: read
+
 jobs:
   Test:
     runs-on: ubuntu-latest

@@ -16,6 +16,9 @@ on:
         default: ''
         type: string
 
+permissions:
+  contents: read
+
 env:
   REGISTRY: ghcr.io
   UI_DIRECTORY: ./frontend
