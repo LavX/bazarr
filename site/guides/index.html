@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Guides - Bazarr+</title>
+  <meta name="description" content="Setup guides for Bazarr+. Learn how to install, configure providers, set up AI translation, and migrate from upstream Bazarr.">
+  <link rel="canonical" href="https://lavx.github.io/bazarr/guides/">
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Guides - Bazarr+">
+  <meta property="og:description" content="Setup guides for Bazarr+. Learn how to install, configure providers, set up AI translation, and migrate from upstream Bazarr.">
+  <meta property="og:url" content="https://lavx.github.io/bazarr/guides/">
+  <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Guides - Bazarr+">
+  <meta name="twitter:description" content="Setup guides for Bazarr+. Learn how to install, configure providers, set up AI translation, and migrate from upstream Bazarr.">
+  <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
+
+  <!-- Geist font: async preload -->
+  <link rel="preload" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" as="style" crossorigin>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" media="print" onload="this.media='all'">
+  <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css"></noscript>
+
+  <link rel="icon" href="../screenshots/logo128.png" type="image/png">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+
+<a href="#main-content" class="skip-link">Skip to content</a>
+
+<!-- Grain overlay -->
+<svg class="grain" aria-hidden="true">
+  <filter id="grain-filter">
+    <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/>
+  </filter>
+  <rect width="100%" height="100%" filter="url(#grain-filter)"/>
+</svg>
+
+<!-- Ambient gradients -->
+<div class="ambient" aria-hidden="true"></div>
+
+<nav class="sticky-nav" aria-label="Site navigation">
+  <div class="container">
+    <img src="../screenshots/logo128.png" alt="Bazarr+" class="nav-logo" width="22" height="22">
+    <a href="../">Home</a>
+    <a href="../#comparison-heading">Compare</a>
+    <a href="../#quick-start">Install</a>
+    <a href="../#screenshots-heading">Screenshots</a>
+    <a href="../#faq-heading">FAQ</a>
+    <a href="./" class="nav-active">Guides</a>
+    <a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a>
+  </div>
+</nav>
+
+<main id="main-content" class="guide-page">
+  <div class="container">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <a href="../">Home</a><span class="sep">/</span><span>Guides</span>
+    </nav>
+    <h1>Guides</h1>
+
+    <div class="guide-grid">
+      <a href="getting-started.html" class="guide-card">
+        <div>
+          <div class="guide-card-title">Getting Started</div>
+          <div class="guide-card-desc">Install Bazarr+ with Docker, connect to Sonarr and Radarr, and configure your first subtitle providers.</div>
+        </div>
+        <span class="guide-card-arrow">Read guide &rarr;</span>
+      </a>
+
+      <a href="ai-translation.html" class="guide-card">
+        <div>
+          <div class="guide-card-title">AI Translation Setup</div>
+          <div class="guide-card-desc">Connect to OpenRouter, pick a model, and translate subtitles in bulk or one at a time from the editor.</div>
+        </div>
+        <span class="guide-card-arrow">Read guide &rarr;</span>
+      </a>
+
+      <a href="migration.html" class="guide-card">
+        <div>
+          <div class="guide-card-title">Migration from Upstream</div>
+          <div class="guide-card-desc">Switch from upstream Bazarr in five minutes. Same database, same config, nothing lost.</div>
+        </div>
+        <span class="guide-card-arrow">Read guide &rarr;</span>
+      </a>
+
+    </div>
+  </div>
+</main>
+
+<!-- Footer -->
+<footer>
+  <div class="container">
+    <div class="footer-inner">
+      <p class="footer-credit">Built by <a href="https://github.com/LavX" target="_blank" rel="noopener">LavX</a>. Based on <a href="https://github.com/morpheus65535/bazarr" target="_blank" rel="noopener">Bazarr</a> by morpheus65535.</p>
+      <ul class="footer-links">
+        <li><a href="./">Guides</a></li>
+        <li><a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a></li>
+        <li><a href="https://github.com/LavX/bazarr/issues" target="_blank" rel="noopener">Issues</a></li>
+        <li><a href="https://github.com/LavX/bazarr/wiki" target="_blank" rel="noopener">Wiki</a></li>
+      </ul>
+    </div>
+  </div>
+</footer>
+
+<script src="../js/site.js"></script>
+
+</body>
+</html>

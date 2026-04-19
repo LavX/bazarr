@@ -19,6 +19,7 @@ import {
   faChevronUp,
   faEllipsis,
   faPlay,
+  faStop,
   faTowerBroadcast,
   faTurnDown,
   faTurnUp,
@@ -233,7 +234,7 @@ const NotificationDrawer: FunctionComponent<NotificationDrawerProps> = ({
                         </Text>
                       </Group>
 
-                      <Collapse in={!collapsedSections[status]}>
+                      <Collapse expanded={!collapsedSections[status]}>
                         <Stack>
                           {grouped[status as string]
                             .slice()
@@ -349,7 +350,36 @@ const NotificationDrawer: FunctionComponent<NotificationDrawerProps> = ({
                                         </Tooltip>
                                       )}
                                       <Group gap={4} style={{ flexShrink: 0 }}>
-                                        {status === "pending" ? (
+                                        {status === "running" ? (
+                                          <Group gap={4} wrap="nowrap">
+                                            <TimeAgo
+                                              key={`job-timestamp-${job?.job_id}`}
+                                              date={
+                                                job?.last_run_time || new Date()
+                                              }
+                                              minPeriod={5}
+                                            />
+                                            <Tooltip label="Stop job">
+                                              <ActionIcon
+                                                variant="subtle"
+                                                color="red"
+                                                size="sm"
+                                                onClick={() =>
+                                                  job?.job_id &&
+                                                  debouncedActionOnJobs({
+                                                    id: job.job_id,
+                                                    action: "cancel",
+                                                  })
+                                                }
+                                              >
+                                                <FontAwesomeIcon
+                                                  icon={faStop}
+                                                  size="xs"
+                                                />
+                                              </ActionIcon>
+                                            </Tooltip>
+                                          </Group>
+                                        ) : status === "pending" ? (
                                           <Menu
                                             position="bottom-end"
                                             withArrow

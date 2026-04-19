@@ -154,6 +154,7 @@ const SettingsSubtitlesView: FunctionComponent = () => {
           label="Hearing-impaired subtitles extension"
           options={hiExtensionOptions}
           settingKey="settings-general-hi_extension"
+          allowDeselect={false}
         ></Selector>
         <Message>
           What file extension to use when saving hearing-impaired subtitles to

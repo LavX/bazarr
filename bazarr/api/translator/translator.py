@@ -90,6 +90,62 @@ class TranslatorJobs(Resource):
             logger.error(f"Error getting jobs: {e}")
             return {"error": str(e)}, 500
 
+    @authenticate
+    @api_ns_translator.doc(
+        responses={200: 'Success', 400: 'Bad Request', 503: 'Service Unavailable'}
+    )
+    def post(self):
+        """Submit a content translation job to the translator service"""
+        service_url = get_service_url()
+        if not service_url:
+            return {"error": "AI Subtitle Translator service URL not configured"}, 503
+
+        data = flask_request.get_json(silent=True) or {}
+        if not data.get("lines") or not data.get("targetLanguage"):
+            return {"error": "Missing required fields: lines, targetLanguage"}, 400
+
+        from subtitles.tools.translate.services.encryption import encrypt_api_key
+
+        api_key = settings.translator.openrouter_api_key
+        encryption_key = settings.translator.openrouter_encryption_key
+        if api_key and encryption_key:
+            try:
+                api_key = encrypt_api_key(api_key, encryption_key)
+            except ValueError:
+                pass
+
+        payload = {
+            "lines": data["lines"],
+            "sourceLanguage": data.get("sourceLanguage", ""),
+            "targetLanguage": data["targetLanguage"],
+            "title": data.get("title", ""),
+            "mediaType": data.get("mediaType", ""),
+            "config": {
+                "apiKey": api_key,
+                "model": settings.translator.openrouter_model,
+                "temperature": settings.translator.openrouter_temperature,
+            }
+        }
+
+        try:
+            response = requests.post(
+                f"{service_url}/api/v1/jobs/translate/content",
+                json=payload,
+                headers={"Content-Type": "application/json", **get_translator_auth_headers()},
+                timeout=30
+            )
+            if response.status_code == 200:
+                return response.json(), 200
+            else:
+                return {"error": f"Service returned {response.status_code}"}, 502
+        except requests.exceptions.ConnectionError:
+            return {"error": "Cannot connect to AI Subtitle Translator service"}, 503
+        except requests.exceptions.Timeout:
+            return {"error": "Service timeout"}, 503
+        except Exception as e:
+            logger.error(f"Error submitting translation job: {e}")
+            return {"error": str(e)}, 500
+
 
 @api_ns_translator.route('translator/jobs/<job_id>')
 class TranslatorJob(Resource):

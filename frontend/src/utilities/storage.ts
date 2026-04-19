@@ -15,5 +15,5 @@ export function useUpdateLocalStorage() {
 export function usePageSize() {
   const settings = useSystemSettings();
 
-  return settings.data?.general.page_size ?? 50;
+  return settings.data?.general?.page_size ?? 50;
 }

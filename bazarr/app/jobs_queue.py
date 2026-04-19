@@ -18,6 +18,11 @@ from app.config import settings
 bazarr_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 
 
+class JobCancelled(Exception):
+    """Raised when a running job is cancelled by the user."""
+    pass
+
+
 class Job:
     """
     Represents a job with details necessary for its identification and execution.
@@ -72,6 +77,7 @@ class Job:
         self.progress_max = progress_max
         self.progress_message = ""
         self.job_returned_value = job_returned_value
+        self.cancelled = False
 
     def __eq__(self, other):
         """
@@ -283,6 +289,8 @@ class JobsQueue:
         """
         for job in self.jobs_running_queue:
             if job.job_id == job_id:
+                if job.cancelled:
+                    raise JobCancelled(f"Job {job.job_name} ({job.job_id}) was cancelled")
                 payload = self._build_progress_payload(job, progress_value, progress_max, progress_message)
                 event_stream(type='jobs', action='update', payload=payload)
                 return True
@@ -468,6 +476,23 @@ class JobsQueue:
                     return True
         return False
 
+    def cancel_running_job(self, job_id: int) -> bool:
+        """
+        Requests cancellation of a running job. The job will be aborted on its next
+        progress update call.
+
+        :param job_id: The unique identifier of the job to cancel.
+        :type job_id: int
+        :return: True if the job was found and marked for cancellation, False otherwise.
+        :rtype: bool
+        """
+        for job in self.jobs_running_queue:
+            if job.job_id == job_id:
+                job.cancelled = True
+                logging.info(f"Job {job.job_name} ({job.job_id}) marked for cancellation")
+                return True
+        return False
+
     def force_start_pending_job(self, job_id: int) -> bool:
         """
         Forces the execution of a job currently in the pending queue. Only jobs with
@@ -592,6 +617,14 @@ class JobsQueue:
                 module = importlib.import_module(job.module)
             
             job.job_returned_value = getattr(module, job.func)(*job.args, **job.kwargs)
+        except JobCancelled:
+            logging.info(f"Job {job.job_name} ({job.job_id}) was cancelled by user")
+            job.status = 'completed'
+            job.progress_message = "Cancelled by user"
+            job.last_run_time = datetime.now()
+            self.jobs_running_queue.remove(job)
+            self.jobs_completed_queue.append(job)
+            return False
         except Exception as e:
             logging.exception(f"Exception raised while running function: {e}")
             job.status = 'failed'

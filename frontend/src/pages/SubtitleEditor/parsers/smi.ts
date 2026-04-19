@@ -1,15 +1,17 @@
 import type { ParseResult } from "@/pages/SubtitleEditor/types";
 import type { SubtitleParser } from "./index";
+import { cueId } from "./uuid";
 
 function stripHtml(html: string): string {
-  return html
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&amp;/gi, "&")
-    .trim();
+  // Normalise <br> to newlines, then let the browser's HTML parser handle
+  // tag removal and entity decoding. DOMParser is the CodeQL-recognised
+  // robust sanitizer for js/incomplete-multi-character-sanitization: no
+  // regex can survive nested/malformed tag bypasses, but a real HTML
+  // parser cannot be tricked. The result is only used for display text
+  // and character counts, never reinjected as HTML.
+  const withBreaks = html.replace(/<br\s*\/?>/gi, "\n");
+  const doc = new DOMParser().parseFromString(withBreaks, "text/html");
+  return (doc.body.textContent ?? "").replace(/\u00a0/g, " ").trim();
 }
 
 export const smiParser: SubtitleParser = {
@@ -61,7 +63,7 @@ export const smiParser: SubtitleParser = {
         i + 1 < syncs.length ? syncs[i + 1].startMs : start.startMs + 3000;
 
       cues.push({
-        id: crypto.randomUUID(),
+        id: cueId(),
         startMs: start.startMs,
         endMs,
         text: displayText,

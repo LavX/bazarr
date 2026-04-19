@@ -78,7 +78,7 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
 
         from api.subtitles.subtitles import postprocess_subtitles
         # Call postprocess_subtitles after translation (handles chmod, re-indexing, events)
-        postprocess_subtitles(dest_srt_file, video_path, media_type, metadata, sonarr_episode_id if media_type == 'series' else radarr_id)
+        postprocess_subtitles(dest_srt_file, video_path, media_type, metadata, sonarr_episode_id if media_type == 'episode' else radarr_id)
 
         # Get current job name (which batch.py already set with title) and mark as done
         current_name = jobs_queue.get_job_name(job_id)

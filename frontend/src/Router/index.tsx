@@ -58,6 +58,9 @@ const HistoryStats = lazy(
 );
 const SystemStatusView = lazy(() => import("@/pages/System/Status"));
 const SubtitleEditor = lazy(() => import("@/pages/SubtitleEditor"));
+const SubtitleEditorPage = lazy(
+  () => import("@/pages/SubtitleEditor/EditorPage"),
+);
 
 function useRoutes(): CustomRouteObject[] {
   const { data } = useBadges();
@@ -138,7 +141,7 @@ function useRoutes(): CustomRouteObject[] {
           },
           {
             icon: faExclamationTriangle,
-            name: "Wanted",
+            name: "Missing",
             path: "wanted",
             hidden: !sonarr && !radarr,
             children: [
@@ -160,7 +163,7 @@ function useRoutes(): CustomRouteObject[] {
           },
           {
             icon: faFileExcel,
-            name: "Blacklist",
+            name: "Excluded",
             path: "blacklist",
             hidden: !sonarr && !radarr,
             children: [
@@ -184,26 +187,7 @@ function useRoutes(): CustomRouteObject[] {
             path: "settings",
             children: [
               {
-                path: "general",
-                name: "General",
-                element: <SettingsGeneralView></SettingsGeneralView>,
-              },
-              {
-                path: "languages",
-                name: "Languages",
-                element: <SettingsLanguagesView></SettingsLanguagesView>,
-              },
-              {
-                path: "providers",
-                name: "Providers",
-                element: <SettingsProvidersView></SettingsProvidersView>,
-              },
-              {
-                path: "subtitles",
-                name: "Subtitles",
-                element: <SettingsSubtitlesView></SettingsSubtitlesView>,
-              },
-              {
+                divider: "Connections",
                 path: "sonarr",
                 name: "Sonarr",
                 element: <SettingsSonarrView></SettingsSonarrView>,
@@ -219,9 +203,31 @@ function useRoutes(): CustomRouteObject[] {
                 element: <SettingsPlexView></SettingsPlexView>,
               },
               {
+                divider: "Subtitles",
+                path: "languages",
+                name: "Languages",
+                element: <SettingsLanguagesView></SettingsLanguagesView>,
+              },
+              {
+                path: "providers",
+                name: "Subtitle Sources",
+                element: <SettingsProvidersView></SettingsProvidersView>,
+              },
+              {
+                path: "subtitles",
+                name: "Subtitles",
+                element: <SettingsSubtitlesView></SettingsSubtitlesView>,
+              },
+              {
                 path: "translator",
                 name: "AI Translator",
                 element: <SettingsTranslatorView></SettingsTranslatorView>,
+              },
+              {
+                divider: "Application",
+                path: "general",
+                name: "General",
+                element: <SettingsGeneralView></SettingsGeneralView>,
               },
               {
                 path: "notifications",
@@ -259,7 +265,7 @@ function useRoutes(): CustomRouteObject[] {
               },
               {
                 path: "providers",
-                name: "Providers",
+                name: "Provider Status",
                 badge: data?.providers,
                 element: <SystemProvidersView></SystemProvidersView>,
               },
@@ -297,6 +303,15 @@ function useRoutes(): CustomRouteObject[] {
             element: (
               <Lazy>
                 <SubtitleEditor></SubtitleEditor>
+              </Lazy>
+            ),
+          },
+          {
+            path: "subtitles/edit/:mediaType/:mediaId/:language",
+            hidden: true,
+            element: (
+              <Lazy>
+                <SubtitleEditorPage></SubtitleEditorPage>
               </Lazy>
             ),
           },

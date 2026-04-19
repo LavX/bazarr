@@ -2,6 +2,7 @@ import BaseApi from "./base";
 import client from "./client";
 
 export interface SubtitleContentResponse {
+  exists?: boolean;
   content: string;
   encoding: string;
   format: string;
@@ -68,6 +69,7 @@ export interface BatchResponse {
   queued: number;
   skipped: number;
   errors: string[];
+  job_id?: number;
 }
 
 class SubtitlesApi extends BaseApi {
@@ -132,6 +134,55 @@ class SubtitlesApi extends BaseApi {
     const base = mediaType === "episode" ? "episodes" : "movies";
     const url = `/${base}/${mediaId}/subtitles/${encodeURIComponent(language)}/content`;
     const response = await client.axios.get<SubtitleContentResponse>(url);
+    return {
+      data: response.data,
+      etag: response.headers["etag"] as string | undefined,
+    };
+  }
+
+  async saveContent(
+    mediaType: string,
+    mediaId: number,
+    language: string,
+    content: string,
+    encoding: string,
+    etag?: string,
+  ) {
+    const base = mediaType === "episode" ? "episodes" : "movies";
+    const url = `/${base}/${mediaId}/subtitles/${encodeURIComponent(language)}/content`;
+    const headers: Record<string, string> = {};
+    if (etag) {
+      headers["If-Match"] = etag;
+    }
+    const response = await client.axios.put(
+      url,
+      { content, encoding },
+      { headers },
+    );
+    return { etag: response.headers["etag"] as string | undefined };
+  }
+
+  async createSubtitle(
+    mediaType: string,
+    mediaId: number,
+    content: string,
+    language: string,
+    format: string,
+    forced: boolean,
+    hi: boolean,
+  ) {
+    const base = mediaType === "episode" ? "episodes" : "movies";
+    const url = `/${base}/${mediaId}/subtitles`;
+    const response = await client.axios.post<{
+      path: string;
+      language: string;
+    }>(url, {
+      content,
+      language,
+      format,
+      forced,
+      hi,
+    });
     return response.data;
   }
 

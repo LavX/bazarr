@@ -1,7 +1,7 @@
 @layer mantine {
   .root {
     border-radius: var(--bz-radius-sm);
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
@@ -47,7 +47,7 @@
     // Disabled variant (ghost dim): embedded/disabled subtitles
     &[data-variant="disabled"] {
       background: rgba(255, 255, 255, 0.03);
-      color: #6c6d85;
+      color: #8a8ba3;
       border: 1px solid rgba(255, 255, 255, 0.04);
 
       &:hover {

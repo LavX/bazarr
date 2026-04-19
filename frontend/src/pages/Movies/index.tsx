@@ -28,7 +28,7 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
-import { uniqBy, uniqueId } from "lodash";
+import { uniqBy } from "lodash";
 import { useMovieModification, useMoviesPagination } from "@/apis/hooks";
 import { useInstanceName } from "@/apis/hooks/site";
 import { useUpgradableItems } from "@/apis/hooks/subtitles";
@@ -244,7 +244,7 @@ const MovieView: FunctionComponent = () => {
                 <Badge
                   mr="xs"
                   color="yellow"
-                  key={uniqueId(`${BuildKey(v.code2, v.hi, v.forced)}_`)}
+                  key={BuildKey(v.code2, v.hi, v.forced)}
                 >
                   <Language.Text value={v}></Language.Text>
                 </Badge>
@@ -430,41 +430,50 @@ const MovieView: FunctionComponent = () => {
           Translate
         </Toolbox.Button>
 
-        <Toolbox.Button
-          icon={faHardDrive}
-          onClick={() =>
-            modals.openContextModal(BatchModConfirmModal, {
-              items: toBatchItems(),
-              action: "scan-disk" as BatchAction,
-            })
-          }
-        >
-          Scan Disk
-        </Toolbox.Button>
-
-        <Toolbox.Button
-          icon={faMagnifyingGlass}
-          onClick={() =>
-            modals.openContextModal(BatchModConfirmModal, {
-              items: toBatchItems(),
-              action: "search-missing" as BatchAction,
-            })
-          }
-        >
-          Search Missing
-        </Toolbox.Button>
-
-        <Toolbox.Button
-          icon={faArrowUp}
-          onClick={() =>
-            modals.openContextModal(BatchModConfirmModal, {
-              items: toBatchItems(),
-              action: "upgrade" as BatchAction,
-            })
-          }
-        >
-          Upgrade
-        </Toolbox.Button>
+        <Menu shadow="md" width={220}>
+          <Menu.Target>
+            <div>
+              <Toolbox.Button icon={faEllipsisVertical}>More</Toolbox.Button>
+            </div>
+          </Menu.Target>
+          <Menu.Dropdown>
+            <Menu.Item
+              leftSection={<FontAwesomeIcon icon={faHardDrive} size="sm" />}
+              onClick={() =>
+                modals.openContextModal(BatchModConfirmModal, {
+                  items: toBatchItems(),
+                  action: "scan-disk" as BatchAction,
+                })
+              }
+            >
+              Scan Disk
+            </Menu.Item>
+            <Menu.Item
+              leftSection={
+                <FontAwesomeIcon icon={faMagnifyingGlass} size="sm" />
+              }
+              onClick={() =>
+                modals.openContextModal(BatchModConfirmModal, {
+                  items: toBatchItems(),
+                  action: "search-missing" as BatchAction,
+                })
+              }
+            >
+              Search Missing
+            </Menu.Item>
+            <Menu.Item
+              leftSection={<FontAwesomeIcon icon={faArrowUp} size="sm" />}
+              onClick={() =>
+                modals.openContextModal(BatchModConfirmModal, {
+                  items: toBatchItems(),
+                  action: "upgrade" as BatchAction,
+                })
+              }
+            >
+              Upgrade
+            </Menu.Item>
+          </Menu.Dropdown>
+        </Menu>
       </Group>
     );
   }, [selections, modals]);

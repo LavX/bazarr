@@ -16,6 +16,9 @@ on:
         default: ''
         type: string
 
+permissions:
+  contents: read
+
 env:
   REGISTRY: ghcr.io
   UI_DIRECTORY: ./frontend
@@ -26,6 +29,8 @@ jobs:
   # ==========================================================================
   build-frontend:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -46,7 +51,7 @@ jobs:
         working-directory: ${{ env.UI_DIRECTORY }}
 
       - name: Upload Frontend Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: frontend-build
           path: ${{ env.UI_DIRECTORY }}/build
@@ -84,7 +89,7 @@ jobs:
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
@@ -203,7 +208,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
           body: |

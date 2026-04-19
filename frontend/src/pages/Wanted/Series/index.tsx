@@ -237,6 +237,7 @@ const WantedSeriesView: FunctionComponent = () => {
       missingLangOptions={langOptions}
       dataFilter={hasActiveFilter ? dataFilter : undefined}
       searchAll={() => mutateAsync({ action: "search-wanted" })}
+      scanAll={() => mutateAsync({ action: "scan-wanted" })}
       getWantedItem={getWantedItem}
     />
   );

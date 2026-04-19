@@ -76,9 +76,17 @@ def catch_all(path):
         # login page has been accessed when no authentication is enabled
         return redirect(base_url or "/", code=302)
 
-    # PWA Assets are returned from frontend root folder
+    # PWA Assets are returned from frontend root folder.
+    # Uses the CodeQL-documented "GOOD" pattern from py/path-injection:
+    # normpath(join(base, name)) + startswith(base). Pre-rejects absolute
+    # paths because os.path.join(base, '/abs') would silently drop the base.
     if path in pwa_assets or path.startswith('workbox-'):
-        return send_file(os.path.join(frontend_build_path, path))
+        if os.path.isabs(path):
+            return abort(403)
+        fullpath = os.path.normpath(os.path.join(frontend_build_path, path))
+        if not fullpath.startswith(frontend_build_path):
+            return abort(403)
+        return send_file(fullpath)
 
     auth = True
     if settings.auth.type == 'basic':

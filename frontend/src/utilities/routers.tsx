@@ -25,20 +25,20 @@ export function usePrompt(
   }, [blocker]);
 
   const handleDiscard = useCallback(() => {
-    modals.closeAll();
     if (blocker.state === "blocked") {
       blocker.proceed?.();
     }
+    modals.closeAll();
   }, [blocker]);
 
   const handleSaveAndLeave = useCallback(async () => {
     if (onSaveAndLeave) {
       await onSaveAndLeave();
     }
-    modals.closeAll();
     if (blocker.state === "blocked") {
       blocker.proceed?.();
     }
+    modals.closeAll();
   }, [blocker, onSaveAndLeave]);
 
   useEffect(() => {
@@ -52,10 +52,11 @@ export function usePrompt(
         closeOnEscape: true,
         closeOnClickOutside: false,
         onClose: () => {
+          // Only reset if still blocked (not if proceed was already called)
           if (blocker.state === "blocked") {
             blocker.reset?.();
+            requestAnimationFrame(() => previousFocus.current?.focus());
           }
-          requestAnimationFrame(() => previousFocus.current?.focus());
         },
         children: (
           <Stack>

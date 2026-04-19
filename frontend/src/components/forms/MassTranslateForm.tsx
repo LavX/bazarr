@@ -372,14 +372,14 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
           {...form.getInputProps("targetLanguage")}
         />
 
+        <Divider />
+
         <Alert variant="light" color="blue">
           <Text size="xs">
-            Note: Each item must have an existing subtitle in the source
-            language. Items without matching subtitles will be skipped.
+            Each item must have an existing subtitle in the source language.
+            Items without matching subtitles will be skipped.
           </Text>
         </Alert>
-
-        <Divider />
 
         <Group justify="space-between">
           <Button variant="default" onClick={() => modals.closeSelf()}>

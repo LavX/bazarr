@@ -68,7 +68,7 @@ body::before {
   }
 }
 
-// Ambient atmospheric glow (z-index above content backgrounds, below grain)
+// Ambient atmospheric glow
 body::after {
   content: "";
   position: fixed;
@@ -102,6 +102,13 @@ body::after {
   z-index: 1;
 }
 
+// Mantine portal node sits outside #root and can add layout height,
+// causing a visible strip below the main content area.
+[data-mantine-shared-portal-node] {
+  position: fixed;
+  z-index: 10001;
+}
+
 /* Shared tokens (scheme-independent) */
 :root {
   /* Border radius scale */
@@ -126,7 +133,7 @@ body::after {
 }
 
 :root[data-mantine-color-scheme="dark"] {
-  --bz-surface-ground: #0c0b1a;
+  --bz-surface-ground: #121125;
   --bz-surface-base: #121125;
   --bz-surface-raised: #1a1a2e;
   --bz-surface-card: #22223a;
@@ -141,8 +148,8 @@ body::after {
   /* Text hierarchy */
   --bz-text-primary: #e8e8f0;
   --bz-text-secondary: #b8b8cc;
-  --bz-text-tertiary: #8e8fa3;
-  --bz-text-disabled: #6c6d85;
+  --bz-text-tertiary: #9e9fb5;
+  --bz-text-disabled: #8a8ba3;
 
   /* Border opacity scale */
   --bz-border-divider: rgba(255, 255, 255, 0.04);
@@ -186,9 +193,14 @@ body::after {
 :global {
   .mantine-AppShell-main {
     background: var(--bz-surface-base);
-    margin: 0 8px 8px 0;
-    border-radius: var(--bz-radius-xl);
+    margin: 0 8px 0 0;
+    border-radius: var(--bz-radius-xl) var(--bz-radius-xl) 0 0;
     border: 1px solid var(--bz-border-card);
+    border-bottom: none;
+  }
+
+  .mantine-AppShell-root {
+    background: var(--bz-surface-ground);
   }
 
   .mantine-AppShell-navbar {
@@ -200,10 +212,6 @@ body::after {
     background: transparent !important;
     border: none !important;
     padding: 8px !important;
-  }
-
-  .mantine-AppShell-root {
-    background: var(--bz-surface-ground);
   }
 }
 

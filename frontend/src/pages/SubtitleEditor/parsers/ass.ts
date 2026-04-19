@@ -1,5 +1,6 @@
 import type { Cue, ParseResult } from "@/pages/SubtitleEditor/types";
 import type { SubtitleParser } from "./index";
+import { cueId } from "./uuid";
 
 function parseTimestamp(raw: string): number {
   // H:MM:SS.cc (centiseconds)
@@ -122,7 +123,7 @@ export const assParser: SubtitleParser = {
         endColIdx >= 0 && endColIdx < parts.length ? parts[endColIdx] : "";
 
       cues.push({
-        id: crypto.randomUUID(),
+        id: cueId(),
         startMs: parseTimestamp(startStr),
         endMs: parseTimestamp(endStr),
         text: assTextToDisplay(rawCueText),

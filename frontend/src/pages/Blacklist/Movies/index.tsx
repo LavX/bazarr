@@ -17,7 +17,7 @@ const BlacklistMoviesView: FunctionComponent = () => {
 
   const { mutateAsync } = useMovieDeleteBlacklist();
 
-  useDocumentTitle(`Movies Blacklist - ${useInstanceName()}`);
+  useDocumentTitle(`Movies Excluded - ${useInstanceName()}`);
 
   return (
     <Container fluid px={0}>

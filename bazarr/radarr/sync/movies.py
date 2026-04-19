@@ -11,6 +11,7 @@ from app.config import settings
 from app.database import TableMovies, TableLanguagesProfiles, database, insert, update, delete, select, get_exclusion_clause
 from app.event_handler import event_stream
 from app.jobs_queue import jobs_queue
+from app.notifier import send_notifications_movie
 from constants import MINIMUM_VIDEO_SIZE
 from radarr.rootfolder import check_radarr_rootfolder
 from subtitles.indexer.movies import store_subtitles_movie
@@ -341,6 +342,8 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False):
                                                    kwargs={'no': movie_id},
                                                    is_signalr=is_signalr)
             else:
+                if is_signalr and settings.general.notify_if_nothing_is_missing_for_signalr_event:
+                    send_notifications_movie(movie_id, "There are no missing subtitles in this movie.")
                 logging.debug(f'BAZARR no missing subtitles for this movie: {movie["title"]} ({movie["year"]})')
         else:
             logging.debug(f'BAZARR cannot find this file yet (Radarr may be slow to import movie between disks?). '

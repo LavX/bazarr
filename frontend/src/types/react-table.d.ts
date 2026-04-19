@@ -41,7 +41,6 @@ declare module "react-table" {
     canSelect?: (item: D) => boolean;
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-empty-interface
   interface CustomTableProps<
     D extends Record<string, unknown>,
   > extends useSelectionProps<D> {}
@@ -119,7 +118,6 @@ declare module "react-table" {
       // UseResizeColumnsColumnProps<D>,
       UseSortByColumnProps<D> {}
 
-  // eslint-disable-next-line @typescript-eslint/no-empty-interface
   export interface Cell<
     D extends Record<string, unknown> = Record<string, unknown>,
   > extends UseGroupByCellProps<D> {}

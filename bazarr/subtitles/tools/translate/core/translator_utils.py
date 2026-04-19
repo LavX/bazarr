@@ -55,7 +55,7 @@ def convert_language_codes(to_lang, forced=False, hi=False):
 
 def create_process_result(message, video_path, orig_to_lang, forced, hi, dest_srt_file, media_type):
     """Create a ProcessSubtitlesResult object with common parameters."""
-    if media_type == 'series':
+    if media_type == 'episode':
         prr = path_mappings.path_replace_reverse
         score = int((settings.translator.default_score / 100) * MAX_SCORES['episode'])
     else:

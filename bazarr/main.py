@@ -38,7 +38,7 @@ if args.no_update or not settings.general.auto_update:
 else:
     # we want to update to the latest version before loading too much stuff. This should prevent deadlock when
     # there's missing embedded packages after a commit
-    check_if_new_update(startup=True)
+    check_if_new_update()
 
 from app.database import (System, database, update, migrate_db, create_db_revision, upgrade_languages_profile_values,
                           fix_languages_profiles_with_duplicate_ids)  # noqa E402

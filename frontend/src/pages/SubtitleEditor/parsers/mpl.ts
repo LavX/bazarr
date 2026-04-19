@@ -1,5 +1,6 @@
 import type { ParseResult } from "@/pages/SubtitleEditor/types";
 import type { SubtitleParser } from "./index";
+import { cueId } from "./uuid";
 
 export const mplParser: SubtitleParser = {
   parse(content: string): ParseResult {
@@ -23,7 +24,7 @@ export const mplParser: SubtitleParser = {
       const displayText = rawText.replace(/\|/g, "\n");
 
       cues.push({
-        id: crypto.randomUUID(),
+        id: cueId(),
         startMs: parseInt(startDs, 10) * 100,
         endMs: parseInt(endDs, 10) * 100,
         text: displayText,

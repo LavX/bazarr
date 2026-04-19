@@ -80,6 +80,7 @@ def provider_throttle_map():
         "opensubtitlescom": {
             TooManyRequests: (datetime.timedelta(minutes=1), "1 minute"),
             DownloadLimitExceeded: (datetime.timedelta(hours=6), "6 hours"),
+            ProviderError: (datetime.timedelta(minutes=1), "1 minute"),
         },
         "addic7ed": {
             DownloadLimitExceeded: (datetime.timedelta(hours=3), "3 hours"),
@@ -371,6 +372,7 @@ def get_providers_auth():
         },
         "subdl": {
             'api_key': settings.subdl.api_key,
+            'anime_mode': settings.subdl.anime_mode,
         },
         'turkcealtyaziorg': {
             'cookies': settings.turkcealtyaziorg.cookies,
@@ -379,11 +381,17 @@ def get_providers_auth():
         'subsource': {
             'api_key': settings.subsource.apikey,
         },
+        'subsarr': {
+            'base_url': settings.subsarr.base_url,
+        },
         'animesubinfo': {},
         'subx':
             {
                 'api_key': settings.subx.api_key,
-            }
+            },
+        'subsro': {
+            'api_key': settings.subsro.api_key,
+        }
     }
 
 

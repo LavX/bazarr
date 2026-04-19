@@ -117,8 +117,15 @@ export function useTranslatorJobs(enabled = true) {
         await client.axios.get<TranslatorJobsResponse>("/translator/jobs");
       return response.data;
     },
-    // Stop polling on error to avoid spamming the console
-    refetchInterval: (query) => (query.state.error ? false : 5000),
+    // Adaptive polling: fast (5s) when jobs are active, slow (30s) when idle
+    refetchInterval: (query) => {
+      if (query.state.error) return false;
+      const jobs = query.state.data?.jobs;
+      const hasActive = jobs?.some(
+        (j) => j.status === "queued" || j.status === "processing",
+      );
+      return hasActive ? 5000 : 30000;
+    },
     retry: false,
     enabled,
     staleTime: 2000,

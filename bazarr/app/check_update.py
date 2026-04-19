@@ -93,12 +93,7 @@ def check_releases(job_id=None, startup=False, wait_for_completion=False):
         jobs_queue.update_job_name(job_id=job_id, new_job_name="Updated Release Info")
 
 
-def check_if_new_update(startup=False, job_id=None, wait_for_completion=False):
-    if not startup and not job_id:
-        jobs_queue.add_job_from_function("Checking for Bazarr update", is_progress=False,
-                                         wait_for_completion=wait_for_completion)
-        return
-
+def check_if_new_update():
     # Skip auto-update when running from source (no BAZARR_VERSION set)
     bazarr_version = os.environ.get("BAZARR_VERSION", "")
     if not bazarr_version:
@@ -112,8 +107,6 @@ def check_if_new_update(startup=False, job_id=None, wait_for_completion=False):
         use_prerelease = True
     else:
         logging.error(f'BAZARR unknown branch provided to updater: {settings.general.branch}')
-        if job_id:
-            jobs_queue.update_job_name(job_id=job_id, new_job_name="Failed to check for Bazarr update")
         return
     logging.debug(f'BAZARR updater is using {settings.general.branch} branch')
 
@@ -168,8 +161,6 @@ def check_if_new_update(startup=False, job_id=None, wait_for_completion=False):
             logging.debug('BAZARR no release found')
     else:
         logging.debug('BAZARR --no_update have been used as an argument')
-    if job_id:
-        jobs_queue.update_job_name(job_id=job_id, new_job_name="Checked for Bazarr update")
 
 
 def download_release(url):

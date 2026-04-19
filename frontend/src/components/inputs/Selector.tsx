@@ -42,7 +42,7 @@ export interface GroupedSelectorOptions<T> {
 
 export type GroupedSelectorProps<T> = Override<
   {
-    options: ComboboxItemGroup[];
+    options: ComboboxItemGroup<string | ComboboxItem>[];
     getkey?: (value: T) => string;
   },
   Omit<SelectProps, "data">

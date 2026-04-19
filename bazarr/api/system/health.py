@@ -2,7 +2,7 @@
 
 from flask_restx import Resource, Namespace
 
-from utilities.health import get_health_issues
+from utilities.health import check_health, get_health_issues
 
 from ..utils import authenticate
 
@@ -18,3 +18,12 @@ class SystemHealth(Resource):
     def get(self):
         """List health issues"""
         return {'data': get_health_issues()}
+
+    @authenticate
+    @api_ns_system_health.doc(parser=None)
+    @api_ns_system_health.response(204, 'Success')
+    @api_ns_system_health.response(401, 'Not Authenticated')
+    def post(self):
+        """Re-check health issues"""
+        check_health(wait_for_completion=True)
+        return '', 204

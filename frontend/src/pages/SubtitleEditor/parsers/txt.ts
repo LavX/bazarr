@@ -1,5 +1,6 @@
 import type { ParseResult } from "@/pages/SubtitleEditor/types";
 import type { SubtitleParser } from "./index";
+import { cueId } from "./uuid";
 
 function parseTimestampToMs(h: string, m: string, s: string): number {
   return (
@@ -37,7 +38,7 @@ export const txtParser: SubtitleParser = {
         const displayText = cueText.replace(/\|/g, "\n");
 
         cues.push({
-          id: crypto.randomUUID(),
+          id: cueId(),
           startMs,
           endMs: startMs + 3000,
           text: displayText,
@@ -60,7 +61,7 @@ export const txtParser: SubtitleParser = {
         const startMs = parseTimestampToMs(h, m, s);
 
         cues.push({
-          id: crypto.randomUUID(),
+          id: cueId(),
           startMs,
           endMs: startMs + 3000,
           text: cueText,

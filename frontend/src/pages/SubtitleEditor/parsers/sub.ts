@@ -1,5 +1,6 @@
 import type { ParseResult } from "@/pages/SubtitleEditor/types";
 import type { SubtitleParser } from "./index";
+import { cueId } from "./uuid";
 
 const DEFAULT_FPS = 23.976;
 
@@ -26,7 +27,7 @@ export const subParser: SubtitleParser = {
       const displayText = rawText.replace(/\|/g, "\n");
 
       cues.push({
-        id: crypto.randomUUID(),
+        id: cueId(),
         startMs: framesToMs(parseInt(startFrame, 10), DEFAULT_FPS),
         endMs: framesToMs(parseInt(endFrame, 10), DEFAULT_FPS),
         text: displayText,

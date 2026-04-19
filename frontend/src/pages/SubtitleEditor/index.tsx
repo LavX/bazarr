@@ -25,11 +25,17 @@ function formatFileSize(bytes: number): string {
 export default function SubtitleEditor() {
   const { mediaType, mediaId, language } = useParams();
 
-  const { data, isLoading, error } = useSubtitleContent(
+  const {
+    data: rawData,
+    isLoading,
+    error,
+  } = useSubtitleContent(
     mediaType,
     mediaId ? Number(mediaId) : undefined,
     language,
   );
+
+  const data = rawData?.data;
 
   const parseResult = useMemo<ParseResult | null>(() => {
     if (!data) return null;

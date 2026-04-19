@@ -1,6 +1,6 @@
 import { FunctionComponent, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
-import { Badge, MantineColor, Tooltip } from "@mantine/core";
+import { Badge, MantineColor, Tooltip, UnstyledButton } from "@mantine/core";
 import { useEpisodeSubtitleModification } from "@/apis/hooks";
 import Language from "@/components/bazarr/Language";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
@@ -45,6 +45,12 @@ export const Subtitle: FunctionComponent<Props> = ({
     }
   }, [disabled, missing, opened]);
 
+  const badgeTooltip = useMemo(() => {
+    if (missing) return "Missing subtitle";
+    if (disabled) return "Embedded subtitle";
+    return "Available subtitle";
+  }, [missing, disabled]);
+
   const selections = useMemo<FormType.ModifySubtitle[]>(() => {
     const list: FormType.ModifySubtitle[] = [];
 
@@ -68,15 +74,27 @@ export const Subtitle: FunctionComponent<Props> = ({
     [availableSubtitles],
   );
 
-  const ctx = (
+  const badgeEl = (
     <Badge variant={variant}>
       <Language.Text value={subtitle} long={false}></Language.Text>
     </Badge>
   );
 
   if (disabled && !missing) {
-    return <Tooltip.Floating label="Embedded Subtitle">{ctx}</Tooltip.Floating>;
+    return (
+      <Tooltip.Floating label={badgeTooltip}>
+        <UnstyledButton
+          aria-label={`${subtitle.name || subtitle.code2} (embedded)`}
+          tabIndex={-1}
+        >
+          {badgeEl}
+        </UnstyledButton>
+      </Tooltip.Floating>
+    );
   }
+
+  // Interactive badges: no Tooltip wrapper, as it breaks Menu.Target click handling
+  const ctx = badgeEl;
 
   return (
     <SubtitleToolsMenu
@@ -94,6 +112,10 @@ export const Subtitle: FunctionComponent<Props> = ({
         if (action === "view") {
           navigate(
             `/subtitles/preview/episode/${episodeId}/${encodeURIComponent(buildLanguageKey(subtitle))}`,
+          );
+        } else if (action === "edit") {
+          navigate(
+            `/subtitles/edit/episode/${episodeId}/${encodeURIComponent(buildLanguageKey(subtitle))}`,
           );
         } else if (action === "search") {
           await download.mutateAsync({

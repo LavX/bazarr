@@ -1,5 +1,6 @@
 import type { ParseResult } from "@/pages/SubtitleEditor/types";
 import type { SubtitleParser } from "./index";
+import { cueId } from "./uuid";
 
 function parseTimestamp(raw: string): number {
   // HH:MM:SS.mmm or MM:SS.mmm
@@ -98,7 +99,7 @@ export const vttParser: SubtitleParser = {
       if (!cueText.trim() && startMs === 0 && endMs === 0) continue;
 
       cues.push({
-        id: crypto.randomUUID(),
+        id: cueId(),
         startMs,
         endMs,
         text: cueText,

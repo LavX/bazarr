@@ -3,8 +3,8 @@ import { Divider, List, Menu, MenuProps, ScrollArea } from "@mantine/core";
 import {
   faAlignJustify,
   faClock,
+  faClosedCaptioning,
   faCode,
-  faDeaf,
   faExchangeAlt,
   faEye,
   faFaceGrinStars,
@@ -13,6 +13,7 @@ import {
   faLanguage,
   faMagic,
   faPaintBrush,
+  faPencil,
   faPlay,
   faSearch,
   faTextHeight,
@@ -41,90 +42,115 @@ export interface ToolOptions {
   }>;
 }
 
-export function useTools() {
-  return useMemo<ToolOptions[]>(
+export interface ToolGroup {
+  label: string;
+  tools: ToolOptions[];
+}
+
+export function useToolGroups() {
+  return useMemo<ToolGroup[]>(
     () => [
       {
-        key: "sync",
-        icon: faPlay,
-        name: "Sync...",
-        modal: SyncSubtitleModal,
+        label: "Sync & Timing",
+        tools: [
+          {
+            key: "sync",
+            icon: faPlay,
+            name: "Sync...",
+            modal: SyncSubtitleModal,
+          },
+          {
+            key: "change_frame_rate",
+            icon: faFilm,
+            name: "Change Frame Rate...",
+            modal: FrameRateModal,
+          },
+          {
+            key: "adjust_time",
+            icon: faClock,
+            name: "Adjust Times...",
+            modal: TimeOffsetModal,
+          },
+          {
+            key: "two_point_fit",
+            icon: faAlignJustify,
+            name: "Two-Point Fit...",
+            modal: TwoPointFitModal,
+          },
+        ],
       },
       {
-        key: "remove_HI",
-        icon: faDeaf,
-        name: "Remove HI Tags",
+        label: "Cleanup",
+        tools: [
+          {
+            key: "remove_HI",
+            icon: faClosedCaptioning,
+            name: "Remove HI Tags",
+          },
+          {
+            key: "remove_tags",
+            icon: faCode,
+            name: "Remove Style Tags",
+          },
+          {
+            key: "emoji",
+            icon: faFaceGrinStars,
+            name: "Remove Emoji",
+          },
+          {
+            key: "OCR_fixes",
+            icon: faImage,
+            name: "OCR Fixes",
+          },
+          {
+            key: "common",
+            icon: faMagic,
+            name: "Common Fixes",
+          },
+          {
+            key: "fix_uppercase",
+            icon: faTextHeight,
+            name: "Fix Uppercase",
+          },
+          {
+            key: "reverse_rtl",
+            icon: faExchangeAlt,
+            name: "Reverse RTL",
+          },
+        ],
       },
       {
-        key: "remove_tags",
-        icon: faCode,
-        name: "Remove Style Tags",
-      },
-      {
-        key: "emoji",
-        icon: faFaceGrinStars,
-        name: "Remove Emoji",
-      },
-      {
-        key: "OCR_fixes",
-        icon: faImage,
-        name: "OCR Fixes",
-      },
-      {
-        key: "common",
-        icon: faMagic,
-        name: "Common Fixes",
-      },
-      {
-        key: "fix_uppercase",
-        icon: faTextHeight,
-        name: "Fix Uppercase",
-      },
-      {
-        key: "reverse_rtl",
-        icon: faExchangeAlt,
-        name: "Reverse RTL",
-      },
-      {
-        key: "add_color",
-        icon: faPaintBrush,
-        name: "Add Color...",
-        modal: ColorToolModal,
-      },
-      {
-        key: "change_frame_rate",
-        icon: faFilm,
-        name: "Change Frame Rate...",
-        modal: FrameRateModal,
-      },
-      {
-        key: "adjust_time",
-        icon: faClock,
-        name: "Adjust Times...",
-        modal: TimeOffsetModal,
-      },
-      {
-        key: "two_point_fit",
-        icon: faAlignJustify,
-        name: "Two-Point Fit...",
-        modal: TwoPointFitModal,
-      },
-      {
-        key: "translation",
-        icon: faLanguage,
-        name: "Translate...",
-        modal: TranslationModal,
+        label: "Style & Language",
+        tools: [
+          {
+            key: "add_color",
+            icon: faPaintBrush,
+            name: "Add Color...",
+            modal: ColorToolModal,
+          },
+          {
+            key: "translation",
+            icon: faLanguage,
+            name: "Translate...",
+            modal: TranslationModal,
+          },
+        ],
       },
     ],
     [],
   );
 }
 
+export function useTools() {
+  const groups = useToolGroups();
+  return useMemo<ToolOptions[]>(() => groups.flatMap((g) => g.tools), [groups]);
+}
+
 interface Props {
   selections: FormType.ModifySubtitle[];
   children?: ReactElement;
   menu?: Omit<MenuProps, "children">;
-  onAction?: (action: "delete" | "search" | "view") => void;
+  onAction?: (action: "delete" | "search" | "view" | "edit") => void;
   // For missing subtitle translation
   missingLanguage?: Subtitle;
   translationSources?: Subtitle[];
@@ -161,7 +187,7 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
     [mutateAsync, selections],
   );
 
-  const tools = useTools();
+  const toolGroups = useToolGroups();
   const modals = useModals();
 
   const disabledTools = selections.length === 0;
@@ -172,30 +198,35 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
     <Menu withArrow withinPortal position="left-end" {...menu}>
       <Menu.Target>{children}</Menu.Target>
       <Menu.Dropdown>
-        <Menu.Label>Tools</Menu.Label>
-        {tools.map((tool) => {
-          // "Translate" for missing subs: show as submenu with source options
-          if (tool.key === "translation" && isMissing) {
-            return null; // handled below in Actions
-          }
-
-          return (
-            <Menu.Item
-              key={tool.key}
-              disabled={disabledTools}
-              leftSection={<FontAwesomeIcon icon={tool.icon}></FontAwesomeIcon>}
-              onClick={() => {
-                if (tool.modal) {
-                  modals.openContextModal(tool.modal, { selections });
-                } else {
-                  process(tool.key, tool.name);
-                }
-              }}
-            >
-              {tool.name}
-            </Menu.Item>
-          );
-        })}
+        {toolGroups.map((group, groupIdx) => (
+          <div key={group.label}>
+            {groupIdx > 0 && <Divider />}
+            <Menu.Label>{group.label}</Menu.Label>
+            {group.tools.map((tool) => {
+              if (tool.key === "translation" && isMissing) {
+                return null;
+              }
+              return (
+                <Menu.Item
+                  key={tool.key}
+                  disabled={disabledTools}
+                  leftSection={
+                    <FontAwesomeIcon icon={tool.icon}></FontAwesomeIcon>
+                  }
+                  onClick={() => {
+                    if (tool.modal) {
+                      modals.openContextModal(tool.modal, { selections });
+                    } else {
+                      process(tool.key, tool.name);
+                    }
+                  }}
+                >
+                  {tool.name}
+                </Menu.Item>
+              );
+            })}
+          </div>
+        ))}
         <Divider></Divider>
         <Menu.Label>Actions</Menu.Label>
         {/* Translate from source — for missing subtitles */}
@@ -241,6 +272,15 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
           }}
         >
           View
+        </Menu.Item>
+        <Menu.Item
+          disabled={onAction === undefined}
+          leftSection={<FontAwesomeIcon icon={faPencil}></FontAwesomeIcon>}
+          onClick={() => {
+            onAction?.("edit");
+          }}
+        >
+          {selections.length === 0 ? "Create / Upload" : "Edit"}
         </Menu.Item>
         <Menu.Item
           disabled={selections.length !== 0 || onAction === undefined}

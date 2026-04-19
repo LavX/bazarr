@@ -1,8 +1,4 @@
 <p align="center">
-  <img src="screenshot/hero_eclipse_compact.png" alt="Bazarr+ v2.0.0 - Codename: Eclipse">
-</p>
-
-<p align="center">
   <img src="frontend/public/images/logo128.png" alt="Bazarr+ Logo" width="128">
 </p>
 
@@ -19,7 +15,7 @@
 </p>
 
 <p align="center">
-  No tracking · Provider priority · OpenSubtitles.org web scraper · AI translation via OpenRouter (300+ LLMs) · API key encryption · batch translation · mass subtitle sync · 11 bulk operations · subtitle viewer · advanced table filters · security hardening · Python 3.14 · navy + amber dark theme
+  No tracking · Provider priority · OpenSubtitles.org web scraper · AI translation via OpenRouter (300+ LLMs) · **Subtitle Editor with video preview, waveform, AI translate** · API key encryption · batch translation · mass subtitle sync · 11 bulk operations · advanced table filters · security hardening · Python 3.14 · navy + amber dark theme
 </p>
 
 ---
@@ -49,6 +45,7 @@
 | **Dedicated Translator Settings** | Not available | 4-zone page with pricing, cost estimates, status panel |
 | **No Tracking** | GA4 + legacy UA phone home to Google | All telemetry removed, nothing phones home |
 | **Security Hardening** | MD5, no CSRF/SSRF/rate limiting | PBKDF2 (600k iter), CSRF, SSRF, brute-force, 4 more |
+| **Subtitle Editor** | Not available | Full editor with video preview, waveform timeline, AI translation, ffsubsync, 8 format support, 40+ shortcuts |
 | **Subtitle Viewer** | Not available | Read-only subtitle preview with SRT/VTT/ASS parsing, cue table, and format detection |
 | **Audio Language Display** | Not shown in tables | Badges in all table views |
 | **Advanced Table Filters** | No filters | Include/exclude audio, missing subtitle, title search |
@@ -83,6 +80,35 @@ docker pull ghcr.io/lavx/bazarr:latest
 docker pull ghcr.io/lavx/opensubtitles-scraper:latest
 docker pull ghcr.io/lavx/ai-subtitle-translator:latest
 ```
+
+### Option 3: Run without Docker
+
+Requires Python 3.12+ and Node.js 18+ (for building the frontend).
+
+```bash
+# Clone with submodules
+git clone --recursive https://github.com/LavX/bazarr.git
+cd bazarr
+
+# Install Python dependencies
+pip install -r requirements.txt
+
+# Build the frontend
+cd frontend && npm ci && npm run build && cd ..
+
+# Run
+python3 docker/supervisor.py --config ./data --port 6767
+```
+
+**System dependencies** (install via your package manager):
+- `ffmpeg` (subtitle sync, video analysis)
+- `mediainfo` (media file metadata)
+- `unrar` (compressed subtitle extraction)
+
+**Notes:**
+- The `--config` flag sets where the database, logs, and settings are stored
+- The supervisor runs a lightweight aiohttp server on the same port, serving the frontend instantly and proxying API requests to the backend. You get a startup screen with progress stages while the backend initializes, and automatic restart on crashes.
+- Media paths are configured in the web UI under Settings > Sonarr/Radarr
 
 ---
 
@@ -121,6 +147,29 @@ Upstream has Google Translate, Gemini, and Lingarr. Bazarr+ adds **OpenRouter** 
 - **Model details** fetched live from the OpenRouter API with per-million token pricing, per-episode/movie cost estimates, context length, and prompt caching indicators
 - **AES-256-GCM encryption** for API keys in transit between Bazarr and the translator service, with a Test Connection button that validates encryption and API key status before saving
 - **Auto disk scan** triggers Sonarr/Radarr to rescan after translation completes
+
+### Subtitle Editor (v2.1 LiveWire)
+A full browser-based subtitle editor accessible from the subtitle action menu. No desktop software needed.
+
+| Keyboard shortcuts | AI Translate with reference |
+|:---:|:---:|
+| ![Shortcuts](screenshot/editor-shortcuts.png) | ![Translate](screenshot/editor-translate.png) |
+
+- **Video preview** with direct play, remux, or transcode fallback. Audio track switching, seekbar, playback speed, subtitle overlay
+- **Waveform timeline** with draggable/resizable cue regions, click-to-seek, audio track-aware peaks
+- **Editable cue table** with inline timing (scroll-wheel adjust), CPS and line-length indicators, quality markers, gap detection, bookmarks
+- **AI translation** with source toggle (reference/editor cues), reference subtitle loading from disk or file import, per-line AI translate button
+- **ffsubsync integration** with VAD selection, Golden-Section Search, framerate options, progress tracking in Jobs Manager
+- **Text styling** buttons (italic, bold, underline, symbols) with Ctrl+I/B/U shortcuts. CPS and line length strip HTML tags
+- **QC panel** with configurable presets for overlap, gap, CPS, line length, and duration checks
+- **Search and Replace** with regex support across all cues
+- **Timing tools**: shift all cues, linear correction (two-point fit), nudge shortcuts
+- **Undo/redo** with full operation history, auto-sort by start time
+- **Auto-save** to localStorage on every change (2s debounce), recovery banner on reload
+- **Subtitle language switcher** in breadcrumb for quick navigation between languages
+- **Format support**: SRT, VTT, ASS/SSA, SUB (MicroDVD), SMI, MPL, TXT
+- **40+ keyboard shortcuts** (press `?` to see the full sheet)
+- **474 tests** (424 frontend + 50 backend)
 
 ### Subtitle Viewer
 Read-only subtitle preview accessible from the subtitle action menu. Supports SRT, VTT, and ASS/SSA formats with automatic format detection. Shows a cue table with timestamps and text, file size, and format badge. Useful for quickly checking subtitle content and timing without downloading.
@@ -217,17 +266,14 @@ services:
       timeout: 10s
       retries: 3
 
-  # AI Subtitle Translator Service (required for AI translation)
+  # AI Subtitle Translator Service (optional, for AI translation)
+  # Configure the API key in Bazarr+ Settings > AI Translator
   ai-subtitle-translator:
     image: ghcr.io/lavx/ai-subtitle-translator:latest
     container_name: ai-subtitle-translator
     restart: unless-stopped
     ports:
       - "8765:8765"
-    environment:
-      # OpenRouter API key (can also be configured in Bazarr UI)
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
-      - OPENROUTER_DEFAULT_MODEL=google/gemini-2.5-flash-lite-preview-09-2025
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8765/health"]
       interval: 30s
@@ -249,7 +295,7 @@ services:
     environment:
       - PUID=1000
       - PGID=1000
-      - TZ=Europe/Budapest
+      - TZ=UTC
       # Point to the scraper service (port 8000)
       - OPENSUBTITLES_SCRAPER_URL=http://opensubtitles-scraper:8000
     volumes:

@@ -1,5 +1,6 @@
 import type { ParseResult } from "@/pages/SubtitleEditor/types";
 import type { SubtitleParser } from "./index";
+import { cueId } from "./uuid";
 
 function parseTimestamp(raw: string): number {
   // HH:MM:SS,mmm or HH:MM:SS.mmm
@@ -49,7 +50,7 @@ export const srtParser: SubtitleParser = {
       const cueText = lines.slice(tsLineIdx + 1).join("\n");
 
       cues.push({
-        id: crypto.randomUUID(),
+        id: cueId(),
         startMs,
         endMs,
         text: cueText,

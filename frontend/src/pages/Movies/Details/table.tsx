@@ -89,7 +89,11 @@ const Table: FunctionComponent<Props> = ({ movie, profile }) => {
           mediaId={radarrId}
           mediaType="movie"
           onAction={async (action) => {
-            if (action === "search") {
+            if (action === "edit") {
+              navigate(
+                `/subtitles/edit/movie/${radarrId}/${encodeURIComponent(buildLanguageKey(item))}`,
+              );
+            } else if (action === "search") {
               await download.mutateAsync({
                 radarrId,
                 form: {
@@ -113,6 +117,10 @@ const Table: FunctionComponent<Props> = ({ movie, profile }) => {
           if (action === "view") {
             navigate(
               `/subtitles/preview/movie/${radarrId}/${encodeURIComponent(buildLanguageKey(item))}`,
+            );
+          } else if (action === "edit") {
+            navigate(
+              `/subtitles/edit/movie/${radarrId}/${encodeURIComponent(buildLanguageKey(item))}`,
             );
           } else if (action === "delete" && path) {
             await remove.mutateAsync({

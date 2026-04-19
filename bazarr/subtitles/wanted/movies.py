@@ -20,7 +20,7 @@ from ..adaptive_searching import is_search_active, updateFailedAttempts
 from ..download import generate_subtitles
 
 
-def _wanted_movie(movie, job_id=None):
+def _wanted_movie(movie, providers_list, job_id=None):
     audio_language_list = get_audio_profile_languages(movie.audio_language)
     if len(audio_language_list) > 0:
         audio_language = audio_language_list[0]['name']
@@ -28,23 +28,20 @@ def _wanted_movie(movie, job_id=None):
         audio_language = 'None'
 
     languages = []
+    languages_to_stamp = []
 
     for language in ast.literal_eval(movie.missing_subtitles):
         if is_search_active(desired_language=language, attempt_string=movie.failedAttempts):
-            database.execute(
-                update(TableMovies)
-                .values(failedAttempts=updateFailedAttempts(desired_language=language,
-                                                            attempt_string=movie.failedAttempts))
-                .where(TableMovies.radarrId == movie.radarrId))
-
             hi_ = "True" if language.endswith(':hi') else "False"
             forced_ = "True" if language.endswith(':forced') else "False"
             languages.append((language.split(":")[0], hi_, forced_))
+            languages_to_stamp.append(language)
 
         else:
             logging.info(f"BAZARR Search is throttled by adaptive search for this movie {movie.path} and "
                          f"language: {language}")
 
+    found_any = False
     for result in generate_subtitles(path_mappings.path_replace_movie(movie.path),
                                      languages,
                                      audio_language,
@@ -56,12 +53,23 @@ def _wanted_movie(movie, job_id=None):
                                      job_id=job_id):
 
         if result:
+            found_any = True
             if isinstance(result, tuple) and len(result):
                 result = result[0]
             store_subtitles_movie(movie.path, path_mappings.path_replace_movie(movie.path))
             history_log_movie(1, movie.radarrId, result)
             event_stream(type='movie-wanted', action='delete', payload=movie.radarrId)
             send_notifications_movie(movie.radarrId, result.message)
+
+    if not found_any and providers_list:
+        for language in languages_to_stamp:
+            updated = updateFailedAttempts(
+                desired_language=language,
+                attempt_string=movie.failedAttempts)
+            database.execute(
+                update(TableMovies)
+                .values(failedAttempts=updated)
+                .where(TableMovies.radarrId == movie.radarrId))
 
 
 def wanted_download_subtitles_movie(radarr_id, job_id=None):
@@ -92,9 +100,37 @@ def wanted_download_subtitles_movie(radarr_id, job_id=None):
     providers_list = get_providers()
 
     if providers_list:
-        _wanted_movie(movie, job_id=job_id)
+        _wanted_movie(movie, providers_list, job_id=job_id)
     else:
         logging.info("BAZARR All providers are throttled")
+
+
+def wanted_scan_subtitles_movies(job_id=None):
+    if not job_id:
+        jobs_queue.add_job_from_function("Scanning disk for missing movies subtitles", is_progress=True)
+        return
+
+    conditions = [(TableMovies.missing_subtitles.is_not(None)),
+                  (TableMovies.missing_subtitles != '[]')]
+    conditions += get_exclusion_clause('movie')
+    movies = database.execute(
+        select(TableMovies.radarrId,
+               TableMovies.path,
+               TableMovies.title)
+        .where(reduce(operator.and_, conditions))) \
+        .all()
+
+    count_movies = len(movies)
+    jobs_queue.update_job_progress(job_id=job_id, progress_max=count_movies)
+
+    if count_movies == 0:
+        jobs_queue.update_job_progress(job_id=job_id, progress_value='max')
+
+    for i, movie in enumerate(movies, start=1):
+        jobs_queue.update_job_progress(job_id=job_id, progress_value=i, progress_message=movie.title)
+        store_subtitles_movie(movie.path, path_mappings.path_replace_movie(movie.path), use_cache=False)
+
+    jobs_queue.update_job_progress(job_id=job_id, progress_message="Scan completed")
 
 
 def wanted_search_missing_subtitles_movies(job_id=None, wait_for_completion=False):
