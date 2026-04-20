@@ -484,6 +484,41 @@ validators = [
     
     # subsro section
     Validator('subsro.api_key', must_exist=True, default='', is_type_of=str, cast=str),
+
+    # compat_endpoint section
+    Validator('compat_endpoint.enabled', default=False, cast=bool),
+    Validator('compat_endpoint.token', default='', cast=str),
+    Validator('compat_endpoint.jwt_secret', default='', cast=str),
+    Validator('compat_endpoint.file_id_secret', default='', cast=str),
+    Validator(
+        'compat_endpoint.token',
+        must_exist=True, is_type_of=str, len_min=32,
+        when=Validator('compat_endpoint.enabled', eq=True),
+    ),
+    Validator(
+        'compat_endpoint.jwt_secret',
+        must_exist=True, is_type_of=str, len_min=32,
+        when=Validator('compat_endpoint.enabled', eq=True),
+    ),
+    Validator(
+        'compat_endpoint.file_id_secret',
+        must_exist=True, is_type_of=str, len_min=32,
+        when=Validator('compat_endpoint.enabled', eq=True),
+    ),
+    Validator('compat_endpoint.cache_ttl_seconds',
+              default=1800, cast=int, gte=60, lte=86400),
+    Validator('compat_endpoint.cache_ttl_partial_seconds',
+              default=300, cast=int, gte=30, lte=3600),
+    Validator('compat_endpoint.search_timeout_seconds',
+              default=20, cast=int, gte=5, lte=120),
+    Validator('compat_endpoint.per_provider_timeout_seconds',
+              default=12, cast=int, gte=3, lte=60),
+    Validator('compat_endpoint.file_id_ttl_seconds',
+              default=3600, cast=int, gte=300, lte=86400),
+    Validator('compat_endpoint.stream_token_ttl_seconds',
+              default=300, cast=int, gte=60, lte=3600),
+    Validator('compat_endpoint.jwt_ttl_seconds',
+              default=86400, cast=int, gte=3600, lte=604800),
 ]
 
 
