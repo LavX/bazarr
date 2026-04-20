@@ -494,6 +494,20 @@ export interface CueWarning {
   message: string;
 }
 
+// Strip HTML-like and ASS override tags for character counting. Applied
+// repeatedly until stable so that nested/overlapping sequences (e.g.
+// "<sc<script>ript>") cannot reintroduce a tag after a single pass.
+function stripMarkup(input: string): string {
+  const tagPattern = /<[^>]*>|\{\\[^}]*\}/g;
+  let previous: string;
+  let current = input;
+  do {
+    previous = current;
+    current = current.replace(tagPattern, "");
+  } while (current !== previous);
+  return current;
+}
+
 export function computeCueWarnings(
   cue: Cue,
   prevCue: Cue | null,
@@ -530,15 +544,8 @@ export function computeCueWarnings(
       message: `Duration too short (${durationMs.toFixed(0)}ms, min ${preset.minDurationMs}ms)`,
     };
   }
-  if (
-    lines.some(
-      (l) =>
-        l.replace(/<[^>]*>|\{\\[^}]*\}/g, "").length > preset.maxCharsPerLine,
-    )
-  ) {
-    const longest = Math.max(
-      ...lines.map((l) => l.replace(/<[^>]*>|\{\\[^}]*\}/g, "").length),
-    );
+  if (lines.some((l) => stripMarkup(l).length > preset.maxCharsPerLine)) {
+    const longest = Math.max(...lines.map((l) => stripMarkup(l).length));
     return {
       level: "orange",
       message: `Line too long (${longest} chars, max ${preset.maxCharsPerLine})`,
