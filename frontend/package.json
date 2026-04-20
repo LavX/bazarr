@@ -112,6 +112,7 @@
   },
   "overrides": {
     "serialize-javascript": "^7.0.4",
+    "follow-redirects": "^1.16.0",
     "eslint-plugin-react-hooks": {
       "eslint": "$eslint"
     }
