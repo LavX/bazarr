@@ -124,6 +124,9 @@ class SystemSettings(Resource):
             event_stream("settings")
             return e.message, 406
         else:
+            if bool(settings.compat_endpoint.enabled):
+                from bazarr.api.system.compat_admin import ensure_secrets
+                ensure_secrets()
             event_stream("settings")
             return '', 204
 

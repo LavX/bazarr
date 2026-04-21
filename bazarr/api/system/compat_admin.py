@@ -45,6 +45,26 @@ def regenerate_all_secrets(write_fn=None) -> str:
     return new_token
 
 
+def ensure_secrets(write_fn=None) -> None:
+    """Called on settings save-with-enabled-flip. Auto-generates any missing secret.
+
+    Idempotent: if all 3 secrets are already present and >=32 chars, no-op.
+    """
+    for name in ("token", "jwt_secret", "file_id_secret"):
+        current = getattr(settings.compat_endpoint, name, "") or ""
+        if len(current) < 32:
+            new_val = secrets.token_urlsafe(32)
+            setattr(settings.compat_endpoint, name, new_val)
+            if write_fn is not None:
+                write_fn(f"compat_endpoint.{name}", new_val)
+            else:
+                try:
+                    from bazarr.app.config import write_config
+                    write_config({f"compat_endpoint.{name}": new_val})
+                except ImportError:
+                    pass
+
+
 @api_ns_compat_admin.route("/api/system/compat/regenerate")
 class CompatRegenerate(Resource):
     @authenticate
