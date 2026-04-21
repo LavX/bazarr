@@ -105,6 +105,11 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
+      - name: pytest compat subpackage
+        run: |
+          pip install pytest pyjwt
+          pytest tests/compat/ -v --tb=short
+
       - name: Unit Tests
         run: |
           bash '${{ env.SCRIPTS_DIRECTORY }}/build_test.sh'
