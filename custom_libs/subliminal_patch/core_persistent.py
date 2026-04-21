@@ -2,6 +2,7 @@
 from __future__ import absolute_import
 
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FTimeout
 import logging
 import time
 
@@ -87,3 +88,43 @@ def download_best_subtitles(
         downloaded_subtitles[video].extend(subtitles)
 
     return downloaded_subtitles
+
+
+def list_all_subtitles_parallel(videos, languages, pool_instance,
+                                 per_provider_timeout: int = 12,
+                                 wall_timeout: int = 20):
+    """Parallel fanout with per-provider + wall timeouts.
+
+    Unlike list_subtitles_prioritized, this does NOT early-stop. Every enabled
+    provider is queried; slow providers are cancelled at per_provider_timeout
+    without holding back the wall_timeout.
+
+    Used exclusively by the compat endpoint. DO NOT replace list_subtitles_prioritized
+    for existing code paths.
+    """
+    out = defaultdict(list)
+    if not videos:
+        return out
+    providers = [p for p in pool_instance.providers
+                 if p not in getattr(pool_instance, "discarded_providers", set())]
+    for video in videos:
+        with ThreadPoolExecutor(max_workers=max(1, len(providers))) as ex:
+            futures = {ex.submit(pool_instance.list_subtitles_provider,
+                                 p, video, languages): p for p in providers}
+            deadline = time.monotonic() + wall_timeout
+            try:
+                for fut in as_completed(futures):
+                    try:
+                        remaining = max(0.1, deadline - time.monotonic())
+                        if remaining <= 0:
+                            break
+                        subs = fut.result(timeout=min(per_provider_timeout, remaining))
+                        if subs:
+                            out[video].extend(subs)
+                    except FTimeout:
+                        continue
+                    except Exception:
+                        continue
+            except FTimeout:
+                pass
+    return out
