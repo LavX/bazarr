@@ -4,11 +4,19 @@ import hashlib
 import hmac
 import json
 import time
+from functools import wraps
 from typing import Tuple
 
 import jwt as pyjwt
+from flask import jsonify, make_response, request
 
 from bazarr.app.config import settings
+
+
+_XREASON_ALLOWED = frozenset({
+    "auth", "not_found", "throttled", "compat-disabled",
+    "bad-request", "upstream", "internal",
+})
 
 
 class CompatBootError(RuntimeError):
@@ -130,3 +138,35 @@ def mint_stream_token(provider: str, native_id: str) -> str:
 
 def parse_stream_token(token: str) -> Tuple[bool, dict]:
     return parse_file_id(token)  # same structure; exp check included
+
+
+def compat_error(message: str, status: int, x_reason: str):
+    """Uniform error response: {message} body + x-reason header + application/json (B13)."""
+    if x_reason not in _XREASON_ALLOWED:
+        raise ValueError(f"x-reason {x_reason!r} not whitelisted")
+    resp = make_response(jsonify({"message": message}), status)
+    resp.headers["x-reason"] = x_reason
+    resp.headers["Content-Type"] = "application/json"
+    return resp
+
+
+def compat_auth(require_jwt: bool = False):
+    """Standalone decorator. MUST NOT call bazarr/api/utils.py::authenticate."""
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            api_key = request.headers.get("Api-Key") or request.headers.get("X-Api-Key")
+            if not api_key:
+                return compat_error("Missing API key", 401, "auth")
+            if not validate_compat_token(api_key):
+                return compat_error("Invalid API key", 401, "auth")
+            if require_jwt:
+                bearer = (request.headers.get("Authorization") or "")
+                if not bearer.startswith("Bearer "):
+                    return compat_error("Authorization header required", 401, "auth")
+                ok, _ = validate_jwt(bearer[7:])
+                if not ok:
+                    return compat_error("Token invalid or expired", 401, "auth")
+            return fn(*args, **kwargs)
+        return wrapper
+    return decorator
