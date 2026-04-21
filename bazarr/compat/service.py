@@ -10,6 +10,7 @@ from subliminal_patch.core_persistent import list_all_subtitles_parallel
 from bazarr.app.config import settings
 from bazarr.app.get_providers import get_providers_sorted, get_providers_auth
 from bazarr.compat import auth, cache as C, response_mapper as M
+from bazarr.utilities.url_guard import assert_safe_outbound, UnsafeURLError
 
 logger = logging.getLogger("bazarr.compat.service")
 
@@ -112,3 +113,30 @@ def download(file_id: str, base_host: str) -> dict:
     stream_tok = auth.mint_stream_token(payload["p"], payload["i"])
     link = f"{base_host.rstrip('/')}/api/v1/download/stream/{quote(stream_tok, safe='')}"
     return M.download_response(link)
+
+
+def _fetch_subtitle_bytes(provider_name: str, native_id: str) -> bytes:
+    """Reconstruct a provider subtitle proxy and download.
+
+    Real implementation in Task 15 — this stub raises NotImplementedError.
+    Callers must invoke assert_safe_outbound on the resolved provider URL
+    BEFORE requests.get (and re-verify after any redirect).
+    """
+    raise NotImplementedError("per-provider reconstruction — see Task 15")
+
+
+def serve_subtitle_content(stream_token: str) -> tuple[bytes, str]:
+    """Validate the stream token and return the subtitle bytes + content-type.
+
+    Raises:
+        ValueError: stream token invalid or expired
+        FileNotFoundError: subtitle not found
+        UnsafeURLError: provider URL failed SSRF guard
+    """
+    ok, payload = auth.parse_stream_token(stream_token)
+    if not ok:
+        raise ValueError("stream token invalid or expired")
+    # Surface the guard symbol so tests can patch it; Task 15 uses it inside _fetch.
+    _ = assert_safe_outbound
+    blob = _fetch_subtitle_bytes(payload["p"], payload["i"])
+    return blob, "application/x-subrip"
