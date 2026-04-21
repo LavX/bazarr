@@ -1,4 +1,4 @@
-import { FunctionComponent, useMemo } from "react";
+import { FunctionComponent } from "react";
 import {
   Alert,
   Button,
@@ -8,7 +8,6 @@ import {
 } from "@mantine/core";
 import { useSystem } from "@/apis/hooks";
 import { Check, Layout, Message, Section } from "@/pages/Settings/components";
-import { useStagedValues } from "@/pages/Settings/utilities/FormValues";
 import { useSettingValue } from "@/pages/Settings/utilities/hooks";
 import TokenField from "./TokenField";
 
@@ -16,10 +15,22 @@ const ENABLED_KEY = "settings-compat_endpoint-enabled";
 const CONSENT_KEY = "settings-compat_endpoint-consent";
 
 const RestartBanner: FunctionComponent = () => {
-  const stagedValues = useStagedValues();
   const { restart, isMutating } = useSystem();
-  const dirty = useMemo(() => ENABLED_KEY in stagedValues, [stagedValues]);
-  if (!dirty) return null;
+  const persistedEnabled = useSettingValue<boolean>(ENABLED_KEY, {
+    original: true,
+  });
+  const persistedToken = useSettingValue<string>(
+    "settings-compat_endpoint-token",
+    { original: true },
+  );
+  // Only show the banner AFTER a successful save has landed with enabled=true
+  // but the running Bazarr process still has an empty token (ensure_secrets
+  // populates it at the next boot). Showing the banner only in this gap means:
+  // - never before the user has saved
+  // - never while the endpoint is off
+  // - always when a restart is actually required to activate the endpoint
+  const needsRestart = Boolean(persistedEnabled) && !persistedToken;
+  if (!needsRestart) return null;
   return (
     <Notification
       color="blue"
