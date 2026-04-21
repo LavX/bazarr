@@ -13,7 +13,7 @@ import { useSettingValue } from "@/pages/Settings/utilities/hooks";
 import RegenerateDialog from "./RegenerateDialog";
 
 const TokenField: FunctionComponent = () => {
-  const token = useSettingValue<string>("settings-compat-token");
+  const token = useSettingValue<string>("settings-compat_endpoint-token");
   const [revealed, setRevealed] = useState(false);
   const [dialogOpen, { open: openDialog, close: closeDialog }] =
     useDisclosure(false);

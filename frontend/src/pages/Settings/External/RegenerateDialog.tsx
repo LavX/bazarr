@@ -18,7 +18,7 @@ const RegenerateDialog: FunctionComponent<RegenerateDialogProps> = ({
   const handleRegenerate = async () => {
     setLoading(true);
     try {
-      await client.axios.post("/api/system/compat/regenerate");
+      await client.axios.post("system/compat/regenerate");
       notifications.show({
         title: "Secrets regenerated",
         message:
