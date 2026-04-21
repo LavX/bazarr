@@ -486,25 +486,16 @@ validators = [
     Validator('subsro.api_key', must_exist=True, default='', is_type_of=str, cast=str),
 
     # compat_endpoint section
+    # NOTE: secret length enforcement happens at blueprint registration via
+    # boot_hmac_selftest (see bazarr/compat/auth.py). Do NOT add len_min
+    # validators here that fire on the "Save" path -- they would reject the
+    # first save that flips enabled=True (secrets still empty at that moment
+    # because auto-generation runs at next boot, not at save time).
     Validator('compat_endpoint.enabled', default=False, cast=bool),
+    Validator('compat_endpoint.consent', default=False, cast=bool),
     Validator('compat_endpoint.token', default='', cast=str),
     Validator('compat_endpoint.jwt_secret', default='', cast=str),
     Validator('compat_endpoint.file_id_secret', default='', cast=str),
-    Validator(
-        'compat_endpoint.token',
-        must_exist=True, is_type_of=str, len_min=32,
-        when=Validator('compat_endpoint.enabled', eq=True),
-    ),
-    Validator(
-        'compat_endpoint.jwt_secret',
-        must_exist=True, is_type_of=str, len_min=32,
-        when=Validator('compat_endpoint.enabled', eq=True),
-    ),
-    Validator(
-        'compat_endpoint.file_id_secret',
-        must_exist=True, is_type_of=str, len_min=32,
-        when=Validator('compat_endpoint.enabled', eq=True),
-    ),
     Validator('compat_endpoint.cache_ttl_seconds',
               default=1800, cast=int, gte=60, lte=86400),
     Validator('compat_endpoint.cache_ttl_partial_seconds',

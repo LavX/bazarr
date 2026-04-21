@@ -21,12 +21,8 @@ def _compat_validators():
 
 
 def _make_settings(config_data: dict) -> Dynaconf:
-    """
-    Create a fresh, isolated Dynaconf instance loaded from a temp YAML file
-    and pre-registered with the real compat_endpoint validators from config.py.
-
-    Each call returns a new instance, so tests cannot leak state to one another
-    or to the module-level `settings` singleton.
+    """Fresh, isolated Dynaconf instance loaded from a temp YAML file and
+    pre-registered with the real compat_endpoint validators from config.py.
     """
     tmp_dir = tempfile.mkdtemp()
     cfg_path = os.path.join(tmp_dir, "config.yaml")
@@ -37,103 +33,54 @@ def _make_settings(config_data: dict) -> Dynaconf:
     return s
 
 
-# ---------------------------------------------------------------------------
-# Default / disabled state
-# ---------------------------------------------------------------------------
-
 def test_defaults_when_no_config_present():
-    """An empty config file uses validator defaults: enabled=False, secrets empty.
-    No ValidationError should be raised."""
+    """Empty config: validators apply defaults (enabled=False, empty secrets)
+    and do not raise."""
     tmp_dir = tempfile.mkdtemp()
     cfg_path = os.path.join(tmp_dir, "config.yaml")
-    open(cfg_path, "w").close()  # empty file
+    open(cfg_path, "w").close()
 
     s = Dynaconf(settings_file=cfg_path, core_loaders=["YAML"], apply_default_on_none=True)
     s.validators.register(*_compat_validators())
 
-    # Must not raise: disabled + empty secrets is valid
     s.validators.validate_all()
     assert s.compat_endpoint.enabled is False
 
 
-def test_disabled_with_empty_secrets_passes():
-    """When enabled=False, all three secrets may be empty without triggering
-    the conditional must_exist / len_min validators."""
+def test_save_with_enabled_true_and_empty_secrets_is_allowed():
+    """The save-time path must accept enabled=True with empty secrets.
+    Secret length is enforced at blueprint registration (boot_hmac_selftest),
+    NOT at save time -- saving must not reject a first-time enable just
+    because secrets haven't been auto-generated yet."""
     s = _make_settings({
         "compat_endpoint": {
-            "enabled": False,
+            "enabled": True,
             "token": "",
             "jwt_secret": "",
             "file_id_secret": "",
         }
     })
-    s.validators.validate_all()  # must not raise
-    assert s.compat_endpoint.enabled is False
-
-
-# ---------------------------------------------------------------------------
-# Enabled: each secret individually missing / too short
-# ---------------------------------------------------------------------------
-
-def test_enabled_empty_jwt_secret_raises():
-    """When enabled=True, an empty jwt_secret must trigger a ValidationError
-    from the conditional len_min=32 validator at config.py:498-502."""
-    s = _make_settings({
-        "compat_endpoint": {
-            "enabled": True,
-            "token": "a" * 32,
-            "jwt_secret": "",
-            "file_id_secret": "c" * 32,
-        }
-    })
-    with pytest.raises(ValidationError):
-        s.validators.validate_all()
-
-
-def test_enabled_token_too_short_raises():
-    """When enabled=True, a token shorter than 32 characters must trigger a
-    ValidationError from the conditional len_min=32 validator at config.py:493-497."""
-    s = _make_settings({
-        "compat_endpoint": {
-            "enabled": True,
-            "token": "short",
-            "jwt_secret": "b" * 32,
-            "file_id_secret": "c" * 32,
-        }
-    })
-    with pytest.raises(ValidationError):
-        s.validators.validate_all()
-
-
-def test_enabled_empty_file_id_secret_raises():
-    """When enabled=True, an empty file_id_secret must trigger a ValidationError
-    from the conditional len_min=32 validator at config.py:503-507."""
-    s = _make_settings({
-        "compat_endpoint": {
-            "enabled": True,
-            "token": "a" * 32,
-            "jwt_secret": "b" * 32,
-            "file_id_secret": "",
-        }
-    })
-    with pytest.raises(ValidationError):
-        s.validators.validate_all()
-
-
-# ---------------------------------------------------------------------------
-# Enabled: all secrets valid
-# ---------------------------------------------------------------------------
-
-def test_enabled_all_secrets_valid_passes():
-    """When enabled=True and all three secrets are at least 32 characters,
-    validation must succeed without raising."""
-    s = _make_settings({
-        "compat_endpoint": {
-            "enabled": True,
-            "token": "a" * 32,
-            "jwt_secret": "b" * 32,
-            "file_id_secret": "c" * 32,
-        }
-    })
-    s.validators.validate_all()  # must not raise
+    s.validators.validate_all()  # must NOT raise
     assert s.compat_endpoint.enabled is True
+
+
+def test_ttl_bounds_enforced():
+    """Numeric TTL validators still fire (gte/lte) regardless of enabled."""
+    s = _make_settings({
+        "compat_endpoint": {
+            "cache_ttl_seconds": 5,  # below gte=60
+        }
+    })
+    with pytest.raises(ValidationError):
+        s.validators.validate_all()
+
+
+def test_ttl_bounds_accept_valid_value():
+    s = _make_settings({
+        "compat_endpoint": {
+            "cache_ttl_seconds": 1800,
+            "search_timeout_seconds": 25,
+        }
+    })
+    s.validators.validate_all()
+    assert s.compat_endpoint.cache_ttl_seconds == 1800

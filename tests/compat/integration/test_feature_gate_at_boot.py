@@ -13,12 +13,30 @@ def test_disabled_state_404s_json(monkeypatch):
     assert r.headers["x-reason"] == "compat-disabled"
 
 
-def test_enabled_state_aborts_when_secrets_missing(monkeypatch):
-    """enabled=True without valid secrets -> CompatBootError (fail-closed, B6)."""
+def test_enabled_state_auto_generates_missing_secrets(monkeypatch):
+    """enabled=True with empty secrets -> ensure_secrets() auto-generates them
+    at blueprint registration, then boot_hmac_selftest passes.
+
+    The old fail-closed behavior (raise CompatBootError when secrets are
+    empty) was replaced because it blocked the first-enable flow: the user
+    ticks Enable + Save before any secret exists, and a fail-closed register()
+    would crash the Flask app on next boot. Auto-generation is the recovery
+    path.
+    """
+    import bazarr.api.system.compat_admin as admin
+    from bazarr.app.config import settings
     from bazarr.compat import register
-    from bazarr.compat.auth import CompatBootError
-    monkeypatch.setattr("bazarr.app.config.settings.compat_endpoint.enabled", True)
-    monkeypatch.setattr("bazarr.app.config.settings.compat_endpoint.token", "")
+
+    monkeypatch.setattr(settings.compat_endpoint, "enabled", True)
+    monkeypatch.setattr(settings.compat_endpoint, "token", "")
+    monkeypatch.setattr(settings.compat_endpoint, "jwt_secret", "")
+    monkeypatch.setattr(settings.compat_endpoint, "file_id_secret", "")
+    # Suppress the real write_config; we only care that ensure_secrets
+    # fills in-memory values so boot_hmac_selftest passes.
+    monkeypatch.setattr(admin, "write_config", lambda: None)
+
     app = Flask(__name__)
-    with pytest.raises(CompatBootError):
-        register(app, base_url="")
+    register(app, base_url="")  # must NOT raise
+
+    for name in ("token", "jwt_secret", "file_id_secret"):
+        assert len(getattr(settings.compat_endpoint, name)) >= 32
