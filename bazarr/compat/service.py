@@ -175,3 +175,20 @@ def serve_subtitle_content(stream_token: str) -> tuple[bytes, str]:
     _ = assert_safe_outbound
     blob = _fetch_subtitle_bytes(payload["p"], payload["i"])
     return blob, "application/x-subrip"
+
+
+def guessit_filename(filename: str) -> dict:
+    """Thin wrapper over guessit. Returns a JSON-safe dict.
+
+    Rejects null bytes and filenames >512 chars (defense against path abuse).
+    """
+    if not filename or "\x00" in filename:
+        raise ValueError("filename contains null byte or is empty")
+    if len(filename) > 512:
+        raise ValueError("filename too long")
+    from subliminal_patch.core import guessit as _guessit
+    result = _guessit(filename)
+    # guessit returns a MatchesDict; coerce to plain dict with JSON-friendly values.
+    import json
+    from guessit.jsonutils import GuessitEncoder
+    return json.loads(json.dumps(dict(result), cls=GuessitEncoder))
