@@ -24,9 +24,10 @@ def test_download_returns_relative_link_by_default():
 
     fid = auth.mint_file_id("opensubtitlescom", "123", "eng", "")
     assert isinstance(fid, int)
-    resp = service.download(fid)
+    resp = service.download(fid, remaining=999,
+                             reset_iso="2099-01-01T00:00:00Z")
     assert resp["link"].startswith("/api/v1/download/stream/")
-    assert resp["remaining_downloads"] > 0
+    assert resp["remaining_downloads"] == 999
 
 
 def test_download_honors_base_host_when_provided():
@@ -36,7 +37,8 @@ def test_download_honors_base_host_when_provided():
     from bazarr.compat.file_id_store import reset_store
     reset_store()
     fid = auth.mint_file_id("opensubtitlescom", "123", "eng", "")
-    resp = service.download(fid, base_host="http://bazarr.local")
+    resp = service.download(fid, base_host="http://bazarr.local",
+                             remaining=0, reset_iso="2099-01-01T00:00:00Z")
     assert resp["link"].startswith("http://bazarr.local/api/v1/download/stream/")
 
 

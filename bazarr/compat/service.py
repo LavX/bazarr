@@ -613,7 +613,8 @@ def search(imdb_id: str, season, episode, languages: Iterable[Language],
     )
 
 
-def download(file_id, base_host: str = "") -> dict:
+def download(file_id, base_host: str = "",
+             remaining: int = 0, reset_iso: str = "") -> dict:
     """Resolve the int file_id, mint a short-lived stream token, return a
     download link. No provider fetch happens here - the subtitle is fetched
     only when the client follows the link.
@@ -629,7 +630,7 @@ def download(file_id, base_host: str = "") -> dict:
     stream_tok = auth.mint_file_stream_token(int(file_id))
     path = f"/api/v1/download/stream/{quote(stream_tok, safe='')}"
     link = f"{base_host.rstrip('/')}{path}" if base_host else path
-    return M.download_response(link)
+    return M.download_response(link, remaining=remaining, reset_iso=reset_iso)
 
 
 def _fetch_subtitle_bytes(sub) -> bytes:

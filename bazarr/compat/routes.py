@@ -11,8 +11,33 @@ def _all_disabled(path):
     return compat_error("disabled", 404, "compat-disabled")
 
 
-from bazarr.compat import auth, service, response_mapper as M
+import datetime as _dt
+from bazarr.compat import auth, service, response_mapper as M, rate_limiter
 from bazarr.compat.auth import compat_auth
+
+
+_SUPPORTED_SUB_FORMATS = frozenset({"srt"})
+
+
+def _quota_config() -> tuple[int, int]:
+    from bazarr.app.config import settings
+    return (int(settings.compat_endpoint.downloads_per_window),
+            int(settings.compat_endpoint.downloads_window_seconds))
+
+
+def _iso_utc(epoch: int) -> str:
+    return _dt.datetime.fromtimestamp(epoch, _dt.timezone.utc)\
+                       .strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _jti_from_request() -> str | None:
+    """Pull jti from the (pre-validated) bearer. Returns None when there
+    is no bearer or the bearer doesn't decode."""
+    bearer = (request.headers.get("Authorization") or "")
+    if not bearer.startswith("Bearer "):
+        return None
+    ok, claims = auth.validate_jwt(bearer[7:])
+    return (claims.get("jti") if ok else None) or None
 
 compat_bp = Blueprint("compat", __name__)
 
@@ -50,17 +75,17 @@ def _infer_client_base(req) -> tuple[str, str]:
 @compat_bp.route("/login", methods=["POST"])
 @compat_auth(require_jwt=False)
 def login():
-    # OS.com returns base_url as a bare hostname (no scheme). We try forwarded
-    # headers first, then request.host; when the client's real host is unknown
-    # (e.g. a bare LAN probe with no reverse proxy) we return request.host as-is
-    # for compatibility - clients can still use the token and JWT.
     scheme, host = _infer_client_base(request)
     base_url = host or request.host
+    limit, window = _quota_config()
+    remaining, reset = rate_limiter.inspect("", limit, window)
+    user_data = M.user_info_response(remaining=remaining, allowed=limit,
+                                      reset_iso=_iso_utc(reset))["data"]
     return jsonify({
         "token": auth.mint_jwt(),
         "status": 200,
         "base_url": base_url,
-        "user": M.user_info_response()["data"],
+        "user": user_data,
     })
 
 
@@ -83,34 +108,26 @@ def logout():
 def subtitles():
     args = request.args
     langs_s = args.get("languages") or ""
-    # Plugin contract: client sends EITHER imdb_id/tmdb_id OR query+season+
-    # episode, never both. Keep them as distinct variables so a filename in
-    # `query` never gets emitted in feature_details.imdb_id (which is a
-    # plugin filter field - a bogus value drops every result silently).
     imdb = args.get("imdb_id") or args.get("tmdb_id") or ""
     query_filename = args.get("query") or None
     if not imdb and not query_filename:
         return compat_error("imdb_id, tmdb_id, or query required", 400, "bad-request")
     moviehash = args.get("moviehash") or None
-    # subzero.language.Language (what every bazarr provider compares with).
-    # babelfish.Language does NOT equal the subzero subclass in set operations
-    # even though hash() matches, so providers would skip every language.
+    moviehash_match = args.get("moviehash_match") or None
+    if moviehash_match and moviehash_match not in ("include", "only"):
+        return compat_error("moviehash_match must be include|only", 400, "bad-request")
     from subzero.language import Language
+    requested_codes = [c.strip() for c in langs_s.split(",") if c.strip()] if langs_s else []
     try:
-        if langs_s:
-            langs = [Language.fromietf(c.strip()) for c in langs_s.split(",") if c.strip()]
+        if requested_codes:
+            langs = [Language.fromietf(c) for c in requested_codes]
         else:
-            # OS.com accepts no-language searches. Fall back to the enabled
-            # provider languages so results aren't empty when a client (e.g.
-            # Stremio) omits the filter.
             langs = [Language.fromietf("en")]
+            requested_codes = ["en"]
     except Exception:
         return compat_error("invalid language code", 400, "bad-request")
     season = args.get("season_number", type=int)
     episode = args.get("episode_number", type=int)
-    # OS.com clients send `type=episode|movie` explicitly. Honor that when
-    # present; fall back to inferring from season_number (the legacy behavior
-    # VLSub relies on when it sets season but not type).
     raw_type = (args.get("type") or "").strip().lower()
     if raw_type in ("episode", "movie"):
         media_type = raw_type
@@ -119,15 +136,12 @@ def subtitles():
     else:
         media_type = "movie"
     try:
-        # imdb may be empty when the client sent only a filename; service
-        # will fall back to guessit + library lookup to resolve title/year.
         result = service.search(imdb or "", season, episode, langs, media_type,
-                                query=query_filename, moviehash=moviehash)
+                                query=query_filename, moviehash=moviehash,
+                                moviehash_match=moviehash_match,
+                                requested_languages=requested_codes)
     except Exception:
         return compat_error("upstream providers unavailable", 503, "upstream")
-    # Paginate on the route side. service.search (and its cache) always hold
-    # the full result set; per_page/page are applied here so cache entries
-    # stay reusable across different pagination requests.
     page = max(1, args.get("page", default=1, type=int) or 1)
     per_page = args.get("per_page", default=50, type=int) or 50
     per_page = min(max(per_page, 1), 100)
@@ -157,18 +171,30 @@ def download():
         fid_int = int(fid)
     except (TypeError, ValueError):
         return compat_error("file_id must be an integer", 400, "bad-request")
+    sub_format = str(body.get("sub_format") or "srt").lower()
+    if sub_format not in _SUPPORTED_SUB_FORMATS:
+        return compat_error(f"unsupported sub_format: {sub_format}",
+                            400, "bad-request")
+
+    limit, window = _quota_config()
+    jti = _jti_from_request() or ""
+    allowed, remaining, reset = rate_limiter.try_consume(jti, limit, window)
+    if not allowed:
+        resp = jsonify({"message": "download quota exhausted",
+                        "reset_time_utc": _iso_utc(reset)})
+        resp.status_code = 406
+        resp.headers["x-reason"] = "throttled"
+        return resp
+
     try:
-        # Plugin contract: `link` must be an absolute URL. Relative paths
-        # break HttpClient.GetAsync when the plugin has no BaseAddress.
-        # Prefer forwarded headers (the URL the client actually reached
-        # us on); fall back to Flask's request.host_url which echoes what
-        # the client hit even when that's loopback - at least it's valid.
         scheme, host = _infer_client_base(request)
         if host:
             base_host = f"{scheme}://{host}"
         else:
             base_host = request.host_url.rstrip("/")
-        resp = service.download(fid_int, base_host=base_host)
+        resp = service.download(fid_int, base_host=base_host,
+                                remaining=remaining,
+                                reset_iso=_iso_utc(reset))
     except FileNotFoundError:
         return compat_error("subtitle not found", 404, "not_found")
     return jsonify(resp)
@@ -204,7 +230,11 @@ def download_stream(stream_token):
 def infos_user():
     """Api-Key alone is sufficient. OS-compat clients (Jellyfin) poll /infos/user
     for remaining-downloads updates without re-minting the JWT each time."""
-    return jsonify(M.user_info_response())
+    limit, window = _quota_config()
+    jti = _jti_from_request() or ""
+    remaining, reset = rate_limiter.inspect(jti, limit, window)
+    return jsonify(M.user_info_response(remaining=remaining, allowed=limit,
+                                          reset_iso=_iso_utc(reset)))
 
 
 @compat_bp.route("/infos/languages", methods=["GET"])
