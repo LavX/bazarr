@@ -202,11 +202,22 @@ async def proxy_handler(request: web.Request) -> web.StreamResponse:
     try:
         timeout = ClientTimeout(total=300, connect=5)
         async with ClientSession(timeout=timeout) as session:
+            # Strip hop-by-hop / framing headers before forwarding. The body
+            # has already been fully read via request.read() (aiohttp de-chunks
+            # at parse time), so forwarding Transfer-Encoding: chunked would
+            # either cause aiohttp to re-chunk a body that's no longer
+            # chunked, or tell waitress to expect more chunk frames that
+            # never come - waitress then hangs waiting for the trailer.
+            # This manifested as silent 100s+ hangs on any POST from clients
+            # like .NET's HttpClient that default to chunked request bodies.
+            _drop = {"host", "content-length", "transfer-encoding",
+                     "connection", "keep-alive", "expect"}
+            forwarded_headers = {k: v for k, v in request.headers.items()
+                                 if k.lower() not in _drop}
             async with session.request(
                 method=request.method,
                 url=target_url,
-                headers={k: v for k, v in request.headers.items()
-                         if k.lower() not in ("host", "content-length")},
+                headers=forwarded_headers,
                 data=await request.read(),
                 allow_redirects=False,
             ) as resp:
