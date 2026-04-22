@@ -57,18 +57,30 @@ def test_search_envelope_paginates_total_pages():
     assert env["total_pages"] == 3
 
 
-def test_download_response_emits_both_remaining_fields():
-    r = M.download_response("https://example/link", reset_iso="2099-01-01T00:00:00Z")
-    assert r["remaining"] > 0  # VLSub
-    assert r["remaining_downloads"] > 0  # Jellyfin (B11)
+def test_download_response_emits_remaining_and_reset():
+    from bazarr.compat import response_mapper as M
+    r = M.download_response("https://example/link",
+                             remaining=42,
+                             reset_iso="2099-01-01T00:00:00Z")
     assert r["link"] == "https://example/link"
+    assert r["remaining"] == 42            # VLSub
+    assert r["remaining_downloads"] == 42  # Jellyfin
     assert r["reset_time_utc"] == "2099-01-01T00:00:00Z"
+    # Deprecated duplicates removed.
+    assert "reset_time" not in r
+    assert "requests" not in r
 
 
-def test_user_info_stub():
-    r = M.user_info_response()
-    assert r["data"]["remaining_downloads"] > 0
-    assert r["data"]["allowed_downloads"] > 0
+def test_user_info_response_takes_real_counters():
+    from bazarr.compat import response_mapper as M
+    r = M.user_info_response(remaining=17, allowed=1000,
+                              reset_iso="2099-01-01T00:00:00Z")
+    d = r["data"]
+    assert d["remaining_downloads"] == 17
+    assert d["allowed_downloads"] == 1000
+    assert d["reset_time_utc"] == "2099-01-01T00:00:00Z"
+    # Duplicate `remaining` removed; `remaining_downloads` is canonical.
+    assert "remaining" not in d
 
 
 def test_feature_details_imdb_id_is_int():

@@ -2,8 +2,6 @@ from __future__ import annotations
 import datetime as dt
 import re
 
-_STUB_REMAINING = 1000
-
 # Plugin contract: upload_date is STRICT and must be a valid ISO 8601
 # datetime. Empty string crashes the Jellyfin plugin with
 # System.Text.Json.JsonException. When a provider doesn't expose an upload
@@ -289,24 +287,24 @@ def search_envelope(entries: list, per_page: int = 50, page: int = 1) -> dict:
     }
 
 
-def download_response(link: str, reset_iso: str | None = None) -> dict:
+def download_response(link: str, remaining: int, reset_iso: str) -> dict:
+    """OS.com-shape download response. No duplicate fields; VLSub and
+    Jellyfin both read `remaining_downloads`, `remaining` is kept for
+    VLSub compat."""
     return {
         "link": link,
-        "remaining": _STUB_REMAINING,
-        "remaining_downloads": _STUB_REMAINING,  # B11 — Jellyfin
-        "requests": 0,
-        "reset_time": reset_iso or _tomorrow_utc_iso(),
-        "reset_time_utc": reset_iso or _tomorrow_utc_iso(),
+        "remaining": int(remaining),
+        "remaining_downloads": int(remaining),
+        "reset_time_utc": reset_iso,
     }
 
 
-def user_info_response() -> dict:
+def user_info_response(remaining: int, allowed: int, reset_iso: str) -> dict:
     return {
         "data": {
-            "allowed_downloads": _STUB_REMAINING,
-            "remaining_downloads": _STUB_REMAINING,
-            "remaining": _STUB_REMAINING,
-            "reset_time_utc": _tomorrow_utc_iso(),
+            "allowed_downloads": int(allowed),
+            "remaining_downloads": int(remaining),
+            "reset_time_utc": reset_iso,
             "level": "User",
             "user_id": 0,
             "ext_installed": False,
