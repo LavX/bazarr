@@ -86,10 +86,11 @@ def test_download_link_uses_forwarded_host_for_fqdn():
     assert link.startswith("https://bazarr.example.com/api/v1/download/stream/"), link
 
 
-def test_download_link_relative_when_only_loopback_visible():
-    """No forwarded headers, request.host is loopback-like - emit a relative
-    link so the client prepends its own base rather than the supervisor's
-    internal host."""
+def test_download_link_is_always_absolute():
+    """Plugin contract: `link` MUST be an absolute URL. Relative paths
+    crash HttpClient.GetAsync when the plugin has no BaseAddress set.
+    With only loopback visible we fall back to request.host_url, which
+    is at least a valid absolute URL the client actually hit."""
     from bazarr.compat import auth
     from bazarr.compat.file_id_store import reset_store
     from unittest.mock import MagicMock
@@ -98,7 +99,6 @@ def test_download_link_relative_when_only_loopback_visible():
     fid = auth.mint_file_id("os", "1", "eng", "", subtitle=fake_sub)
     app = _make_app()
     jwt_tok = auth.mint_jwt()
-    # Flask test_client uses host=localhost (filtered as loopback-like).
     r = app.test_client().post(
         "/api/v1/download",
         headers={"Api-Key": "t" * 32,
@@ -106,7 +106,9 @@ def test_download_link_relative_when_only_loopback_visible():
         json={"file_id": fid},
     )
     assert r.status_code == 200
-    assert r.get_json()["link"].startswith("/api/v1/download/stream/")
+    link = r.get_json()["link"]
+    assert link.startswith(("http://", "https://")), link
+    assert "/api/v1/download/stream/" in link
 
 
 def test_infos_user_accepts_api_key_alone():
@@ -124,7 +126,9 @@ def test_infos_user_accepts_api_key_alone():
 
 
 def test_infos_user_rejects_missing_api_key():
+    """Api-Key failures are 403 so the plugin doesn't misread them as
+    a JWT-expiry signal and retry in a loop."""
     app = _make_app()
     r = app.test_client().get("/api/v1/infos/user")
-    assert r.status_code == 401
+    assert r.status_code == 403
     assert r.headers["x-reason"] == "auth"

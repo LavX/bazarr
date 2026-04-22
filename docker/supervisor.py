@@ -214,6 +214,19 @@ async def proxy_handler(request: web.Request) -> web.StreamResponse:
                      "connection", "keep-alive", "expect"}
             forwarded_headers = {k: v for k, v in request.headers.items()
                                  if k.lower() not in _drop}
+            # Advertise the CLIENT-facing URL to the backend. Without
+            # these, Flask's request.host is the internal 127.0.0.1:6768
+            # and any absolute URL it builds (download links, base_url,
+            # etc.) is unreachable from the outside. If an outer reverse
+            # proxy already set these, preserve them; otherwise fill
+            # them in from what THIS supervisor sees.
+            fwd_host_lower = {k.lower() for k in forwarded_headers}
+            if "x-forwarded-host" not in fwd_host_lower:
+                forwarded_headers["X-Forwarded-Host"] = request.host
+            if "x-forwarded-proto" not in fwd_host_lower:
+                forwarded_headers["X-Forwarded-Proto"] = request.scheme
+            if "x-forwarded-for" not in fwd_host_lower and request.remote:
+                forwarded_headers["X-Forwarded-For"] = request.remote
             async with session.request(
                 method=request.method,
                 url=target_url,

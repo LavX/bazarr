@@ -29,14 +29,20 @@ def _strip_cors(resp):
 def _infer_client_base(req) -> tuple[str, str]:
     """Best-effort (scheme, host) reconstruction for the URL the client hit.
 
-    Honors proxy headers first (reverse-proxy or supervisor setups), falls back
-    to request.host/scheme. Returns ("", "") if only the internal loopback
-    address is visible - callers should then emit a relative URL.
+    Trusts X-Forwarded-Host/Proto (set by supervisor.py and any outer
+    reverse proxy) because those reflect what the CLIENT used to reach us.
+    Falls back to request.host/scheme for direct-to-Flask hits. Returns
+    ("", "") only if neither yields a value.
+
+    Historically this function filtered out 127.*/localhost hosts on the
+    theory that they were the internal supervisor->flask loopback. That
+    was wrong: it also rejected legitimate same-box clients (Jellyfin
+    on the same docker host) and masked the real bug - supervisor
+    wasn't setting X-Forwarded-Host at all.
     """
     scheme = (req.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip() or req.scheme
     host = (req.headers.get("X-Forwarded-Host") or "").split(",")[0].strip() or req.host
-    # Ignore the internal supervisor host; it's meaningless to clients.
-    if not host or host.startswith("127.") or host.startswith("localhost"):
+    if not host:
         return "", ""
     return scheme or "http", host
 
@@ -59,8 +65,12 @@ def login():
 
 
 @compat_bp.route("/logout", methods=["DELETE"])
-@compat_auth(require_jwt=True)
+@compat_auth(require_jwt=False)
 def logout():
+    # Contract: "any 2xx". The plugin may hit /logout AFTER it has already
+    # cleared its JWT on a 401-retry path, so we cannot require a Bearer
+    # here - doing so traps the plugin in a clear-and-retry loop. Api-Key
+    # is still required (via @compat_auth), which is the real auth anyway.
     return "", 204
 
 
@@ -69,15 +79,14 @@ def logout():
 def subtitles():
     args = request.args
     langs_s = args.get("languages") or ""
-    imdb = args.get("imdb_id") or args.get("tmdb_id") or args.get("query")
-    if not imdb:
+    # Plugin contract: client sends EITHER imdb_id/tmdb_id OR query+season+
+    # episode, never both. Keep them as distinct variables so a filename in
+    # `query` never gets emitted in feature_details.imdb_id (which is a
+    # plugin filter field - a bogus value drops every result silently).
+    imdb = args.get("imdb_id") or args.get("tmdb_id") or ""
+    query_filename = args.get("query") or None
+    if not imdb and not query_filename:
         return compat_error("imdb_id, tmdb_id, or query required", 400, "bad-request")
-    # The client's filename and OS-style moviehash are optional enrichments:
-    # clients like VLSub and Jellyfin send the playing filename as `query`
-    # (separate from imdb_id), and OS clients send `moviehash` for exact
-    # hash match. Both are plumbed into the virtual Video so providers can
-    # score against release group, resolution, source, etc.
-    query_filename = args.get("query") if args.get("imdb_id") else None
     moviehash = args.get("moviehash") or None
     # subzero.language.Language (what every bazarr provider compares with).
     # babelfish.Language does NOT equal the subzero subclass in set operations
@@ -106,7 +115,9 @@ def subtitles():
     else:
         media_type = "movie"
     try:
-        result = service.search(imdb, season, episode, langs, media_type,
+        # imdb may be empty when the client sent only a filename; service
+        # will fall back to guessit + library lookup to resolve title/year.
+        result = service.search(imdb or "", season, episode, langs, media_type,
                                 query=query_filename, moviehash=moviehash)
     except Exception:
         return compat_error("upstream providers unavailable", 503, "upstream")
@@ -143,12 +154,16 @@ def download():
     except (TypeError, ValueError):
         return compat_error("file_id must be an integer", 400, "bad-request")
     try:
-        # Prefer an absolute URL built from forwarded/host headers. If the
-        # inferred host is the internal supervisor loopback (127.x), fall back
-        # to a relative path so the client prepends the address it actually
-        # connected to rather than its own loopback.
+        # Plugin contract: `link` must be an absolute URL. Relative paths
+        # break HttpClient.GetAsync when the plugin has no BaseAddress.
+        # Prefer forwarded headers (the URL the client actually reached
+        # us on); fall back to Flask's request.host_url which echoes what
+        # the client hit even when that's loopback - at least it's valid.
         scheme, host = _infer_client_base(request)
-        base_host = f"{scheme}://{host}" if host else ""
+        if host:
+            base_host = f"{scheme}://{host}"
+        else:
+            base_host = request.host_url.rstrip("/")
         resp = service.download(fid_int, base_host=base_host)
     except FileNotFoundError:
         return compat_error("subtitle not found", 404, "not_found")
@@ -156,8 +171,16 @@ def download():
 
 
 @compat_bp.route("/download/stream/<stream_token>", methods=["GET"])
-@compat_auth(require_jwt=False)
 def download_stream(stream_token):
+    """Pre-signed download URL.
+
+    Contract: plugin sends NO auth headers here. The HMAC-signed stream
+    token IS the auth - only a token we minted (via mint_file_stream_token,
+    signed with compat_endpoint.file_id_secret) can resolve to a payload,
+    and the token carries an exp claim that service.serve_subtitle_content
+    enforces. Applying @compat_auth here would require an Api-Key header
+    on this route, which would break plugin download the moment it fired.
+    """
     import logging
     _log = logging.getLogger("bazarr.compat.routes")
     try:

@@ -214,15 +214,23 @@ def compat_error(message: str, status: int, x_reason: str):
 
 
 def compat_auth(require_jwt: bool = False):
-    """Standalone decorator. MUST NOT call bazarr/api/utils.py::authenticate."""
+    """Standalone decorator. MUST NOT call bazarr/api/utils.py::authenticate.
+
+    Status-code contract (matters for plugin retry loops):
+      - Api-Key missing / invalid: 403 Forbidden. The plugin MUST NOT
+        interpret this as a JWT-expiry signal; otherwise it'll clear its
+        JWT and retry in a loop that can't recover.
+      - JWT missing / invalid / expired: 401 Unauthorized. This IS the
+        signal the plugin uses to re-login (clear token + POST /login).
+    """
     def decorator(fn):
         @wraps(fn)
         def wrapper(*args, **kwargs):
             api_key = request.headers.get("Api-Key") or request.headers.get("X-Api-Key")
             if not api_key:
-                return compat_error("Missing API key", 401, "auth")
+                return compat_error("Missing API key", 403, "auth")
             if not validate_compat_token(api_key):
-                return compat_error("Invalid API key", 401, "auth")
+                return compat_error("Invalid API key", 403, "auth")
             if require_jwt:
                 bearer = (request.headers.get("Authorization") or "")
                 if not bearer.startswith("Bearer "):

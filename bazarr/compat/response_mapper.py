@@ -1,7 +1,63 @@
 from __future__ import annotations
 import datetime as dt
+import re
 
 _STUB_REMAINING = 1000
+
+# Plugin contract: upload_date is STRICT and must be a valid ISO 8601
+# datetime. Empty string crashes the Jellyfin plugin with
+# System.Text.Json.JsonException. When a provider doesn't expose an upload
+# timestamp we emit the Unix epoch as a safe "unknown" sentinel that still
+# deserializes cleanly into System.DateTime.
+_EPOCH_ISO = "1970-01-01T00:00:00Z"
+
+
+# Release-quality markers used to score release-string parts when providers
+# pack multiple releases into one field (gestdown, SUBDL Anonymus, etc.).
+# Parts containing any of these are "specific" and preferred over bare tokens.
+_RELEASE_QUALITY_RE = re.compile(
+    r"\b("
+    r"2160p|1080p|720p|480p|"
+    r"WEB-?DL|WEBRip|WEB|BluRay|BDRip|BRRip|HDRip|HDTV|DVDRip|"
+    r"x265|x264|H\.?265|H\.?264|HEVC|AVC|"
+    r"DDP?5\.1|DDP?7\.1|DTS|AAC|AC3|FLAC"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _normalize_release(raw) -> str:
+    """Pick a single clean release string from whatever the provider handed us.
+
+    Providers like gestdown and SUBDL frequently pack multiple matching
+    release names into one `release` field, separated by newlines, slashes,
+    or pipes. Surfacing that raw string in the Jellyfin picker looks like
+    a disaster: a 22-line blob or a 'WEB-DL\\nx264' with an embedded newline.
+
+    Strategy: split on common separators, keep the part with the most
+    release-quality markers (resolution, source, codec, audio), tiebreak
+    on length. No info loss in the download flow because we key on
+    subtitle_id, not release.
+    """
+    if not raw:
+        return ""
+    s = str(raw).strip()
+    if not s:
+        return ""
+    # Split on newline, CR, slash-with-optional-spaces, pipe-with-optional-spaces.
+    # Commas are NOT separators (a release like "x264, AAC" is one release).
+    parts = re.split(r"[\n\r]+|\s*/\s*|\s*\|\s*", s)
+    parts = [p.strip(" \t.,-") for p in parts]
+    parts = [p for p in parts if p]
+    if not parts:
+        return s  # whatever it was, return the stripped original
+    if len(parts) == 1:
+        return parts[0]
+    # Score: (count of quality markers, length). Prefer specific over long.
+    def _score(p: str):
+        return (len(_RELEASE_QUALITY_RE.findall(p)), len(p))
+    parts.sort(key=_score, reverse=True)
+    return parts[0]
 
 
 def _tomorrow_utc_iso() -> str:
@@ -36,7 +92,7 @@ def subtitle_to_os_entry(sub, file_id: int, media_type: str, imdb_id: str,
     """
     lang = getattr(sub, "language", None)
     lang_alpha2 = getattr(lang, "alpha2", None) or ""
-    release = getattr(sub, "release_info", "") or ""
+    release = _normalize_release(getattr(sub, "release_info", ""))
     uploader_name = getattr(sub, "uploader", None) or getattr(sub, "provider_name", "")
     feat_type = "Episode" if media_type == "episode" else "Movie"  # B12
 
@@ -94,7 +150,7 @@ def subtitle_to_os_entry(sub, file_id: int, media_type: str, imdb_id: str,
         "foreign_parts_only": False,
         "fps": 0.0,
         "upload_date": getattr(sub, "upload_date", None).isoformat() + "Z"
-                       if getattr(sub, "upload_date", None) else "",
+                       if getattr(sub, "upload_date", None) else _EPOCH_ISO,
         "uploader": {"name": str(uploader_name)},
         "feature_details": {
             "feature_type": feat_type,
@@ -158,16 +214,21 @@ def user_info_response() -> dict:
 
 
 def languages_response() -> dict:
-    """Lowercase BCP-47 per I10; comprehensive for all audited clients.
+    """BCP-47 language codes for all audited clients.
 
     OS.com wire contract: each entry has 'language_code' and
     'language_name' (not 'code' / 'name'). The Jellyfin plugin's
-    LanguageInfo model deserializes from 'language_code', so emitting
-    'code' made every language appear unsupported on that side.
+    LanguageInfo model deserializes from 'language_code'.
+
+    Region subtags are emitted in the canonical mixed case that the
+    plugin normalizes toward: 'zh-CN' (for 'zh'), 'zh-TW', 'pt-BR',
+    'pt-PT'. The plugin's match is case-insensitive, but emitting
+    canonical case guards against stricter clients and keeps the
+    response readable.
     """
     codes = [
-        "en", "es", "fr", "de", "it", "pt-br", "pt-pt", "nl", "pl",
-        "ru", "zh-cn", "zh-tw", "ja", "ko", "ar", "hu", "tr", "cs",
+        "en", "es", "fr", "de", "it", "pt-BR", "pt-PT", "nl", "pl",
+        "ru", "zh-CN", "zh-TW", "ja", "ko", "ar", "hu", "tr", "cs",
         "da", "no", "sv", "fi", "el", "he", "th", "vi", "ro", "sk",
         "bg", "uk", "hr", "sr", "id",
     ]

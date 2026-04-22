@@ -43,7 +43,7 @@ def test_subtitles_endpoint_requires_api_key(monkeypatch):
     app = Flask(__name__)
     app.register_blueprint(compat_bp, url_prefix="/api/v1")
     r = app.test_client().get("/api/v1/subtitles?imdb_id=tt1&languages=en")
-    assert r.status_code == 401
+    assert r.status_code == 403
     assert r.headers["x-reason"] == "auth"
 
 
