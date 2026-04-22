@@ -502,8 +502,9 @@ validators = [
               default=300, cast=int, gte=30, lte=3600),
     Validator('compat_endpoint.search_timeout_seconds',
               default=20, cast=int, gte=5, lte=120),
-    Validator('compat_endpoint.per_provider_timeout_seconds',
-              default=12, cast=int, gte=3, lte=60),
+    # per_provider_timeout is not a user-facing knob: it's derived as
+    # 60% of the wall timeout inside _do_fanout. The log-label threshold
+    # should scale with the wall, not be tuned independently.
     Validator('compat_endpoint.file_id_ttl_seconds',
               default=3600, cast=int, gte=300, lte=86400),
     Validator('compat_endpoint.stream_token_ttl_seconds',

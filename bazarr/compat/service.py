@@ -485,17 +485,43 @@ _SKIP_FOR_VIRTUAL_VIDEO = frozenset({"embeddedsubtitles"})
 
 def _do_fanout(imdb_id, season, episode, languages, media_type,
                query=None, moviehash=None):
+    from subliminal_patch.provider_health import get_tracker as _get_health_tracker
+    health = _get_health_tracker()
     pool = _get_compat_pool()
     video = _build_video(imdb_id, season, episode, media_type,
                          query=query, moviehash=moviehash)
-    logger.info("compat fanout: video=%r lang=%s providers=%d",
-                video, [str(l) for l in languages], len(pool.providers))
+    health_discarded = health.currently_discarded()
+    exclude = set(_SKIP_FOR_VIRTUAL_VIDEO) | health_discarded
+    logger.info("compat fanout: video=%r lang=%s providers=%d health_skipped=%s",
+                video, [str(l) for l in languages], len(pool.providers),
+                sorted(health_discarded) or "[]")
+
+    # per-provider outcome captured here so we can emit a single
+    # summary log after the fanout instead of one line per provider.
+    stats: dict[str, tuple[str, int]] = {}
+
+    def _on_result(name, outcome, latency_ms):
+        stats[name] = (outcome, latency_ms)
+        health.record(name, outcome, latency_ms)
+
+    wall = int(settings.compat_endpoint.search_timeout_seconds)
+    # "slow" log-label threshold is always 60% of the wall so the ratio
+    # stays meaningful whether the user configured 8s or 60s. Floored at
+    # 3s to keep the label from firing on every sub-second response when
+    # the wall is at its minimum.
+    per_provider = max(3, int(wall * 0.6))
     results = list_all_subtitles_parallel(
         [video], set(languages), pool,
-        per_provider_timeout=int(settings.compat_endpoint.per_provider_timeout_seconds),
-        wall_timeout=int(settings.compat_endpoint.search_timeout_seconds),
-        exclude_providers=_SKIP_FOR_VIRTUAL_VIDEO,
+        per_provider_timeout=per_provider,
+        wall_timeout=wall,
+        exclude_providers=exclude,
+        on_result=_on_result,
     )
+
+    if stats:
+        compact = ", ".join(f"{n}={o}:{l}ms"
+                            for n, (o, l) in sorted(stats.items()))
+        logger.info("compat fanout complete: %s", compact)
     subs = []
     for v, sub_list in results.items():
         subs.extend(sub_list)

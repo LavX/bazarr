@@ -17,6 +17,7 @@ import {
   Check,
   Layout,
   Message,
+  Number,
   Password,
   Section,
 } from "@/pages/Settings/components";
@@ -131,6 +132,21 @@ const SettingsExternalView: FunctionComponent = () => {
           for interoperability with existing OpenSubtitles-compatible
           media-center plugins. Bazarr+ is not affiliated with or endorsed by
           OpenSubtitles.com.
+        </Message>
+        <Number
+          label="Search timeout (seconds)"
+          settingKey="settings-compat_endpoint-search_timeout_seconds"
+          min={5}
+          max={120}
+          step={1}
+        />
+        <Message>
+          Hard upper bound for a single fanout across all enabled subtitle
+          providers. Providers that exceed this budget are abandoned for the
+          current request; three consecutive abandonments temporarily remove
+          them from the rotation so remaining providers get more thread time.
+          Lower values respond faster but miss slow-but-capable scraper
+          providers; higher values return more complete results. Default: 20.
         </Message>
       </Section>
       <Section header="Metadata Providers">
