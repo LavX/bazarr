@@ -10,6 +10,8 @@ def make_sub():
         release_info="Movie.2020.1080p.BluRay.x264-GROUP",
         download_count=500, hearing_impaired=False,
         uploader="Anon", matches={"hash", "release_group"},
+        ai_translated=False, machine_translated=False,
+        foreign_parts_only=False, fps=0.0,
     )
     return s
 
@@ -113,3 +115,164 @@ def test_feature_details_graceful_without_video():
     assert fd["title"] == ""
     assert fd["movie_name"] == ""
     assert fd["year"] == 0
+
+
+def test_upload_date_tz_aware_does_not_double_suffix():
+    """Regression: tz-aware isoformat() + 'Z' produced '+00:00Z'."""
+    from datetime import datetime, timezone
+    from unittest.mock import MagicMock
+    from bazarr.compat import response_mapper as M
+    aware = datetime(2023, 1, 15, 12, 34, 56, tzinfo=timezone.utc)
+    sub = MagicMock(upload_date=aware, id="1",
+                    language=MagicMock(alpha2="en"),
+                    download_count=0, ratings=0.0, release_info="",
+                    uploader=None, provider_name="os", matches=set())
+    e = M.subtitle_to_os_entry(sub, 1, "movie", "tt1")
+    d = e["attributes"]["upload_date"]
+    assert d == "2023-01-15T12:34:56Z"
+    assert "+00:00Z" not in d
+
+
+def test_upload_date_naive_gets_z_suffix():
+    from datetime import datetime
+    from unittest.mock import MagicMock
+    from bazarr.compat import response_mapper as M
+    naive = datetime(2023, 1, 15, 12, 34, 56)
+    sub = MagicMock(upload_date=naive, id="1",
+                    language=MagicMock(alpha2="en"),
+                    download_count=0, ratings=0.0, release_info="",
+                    uploader=None, provider_name="os", matches=set())
+    e = M.subtitle_to_os_entry(sub, 1, "movie", "tt1")
+    assert e["attributes"]["upload_date"].endswith("Z")
+    assert "+00:00" not in e["attributes"]["upload_date"]
+
+
+def test_provider_attributes_pass_through():
+    """ai_translated, machine_translated, foreign_parts_only, fps are no
+    longer hardcoded."""
+    from unittest.mock import MagicMock
+    from bazarr.compat import response_mapper as M
+    sub = MagicMock(
+        upload_date=None, id="1", language=MagicMock(alpha2="en"),
+        download_count=0, ratings=0.0, release_info="Movie.2020.1080p.WEB-DL",
+        uploader=None, provider_name="os",
+        ai_translated=True, machine_translated=True,
+        foreign_parts_only=True, fps=23.976, matches=set(),
+    )
+    a = M.subtitle_to_os_entry(sub, 1, "movie", "tt1")["attributes"]
+    assert a["ai_translated"] is True
+    assert a["machine_translated"] is True
+    assert a["foreign_parts_only"] is True
+    assert a["fps"] == 23.976
+
+
+def test_hd_derived_from_release_info():
+    from unittest.mock import MagicMock
+    from bazarr.compat import response_mapper as M
+
+    def mk(release):
+        return MagicMock(
+            upload_date=None, id="1", language=MagicMock(alpha2="en"),
+            download_count=0, ratings=0.0, release_info=release,
+            uploader=None, provider_name="os", matches=set(),
+        )
+    assert M.subtitle_to_os_entry(mk("Movie.2020.1080p.WEB-DL"), 1, "movie", "tt1")["attributes"]["hd"] is True
+    assert M.subtitle_to_os_entry(mk("Movie.2020.720p.HDTV"), 1, "movie", "tt1")["attributes"]["hd"] is True
+    assert M.subtitle_to_os_entry(mk("Movie.2020.2160p.BluRay"), 1, "movie", "tt1")["attributes"]["hd"] is True
+    assert M.subtitle_to_os_entry(mk("Movie.2020.DVDRip"), 1, "movie", "tt1")["attributes"]["hd"] is False
+
+
+def test_comments_field_populated_from_release_info():
+    """Plugin reads attributes.comments; used to be dropped."""
+    from unittest.mock import MagicMock
+    from bazarr.compat import response_mapper as M
+    sub = MagicMock(
+        upload_date=None, id="1", language=MagicMock(alpha2="en"),
+        download_count=0, ratings=0.0,
+        release_info="Release.group.note",
+        uploader=None, provider_name="os", matches=set(),
+    )
+    a = M.subtitle_to_os_entry(sub, 1, "movie", "tt1")["attributes"]
+    assert a["comments"] == "Release.group.note"
+
+
+def test_moviehash_match_reflects_hash_in_matches():
+    from unittest.mock import MagicMock
+    from bazarr.compat import response_mapper as M
+    sub = MagicMock(
+        upload_date=None, id="1", language=MagicMock(alpha2="en"),
+        download_count=0, ratings=0.0, release_info="",
+        uploader=None, provider_name="os", matches={"hash", "release_group"},
+    )
+    a = M.subtitle_to_os_entry(sub, 1, "movie", "tt1",
+                                hash_matched=True)["attributes"]
+    assert a["moviehash_match"] is True
+
+
+def test_moviehash_match_false_when_hash_missing():
+    from unittest.mock import MagicMock
+    from bazarr.compat import response_mapper as M
+    sub = MagicMock(
+        upload_date=None, id="1", language=MagicMock(alpha2="en"),
+        download_count=0, ratings=0.0, release_info="",
+        uploader=None, provider_name="os", matches={"series"},
+    )
+    a = M.subtitle_to_os_entry(sub, 1, "movie", "tt1",
+                                hash_matched=False)["attributes"]
+    assert a["moviehash_match"] is False
+
+
+def test_file_name_uses_provider_filename_when_available():
+    from unittest.mock import MagicMock
+    from bazarr.compat import response_mapper as M
+    sub = MagicMock(
+        upload_date=None, id="1", language=MagicMock(alpha2="en"),
+        download_count=0, ratings=0.0, release_info="",
+        uploader=None, provider_name="os",
+        filename="Movie.2020.1080p.WEB-DL.en.srt", matches=set(),
+    )
+    a = M.subtitle_to_os_entry(sub, 42, "movie", "tt1")["attributes"]
+    assert a["files"][0]["file_name"] == "Movie.2020.1080p.WEB-DL.en.srt"
+
+
+def test_file_name_never_starts_with_dot_when_imdb_empty():
+    from unittest.mock import MagicMock
+    from bazarr.compat import response_mapper as M
+    sub = MagicMock(
+        upload_date=None, id="1", language=MagicMock(alpha2="en"),
+        download_count=0, ratings=0.0, release_info="",
+        uploader=None, provider_name="os", matches=set(),
+    )
+    # Query-only search: imdb is ""
+    a = M.subtitle_to_os_entry(sub, 42, "movie", "")["attributes"]
+    fn = a["files"][0]["file_name"]
+    assert not fn.startswith("."), fn
+    assert "en" in fn
+
+
+def test_ratings_derived_from_score_tuple():
+    """When caller threads (score, max_score), ratings is 0.0-10.0."""
+    from unittest.mock import MagicMock
+    from bazarr.compat import response_mapper as M
+    sub = MagicMock(
+        upload_date=None, id="1", language=MagicMock(alpha2="en"),
+        download_count=0, ratings=0.0, release_info="",
+        uploader=None, provider_name="os", matches=set(),
+    )
+    a = M.subtitle_to_os_entry(sub, 1, "movie", "tt1",
+                                score=(168, 336))["attributes"]
+    assert a["ratings"] == 5.0
+
+
+def test_requested_language_is_preserved_for_region_subtag():
+    from unittest.mock import MagicMock
+    from bazarr.compat import response_mapper as M
+    sub = MagicMock(
+        upload_date=None, id="1",
+        language=MagicMock(alpha2="zh"),
+        download_count=0, ratings=0.0, release_info="",
+        uploader=None, provider_name="os", matches=set(),
+    )
+    a = M.subtitle_to_os_entry(sub, 1, "movie", "tt1",
+                                requested_language="zh-CN")["attributes"]
+    assert a["language"] == "zh-CN"

@@ -25,6 +25,20 @@ _RELEASE_QUALITY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Providers whose subtitles are considered trusted when the provider
+# object doesn't set sub.from_trusted itself. Curated: these providers
+# are the historical OS.com-tier uploaders.
+_TRUSTED_PROVIDERS = frozenset({
+    "opensubtitlescom", "opensubtitles", "addic7ed",
+})
+
+# Release-string markers that mean "HD". Narrower than _RELEASE_QUALITY_RE:
+# only resolution and source markers count, not codec or audio.
+_HD_RE = re.compile(
+    r"\b(2160p|1080p|720p|WEB-?DL|BluRay|BDRip|BRRip)\b",
+    re.IGNORECASE,
+)
+
 
 def _normalize_release(raw) -> str:
     """Pick a single clean release string from whatever the provider handed us.
@@ -80,24 +94,105 @@ def _imdb_to_int(imdb_id) -> int:
         return 0
 
 
-def subtitle_to_os_entry(sub, file_id: int, media_type: str, imdb_id: str,
-                         season=None, episode=None, video=None) -> dict:
-    """Map a Subtitle instance to an OS.com `data[].attributes` shape.
+def _format_upload_date(value) -> str:
+    """Emit valid ISO-8601 in UTC with trailing Z, never `+00:00Z`.
 
-    file_id is a server-mapped int (OS.com contract); entry-level `id` is the
-    same value as a numeric string (OS.com returns numeric strings like
-    "10832492"). `video` is the enriched virtual Video built in
-    compat.service._build_video - used to populate feature_details.title /
-    movie_name / year from library lookup + refiner output.
+    Accepts naive or tz-aware datetime; returns the epoch fallback for
+    None or anything that doesn't look like a datetime. Strict strftime
+    so no fractional seconds either - Jellyfin plugin's parser is picky.
+    """
+    if not value:
+        return _EPOCH_ISO
+    try:
+        if getattr(value, "tzinfo", None) is not None:
+            value = value.astimezone(dt.timezone.utc)
+        return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (AttributeError, TypeError, ValueError):
+        return _EPOCH_ISO
+
+
+def _emit_language(lang, requested_language: str | None) -> str:
+    """Prefer the BCP-47 code the caller requested (preserves region
+    subtags like zh-CN, pt-BR). Fallback: reconstruct from language
+    object's alpha2 + country, then bare alpha2."""
+    if requested_language:
+        return str(requested_language)
+    alpha2 = getattr(lang, "alpha2", None) or ""
+    country = getattr(lang, "country", None)
+    country_code = getattr(country, "alpha2", None) if country else None
+    if alpha2 and country_code:
+        return f"{alpha2.lower()}-{country_code.upper()}"
+    return str(alpha2).lower()
+
+
+def _emit_file_name(sub, file_id: int, lang_code: str) -> str:
+    """Prefer the provider's actual filename; fall back to an
+    unambiguous synthetic that never starts with '.'.
+
+    Old synthetic was f'{imdb_id}.{lang}.srt', which became '.en.srt'
+    whenever imdb was empty (query-only search) and was also inconsistent
+    across callers that passed tt-prefixed vs bare imdb ids.
+    """
+    provider = getattr(sub, "filename", None)
+    if provider:
+        return str(provider)
+    code = lang_code or "und"
+    return f"subtitle-{int(file_id)}.{code}.srt"
+
+
+def _derive_from_trusted(sub) -> bool:
+    """Provider sets its own from_trusted wins; otherwise the curated
+    list decides."""
+    explicit = getattr(sub, "from_trusted", None)
+    if explicit is not None:
+        return bool(explicit)
+    provider = getattr(sub, "provider_name", "") or ""
+    return provider in _TRUSTED_PROVIDERS
+
+
+def _derive_hd(release_info) -> bool:
+    if not release_info:
+        return False
+    return bool(_HD_RE.search(str(release_info)))
+
+
+def _derive_ratings(score_tuple) -> float:
+    """score/max_score -> 0.0..10.0 with 2 decimals. Clamped defensively."""
+    if not score_tuple:
+        return 0.0
+    try:
+        score, max_score = score_tuple
+        if not max_score:
+            return 0.0
+        v = (float(score) / float(max_score)) * 10.0
+        return round(max(0.0, min(10.0, v)), 2)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0.0
+
+
+def subtitle_to_os_entry(sub, file_id: int, media_type: str, imdb_id: str,
+                         season=None, episode=None, video=None,
+                         hash_matched: bool | None = None,
+                         score: tuple[int, int] | None = None,
+                         requested_language: str | None = None) -> dict:
+    """Map a Subtitle to an OS.com `data[].attributes` shape.
+
+    Optional kwargs:
+        hash_matched: set by the caller when it filtered on moviehash
+            (authoritative). If None, derive from 'hash' in sub.matches.
+        score: (score, max_score) from subliminal_patch.score.ComputeScore,
+            projected to attributes.ratings as 0.0-10.0.
+        requested_language: BCP-47 code the client asked for; preserves
+            region subtags that lang.alpha2 drops.
     """
     lang = getattr(sub, "language", None)
     lang_alpha2 = getattr(lang, "alpha2", None) or ""
+    language_out = _emit_language(lang, requested_language)
     release = _normalize_release(getattr(sub, "release_info", ""))
+    raw_release = getattr(sub, "release_info", "") or ""
     uploader_name = getattr(sub, "uploader", None) or getattr(sub, "provider_name", "")
-    feat_type = "Episode" if media_type == "episode" else "Movie"  # B12
+    feat_type = "Episode" if media_type == "episode" else "Movie"
 
-    # Pull metadata off the virtual video (library + refiner populated).
-    # Falls back to empty/0 when the video wasn't threaded through.
     v_title = ""
     v_year = 0
     ep_title = ""
@@ -112,9 +207,6 @@ def subtitle_to_os_entry(sub, file_id: int, media_type: str, imdb_id: str,
             v_year = int(year_raw) if year_raw else 0
         except (TypeError, ValueError):
             v_year = 0
-        # Prefer video's resolved season/episode when the route didn't
-        # receive them. OS-compat clients (Jellyfin plugin) filter results
-        # by these fields, so 0/0 means every hit gets dropped.
         if media_type == "episode":
             if not season:
                 vs = getattr(video, "season", None)
@@ -124,8 +216,6 @@ def subtitle_to_os_entry(sub, file_id: int, media_type: str, imdb_id: str,
                 ve = getattr(video, "episode", None)
                 if ve:
                     episode = ve
-    # OS.com's movie_name is "YYYY - Title" for movies; for episodes it's
-    # usually the episode title. Best-effort replication:
     if media_type == "episode":
         movie_name = ep_title or v_title
     elif v_year and v_title:
@@ -134,23 +224,35 @@ def subtitle_to_os_entry(sub, file_id: int, media_type: str, imdb_id: str,
         movie_name = v_title
 
     imdb_id_int = _imdb_to_int(imdb_id)
+
+    # moviehash_match: explicit override wins, else derive from matches.
+    if hash_matched is None:
+        matches_set = getattr(sub, "matches", None) or set()
+        try:
+            hash_matched_final = "hash" in matches_set
+        except TypeError:
+            hash_matched_final = False
+    else:
+        hash_matched_final = bool(hash_matched)
+
     attributes = {
-        "language": str(lang_alpha2).lower(),
+        "language": language_out,
         "subtitle_id": str(getattr(sub, "id", "")),
         "release": release,
+        "comments": str(raw_release),
         "download_count": int(getattr(sub, "download_count", 0) or 0),
-        "ratings": float(getattr(sub, "ratings", 0) or 0),
+        "ratings": _derive_ratings(score)
+                   or float(getattr(sub, "ratings", 0) or 0),
         "votes": 0,
-        "from_trusted": bool(getattr(sub, "from_trusted", False)),
-        "hd": bool(getattr(sub, "hd", False)),
+        "from_trusted": _derive_from_trusted(sub),
+        "hd": _derive_hd(raw_release),
         "hearing_impaired": bool(getattr(sub, "hearing_impaired", False)),
-        "moviehash_match": False,
-        "ai_translated": False,
-        "machine_translated": False,
-        "foreign_parts_only": False,
-        "fps": 0.0,
-        "upload_date": getattr(sub, "upload_date", None).isoformat() + "Z"
-                       if getattr(sub, "upload_date", None) else _EPOCH_ISO,
+        "moviehash_match": hash_matched_final,
+        "ai_translated": bool(getattr(sub, "ai_translated", False)),
+        "machine_translated": bool(getattr(sub, "machine_translated", False)),
+        "foreign_parts_only": bool(getattr(sub, "foreign_parts_only", False)),
+        "fps": float(getattr(sub, "fps", 0.0) or getattr(sub, "frame_rate", 0.0) or 0.0),
+        "upload_date": _format_upload_date(getattr(sub, "upload_date", None)),
         "uploader": {"name": str(uploader_name)},
         "feature_details": {
             "feature_type": feat_type,
@@ -163,7 +265,7 @@ def subtitle_to_os_entry(sub, file_id: int, media_type: str, imdb_id: str,
         },
         "files": [{
             "file_id": int(file_id),
-            "file_name": f"{imdb_id}.{lang_alpha2}.srt",
+            "file_name": _emit_file_name(sub, file_id, lang_alpha2 or "und"),
         }],
     }
     return {"id": str(file_id), "type": "subtitle", "attributes": attributes}
