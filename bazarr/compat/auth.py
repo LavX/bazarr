@@ -134,7 +134,15 @@ def parse_file_stream_token(token: str) -> Tuple[bool, dict]:
     try:
         padded = token + ("=" * (-len(token) % 4))
         raw = base64.urlsafe_b64decode(padded.encode())
-        p_bytes, sig = raw.rsplit(b".", 1)
+        # Signature is always 32 bytes (SHA-256). Splitting on the last
+        # b"." would silently corrupt the parse when the signature itself
+        # happens to contain a 0x2e byte as its last byte - a ~0.4% chance
+        # per mint that manifested as intermittent "stream token invalid"
+        # failures under load.
+        if len(raw) < 33 or raw[-33:-32] != b".":
+            return False, {}
+        p_bytes = raw[:-33]
+        sig = raw[-32:]
     except Exception:
         return False, {}
     secret = (settings.compat_endpoint.file_id_secret or "").encode()
@@ -172,7 +180,12 @@ def parse_stream_token(token: str) -> Tuple[bool, dict]:
     try:
         padded = token + ("=" * (-len(token) % 4))
         raw = base64.urlsafe_b64decode(padded.encode())
-        p_bytes, sig = raw.rsplit(b".", 1)
+        # Fixed-length split: signature is always 32 bytes (SHA-256).
+        # rsplit(b".", 1) breaks when the signature ends in 0x2e.
+        if len(raw) < 33 or raw[-33:-32] != b".":
+            return False, {}
+        p_bytes = raw[:-33]
+        sig = raw[-32:]
     except Exception:
         return False, {}
     secret = (settings.compat_endpoint.file_id_secret or "").encode()

@@ -3,11 +3,16 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _set_secrets(monkeypatch):
+def _set_secrets():
+    """Set compat secrets via the dict-assignment path. DynaBox setattr
+    doesn't reliably restore on teardown (monkeypatch's revert mutates
+    the wrapper in a way Dynaconf's layered storage doesn't always see),
+    causing flakes when tests run in different orders across the suite."""
     from bazarr.app.config import settings
-    monkeypatch.setattr(settings.compat_endpoint, "file_id_secret", "f" * 32)
-    monkeypatch.setattr(settings.compat_endpoint, "file_id_ttl_seconds", 3600)
-    monkeypatch.setattr(settings.compat_endpoint, "stream_token_ttl_seconds", 300)
+    settings["compat_endpoint"]["file_id_secret"] = "f" * 32
+    settings["compat_endpoint"]["file_id_ttl_seconds"] = 3600
+    settings["compat_endpoint"]["stream_token_ttl_seconds"] = 300
+    yield
 
 
 def test_download_returns_relative_link_by_default():

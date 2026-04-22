@@ -205,6 +205,20 @@ const SystemStatusView: FunctionComponent = () => {
             </Label>
           </Row>
         </InfoContainer>
+        <InfoContainer title="Metadata Sources">
+          <Row title="TheTVDB">
+            <Label icon={faPaperPlane} link="https://thetvdb.com">
+              Metadata provided by TheTVDB. Please consider adding missing
+              information or subscribing.
+            </Label>
+          </Row>
+          <Row title="OMDb">
+            <Label icon={faPaperPlane} link="https://www.omdbapi.com">
+              Movie metadata provided by OMDb API when the local library does
+              not have the requested title.
+            </Label>
+          </Row>
+        </InfoContainer>
       </Stack>
     </Container>
   );

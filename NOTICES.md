@@ -29,6 +29,20 @@ license texts are included in the `libs/` directory where applicable.
 - subliminal_patch — fork of subliminal — modifications copyright (C) the
   respective contributors
 
+## Metadata sources
+
+Bazarr+ enriches subtitle search responses with title, year, and series
+information from the following metadata sources when a library-local
+lookup is not available:
+
+- **TheTVDB** (https://thetvdb.com) — Metadata provided by TheTVDB.
+  Please consider adding missing information or subscribing. Accessed
+  via the TVDB v4 API under a project-tier license key embedded in
+  Bazarr+ for no-configuration episode resolution.
+- **OMDb API** (https://www.omdbapi.com) — Movie metadata is resolved
+  through OMDb when an operator supplies their own API key in settings.
+  No key is shipped by default.
+
 ## License
 
 Bazarr+ is released under GPL v3. See `LICENSE` for the full text.

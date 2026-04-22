@@ -16,15 +16,18 @@ def _reset_compat_secrets():
         for name in ("token", "jwt_secret", "file_id_secret",
                      "jwt_ttl_seconds", "file_id_ttl_seconds", "stream_token_ttl_seconds")
     }
-    settings.compat_endpoint.token = "t" * 32
-    settings.compat_endpoint.jwt_secret = "j" * 32
-    settings.compat_endpoint.file_id_secret = "f" * 32
-    settings.compat_endpoint.jwt_ttl_seconds = 60
-    settings.compat_endpoint.file_id_ttl_seconds = 60
-    settings.compat_endpoint.stream_token_ttl_seconds = 60
+    # Use dict-assignment (not setattr on the DynaBox wrapper) because the
+    # wrapper doesn't reliably propagate into Dynaconf's layered storage
+    # once another test has monkeypatched a dotted path in the same session.
+    settings["compat_endpoint"]["token"] = "t" * 32
+    settings["compat_endpoint"]["jwt_secret"] = "j" * 32
+    settings["compat_endpoint"]["file_id_secret"] = "f" * 32
+    settings["compat_endpoint"]["jwt_ttl_seconds"] = 60
+    settings["compat_endpoint"]["file_id_ttl_seconds"] = 60
+    settings["compat_endpoint"]["stream_token_ttl_seconds"] = 60
     yield
     for name, value in original.items():
-        setattr(settings.compat_endpoint, name, value)
+        settings["compat_endpoint"][name] = value
 
 
 def test_validate_compat_token_accepts_exact_match(monkeypatch):
@@ -136,15 +139,38 @@ def test_file_id_expired_rejected(monkeypatch):
     assert not ok
 
 
-def test_stream_token_roundtrip_and_expiry():
-    """Use direct attribute writes instead of monkeypatch dotted paths - see
-    the _reset_compat_secrets fixture note about Dynaconf restoration."""
+def test_stream_token_roundtrip():
     from bazarr.app.config import settings
-    settings.compat_endpoint.file_id_secret = "f" * 32
-    settings.compat_endpoint.stream_token_ttl_seconds = 1
+    settings["compat_endpoint"]["file_id_secret"] = "f" * 32
+    settings["compat_endpoint"]["stream_token_ttl_seconds"] = 60
     tok = A.mint_stream_token("p", "i")
     ok, payload = A.parse_stream_token(tok)
     assert ok and payload["p"] == "p" and payload["i"] == "i"
+
+
+def test_stream_token_roundtrip_all_byte_values_in_sig():
+    """Regression: the parser used raw.rsplit(b'.', 1), which broke when
+    the HMAC signature happened to end in 0x2e. Fixed-length split at -32
+    makes the parser deterministic regardless of signature content.
+    1000 iterations with varying payloads should exercise a signature
+    whose last byte is b'.' (0x2e) many times over."""
+    from bazarr.app.config import settings
+    settings["compat_endpoint"]["file_id_secret"] = "f" * 32
+    settings["compat_endpoint"]["stream_token_ttl_seconds"] = 60
+    for i in range(1000):
+        tok = A.mint_stream_token(f"p{i}", f"i{i}")
+        ok, payload = A.parse_stream_token(tok)
+        assert ok, f"roundtrip failed on iteration {i}, token={tok!r}"
+        assert payload["p"] == f"p{i}"
+        assert payload["i"] == f"i{i}"
+
+
+def test_stream_token_expiry():
+    """Expiry path: TTL=1, sleep 2s, parse must reject."""
+    from bazarr.app.config import settings
+    settings["compat_endpoint"]["file_id_secret"] = "f" * 32
+    settings["compat_endpoint"]["stream_token_ttl_seconds"] = 1
+    tok = A.mint_stream_token("p", "i")
     time.sleep(2)
     ok, _ = A.parse_stream_token(tok)
     assert not ok

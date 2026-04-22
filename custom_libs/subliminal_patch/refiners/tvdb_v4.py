@@ -23,8 +23,8 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-# Public project-tier TVDB v4 API key. Free tier, 100M hits/day.
-_APIKEY = "7f7eed88-2530-4f84-8ee7-f154471b8f87"
+# Project-tier TVDB v4 API key negotiated for Bazarr+.
+_APIKEY = "9761986e-3402-4658-bb1c-3ac289c50093"
 _BASE_URL = "https://api4.thetvdb.com/v4"
 # TVDB v4 tokens are valid for ~30 days; refresh at 28 to be safe.
 _TOKEN_TTL_SECONDS = 28 * 86400
