@@ -15,7 +15,7 @@ def _no_library(monkeypatch):
     that care about it patch the function explicitly."""
     from bazarr.compat import service
     monkeypatch.setattr(service, "_lookup_library_metadata",
-                        lambda imdb_id, media_type: {})
+                        lambda imdb_id, media_type, season=None, episode=None: {})
 
 
 def test_movie_without_query_is_bare_but_has_imdb_id():
@@ -106,3 +106,51 @@ def test_library_title_wins_over_guessit_title_but_guessit_fills_gaps():
     assert v.title == "The Shawshank Redemption"  # library beats guessit
     assert v.resolution == "2160p"  # guessit still fills release quality
     assert v.release_group == "TERMiNAL"
+
+
+def test_library_path_delegates_to_parse_video():
+    """When the library has a real path on disk, compat delegates to
+    Bazarr's parse_video pipeline (same scoring intelligence as the
+    native manual search). Falls back to virtual Video when the file is
+    missing or parse_video fails."""
+    from unittest.mock import MagicMock
+    from bazarr.compat import service
+    from bazarr.compat.service import _build_video
+    from subliminal.video import Movie
+
+    fake_video = Movie(name="Shawshank.2160p.BluRay.mkv",
+                       title="The Shawshank Redemption", year=1994)
+    fake_video.resolution = "2160p"
+    fake_video.release_group = "REAL-GROUP"
+    fake_video.source = "Blu-ray"
+    fake_video.hashes = {"opensubtitles": "deadbeef"}
+
+    with patch.object(service, "_lookup_library_metadata",
+                       return_value={"title": "The Shawshank Redemption",
+                                     "year": "1994",
+                                     "path": "/storage/shawshank.mkv",
+                                     "sceneName": "shawshank.2160p.bluray"}), \
+         patch("os.path.exists", return_value=True), \
+         patch("bazarr.subtitles.utils.get_video",
+                return_value=fake_video) as gv:
+        v = _build_video("tt0111161", None, None, "movie")
+
+    gv.assert_called_once()
+    assert v is fake_video
+    assert v.release_group == "REAL-GROUP"
+    assert v.imdb_id == "tt0111161"  # compat attached the id post-parse
+
+
+def test_library_path_missing_file_falls_back_to_virtual():
+    """If the library has a path but the file isn't accessible, build the
+    virtual Video rather than erroring."""
+    from bazarr.compat import service
+    from bazarr.compat.service import _build_video
+    with patch.object(service, "_lookup_library_metadata",
+                       return_value={"title": "Shawshank", "year": "1994",
+                                     "path": "/nonexistent/file.mkv"}), \
+         patch("os.path.exists", return_value=False):
+        v = _build_video("tt0111161", None, None, "movie")
+    # Virtual Movie built from library title + imdb
+    assert v.title == "Shawshank"
+    assert v.imdb_id == "tt0111161"

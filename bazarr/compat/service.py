@@ -58,37 +58,61 @@ def _tt(imdb_id) -> str:
     return f"tt{s}" if s.isdigit() or s.lstrip("0").isdigit() else ""
 
 
-def _lookup_library_metadata(imdb_id: str, media_type: str) -> dict:
-    """Best-effort title/year/tvdb_id resolution from the local Bazarr DB.
+def _lookup_library_metadata(imdb_id: str, media_type: str,
+                             season: int | None = None,
+                             episode: int | None = None) -> dict:
+    """Best-effort title/year/tvdb_id/path resolution from the local Bazarr DB.
 
     Providers like supersubtitles and yifysubtitles score heavily on title
     match, so searching with a bare `imdb_id` and empty title returns few or
     irrelevant results. When the title is already in TableMovies/TableShows
     (almost always, since this is a library-backed deployment) we can hand
     the real title/year to the Video constructor and dramatically improve
-    hit rate. Returns {} if the imdb_id is not in the library.
+    hit rate.
+
+    When season+episode are supplied for episode searches, also resolves the
+    per-episode file path and sceneName so _build_video can delegate to
+    Bazarr's real parse_video pipeline (same scoring intelligence as the
+    native manual search). Returns {} if the imdb_id is not in the library.
     """
     try:
-        from bazarr.app.database import database, select, TableMovies, TableShows
+        from bazarr.app.database import (database, select, TableMovies,
+                                         TableShows, TableEpisodes)
     except Exception:
         return {}
     imdb = imdb_id if str(imdb_id).startswith("tt") else f"tt{imdb_id}"
     try:
         if media_type == "episode":
-            row = database.execute(
-                select(TableShows.title, TableShows.year, TableShows.tvdbId)
+            show = database.execute(
+                select(TableShows.sonarrSeriesId, TableShows.title,
+                       TableShows.year, TableShows.tvdbId)
                 .where(TableShows.imdbId == imdb)
             ).first()
-            if row:
-                return {"title": row[0] or "", "year": row[1],
-                        "tvdb_id": row[2]}
+            if not show:
+                return {}
+            out = {"title": show[1] or "", "year": show[2], "tvdb_id": show[3]}
+            if season is not None and episode is not None:
+                ep = database.execute(
+                    select(TableEpisodes.path, TableEpisodes.sceneName,
+                           TableEpisodes.title)
+                    .where(TableEpisodes.sonarrSeriesId == show[0])
+                    .where(TableEpisodes.season == int(season))
+                    .where(TableEpisodes.episode == int(episode))
+                ).first()
+                if ep:
+                    out["path"] = ep[0] or ""
+                    out["sceneName"] = ep[1] or ""
+                    out["episode_title"] = ep[2] or ""
+            return out
         else:
             row = database.execute(
-                select(TableMovies.title, TableMovies.year)
+                select(TableMovies.title, TableMovies.year,
+                       TableMovies.path, TableMovies.sceneName)
                 .where(TableMovies.imdbId == imdb)
             ).first()
             if row:
-                return {"title": row[0] or "", "year": row[1]}
+                return {"title": row[0] or "", "year": row[1],
+                        "path": row[2] or "", "sceneName": row[3] or ""}
     except Exception as e:
         logger.debug("compat library metadata lookup failed for %s: %s", imdb, e)
     return {}
@@ -109,22 +133,100 @@ def _guessit_filename(filename: str) -> dict:
         return {}
 
 
+def _parse_video_from_library(path: str, meta: dict, media_type: str,
+                              imdb_id: str, season: int | None,
+                              episode: int | None,
+                              moviehash: str | None) -> Video | None:
+    """Build a Video via Bazarr's parse_video (same as native manual search).
+
+    Returns None when the path is missing on disk or parse_video raises;
+    the caller falls back to the virtual Video build in that case. On
+    success the returned Video carries the rich metadata (release_group,
+    source, resolution, codecs, and opensubtitles hashes when hashing is
+    enabled) that ComputeScore needs to differentiate subtitle matches.
+    """
+    import os
+    if not os.path.exists(path):
+        return None
+    try:
+        from bazarr.subtitles.utils import get_video
+    except Exception as e:
+        logger.debug("compat: get_video import failed: %s", e)
+        return None
+    title = meta.get("title") or ""
+    scene_name = meta.get("sceneName") or "None"
+    native_media_type = "series" if media_type == "episode" else "movie"
+    try:
+        v = get_video(path, title, scene_name,
+                      providers=None, media_type=native_media_type)
+    except Exception as e:
+        logger.debug("compat: get_video failed for %r: %s", path, e)
+        return None
+    if v is None:
+        return None
+
+    # get_video populates from path analysis and refiners, but doesn't know
+    # the caller-supplied identifiers. Attach them so providers that look
+    # up by imdb/tvdb hit on a single match.
+    if media_type == "episode":
+        if not getattr(v, "series_imdb_id", None):
+            v.series_imdb_id = imdb_id
+        if not getattr(v, "season", None) and season is not None:
+            v.season = int(season)
+        if not getattr(v, "episode", None) and episode is not None:
+            v.episode = int(episode)
+        tvdb_id = meta.get("tvdb_id")
+        if tvdb_id and not getattr(v, "series_tvdb_id", None):
+            try:
+                v.series_tvdb_id = int(tvdb_id)
+            except (TypeError, ValueError):
+                pass
+    else:
+        if not getattr(v, "imdb_id", None):
+            v.imdb_id = imdb_id
+
+    # Client-supplied hash wins over whatever parse_video computed; the
+    # client already has the file open and its computation is canonical.
+    if moviehash:
+        existing = dict(getattr(v, "hashes", {}) or {})
+        existing["opensubtitles"] = str(moviehash)
+        existing["opensubtitlescom"] = str(moviehash)
+        v.hashes = existing
+    return v
+
+
 def _build_video(imdb_id: str, season: int | None, episode: int | None,
                  media_type: str, query: str | None = None,
                  moviehash: str | None = None) -> Video:
-    """Construct a Video for compat fanout, enriched with whatever we can
-    scrape from (a) the local library (title/year/tvdb_id), (b) the client's
-    filename via guessit (source, resolution, release_group, codecs), and
-    (c) the OS-style moviehash if the client has one. Providers score
-    heavily on these fields, so populating them dramatically improves hit
-    rates for file-less compat searches.
+    """Construct a Video for compat fanout.
+
+    Preferred path: when the imdb_id resolves to a library entry with a
+    real file on disk, delegate to Bazarr's parse_video pipeline so
+    providers and ComputeScore get the same release_group / source /
+    resolution / codecs / hash intelligence as Bazarr's native manual
+    search UI. Attach imdb / tvdb identifiers that the library path
+    doesn't populate so providers can still look up the title.
+
+    Fallback (library miss OR library hit but file missing): build a
+    virtual Video from whatever we can scrape, library metadata + guessit
+    on the client's filename + OMDB/TVDB refiner lookups. Lower scoring
+    signal but still better than nothing for query-only searches.
     """
     # Normalize up front: clients (Jellyfin plugin) strip 'tt' before
     # sending. OMDB / TVDB v1 / v4 all reject the bare numeric form, so
     # carrying the normalized value through the Video avoids having to
     # re-prepend in every downstream caller.
     imdb_id = _tt(imdb_id) or imdb_id
-    meta = _lookup_library_metadata(imdb_id, media_type)
+    meta = _lookup_library_metadata(imdb_id, media_type, season, episode)
+
+    path = meta.get("path") or ""
+    if path:
+        real = _parse_video_from_library(path, meta, media_type,
+                                          imdb_id, season, episode, moviehash)
+        if real is not None:
+            return real
+        logger.debug("compat: library has path %r but parse_video failed; "
+                     "falling back to virtual Video build", path)
     title = meta.get("title") or ""
     year_raw = meta.get("year")
     try:
