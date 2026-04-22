@@ -484,8 +484,10 @@ _SKIP_FOR_VIRTUAL_VIDEO = frozenset({"embeddedsubtitles"})
 
 
 def _do_fanout(imdb_id, season, episode, languages, media_type,
-               query=None, moviehash=None):
+               query=None, moviehash=None, moviehash_match=None,
+               requested_languages=None):
     from subliminal_patch.provider_health import get_tracker as _get_health_tracker
+    from subliminal_patch.score import ComputeScore, MAX_SCORES
     health = _get_health_tracker()
     pool = _get_compat_pool()
     video = _build_video(imdb_id, season, episode, media_type,
@@ -496,8 +498,6 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
                 video, [str(l) for l in languages], len(pool.providers),
                 sorted(health_discarded) or "[]")
 
-    # per-provider outcome captured here so we can emit a single
-    # summary log after the fanout instead of one line per provider.
     stats: dict[str, tuple[str, int]] = {}
 
     def _on_result(name, outcome, latency_ms):
@@ -505,10 +505,6 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
         health.record(name, outcome, latency_ms)
 
     wall = int(settings.compat_endpoint.search_timeout_seconds)
-    # "slow" log-label threshold is always 60% of the wall so the ratio
-    # stays meaningful whether the user configured 8s or 60s. Floored at
-    # 3s to keep the label from firing on every sub-second response when
-    # the wall is at its minimum.
     per_provider = max(3, int(wall * 0.6))
     results = list_all_subtitles_parallel(
         [video], set(languages), pool,
@@ -522,9 +518,36 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
         compact = ", ".join(f"{n}={o}:{l}ms"
                             for n, (o, l) in sorted(stats.items()))
         logger.info("compat fanout complete: %s", compact)
+
     subs = []
     for v, sub_list in results.items():
         subs.extend(sub_list)
+
+    # moviehash_match filtering: "only" drops every non-hash row. This
+    # is what makes Jellyfin's "perfect match" toggle work: without the
+    # filter, plugin sees all results and filters client-side on the
+    # all-False moviehash_match field, which historically eliminated
+    # everything.
+    def _has_hash(s):
+        try:
+            return "hash" in (getattr(s, "matches", None) or set())
+        except TypeError:
+            return False
+
+    if moviehash_match == "only":
+        subs = [s for s in subs if _has_hash(s)]
+
+    # Project Bazarr's real score into attributes.ratings so the plugin's
+    # sort (moviehash_match -> download_count -> ratings) has something
+    # meaningful beyond the first two keys.
+    compute = ComputeScore()
+    max_score = MAX_SCORES["episode" if media_type == "episode" else "movie"]
+
+    # Pick a single requested_language for the mapper. The plugin sends
+    # one language per search anyway (BCP-47), so when there's only one
+    # entry we preserve its region subtag.
+    req_lang_map = _build_requested_language_map(requested_languages or [])
+
     entries = []
     for sub in subs:
         file_id = auth.mint_file_id(
@@ -534,23 +557,58 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
             release_info=getattr(sub, "release_info", "") or "",
             subtitle=sub,
         )
-        entries.append(M.subtitle_to_os_entry(sub, file_id, media_type, imdb_id,
-                                              season, episode, video=video))
+        try:
+            matches = sub.get_matches(video) if hasattr(sub, "get_matches") \
+                      else (getattr(sub, "matches", None) or set())
+        except Exception:
+            matches = getattr(sub, "matches", None) or set()
+        try:
+            score, _sc_no_hash = compute(matches, sub, video)
+        except Exception:
+            score = 0
+        sub_alpha2 = getattr(getattr(sub, "language", None), "alpha2", None) or ""
+        req_lang = req_lang_map.get(sub_alpha2)
+        entries.append(M.subtitle_to_os_entry(
+            sub, file_id, media_type, imdb_id, season, episode,
+            video=video,
+            hash_matched=_has_hash(sub),
+            score=(int(score), int(max_score)),
+            requested_language=req_lang,
+        ))
     entries.sort(key=lambda e: -int(e["attributes"].get("download_count", 0)))
     return M.search_envelope(entries, per_page=50, page=1)
 
 
+def _build_requested_language_map(requested_languages: list[str]) -> dict:
+    """Map alpha2 -> original BCP-47 code so mapper can preserve region
+    subtags like zh-CN. When the caller asked for 'en' and provider
+    returned Language('eng'), we get back 'en'. When caller asked for
+    'zh-CN' and provider returned Language('zho'), we emit 'zh-CN'."""
+    out: dict[str, str] = {}
+    for code in requested_languages:
+        if not code:
+            continue
+        base = code.split("-", 1)[0].lower()
+        out.setdefault(base, code)
+    return out
+
+
 def search(imdb_id: str, season, episode, languages: Iterable[Language],
            media_type: str, query: str | None = None,
-           moviehash: str | None = None) -> dict:
+           moviehash: str | None = None,
+           moviehash_match: str | None = None,
+           requested_languages: list[str] | None = None) -> dict:
     enabled = get_providers_sorted()
     key = C.build_key(media_type, imdb_id, season, episode, languages, enabled,
-                      query=query, moviehash=moviehash)
+                      query=query, moviehash=moviehash,
+                      moviehash_match=moviehash_match)
     ttl = int(settings.compat_endpoint.cache_ttl_seconds)
     return C.compat_region.get_or_create(
         key,
         creator=lambda: _do_fanout(imdb_id, season, episode, languages,
-                                    media_type, query=query, moviehash=moviehash),
+                                    media_type, query=query, moviehash=moviehash,
+                                    moviehash_match=moviehash_match,
+                                    requested_languages=requested_languages),
         expiration_time=ttl,
     )
 
