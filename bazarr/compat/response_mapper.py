@@ -103,11 +103,18 @@ def user_info_response() -> dict:
 
 
 def languages_response() -> dict:
-    """Lowercase BCP-47 per I10; comprehensive for all audited clients."""
+    """Lowercase BCP-47 per I10; comprehensive for all audited clients.
+
+    OS.com wire contract: each entry has 'language_code' and
+    'language_name' (not 'code' / 'name'). The Jellyfin plugin's
+    LanguageInfo model deserializes from 'language_code', so emitting
+    'code' made every language appear unsupported on that side.
+    """
     codes = [
         "en", "es", "fr", "de", "it", "pt-br", "pt-pt", "nl", "pl",
         "ru", "zh-cn", "zh-tw", "ja", "ko", "ar", "hu", "tr", "cs",
         "da", "no", "sv", "fi", "el", "he", "th", "vi", "ro", "sk",
         "bg", "uk", "hr", "sr", "id",
     ]
-    return {"data": [{"code": c, "name": c.upper()} for c in codes]}
+    return {"data": [{"language_code": c, "language_name": c.upper()}
+                     for c in codes]}
