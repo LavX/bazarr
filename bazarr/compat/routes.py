@@ -204,12 +204,23 @@ def download():
 def download_stream(stream_token):
     """Pre-signed download URL.
 
-    Contract: plugin sends NO auth headers here. The HMAC-signed stream
-    token IS the auth - only a token we minted (via mint_file_stream_token,
-    signed with compat_endpoint.file_id_secret) can resolve to a payload,
-    and the token carries an exp claim that service.serve_subtitle_content
-    enforces. Applying @compat_auth here would require an Api-Key header
-    on this route, which would break plugin download the moment it fired.
+    Auth model: the HMAC-signed stream_token is the authorization, with
+    exp enforced by parse_file_stream_token (see auth.py). Api-Key is
+    not required here, but the Jellyfin plugin sends it on every request
+    including this follow-up; the route accepts it silently so the plugin
+    does not have to special-case this endpoint.
+
+    Same-origin contract: the link returned by /download always points at
+    this host (service.download constructs it from the request's own
+    scheme+host or the forwarded headers). Never return a link to a
+    third-party host, the plugin's request helper forwards the Bazarr
+    Api-Key header on the follow-up, which would leak the token to
+    whoever owns that host.
+
+    Empty-body contract (P0 from plugin docs): when provider content is
+    missing, return 200 + empty body, not 404. The plugin uses this
+    signal to blocklist the file_id and skip it on future scans. A 404
+    is treated as transient and retried forever.
     """
     import logging
     _log = logging.getLogger("bazarr.compat.routes")
