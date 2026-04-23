@@ -26,7 +26,7 @@ def build_key(media_type: str, imdb_id: str, season: int | None,
         for l in languages
     )
     provider_hash = hashlib.sha256(
-        ",".join(sorted(enabled_providers)).encode()
+        ",".join(sorted(enabled_providers or [])).encode()
     ).hexdigest()[:16]
     extras = hashlib.sha256(
         f"{query or ''}|{moviehash or ''}|{moviehash_match or ''}".encode()
