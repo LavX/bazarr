@@ -758,7 +758,8 @@ def download(file_id, base_host: str = "",
     if not ok:
         raise FileNotFoundError("file_id invalid or expired")
     stream_tok = auth.mint_file_stream_token(int(file_id))
-    path = f"/api/v1/download/stream/{quote(stream_tok, safe='')}"
+    base_url = (settings.general.base_url or "").rstrip("/")
+    path = f"{base_url}/api/v1/download/stream/{quote(stream_tok, safe='')}"
     link = f"{base_host.rstrip('/')}{path}" if base_host else path
     return M.download_response(link, remaining=remaining, reset_iso=reset_iso)
 
