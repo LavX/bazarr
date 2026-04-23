@@ -37,6 +37,25 @@ def _normalize_lang(lang):
     return lang
 
 
+def _resolve_tmdb_to_imdb(tmdb_id: str) -> str:
+    """Best-effort TMDB -> IMDB resolution via the local library database.
+
+    Falls back to empty string (search proceeds as query-only) when
+    resolution fails or the movie is not in the library.
+    """
+    try:
+        from bazarr.app.database import database, select, TableMovies
+        row = database.execute(
+            select(TableMovies.imdbId)
+            .where(TableMovies.tmdbId == str(tmdb_id))
+        ).first()
+        if row and row[0]:
+            return str(row[0])
+    except Exception:
+        pass
+    return ""
+
+
 def _quota_config() -> tuple[int, int]:
     from bazarr.app.config import settings
     return (int(settings.compat_endpoint.downloads_per_window),
@@ -126,10 +145,13 @@ def logout():
 def subtitles():
     args = request.args
     langs_s = args.get("languages") or ""
-    imdb = args.get("imdb_id") or args.get("tmdb_id") or ""
+    imdb = args.get("imdb_id") or ""
+    tmdb = args.get("tmdb_id") or ""
     query_filename = args.get("query") or None
-    if not imdb and not query_filename:
+    if not imdb and not query_filename and not tmdb:
         return compat_error("imdb_id, tmdb_id, or query required", 400, "bad-request")
+    if not imdb and tmdb:
+        imdb = _resolve_tmdb_to_imdb(tmdb)
     moviehash = args.get("moviehash") or None
     moviehash_match = args.get("moviehash_match") or None
     if moviehash_match and moviehash_match not in ("include", "only"):

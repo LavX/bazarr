@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import os
 from threading import Lock
 from typing import Iterable
 from urllib.parse import quote
@@ -595,7 +596,9 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
     video = _build_video(imdb_id, season, episode, media_type,
                          query=query, moviehash=moviehash)
     health_discarded = health.currently_discarded()
-    exclude = set(_SKIP_FOR_VIRTUAL_VIDEO) | health_discarded
+    video_has_file = bool(getattr(video, "name", None)
+                          and os.path.exists(getattr(video, "name", "")))
+    exclude = health_discarded | (set() if video_has_file else set(_SKIP_FOR_VIRTUAL_VIDEO))
     logger.info("compat fanout: video=%r lang=%s providers=%d health_skipped=%s",
                 video, [str(l) for l in languages], len(pool.providers),
                 sorted(health_discarded) or "[]")

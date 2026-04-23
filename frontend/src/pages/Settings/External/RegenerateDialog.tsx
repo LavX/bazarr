@@ -1,6 +1,8 @@
 import { FunctionComponent, useId, useState } from "react";
 import { Button, Group, Modal, Stack, Text } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
+import { useQueryClient } from "@tanstack/react-query";
+import { QueryKeys } from "@/apis/queries/keys";
 import client from "@/apis/raw/client";
 
 interface RegenerateDialogProps {
@@ -14,11 +16,15 @@ const RegenerateDialog: FunctionComponent<RegenerateDialogProps> = ({
 }) => {
   const descriptionId = useId();
   const [loading, setLoading] = useState(false);
+  const queryClient = useQueryClient();
 
   const handleRegenerate = async () => {
     setLoading(true);
     try {
       await client.axios.post("system/compat/regenerate");
+      void queryClient.invalidateQueries({
+        queryKey: [QueryKeys.System, QueryKeys.Settings],
+      });
       notifications.show({
         title: "Secrets regenerated",
         message:
