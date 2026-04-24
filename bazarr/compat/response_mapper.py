@@ -182,7 +182,8 @@ def subtitle_to_os_entry(sub, file_id: int, media_type: str, imdb_id: str,
     language_out = _emit_language(lang, requested_language)
     release = _normalize_release(getattr(sub, "release_info", ""))
     raw_release = getattr(sub, "release_info", "") or ""
-    uploader_name = getattr(sub, "uploader", None) or getattr(sub, "provider_name", "")
+    provider_name = getattr(sub, "provider_name", "") or ""
+    uploader_name = getattr(sub, "uploader", None) or provider_name
     feat_type = "Episode" if media_type == "episode" else "Movie"
 
     v_title = ""
@@ -249,7 +250,7 @@ def subtitle_to_os_entry(sub, file_id: int, media_type: str, imdb_id: str,
         "foreign_parts_only": bool(getattr(sub, "foreign_parts_only", False)),
         "fps": float(getattr(sub, "fps", 0.0) or getattr(sub, "frame_rate", 0.0) or 0.0),
         "upload_date": _format_upload_date(getattr(sub, "upload_date", None)),
-        "uploader": {"name": str(uploader_name)},
+        "uploader": {"name": f"{provider_name}:{uploader_name}" if provider_name else str(uploader_name)},
         "feature_details": {
             "feature_type": feat_type,
             "imdb_id": imdb_id_int,
@@ -259,6 +260,7 @@ def subtitle_to_os_entry(sub, file_id: int, media_type: str, imdb_id: str,
             "movie_name": movie_name,
             "year": v_year,
         },
+        "url": getattr(sub, "page_link", None) or "",
         "files": [{
             "file_id": int(file_id),
             "file_name": _emit_file_name(sub, file_id, lang_alpha2 or "und"),

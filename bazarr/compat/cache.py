@@ -12,7 +12,8 @@ compat_region = make_region(key_mangler=lambda k: k).configure(
 def build_key(media_type: str, imdb_id: str, season: int | None,
               episode: int | None, languages, enabled_providers,
               query: str | None = None, moviehash: str | None = None,
-              moviehash_match: str | None = None) -> str:
+              moviehash_match: str | None = None,
+              requested_languages: list[str] | None = None) -> str:
     """Deterministic across restarts. Language variants preserved.
 
     query/moviehash/moviehash_match are part of the key because they
@@ -28,8 +29,9 @@ def build_key(media_type: str, imdb_id: str, season: int | None,
     provider_hash = hashlib.sha256(
         ",".join(sorted(enabled_providers or [])).encode()
     ).hexdigest()[:16]
+    req_langs = ",".join(sorted(requested_languages or []))
     extras = hashlib.sha256(
-        f"{query or ''}|{moviehash or ''}|{moviehash_match or ''}".encode()
+        f"{query or ''}|{moviehash or ''}|{moviehash_match or ''}|{req_langs}".encode()
     ).hexdigest()[:16]
     return (
         f"compat:v2:{media_type}:{imdb_id}:{season or 0}:{episode or 0}"
