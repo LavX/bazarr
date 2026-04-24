@@ -12,7 +12,7 @@ import {
   faTriangleExclamation,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { useSystem } from "@/apis/hooks";
+import { useSystem, useSystemStatus } from "@/apis/hooks";
 import {
   Check,
   Layout,
@@ -29,20 +29,12 @@ const CONSENT_KEY = "settings-compat_endpoint-consent";
 
 const RestartBanner: FunctionComponent = () => {
   const { restart, isMutating } = useSystem();
+  const status = useSystemStatus();
+  const compatActive = status.data?.compat_active ?? false;
   const persistedEnabled = useSettingValue<boolean>(ENABLED_KEY, {
     original: true,
   });
-  const persistedToken = useSettingValue<string>(
-    "settings-compat_endpoint-token",
-    { original: true },
-  );
-  // Only show the banner AFTER a successful save has landed with enabled=true
-  // but the running Bazarr process still has an empty token (ensure_secrets
-  // populates it at the next boot). Showing the banner only in this gap means:
-  // - never before the user has saved
-  // - never while the endpoint is off
-  // - always when a restart is actually required to activate the endpoint
-  const needsRestart = Boolean(persistedEnabled) && !persistedToken;
+  const needsRestart = Boolean(persistedEnabled) && !compatActive;
   if (!needsRestart) return null;
   return (
     <Alert

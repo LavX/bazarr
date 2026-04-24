@@ -389,6 +389,19 @@ class OpenSubtitlesComProvider(ProviderRetryMixin, Provider):
 
         result = res.json()
 
+        if not result['data'] and file_hash:
+            logger.debug("Hash query returned 0 results, retrying without moviehash")
+            params_no_hash = [(k, v) for k, v in params if k != 'moviehash']
+            res = self.retry(
+                lambda: self.checked(
+                    lambda: self.session.get(self.server_url() + 'subtitles', params=params_no_hash, timeout=30),
+                    validate_json=True,
+                    json_key_name='data'
+                ),
+                amount=retry_amount
+            )
+            result = res.json()
+
         # filter out forced subtitles or not depending on the required languages
         if all([lang.forced for lang in languages]):  # only forced
             result['data'] = [x for x in result['data'] if self.is_real_forced(x['attributes'])]

@@ -6,6 +6,8 @@ media objects by design.
 """
 from __future__ import annotations
 
+compat_active: bool = False
+
 
 def register(app, base_url: str) -> None:
     """Register the compat blueprint (real or stub) with the Flask app.
@@ -18,6 +20,7 @@ def register(app, base_url: str) -> None:
     from bazarr.app.config import settings
     enabled = bool(settings.compat_endpoint.enabled)
     prefix = base_url.rstrip("/") + "/api/v1"
+    global compat_active
     if enabled:
         from bazarr.api.system.compat_admin import ensure_secrets
         ensure_secrets()  # idempotent; auto-generates token/jwt_secret/file_id_secret if missing
@@ -25,6 +28,8 @@ def register(app, base_url: str) -> None:
         boot_hmac_selftest()  # fail-closed if any secret is still invalid
         from .routes import compat_bp
         app.register_blueprint(compat_bp, url_prefix=prefix)
+        compat_active = True
     else:
         from .routes import compat_stub_bp
         app.register_blueprint(compat_stub_bp, url_prefix=prefix)
+        compat_active = False

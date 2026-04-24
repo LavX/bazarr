@@ -42,6 +42,7 @@ declare namespace System {
     start_time: number;
     timezone: string;
     cpu_cores: number;
+    compat_active: boolean;
   }
 
   interface Backups {

@@ -685,8 +685,14 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
                 score = int(score) + min(20, int(math.log10(dc + 1) * 4))
         except (TypeError, ValueError):
             pass
-        sub_alpha2 = getattr(getattr(sub, "language", None), "alpha2", None) or ""
+        sub_lang = getattr(sub, "language", None)
+        sub_alpha2 = getattr(sub_lang, "alpha2", None) or ""
         req_lang = req_lang_map.get(sub_alpha2)
+        if req_lang and "-" in req_lang:
+            sub_country = getattr(getattr(sub_lang, "country", None), "alpha2", None) or ""
+            req_region = req_lang.split("-", 1)[1].upper()
+            if sub_country and sub_country.upper() != req_region:
+                req_lang = None
         entries.append(M.subtitle_to_os_entry(
             sub, file_id, media_type, imdb_id, season, episode,
             video=video,
@@ -729,7 +735,8 @@ def search(imdb_id: str, season, episode, languages: Iterable[Language],
     enabled = get_providers_sorted()
     key = C.build_key(media_type, imdb_id, season, episode, languages, enabled,
                       query=query, moviehash=moviehash,
-                      moviehash_match=moviehash_match)
+                      moviehash_match=moviehash_match,
+                      requested_languages=requested_languages)
     cache_ttl = int(settings.compat_endpoint.cache_ttl_seconds)
     fid_ttl = int(settings.compat_endpoint.file_id_ttl_seconds)
     ttl = min(cache_ttl, fid_ttl)

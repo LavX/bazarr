@@ -83,4 +83,10 @@ class SystemStatus(Resource):
         system_status.update({'timezone': timezone})
         system_status.update({'cpu_cores': os.cpu_count()})
 
+        try:
+            from bazarr.compat import compat_active
+            system_status.update({'compat_active': compat_active})
+        except Exception:
+            system_status.update({'compat_active': False})
+
         return {'data': system_status}
