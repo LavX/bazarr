@@ -20,7 +20,11 @@ import {
 } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import { IconDefinition } from "@fortawesome/fontawesome-common-types";
-import { faGithub, faWikipediaW } from "@fortawesome/free-brands-svg-icons";
+import {
+  faDiscord,
+  faGithub,
+  faWikipediaW,
+} from "@fortawesome/free-brands-svg-icons";
 import {
   faCode,
   faPaperPlane,
@@ -185,18 +189,18 @@ const SystemStatusView: FunctionComponent = () => {
         </InfoContainer>
         <InfoContainer title="More Info">
           <Row title="Home Page">
-            <Label icon={faPaperPlane} link="https://www.bazarr.media/">
-              Bazarr Website
+            <Label icon={faPaperPlane} link="https://lavx.github.io/bazarr">
+              Bazarr+ Website
             </Label>
           </Row>
           <Row title="Source">
             <Label icon={faGithub} link={GithubRepoRoot}>
-              Bazarr on Github
+              Bazarr+ on GitHub
             </Label>
           </Row>
           <Row title="Wiki">
-            <Label icon={faWikipediaW} link="https://wiki.bazarr.media">
-              Bazarr Wiki
+            <Label icon={faWikipediaW} link={`${GithubRepoRoot}/wiki`}>
+              Bazarr+ Wiki
             </Label>
           </Row>
           <Row title="API documentation">
@@ -204,18 +208,21 @@ const SystemStatusView: FunctionComponent = () => {
               Swagger UI
             </Label>
           </Row>
+          <Row title="Community">
+            <Label icon={faDiscord} link="https://discord.gg/WSVzzaDg">
+              Bazarr+ on Discord
+            </Label>
+          </Row>
         </InfoContainer>
         <InfoContainer title="Metadata Sources">
           <Row title="TheTVDB">
             <Label icon={faPaperPlane} link="https://thetvdb.com">
-              Metadata provided by TheTVDB. Please consider adding missing
-              information or subscribing.
+              TV series metadata
             </Label>
           </Row>
           <Row title="OMDb">
             <Label icon={faPaperPlane} link="https://www.omdbapi.com">
-              Movie metadata provided by OMDb API when the local library does
-              not have the requested title.
+              Movie metadata fallback
             </Label>
           </Row>
         </InfoContainer>
