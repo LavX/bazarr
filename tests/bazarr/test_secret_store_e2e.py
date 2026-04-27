@@ -157,6 +157,43 @@ def test_e2e_first_save_persists_master_key_alongside_ciphertext():
     assert decrypted == "real-sonarr-key"
 
 
+def test_has_plaintext_secrets_on_disk_detects_clear_text_credential():
+    """Force-migration trigger: if any USER_VISIBLE_SECRETS path is
+    non-empty plaintext (no marker), bootstrap must KNOW so it can call
+    write_config unconditionally. Otherwise the lazy migration story
+    leaves clear-text credentials sitting on disk indefinitely until
+    the operator happens to touch a Settings field."""
+    from secret_store.migration import has_plaintext_secrets_on_disk
+
+    # Mixed shape: one clear-text password, one already-encrypted token.
+    settings = _FakeSettings({
+        "sonarr": {"apikey": "still-clear-text-from-an-edit"},
+        "compat_endpoint": {"token": SECRET_MARKER_PREFIX + "ignored"},
+    })
+    assert has_plaintext_secrets_on_disk(settings) is True
+
+    # All ciphertext / empty -> nothing to migrate.
+    fully_encrypted = _FakeSettings({
+        "sonarr": {"apikey": encrypt_secret("real-apikey")},
+        "compat_endpoint": {"token": encrypt_secret("real-token")},
+    })
+    assert has_plaintext_secrets_on_disk(fully_encrypted) is False
+
+    # Empty values are not flagged - empty stays empty, no migration.
+    empty = _FakeSettings({"sonarr": {"apikey": ""}})
+    assert has_plaintext_secrets_on_disk(empty) is False
+
+
+def test_has_plaintext_secrets_on_disk_detects_clear_text_in_list():
+    """Same trigger for USER_VISIBLE_SECRET_LISTS - a single plaintext
+    list element flips the bit."""
+    from secret_store.migration import has_plaintext_secrets_on_disk
+    settings = _FakeSettings({
+        "translator": {"gemini_keys": [encrypt_secret("g1"), "still-plain"]},
+    })
+    assert has_plaintext_secrets_on_disk(settings) is True
+
+
 def test_e2e_save_after_first_boot_does_not_double_encrypt():
     """Once a credential is on disk in ciphertext form, a normal save
     cycle (no user edit) must not produce a fresh ciphertext - encrypt

@@ -32,8 +32,13 @@ before checking, so this stays simple.
 """
 
 USER_VISIBLE_SECRETS = frozenset({
-    # Bazarr's own API key + admin password
+    # Bazarr's own admin login (username + password) and the API key that
+    # the SPA uses on every authenticated request. Username is NOT
+    # universally treated as secret, but encrypting it alongside the
+    # password preserves account privacy in support bundles / leaked
+    # config.yaml uploads.
     "auth.apikey",
+    "auth.username",
     "auth.password",
     # Compat endpoint token (user copies this into VLSub / Jellyfin plugin)
     "compat_endpoint.token",
@@ -42,13 +47,20 @@ USER_VISIBLE_SECRETS = frozenset({
     # *arr API keys
     "sonarr.apikey",
     "radarr.apikey",
-    # Plex (apikey + token; encryption_key stays in SYSTEM_SECRETS)
+    # Plex (apikey + token; encryption_key stays in SYSTEM_SECRETS).
+    # plex.username / plex.email come from the OAuth flow and are user
+    # PII, encrypted at rest alongside the token.
     "plex.apikey",
     "plex.token",
+    "plex.username",
+    "plex.email",
     # Jellyfin
     "jellyfin.apikey",
-    # Network proxy + database
+    # Network proxy (full login pair).
+    "proxy.username",
     "proxy.password",
+    # External Postgres (full login pair).
+    "postgresql.username",
     "postgresql.password",
     # AI Subtitle Translator. The "encryption_key" here is a USER-managed
     # secret - the Translator settings page exposes it as a Password field
@@ -58,18 +70,46 @@ USER_VISIBLE_SECRETS = frozenset({
     "translator.openrouter_api_key",
     "translator.openrouter_encryption_key",
     "translator.lingarr_token",
-    # Subtitle providers - passwords
+    # Subtitle providers - full login pairs (username + password) so a
+    # leaked config.yaml doesn't expose which provider accounts the
+    # operator owns even when the password is the only crackable bit.
+    "opensubtitles.username",
     "opensubtitles.password",
+    "opensubtitlescom.username",
     "opensubtitlescom.password",
+    "addic7ed.username",
     "addic7ed.password",
+    "legendasdivx.username",
     "legendasdivx.password",
+    "legendasnet.username",
     "legendasnet.password",
+    "xsubs.username",
     "xsubs.password",
+    "deathbycaptcha.username",
     "deathbycaptcha.password",
+    "napisy24.username",
     "napisy24.password",
+    "titlovi.username",
     "titlovi.password",
+    "titulky.username",
     "titulky.password",
+    "karagarga.username",
     "karagarga.password",
+    # karagarga forum login is a separate credential pair (no f_username
+    # validator exists - the same `username` is reused).
+    "karagarga.f_password",
+    # ktuvit: separate field names but same pattern (login pair).
+    "ktuvit.email",
+    "ktuvit.hashed_password",
+    # Private-tracker passkey (single credential, no separate password).
+    "hdbits.username",
+    "hdbits.passkey",
+    # Session cookies - functionally equivalent to a long-lived auth
+    # token once the provider login has happened.
+    "addic7ed.cookies",
+    "avistaz.cookies",
+    "cinemaz.cookies",
+    "turkcealtyaziorg.cookies",
     # Subtitle providers - tokens / keys
     "assrt.token",
     "betaseries.token",

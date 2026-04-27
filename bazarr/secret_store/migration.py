@@ -156,6 +156,51 @@ def migrate_legacy_plex_encryption(settings_obj) -> None:
         )
 
 
+def has_plaintext_secrets_on_disk(settings_obj) -> bool:
+    """Return True iff at least one USER_VISIBLE_SECRETS path holds a
+    non-empty string without the enc:v1: marker - i.e. somebody (manual
+    edit, fresh upgrade, registry-expansion deploy) wrote a credential
+    in clear text and write_config has not yet rewritten the file.
+
+    Lets the bootstrap force a one-time write_config call so the
+    encryption guarantee is deterministic - the operator does not have
+    to remember to touch a Settings field to trigger migration.
+
+    Reads from the LIVE settings object (which after dynaconf load
+    matches what's on disk for fields with no marker), so this is the
+    same source of truth that decrypt_settings_in_place / write_config
+    operate on.
+    """
+    for path in USER_VISIBLE_SECRETS:
+        try:
+            section, key = _split_path(path)
+            section_obj = getattr(settings_obj, section, None)
+            if section_obj is None:
+                continue
+            current = section_obj.get(key) if hasattr(section_obj, "get") \
+                else getattr(section_obj, key, None)
+            if isinstance(current, str) and current and not is_encrypted(current):
+                return True
+        except Exception:
+            continue
+
+    for path in USER_VISIBLE_SECRET_LISTS:
+        try:
+            section, key = _split_path(path)
+            section_obj = getattr(settings_obj, section, None)
+            if section_obj is None:
+                continue
+            current = section_obj.get(key) if hasattr(section_obj, "get") \
+                else getattr(section_obj, key, None)
+            if isinstance(current, list):
+                for item in current:
+                    if isinstance(item, str) and item and not is_encrypted(item):
+                        return True
+        except Exception:
+            continue
+    return False
+
+
 def decrypt_settings_in_place(settings_obj) -> None:
     """Walk every USER_VISIBLE_SECRETS / USER_VISIBLE_SECRET_LISTS path in
     the live settings object and decrypt any value carrying the marker

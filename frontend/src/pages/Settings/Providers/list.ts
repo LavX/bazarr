@@ -57,7 +57,7 @@ export const ProviderList: Readonly<ProviderInfo[]> = [
         key: "password",
       },
       {
-        type: "text",
+        type: "password",
         key: "cookies",
         name: "Cookies, e.g., PHPSESSID=abc; wikisubtitlesuser=xyz; wikisubtitlespass=efg",
       },
@@ -105,7 +105,7 @@ export const ProviderList: Readonly<ProviderInfo[]> = [
       "avistaz.to - AvistaZ is an Asian torrent tracker for HD movies, TV shows and music",
     inputs: [
       {
-        type: "text",
+        type: "password",
         key: "cookies",
         name: "Cookies, e.g., PHPSESSID=abc; wikisubtitlesuser=xyz; wikisubtitlespass=efg",
       },
@@ -121,7 +121,7 @@ export const ProviderList: Readonly<ProviderInfo[]> = [
     description: "Chinese Subtitles Provider",
     inputs: [
       {
-        type: "text",
+        type: "password",
         key: "token",
       },
     ],
@@ -132,7 +132,7 @@ export const ProviderList: Readonly<ProviderInfo[]> = [
     description: "French / English Provider for TV Shows Only",
     inputs: [
       {
-        type: "text",
+        type: "password",
         key: "token",
         name: "API KEY",
       },
@@ -151,7 +151,7 @@ export const ProviderList: Readonly<ProviderInfo[]> = [
       "cinemaz.to - CinemaZ is a private torrent tracker which is dedicated to little-known\nand cult films that you will not find on other popular torrent resources.",
     inputs: [
       {
-        type: "text",
+        type: "password",
         key: "cookies",
         name: "Cookies, e.g., PHPSESSID=abc; wikisubtitlesuser=xyz; wikisubtitlespass=efg",
       },
@@ -298,7 +298,7 @@ export const ProviderList: Readonly<ProviderInfo[]> = [
         key: "email",
       },
       {
-        type: "text",
+        type: "password",
         key: "hashed_password",
         name: "Hashed Password",
       },
@@ -450,7 +450,7 @@ export const ProviderList: Readonly<ProviderInfo[]> = [
     key: "subdl",
     inputs: [
       {
-        type: "text",
+        type: "password",
         key: "api_key",
       },
       {
@@ -529,7 +529,7 @@ export const ProviderList: Readonly<ProviderInfo[]> = [
       "API key required. Get your key from Subs.ro website: https://subs.ro/api",
     inputs: [
       {
-        type: "text",
+        type: "password",
         key: "api_key",
         name: "API Key",
       },
@@ -571,7 +571,7 @@ export const ProviderList: Readonly<ProviderInfo[]> = [
       "API key required. Get your key from SubX website: https://subx-api.duckdns.org/",
     inputs: [
       {
-        type: "text",
+        type: "password",
         key: "api_key",
         name: "API Key",
       },
@@ -629,7 +629,7 @@ export const ProviderList: Readonly<ProviderInfo[]> = [
       "For requests coming from outside of Turkey, cookies and user agent are required. Especially cf_clearance cookie.",
     inputs: [
       {
-        type: "text",
+        type: "password",
         key: "cookies",
         name: "Cookies, e.g., PHPSESSID=abc; wikisubtitlesuser=xyz; wikisubtitlespass=efg",
       },

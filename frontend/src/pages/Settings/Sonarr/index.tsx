@@ -8,6 +8,7 @@ import {
   Message,
   MultiSelector,
   Number,
+  Password,
   PathMappingTable,
   Section,
   Selector,
@@ -44,7 +45,10 @@ const SettingsSonarrView: FunctionComponent = () => {
             options={timeoutOptions}
             settingKey="settings-sonarr-http_timeout"
           ></Selector>
-          <Text label="API Key" settingKey="settings-sonarr-apikey"></Text>
+          <Password
+            label="API Key"
+            settingKey="settings-sonarr-apikey"
+          ></Password>
           <Check label="SSL" settingKey="settings-sonarr-ssl"></Check>
           <URLTestButton category="sonarr"></URLTestButton>
         </Section>

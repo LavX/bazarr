@@ -32,6 +32,7 @@ from .migration import (
     decrypt_settings_dict,
     decrypt_settings_in_place,
     encrypt_settings_dict,
+    has_plaintext_secrets_on_disk,
     migrate_legacy_plex_encryption,
 )
 from .registry import (
@@ -54,6 +55,7 @@ __all__ = [
     "encrypt_secret",
     "encrypt_settings_dict",
     "get_master_key",
+    "has_plaintext_secrets_on_disk",
     "is_encrypted",
     "is_system_secret",
     "is_user_visible_secret",

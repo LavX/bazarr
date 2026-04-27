@@ -618,6 +618,7 @@ from secret_store import (  # noqa: E402
     decrypt_settings_dict,
     decrypt_settings_in_place,
     encrypt_settings_dict,
+    has_plaintext_secrets_on_disk,
     migrate_legacy_plex_encryption,
 )
 
@@ -628,6 +629,14 @@ from secret_store import (  # noqa: E402
 # under the unified key and the user's Plex creds would be unrecoverable.
 # Migrate FIRST so the rest of the pipeline only sees plaintext.
 migrate_legacy_plex_encryption(settings)
+
+# Detect plaintext credentials BEFORE decrypt_settings_in_place runs - it
+# is a passthrough on plaintext, so afterwards the in-memory state and
+# the on-disk state match for plaintext fields and write_config's
+# comparison would skip the rewrite. Capture the "needs migration" bit
+# now and force a write below.
+_force_first_save_migration = has_plaintext_secrets_on_disk(settings)
+
 decrypt_settings_in_place(settings)
 
 
@@ -635,6 +644,7 @@ def write_config():
     # On-disk shape compared in plaintext form: encrypt_secret is non-
     # deterministic (per-payload salt + timestamp), so naive ciphertext
     # comparison would always diff and rewrite config.yaml on every save.
+    global _force_first_save_migration
     in_memory_plaintext = {k.lower(): v for k, v in settings.as_dict().items()}
     on_disk_dict = {
         k.lower(): v for k, v in Dynaconf(
@@ -644,9 +654,13 @@ def write_config():
     }
     on_disk_plaintext = decrypt_settings_dict(on_disk_dict)
 
-    if in_memory_plaintext == on_disk_plaintext:
+    if in_memory_plaintext == on_disk_plaintext and not _force_first_save_migration:
         logging.debug("Nothing changed when comparing to config file. Skipping write to file.")
         return
+
+    if _force_first_save_migration:
+        logging.info("secret_store: forcing config rewrite to encrypt plaintext credentials on disk")
+        _force_first_save_migration = False
 
     try:
         write(settings_path=config_yaml_file + '.tmp',
