@@ -25,10 +25,43 @@ from pathlib import Path
 
 from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
 
-# Add bundled libs to path so we can import yaml (PyYAML)
+# Add bundled libs to path so we can import yaml (PyYAML) + itsdangerous
+# (used to decrypt the at-rest apikey before injecting into index.html;
+# the supervisor reads config.yaml directly without going through the
+# bazarr settings pipeline, so it has to do the decrypt itself).
 APP_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(APP_DIR / "libs"))
 import yaml  # noqa: E402
+from itsdangerous import BadPayload, BadSignature, URLSafeSerializer  # noqa: E402
+
+# Same marker as bazarr.secret_store.crypto.SECRET_MARKER_PREFIX. Kept as
+# a literal here (instead of importing from bazarr/) so the supervisor
+# doesn't pull in the full bazarr bootstrap (Dynaconf, validators, etc.)
+# just to decrypt one value.
+_SECRET_MARKER_PREFIX = "enc:v1:"
+
+
+def _decrypt_apikey_if_encrypted(apikey: str, master_key: str) -> str:
+    """If the apikey carries the secret_store marker prefix, decrypt it
+    with URLSafeSerializer + master_key. Mirrors the read half of
+    bazarr.secret_store.crypto.decrypt_secret without importing it.
+
+    Tolerant: a missing master_key, a corrupt payload, or a value with no
+    marker is returned unchanged. The supervisor MUST keep starting even
+    when the credential is unreadable - the user can still fix things
+    once the backend boots and the Settings page renders.
+    """
+    if not isinstance(apikey, str) or not apikey.startswith(_SECRET_MARKER_PREFIX):
+        return apikey
+    if not master_key:
+        return apikey
+    try:
+        payload = URLSafeSerializer(master_key).loads(apikey[len(_SECRET_MARKER_PREFIX):])
+    except (BadSignature, BadPayload, ValueError):
+        return apikey
+    if isinstance(payload, dict) and "secret" in payload:
+        return payload["secret"]
+    return apikey
 
 # Unbuffered print so logs appear immediately when redirected to a file
 _print = print
@@ -291,7 +324,14 @@ async def _proxy_websocket(request: web.Request, target_url: str) -> web.WebSock
 
 
 def _read_bazarr_config(config_dir: str) -> dict:
-    """Read the bazarr config.yaml to extract apiKey and baseUrl."""
+    """Read the bazarr config.yaml to extract apiKey and baseUrl.
+
+    The apikey on disk is encrypted under general.secrets_encryption_key
+    via bazarr.secret_store. Decrypt it before injecting into index.html
+    so the SPA receives the same plaintext value the backend serves over
+    /api/system/settings. Without this, the bundle gets the ciphertext as
+    its X-API-KEY and every authenticated API call returns 401.
+    """
     config_path = Path(config_dir) / "config" / "config.yaml"
     defaults = {"baseUrl": "/", "apiKey": "", "canUpdate": False, "hasUpdate": False}
     try:
@@ -300,8 +340,10 @@ def _read_bazarr_config(config_dir: str) -> dict:
                 cfg = yaml.safe_load(f) or {}
             auth = cfg.get("auth", {})
             general = cfg.get("general", {})
-            if auth.get("apikey"):
-                defaults["apiKey"] = auth["apikey"]
+            apikey = auth.get("apikey") or ""
+            if apikey:
+                master_key = general.get("secrets_encryption_key") or ""
+                defaults["apiKey"] = _decrypt_apikey_if_encrypted(apikey, master_key)
             if general.get("base_url"):
                 defaults["baseUrl"] = general["base_url"]
     except Exception as e:
