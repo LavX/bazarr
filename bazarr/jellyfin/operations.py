@@ -3,9 +3,22 @@
 import logging
 
 from app.config import settings
-from .client import JellyfinClient
+from .client import JellyfinClient, _redact_secret
 
 logger = logging.getLogger(__name__)
+
+
+def _redact(text) -> str:
+    """Pull api_key from settings and scrub it (plus any Token="..." form)
+    from text destined for logs or HTTP responses."""
+    secret = ''
+    try:
+        candidate = settings.jellyfin.apikey
+        if isinstance(candidate, str):
+            secret = candidate
+    except Exception:
+        pass
+    return _redact_secret(str(text), secret)
 
 
 def get_jellyfin_client(url: str = None, apikey: str = None) -> JellyfinClient:
@@ -22,7 +35,13 @@ def get_jellyfin_client(url: str = None, apikey: str = None) -> JellyfinClient:
 
 
 def jellyfin_test_connection(url: str = None, apikey: str = None) -> dict:
-    """Test connectivity to a Jellyfin server. Returns server info or error."""
+    """Test connectivity to a Jellyfin server. Returns server info or error.
+
+    Error responses do NOT echo exception text back to the caller: a misbehaving
+    Jellyfin can put server banners, URLs, or even pieces of the Authorization
+    header into HTTP error messages, and we already strip those server-side via
+    _redact() before logging. Surface a coarse `error_code` instead so the UI
+    can render a friendly message without leaking diagnostics to the network."""
     try:
         client = get_jellyfin_client(url, apikey)
         info = client.get_system_info()
@@ -31,11 +50,19 @@ def jellyfin_test_connection(url: str = None, apikey: str = None) -> dict:
             'server_name': info.get('ServerName', ''),
             'version': info.get('Version', ''),
         }
-    except Exception as e:
-        logger.error(f"Failed to connect to Jellyfin server: {e}")
+    except ValueError as e:
+        # Configuration errors (missing url / apikey) are safe to surface —
+        # they originate from our own code, not the server.
+        logger.error(f"Failed to connect to Jellyfin server: {_redact(e)}")
         return {
             'success': False,
-            'error': str(e),
+            'error_code': 'configuration',
+        }
+    except Exception as e:
+        logger.error(f"Failed to connect to Jellyfin server: {_redact(e)}")
+        return {
+            'success': False,
+            'error_code': 'connection_failed',
         }
 
 
@@ -58,7 +85,7 @@ def jellyfin_get_libraries(url: str = None, apikey: str = None) -> list:
             if (lib.get('CollectionType') or '').lower() in ('movies', 'tvshows')
         ]
     except Exception as e:
-        logger.error(f"Failed to get Jellyfin libraries: {e}")
+        logger.error(f"Failed to get Jellyfin libraries: {_redact(e)}")
         return []
 
 
@@ -105,7 +132,7 @@ def _find_item(client: JellyfinClient, is_movie: bool, library_ids: list,
             if title_match:
                 return title_match
         except Exception as e:
-            logger.debug(f"Error searching library {library_id}: {e}")
+            logger.debug(f"Error searching library {library_id}: {_redact(e)}")
             continue
 
     return None
@@ -120,7 +147,7 @@ def _find_episode(client: JellyfinClient, series_id: str, season: int,
             if ep.get('IndexNumber') == episode:
                 return ep['Id']
     except Exception as e:
-        logger.debug(f"Error finding episode S{season:02d}E{episode:02d} in series {series_id}: {e}")
+        logger.debug(f"Error finding episode S{season:02d}E{episode:02d} in series {series_id}: {_redact(e)}")
 
     return None
 
@@ -186,7 +213,7 @@ def jellyfin_refresh_item(imdb_id: str = None, is_movie: bool = True, season: in
         jellyfin_update_library(client, is_movie, library_ids)
 
     except Exception as e:
-        logger.warning(f"Failed to refresh Jellyfin item, falling back to library update: {e}")
+        logger.warning(f"Failed to refresh Jellyfin item, falling back to library update: {_redact(e)}")
         try:
             jellyfin_update_library(get_jellyfin_client(), is_movie)
         except Exception:
@@ -235,7 +262,7 @@ def jellyfin_update_library(client: JellyfinClient = None, is_movie_library: boo
                 logger.info(f"Triggered refresh for Jellyfin library: {library_id}")
                 updated_count += 1
             except Exception as e:
-                logger.error(f"Failed to refresh Jellyfin library '{library_id}': {e}")
+                logger.error(f"Failed to refresh Jellyfin library '{library_id}': {_redact(e)}")
                 continue
 
         if updated_count > 0:
@@ -244,4 +271,4 @@ def jellyfin_update_library(client: JellyfinClient = None, is_movie_library: boo
             logger.warning("Failed to refresh any Jellyfin libraries")
 
     except Exception as e:
-        logger.error(f"Error in jellyfin_update_library: {e}")
+        logger.error(f"Error in jellyfin_update_library: {_redact(e)}")

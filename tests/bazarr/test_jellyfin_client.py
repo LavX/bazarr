@@ -65,9 +65,49 @@ class TestFakeClientMatchesContract:
 @patch.object(JellyfinClient, "post")
 def test_refresh_item(mock_post, client):
     mock_post.return_value = MagicMock()
-    client.refresh_item("item-123")
+    valid_id = "abcdef0123456789abcdef0123456789"  # 32-char hex GUID shape
+    client.refresh_item(valid_id)
     mock_post.assert_called_once()
-    assert "/Items/item-123/Refresh" in mock_post.call_args[0][0]
+    assert f"/Items/{valid_id}/Refresh" in mock_post.call_args[0][0]
+
+
+@pytest.mark.parametrize("bad_id", [
+    "../../etc/passwd",
+    "abc/def",
+    "abc?injected=1",
+    "abc.exe",
+    "",
+    "short",
+    "a" * 100,  # too long
+])
+def test_refresh_item_rejects_unsafe_id(client, bad_id):
+    """A malicious or corrupt Jellyfin response with non-GUID IDs must not
+    flow into URL-path substitution."""
+    with pytest.raises(ValueError, match="refusing unsafe Jellyfin id"):
+        client.refresh_item(bad_id)
+
+
+def test_session_verifies_tls_by_default():
+    """Hardcoded verify=False is the bug we are guarding against. By default
+    the client must validate TLS like sonarr/radarr/plex."""
+    c = JellyfinClient("https://jellyfin.example", "k", verify_ssl=True)
+    assert c.session.verify is True
+
+
+def test_session_can_opt_out_of_tls_verification():
+    """Users with self-signed homelab certs flip the explicit opt-out."""
+    c = JellyfinClient("https://jellyfin.example", "k", verify_ssl=False)
+    assert c.session.verify is False
+
+
+def test_redact_secret_strips_token_and_key():
+    """Helper underpinning operations._redact: api_key never appears in
+    redacted output; the Authorization Token form is also masked."""
+    from bazarr.jellyfin.client import _redact_secret
+    raw = 'GET https://x/y Token="SECRET-LEAK" failed: bad SECRET-LEAK'
+    assert "SECRET-LEAK" not in _redact_secret(raw, "SECRET-LEAK")
+    # Token="..." form is masked even when the literal secret is unknown
+    assert _redact_secret('Token="anything"', '') == 'Token="***"'
 
 
 @patch.object(JellyfinClient, "post")

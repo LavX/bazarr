@@ -49,10 +49,31 @@ def test_test_connection_success():
 
 
 def test_test_connection_failure():
-    with patch("bazarr.jellyfin.operations.get_jellyfin_client", side_effect=Exception("refused")):
+    """Connection failures surface a coarse error_code, not the raw exception
+    text. Server banners, URLs, and any echoed Authorization data must stay
+    server-side (logged after redaction). The api_key in particular must NEVER
+    appear in the response payload."""
+    with patch("bazarr.jellyfin.operations.get_jellyfin_client",
+               side_effect=Exception("refused at https://jf:8096 SECRET")):
         result = jellyfin_test_connection()
     assert result["success"] is False
-    assert "refused" in result["error"]
+    assert result.get("error_code") == "connection_failed"
+    # Raw exception text never leaks
+    assert "refused" not in str(result)
+    assert "SECRET" not in str(result)
+    # Old error key removed
+    assert "error" not in result
+
+
+def test_test_connection_configuration_error():
+    """Missing url / apikey are configuration errors (raised by our own
+    get_jellyfin_client). Surface a distinct error_code so the UI can prompt
+    correctly."""
+    with patch("bazarr.jellyfin.operations.get_jellyfin_client",
+               side_effect=ValueError("Jellyfin URL not configured.")):
+        result = jellyfin_test_connection()
+    assert result["success"] is False
+    assert result.get("error_code") == "configuration"
 
 
 def test_test_connection_with_explicit_params():

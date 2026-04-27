@@ -308,6 +308,9 @@ validators = [
     Validator('jellyfin.update_series_library', must_exist=True, default=False, is_type_of=bool),
     Validator('jellyfin.refresh_method', must_exist=True, default='immediate', is_type_of=str,
               is_in=['immediate', 'async']),
+    # Default to verifying TLS like sonarr/radarr/plex; users with self-signed
+    # homelab certs can flip this off explicitly. Matches feedback_codeql memory.
+    Validator('jellyfin.verify_ssl', must_exist=True, default=True, is_type_of=bool),
 
     # proxy section
     Validator('proxy.type', must_exist=True, default=None, is_type_of=(NoneType, str),
