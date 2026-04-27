@@ -618,8 +618,16 @@ from secret_store import (  # noqa: E402
     decrypt_settings_dict,
     decrypt_settings_in_place,
     encrypt_settings_dict,
+    migrate_legacy_plex_encryption,
 )
 
+# Legacy Plex encryption (URLSafeSerializer + plex.encryption_key) used a
+# different at-rest format with no marker prefix. If we hand its
+# ciphertext to decrypt_settings_in_place, the marker check fails and the
+# bytes get treated as plaintext - the next save would re-encrypt them
+# under the unified key and the user's Plex creds would be unrecoverable.
+# Migrate FIRST so the rest of the pipeline only sees plaintext.
+migrate_legacy_plex_encryption(settings)
 decrypt_settings_in_place(settings)
 
 

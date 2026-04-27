@@ -15,8 +15,7 @@ from plexapi.exceptions import BadRequest
 
 from . import api_ns_plex
 from .exceptions import *
-from .security import (TokenManager, sanitize_log_data, pin_cache, get_or_create_encryption_key, sanitize_server_url,
-                       encrypt_api_key)
+from .security import sanitize_log_data, pin_cache, sanitize_server_url
 from app.config import get_ssl_verify
 from app.config import settings, write_config
 from app.logger import logger
@@ -39,30 +38,21 @@ def _update_plexapi_headers():
     plexapi.BASE_HEADERS['X-Plex-Client-Identifier'] = client_id
 
 
-def get_token_manager():
-    # Check if encryption key exists before attempting to create one
-    key_existed = bool(getattr(settings.plex, 'encryption_key', None))
-    key = get_or_create_encryption_key(settings.plex, 'encryption_key')
-    # Save config if a new key was generated
-    if not key_existed:
-        write_config()
-    return TokenManager(key)
-
-
+# Pre-secret_store, Plex used a per-namespace TokenManager backed by
+# plex.encryption_key. encrypt_token / decrypt_token are kept as
+# compatibility shims that pass the credential through unchanged - the
+# secret_store at-rest pipeline owns encryption now, and the in-memory
+# values are already plaintext by the time these helpers see them.
 def encrypt_token(token):
-    if not token:
-        return None
-    return get_token_manager().encrypt(token)
+    return token if token else None
 
 
 def decrypt_token(encrypted_token):
     if not encrypted_token:
         return None
-    try:
-        return get_token_manager().decrypt(encrypted_token)
-    except Exception as e:
-        logger.error(f"Token decryption failed: {type(e).__name__}: {str(e)}")
-        raise InvalidTokenError("Failed to decrypt stored authentication token. The token may be corrupted or the encryption key may have changed. Please re-authenticate with Plex.")
+    # The unified pipeline decrypts on boot; what we have here IS the
+    # plaintext. Returning it unchanged is correct.
+    return encrypted_token
 
 
 def generate_client_id():
@@ -89,21 +79,9 @@ def get_decrypted_token():
 
     if auth_method == 'oauth':
         token = settings.plex.get('token')
-        if not token:
-            return None
-        return decrypt_token(token)
-    else:
-        apikey = settings.plex.get('apikey')
-        if not apikey:
-            return None
-
-        if not settings.plex.get('apikey_encrypted', False):
-            if encrypt_api_key():
-                apikey = settings.plex.get('apikey')
-            else:
-                return None
-
-        return decrypt_token(apikey)
+        return token if token else None
+    apikey = settings.plex.get('apikey')
+    return apikey if apikey else None
 
 
 def check_plex_pass_feature(account, feature_name):
@@ -781,15 +759,11 @@ class PlexEncryptApiKey(Resource):
     @authenticate
     @api_ns_plex.doc(parser=post_request_parser)
     def post(self):
-        try:
-            if encrypt_api_key():
-                return {'success': True, 'message': 'API key encrypted successfully'}
-            else:
-                return {'success': False, 'message': 'No plain text API key found or already encrypted'}
-
-        except Exception as e:
-            logger.error(f"API key encryption failed: {e}")
-            return {'error': 'Failed to encrypt API key'}, 500
+        # Encryption is now automatic at write time via secret_store, so
+        # this endpoint is a no-op. Kept for any frontend code that still
+        # POSTs here on save - returning success preserves the old
+        # protocol without touching the credential.
+        return {'success': True, 'message': 'API key encryption is automatic now'}
 
 
 @api_ns_plex.route('plex/apikey')
@@ -807,15 +781,17 @@ class PlexApiKey(Resource):
             if not apikey:
                 return {'error': 'API key is required'}, 400
 
-            encrypted_apikey = encrypt_token(apikey)
-
-            settings.plex.apikey = encrypted_apikey
-            settings.plex.apikey_encrypted = True
+            # Plaintext into in-memory settings; secret_store encrypts on
+            # write_config(). The legacy apikey_encrypted=True flag is no
+            # longer needed - leave it cleared so the legacy migration
+            # path doesn't get re-triggered on reboot.
+            settings.plex.apikey = apikey
+            settings.plex.apikey_encrypted = False
             settings.plex.auth_method = 'apikey'
 
             write_config()
 
-            logger.debug("API key saved and encrypted")
+            logger.debug("API key saved")
             return {'success': True, 'message': 'API key saved securely'}
 
         except Exception as e:

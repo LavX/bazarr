@@ -30,6 +30,16 @@ from typing import Any, Dict
 from .crypto import decrypt_secret, encrypt_secret, is_encrypted
 from .registry import USER_VISIBLE_SECRET_LISTS, USER_VISIBLE_SECRETS
 
+
+# Plex legacy encryption fields. Pre-this-package, plex.apikey / plex.token
+# were stored encrypted under plex.encryption_key (URLSafeSerializer with
+# no marker prefix), and a sibling boolean plex.apikey_encrypted flagged
+# the apikey as encrypted. The unified pipeline doesn't need any of that
+# - encryption metadata is self-describing via the marker prefix - so on
+# first boot we decrypt them with the legacy key and let write_config
+# re-encrypt under the unified master key.
+_PLEX_LEGACY_FIELDS = ("apikey", "token")
+
 logger = logging.getLogger(__name__)
 
 
@@ -53,6 +63,94 @@ def _read_section_key(d: Dict[str, Any], path: str) -> tuple[str, str, Any]:
         if candidate in d and isinstance(d[candidate], dict) and key in d[candidate]:
             return candidate, key, d[candidate][key]
     raise KeyError(path)
+
+
+def migrate_legacy_plex_encryption(settings_obj) -> None:
+    """Decrypt any plex.apikey / plex.token still stored under the legacy
+    URLSafeSerializer + plex.encryption_key scheme, and clear the
+    accompanying apikey_encrypted boolean. Runs ONCE at boot, BEFORE
+    decrypt_settings_in_place - the legacy ciphertext does NOT carry the
+    enc:v1: marker, so without this conversion the unified pipeline
+    would treat the legacy bytes as plaintext, the next write would
+    re-encrypt them as if they were a credential, and the user's plex
+    creds would be unrecoverable.
+
+    The legacy plex.encryption_key stays in config.yaml (it's still a
+    SYSTEM_SECRET masked by the API serializer) so the migration is
+    one-way safe: a downgrade post-this-version can't read enc:v1:
+    ciphertext anyway, so leaving the legacy key around is harmless and
+    avoids a destructive deletion in the migration path.
+
+    No-op on installs that never used the legacy scheme (apikey_encrypted
+    absent or False).
+    """
+    plex = getattr(settings_obj, "plex", None)
+    if plex is None:
+        return
+
+    apikey_encrypted = bool(plex.get("apikey_encrypted", False)) \
+        if hasattr(plex, "get") else bool(getattr(plex, "apikey_encrypted", False))
+    if not apikey_encrypted:
+        return
+
+    legacy_key = plex.get("encryption_key", "") if hasattr(plex, "get") \
+        else getattr(plex, "encryption_key", "")
+    if not legacy_key:
+        # The flag is set but the key is missing - the install is in an
+        # inconsistent state. Clear the flag so the unified pipeline
+        # doesn't re-trigger this branch on every boot, and leave the
+        # values in place for the user to recover from the Settings page.
+        plex.apikey_encrypted = False
+        logger.warning(
+            "plex.apikey_encrypted=True but plex.encryption_key is empty; "
+            "skipping legacy decryption. Reconfigure Plex from Settings."
+        )
+        return
+
+    # Lazy import - keeps the secret_store package usable without a full
+    # bazarr environment for the simpler tests.
+    try:
+        from api.plex.security import TokenManager  # noqa: PLC0415
+    except Exception as e:  # pragma: no cover
+        logger.error(
+            f"Cannot load legacy Plex TokenManager for migration: "
+            f"{type(e).__name__}; leaving legacy values in place."
+        )
+        return
+
+    token_manager = TokenManager(legacy_key)
+    migrated_any = False
+    for field in _PLEX_LEGACY_FIELDS:
+        ciphertext = plex.get(field, "") if hasattr(plex, "get") \
+            else getattr(plex, field, "")
+        if not ciphertext:
+            continue
+        if is_encrypted(ciphertext):
+            # Already on the unified format (someone re-saved between
+            # commit 2 deploy and this migration running). Nothing to do.
+            continue
+        try:
+            plaintext = token_manager.decrypt(ciphertext)
+        except Exception as e:
+            # A genuine corruption / wrong-key situation. Don't crash
+            # the boot; the user can re-paste the credential.
+            logger.error(
+                f"Legacy Plex decryption failed for plex.{field}: "
+                f"{type(e).__name__}. Reconfigure Plex from Settings."
+            )
+            continue
+        plex[field] = plaintext
+        migrated_any = True
+
+    # Always clear the legacy flag once we've handled the fields - leaving
+    # it True would mean the next boot tries to legacy-decrypt plaintext.
+    plex.apikey_encrypted = False
+    if migrated_any:
+        logger.info(
+            "Migrated legacy-encrypted Plex credentials to the unified "
+            "secret_store format. They will be re-persisted under "
+            "general.secrets_encryption_key on next config save."
+        )
 
 
 def decrypt_settings_in_place(settings_obj) -> None:
