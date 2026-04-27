@@ -1,11 +1,11 @@
 .librarySelector {
-  margin-bottom: 1rem;
+  margin-bottom: var(--mantine-spacing-md);
 }
 
 .alertMessage {
-  margin-top: 0.5rem;
+  margin-top: var(--mantine-spacing-xs);
 }
 
 .selectField {
-  margin-top: 0.25rem;
+  margin-top: var(--mantine-spacing-xxs, 0.25rem);
 }

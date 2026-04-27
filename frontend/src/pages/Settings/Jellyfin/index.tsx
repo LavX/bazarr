@@ -91,7 +91,7 @@ const RefreshMethodSelector: FunctionComponent = () => {
       renderOption={({ option }) => {
         const item = refreshMethodOptions.find((o) => o.value === option.value);
         return (
-          <Stack gap={1}>
+          <Stack gap="xs">
             <MantineText size="sm" fw={500}>
               {item?.label}
             </MantineText>
@@ -114,22 +114,20 @@ const SettingsJellyfinView: FunctionComponent = () => {
 
       <CollapseBox settingKey={jellyfinEnabledKey}>
         <Section header="Connection">
-          <Stack gap="xs">
-            <Text
-              label="Server URL"
-              settingKey="settings-jellyfin-url"
-              placeholder="http://localhost:8096"
-              description="Full URL of your Jellyfin server (e.g., http://192.168.1.100:8096)"
-            />
-            <Password
-              label="API Key"
-              settingKey="settings-jellyfin-apikey"
-              placeholder="Enter your Jellyfin API key"
-              description="Generate an API key in Jellyfin Dashboard > API Keys"
-            />
-            <RefreshMethodSelector />
-            <JellyfinTestButton />
-          </Stack>
+          <Text
+            label="Server URL"
+            settingKey="settings-jellyfin-url"
+            placeholder="http://localhost:8096"
+            description="Full URL of your Jellyfin server (e.g., http://192.168.1.100:8096)"
+          />
+          <Password
+            label="API Key"
+            settingKey="settings-jellyfin-apikey"
+            placeholder="Enter your Jellyfin API key"
+            description="Generate an API key in Jellyfin Dashboard > API Keys"
+          />
+          <RefreshMethodSelector />
+          <JellyfinTestButton />
         </Section>
 
         <Section header="Movie Library">
