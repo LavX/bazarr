@@ -126,7 +126,9 @@ def test_get_libraries_filters_by_collection_type():
             "Name": "Music", "Locations": [], "CollectionType": "music", "ItemId": "lib-music",
         })
         mock_get.return_value = client
-        libs = jellyfin_get_libraries()
+        result = jellyfin_get_libraries()
+    libs = result["libraries"]
+    assert result["error_code"] is None
     assert len(libs) == 2
     assert libs[0]["name"] == "Movies"
     assert libs[1]["name"] == "Shows"
@@ -134,18 +136,38 @@ def test_get_libraries_filters_by_collection_type():
 
 
 def test_get_libraries_handles_null_collection_type():
+    """Real Jellyfin can serve libraries with CollectionType=null (e.g. mixed-
+    content libraries before classification). The filter must drop them, not
+    crash. Note: bypasses the fake's OpenAPI validator (jsonschema rejects
+    null where OpenAPI 3.0 marks `nullable: true`)."""
     with patch("bazarr.jellyfin.operations.get_jellyfin_client") as mock_get:
         client = FakeJellyfinClient()
-        client.libraries = [{"Name": "Misc", "Locations": [], "CollectionType": None, "ItemId": "x"}]
+        client.get_libraries = lambda: [
+            {"Name": "Misc", "Locations": [], "CollectionType": None, "ItemId": "x"},
+        ]
         mock_get.return_value = client
-        libs = jellyfin_get_libraries()
-    assert len(libs) == 0
+        result = jellyfin_get_libraries()
+    assert result["error_code"] is None
+    assert result["libraries"] == []
 
 
-def test_get_libraries_returns_empty_on_error():
+def test_get_libraries_returns_connection_failed_on_error():
+    """Connection/auth/TLS failures must surface as `connection_failed`, NOT
+    silently as an empty list. Otherwise the UI cannot distinguish 'server
+    unreachable' from 'no libraries exist' and renders the wrong guidance."""
     with patch("bazarr.jellyfin.operations.get_jellyfin_client", side_effect=Exception("fail")):
-        libs = jellyfin_get_libraries()
-    assert libs == []
+        result = jellyfin_get_libraries()
+    assert result == {"libraries": [], "error_code": "connection_failed"}
+
+
+def test_get_libraries_returns_configuration_when_url_or_key_missing():
+    """ValueErrors from get_jellyfin_client (missing URL/apikey) get a
+    distinct error_code so the UI guides 'configure URL/key first'
+    instead of conflating with connectivity failures."""
+    with patch("bazarr.jellyfin.operations.get_jellyfin_client",
+               side_effect=ValueError("Jellyfin URL not configured.")):
+        result = jellyfin_get_libraries()
+    assert result == {"libraries": [], "error_code": "configuration"}
 
 
 
@@ -451,10 +473,10 @@ def test_redact_strips_override_apikey_when_get_libraries_fails(settings):
     with patch("bazarr.jellyfin.operations.get_jellyfin_client",
                side_effect=Exception(err)):
         with patch.object(_ops_module.logger, "error") as mock_error:
-            libs = jellyfin_get_libraries(url="https://j", apikey=override,
-                                          verify_ssl=False)
+            result = jellyfin_get_libraries(url="https://j", apikey=override,
+                                            verify_ssl=False)
 
-    assert libs == []
+    assert result == {"libraries": [], "error_code": "connection_failed"}
     logged = mock_error.call_args[0][0]
     assert override not in logged
     assert "saved-key-DIFFERENT" not in logged

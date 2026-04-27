@@ -69,14 +69,21 @@ class JellyfinLibraries(Resource):
     def post(self):
         """List available movie and series libraries from the Jellyfin server.
         Accepts optional url/apikey params (in the request body) to query
-        before saving config."""
+        before saving config.
+
+        Returns `{data: [...], error_code: null|str}` so the UI can
+        distinguish "no libraries exist" (success, empty data) from
+        connection/configuration failures (data=[], error_code set)."""
         args = self.post_request_parser.parse_args()
-        libraries = jellyfin_get_libraries(
+        result = jellyfin_get_libraries(
             url=args.get('url'),
             apikey=args.get('apikey'),
             verify_ssl=_parse_verify_ssl(args.get('verify_ssl')),
         )
-        return {'data': libraries}, 200
+        return {
+            'data': result['libraries'],
+            'error_code': result['error_code'],
+        }, 200
 
 
 @api_ns_jellyfin.route('jellyfin/refresh-libraries')

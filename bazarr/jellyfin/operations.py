@@ -137,8 +137,17 @@ def jellyfin_refresh_all_libraries() -> dict:
 
 
 def jellyfin_get_libraries(url: str = None, apikey: str = None,
-                           verify_ssl: bool = None) -> list:
-    """Get movie and series libraries from the configured Jellyfin server."""
+                           verify_ssl: bool = None) -> dict:
+    """Get movie and series libraries from the configured Jellyfin server.
+
+    Returns a structured result so the API layer can distinguish "no
+    libraries exist" from "we couldn't reach the server." Collapsing both
+    into `[]` (the previous behavior) made the UI render misleading
+    "no libraries found" guidance on auth/TLS/connectivity failures.
+
+    Shape: {'libraries': [...], 'error_code': None | 'configuration' |
+    'connection_failed'}.
+    """
     try:
         client = get_jellyfin_client(url, apikey, verify_ssl=verify_ssl)
         libraries = client.get_libraries()
@@ -146,18 +155,26 @@ def jellyfin_get_libraries(url: str = None, apikey: str = None,
         logger.debug(f"Jellyfin returned {len(libraries)} library folders: "
                      f"{[(lib.get('Name'), lib.get('CollectionType')) for lib in libraries]}")
 
-        return [
-            {
-                'id': lib.get('ItemId', ''),
-                'name': lib['Name'],
-                'type': (lib.get('CollectionType') or '').lower(),
-            }
-            for lib in libraries
-            if (lib.get('CollectionType') or '').lower() in ('movies', 'tvshows')
-        ]
+        return {
+            'libraries': [
+                {
+                    'id': lib.get('ItemId', ''),
+                    'name': lib['Name'],
+                    'type': (lib.get('CollectionType') or '').lower(),
+                }
+                for lib in libraries
+                if (lib.get('CollectionType') or '').lower() in ('movies', 'tvshows')
+            ],
+            'error_code': None,
+        }
+    except ValueError as e:
+        # Configuration errors (missing url / apikey) - safe to surface as
+        # a distinct error_code so the UI guides "configure URL/key first".
+        logger.error(f"Failed to get Jellyfin libraries: {_redact(e, override_secret=apikey)}")
+        return {'libraries': [], 'error_code': 'configuration'}
     except Exception as e:
         logger.error(f"Failed to get Jellyfin libraries: {_redact(e, override_secret=apikey)}")
-        return []
+        return {'libraries': [], 'error_code': 'connection_failed'}
 
 
 def _find_item(client: JellyfinClient, is_movie: bool, library_ids: list,

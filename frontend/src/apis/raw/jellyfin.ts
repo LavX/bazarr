@@ -27,6 +27,15 @@ interface JellyfinLibrary {
   type: string;
 }
 
+export class JellyfinLibrariesError extends Error {
+  constructor(
+    public readonly errorCode: "configuration" | "connection_failed",
+  ) {
+    super(`jellyfin libraries probe failed: ${errorCode}`);
+    this.name = "JellyfinLibrariesError";
+  }
+}
+
 class JellyfinApi extends BaseApi {
   constructor() {
     super("/jellyfin");
@@ -53,11 +62,18 @@ class JellyfinApi extends BaseApi {
 
     // post() returns AxiosResponse<T> (not unwrapped like get()), so peel
     // both the AxiosResponse envelope and the Bazarr `{data: [...]}` wrap.
-    const response = await this.post<{ data: JellyfinLibrary[] }>(
-      "/libraries",
-      body,
-    );
+    const response = await this.post<{
+      data: JellyfinLibrary[];
+      error_code: "configuration" | "connection_failed" | null;
+    }>("/libraries", body);
 
+    // Throw on backend-reported failure so React Query's `error` state
+    // surfaces. Returning `[]` would otherwise collapse "couldn't reach
+    // server" into "no libraries exist" and the UI would render the
+    // wrong guidance.
+    if (response.data.error_code) {
+      throw new JellyfinLibrariesError(response.data.error_code);
+    }
     return response.data.data;
   }
 
