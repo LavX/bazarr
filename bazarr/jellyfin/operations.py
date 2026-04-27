@@ -190,7 +190,13 @@ def _find_item(client: JellyfinClient, is_movie: bool, library_ids: list,
             # Single pass: check IDs first, remember title match as fallback
             title_match = None
             for item in items:
-                provider_ids = item.get('ProviderIds', {})
+                # Jellyfin DTOs allow ProviderIds to be null, not just missing.
+                # `.get(key, {})` only honors the default when the key is
+                # absent; with `"ProviderIds": null` it returns None and the
+                # following `.get()` would AttributeError, abort the loop,
+                # and the caller would fall back to a full-library refresh
+                # instead of finding the targeted item.
+                provider_ids = item.get('ProviderIds') or {}
                 if imdb_id and provider_ids.get('Imdb') == imdb_id:
                     return item
                 if tmdb_id and provider_ids.get('Tmdb') == str(tmdb_id):

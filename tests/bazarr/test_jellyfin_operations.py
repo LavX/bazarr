@@ -415,6 +415,33 @@ def test_redact_strips_override_apikey_when_test_connection_fails(settings):
     assert "***" in logged
 
 
+def test_find_item_handles_null_providerids(fake, settings):
+    """Jellyfin DTOs allow ProviderIds to be null. `item.get('ProviderIds', {})`
+    only returns {} when the key is missing - if it's present with value None,
+    the default is skipped and `.get()` would AttributeError, abort scanning
+    the library, and force a full-library refresh fallback instead of finding
+    the targeted item. Confirm the targeted refresh still wins when one item
+    has ProviderIds=null among other items in the same library.
+
+    Note: the FakeJellyfinClient's strict OpenAPI validator rejects
+    ProviderIds=null (jsonschema doesn't honor OpenAPI 3.0's `nullable`
+    extension), but real Jellyfin DOES serve null values - and
+    requests.json() in the live client doesn't validate. So we mock
+    get_items directly to deliver the wire shape we're guarding against.
+    """
+    settings.jellyfin.movie_library_ids = ["lib-movies"]
+    settings.jellyfin.get.return_value = "immediate"
+    poisoned = make_movie(id="bad", imdb_id="tt000")
+    poisoned["ProviderIds"] = None  # the wire shape Codex flagged
+    target = make_movie(id="good", imdb_id="tt999", path="/media/movies/Found")
+    fake.get_items = lambda params: [poisoned, target]
+
+    jellyfin_refresh_item(imdb_id="tt999", is_movie=True)
+
+    # Targeted refresh of the good item, NOT the library-wide fallback.
+    assert fake.refresh_item_calls == ["good"]
+
+
 def test_redact_strips_override_apikey_when_get_libraries_fails(settings):
     """Same protection on the libraries probe path."""
     settings.jellyfin.apikey = "saved-key-DIFFERENT"
