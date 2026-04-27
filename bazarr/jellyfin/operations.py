@@ -66,6 +66,58 @@ def jellyfin_test_connection(url: str = None, apikey: str = None) -> dict:
         }
 
 
+def jellyfin_refresh_all_libraries() -> dict:
+    """Trigger a refresh on every configured Jellyfin library, both movie
+    and series. Used by the Maintenance "Refresh now" button so the user
+    can verify their setup or recover from a Jellyfin restart without
+    waiting for the next subtitle download.
+
+    Returns a structured summary so the UI can render a toast like
+    "Refreshed 4 of 5 libraries" without leaking exception text.
+    """
+    result = {
+        'success': False,
+        'movies_total': 0,
+        'movies_refreshed': 0,
+        'series_total': 0,
+        'series_refreshed': 0,
+    }
+    try:
+        client = get_jellyfin_client()
+    except ValueError as e:
+        logger.error(f"Jellyfin refresh-all aborted: {_redact(e)}")
+        return {**result, 'error_code': 'configuration'}
+    except Exception as e:
+        logger.error(f"Jellyfin refresh-all aborted: {_redact(e)}")
+        return {**result, 'error_code': 'connection_failed'}
+
+    for is_movie in (True, False):
+        ids = (settings.jellyfin.movie_library_ids if is_movie
+               else settings.jellyfin.series_library_ids)
+        if not isinstance(ids, list):
+            ids = [ids] if ids else []
+        ids = [i for i in ids if i]
+        key_total = 'movies_total' if is_movie else 'series_total'
+        key_done = 'movies_refreshed' if is_movie else 'series_refreshed'
+        result[key_total] = len(ids)
+        for library_id in ids:
+            try:
+                client.refresh_item(library_id)
+                result[key_done] += 1
+            except Exception as e:
+                logger.error(
+                    f"Failed to refresh Jellyfin library {library_id!r}: "
+                    f"{_redact(e)}"
+                )
+
+    refreshed = result['movies_refreshed'] + result['series_refreshed']
+    total = result['movies_total'] + result['series_total']
+    result['success'] = total > 0 and refreshed == total
+    if total == 0:
+        result['error_code'] = 'no_libraries_configured'
+    return result
+
+
 def jellyfin_get_libraries(url: str = None, apikey: str = None) -> list:
     """Get movie and series libraries from the configured Jellyfin server."""
     try:

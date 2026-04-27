@@ -25,3 +25,9 @@ export const useJellyfinTestConnectionMutation = () => {
       api.jellyfin.testConnection(params.url, params.apikey),
   });
 };
+
+export const useJellyfinRefreshLibrariesMutation = () => {
+  return useMutation({
+    mutationFn: () => api.jellyfin.refreshLibraries(),
+  });
+};

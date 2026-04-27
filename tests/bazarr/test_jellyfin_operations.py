@@ -18,6 +18,7 @@ from bazarr.jellyfin.operations import (
     jellyfin_test_connection,
     jellyfin_get_libraries,
     jellyfin_refresh_item,
+    jellyfin_refresh_all_libraries,
     jellyfin_update_library,
 )
 from fake_jellyfin import FakeJellyfinClient, make_movie, make_series, make_episode
@@ -265,3 +266,70 @@ def test_update_library_skips_empty_ids(fake, settings):
     settings.jellyfin.series_library_ids = ["", "lib1"]
     jellyfin_update_library(fake, is_movie_library=False, library_ids=["", "lib1"])
     assert fake.refresh_item_calls == ["lib1"]
+
+
+# --- jellyfin_refresh_all_libraries (Maintenance card) ---
+
+
+def test_refresh_all_success_counts(fake, settings):
+    settings.jellyfin.movie_library_ids = ["m1", "m2"]
+    settings.jellyfin.series_library_ids = ["s1"]
+    result = jellyfin_refresh_all_libraries()
+    assert result["success"] is True
+    assert result["movies_total"] == 2
+    assert result["movies_refreshed"] == 2
+    assert result["series_total"] == 1
+    assert result["series_refreshed"] == 1
+    assert "error_code" not in result
+    assert fake.refresh_item_calls == ["m1", "m2", "s1"]
+
+
+def test_refresh_all_no_libraries_configured(settings):
+    settings.jellyfin.movie_library_ids = []
+    settings.jellyfin.series_library_ids = []
+    with patch("bazarr.jellyfin.operations.get_jellyfin_client",
+               return_value=FakeJellyfinClient()):
+        result = jellyfin_refresh_all_libraries()
+    assert result["success"] is False
+    assert result["error_code"] == "no_libraries_configured"
+
+
+def test_refresh_all_configuration_error():
+    with patch("bazarr.jellyfin.operations.get_jellyfin_client",
+               side_effect=ValueError("Jellyfin URL not configured.")):
+        result = jellyfin_refresh_all_libraries()
+    assert result["success"] is False
+    assert result["error_code"] == "configuration"
+
+
+def test_refresh_all_connection_failure():
+    with patch("bazarr.jellyfin.operations.get_jellyfin_client",
+               side_effect=Exception("connection refused at https://x SECRET")):
+        result = jellyfin_refresh_all_libraries()
+    assert result["success"] is False
+    assert result["error_code"] == "connection_failed"
+    # No raw exception text leaks through (api_key wouldn't either)
+    assert "SECRET" not in str(result)
+    assert "refused" not in str(result)
+
+
+def test_refresh_all_partial_success(fake, settings):
+    """Some libraries succeed, others fail. success=False but counts reflect
+    the partial result so the UI can render 'Refreshed 1 of 2'."""
+    settings.jellyfin.movie_library_ids = ["good", "bad"]
+    settings.jellyfin.series_library_ids = []
+
+    real_refresh = fake.refresh_item
+
+    def flaky(item_id):
+        if item_id == "bad":
+            raise RuntimeError("upstream Jellyfin returned 500")
+        real_refresh(item_id)
+
+    fake.refresh_item = flaky
+
+    result = jellyfin_refresh_all_libraries()
+    assert result["success"] is False
+    assert result["movies_total"] == 2
+    assert result["movies_refreshed"] == 1
+    assert "error_code" not in result

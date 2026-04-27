@@ -1,6 +1,15 @@
 import { FunctionComponent, useCallback, useState } from "react";
-import { Button, Select, Stack, Text as MantineText } from "@mantine/core";
-import { useJellyfinTestConnectionMutation } from "@/apis/hooks/jellyfin";
+import {
+  Button,
+  Group,
+  Select,
+  Stack,
+  Text as MantineText,
+} from "@mantine/core";
+import {
+  useJellyfinRefreshLibrariesMutation,
+  useJellyfinTestConnectionMutation,
+} from "@/apis/hooks/jellyfin";
 import {
   Check,
   CollapseBox,
@@ -43,7 +52,11 @@ const JellyfinTestButton: FunctionComponent = () => {
             setTitle(`${data.server_name} (v${data.version})`);
             setColor("success");
           } else {
-            setTitle(data.error || "Connection failed");
+            setTitle(
+              data.error_code === "configuration"
+                ? "URL and API Key required"
+                : "Connection failed",
+            );
             setColor("danger");
           }
         },
@@ -157,8 +170,62 @@ const SettingsJellyfinView: FunctionComponent = () => {
             settingKey="settings-jellyfin-update_series_library"
           />
         </Section>
+
+        <Section header="Maintenance">
+          <JellyfinRefreshNowButton />
+        </Section>
       </CollapseBox>
     </Layout>
+  );
+};
+
+const JellyfinRefreshNowButton: FunctionComponent = () => {
+  const [label, setLabel] = useState("Refresh all libraries now");
+  const [color, setColor] = useState<string>("light");
+  const mutation = useJellyfinRefreshLibrariesMutation();
+
+  const click = useCallback(() => {
+    setLabel("Refreshing...");
+    setColor("light");
+    mutation.mutate(undefined, {
+      onSuccess: (data) => {
+        const total = data.movies_total + data.series_total;
+        const done = data.movies_refreshed + data.series_refreshed;
+        if (data.error_code === "configuration") {
+          setLabel("Configure URL and API Key first");
+          setColor("danger");
+          return;
+        }
+        if (data.error_code === "no_libraries_configured") {
+          setLabel("No libraries configured");
+          setColor("danger");
+          return;
+        }
+        if (data.error_code === "connection_failed") {
+          setLabel("Connection failed");
+          setColor("danger");
+          return;
+        }
+        setLabel(`Refreshed ${done} of ${total}`);
+        setColor(data.success ? "success" : "danger");
+      },
+      onError: () => {
+        setLabel("Refresh failed");
+        setColor("danger");
+      },
+    });
+  }, [mutation]);
+
+  return (
+    <Group>
+      <Button autoContrast onClick={click} variant={color}>
+        {label}
+      </Button>
+      <MantineText size="xs" c="dimmed">
+        Triggers a metadata refresh on every configured Jellyfin library. Useful
+        after changing libraries or restarting Jellyfin.
+      </MantineText>
+    </Group>
   );
 };
 

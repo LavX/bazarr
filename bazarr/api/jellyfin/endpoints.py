@@ -4,7 +4,11 @@ from flask_restx import Resource, reqparse
 
 from . import api_ns_jellyfin
 from ..utils import authenticate
-from jellyfin.operations import jellyfin_test_connection, jellyfin_get_libraries
+from jellyfin.operations import (
+    jellyfin_test_connection,
+    jellyfin_get_libraries,
+    jellyfin_refresh_all_libraries,
+)
 
 
 @api_ns_jellyfin.route('jellyfin/test-connection')
@@ -41,3 +45,17 @@ class JellyfinLibraries(Resource):
         args = self.get_request_parser.parse_args()
         libraries = jellyfin_get_libraries(url=args.get('url'), apikey=args.get('apikey'))
         return {'data': libraries}, 200
+
+
+@api_ns_jellyfin.route('jellyfin/refresh-libraries')
+class JellyfinRefreshLibraries(Resource):
+    @authenticate
+    @api_ns_jellyfin.response(200, 'Success')
+    @api_ns_jellyfin.response(401, 'Not Authenticated')
+    def post(self):
+        """Trigger an on-demand refresh for every configured Jellyfin library
+        (movie + series). Used by the Maintenance card on the Settings page
+        so users can verify their setup without waiting for the next subtitle
+        download to fire the auto-refresh.
+        """
+        return jellyfin_refresh_all_libraries(), 200
