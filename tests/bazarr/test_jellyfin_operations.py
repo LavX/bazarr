@@ -3,26 +3,43 @@
 All test data is validated against Jellyfin's OpenAPI spec via the fake client.
 """
 
-import sys
 from unittest.mock import patch, MagicMock
 
 import pytest
 
-# Mock app.config before importing operations
-mock_config = MagicMock()
-sys.modules.setdefault("app", MagicMock())
-sys.modules.setdefault("app.config", mock_config)
-mock_config.settings = MagicMock()
+# Operations module-level binds `from app.config import settings`, which holds
+# real bazarr config in batched test runs. The fixtures below patch
+# `bazarr.jellyfin.operations.settings` per-test so each test sees a fresh
+# MagicMock without leaking into compat/notifier/other tests that depend on
+# the real settings module. Avoid sys.modules-level mocks here - those cross
+# test files and produce spectacular order-dependent failures (the original
+# upstream design used `sys.modules.setdefault("app.config", ...)` which
+# becomes a no-op once any other test imports app.config and so the mock
+# never won when run with the broader suite).
+import bazarr.jellyfin.operations as _ops_module  # noqa: E402
 
-from bazarr.jellyfin.operations import (
+from bazarr.jellyfin.operations import (  # noqa: E402
     jellyfin_test_connection,
     jellyfin_get_libraries,
     jellyfin_refresh_item,
     jellyfin_refresh_all_libraries,
     jellyfin_update_library,
 )
-from fake_jellyfin import FakeJellyfinClient, make_movie, make_series, make_episode
+from fake_jellyfin import FakeJellyfinClient, make_movie, make_series, make_episode  # noqa: E402
 
+
+
+@pytest.fixture(autouse=True)
+def _isolated_settings():
+    """Replace `bazarr.jellyfin.operations.settings` with a fresh MagicMock for
+    every test, then restore. Keeps test pollution scoped to this file."""
+    original = _ops_module.settings
+    fresh = MagicMock()
+    _ops_module.settings = fresh
+    try:
+        yield fresh
+    finally:
+        _ops_module.settings = original
 
 
 @pytest.fixture
@@ -34,8 +51,8 @@ def fake():
 
 
 @pytest.fixture
-def settings():
-    return mock_config.settings
+def settings(_isolated_settings):
+    return _isolated_settings
 
 
 
