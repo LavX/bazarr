@@ -339,7 +339,23 @@ class TableShowsRootfolder(Base):
 
 
 def init_db():
-    database.begin()
+    # Idempotent: bazarr can end up importing `init` under both `bazarr.init`
+    # and `init` aliases when tests cross module-namespace boundaries
+    # (compat tests sometimes load via the parent-package path; everything
+    # else uses the canonical sys.path-rooted path post-encryption-pass).
+    # Each fresh import re-runs init.py which calls init_db, but the
+    # underlying `database` is a scoped_session shared across instances,
+    # so the second begin() raises "A transaction is already begun on
+    # this Session". scoped_session proxies don't expose in_transaction
+    # so we catch sqlalchemy's own signal directly.
+    from sqlalchemy.exc import InvalidRequestError
+    try:
+        database.begin()
+    except InvalidRequestError:
+        # Already in a transaction from a previous init_db (likely
+        # via a duplicate module import path). Safe to skip; the
+        # metadata create_all below is itself idempotent.
+        pass
 
     # Create tables if they don't exist.
     metadata.create_all(engine)
