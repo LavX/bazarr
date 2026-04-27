@@ -52,20 +52,25 @@ class JellyfinTestConnection(Resource):
 
 @api_ns_jellyfin.route('jellyfin/libraries')
 class JellyfinLibraries(Resource):
-    get_request_parser = reqparse.RequestParser()
-    get_request_parser.add_argument('url', type=str, required=False, location='args', help='Jellyfin server URL')
-    get_request_parser.add_argument('apikey', type=str, required=False, location='args', help='Jellyfin API key')
-    get_request_parser.add_argument('verify_ssl', type=str, required=False, location='args',
-                                    help='Override saved verify_ssl flag for this query (true/false)')
+    # POST (not GET) so apikey rides in the request body instead of the
+    # query string. apikey-in-URL leaks to browser history, reverse-proxy
+    # access logs, and any URL telemetry; body keeps it inside the TLS
+    # tunnel and out of long-lived logs.
+    post_request_parser = reqparse.RequestParser()
+    post_request_parser.add_argument('url', type=str, required=False, help='Jellyfin server URL')
+    post_request_parser.add_argument('apikey', type=str, required=False, help='Jellyfin API key')
+    post_request_parser.add_argument('verify_ssl', type=str, required=False,
+                                     help='Override saved verify_ssl flag for this query (true/false)')
 
     @authenticate
-    @api_ns_jellyfin.doc(parser=get_request_parser)
+    @api_ns_jellyfin.doc(parser=post_request_parser)
     @api_ns_jellyfin.response(200, 'Success')
     @api_ns_jellyfin.response(401, 'Not Authenticated')
-    def get(self):
+    def post(self):
         """List available movie and series libraries from the Jellyfin server.
-        Accepts optional url/apikey params to query before saving config."""
-        args = self.get_request_parser.parse_args()
+        Accepts optional url/apikey params (in the request body) to query
+        before saving config."""
+        args = self.post_request_parser.parse_args()
         libraries = jellyfin_get_libraries(
             url=args.get('url'),
             apikey=args.get('apikey'),

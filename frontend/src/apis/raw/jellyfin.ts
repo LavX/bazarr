@@ -44,18 +44,21 @@ class JellyfinApi extends BaseApi {
   }
 
   async libraries(url?: string, apikey?: string, verifySsl?: boolean) {
-    const params: Record<string, string> = {};
-    if (url) params.url = url;
-    if (apikey) params.apikey = apikey;
-    if (verifySsl !== undefined)
-      params.verify_ssl = verifySsl ? "true" : "false";
+    // POST so apikey rides in the request body. apikey-in-URL leaks into
+    // browser history, reverse-proxy access logs, and any URL telemetry.
+    const body: Record<string, string> = {};
+    if (url) body.url = url;
+    if (apikey) body.apikey = apikey;
+    if (verifySsl !== undefined) body.verify_ssl = verifySsl ? "true" : "false";
 
-    const response = await this.get<{ data: JellyfinLibrary[] }>(
+    // post() returns AxiosResponse<T> (not unwrapped like get()), so peel
+    // both the AxiosResponse envelope and the Bazarr `{data: [...]}` wrap.
+    const response = await this.post<{ data: JellyfinLibrary[] }>(
       "/libraries",
-      params,
+      body,
     );
 
-    return response.data;
+    return response.data.data;
   }
 
   async refreshLibraries() {

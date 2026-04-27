@@ -101,10 +101,19 @@ class JellyfinClient:
     def get(self, path: str, params: dict = None) -> requests.Response:
         response = self.session.get(self._url(path), params=params,
                                     timeout=_DEFAULT_TIMEOUT, stream=True)
-        response.raise_for_status()
-        # Pre-load the bounded body so callers' .json() / .text reads do
-        # not exceed the cap.
-        response._content = _bounded_body(response)
+        # `stream=True` keeps the underlying connection open until the body
+        # is fully consumed. If raise_for_status() (4xx/5xx) or _bounded_body
+        # (>16 MiB hostile payload) raises, the connection would leak back
+        # into the pool half-read; close it explicitly so repeated failures
+        # cannot exhaust file descriptors / pool slots.
+        try:
+            response.raise_for_status()
+            # Pre-load the bounded body so callers' .json() / .text reads do
+            # not exceed the cap.
+            response._content = _bounded_body(response)
+        except Exception:
+            response.close()
+            raise
         return response
 
     def post(self, path: str, json: dict = None, params: dict = None) -> requests.Response:

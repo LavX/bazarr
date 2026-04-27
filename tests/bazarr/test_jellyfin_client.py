@@ -119,3 +119,42 @@ def test_report_media_updated(mock_post, client):
     })
 
 
+def test_get_closes_response_when_status_raises(client):
+    """A 4xx/5xx from Jellyfin must not leak the streamed connection back
+    into the pool. Repeated server errors would otherwise exhaust the pool
+    and FDs."""
+    import requests
+    fake = MagicMock()
+    fake.raise_for_status.side_effect = requests.HTTPError("500")
+    with patch.object(client.session, "get", return_value=fake):
+        with pytest.raises(requests.HTTPError):
+            client.get("/Items")
+    fake.close.assert_called_once()
+
+
+def test_get_closes_response_when_body_exceeds_cap(client):
+    """A hostile/MITM'd Jellyfin returning >16 MiB must close the streamed
+    response so the connection / file descriptor is released."""
+    fake = MagicMock()
+    fake.raise_for_status.return_value = None
+    # Yield two chunks totalling > _MAX_RESPONSE_BYTES so _bounded_body raises.
+    big = b"x" * (9 * 1024 * 1024)
+    fake.iter_content.return_value = iter([big, big])
+    with patch.object(client.session, "get", return_value=fake):
+        with pytest.raises(ValueError, match="exceeded"):
+            client.get("/Items")
+    fake.close.assert_called_once()
+
+
+def test_get_does_not_close_response_on_success(client):
+    """Sanity: the success path must leave the response usable by callers
+    (callers read .json() / .text after we pre-load _content)."""
+    fake = MagicMock()
+    fake.raise_for_status.return_value = None
+    fake.iter_content.return_value = iter([b'{"ok": true}'])
+    with patch.object(client.session, "get", return_value=fake):
+        out = client.get("/Items")
+    assert out is fake
+    fake.close.assert_not_called()
+
+
