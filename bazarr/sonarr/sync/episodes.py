@@ -29,6 +29,12 @@ bool_map = {"True": True, "False": False}
 
 FEATURE_PREFIX = "SYNC_EPISODES "
 
+# Max rows per batched INSERT. Each episode row binds ~19 values, so
+# 50 stays well under SQLite's legacy SQLITE_MAX_VARIABLE_NUMBER (999)
+# while still amortizing round-trip cost for typical full-season
+# inserts on modern SQLite/PostgreSQL deployments.
+EPISODE_INSERT_CHUNK_SIZE = 50
+
 
 def trace(message):
     if settings.general.debug:
@@ -54,32 +60,80 @@ def check_actual_file_size(original_episode_path):
     return bazarr_file_size > MINIMUM_VIDEO_SIZE
 
 
-def sync_episodes(series_id, defer_search=False, is_signalr=False):
+def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data=None):
+    """Sync one series' episodes between Sonarr and the local DB.
+
+    The bulk update_series() caller pre-fetches episode lists in
+    parallel and passes them in via `episodes_data` so we skip the
+    serial per-series HTTP call. Single-series callers (signalr,
+    manual refresh, the insert/update branches in update_one_series)
+    omit it and we fetch on demand as before.
+    """
     logging.debug(f'BAZARR Starting episodes sync from Sonarr for series ID {series_id}.')
     apikey_sonarr = settings.sonarr.apikey
 
-    # Get current episodes id in DB
-    if series_id:
-        current_episodes_id_db_list = [row.sonarrEpisodeId for row in
-                                       database.execute(
-                                           select(TableEpisodes.sonarrEpisodeId,
-                                                  TableEpisodes.path,
-                                                  TableEpisodes.sonarrSeriesId)
-                                           .where(TableEpisodes.sonarrSeriesId == series_id)).all()]
-        current_episodes_in_db_row_as_dict = {row[0].sonarrEpisodeId: row[0].to_dict() for row in
-                                              database.execute(
-                                                  select(TableEpisodes)
-                                                  .where(TableEpisodes.sonarrSeriesId == series_id))
-                                              .all()}
-    else:
+    # Get current episodes for the series in ONE narrow-column SELECT.
+    # Pre-refactor this issued two adjacent queries: a small one for the
+    # id list, then a `select(TableEpisodes)` that pulled the FULL row
+    # (including the heavy ffprobe_cache blob) into a dict only used for
+    # comparing against episodeParser output. Combine into one query
+    # that fetches just the parser-output columns - the only fields the
+    # comparison and the per-row update path actually read.
+    if not series_id:
         return
+
+    current_episodes_in_db_row_as_dict = {
+        row.sonarrEpisodeId: {
+            'sonarrSeriesId': row.sonarrSeriesId,
+            'sonarrEpisodeId': row.sonarrEpisodeId,
+            'title': row.title,
+            'path': row.path,
+            'season': row.season,
+            'episode': row.episode,
+            'sceneName': row.sceneName,
+            'monitored': row.monitored,
+            'format': row.format,
+            'resolution': row.resolution,
+            'video_codec': row.video_codec,
+            'audio_codec': row.audio_codec,
+            'episode_file_id': row.episode_file_id,
+            'audio_language': row.audio_language,
+            'file_size': row.file_size,
+            'absoluteEpisode': row.absoluteEpisode,
+            'tvdbId': row.tvdbId,
+        }
+        for row in database.execute(
+            select(TableEpisodes.sonarrSeriesId,
+                   TableEpisodes.sonarrEpisodeId,
+                   TableEpisodes.title,
+                   TableEpisodes.path,
+                   TableEpisodes.season,
+                   TableEpisodes.episode,
+                   TableEpisodes.sceneName,
+                   TableEpisodes.monitored,
+                   TableEpisodes.format,
+                   TableEpisodes.resolution,
+                   TableEpisodes.video_codec,
+                   TableEpisodes.audio_codec,
+                   TableEpisodes.episode_file_id,
+                   TableEpisodes.audio_language,
+                   TableEpisodes.file_size,
+                   TableEpisodes.absoluteEpisode,
+                   TableEpisodes.tvdbId)
+            .where(TableEpisodes.sonarrSeriesId == series_id)).all()
+    }
+    current_episodes_id_db_list = list(current_episodes_in_db_row_as_dict.keys())
 
     current_episodes_sonarr = []
     episodes_to_update = []
     episodes_to_add = []
 
-    # Get episodes data for a series from Sonarr
-    episodes = get_episodes_from_sonarr_api(apikey_sonarr=apikey_sonarr, series_id=series_id)
+    # Get episodes data for a series from Sonarr (or use the
+    # pre-fetched payload from the bulk update_series() caller).
+    if episodes_data is None:
+        episodes = get_episodes_from_sonarr_api(apikey_sonarr=apikey_sonarr, series_id=series_id)
+    else:
+        episodes = episodes_data
     if episodes:
         if get_sonarr_info.is_legacy():
             # We skip this for legacy versions of Sonarr since it already have episodeFile structure included
@@ -158,33 +212,53 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False):
             for removed_episode in episodes_to_delete:
                 event_stream(type='episode', action='delete', payload=removed_episode)
 
-    # Insert new episodes in DB
+    # Insert new episodes in DB. Batch inserts in fixed-size chunks to
+    # stay under bind-parameter limits (SQLite builds with the legacy
+    # 999-variable limit fail at ~52 rows since each episode row binds
+    # ~19 values, and the IntegrityError catch wouldn't recover from
+    # the resulting OperationalError). On IntegrityError fall back to
+    # per-row inserts for that chunk only - preserving the existing
+    # convert-to-update recovery for individual conflicting rows.
     if len(episodes_to_add):
+        insertion_timestamp = datetime.now()
         for added_episode in episodes_to_add:
+            added_episode['created_at_timestamp'] = insertion_timestamp
+
+        for chunk_start in range(0, len(episodes_to_add), EPISODE_INSERT_CHUNK_SIZE):
+            chunk = episodes_to_add[chunk_start:chunk_start + EPISODE_INSERT_CHUNK_SIZE]
             try:
-                added_episode['created_at_timestamp'] = datetime.now()
-                database.execute(insert(TableEpisodes).values(added_episode))
-            except IntegrityError as e:
-                logging.error(f"BAZARR cannot insert episodes because of {e}. We'll try to update it instead.")
-                del added_episode['created_at_timestamp']
-                episodes_to_update.append(added_episode)
+                database.execute(insert(TableEpisodes).values(chunk))
+            except IntegrityError as batch_err:
+                logging.debug(f'BAZARR batched episode insert failed ({batch_err}); '
+                              f'falling back to per-row insert with update recovery')
+                for added_episode in chunk:
+                    try:
+                        database.execute(insert(TableEpisodes).values(added_episode))
+                    except IntegrityError as e:
+                        logging.error(f"BAZARR cannot insert episodes because of {e}. We'll try to update it instead.")
+                        del added_episode['created_at_timestamp']
+                        episodes_to_update.append(added_episode)
+                    else:
+                        store_subtitles(added_episode['path'], path_mappings.path_replace(added_episode['path']))
+                        event_stream(type='episode', payload=added_episode['sonarrEpisodeId'])
             else:
-                store_subtitles(added_episode['path'], path_mappings.path_replace(added_episode['path']))
-                event_stream(type='episode', payload=added_episode['sonarrEpisodeId'])
+                for added_episode in chunk:
+                    store_subtitles(added_episode['path'], path_mappings.path_replace(added_episode['path']))
+                    event_stream(type='episode', payload=added_episode['sonarrEpisodeId'])
 
     # Update existing episodes in DB
     if len(episodes_to_update):
         for updated_episode in episodes_to_update:
+            previous_episode_id = updated_episode['sonarrEpisodeId']
+            # Read previous values from the cache built up at the top of
+            # this function instead of re-querying. Pre-refactor this
+            # loop ran an extra SELECT per updated episode just to read
+            # episode_file_id + path - both are already in the dict.
+            cached_previous = current_episodes_in_db_row_as_dict.get(previous_episode_id, {})
+            previous_episode_file_id = cached_previous.get('episode_file_id')
+            previous_episode_path = cached_previous.get('path')
+
             try:
-                previous_episode_data = database.execute(
-                    select(TableEpisodes.episode_file_id, TableEpisodes.path)
-                    .where(TableEpisodes.sonarrEpisodeId == updated_episode['sonarrEpisodeId'])
-                ).first()
-
-                previous_episode_id = updated_episode['sonarrEpisodeId']
-                previous_episode_file_id = previous_episode_data.episode_file_id
-                previous_episode_path = previous_episode_data.path
-
                 updated_episode['updated_at_timestamp'] = datetime.now()
                 database.execute(update(TableEpisodes)
                                  .values(updated_episode)

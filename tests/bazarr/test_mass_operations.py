@@ -110,7 +110,7 @@ class TestProcessSubtitleItem:
             to_lang='hu',
             forced=False,
             hi=False,
-            media_type='series',
+            media_type='episode',
             sonarr_series_id=10,
             sonarr_episode_id=1,
             radarr_id=None,
