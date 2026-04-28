@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Bazarr+ - Self-Hosted Subtitle Management for Sonarr, Radarr, Plex &amp; Jellyfin</title>
-  <meta name="description" content="Bazarr+ is a drop-in replacement for Bazarr with provider priority, AI translation, bulk operations, a subtitle editor, and zero telemetry.">
+  <meta name="description" content="Bazarr+ is a drop-in replacement for Bazarr with External Integration for Jellyfin and VLSub, API key encryption at rest, AI translation, provider priority, bulk operations, a subtitle editor, and zero telemetry.">
   <link rel="canonical" href="https://lavx.github.io/bazarr">
 
   <!-- Open Graph -->
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://lavx.github.io/bazarr">
   <meta property="og:title" content="Bazarr+ - Self-Hosted Subtitle Management">
-  <meta property="og:description" content="Provider priority, AI translation, bulk operations, subtitle editor, zero telemetry. Drop-in replacement for Bazarr.">
+  <meta property="og:description" content="External Integration for Jellyfin and VLSub, API key encryption at rest, AI translation, provider priority, bulk operations, subtitle editor, zero telemetry.">
   <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -19,7 +19,7 @@
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Bazarr+ - Self-Hosted Subtitle Management">
-  <meta name="twitter:description" content="Provider priority, AI translation, bulk operations, subtitle editor, zero telemetry. Drop-in replacement for Bazarr.">
+  <meta name="twitter:description" content="External Integration for Jellyfin and VLSub, API key encryption at rest, AI translation, provider priority, bulk operations, subtitle editor, zero telemetry.">
   <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
 
   <!-- JSON-LD -->
@@ -30,10 +30,10 @@
     "name": "Bazarr+",
     "applicationCategory": "MultimediaApplication",
     "operatingSystem": "Linux, Docker",
-    "description": "Self-hosted subtitle management for Sonarr and Radarr with provider priority, AI translation, bulk operations, and zero telemetry.",
+    "description": "Self-hosted subtitle management for Sonarr, Radarr, Plex, and Jellyfin with External Integration (OpenSubtitles-compatible REST endpoint for Jellyfin and VLSub clients), API key encryption at rest, AI translation, provider priority, bulk operations, and zero telemetry.",
     "url": "https://lavx.github.io/bazarr",
     "downloadUrl": "https://github.com/LavX/bazarr",
-    "softwareVersion": "2.1.0-rc1",
+    "softwareVersion": "2.2.0",
     "author": {
       "@type": "Person",
       "name": "LavX"
@@ -128,6 +128,21 @@
             </tr>
           </thead>
           <tbody>
+            <tr>
+              <td>External Integration <span class="badge-new" aria-label="New in v2.2">v2.2</span></td>
+              <td class="cell-na"><span class="icon-dash" aria-hidden="true">&ndash;</span></td>
+              <td class="cell-plus"><span class="icon-check" aria-hidden="true">&#x2713;</span> OpenSubtitles-compatible REST endpoint with first-party <a href="https://github.com/LavX/jellyfin-plugin-bazarr-plus" target="_blank" rel="noopener">Jellyfin plugin</a> and <a href="https://github.com/LavX/vlsub-bazarr-plus" target="_blank" rel="noopener">VLSub Bazarr+</a></td>
+            </tr>
+            <tr>
+              <td>Jellyfin Library Refresh <span class="badge-new" aria-label="New in v2.2">v2.2</span></td>
+              <td class="cell-na"><span class="icon-dash" aria-hidden="true">&ndash;</span> Upstream <code>development</code> only</td>
+              <td class="cell-plus"><span class="icon-check" aria-hidden="true">&#x2713;</span> Cherry-picked and polished: HTTPS with self-signed support, hardening, "Refresh now" card</td>
+            </tr>
+            <tr>
+              <td>API Key Encryption <span class="badge-new" aria-label="New in v2.2">v2.2</span></td>
+              <td class="cell-na"><span class="icon-dash" aria-hidden="true">&ndash;</span></td>
+              <td class="cell-plus"><span class="icon-check" aria-hidden="true">&#x2713;</span> AES-encrypted <strong>at rest</strong> with auto-migration and key rotation</td>
+            </tr>
             <tr>
               <td>Provider Priority</td>
               <td class="cell-rejected"><span class="icon-x" aria-hidden="true">&#x2717;</span> <a href="https://bazarr.featureupvote.com/suggestions/112323/provider-prioritization" target="_blank" rel="noopener">Requested</a> (62 votes)</td>

@@ -1030,3 +1030,20 @@ footer {
   color: var(--amber-text);
   transition: color 0.2s;
 }
+
+/* ===========================
+   "NEW IN" BADGE
+=========================== */
+.badge-new {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #1a1a2e;
+  background: var(--amber);
+  border-radius: 999px;
+  vertical-align: middle;
+  line-height: 1.4;
+}
