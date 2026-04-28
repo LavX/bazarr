@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  No tracking · Provider priority · OpenSubtitles.org web scraper · AI translation via OpenRouter (300+ LLMs) · **Subtitle Editor with video preview, waveform, AI translate** · API key encryption · batch translation · mass subtitle sync · 11 bulk operations · advanced table filters · security hardening · Python 3.14 · navy + amber dark theme
+  **External Integration for Jellyfin and VLSub** · No tracking · Provider priority · OpenSubtitles.org web scraper · AI translation via OpenRouter (300+ LLMs) · **Subtitle Editor with video preview, waveform, AI translate** · API key encryption at rest · Jellyfin library refresh · batch translation · mass subtitle sync · 11 bulk operations · advanced table filters · security hardening · Python 3.14 · navy + amber dark theme
 </p>
 
 ---
@@ -34,10 +34,12 @@
 
 | Feature | Upstream Bazarr | Bazarr+ |
 |---------|-----------------|---------|
+| **External Integration (Jellyfin / VLSub)** | Not available | OpenSubtitles-compatible REST endpoint with JWT auth, signed download tokens, SSRF guard, and provider fanout. Two first-party clients: [Jellyfin plugin](https://github.com/LavX/jellyfin-plugin-bazarr-plus) and [VLSub Bazarr+](https://github.com/LavX/vlsub-bazarr-plus). |
+| **Jellyfin Library Refresh** | On upstream's `development` branch only (no released version) | Cherry-picked and polished: HTTPS with optional self-signed cert acceptance, per-library overrides, secret redaction, response cap, "Refresh now" Maintenance card |
 | **Provider Priority** | [Rejected](https://bazarr.featureupvote.com/suggestions/112323/provider-prioritization) (62 votes) | Dual mode: priority order with early stop, or classic simultaneous |
 | **OpenSubtitles.org (Scraper)** | Not available | Self-hosted FastAPI microservice via CloudScraper |
 | **AI Subtitle Translator (OpenRouter)** | Not available | 300+ LLMs + any custom model ID |
-| **API Key Encryption** | Not available | AES-256-GCM encryption for keys in transit |
+| **API Key Encryption** | Not available | AES-encrypted **at rest** (provider keys, Sonarr/Radarr, Plex token, OpenRouter key, External Integration token) with auto-migration and key rotation; AES-256-GCM **in transit** to the AI translator |
 | **Translate from Missing Menu** | Not available | Action menu on missing subs with source language picker |
 | **Batch Translation** | Not available | Translate entire series/libraries from Wanted pages |
 | **Mass Subtitle Sync** | [Rejected](https://bazarr.featureupvote.com/suggestions/172013/mass-sync-all-subtitles) (249 votes) | Bulk sync from Tasks page or Mass Edit, skips already-synced |
@@ -130,6 +132,28 @@ python3 docker/supervisor.py --config ./data --port 6767
 
 <details>
 <summary><strong>Feature Details</strong></summary>
+
+### External Integration (v2.2 Synapse)
+Bazarr+ exposes an OpenSubtitles-compatible REST endpoint under `/compat/*` so external clients can query your Bazarr+ instance as a federated subtitle service. Two first-party clients ship alongside this release: a [Jellyfin 10.11+ subtitle plugin](https://github.com/LavX/jellyfin-plugin-bazarr-plus) and a [VLC 3.0+ Lua extension (VLSub Bazarr+)](https://github.com/LavX/vlsub-bazarr-plus). Enable the endpoint under **Settings → External Integration**, copy the generated API token, paste it into the plugin/extension, and your Bazarr+ providers serve the client directly.
+
+- **Search and download** with full provider fanout: `/compat/search` runs your enabled providers in parallel via a dedicated bounded thread pool with dogpile coalescing
+- **JWT auth with `jti` revocation**: short-lived bearer tokens, sliding-window per-`jti` rate limiting on `/compat/download`, logout revokes immediately
+- **Signed stream tokens**: downloads return one-shot HMAC-signed stream URLs with a TTL; raw provider URLs are never exposed
+- **SSRF guard with DNS rebinding protection**: every outbound URL the compat layer touches blocks loopback, RFC1918, link-local, and any IP that fails revalidation post-DNS resolution
+- **TVDB v4 + OMDB enrichment**: given an IMDB id, the layer hydrates season/episode and TVDB series id so providers like Gestdown that key on TVDB just work; the OMDB refiner (broken since the Python 3 migration upstream) is revived
+- **Dedicated CI gate**: `pytest tests/compat/` runs unit, integration, and contract tests on every push (auth, rate limiter, response mapper, SSRF guard, TVDB v4, OMDB, fanout, JWT denylist, file-id store, build-video, plus a VLSub contract assertion)
+
+### Jellyfin Library Refresh (v2.2 Synapse)
+The base Jellyfin integration was cherry-picked from upstream's `development` branch (which has not shipped in any released upstream version). Bazarr+ adds the polish: an explicit `verify_ssl` toggle so HTTPS Jellyfin instances with self-signed certs work, humanised empty/loading/error states in the LibrarySelector, a "Refresh now" Maintenance card to verify connectivity without doing a real download, Atmospheric Dark conventions on the Settings page, and a hardening pass: API keys kept out of URL strings (header only), secret redaction in logs, response cap to prevent runaway downloads, ID validation on incoming `ProviderIds`, and streamed responses closed on read failure.
+
+This pairs with External Integration to make the Bazarr+ ↔ Jellyfin loop fully symmetric: library refresh is Bazarr+ → Jellyfin (push); the integration endpoint is Jellyfin → Bazarr+ (pull).
+
+### API Key Encryption at Rest (v2.2 Synapse)
+Every sensitive credential Bazarr+ stores on disk is now AES-encrypted under a per-instance master key. Protected fields include all provider API keys, Sonarr/Radarr keys, the Plex token (now unified under the shared master key), the OpenRouter key for the AI translator, and the External Integration admin token. The settings API masks `SYSTEM_SECRETS` in `/api/system/settings` responses so the frontend never sees raw secrets, only a sentinel. The auth password hash is no longer ever returned to the UI.
+
+A central `secret_store` module owns crypto: every sensitive field is registered up front (no field is encrypted by accident, no field is left in cleartext by accident). On first boot after upgrade, Bazarr+ auto-migrates existing cleartext values into the encrypted store. Key rotation is supported with end-to-end tests covering rotation, masking, migration, decrypt-on-read, encrypt-on-write, force-migrate, and the supervisor's index.html injection path.
+
+The previous v2.0/v2.1 "API key encryption" only applied to keys *in transit* between Bazarr+ and the AI translator. v2.2 extends encryption to the disk surface as well.
 
 ### OpenSubtitles.org Web Scraper
 OpenSubtitles.org shut down their XML-RPC API for all third-party apps, VIP included. Bazarr+ ships a self-hosted FastAPI microservice that scrapes OpenSubtitles.org directly via CloudScraper with optional FlareSolverr fallback. It provides search, subtitle listing, and download endpoints (`/api/v1/search`, `/api/v1/subtitles`, `/api/v1/download/subtitle`) and integrates into Bazarr's provider system through a mixin class. No API key or VIP subscription needed.
@@ -480,6 +504,8 @@ This fork is maintained by **LavX**. Explore more projects and services:
 - **[LMS Tools](https://tools.lavx.hu)** -- 140+ free, privacy-focused online tools for developers and researchers.
 
 ### Open Source Projects
+- **[Jellyfin Plugin: Bazarr+ Subtitles](https://github.com/LavX/jellyfin-plugin-bazarr-plus)** -- Jellyfin 10.11+ subtitle provider plugin that fetches from your Bazarr+ External Integration endpoint.
+- **[VLSub Bazarr+](https://github.com/LavX/vlsub-bazarr-plus)** -- VLC 3.0+ Lua extension that searches and downloads subtitles via your Bazarr+ instance.
 - **[AI Subtitle Translator](https://github.com/LavX/ai-subtitle-translator)** -- LLM-powered subtitle translator using OpenRouter API.
 - **[OpenSubtitles Scraper](https://github.com/LavX/opensubtitles-scraper)** -- Web scraper for OpenSubtitles.org (no VIP required).
 - **[JFrog to Nexus OSS](https://github.com/LavX/jfrogtonexusoss)** -- Automated migration tool for repository managers.
