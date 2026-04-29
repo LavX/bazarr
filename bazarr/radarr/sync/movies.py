@@ -218,7 +218,7 @@ def update_movies(job_id=None, wait_for_completion=False):
 
 
 def update_one_movie(movie_id, action, defer_search=False, is_signalr=False):
-    logging.debug(f'BAZARR syncing this specific movie from Radarr: {movie_id}')
+    logging.debug('BAZARR syncing this specific movie from Radarr: %s', movie_id)
 
     # Check if there's a row in the database for this movie ID
     existing_movie = database.execute(
@@ -239,8 +239,8 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False):
             else:
                 event_stream(type='movie', action='delete', payload=int(movie_id))
                 logging.debug(
-                    f'BAZARR deleted this movie from the database: '
-                    f'{path_mappings.path_replace_movie(existing_movie.path)}')
+                    'BAZARR deleted this movie from the database: '
+                    '%s', path_mappings.path_replace_movie(existing_movie.path))
         return
 
     movie_default_enabled = settings.general.movie_default_enabled
@@ -289,7 +289,7 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False):
         else:
             event_stream(type='movie', action='delete', payload=int(movie_id))
             logging.debug(
-                f'BAZARR deleted this movie from the database:{path_mappings.path_replace_movie(existing_movie.path)}')
+                'BAZARR deleted this movie from the database:%s', path_mappings.path_replace_movie(existing_movie.path))
         return
 
     # Update existing movie in DB
@@ -307,7 +307,7 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False):
             store_subtitles_movie(movie['path'], path_mappings.path_replace_movie(movie['path']))
             event_stream(type='movie', action='update', payload=int(movie_id))
             logging.debug(
-                f'BAZARR updated this movie into the database:{path_mappings.path_replace_movie(movie["path"])}')
+                'BAZARR updated this movie into the database:%s', path_mappings.path_replace_movie(movie["path"]))
 
     # Insert new movie in DB
     elif movie and not existing_movie:
@@ -323,16 +323,16 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False):
             store_subtitles_movie(movie['path'], path_mappings.path_replace_movie(movie['path']))
             event_stream(type='movie', action='update', payload=int(movie_id))
             logging.debug(
-                f'BAZARR inserted this movie into the database:{path_mappings.path_replace_movie(movie["path"])}')
+                'BAZARR inserted this movie into the database:%s', path_mappings.path_replace_movie(movie["path"]))
 
     # Downloading missing subtitles
     if defer_search:
         logging.debug(
-            f'BAZARR searching for missing subtitles is deferred until scheduled task execution for this movie: '
-            f'{path_mappings.path_replace_movie(movie["path"])}')
+            'BAZARR searching for missing subtitles is deferred until scheduled task execution for this movie: '
+            '%s', path_mappings.path_replace_movie(movie["path"]))
     else:
         if os.path.exists(path_mappings.path_replace_movie(movie["path"])):
-            logging.debug(f'BAZARR downloading missing subtitles for this movie: {movie["title"]} ({movie["year"]})')
+            logging.debug('BAZARR downloading missing subtitles for this movie: %s (%s)', movie["title"], movie["year"])
             if _is_there_missing_subtitles(radarr_id=movie_id):
                 jobs_queue.feed_jobs_pending_queue(job_name=f'Downloading missing subtitles for {movie["title"]} '
                                                             f'({movie["year"]})',
@@ -344,11 +344,11 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False):
             else:
                 if is_signalr and settings.general.notify_if_nothing_is_missing_for_signalr_event:
                     send_notifications_movie(movie_id, "There are no missing subtitles in this movie.")
-                logging.debug(f'BAZARR no missing subtitles for this movie: {movie["title"]} ({movie["year"]})')
+                logging.debug('BAZARR no missing subtitles for this movie: %s (%s)', movie["title"], movie["year"])
         else:
-            logging.debug(f'BAZARR cannot find this file yet (Radarr may be slow to import movie between disks?). '
-                          f'Searching for missing subtitles is deferred until scheduled task execution for this movie: '
-                          f'{movie["title"]} ({movie["year"]})')
+            logging.debug('BAZARR cannot find this file yet (Radarr may be slow to import movie between disks?). '
+                          'Searching for missing subtitles is deferred until scheduled task execution for this movie: '
+                          '%s (%s)', movie["title"], movie["year"])
 
 
 def _is_there_missing_subtitles(radarr_id: int) -> bool:

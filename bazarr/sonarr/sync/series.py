@@ -201,7 +201,7 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
     call with only series_id + action and the helper falls back to
     the inline behavior.
     """
-    logging.debug(f'BAZARR syncing this specific series from Sonarr: {series_id}')
+    logging.debug('BAZARR syncing this specific series from Sonarr: %s', series_id)
 
     # Check if there's a row in database for this series ID. The
     # bulk caller already knows the answer from `current_shows_db`;
@@ -276,7 +276,7 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
                 sync_episodes(series_id=int(series_id))
             event_stream(type='series', action='update', payload=int(series_id))
             logging.debug(
-                f'BAZARR updated this series into the database:{path_mappings.path_replace(series["path"])}')
+                'BAZARR updated this series into the database:%s', path_mappings.path_replace(series["path"]))
     elif action == 'updated' and not existing_in_db:
         # Insert new series in DB
         series = seriesParser(series_payload, action='insert', tags_dict=tags_dict,
@@ -300,4 +300,4 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
                 sync_episodes(series_id=int(series_id))
             event_stream(type='series', action='update', payload=int(series_id))
             logging.debug(
-                f'BAZARR inserted this series into the database:{path_mappings.path_replace(series["path"])}')
+                'BAZARR inserted this series into the database:%s', path_mappings.path_replace(series["path"]))
