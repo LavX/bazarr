@@ -64,12 +64,17 @@ def start_bazarr():
     return ep
 
 
-def terminate_child():
+def terminate_child(timeout=30):
     global child_process
     print(f"Terminating child process with PID {child_process.pid}")
-    if child_process.poll() is None:   # Process is still running
-        child_process.terminate()      # Send termination signal
-    child_process.wait()               # Ensure it exits
+    if child_process.poll() is None:
+        child_process.terminate()
+        try:
+            child_process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            print(f"Child process did not exit within {timeout}s, sending SIGKILL")
+            child_process.kill()
+            child_process.wait()
 
 
 def get_stop_status_code(input_file):
@@ -136,9 +141,19 @@ def interrupt_handler(signum, frame):
             raise SystemExit(EXIT_INTERRUPT)
 
 
+def sigterm_handler(signum, frame):
+    global interrupted
+    if not interrupted:
+        interrupted = True
+        print('Received SIGTERM, forwarding to child process and shutting down...')
+        terminate_child()
+        exit_program(EXIT_NORMAL)
+
+
 if __name__ == '__main__':
     interrupted = False
     signal.signal(signal.SIGINT, interrupt_handler)
+    signal.signal(signal.SIGTERM, sigterm_handler)
     restart_file = os.path.join(args.config_dir, FILE_RESTART)
     stop_file = os.path.join(args.config_dir, FILE_STOP)
     os.environ[ENV_STOPFILE] = stop_file
@@ -163,7 +178,10 @@ if __name__ == '__main__':
         check_status()
         try:
             time.sleep(5)
-        except (KeyboardInterrupt, SystemExit, ChildProcessError):
+        except SystemExit:
+            raise
+        except (KeyboardInterrupt, ChildProcessError):
             # this code should never be reached, if signal handling is working properly
             print('Bazarr exited main script file via keyboard interrupt.')
             exit_program(EXIT_INTERRUPT)
+

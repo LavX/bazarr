@@ -74,15 +74,16 @@ class Server:
                 self.shutdown()
 
     def interrupt_handler(self, signum, frame):
-        # print('Server signal interrupt handler called with signal', signum)
         if not self.interrupted:
             # ignore user hammering Ctrl-C; we heard you the first time!
             self.interrupted = True
-            self.shutdown(EXIT_INTERRUPT)
+            status = EXIT_INTERRUPT if signum == signal.SIGINT else EXIT_NORMAL
+            self.shutdown(status)
 
     def start(self):
         self.server.print_listen("BAZARR is started and waiting for requests on: http://{}:{}")
         signal.signal(signal.SIGINT, self.interrupt_handler)
+        signal.signal(signal.SIGTERM, self.interrupt_handler)
         try:
             self.server.run()
         except (KeyboardInterrupt, SystemExit):
@@ -113,3 +114,4 @@ class Server:
 
 
 webserver = Server()
+

@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import flask_migrate
-import signal
 
 from dogpile.cache import make_region
 from datetime import datetime
@@ -105,9 +104,6 @@ def close_database():
 @atexit.register
 def _stop_worker_threads():
     database.remove()
-
-
-signal.signal(signal.SIGTERM, lambda signal_no, frame: close_database())
 
 Base = declarative_base()
 metadata = Base.metadata
