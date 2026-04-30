@@ -21,6 +21,7 @@ import {
 import {
   adaptiveSearchingDelayOption,
   adaptiveSearchingDeltaOption,
+  adaptiveSearchingMaxAgeOption,
   colorOptions,
   embeddedSubtitlesParserOption,
   folderOptions,
@@ -284,6 +285,19 @@ const SettingsSubtitlesView: FunctionComponent = () => {
             The delay between Bazarr searching for subtitles in adaptive search
             mode. If the media has been searched for more recently than this
             value, Bazarr will skip searching for subtitles.
+          </Message>
+          <Selector
+            settingKey="settings-general-adaptive_searching_max_age"
+            settingOptions={{ onSaved: (v) => (v === undefined ? "" : v) }}
+            options={adaptiveSearchingMaxAgeOption}
+          ></Selector>
+          <Message>
+            When the timespan between the first and last failed search attempt
+            for a subtitle language reaches this threshold, Bazarr will
+            permanently stop searching for it and remove it from the missing
+            subtitles list. Requires at least two recorded attempts. Set to
+            Disabled to always keep searching. Changing this will trigger a
+            missing subtitles re-scan for all episodes and movies.
           </Message>
         </CollapseBox>
         <Check

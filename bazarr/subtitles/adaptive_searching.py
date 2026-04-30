@@ -108,6 +108,61 @@ def is_search_active(desired_language, attempt_string):
     return True
 
 
+def is_search_given_up(desired_language, attempt_string):
+    """
+    Returns True if searching should be permanently abandoned for this language.
+    Requires at least two recorded attempts; compares the timespan between the first
+    and last attempt against the configured adaptive_searching_max_age threshold.
+
+    @param desired_language: 2 letter language code to check
+    @type desired_language: str
+    @param attempt_string: string representation of a list of lists from database column failedAttempts
+    @type attempt_string: str
+
+    @return: True if the language should be dropped from missing_subtitles
+    @rtype: bool
+    """
+    max_age = settings.general.adaptive_searching_max_age
+    if not max_age:
+        return False
+
+    try:
+        attempts = ast.literal_eval(attempt_string)
+        if type(attempts) is not list:
+            raise ValueError
+    except ValueError:
+        return False
+
+    matching_attempts = sorted([x for x in attempts if x[0] == desired_language], key=lambda x: x[1])
+
+    if len(matching_attempts) < 2:
+        return False
+
+    try:
+        first_ts = datetime.fromtimestamp(matching_attempts[0][1])
+        last_ts = datetime.fromtimestamp(matching_attempts[-1][1])
+    except (OverflowError, ValueError, OSError):
+        return False
+
+    if max_age.endswith('m'):
+        threshold = timedelta(days=int(max_age[:-1]) * 30)
+    elif max_age.endswith('y'):
+        threshold = timedelta(days=int(max_age[:-1]) * 365)
+    elif max_age.endswith('w'):
+        threshold = timedelta(weeks=int(max_age[:-1]))
+    elif max_age.endswith('d'):
+        threshold = timedelta(days=int(max_age[:-1]))
+    else:
+        logging.debug(f"Adaptive searching: cannot parse adaptive_searching_max_age from config: {max_age}")
+        return False
+
+    given_up = (last_ts - first_ts) >= threshold
+    if given_up:
+        logging.debug(f"Adaptive searching: giving up on {desired_language} — span between first and last attempt "
+                      f"({last_ts - first_ts}) exceeds threshold ({threshold})")
+    return given_up
+
+
 def updateFailedAttempts(desired_language, attempt_string):
     """
     Function to parse attempts and make sure we only keep initial and latest search timestamp for each language.

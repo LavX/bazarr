@@ -30,6 +30,7 @@ declare namespace Settings {
     adaptive_searching: boolean;
     adaptive_searching_delay: string;
     adaptive_searching_delta: string;
+    adaptive_searching_max_age: string;
     anti_captcha_provider?: string;
     auto_update: boolean;
     base_url?: string;

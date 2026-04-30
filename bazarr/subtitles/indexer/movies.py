@@ -19,6 +19,7 @@ from utilities.video_analyzer import embedded_subs_reader
 from app.event_handler import event_stream
 from subtitles.indexer.utils import guess_external_subtitles, get_external_subtitles_path
 from app.jobs_queue import jobs_queue
+from subtitles.adaptive_searching import is_search_given_up
 
 gc.enable()
 
@@ -156,6 +157,7 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
 def list_missing_subtitles_movies(no=None):
     stmt = select(TableMovies.radarrId,
                   TableMovies.subtitles,
+                  TableMovies.failedAttempts,
                   TableMovies.profileId,
                   TableMovies.audio_language)
 
@@ -258,6 +260,8 @@ def list_missing_subtitles_movies(no=None):
                 # make the missing languages list looks like expected
                 missing_subtitles_output_list = []
                 for item in missing_subtitles_list:
+                    if is_search_given_up(item['language'], movie_subtitles.failedAttempts):
+                        continue
                     lang = item['language']
                     if item['forced'] == 'True':
                         lang += ':forced'

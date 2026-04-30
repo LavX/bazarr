@@ -138,6 +138,8 @@ validators = [
               is_in=['1w', '2w', '3w', '4w']),
     Validator('general.adaptive_searching_delta', must_exist=True, default='1w', is_type_of=str,
               is_in=['3d', '1w', '2w', '3w', '4w']),
+    Validator('general.adaptive_searching_max_age', must_exist=True, default='', is_type_of=str,
+              is_in=['', '1m', '3m', '6m', '1y', '2y']),
     Validator('general.enabled_providers', must_exist=True, default=[], is_type_of=list),
     Validator('general.provider_priorities', must_exist=True, default={}, is_type_of=dict),
     Validator('general.use_provider_priority', must_exist=True, default=True, is_type_of=bool),
@@ -688,6 +690,7 @@ def save_settings(settings_items):
     undefined_audio_track_default_changed = False
     undefined_subtitles_track_default_changed = False
     audio_tracks_parsing_changed = False
+    adaptive_searching_max_age_changed = False
     reset_providers = False
 
     # Subzero Mods
@@ -740,6 +743,10 @@ def save_settings(settings_items):
         if key in ['settings-general-use_embedded_subs', 'settings-general-ignore_pgs_subs',
                    'settings-general-ignore_vobsub_subs', 'settings-general-ignore_ass_subs']:
             use_embedded_subs_changed = True
+
+        if key == 'settings-general-adaptive_searching_max_age':
+            if value != settings.general.adaptive_searching_max_age:
+                adaptive_searching_max_age_changed = True
 
         if key == 'settings-general-default_und_audio_lang':
             undefined_audio_track_default_changed = True
@@ -896,7 +903,7 @@ def save_settings(settings_items):
 
             update_subzero = True
 
-    if use_embedded_subs_changed or undefined_audio_track_default_changed:
+    if use_embedded_subs_changed or undefined_audio_track_default_changed or adaptive_searching_max_age_changed:
         from .scheduler import scheduler
         from subtitles.indexer.series import list_missing_subtitles
         from subtitles.indexer.movies import list_missing_subtitles_movies
