@@ -124,7 +124,7 @@ jobs:
           fetch-depth: 0  # Full history for git describe
 
       - name: Download Frontend Build
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: frontend-build-${{ github.run_id }}
           path: ${{ env.UI_DIRECTORY }}/build
