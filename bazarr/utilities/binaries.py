@@ -8,17 +8,22 @@ import json
 import hashlib
 import stat
 
-from cachetools import LRUCache
 from whichcraft import which
 from dogpile.cache import make_region
 
-# Bounded LRU + 1h TTL. Only used to memoise md5() and get_binaries_from_json()
-# results across a few binary paths. maxsize=64 is plenty, and the 1h TTL
-# means the md5 cache rotates often enough to pick up auto-updated
-# ffmpeg/ffprobe binaries within a reasonable window.
+from utilities.locked_lru import LockedLRU
+
+# Bounded thread-safe LRU + 1h TTL. Only used to memoise md5() and
+# get_binaries_from_json() results across a few binary paths. In practice
+# there are at most ~4 entries (ffmpeg, ffprobe, mediainfo, the JSON blob);
+# maxsize=8 communicates that intent, with headroom for platform variants.
+# The 1h TTL rotates the md5 cache often enough to pick up auto-updated
+# ffmpeg/ffprobe binaries within a reasonable window. LockedLRU is used
+# instead of bare LRUCache because get_binary() can be invoked from
+# concurrent request threads via the video analyzer.
 region = make_region().configure(
     'dogpile.cache.memory',
-    arguments={'cache_dict': LRUCache(maxsize=64)},
+    arguments={'cache_dict': LockedLRU(maxsize=8)},
     expiration_time=3600,
 )
 
