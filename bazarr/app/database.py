@@ -30,7 +30,13 @@ if POSTGRES_ENABLED_ENV:
 else:
     postgresql = settings.postgresql.enabled
 
-region = make_region().configure('dogpile.cache.memory')
+# Single-entry cache for update_profile_id_list(). No LRU bound is needed
+# (one key only). The 60s TTL is a safety net so a missed manual
+# invalidation does not pin stale profile data forever.
+region = make_region().configure(
+    'dogpile.cache.memory',
+    expiration_time=60,
+)
 
 migrations_directory = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'migrations')
 

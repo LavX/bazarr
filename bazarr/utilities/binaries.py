@@ -8,10 +8,19 @@ import json
 import hashlib
 import stat
 
+from cachetools import LRUCache
 from whichcraft import which
 from dogpile.cache import make_region
 
-region = make_region().configure('dogpile.cache.memory')
+# Bounded LRU + 1h TTL. Only used to memoise md5() and get_binaries_from_json()
+# results across a few binary paths. maxsize=64 is plenty, and the 1h TTL
+# means the md5 cache rotates often enough to pick up auto-updated
+# ffmpeg/ffprobe binaries within a reasonable window.
+region = make_region().configure(
+    'dogpile.cache.memory',
+    arguments={'cache_dict': LRUCache(maxsize=64)},
+    expiration_time=3600,
+)
 
 
 class BinaryNotFound(Exception):

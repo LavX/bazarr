@@ -1,11 +1,21 @@
 from __future__ import annotations
 import hashlib
 import json
+from cachetools import LRUCache
 from dogpile.cache import make_region
 
+# Bound the in-memory region with a cachetools LRU and a sane region default
+# TTL. Each cached envelope holds provider matches + scores and can be tens of
+# KB; without a bound, a 5000-episode library could hold 5000 envelopes for up
+# to 24h. maxsize=2048 caps worst-case footprint regardless of library size,
+# evicting the least-recently-used envelope on overflow. expiration_time=1800
+# is the region default; callers in service.py override it per-call via
+# `expiration_time=...`, so this only matters for callers that forget to pass
+# one.
 compat_region = make_region(key_mangler=lambda k: k).configure(
     "dogpile.cache.memory",
-    arguments={},
+    arguments={"cache_dict": LRUCache(maxsize=2048)},
+    expiration_time=1800,
 )
 
 
