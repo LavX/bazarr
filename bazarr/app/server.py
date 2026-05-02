@@ -6,6 +6,7 @@ import logging
 import errno
 from literals import EXIT_INTERRUPT, EXIT_NORMAL, EXIT_PORT_ALREADY_IN_USE_ERROR
 from utilities.central import restart_bazarr, stop_bazarr
+from utilities.tracemalloc_dumper import install as install_tracemalloc_dumper
 
 from waitress.server import create_server
 from time import sleep
@@ -38,6 +39,8 @@ class Server:
         self.address = str(settings.general.ip)
         self.port = int(args.port) if args.port else int(settings.general.port)
         self.interrupted = False
+
+        install_tracemalloc_dumper()
 
         while not self.connected:
             sleep(0.1)

@@ -71,14 +71,18 @@ if postgresql:
             database=postgres_database
         )
     logger.debug(f"Connecting to PostgreSQL database: {url.render_as_string(hide_password=True)}")
-    
+
     engine = create_engine(url, poolclass=NullPool, isolation_level="AUTOCOMMIT")
+    from utilities.sql_profiler import install_slow_query_log
+    install_slow_query_log(engine)
 else:
     # insert is different between database types
     from sqlalchemy.dialects.sqlite import insert  # noqa E402
     url = f'sqlite:///{os.path.join(args.config_dir, "db", "bazarr.db")}'
     logger.debug(f"Connecting to SQLite database: {url}")
     engine = create_engine(url, poolclass=NullPool, isolation_level="AUTOCOMMIT")
+    from utilities.sql_profiler import install_slow_query_log
+    install_slow_query_log(engine)
 
     from sqlalchemy.engine import Engine
     from sqlalchemy import event
