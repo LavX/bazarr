@@ -10,7 +10,7 @@ import signal
 from dogpile.cache import make_region
 from datetime import datetime
 
-from sqlalchemy import create_engine, inspect, DateTime, ForeignKey, Integer, LargeBinary, Text, func, text, BigInteger
+from sqlalchemy import create_engine, inspect, DateTime, ForeignKey, Index, Integer, LargeBinary, Text, func, text, BigInteger
 # importing here to be indirectly imported in other modules later
 from sqlalchemy import update, delete, select, func  # noqa W0611
 from sqlalchemy.orm import scoped_session, sessionmaker, mapped_column, close_all_sessions
@@ -138,7 +138,7 @@ class TableBlacklist(Base):
     provider = mapped_column(Text)
     sonarr_episode_id = mapped_column(Integer, ForeignKey('table_episodes.sonarrEpisodeId', ondelete='CASCADE'))
     sonarr_series_id = mapped_column(Integer, ForeignKey('table_shows.sonarrSeriesId', ondelete='CASCADE'))
-    subs_id = mapped_column(Text)
+    subs_id = mapped_column(Text, index=True)
     timestamp = mapped_column(DateTime, default=datetime.now)
 
 
@@ -149,7 +149,7 @@ class TableBlacklistMovie(Base):
     language = mapped_column(Text)
     provider = mapped_column(Text)
     radarr_id = mapped_column(Integer, ForeignKey('table_movies.radarrId', ondelete='CASCADE'))
-    subs_id = mapped_column(Text)
+    subs_id = mapped_column(Text, index=True)
     timestamp = mapped_column(DateTime, default=datetime.now)
 
 
@@ -161,7 +161,7 @@ class TableEpisodes(Base):
     audio_language = mapped_column(Text)
     created_at_timestamp = mapped_column(DateTime)
     episode = mapped_column(Integer, nullable=False)
-    episode_file_id = mapped_column(Integer)
+    episode_file_id = mapped_column(Integer, index=True)
     failedAttempts = mapped_column(Text)
     ffprobe_cache = mapped_column(LargeBinary)
     file_size = mapped_column(BigInteger)
@@ -173,7 +173,7 @@ class TableEpisodes(Base):
     sceneName = mapped_column(Text)
     season = mapped_column(Integer, nullable=False)
     sonarrEpisodeId = mapped_column(Integer, primary_key=True)
-    sonarrSeriesId = mapped_column(Integer, ForeignKey('table_shows.sonarrSeriesId', ondelete='CASCADE'))
+    sonarrSeriesId = mapped_column(Integer, ForeignKey('table_shows.sonarrSeriesId', ondelete='CASCADE'), index=True)
     subtitles = mapped_column(Text)
     title = mapped_column(Text, nullable=False)
     tvdbId = mapped_column(Integer)
@@ -186,16 +186,20 @@ class TableEpisodes(Base):
 
 class TableHistory(Base):
     __tablename__ = 'table_history'
+    __table_args__ = (
+        Index('ix_table_history_video_path_language_timestamp',
+              'video_path', 'language', 'timestamp'),
+    )
 
     id = mapped_column(Integer, primary_key=True)
-    action = mapped_column(Integer, nullable=False)
+    action = mapped_column(Integer, nullable=False, index=True)
     description = mapped_column(Text, nullable=False)
     language = mapped_column(Text)
     provider = mapped_column(Text)
     score = mapped_column(Integer)
     score_out_of = mapped_column(Integer, nullable=True)
-    sonarrEpisodeId = mapped_column(Integer, ForeignKey('table_episodes.sonarrEpisodeId', ondelete='CASCADE'))
-    sonarrSeriesId = mapped_column(Integer, ForeignKey('table_shows.sonarrSeriesId', ondelete='CASCADE'))
+    sonarrEpisodeId = mapped_column(Integer, ForeignKey('table_episodes.sonarrEpisodeId', ondelete='CASCADE'), index=True)
+    sonarrSeriesId = mapped_column(Integer, ForeignKey('table_shows.sonarrSeriesId', ondelete='CASCADE'), index=True)
     subs_id = mapped_column(Text)
     subtitles_path = mapped_column(Text)
     timestamp = mapped_column(DateTime, nullable=False, default=datetime.now)
@@ -207,13 +211,17 @@ class TableHistory(Base):
 
 class TableHistoryMovie(Base):
     __tablename__ = 'table_history_movie'
+    __table_args__ = (
+        Index('ix_table_history_movie_video_path_language_timestamp',
+              'video_path', 'language', 'timestamp'),
+    )
 
     id = mapped_column(Integer, primary_key=True)
-    action = mapped_column(Integer, nullable=False)
+    action = mapped_column(Integer, nullable=False, index=True)
     description = mapped_column(Text, nullable=False)
     language = mapped_column(Text)
     provider = mapped_column(Text)
-    radarrId = mapped_column(Integer, ForeignKey('table_movies.radarrId', ondelete='CASCADE'))
+    radarrId = mapped_column(Integer, ForeignKey('table_movies.radarrId', ondelete='CASCADE'), index=True)
     score = mapped_column(Integer)
     score_out_of = mapped_column(Integer, nullable=True)
     subs_id = mapped_column(Text)
@@ -257,7 +265,7 @@ class TableMovies(Base):
     overview = mapped_column(Text)
     path = mapped_column(Text, nullable=False, unique=True)
     poster = mapped_column(Text)
-    profileId = mapped_column(Integer, ForeignKey('table_languages_profiles.profileId', ondelete='SET NULL'))
+    profileId = mapped_column(Integer, ForeignKey('table_languages_profiles.profileId', ondelete='SET NULL'), index=True)
     radarrId = mapped_column(Integer, primary_key=True)
     resolution = mapped_column(Text)
     sceneName = mapped_column(Text)
@@ -316,7 +324,7 @@ class TableShows(Base):
     overview = mapped_column(Text)
     path = mapped_column(Text, nullable=False, unique=True)
     poster = mapped_column(Text)
-    profileId = mapped_column(Integer, ForeignKey('table_languages_profiles.profileId', ondelete='SET NULL'))
+    profileId = mapped_column(Integer, ForeignKey('table_languages_profiles.profileId', ondelete='SET NULL'), index=True)
     seriesType = mapped_column(Text)
     sonarrSeriesId = mapped_column(Integer, primary_key=True)
     sortTitle = mapped_column(Text)
