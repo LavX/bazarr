@@ -21,7 +21,7 @@ from typing import Optional
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 
-logger = logging.getLogger("bazarr.sql_profiler")
+logger = logging.getLogger(__name__)
 
 
 def _is_enabled() -> bool:

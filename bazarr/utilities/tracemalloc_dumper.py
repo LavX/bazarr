@@ -17,7 +17,7 @@ import sys
 import threading
 import tracemalloc
 
-logger = logging.getLogger("bazarr.tracemalloc_dumper")
+logger = logging.getLogger(__name__)
 
 _previous_snapshot = None
 _lock = threading.Lock()
