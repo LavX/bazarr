@@ -71,13 +71,33 @@ if postgresql:
             database=postgres_database
         )
     logger.debug(f"Connecting to PostgreSQL database: {url.render_as_string(hide_password=True)}")
-    
-    engine = create_engine(url, poolclass=NullPool, isolation_level="AUTOCOMMIT")
+
+    # Postgres: use SQLAlchemy's default QueuePool. NullPool would force a
+    # fresh TCP+TLS handshake for every database.execute(...) call (~266
+    # callsites), which is catastrophic on Postgres. pool_pre_ping issues a
+    # cheap SELECT 1 before handing out a checked-out connection so stale
+    # connections (server-side timeout, network blip, db restart) are
+    # transparently recycled instead of surfacing as OperationalError.
+    # pool_recycle=1800 proactively retires connections after 30 minutes,
+    # which is below typical idle-timeout ceilings on managed Postgres.
+    engine = create_engine(
+        url,
+        pool_size=5,
+        max_overflow=10,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+        isolation_level="AUTOCOMMIT",
+    )
 else:
     # insert is different between database types
     from sqlalchemy.dialects.sqlite import insert  # noqa E402
     url = f'sqlite:///{os.path.join(args.config_dir, "db", "bazarr.db")}'
     logger.debug(f"Connecting to SQLite database: {url}")
+    # SQLite: keep NullPool. SQLite's single-writer file-lock model produces
+    # "database is locked" errors when connections are pooled and shared
+    # across threads, so the safest pattern is one fresh connection per
+    # statement and let the WAL / busy_timeout PRAGMAs below absorb
+    # contention. Do NOT switch this to QueuePool.
     engine = create_engine(url, poolclass=NullPool, isolation_level="AUTOCOMMIT")
 
     from sqlalchemy.engine import Engine
@@ -93,7 +113,18 @@ else:
         cursor.execute("PRAGMA busy_timeout=60000")
         cursor.close()
 
-session_factory = sessionmaker(bind=engine)
+# sessionmaker defaults are wrong for this codebase's access pattern.
+# autoflush=False: bazarr writes through Core insert() / update() / delete()
+# constructs, never via session.add(); there is nothing for the session to
+# auto-flush, and leaving autoflush on would silently flush any future ORM
+# mutation right before unrelated SELECTs run, which is a surprise vector.
+# expire_on_commit=False: the engine runs in AUTOCOMMIT, so every statement
+# commits on its own. With the SQLAlchemy default (expire_on_commit=True),
+# every ORM instance returned by the session would be marked expired the
+# instant its statement commits, forcing an implicit re-SELECT the next
+# time any attribute is accessed. Disabling preserves the loaded values
+# for the natural lifetime of the consuming code.
+session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 database = scoped_session(session_factory)
 
 
