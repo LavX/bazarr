@@ -50,7 +50,7 @@ def update_notifier():
     for x in results['schemas']:
         if x['service_name'] not in notifiers_in_db:
             notifiers_added.append({'name': str(x['service_name']), 'enabled': 0})
-            logging.debug(f'Adding new notifier agent: {x["service_name"]}')
+            logging.debug(f'Adding new notifier agent: {x["service_name"]}')  # noqa: G004
         else:
             notifiers_kept.append(x['service_name'])
 

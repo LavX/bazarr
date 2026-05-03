@@ -113,7 +113,7 @@ def test_library_path_delegates_to_parse_video():
     Bazarr's parse_video pipeline (same scoring intelligence as the
     native manual search). Falls back to virtual Video when the file is
     missing or parse_video fails."""
-    from unittest.mock import MagicMock
+    from unittest.mock import MagicMock  # noqa: F401
     from compat import service
     from compat.service import _build_video
     from subliminal.video import Movie

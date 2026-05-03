@@ -12,7 +12,7 @@ from datetime import datetime
 
 from sqlalchemy import create_engine, inspect, DateTime, ForeignKey, Index, Integer, LargeBinary, Text, func, text, BigInteger
 # importing here to be indirectly imported in other modules later
-from sqlalchemy import update, delete, select, func  # noqa W0611
+from sqlalchemy import update, delete, select, func  # noqa: F401, F811
 from sqlalchemy.orm import scoped_session, sessionmaker, mapped_column, close_all_sessions
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.pool import NullPool
@@ -42,8 +42,8 @@ migrations_directory = os.path.join(os.path.dirname(os.path.dirname(os.path.dirn
 
 if postgresql:
     # insert is different between database types
-    from sqlalchemy.dialects.postgresql import insert  # noqa E402
-    from sqlalchemy.engine import URL, make_url  # noqa E402
+    from sqlalchemy.dialects.postgresql import insert
+    from sqlalchemy.engine import URL, make_url
 
     postgres_database = os.getenv("POSTGRES_DATABASE", settings.postgresql.database)
     postgres_username = os.getenv("POSTGRES_USERNAME", settings.postgresql.username)
@@ -76,7 +76,7 @@ if postgresql:
             port=postgres_port,
             database=postgres_database
         )
-    logger.debug(f"Connecting to PostgreSQL database: {url.render_as_string(hide_password=True)}")
+    logger.debug(f"Connecting to PostgreSQL database: {url.render_as_string(hide_password=True)}")  # noqa: G004
 
     # Postgres: use SQLAlchemy's default QueuePool. NullPool would force a
     # fresh TCP+TLS handshake for every database.execute(...) call (~266
@@ -96,9 +96,9 @@ if postgresql:
     )
 else:
     # insert is different between database types
-    from sqlalchemy.dialects.sqlite import insert  # noqa E402
+    from sqlalchemy.dialects.sqlite import insert
     url = f'sqlite:///{os.path.join(args.config_dir, "db", "bazarr.db")}'
-    logger.debug(f"Connecting to SQLite database: {url}")
+    logger.debug(f"Connecting to SQLite database: {url}")  # noqa: G004
     # SQLite: keep NullPool. SQLite's single-writer file-lock model produces
     # "database is locked" errors when connections are pooled and shared
     # across threads, so the safest pattern is one fresh connection per
@@ -122,7 +122,7 @@ else:
 # Dev-only slow-query log. Gated by BAZARR_SQL_PROFILE env var; this
 # is a cheap function call and a hard early-return when disabled, so
 # we wire it once for both engines without branching.
-from utilities.sql_profiler import install_slow_query_log  # noqa E402
+from utilities.sql_profiler import install_slow_query_log  # noqa: E402
 install_slow_query_log(engine)
 
 # sessionmaker defaults are wrong for this codebase's access pattern.
@@ -451,26 +451,26 @@ def get_exclusion_clause(exclusion_type):
     if exclusion_type == 'series':
         tagsList = settings.sonarr.excluded_tags
         for tag in tagsList:
-            where_clause.append(~(TableShows.tags.contains(f"\'{tag}\'")))
+            where_clause.append(~(TableShows.tags.contains(f"\'{tag}\'")))  # noqa: PERF401
     else:
         tagsList = settings.radarr.excluded_tags
         for tag in tagsList:
-            where_clause.append(~(TableMovies.tags.contains(f"\'{tag}\'")))
+            where_clause.append(~(TableMovies.tags.contains(f"\'{tag}\'")))  # noqa: PERF401
 
     if exclusion_type == 'series':
         monitoredOnly = settings.sonarr.only_monitored
         if monitoredOnly:
-            where_clause.append((TableEpisodes.monitored == 'True'))  # noqa E712
-            where_clause.append((TableShows.monitored == 'True'))  # noqa E712
+            where_clause.append((TableEpisodes.monitored == 'True'))
+            where_clause.append((TableShows.monitored == 'True'))
     else:
         monitoredOnly = settings.radarr.only_monitored
         if monitoredOnly:
-            where_clause.append((TableMovies.monitored == 'True'))  # noqa E712
+            where_clause.append((TableMovies.monitored == 'True'))
 
     if exclusion_type == 'series':
         typesList = settings.sonarr.excluded_series_types
         for item in typesList:
-            where_clause.append((TableShows.seriesType != item))
+            where_clause.append((TableShows.seriesType != item))  # noqa: PERF401
 
         exclude_season_zero = settings.sonarr.exclude_season_zero
         if exclude_season_zero:
@@ -568,7 +568,7 @@ def get_audio_profile_languages(audio_languages_list_str):
                 )
             else:
                 if und_default_language:
-                    logging.debug(f"Undefined language audio track treated as {und_default_language}")
+                    logging.debug(f"Undefined language audio track treated as {und_default_language}")  # noqa: G004
                     audio_languages.append(
                         {"name": und_default_language,
                          "code2": alpha2_from_language(und_default_language) or None,

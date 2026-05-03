@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch  # noqa: F401
 import pytest
 from flask import Flask
 

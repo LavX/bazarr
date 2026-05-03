@@ -4,7 +4,7 @@
 import logging
 import requests
 from collections import namedtuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta  # noqa: F401
 from requests.exceptions import HTTPError
 
 from app.config import settings
@@ -127,7 +127,7 @@ class AniDBClient(object):
                             else:
                                 tvdb_episodes = [episode_ref.split('-')[1]]
 
-                            logger.info(f"Comparing {tvdb_episodes} with {episode}")
+                            logger.info(f"Comparing {tvdb_episodes} with {episode}")  # noqa: G004
                             for tvdb_episode in tvdb_episodes:
                                 if int(tvdb_episode) == episode:
                                     anidb_id = int(anime.attrib.get('anidbid'))
@@ -227,13 +227,13 @@ def refine_anidb_ids(video):
     if not anidb_series_id:
         return video
 
-    logger.debug(f'AniDB refinement identified {video.series} as {anidb_series_id}.')
+    logger.debug(f'AniDB refinement identified {video.series} as {anidb_series_id}.')  # noqa: G004
     
     anidb_episode_id = None
 
     if anidb_client.has_api_credentials:
         if anidb_client.is_throttled:
-            logger.warning(f'API daily limit reached. Skipping episode ID refinement for {video.series}')
+            logger.warning(f'API daily limit reached. Skipping episode ID refinement for {video.series}')  # noqa: G004
         else:
             try:
                 anidb_episode_id = anidb_client.get_episode_ids(
@@ -241,12 +241,12 @@ def refine_anidb_ids(video):
                     anidb_episode_no
                 )
             except TooManyRequests:
-                logger.error(f'API daily limit reached while refining {video.series}')
+                logger.error(f'API daily limit reached while refining {video.series}')  # noqa: G004
                 anidb_client.mark_as_throttled()
     else:
         intersect = providers_requiring_anidb_api.intersection(settings.general.enabled_providers)
         if len(intersect) >= 1:
-            logger.warn(f'AniDB API credentials are not fully set up, the following providers may not work: {intersect}')
+            logger.warn(f'AniDB API credentials are not fully set up, the following providers may not work: {intersect}')  # noqa: G004, G010
 
     video.series_anidb_id = anidb_series_id
     video.series_anidb_episode_id = anidb_episode_id

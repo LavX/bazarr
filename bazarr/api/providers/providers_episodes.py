@@ -8,9 +8,9 @@ from app.database import TableEpisodes, TableShows, database, select
 from utilities.path_mappings import path_mappings
 from app.get_providers import get_providers_sorted
 from subtitles.manual import manual_search, episode_manually_download_specific_subtitle
-from sonarr.history import history_log
-from app.config import settings
-from app.jobs_queue import jobs_queue
+from sonarr.history import history_log  # noqa: F401
+from app.config import settings  # noqa: F401
+from app.jobs_queue import jobs_queue  # noqa: F401
 from subtitles.indexer.series import store_subtitles, list_missing_subtitles
 
 from ..utils import authenticate

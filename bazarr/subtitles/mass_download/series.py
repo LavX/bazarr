@@ -52,7 +52,7 @@ def series_download_subtitles(no, job_id=None, job_sub_function=False):
         .all()
     throttled = False
     if not episodes_details:
-        logging.debug(f"BAZARR no episode for that sonarrSeriesId have been found in database or they have all been "
+        logging.debug(f"BAZARR no episode for that sonarrSeriesId have been found in database or they have all been "  # noqa: G004
                       f"ignored because of monitored status, series type or series tags: {no}")
     else:
         count_episodes_details = len(episodes_details)
@@ -124,7 +124,7 @@ def episode_download_subtitles(no, job_id=None, job_sub_function=False, provider
     episodePath = path_mappings.path_replace(episode.path)
 
     if not os.path.exists(episodePath):
-        logging.debug(f"BAZARR episode file not found. Path mapping issue?: {episodePath}")
+        logging.debug(f"BAZARR episode file not found. Path mapping issue?: {episodePath}")  # noqa: G004
         jobs_queue.update_job_progress(job_id=job_id, progress_message=f"Episode path doesn't exists: {episodePath}")
         raise OSError
 

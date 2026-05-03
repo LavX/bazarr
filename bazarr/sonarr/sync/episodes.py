@@ -13,8 +13,8 @@ from constants import MINIMUM_VIDEO_SIZE
 from app.database import database, TableShows, TableEpisodes, delete, update, insert, select, get_exclusion_clause
 from app.config import settings
 from utilities.path_mappings import path_mappings
-from subtitles.indexer.series import store_subtitles, series_full_scan_subtitles
-from subtitles.mass_download import episode_download_subtitles
+from subtitles.indexer.series import store_subtitles, series_full_scan_subtitles  # noqa: F401
+from subtitles.mass_download import episode_download_subtitles  # noqa: F401
 from app.event_handler import event_stream
 from sonarr.info import get_sonarr_info
 from app.jobs_queue import jobs_queue
@@ -38,7 +38,7 @@ EPISODE_INSERT_CHUNK_SIZE = 50
 
 def trace(message):
     if settings.general.debug:
-        logging.debug(FEATURE_PREFIX + message)
+        logging.debug(FEATURE_PREFIX + message)  # noqa: G003
 
 
 def get_episodes_monitored_table(series_id):
@@ -209,7 +209,7 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
         try:
             database.execute(delete(TableEpisodes).where(TableEpisodes.sonarrEpisodeId.in_(episodes_to_delete)))
         except IntegrityError as e:
-            logging.error(f"BAZARR cannot delete episodes because of {e}")
+            logging.error(f"BAZARR cannot delete episodes because of {e}")  # noqa: G004
         else:
             # Per-row episode delete events used to fire one socketio
             # packet per row here (5000 packets for an initial sync of a
@@ -241,7 +241,7 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
                     try:
                         database.execute(insert(TableEpisodes).values(added_episode))
                     except IntegrityError as e:
-                        logging.error(f"BAZARR cannot insert episodes because of {e}. We'll try to update it instead.")
+                        logging.error(f"BAZARR cannot insert episodes because of {e}. We'll try to update it instead.")  # noqa: G004
                         del added_episode['created_at_timestamp']
                         episodes_to_update.append(added_episode)
                     else:
@@ -270,7 +270,7 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
                                  .values(updated_episode)
                                  .where(TableEpisodes.sonarrEpisodeId == updated_episode['sonarrEpisodeId']))
             except IntegrityError as e:
-                logging.error(f"BAZARR cannot update episodes because of {e}")
+                logging.error(f"BAZARR cannot update episodes because of {e}")  # noqa: G004
             else:
                 if (previous_episode_file_id != updated_episode['episode_file_id'] or
                         previous_episode_path != updated_episode['path']):
@@ -369,7 +369,7 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False):
                 delete(TableEpisodes)
                 .where(TableEpisodes.sonarrEpisodeId == episode_id))
         except IntegrityError as e:
-            logging.error(f"BAZARR cannot delete episode {existing_episode.path} because of {e}")
+            logging.error(f"BAZARR cannot delete episode {existing_episode.path} because of {e}")  # noqa: G004
         else:
             event_stream(type='episode', action='delete', payload=int(episode_id))
             logging.debug(
@@ -385,7 +385,7 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False):
                 .values(episode)
                 .where(TableEpisodes.sonarrEpisodeId == episode_id))
         except IntegrityError as e:
-            logging.error(f"BAZARR cannot update episode {episode['path']} because of {e}")
+            logging.error(f"BAZARR cannot update episode {episode['path']} because of {e}")  # noqa: G004
         else:
             store_subtitles(episode['path'], path_mappings.path_replace(episode['path']))
             event_stream(type='episode', action='update', payload=int(episode_id))
@@ -400,7 +400,7 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False):
                 insert(TableEpisodes)
                 .values(episode))
         except IntegrityError as e:
-            logging.error(f"BAZARR cannot insert episode {episode['path']} because of {e}")
+            logging.error(f"BAZARR cannot insert episode {episode['path']} because of {e}")  # noqa: G004
         else:
             store_subtitles(episode['path'], path_mappings.path_replace(episode['path']))
             event_stream(type='episode', action='update', payload=int(episode_id))

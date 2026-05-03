@@ -19,7 +19,7 @@ These are higher-cost tests that exercise crypto + registry + migration
 together; the simpler unit suites already prove each piece in
 isolation.
 """
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch  # noqa: F401
 
 import pytest
 from itsdangerous import URLSafeSerializer

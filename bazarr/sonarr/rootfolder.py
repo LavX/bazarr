@@ -35,7 +35,7 @@ def get_sonarr_rootfolder():
             if any(item.path.startswith(folder['path']) for item in database.execute(
                     select(TableShows.path))
                     .all()):
-                sonarr_rootfolder.append({'id': folder['id'], 'path': folder['path']})
+                sonarr_rootfolder.append({'id': folder['id'], 'path': folder['path']})  # noqa: PERF401
         db_rootfolder = database.execute(
             select(TableShowsRootfolder.id, TableShowsRootfolder.path))\
             .all()

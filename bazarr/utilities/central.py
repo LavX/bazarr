@@ -41,7 +41,7 @@ def stop_bazarr(status_code=EXIT_NORMAL):
             file.write(f'{status_code}\n')
             file.close()
     except Exception as e:
-        logging.error(f'BAZARR Cannot create stop file: {repr(e)}')
+        logging.error(f'BAZARR Cannot create stop file: {repr(e)}')  # noqa: G004
     logging.info('Bazarr is being shutdown...')
     os._exit(status_code)  # Don't raise SystemExit here since it's catch by waitress and it prevents proper exit
 
@@ -50,6 +50,6 @@ def restart_bazarr():
     try:
         Path(get_restart_file_path()).touch()
     except Exception as e:
-        logging.error(f'BAZARR Cannot create restart file: {repr(e)}')
+        logging.error(f'BAZARR Cannot create restart file: {repr(e)}')  # noqa: G004
     logging.info('Bazarr is being restarted...')
     os._exit(EXIT_NORMAL)  # Don't raise SystemExit here since it's catch by waitress and it prevents proper exit

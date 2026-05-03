@@ -1,4 +1,4 @@
-from collections import defaultdict
+from collections import defaultdict  # noqa: F401
 from unittest.mock import MagicMock, patch
 
 import pytest

@@ -16,7 +16,7 @@ def test_first_enable_autogenerates_secrets(monkeypatch):
 def test_ensure_secrets_idempotent_when_secrets_present(monkeypatch):
     """If all 3 secrets already >=32 chars, ensure_secrets is a no-op."""
     from api.system.compat_admin import ensure_secrets
-    from app.config import settings
+    from app.config import settings  # noqa: F401
     monkeypatch.setattr("app.config.settings.compat_endpoint.enabled", True)
     monkeypatch.setattr("app.config.settings.compat_endpoint.token", "a" * 32)
     monkeypatch.setattr("app.config.settings.compat_endpoint.jwt_secret", "b" * 32)

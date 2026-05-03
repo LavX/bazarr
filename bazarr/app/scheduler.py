@@ -98,7 +98,7 @@ class Scheduler:
             logging.error("BAZARR cannot use the specified timezone and will use UTC instead.")
             self.timezone = tz.gettz("UTC")
         else:
-            logging.info(f"Scheduler will use this timezone: {self.timezone}")
+            logging.info(f"Scheduler will use this timezone: {self.timezone}")  # noqa: G004
 
         self.aps_scheduler = BackgroundScheduler({'apscheduler.timezone': self.timezone})
 

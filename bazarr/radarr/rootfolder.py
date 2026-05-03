@@ -35,7 +35,7 @@ def get_radarr_rootfolder():
             if any(item.path.startswith(folder['path']) for item in database.execute(
                     select(TableMovies.path))
                     .all()):
-                radarr_rootfolder.append({'id': folder['id'], 'path': folder['path']})
+                radarr_rootfolder.append({'id': folder['id'], 'path': folder['path']})  # noqa: PERF401
         db_rootfolder = database.execute(
             select(TableMoviesRootfolder.id, TableMoviesRootfolder.path))\
             .all()

@@ -23,7 +23,7 @@ from sonarr.history import history_log
 from radarr.history import history_log_movie
 from subtitles.indexer.series import store_subtitles
 from subtitles.indexer.movies import store_subtitles_movie
-from subtitles.processing import ProcessSubtitlesResult
+from subtitles.processing import ProcessSubtitlesResult  # noqa: F401
 
 from .cache import subtitle_cache
 from .pool import update_pools, _get_pool
@@ -33,7 +33,7 @@ from .processing import process_subtitle
 
 @update_pools
 def manual_search(path, profile_id, providers, sceneName, title, media_type):
-    logging.debug(f'BAZARR Manually searching subtitles for this file: {path}')
+    logging.debug(f'BAZARR Manually searching subtitles for this file: {path}')  # noqa: G004
 
     final_subtitles = []
 
@@ -61,7 +61,7 @@ def manual_search(path, profile_id, providers, sceneName, title, media_type):
                 logging.info("BAZARR All providers are throttled")
                 return 'All providers are throttled'
         except Exception as e:
-            logging.exception(f"BAZARR Error trying to get Subtitle list from provider for this file {path}: {repr(e)}")
+            logging.exception(f"BAZARR Error trying to get Subtitle list from provider for this file {path}: {repr(e)}")  # noqa: G004
         else:
             subtitles_list = []
             minimum_score = settings.general.minimum_score
@@ -70,7 +70,7 @@ def manual_search(path, profile_id, providers, sceneName, title, media_type):
 
             for s in subtitles[video]:
                 if not normal and s.language not in language_set:
-                    logging.debug(f"Skipping subtitle {s.language} because it's not requested")
+                    logging.debug(f"Skipping subtitle {s.language} because it's not requested")  # noqa: G004
                     continue
 
                 try:
@@ -88,7 +88,7 @@ def manual_search(path, profile_id, providers, sceneName, title, media_type):
 
                     if can_verify_series and not {"series", "season", "episode"}.issubset(matches):
                         try:
-                            logging.debug(f"BAZARR Skipping {s}, because it doesn't match our series/episode")
+                            logging.debug(f"BAZARR Skipping {s}, because it doesn't match our series/episode")  # noqa: G004
                         except TypeError:
                             logging.debug("BAZARR Ignoring invalid subtitles")
                         continue
@@ -113,7 +113,7 @@ def manual_search(path, profile_id, providers, sceneName, title, media_type):
                     if s.release_info is not None:
                         for s_item in s.release_info.split(','):
                             if s_item.strip():
-                                releases.append(s_item)
+                                releases.append(s_item)  # noqa: PERF401
 
                 if s.uploader and s.uploader.strip():
                     s_uploader = s.uploader.strip()
@@ -141,8 +141,8 @@ def manual_search(path, profile_id, providers, sceneName, title, media_type):
 
             final_subtitles = sorted(subtitles_list, key=lambda x: (x['orig_score'], x['score_without_hash']),
                                      reverse=True)
-            logging.debug(f'BAZARR {len(final_subtitles)} Subtitles have been found for this file: {path}')
-            logging.debug(f'BAZARR Ended searching Subtitles for this file: {path}')
+            logging.debug(f'BAZARR {len(final_subtitles)} Subtitles have been found for this file: {path}')  # noqa: G004
+            logging.debug(f'BAZARR Ended searching Subtitles for this file: {path}')  # noqa: G004
 
     subliminal.region.backend.sync()
 
@@ -152,7 +152,7 @@ def manual_search(path, profile_id, providers, sceneName, title, media_type):
 @update_pools
 def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provider, sceneName, title, media_type,
                              use_original_format, profile_id, job_id=None):
-    logging.debug(f'BAZARR Manually downloading Subtitles for this file: {path}')
+    logging.debug(f'BAZARR Manually downloading Subtitles for this file: {path}')  # noqa: G004
 
     if settings.general.utf8_encode:
         os.environ["SZ_KEEP_ENCODING"] = ""
@@ -180,16 +180,16 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
         try:
             if provider:
                 download_subtitles([subtitle], _get_pool(media_type, profile_id))
-                logging.debug(f'BAZARR Subtitles file downloaded for this file: {path}')
+                logging.debug(f'BAZARR Subtitles file downloaded for this file: {path}')  # noqa: G004
             else:
                 logging.info("BAZARR All providers are throttled")
                 return 'All providers are throttled'
         except Exception:
-            logging.exception(f'BAZARR Error downloading Subtitles for this file {path}')
+            logging.exception(f'BAZARR Error downloading Subtitles for this file {path}')  # noqa: G004
             return 'Error downloading Subtitles'
         else:
             if not subtitle.is_valid():
-                logging.error(f"BAZARR Downloaded subtitles isn't valid for this file: {path}")
+                logging.error(f"BAZARR Downloaded subtitles isn't valid for this file: {path}")  # noqa: G004
                 return "Downloaded subtitles isn't valid. Check log."
             try:
                 chmod = int(settings.general.chmod, 8) if not sys.platform.startswith(
@@ -202,7 +202,7 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
                                                  formats=(subtitle.format,),
                                                  path_decoder=force_unicode)
             except Exception as e:
-                logging.exception(f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')
+                logging.exception(f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')  # noqa: G004
                 return 'Error saving Subtitles file to disk'
             else:
                 if saved_subtitles:
@@ -215,18 +215,18 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
                         if processed_subtitle:
                             return processed_subtitle
                         else:
-                            logging.debug(f"BAZARR unable to process this subtitles: {subtitle}")
+                            logging.debug(f"BAZARR unable to process this subtitles: {subtitle}")  # noqa: G004
                             continue
                 else:
                     logging.error(
-                        f"BAZARR Tried to manually download a Subtitles for file: {path} but we weren't able to do "
+                        f"BAZARR Tried to manually download a Subtitles for file: {path} but we weren't able to do "  # noqa: G004
                         f"(probably throttled by {subtitle.provider_name}. Please retry later or select a Subtitles "
                         f"from another provider.")
                     return 'Something went wrong, check the logs for error'
 
     subliminal.region.backend.sync()
 
-    logging.debug(f'BAZARR Ended manually downloading Subtitles for file: {path}')
+    logging.debug(f'BAZARR Ended manually downloading Subtitles for file: {path}')  # noqa: G004
 
 
 def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode_id, hi, forced, use_original_format,

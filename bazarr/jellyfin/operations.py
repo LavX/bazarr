@@ -80,13 +80,13 @@ def jellyfin_test_connection(url: str = None, apikey: str = None,
     except ValueError as e:
         # Configuration errors (missing url / apikey) are safe to surface —
         # they originate from our own code, not the server.
-        logger.error(f"Failed to connect to Jellyfin server: {_redact(e, override_secret=apikey)}")
+        logger.error(f"Failed to connect to Jellyfin server: {_redact(e, override_secret=apikey)}")  # noqa: G004
         return {
             'success': False,
             'error_code': 'configuration',
         }
     except Exception as e:
-        logger.error(f"Failed to connect to Jellyfin server: {_redact(e, override_secret=apikey)}")
+        logger.error(f"Failed to connect to Jellyfin server: {_redact(e, override_secret=apikey)}")  # noqa: G004
         return {
             'success': False,
             'error_code': 'connection_failed',
@@ -112,10 +112,10 @@ def jellyfin_refresh_all_libraries() -> dict:
     try:
         client = get_jellyfin_client()
     except ValueError as e:
-        logger.error(f"Jellyfin refresh-all aborted: {_redact(e)}")
+        logger.error(f"Jellyfin refresh-all aborted: {_redact(e)}")  # noqa: G004
         return {**result, 'error_code': 'configuration'}
     except Exception as e:
-        logger.error(f"Jellyfin refresh-all aborted: {_redact(e)}")
+        logger.error(f"Jellyfin refresh-all aborted: {_redact(e)}")  # noqa: G004
         return {**result, 'error_code': 'connection_failed'}
 
     for is_movie in (True, False):
@@ -133,7 +133,7 @@ def jellyfin_refresh_all_libraries() -> dict:
                 result[key_done] += 1
             except Exception as e:
                 logger.error(
-                    f"Failed to refresh Jellyfin library {library_id!r}: "
+                    f"Failed to refresh Jellyfin library {library_id!r}: "  # noqa: G004
                     f"{_redact(e)}"
                 )
 
@@ -161,7 +161,7 @@ def jellyfin_get_libraries(url: str = None, apikey: str = None,
         client = get_jellyfin_client(url, apikey, verify_ssl=verify_ssl)
         libraries = client.get_libraries()
 
-        logger.debug(f"Jellyfin returned {len(libraries)} library folders: "
+        logger.debug(f"Jellyfin returned {len(libraries)} library folders: "  # noqa: G004
                      f"{[(lib.get('Name'), lib.get('CollectionType')) for lib in libraries]}")
 
         return {
@@ -179,10 +179,10 @@ def jellyfin_get_libraries(url: str = None, apikey: str = None,
     except ValueError as e:
         # Configuration errors (missing url / apikey) - safe to surface as
         # a distinct error_code so the UI guides "configure URL/key first".
-        logger.error(f"Failed to get Jellyfin libraries: {_redact(e, override_secret=apikey)}")
+        logger.error(f"Failed to get Jellyfin libraries: {_redact(e, override_secret=apikey)}")  # noqa: G004
         return {'libraries': [], 'error_code': 'configuration'}
     except Exception as e:
-        logger.error(f"Failed to get Jellyfin libraries: {_redact(e, override_secret=apikey)}")
+        logger.error(f"Failed to get Jellyfin libraries: {_redact(e, override_secret=apikey)}")  # noqa: G004
         return {'libraries': [], 'error_code': 'connection_failed'}
 
 
@@ -235,7 +235,7 @@ def _find_item(client: JellyfinClient, is_movie: bool, library_ids: list,
             if title_match:
                 return title_match
         except Exception as e:
-            logger.debug(f"Error searching library {library_id}: {_redact(e)}")
+            logger.debug(f"Error searching library {library_id}: {_redact(e)}")  # noqa: G004
             continue
 
     return None
@@ -250,7 +250,7 @@ def _find_episode(client: JellyfinClient, series_id: str, season: int,
             if ep.get('IndexNumber') == episode:
                 return ep['Id']
     except Exception as e:
-        logger.debug(f"Error finding episode S{season:02d}E{episode:02d} in series {series_id}: {_redact(e)}")
+        logger.debug(f"Error finding episode S{season:02d}E{episode:02d} in series {series_id}: {_redact(e)}")  # noqa: G004
 
     return None
 
@@ -276,7 +276,7 @@ def jellyfin_refresh_item(imdb_id: str = None, is_movie: bool = True, season: in
 
         if not library_ids:
             library_type = "movie" if is_movie else "series"
-            logger.debug(f"No {library_type} libraries configured in Jellyfin settings")
+            logger.debug(f"No {library_type} libraries configured in Jellyfin settings")  # noqa: G004
             return
 
         if not (imdb_id or tmdb_id or tvdb_id or title):
@@ -291,7 +291,7 @@ def jellyfin_refresh_item(imdb_id: str = None, is_movie: bool = True, season: in
                               imdb_id=imdb_id, tmdb_id=tmdb_id, title=title, year=year)
             if item:
                 _refresh_or_report(client, immediate, item_id=item['Id'], path=item.get('Path'))
-                logger.info(f"Refreshed movie in Jellyfin: {item.get('Path', item['Id'])}")
+                logger.info(f"Refreshed movie in Jellyfin: {item.get('Path', item['Id'])}")  # noqa: G004
                 return
         else:
             series = _find_item(client, is_movie=False, library_ids=library_ids,
@@ -301,7 +301,7 @@ def jellyfin_refresh_item(imdb_id: str = None, is_movie: bool = True, season: in
                     episode_id = _find_episode(client, series['Id'], season, episode)
                     if episode_id:
                         client.refresh_item(episode_id)
-                        logger.info(f"Refreshed episode in Jellyfin (immediate): "
+                        logger.info(f"Refreshed episode in Jellyfin (immediate): "  # noqa: G004
                                     f"S{season:02d}E{episode:02d}")
                         return
                 else:
@@ -313,18 +313,18 @@ def jellyfin_refresh_item(imdb_id: str = None, is_movie: bool = True, season: in
                     # episode never gets a refresh nudge.
                     _refresh_or_report(client, immediate, item_id=series['Id'],
                                        path=series.get('Path'))
-                    logger.info(f"Reported series update to Jellyfin (async): "
+                    logger.info(f"Reported series update to Jellyfin (async): "  # noqa: G004
                                 f"{series.get('Path') or series['Id']} "
                                 f"S{season:02d}E{episode:02d}")
                     return
 
         # Fallback: full library update
-        logger.warning(f"Item not found in Jellyfin (IMDB: {imdb_id}, TMDB: {tmdb_id}, TVDB: {tvdb_id}), "
+        logger.warning(f"Item not found in Jellyfin (IMDB: {imdb_id}, TMDB: {tmdb_id}, TVDB: {tvdb_id}), "  # noqa: G004
                        f"falling back to library update")
         jellyfin_update_library(client, is_movie, library_ids)
 
     except Exception as e:
-        logger.warning(f"Failed to refresh Jellyfin item, falling back to library update: {_redact(e)}")
+        logger.warning(f"Failed to refresh Jellyfin item, falling back to library update: {_redact(e)}")  # noqa: G004
         try:
             jellyfin_update_library(get_jellyfin_client(), is_movie)
         except Exception:
@@ -360,7 +360,7 @@ def jellyfin_update_library(client: JellyfinClient = None, is_movie_library: boo
 
         if not library_ids:
             library_type = "movie" if is_movie_library else "series"
-            logger.debug(f"No {library_type} libraries configured in Jellyfin settings")
+            logger.debug(f"No {library_type} libraries configured in Jellyfin settings")  # noqa: G004
             return
 
         updated_count = 0
@@ -370,16 +370,16 @@ def jellyfin_update_library(client: JellyfinClient = None, is_movie_library: boo
 
             try:
                 client.refresh_item(library_id)
-                logger.info(f"Triggered refresh for Jellyfin library: {library_id}")
+                logger.info(f"Triggered refresh for Jellyfin library: {library_id}")  # noqa: G004
                 updated_count += 1
             except Exception as e:
-                logger.error(f"Failed to refresh Jellyfin library '{library_id}': {_redact(e)}")
+                logger.error(f"Failed to refresh Jellyfin library '{library_id}': {_redact(e)}")  # noqa: G004
                 continue
 
         if updated_count > 0:
-            logger.debug(f"Successfully triggered refresh for {updated_count} Jellyfin libraries")
+            logger.debug(f"Successfully triggered refresh for {updated_count} Jellyfin libraries")  # noqa: G004
         else:
             logger.warning("Failed to refresh any Jellyfin libraries")
 
     except Exception as e:
-        logger.error(f"Error in jellyfin_update_library: {_redact(e)}")
+        logger.error(f"Error in jellyfin_update_library: {_redact(e)}")  # noqa: G004

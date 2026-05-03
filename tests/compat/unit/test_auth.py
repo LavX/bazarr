@@ -53,7 +53,7 @@ def test_validate_compat_token_uses_constant_time():
     assert hmac.compare_digest("a" * 32, "a" * 32) is True
 
 
-import time
+import time  # noqa: E402
 
 
 def test_mint_and_validate_jwt_roundtrip(monkeypatch):

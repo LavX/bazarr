@@ -1,5 +1,5 @@
 import base64
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock  # noqa: F401
 import pytest
 from subtitles.tools.translate.services.encryption import encrypt_api_key, validate_encryption_key
 

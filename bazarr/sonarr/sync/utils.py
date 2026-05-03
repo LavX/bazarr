@@ -38,11 +38,11 @@ def get_profile_list():
         if get_sonarr_info.is_legacy():
             for profile in profiles_json.json():
                 if 'language' in profile:
-                    profiles_list.append([profile['id'], profile['language'].capitalize()])
+                    profiles_list.append([profile['id'], profile['language'].capitalize()])  # noqa: PERF401
         else:
             for profile in profiles_json.json():
                 if 'name' in profile:
-                    profiles_list.append([profile['id'], profile['name'].capitalize()])
+                    profiles_list.append([profile['id'], profile['name'].capitalize()])  # noqa: PERF401
 
     return profiles_list
 
@@ -91,7 +91,7 @@ def get_series_from_sonarr_api(apikey_sonarr, sonarr_series_id=None):
         logging.exception("BAZARR Error trying to get series from Sonarr.")
         return
     except Exception as e:
-        logging.exception(f"Exception raised while getting series from Sonarr API: {e}")
+        logging.exception(f"Exception raised while getting series from Sonarr API: {e}")  # noqa: G004
         return
     else:
         if r.status_code == 200:
@@ -129,7 +129,7 @@ def get_episodes_from_sonarr_api(apikey_sonarr, series_id=None, episode_id=None)
         logging.exception("BAZARR Error trying to get episodes from Sonarr.")
         return
     except Exception as e:
-        logging.exception(f"Exception raised while getting episodes from Sonarr API: {e}")
+        logging.exception(f"Exception raised while getting episodes from Sonarr API: {e}")  # noqa: G004
         return
     else:
         if r.status_code == 200:
@@ -163,7 +163,7 @@ def get_episodesFiles_from_sonarr_api(apikey_sonarr, series_id=None, episode_fil
         logging.exception("BAZARR Error trying to get episodeFiles from Sonarr.")
         return
     except Exception as e:
-        logging.exception(f"Exception raised while getting episodes from Sonarr API: {e}")
+        logging.exception(f"Exception raised while getting episodes from Sonarr API: {e}")  # noqa: G004
         return
     else:
         if r.status_code == 200:
@@ -192,7 +192,7 @@ def get_history_from_sonarr_api(apikey_sonarr, episode_id):
         logging.exception("BAZARR Error trying to get history from Sonarr.")
         return
     except Exception as e:
-        logging.exception(f"Exception raised while getting history from Sonarr API: {e}")
+        logging.exception(f"Exception raised while getting history from Sonarr API: {e}")  # noqa: G004
         return
     else:
         if r.status_code == 200:

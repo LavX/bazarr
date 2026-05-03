@@ -38,7 +38,7 @@ def build_key(media_type: str, imdb_id: str, season: int | None,
     lang_tuples = sorted(
         (str(l.alpha3), str(l.country) if l.country else "",
          bool(getattr(l, "forced", False)), bool(getattr(l, "hi", False)))
-        for l in languages
+        for l in languages  # noqa: E741
     )
     provider_hash = hashlib.sha256(
         ",".join(sorted(enabled_providers or [])).encode()

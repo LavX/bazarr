@@ -7,7 +7,7 @@ import tempfile
 
 import subliminal
 from subliminal_patch.providers.addic7ed import Addic7edProvider
-from subliminal_patch.providers.addic7ed import Addic7edSubtitle
+from subliminal_patch.providers.addic7ed import Addic7edSubtitle  # noqa: F401
 from dogpile.cache.region import register_backend as register_cache_backend
 from subzero.language import Language
 

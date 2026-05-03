@@ -49,7 +49,7 @@ class GetRadarrInfo:
             except Exception:
                 logging.debug('BAZARR cannot get Radarr version')
                 radarr_version = 'unknown'
-        logging.debug(f'BAZARR got this Radarr version from its API: {radarr_version}')
+        logging.debug(f'BAZARR got this Radarr version from its API: {radarr_version}')  # noqa: G004
         region.set("radarr_version", radarr_version)
         return radarr_version
 

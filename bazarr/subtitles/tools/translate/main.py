@@ -30,12 +30,12 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
 
     translator_label = settings.translator.translator_type.replace("_", " ").title()
     try:
-        logging.debug(f'Translation request: video={video_path}, source={source_srt_file}, from={from_lang}, to={to_lang}')
+        logging.debug(f'Translation request: video={video_path}, source={source_srt_file}, from={from_lang}, to={to_lang}')  # noqa: G004
 
         validate_translation_params(video_path, source_srt_file, from_lang, to_lang)
         lang_obj, orig_to_lang = convert_language_codes(to_lang, forced, hi)
 
-        logging.debug(f'BAZARR is translating in {lang_obj} this subtitles {source_srt_file}')
+        logging.debug(f'BAZARR is translating in {lang_obj} this subtitles {source_srt_file}')  # noqa: G004
 
         dest_srt_file_if_alongside_video = get_subtitle_path(
             video_path,
@@ -51,7 +51,7 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         )
 
         translator_type = settings.translator.translator_type or 'google'
-        logging.debug(f'Using translator type: {translator_type}')
+        logging.debug(f'Using translator type: {translator_type}')  # noqa: G004
 
         translator = TranslatorFactory.create_translator(
             translator_type,
@@ -70,11 +70,11 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
             radarr_id=radarr_id
         )
 
-        logging.debug(f'Created translator instance: {translator.__class__.__name__}')
+        logging.debug(f'Created translator instance: {translator.__class__.__name__}')  # noqa: G004
         result = translator.translate(job_id=job_id)
         if result is False:
             raise RuntimeError(f'{translator.__class__.__name__} returned a failed translation result')
-        logging.debug(f'BAZARR saved translated subtitles to {dest_srt_file}')
+        logging.debug(f'BAZARR saved translated subtitles to {dest_srt_file}')  # noqa: G004
 
         from api.subtitles.subtitles import postprocess_subtitles
         # Call postprocess_subtitles after translation (handles chmod, re-indexing, events)
@@ -90,7 +90,7 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         return result
 
     except Exception as e:
-        logging.error(f'Translation failed: {str(e)}', exc_info=True)
+        logging.error(f'Translation failed: {str(e)}', exc_info=True)  # noqa: G004, G201
         current_name = jobs_queue.get_job_name(job_id)
         if current_name and 'Translating' in current_name:
             fail_name = current_name.replace('Translating', 'Failed')

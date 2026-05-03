@@ -28,11 +28,11 @@ def get_profile_list():
         if get_radarr_info.is_legacy():
             for profile in profiles_json.json():
                 if 'language' in profile:
-                    profiles_list.append([profile['id'], profile['language'].capitalize()])
+                    profiles_list.append([profile['id'], profile['language'].capitalize()])  # noqa: PERF401
         else:
             for profile in profiles_json.json():
                 if 'language' in profile and 'name' in profile['language']:
-                    profiles_list.append([profile['id'], profile['language']['name'].capitalize()])
+                    profiles_list.append([profile['id'], profile['language']['name'].capitalize()])  # noqa: PERF401
 
     return profiles_list
 
@@ -88,7 +88,7 @@ def get_movies_from_radarr_api(apikey_radarr, radarr_id=None):
         logging.exception("BAZARR Error trying to get movies from Radarr.")
         return
     except Exception as e:
-        logging.exception(f"Exception raised while getting movies from Radarr API: {e}")
+        logging.exception(f"Exception raised while getting movies from Radarr API: {e}")  # noqa: G004
         return
     else:
         if r.status_code == 200:
@@ -117,7 +117,7 @@ def get_history_from_radarr_api(apikey_radarr, movie_id):
         logging.exception("BAZARR Error trying to get history from Radarr.")
         return
     except Exception as e:
-        logging.exception(f"Exception raised while getting history from Radarr API: {e}")
+        logging.exception(f"Exception raised while getting history from Radarr API: {e}")  # noqa: G004
         return
     else:
         if r.status_code == 200:

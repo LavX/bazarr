@@ -1,6 +1,6 @@
 # coding=utf-8
 
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock, call  # noqa: F401
 
 
 class TestParseSubtitlesColumn:
@@ -917,7 +917,7 @@ class TestSchedulerIntegration:
         mock_settings.general.use_radarr = True
         mock_collect.return_value = ([], 0)
 
-        result = mass_batch_operation(items=None, action='sync', job_id='test')
+        result = mass_batch_operation(items=None, action='sync', job_id='test')  # noqa: F841
 
         # When items=None, _collect_subtitle_items should be called with items=None
         mock_collect.assert_called_once()

@@ -21,10 +21,10 @@ from srt import Subtitle
 from app.config import settings
 from sonarr.history import history_log
 from radarr.history import history_log_movie
-from utilities.path_mappings import path_mappings
-from subtitles.processing import ProcessSubtitlesResult
+from utilities.path_mappings import path_mappings  # noqa: F401
+from subtitles.processing import ProcessSubtitlesResult  # noqa: F401
 from app.jobs_queue import jobs_queue
-from languages.get_languages import alpha3_from_alpha2, language_from_alpha2, language_from_alpha3
+from languages.get_languages import alpha3_from_alpha2, language_from_alpha2, language_from_alpha3  # noqa: F401
 from ..core.translator_utils import add_translator_info, get_description, create_process_result
 
 logger = logging.getLogger(__name__)
@@ -87,8 +87,8 @@ class GeminiTranslatorService:
         subs.remove_miscellaneous_events()
 
         try:
-            logger.debug(f'BAZARR is sending subtitle file to Gemini for translation')
-            logger.info(f"BAZARR is sending subtitle file to Gemini for translation " + self.source_srt_file)
+            logger.debug(f'BAZARR is sending subtitle file to Gemini for translation')  # noqa: F541, G004
+            logger.info(f"BAZARR is sending subtitle file to Gemini for translation " + self.source_srt_file)  # noqa: F541, G003
 
             self.api_keys = self._get_configured_api_keys()
             self.current_api_key = self._select_next_api_key()
@@ -113,7 +113,7 @@ class GeminiTranslatorService:
                 raise
 
         except Exception as e:
-            logger.error(f'BAZARR encountered an error translating with Gemini: {str(e)}')
+            logger.error(f'BAZARR encountered an error translating with Gemini: {str(e)}')  # noqa: G004
             raise
 
         else:
@@ -539,7 +539,7 @@ class GeminiTranslatorService:
                     self._clear_progress()
 
         except Exception as e:
-            logger.error(f'BAZARR encountered an error translating with Gemini: {str(e)}')
+            logger.error(f'BAZARR encountered an error translating with Gemini: {str(e)}')  # noqa: G004
             jobs_queue.update_job_progress(job_id=self.job_id, progress_value=total,
                                            progress_message=f'Gemini translation failed: {str(e)}')
             self._clear_progress()

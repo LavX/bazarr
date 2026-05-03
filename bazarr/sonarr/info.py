@@ -49,7 +49,7 @@ class GetSonarrInfo:
             except Exception:
                 logging.debug('BAZARR cannot get Sonarr version')
                 sonarr_version = 'unknown'
-        logging.debug(f'BAZARR got this Sonarr version from its API: {sonarr_version}')
+        logging.debug(f'BAZARR got this Sonarr version from its API: {sonarr_version}')  # noqa: G004
         region.set("sonarr_version", sonarr_version)
         return sonarr_version
 

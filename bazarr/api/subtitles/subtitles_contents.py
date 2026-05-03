@@ -1,5 +1,5 @@
 # coding=utf-8
-import logging
+import logging  # noqa: F401
 import srt
 
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
@@ -53,7 +53,7 @@ class SubtitleNameContents(Resource):
 
             start_total_seconds = int(sub.start.total_seconds())
             end_total_seconds = int(sub.end.total_seconds())
-            duration_timedelta = sub.end - sub.start
+            duration_timedelta = sub.end - sub.start  # noqa: F841
 
             results.append(dict(
                 index=sub.index,

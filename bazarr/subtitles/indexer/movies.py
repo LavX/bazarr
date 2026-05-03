@@ -4,7 +4,7 @@ import gc
 import os
 import logging
 import ast
-import time
+import time  # noqa: F401
 
 from subliminal_patch import core, search_external_subtitles
 
@@ -24,7 +24,7 @@ gc.enable()
 
 
 def store_subtitles_movie(original_path, reversed_path, use_cache=True):
-    logging.debug(f'BAZARR started subtitles indexing for this file: {reversed_path}')
+    logging.debug(f'BAZARR started subtitles indexing for this file: {reversed_path}')  # noqa: G004
     actual_subtitles = []
     if os.path.exists(reversed_path):
         if settings.general.use_embedded_subs:
@@ -34,7 +34,7 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
                 .where(TableMovies.path == original_path)) \
                 .first()
             if not item:
-                logging.exception(f"BAZARR error when trying to select this movie from database: {reversed_path}")
+                logging.exception(f"BAZARR error when trying to select this movie from database: {reversed_path}")  # noqa: G004
             else:
                 try:
                     subtitle_languages = embedded_subs_reader(reversed_path,
@@ -48,7 +48,7 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
                                      "vobsub") or \
                                     (settings.general.ignore_ass_subs and subtitle_codec.lower() ==
                                      "ass"):
-                                logging.debug("BAZARR skipping %s sub for language: %s" % (subtitle_codec, alpha2_from_alpha3(subtitle_language)))
+                                logging.debug("BAZARR skipping %s sub for language: %s" % (subtitle_codec, alpha2_from_alpha3(subtitle_language)))  # noqa: G002
                                 continue
 
                             if alpha2_from_alpha3(subtitle_language) is not None:
@@ -57,14 +57,14 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
                                     lang = f'{lang}:forced'
                                 if subtitle_hi:
                                     lang = f'{lang}:hi'
-                                logging.debug(f"BAZARR embedded subtitles detected: {lang}")
+                                logging.debug(f"BAZARR embedded subtitles detected: {lang}")  # noqa: G004
                                 actual_subtitles.append([lang, None, None])
                         except Exception as error:
-                            logging.debug(f"BAZARR unable to index this unrecognized language: {subtitle_language} "
+                            logging.debug(f"BAZARR unable to index this unrecognized language: {subtitle_language} "  # noqa: G004
                                           f"({error})")
                 except Exception:
                     logging.exception(
-                        f"BAZARR error when trying to analyze this {os.path.splitext(reversed_path)[1]} file: "
+                        f"BAZARR error when trying to analyze this {os.path.splitext(reversed_path)[1]} file: "  # noqa: G004
                         f"{reversed_path}")
 
         try:
@@ -97,7 +97,7 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
             subtitles = guess_external_subtitles(full_dest_folder_path, subtitles, "movie",
                                                  previously_indexed_subtitles_to_exclude)
         except Exception as e:
-            logging.exception(f"BAZARR unable to index external subtitles for this file {reversed_path}: {repr(e)}")
+            logging.exception(f"BAZARR unable to index external subtitles for this file {reversed_path}: {repr(e)}")  # noqa: G004
         else:
             for subtitle, language in subtitles.items():
                 valid_language = False
@@ -105,11 +105,11 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
                     if hasattr(language, 'alpha3'):
                         valid_language = alpha2_from_alpha3(language.alpha3)
                 else:
-                    logging.debug(f"Skipping subtitles because we are unable to define language: {subtitle}")
+                    logging.debug(f"Skipping subtitles because we are unable to define language: {subtitle}")  # noqa: G004
                     continue
 
                 if not valid_language:
-                    logging.debug(f'{language.alpha3} is an unsupported language code.')
+                    logging.debug(f'{language.alpha3} is an unsupported language code.')  # noqa: G004
                     continue
 
                 subtitle_path = get_external_subtitles_path(reversed_path, subtitle)
@@ -117,7 +117,7 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
                 try:
                     subtitle_size = os.stat(subtitle_path).st_size
                 except FileNotFoundError:
-                    logging.debug(f"BAZARR skipping missing subtitle file: {subtitle_path}")
+                    logging.debug(f"BAZARR skipping missing subtitle file: {subtitle_path}")  # noqa: G004
                     continue
 
                 custom = CustomLanguage.found_external(subtitle, subtitle_path)
@@ -133,7 +133,7 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
                         language_str = f'{language}:hi'
                     else:
                         language_str = str(language)
-                    logging.debug(f"BAZARR external subtitles detected: {language_str}")
+                    logging.debug(f"BAZARR external subtitles detected: {language_str}")  # noqa: G004
                     actual_subtitles.append([language_str, path_mappings.path_replace_reverse_movie(subtitle_path),
                                              subtitle_size])
 
@@ -148,14 +148,14 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
 
         for movie in matching_movies:
             if movie:
-                logging.debug(f"BAZARR storing those languages to DB: {actual_subtitles}")
+                logging.debug(f"BAZARR storing those languages to DB: {actual_subtitles}")  # noqa: G004
                 list_missing_subtitles_movies(no=movie.radarrId)
             else:
-                logging.debug(f"BAZARR haven't been able to update existing subtitles to DB: {actual_subtitles}")
+                logging.debug(f"BAZARR haven't been able to update existing subtitles to DB: {actual_subtitles}")  # noqa: G004
     else:
         logging.debug("BAZARR this file doesn't seems to exist or isn't accessible.")
 
-    logging.debug(f'BAZARR ended subtitles indexing for this file: {reversed_path}')
+    logging.debug(f'BAZARR ended subtitles indexing for this file: {reversed_path}')  # noqa: G004
 
     return actual_subtitles
 
@@ -173,7 +173,7 @@ def list_missing_subtitles_movies(no=None):
 
     use_embedded_subs = settings.general.use_embedded_subs
 
-    matches_audio = lambda language: any(x['code2'] == language['language'] for x in get_audio_profile_languages(
+    matches_audio = lambda language: any(x['code2'] == language['language'] for x in get_audio_profile_languages(  # noqa: E731
                                 movie_subtitles.audio_language))
 
     for movie_subtitles in movies_subtitles:
@@ -250,7 +250,7 @@ def list_missing_subtitles_movies(no=None):
                 missing_subtitles_list = []
                 for item in desired_subtitles_list:
                     if item not in actual_subtitles_list:
-                        missing_subtitles_list.append(item)
+                        missing_subtitles_list.append(item)  # noqa: PERF401
 
                     # remove missing that have forced or hi subtitles for this language in existing
                 for item in actual_subtitles_list:

@@ -23,7 +23,7 @@ class SubSyncer:
         self.ffmpeg_path = None
         self.args = None
         try:
-            import webrtcvad  # noqa W0611
+            import webrtcvad  # noqa: F401
         except ImportError:
             self.vad = 'subs_then_auditok'
         else:
@@ -105,7 +105,7 @@ class SubSyncer:
             result = self.sync_result
         except Exception:
             logging.exception(
-                f'BAZARR an exception occurs during the synchronization process for this subtitle file: {self.srtin}')
+                f'BAZARR an exception occurs during the synchronization process for this subtitle file: {self.srtin}')  # noqa: G004
         else:
             if settings.subsync.debug:
                 return result
@@ -141,6 +141,6 @@ class SubSyncer:
                     else:
                         history_log_movie(action=5, radarr_id=radarr_id, result=result)
             else:
-                logging.error(f'BAZARR unable to sync subtitles: {self.srtin}')
+                logging.error(f'BAZARR unable to sync subtitles: {self.srtin}')  # noqa: G004
 
             return result

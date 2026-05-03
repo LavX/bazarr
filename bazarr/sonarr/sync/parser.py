@@ -100,7 +100,7 @@ def profile_id_to_language(id_, profiles):
     profiles_to_return = []
     for profile in profiles:
         if id_ == profile[0]:
-            profiles_to_return.append(profile[1])
+            profiles_to_return.append(profile[1])  # noqa: PERF401
     return profiles_to_return
 
 

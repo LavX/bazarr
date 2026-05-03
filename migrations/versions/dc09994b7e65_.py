@@ -11,7 +11,7 @@ from sqlalchemy import exc as sa_exc
 import warnings
 
 try:
-    from psycopg2.errors import UndefinedObject
+    from psycopg2.errors import UndefinedObject  # noqa: F401
 except ImportError:
     pass
 
@@ -140,9 +140,9 @@ def upgrade():
                                     ondelete='CASCADE')
         if not column_exists('table_history', 'id'):
             batch_op.add_column(sa.Column('id', sa.Integer, primary_key=True))
-        if column_type('table_history', 'score') == str:
+        if column_type('table_history', 'score') == str:  # noqa: E721
             batch_op.alter_column(column_name='score', existing_type=sa.Text, type_=sa.Integer)
-        if column_type('table_history', 'timestamp') == int:
+        if column_type('table_history', 'timestamp') == int:  # noqa: E721
             table_history_timestamp_altered = True
             batch_op.alter_column(column_name='timestamp', existing_type=sa.Integer, type_=sa.DateTime)
     with op.batch_alter_table('table_history') as batch_op:
@@ -169,7 +169,7 @@ def upgrade():
                                     ondelete='CASCADE')
         if not column_exists('table_blacklist', 'id'):
             batch_op.add_column(sa.Column('id', sa.Integer, primary_key=True))
-        if column_type('table_blacklist', 'timestamp') == int:
+        if column_type('table_blacklist', 'timestamp') == int:  # noqa: E721
             table_blacklist_timestamp_altered = True
             batch_op.alter_column(column_name='timestamp', existing_type=sa.Integer, type_=sa.DateTime, nullable=True)
         else:
@@ -229,9 +229,9 @@ def upgrade():
                                     ondelete='CASCADE')
         if not column_exists('table_history_movie', 'id'):
             batch_op.add_column(sa.Column('id', sa.Integer, primary_key=True))
-        if column_type('table_history_movie', 'score') == str:
+        if column_type('table_history_movie', 'score') == str:  # noqa: E721
             batch_op.alter_column(column_name='score', existing_type=sa.Text, type_=sa.Integer)
-        if column_type('table_history_movie', 'timestamp') == int:
+        if column_type('table_history_movie', 'timestamp') == int:  # noqa: E721
             table_history_movie_timestamp_altered = True
             batch_op.alter_column(column_name='timestamp', existing_type=sa.Integer, type_=sa.DateTime)
     with op.batch_alter_table('table_history_movie') as batch_op:
@@ -251,7 +251,7 @@ def upgrade():
                                     ondelete='CASCADE')
         if not column_exists('table_blacklist_movie', 'id'):
             batch_op.add_column(sa.Column('id', sa.Integer, primary_key=True))
-        if column_type('table_blacklist_movie', 'timestamp') == int:
+        if column_type('table_blacklist_movie', 'timestamp') == int:  # noqa: E721
             table_blacklist_movie_timestamp_altered = True
             batch_op.alter_column(column_name='timestamp', existing_type=sa.Integer, type_=sa.DateTime, nullable=True)
         else:

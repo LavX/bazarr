@@ -62,7 +62,7 @@ def get_plex_libraries_with_paths():
         }
         
     except Exception as e:
-        logging.debug(f"BAZARR could not fetch Plex library paths: {e}")
+        logging.debug(f"BAZARR could not fetch Plex library paths: {e}")  # noqa: G004
         return {'movie_paths': [], 'series_paths': []}
 
 
@@ -90,5 +90,5 @@ def _get_library_locations(server_url, section_key, token):
                         return [path] if path else []
         return []
     except Exception as e:
-        logging.debug(f"Failed to get locations for library section {section_key}: {e}")
+        logging.debug(f"Failed to get locations for library section {section_key}: {e}")  # noqa: G004
         return []

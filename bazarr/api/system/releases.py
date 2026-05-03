@@ -59,6 +59,6 @@ class SystemReleases(Resource):
 
         except Exception:
             logging.exception(
-                f'BAZARR cannot parse releases caching file: '
+                f'BAZARR cannot parse releases caching file: '  # noqa: G004
                 f'{os.path.join(args.config_dir, "config", "releases.txt")}')
         return marshal(filtered_releases, self.get_response_model, envelope='data')

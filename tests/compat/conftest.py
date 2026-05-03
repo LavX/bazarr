@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(_repo, "libs"))
 sys.path.insert(0, os.path.join(_repo, "bazarr"))
 sys.path.insert(0, os.path.join(_repo, "custom_libs"))
 
-import pytest
+import pytest  # noqa: E402
 
 
 @pytest.fixture(autouse=True)

@@ -60,7 +60,7 @@ class TranslatorStatus(Resource):
         except requests.exceptions.Timeout:
             return {"error": "Service timeout"}, 503
         except Exception as e:
-            logger.error(f"Error getting translator status: {e}")
+            logger.error(f"Error getting translator status: {e}")  # noqa: G004
             return {"error": str(e)}, 500
 
 
@@ -87,7 +87,7 @@ class TranslatorJobs(Resource):
         except requests.exceptions.Timeout:
             return {"error": "Service timeout"}, 503
         except Exception as e:
-            logger.error(f"Error getting jobs: {e}")
+            logger.error(f"Error getting jobs: {e}")  # noqa: G004
             return {"error": str(e)}, 500
 
     @authenticate
@@ -143,7 +143,7 @@ class TranslatorJobs(Resource):
         except requests.exceptions.Timeout:
             return {"error": "Service timeout"}, 503
         except Exception as e:
-            logger.error(f"Error submitting translation job: {e}")
+            logger.error(f"Error submitting translation job: {e}")  # noqa: G004
             return {"error": str(e)}, 500
 
 
@@ -170,7 +170,7 @@ class TranslatorJob(Resource):
         except requests.exceptions.ConnectionError:
             return {"error": "Cannot connect to AI Subtitle Translator service"}, 503
         except Exception as e:
-            logger.error(f"Error getting job {job_id}: {e}")
+            logger.error(f"Error getting job {job_id}: {e}")  # noqa: G004
             return {"error": str(e)}, 500
 
     @authenticate
@@ -194,7 +194,7 @@ class TranslatorJob(Resource):
         except requests.exceptions.ConnectionError:
             return {"error": "Cannot connect to AI Subtitle Translator service"}, 503
         except Exception as e:
-            logger.error(f"Error deleting job {job_id}: {e}")
+            logger.error(f"Error deleting job {job_id}: {e}")  # noqa: G004
             return {"error": str(e)}, 500
 
 
@@ -221,7 +221,7 @@ class TranslatorModels(Resource):
         except requests.exceptions.Timeout:
             return {"error": "Service timeout"}, 503
         except Exception as e:
-            logger.error(f"Error getting models: {e}")
+            logger.error(f"Error getting models: {e}")  # noqa: G004
             return {"error": str(e)}, 500
 
 
@@ -246,7 +246,7 @@ class TranslatorConfig(Resource):
         except requests.exceptions.ConnectionError:
             return {"error": "Cannot connect to AI Subtitle Translator service"}, 503
         except Exception as e:
-            logger.error(f"Error getting config: {e}")
+            logger.error(f"Error getting config: {e}")  # noqa: G004
             return {"error": str(e)}, 500
 
 
@@ -303,5 +303,5 @@ class TranslatorTest(Resource):
         except requests.exceptions.Timeout:
             return {"error": "Service timeout"}, 503
         except Exception as e:
-            logger.error(f"Error testing translator: {e}")
+            logger.error(f"Error testing translator: {e}")  # noqa: G004
             return {"error": str(e)}, 500

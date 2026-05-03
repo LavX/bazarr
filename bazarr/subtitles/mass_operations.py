@@ -377,7 +377,7 @@ def _process_media_action(items, action, job_id):
                 upgrade_movies_subtitles(job_id=job_id, radarr_ids=radarr_ids)
             queued = len(sonarr_series_ids) + len(radarr_ids)
         except Exception as e:
-            logger.error(f'Error during upgrade: {e}')
+            logger.error(f'Error during upgrade: {e}')  # noqa: G004
             errors.append(str(e))
         return {'queued': queued, 'skipped': 0, 'errors': errors}
 
@@ -426,7 +426,7 @@ def _process_media_action(items, action, job_id):
                     continue
             queued += 1
         except Exception as e:
-            logger.error(f'Error processing {action} for {item}: {e}')
+            logger.error(f'Error processing {action} for {item}: {e}')  # noqa: G004
             errors.append(str(e))
 
     return {'queued': queued, 'skipped': skipped, 'errors': errors}
@@ -502,7 +502,7 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
             else:
                 failed += 1
         except Exception as e:
-            logger.error(f'Error during {action} on {item["srt_path"]}: {e}')
+            logger.error(f'Error during {action} on {item["srt_path"]}: {e}')  # noqa: G004
             all_errors.append(str(e))
             failed += 1
 
@@ -511,7 +511,7 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
         new_job_name=f"Mass {action} complete: {processed} done, {total_skipped} skipped"
     )
     logger.info(
-        f'BAZARR mass {action} complete: {processed} processed, {failed} failed, '
+        f'BAZARR mass {action} complete: {processed} processed, {failed} failed, '  # noqa: G004
         f'{total_skipped} skipped, {len(all_errors)} errors'
     )
     return {'queued': processed, 'skipped': total_skipped + failed, 'errors': all_errors}

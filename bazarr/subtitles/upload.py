@@ -42,7 +42,7 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
     if not job_id:
         return jobs_queue.add_job_from_function(f"Uploading {filename}", is_progress=False)
 
-    logging.debug(f'BAZARR Manually uploading subtitles: {filename}')
+    logging.debug(f'BAZARR Manually uploading subtitles: {filename}')  # noqa: G004
 
     single = settings.general.single_language
 
@@ -110,7 +110,7 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
 
     sub.content = subtitle.getvalue()
     if not sub.is_valid():
-        logging.exception(f'BAZARR Invalid subtitle file: {filename}')
+        logging.exception(f'BAZARR Invalid subtitle file: {filename}')  # noqa: G004
         sub.mods = None
 
     if settings.general.utf8_encode:
@@ -134,11 +134,11 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
                                          formats=sub_format if use_original_format else ("srt",),
                                          path_decoder=force_unicode)
     except Exception as e:
-        logging.exception(f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')
+        logging.exception(f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')  # noqa: G004
         return
 
     if len(saved_subtitles) < 1:
-        logging.exception(f'BAZARR Error saving Subtitles file to disk for this file: {path}')
+        logging.exception(f'BAZARR Error saving Subtitles file to disk for this file: {path}')  # noqa: G004
         return
 
     subtitle_path = saved_subtitles[0].storage_path
@@ -198,7 +198,7 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
                                     hearing_impaired=None)
 
     if not result:
-        logging.debug(f"BAZARR unable to process subtitles for this {'episode' if media_type == 'series' else 'movie'}:"
+        logging.debug(f"BAZARR unable to process subtitles for this {'episode' if media_type == 'series' else 'movie'}:"  # noqa: G004
                       f" {path}")
     else:
         if isinstance(result, tuple) and len(result):

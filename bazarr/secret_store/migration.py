@@ -123,10 +123,10 @@ def migrate_legacy_plex_encryption(settings_obj) -> None:
     # Lazy import - keeps the secret_store package usable without a full
     # bazarr environment for the simpler tests.
     try:
-        from api.plex.security import TokenManager  # noqa: PLC0415
+        from api.plex.security import TokenManager  # noqa: PLC0415, RUF100
     except Exception as e:  # pragma: no cover
         logger.error(
-            f"Cannot load legacy Plex TokenManager for migration: "
+            f"Cannot load legacy Plex TokenManager for migration: "  # noqa: G004
             f"{type(e).__name__}; leaving legacy values in place."
         )
         return
@@ -244,7 +244,7 @@ def decrypt_settings_in_place(settings_obj) -> None:
             # Don't print the credential value or section/key hint that could
             # be inferred to a specific provider in a public bug report.
             logger.error(
-                f"Failed to decrypt secret at rest: {type(e).__name__}; "
+                f"Failed to decrypt secret at rest: {type(e).__name__}; "  # noqa: G004
                 f"continuing with the value unchanged so the rest of bazarr "
                 f"can boot. Rotate the credential to recover."
             )
@@ -268,7 +268,7 @@ def decrypt_settings_in_place(settings_obj) -> None:
             section_obj[key] = new_items
         except Exception as e:
             logger.error(
-                f"Failed to decrypt list-shaped secret at rest: "
+                f"Failed to decrypt list-shaped secret at rest: "  # noqa: G004
                 f"{type(e).__name__}; continuing unchanged."
             )
 

@@ -64,10 +64,10 @@ def check_credentials(user, pw, request, log_success=True):
     password = settings.auth.password
     if user == username and _verify_password(pw, password):
         if log_success:
-            logging.info(f'Successful authentication from {ip_addr} for user {user}')
+            logging.info(f'Successful authentication from {ip_addr} for user {user}')  # noqa: G004
         return True
     else:
-        logging.info(f'Failed authentication from {ip_addr} for user {user}')
+        logging.info(f'Failed authentication from {ip_addr} for user {user}')  # noqa: G004
         return False
 
 
@@ -105,7 +105,7 @@ def get_target_folder(file_path):
             try:
                 os.makedirs(fld)
             except Exception:
-                logging.error(f'BAZARR is unable to create directory to save subtitles: {fld}')
+                logging.error(f'BAZARR is unable to create directory to save subtitles: {fld}')  # noqa: G004
                 fld = None
     else:
         fld = None

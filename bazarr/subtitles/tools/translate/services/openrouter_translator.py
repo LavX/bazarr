@@ -73,7 +73,7 @@ class OpenRouterTranslatorService:
                 from .encryption import encrypt_api_key
                 api_key = encrypt_api_key(api_key, encryption_key)
             except ValueError as e:
-                logger.error(f'Invalid encryption key: {e}')
+                logger.error(f'Invalid encryption key: {e}')  # noqa: G004
                 raise ValueError("Invalid encryption key format. Check your encryption key in Settings.")
         return api_key
 
@@ -87,18 +87,18 @@ class OpenRouterTranslatorService:
                 logger.debug('No lines to translate in subtitle file')
                 return self.dest_srt_file
 
-            logger.debug(f'Starting AI translation for {self.source_srt_file}')
+            logger.debug(f'Starting AI translation for {self.source_srt_file}')  # noqa: G004
 
             # Submit job and poll for completion
             translated_lines = self._submit_and_poll(lines_list, bazarr_job_id=job_id)
 
             if translated_lines is None:
-                logger.error(f'Translation failed for {self.source_srt_file}')
+                logger.error(f'Translation failed for {self.source_srt_file}')  # noqa: G004
                 show_message(f'Translation failed for {self.source_srt_file}')
                 return False
 
             # Process results
-            logger.debug(f'BAZARR saving AI translated subtitles to {self.dest_srt_file}')
+            logger.debug(f'BAZARR saving AI translated subtitles to {self.dest_srt_file}')  # noqa: G004
             translation_map = {}
             for item in translated_lines:
                 if isinstance(item, dict) and 'position' in item and 'line' in item:
@@ -112,7 +112,7 @@ class OpenRouterTranslatorService:
                 subs.save(self.dest_srt_file)
                 add_translator_info(self.dest_srt_file, "# Subtitles translated with AI Subtitle Translator #")
             except OSError:
-                logger.error(f'BAZARR is unable to save translated subtitles to {self.dest_srt_file}')
+                logger.error(f'BAZARR is unable to save translated subtitles to {self.dest_srt_file}')  # noqa: G004
                 show_message(f'Translation failed: Unable to save translated subtitles to {self.dest_srt_file}')
                 raise OSError
 
@@ -132,7 +132,7 @@ class OpenRouterTranslatorService:
             return self.dest_srt_file
 
         except Exception as e:
-            logger.error(f'BAZARR encountered an error during AI translation: {str(e)}')
+            logger.error(f'BAZARR encountered an error during AI translation: {str(e)}')  # noqa: G004
             show_message(f'AI translation failed: {str(e)}')
             hide_progress(id=f'translate_progress_{self.dest_srt_file}')
             return False
@@ -155,11 +155,11 @@ class OpenRouterTranslatorService:
             source_lang = language_from_alpha2(source_lang) or source_lang
             target_lang = language_from_alpha2(target_lang) or target_lang
 
-            logger.debug(f'BAZARR translation language codes: from_lang={self.from_lang}, to_lang={self.to_lang}, '
+            logger.debug(f'BAZARR translation language codes: from_lang={self.from_lang}, to_lang={self.to_lang}, '  # noqa: G004
                          f'orig_to_lang={self.orig_to_lang}, final source={source_lang}, final target={target_lang}')
 
             if not target_lang:
-                logger.error(f'Target language is empty! from_lang={self.from_lang}, to_lang={self.to_lang}, orig_to_lang={self.orig_to_lang}')
+                logger.error(f'Target language is empty! from_lang={self.from_lang}, to_lang={self.to_lang}, orig_to_lang={self.orig_to_lang}')  # noqa: G004
                 return None
 
             lines_payload: List[Dict[str, Any]] = [{"position": i, "line": line} for i, line in enumerate(lines_list)]
@@ -195,7 +195,7 @@ class OpenRouterTranslatorService:
             base_url = settings.translator.openrouter_url.rstrip('/')
 
             # Submit job
-            logger.debug(f'BAZARR submitting {len(lines_payload)} lines to AI Subtitle Translator')
+            logger.debug(f'BAZARR submitting {len(lines_payload)} lines to AI Subtitle Translator')  # noqa: G004
             submit_response = requests.post(
                 f"{base_url}/api/v1/jobs/translate/content",
                 json=payload,
@@ -214,7 +214,7 @@ class OpenRouterTranslatorService:
                 logger.error("No jobId returned from translation service")
                 return None
 
-            logger.debug(f'BAZARR translation job submitted: {job_id}')
+            logger.debug(f'BAZARR translation job submitted: {job_id}')  # noqa: G004
 
             # Poll for completion
             return self._poll_job(base_url, job_id, len(lines_payload), bazarr_job_id=bazarr_job_id)
@@ -226,7 +226,7 @@ class OpenRouterTranslatorService:
             logger.error('AI Subtitle Translator connection error')
             return None
         except Exception as e:
-            logger.error(f'AI Subtitle Translator error: {str(e)}')
+            logger.error(f'AI Subtitle Translator error: {str(e)}')  # noqa: G004
             return None
 
     def _poll_job(self, base_url: str, job_id: str, total_lines: int, bazarr_job_id=None) -> Optional[Any]:
@@ -244,7 +244,7 @@ class OpenRouterTranslatorService:
                 )
 
                 if status_response.status_code != 200:
-                    logger.error(f"Error getting job status: {status_response.status_code}")
+                    logger.error(f"Error getting job status: {status_response.status_code}")  # noqa: G004
                     time.sleep(poll_interval)
                     elapsed += poll_interval
                     continue
@@ -280,7 +280,7 @@ class OpenRouterTranslatorService:
                         # Handle structured response with "lines" key from AI Subtitle Translator
                         # The service returns {"lines": [...], "model_used": ..., "tokens_used": ...}
                         if isinstance(result, dict) and "lines" in result:
-                            logger.debug(f'Extracted {len(result["lines"])} lines from structured result')
+                            logger.debug(f'Extracted {len(result["lines"])} lines from structured result')  # noqa: G004
                             return result["lines"]
                         # Fallback for direct list response
                         return result
@@ -290,14 +290,14 @@ class OpenRouterTranslatorService:
                 elif status == "failed":
                     hide_progress(id=f'translate_progress_{self.dest_srt_file}')
                     error = job_status.get("error", "Unknown error")
-                    logger.error(f"Translation job failed: {error}")
+                    logger.error(f"Translation job failed: {error}")  # noqa: G004
                     show_message(f"Translation failed: {error}")
                     return None
 
                 elif status == "partial":
                     hide_progress(id=f'translate_progress_{self.dest_srt_file}')
                     error = job_status.get("error", message or "Partial translation")
-                    logger.error(f"Translation partially failed: {error}")
+                    logger.error(f"Translation partially failed: {error}")  # noqa: G004
                     show_message(f"Translation failed (partial): {error}")
                     return None
 
@@ -311,7 +311,7 @@ class OpenRouterTranslatorService:
                 elapsed += poll_interval
 
             except requests.exceptions.RequestException as e:
-                logger.warning(f"Error polling job status: {e}")
+                logger.warning(f"Error polling job status: {e}")  # noqa: G004
                 time.sleep(poll_interval)
                 elapsed += poll_interval
 
@@ -338,16 +338,16 @@ class OpenRouterTranslatorService:
             if isinstance(translated_batch, list):
                 for item in translated_batch:
                     if not isinstance(item, dict) or 'position' not in item or 'line' not in item:
-                        logger.error(f'Invalid response format: {item}')
+                        logger.error(f'Invalid response format: {item}')  # noqa: G004
                         return None
                 return translated_batch
             else:
-                logger.error(f'Unexpected response format: {translated_batch}')
+                logger.error(f'Unexpected response format: {translated_batch}')  # noqa: G004
                 return None
         elif response.status_code == 429:
             raise TooManyRequests("Rate limit exceeded")
         elif response.status_code >= 500:
             raise RequestError(f"Server error: {response.status_code}")
         else:
-            logger.error(f'API error: {response.status_code} - {response.text}')
+            logger.error(f'API error: {response.status_code} - {response.text}')  # noqa: G004
             return None

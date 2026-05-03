@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from datetime import datetime
 
 from app.config import settings
-from subtitles.indexer.series import list_missing_subtitles
+from subtitles.indexer.series import list_missing_subtitles  # noqa: F401
 from sonarr.rootfolder import check_sonarr_rootfolder
 from app.database import TableShows, TableLanguagesProfiles, database, insert, update, delete, select
 from utilities.path_mappings import path_mappings
@@ -34,7 +34,7 @@ SONARR_PREFETCH_WORKERS = 8
 
 def trace(message):
     if settings.general.debug:
-        logging.debug(FEATURE_PREFIX + message)
+        logging.debug(FEATURE_PREFIX + message)  # noqa: G003
 
 
 def get_language_profiles():
@@ -63,7 +63,7 @@ def update_series(job_id=None, wait_for_completion=False):
     try:
         series = get_series_from_sonarr_api(apikey_sonarr=settings.sonarr.apikey)
     except Exception as e:
-        logging.exception(f"BAZARR Error trying to get series from Sonarr: {e}")
+        logging.exception(f"BAZARR Error trying to get series from Sonarr: {e}")  # noqa: G004
         return
     else:
         # Hoist invariants out of the per-series loop. update_one_series
@@ -160,7 +160,7 @@ def update_series(job_id=None, wait_for_completion=False):
                 try:
                     episodes_data = episode_futures[show['id']].result()
                 except Exception:
-                    logging.exception(f"BAZARR error pre-fetching episodes for series {show['id']}")
+                    logging.exception(f"BAZARR error pre-fetching episodes for series {show['id']}")  # noqa: G004
                     episodes_data = None
 
                 sync_episodes(series_id=show['id'], episodes_data=episodes_data)
@@ -245,7 +245,7 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
             series_data_list = get_series_from_sonarr_api(apikey_sonarr=settings.sonarr.apikey,
                                                           sonarr_series_id=int(series_id))
         except Exception:
-            logging.exception(f'BAZARR cannot get series with ID {series_id} from Sonarr API.')
+            logging.exception(f'BAZARR cannot get series with ID {series_id} from Sonarr API.')  # noqa: G004
             return
         if not series_data_list:
             return
@@ -266,7 +266,7 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
                 .values(series)
                 .where(TableShows.sonarrSeriesId == series['sonarrSeriesId']))
         except IntegrityError as e:
-            logging.error(f"BAZARR cannot update series {series['path']} because of {e}")
+            logging.error(f"BAZARR cannot update series {series['path']} because of {e}")  # noqa: G004
         else:
             if not is_signalr and not skip_episode_sync:
                 # Sonarr emit two SignalR events when episodes must be refreshed.
@@ -290,7 +290,7 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
                 insert(TableShows)
                 .values(series))
         except IntegrityError as e:
-            logging.error(f"BAZARR cannot insert series {series['path']} because of {e}")
+            logging.error(f"BAZARR cannot insert series {series['path']} because of {e}")  # noqa: G004
         else:
             if not is_signalr and not skip_episode_sync:
                 # Newly inserted series have zero episodes in the DB; the

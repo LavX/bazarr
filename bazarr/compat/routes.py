@@ -17,9 +17,9 @@ def _all_disabled(path):
     return compat_error("disabled", 404, "compat-disabled")
 
 
-import datetime as _dt
-from . import auth, service, response_mapper as M, rate_limiter
-from .auth import compat_auth
+import datetime as _dt  # noqa: E402
+from . import auth, service, response_mapper as M, rate_limiter  # noqa: E402
+from .auth import compat_auth  # noqa: E402
 
 
 _SUPPORTED_SUB_FORMATS = frozenset({"srt"})

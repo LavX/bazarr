@@ -28,5 +28,5 @@ def refine_info_url(video):
         # take the latest grab for the episode
         if 'nzbInfoUrl' in grab['data'] and grab['data']['nzbInfoUrl']:
             video.info_url = grab['data']['nzbInfoUrl']
-            logging.debug(f'Refining {video} with Info URL: {video.info_url}')
+            logging.debug(f'Refining {video} with Info URL: {video.info_url}')  # noqa: G004
             break

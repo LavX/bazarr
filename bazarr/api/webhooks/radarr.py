@@ -66,7 +66,7 @@ class WebHooksRadarr(Resource):
         args = api_ns_webhooks_radarr.payload
         event_type = args.get("eventType")
 
-        logging.debug(f"Received Radarr webhook event: {event_type}")
+        logging.debug(f"Received Radarr webhook event: {event_type}")  # noqa: G004
 
         if event_type == "Test":
             message = "Received test hook, skipping database search."
@@ -93,7 +93,7 @@ class WebHooksRadarr(Resource):
         movie = database.execute(q).first()
         if not movie and radarr_id:
             logging.debug(
-                f"No movie matching file ID {movie_file_id} found in the database. Attempting to sync from Radarr."
+                f"No movie matching file ID {movie_file_id} found in the database. Attempting to sync from Radarr."  # noqa: G004
             )
             update_one_movie(radarr_id, "updated")
             movie = database.execute(q).first()

@@ -136,7 +136,7 @@ def test_concurrent_fanout_cap_blocks_extra_callers():
 
     cap = int(settings.compat_endpoint.max_concurrent_fanouts)
 
-    enter = threading.Event()
+    enter = threading.Event()  # noqa: F841
     enter_count = threading.Semaphore(0)
     release = threading.Event()
     in_flight = []

@@ -15,7 +15,7 @@ from app.notifier import send_notifications_movie
 from constants import MINIMUM_VIDEO_SIZE
 from radarr.rootfolder import check_radarr_rootfolder
 from subtitles.indexer.movies import store_subtitles_movie
-from subtitles.mass_download import movies_download_subtitles
+from subtitles.mass_download import movies_download_subtitles  # noqa: F401
 from utilities.path_mappings import path_mappings
 from subtitles.adaptive_searching import is_search_active
 
@@ -31,7 +31,7 @@ FEATURE_PREFIX = "SYNC_MOVIES "
 
 def trace(message):
     if settings.general.debug:
-        logging.debug(FEATURE_PREFIX + message)
+        logging.debug(FEATURE_PREFIX + message)  # noqa: G003
 
 
 def get_language_profiles():
@@ -55,7 +55,7 @@ def update_movie(updated_movie):
             update(TableMovies).values(updated_movie)
             .where(TableMovies.radarrId == updated_movie['radarrId']))
     except IntegrityError as e:
-        logging.error(f"BAZARR cannot update movie {updated_movie['path']} because of {e}")
+        logging.error(f"BAZARR cannot update movie {updated_movie['path']} because of {e}")  # noqa: G004
     else:
         store_subtitles_movie(updated_movie['path'], path_mappings.path_replace_movie(updated_movie['path']))
         event_stream(type='movie', action='update', payload=updated_movie['radarrId'])
@@ -80,7 +80,7 @@ def add_movie(added_movie):
             insert(TableMovies)
             .values(added_movie))
     except IntegrityError as e:
-        logging.error(f"BAZARR cannot insert movie {added_movie['path']} because of {e}")
+        logging.error(f"BAZARR cannot insert movie {added_movie['path']} because of {e}")  # noqa: G004
     else:
         store_subtitles_movie(added_movie['path'], path_mappings.path_replace_movie(added_movie['path']))
         event_stream(type='movie', action='update', payload=int(added_movie['radarrId']))
@@ -209,7 +209,7 @@ def update_movies(job_id=None, wait_for_completion=False):
                 try:
                     database.execute(delete(TableMovies).where(TableMovies.radarrId.in_(movies_to_delete)))
                 except IntegrityError as e:
-                    logging.error(f"BAZARR cannot delete movies because of {e}")
+                    logging.error(f"BAZARR cannot delete movies because of {e}")  # noqa: G004
                 else:
                     for removed_movie in movies_to_delete:
                         movies_deleted.append(removed_movie)
@@ -295,7 +295,7 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False):
                     delete(TableMovies)
                     .where(TableMovies.radarrId == movie_id))
             except IntegrityError as e:
-                logging.error(f"BAZARR cannot delete movie {path_mappings.path_replace_movie(existing_movie.path)} "
+                logging.error(f"BAZARR cannot delete movie {path_mappings.path_replace_movie(existing_movie.path)} "  # noqa: G004
                               f"because of {e}")
             else:
                 event_stream(type='movie', action='delete', payload=int(movie_id))
@@ -345,7 +345,7 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False):
                 delete(TableMovies)
                 .where(TableMovies.radarrId == movie_id))
         except IntegrityError as e:
-            logging.error(f"BAZARR cannot delete movie {path_mappings.path_replace_movie(existing_movie.path)} because "
+            logging.error(f"BAZARR cannot delete movie {path_mappings.path_replace_movie(existing_movie.path)} because "  # noqa: G004
                           f"of {e}")
         else:
             event_stream(type='movie', action='delete', payload=int(movie_id))
@@ -362,7 +362,7 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False):
                 .values(movie)
                 .where(TableMovies.radarrId == movie['radarrId']))
         except IntegrityError as e:
-            logging.error(f"BAZARR cannot update movie {path_mappings.path_replace_movie(movie['path'])} because "
+            logging.error(f"BAZARR cannot update movie {path_mappings.path_replace_movie(movie['path'])} because "  # noqa: G004
                           f"of {e}")
         else:
             store_subtitles_movie(movie['path'], path_mappings.path_replace_movie(movie['path']))
@@ -378,7 +378,7 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False):
                 insert(TableMovies)
                 .values(movie))
         except IntegrityError as e:
-            logging.error(f"BAZARR cannot insert movie {path_mappings.path_replace_movie(movie['path'])} because "
+            logging.error(f"BAZARR cannot insert movie {path_mappings.path_replace_movie(movie['path'])} because "  # noqa: G004
                           f"of {e}")
         else:
             store_subtitles_movie(movie['path'], path_mappings.path_replace_movie(movie['path']))

@@ -29,7 +29,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
     if not languages:
         return None
 
-    logging.debug(f'BAZARR Searching subtitles for this file: {path}')
+    logging.debug(f'BAZARR Searching subtitles for this file: {path}')  # noqa: G004
 
     if settings.general.utf8_encode:
         os.environ["SZ_KEEP_ENCODING"] = ""
@@ -50,7 +50,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
     try:
         video = get_video(force_unicode(path), title, sceneName, providers=providers, media_type=media_type)
     except ValueError as e:
-        logging.exception(f'BAZARR Unable to get video object for {path}: {e}')
+        logging.exception(f'BAZARR Unable to get video object for {path}: {e}')  # noqa: G004
         return None
 
     if video:
@@ -83,7 +83,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                 # confirm if language is still missing or if cutoff has been reached
                 if check_if_still_required and language not in check_missing_languages(path, media_type):
                     # cutoff has been reached
-                    logging.debug(f"BAZARR this language ({parse_language_object(language)}) is ignored because cutoff "
+                    logging.debug(f"BAZARR this language ({parse_language_object(language)}) is ignored because cutoff "  # noqa: G004
                                   f"has been reached during this search.")
                     continue
                 else:
@@ -96,7 +96,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                                        use_original_format=original_format in (1, "1", "True", True),
                                                                        use_provider_priority=settings.general.use_provider_priority)
                     except Exception as e:
-                        logging.exception(f'BAZARR Error downloading Subtitles for this file {path}: {repr(e)}')
+                        logging.exception(f'BAZARR Error downloading Subtitles for this file {path}: {repr(e)}')  # noqa: G004
                         return None
 
                 if downloaded_subtitles:
@@ -130,7 +130,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                              )
                         except Exception as e:
                             logging.exception(
-                                f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')
+                                f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')  # noqa: G004
                             pass
                         else:
                             saved_any = True
@@ -144,7 +144,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                                       is_upgrade=is_upgrade, is_manual=False,
                                                                       path=path, max_score=max_score, job_id=job_id)
                                 if not processed_subtitle:
-                                    logging.debug(f"BAZARR unable to process this subtitles: {subtitle}")
+                                    logging.debug(f"BAZARR unable to process this subtitles: {subtitle}")  # noqa: G004
                                     continue
                                 yield processed_subtitle
         else:
@@ -152,12 +152,12 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
             return None
 
         if not saved_any:
-            logging.debug(f'BAZARR No Subtitles were found for this file: {path}')
+            logging.debug(f'BAZARR No Subtitles were found for this file: {path}')  # noqa: G004
             return None
 
     subliminal.region.backend.sync()
 
-    logging.debug(f'BAZARR Ended searching Subtitles for file: {path}')
+    logging.debug(f'BAZARR Ended searching Subtitles for file: {path}')  # noqa: G004
 
 
 def _get_language_obj(languages):
@@ -209,7 +209,7 @@ def check_missing_languages(path, media_type):
     if not confirmed_missing_subs:
         reversed_path = path_mappings.path_replace_reverse(path) if media_type == 'series' else \
             path_mappings.path_replace_reverse_movie(path)
-        logging.debug(f"BAZARR no media with this path have been found in database: {reversed_path}")
+        logging.debug(f"BAZARR no media with this path have been found in database: {reversed_path}")  # noqa: G004
         return []
 
     languages = []

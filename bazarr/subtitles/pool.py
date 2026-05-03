@@ -9,7 +9,7 @@ from inspect import getfullargspec
 from radarr.blacklist import get_blacklist_movie
 from sonarr.blacklist import get_blacklist
 from app.get_providers import get_providers, get_providers_auth, provider_throttle, provider_pool, get_language_equals, \
-    get_providers_sorted
+    get_providers_sorted  # noqa: F401
 
 from .utils import get_ban_list
 

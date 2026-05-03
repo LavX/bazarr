@@ -58,7 +58,7 @@ def get_binary(name):
     installed_exe = which(name)
 
     if installed_exe and os.path.isfile(installed_exe):
-        logging.debug(f'BAZARR returning this binary: {installed_exe}')
+        logging.debug(f'BAZARR returning this binary: {installed_exe}')  # noqa: G004
         return installed_exe
     else:
         logging.debug('BAZARR binary not found in path, searching for it...')
@@ -86,27 +86,27 @@ def get_binary(name):
             logging.debug('BAZARR binary not found in binaries.json')
             raise BinaryNotFound
         else:
-            logging.debug(f'BAZARR found this in binaries.json: {binary}')
+            logging.debug(f'BAZARR found this in binaries.json: {binary}')  # noqa: G004
 
         if os.path.isfile(exe) and md5(exe) == binary['checksum']:
-            logging.debug(f'BAZARR returning this existing and up-to-date binary: {exe}')
+            logging.debug(f'BAZARR returning this existing and up-to-date binary: {exe}')  # noqa: G004
             return exe
         else:
             try:
-                logging.debug(f'BAZARR creating directory tree for {exe_dir}')
+                logging.debug(f'BAZARR creating directory tree for {exe_dir}')  # noqa: G004
                 os.makedirs(exe_dir, exist_ok=True)
-                logging.debug(f'BAZARR downloading {name} from {binary["url"]}')
+                logging.debug(f'BAZARR downloading {name} from {binary["url"]}')  # noqa: G004
                 r = requests.get(binary['url'])
-                logging.debug(f'BAZARR saving {name} to {exe_dir}')
+                logging.debug(f'BAZARR saving {name} to {exe_dir}')  # noqa: G004
                 with open(exe, 'wb') as f:
                     f.write(r.content)
                 if system != 'Windows':
-                    logging.debug(f'BAZARR adding execute permission on {exe}')
+                    logging.debug(f'BAZARR adding execute permission on {exe}')  # noqa: G004
                     st = os.stat(exe)
                     os.chmod(exe, st.st_mode | stat.S_IEXEC)
             except Exception:
-                logging.exception(f'BAZARR unable to download {name} to {exe_dir}')
+                logging.exception(f'BAZARR unable to download {name} to {exe_dir}')  # noqa: G004
                 raise BinaryNotFound
             else:
-                logging.debug(f'BAZARR returning this new binary: {exe}')
+                logging.debug(f'BAZARR returning this new binary: {exe}')  # noqa: G004
                 return exe
