@@ -11,7 +11,7 @@ from subliminal_patch.core_persistent import list_all_subtitles_parallel
 from app.config import settings
 from app.get_providers import get_providers_sorted, get_providers_auth
 from . import auth, cache as C, response_mapper as M
-from utilities.url_guard import assert_safe_outbound, UnsafeURLError
+from utilities.url_guard import assert_safe_outbound, UnsafeURLError  # noqa: F401
 
 logger = logging.getLogger("bazarr.compat.service")
 
@@ -600,7 +600,7 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
                           and os.path.exists(getattr(video, "name", "")))
     exclude = health_discarded | (set() if video_has_file else set(_SKIP_FOR_VIRTUAL_VIDEO))
     logger.info("compat fanout: video=%r lang=%s providers=%d health_skipped=%s",
-                video, [str(l) for l in languages], len(pool.providers),
+                video, [str(l) for l in languages], len(pool.providers),  # noqa: E741
                 sorted(health_discarded) or "[]")
 
     stats: dict[str, tuple[str, int]] = {}
@@ -621,11 +621,11 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
 
     if stats:
         compact = ", ".join(f"{n}={o}:{l}ms"
-                            for n, (o, l) in sorted(stats.items()))
+                            for n, (o, l) in sorted(stats.items()))  # noqa: E741
         logger.info("compat fanout complete: %s", compact)
 
     subs = []
-    for v, sub_list in results.items():
+    for v, sub_list in results.items():  # noqa: PERF102
         subs.extend(sub_list)
 
     # moviehash_match filtering: "only" drops every non-hash row. This

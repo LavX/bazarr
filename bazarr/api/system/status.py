@@ -12,7 +12,7 @@ from alembic.migration import MigrationContext
 from radarr.info import get_radarr_info
 from sonarr.info import get_sonarr_info
 from app.get_args import args
-from app.database import engine, database, select
+from app.database import engine, database, select  # noqa: F401
 from init import startTime
 
 from ..utils import authenticate

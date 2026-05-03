@@ -1,8 +1,8 @@
 import hashlib
 import hmac
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock  # noqa: F401
 
-import pytest
+import pytest  # noqa: F401
 from subtitles.tools.translate.services.auth import get_translator_auth_headers
 
 

@@ -8,11 +8,11 @@ calls so they run fast and without any external dependencies.
 
 import json
 import os
-import struct
+import struct  # noqa: F401
 from collections import namedtuple
-from unittest.mock import MagicMock, Mock, patch, mock_open
+from unittest.mock import MagicMock, Mock, patch, mock_open  # noqa: F401
 
-import pytest
+import pytest  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -82,18 +82,18 @@ _patches = {
     'utilities.path_mappings': MagicMock(),
     'utilities.binaries': MagicMock(),
     'api.utils': _api_utils_mock,
-    'api.utils': _api_utils_mock,
+    'api.utils': _api_utils_mock,  # noqa: F601
     'api.subtitles.content': MagicMock(),
     'flask_restx': _fake_flask_restx,
     'init': MagicMock(startTime=0),
 }
 
-import sys
+import sys  # noqa: E402
 for mod_name, mock_obj in _patches.items():
     sys.modules.setdefault(mod_name, mock_obj)
 
 # Now safe to import
-from api.editor.editor import (
+from api.editor.editor import (  # noqa: E402
     _resolve_video_path,
     _probe_video,
     _validate_params,
@@ -105,7 +105,7 @@ from api.editor.editor import (
 )
 
 # Re-import database and path_mappings as the module sees them
-from api.editor import editor as editor_module
+from api.editor import editor as editor_module  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -778,7 +778,7 @@ class TestEditorSyncPost:
              patch('os.close'), \
              patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue)}), \
              patch('api.editor.editor.jobs_queue', mock_jobs_queue, create=True), \
-             patch('threading.Thread') as mock_thread:
+             patch('threading.Thread') as mock_thread:  # noqa: F841
 
             # Need to also patch the import inside the method
             with patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue)}):

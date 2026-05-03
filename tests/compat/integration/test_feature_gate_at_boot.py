@@ -1,5 +1,5 @@
 from flask import Flask
-import pytest
+import pytest  # noqa: F401
 
 
 def test_disabled_state_404s_json(monkeypatch):

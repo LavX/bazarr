@@ -56,5 +56,5 @@ def set_chmod(subtitles_path):
     chmod = int(settings.general.chmod, 8) if not sys.platform.startswith(
         'win') and settings.general.chmod_enabled else None
     if chmod:
-        logging.debug(f"BAZARR setting permission to {chmod} on {subtitles_path} after custom post-processing.")
+        logging.debug(f"BAZARR setting permission to {chmod} on {subtitles_path} after custom post-processing.")  # noqa: G004
         os.chmod(subtitles_path, chmod)

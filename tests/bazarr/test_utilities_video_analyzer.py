@@ -203,7 +203,7 @@ M_INFO = {
 }
 
 
-from subzero.language import Language
+from subzero.language import Language  # noqa: E402
 
 
 @pytest.fixture

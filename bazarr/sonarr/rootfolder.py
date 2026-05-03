@@ -7,6 +7,7 @@ import logging
 from app.config import settings, get_ssl_verify
 from app.database import TableShowsRootfolder, TableShows, database, insert, update, delete, select
 from utilities.path_mappings import path_mappings
+from sonarr.http_session import sonarr_session
 from sonarr.info import sonarr_headers, url_api_sonarr
 
 
@@ -18,8 +19,8 @@ def get_sonarr_rootfolder():
     url_sonarr_api_rootfolder = f"{url_api_sonarr()}rootfolder"
 
     try:
-        rootfolder = requests.get(url_sonarr_api_rootfolder, timeout=int(settings.sonarr.http_timeout), verify=get_ssl_verify('sonarr'),
-                                  headers=sonarr_headers(apikey_sonarr))
+        rootfolder = sonarr_session().get(url_sonarr_api_rootfolder, timeout=int(settings.sonarr.http_timeout), verify=get_ssl_verify('sonarr'),
+                                          headers=sonarr_headers(apikey_sonarr))
     except requests.exceptions.ConnectionError:
         logging.exception("BAZARR Error trying to get rootfolder from Sonarr. Connection Error.")
         return []
@@ -34,7 +35,7 @@ def get_sonarr_rootfolder():
             if any(item.path.startswith(folder['path']) for item in database.execute(
                     select(TableShows.path))
                     .all()):
-                sonarr_rootfolder.append({'id': folder['id'], 'path': folder['path']})
+                sonarr_rootfolder.append({'id': folder['id'], 'path': folder['path']})  # noqa: PERF401
         db_rootfolder = database.execute(
             select(TableShowsRootfolder.id, TableShowsRootfolder.path))\
             .all()

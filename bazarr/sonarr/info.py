@@ -1,7 +1,6 @@
 # coding=utf-8
 
 import logging
-import requests
 import datetime
 import semver
 
@@ -11,6 +10,7 @@ from dogpile.cache import make_region
 
 from app.config import settings, empty_values, get_ssl_verify
 from constants import HEADERS
+from sonarr.http_session import sonarr_session
 
 region = make_region().configure('dogpile.cache.memory')
 
@@ -32,8 +32,8 @@ class GetSonarrInfo:
             headers = {**HEADERS, "X-Api-Key": settings.sonarr.apikey}
             try:
                 sv = f"{url_sonarr()}/api/system/status"
-                sonarr_json = requests.get(sv, timeout=int(settings.sonarr.http_timeout), verify=get_ssl_verify('sonarr'),
-                                           headers=headers).json()
+                sonarr_json = sonarr_session().get(sv, timeout=int(settings.sonarr.http_timeout), verify=get_ssl_verify('sonarr'),
+                                                   headers=headers).json()
                 if 'version' in sonarr_json:
                     sonarr_version = sonarr_json['version']
                 else:
@@ -41,15 +41,15 @@ class GetSonarrInfo:
             except JSONDecodeError:
                 try:
                     sv = f"{url_sonarr()}/api/v3/system/status"
-                    sonarr_version = requests.get(sv, timeout=int(settings.sonarr.http_timeout), verify=get_ssl_verify('sonarr'),
-                                                  headers=headers).json()['version']
+                    sonarr_version = sonarr_session().get(sv, timeout=int(settings.sonarr.http_timeout), verify=get_ssl_verify('sonarr'),
+                                                          headers=headers).json()['version']
                 except (RequestException, JSONDecodeError, KeyError):
                     logging.debug('BAZARR cannot get Sonarr version')
                     sonarr_version = 'unknown'
             except Exception:
                 logging.debug('BAZARR cannot get Sonarr version')
                 sonarr_version = 'unknown'
-        logging.debug(f'BAZARR got this Sonarr version from its API: {sonarr_version}')
+        logging.debug(f'BAZARR got this Sonarr version from its API: {sonarr_version}')  # noqa: G004
         region.set("sonarr_version", sonarr_version)
         return sonarr_version
 

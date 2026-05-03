@@ -9,7 +9,7 @@ from app.database import TableShows, TableEpisodes, TableMovies, database, selec
 from languages.get_languages import alpha3_from_alpha2
 from utilities.path_mappings import path_mappings
 from utilities.video_analyzer import subtitles_sync_references
-from subtitles.tools.subsyncer import SubSyncer
+from subtitles.tools.subsyncer import SubSyncer  # noqa: F401
 from subtitles.tools.translate.main import translate_subtitles_file
 from subtitles.tools.mods import subtitles_apply_mods
 from subtitles.indexer.series import store_subtitles
@@ -147,7 +147,7 @@ class Subtitles(Resource):
 
         if action == 'sync':
             try:
-                postprocess_callback = lambda: postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id)
+                postprocess_callback = lambda: postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id)  # noqa: E731
                 sync_subtitles(video_path=video_path, srt_path=subtitles_path, srt_lang=language, hi=hi, forced=forced,
                                percent_score=0,  # make sure to always sync when requested manually
                                reference=args.get('reference') if args.get('reference') not in empty_values else

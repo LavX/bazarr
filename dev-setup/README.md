@@ -321,6 +321,10 @@ Autopulse Container (/app/)
 └── data/ (persistent data - mounted)
 ```
 
+## Profiling
+
+For dev-only allocator profiling, run `./profile-with-memray.sh run` (records to `/tmp/bazarr-memray-*.bin` and emits a flame graph). Two opt-in env vars also wire up lightweight tooling at startup: `BAZARR_SQL_PROFILE=1` enables a SQLAlchemy slow-query log (threshold via `BAZARR_SQL_PROFILE_THRESHOLD_MS`), and `BAZARR_TRACEMALLOC=1` arms a SIGUSR1 tracemalloc dumper (`kill -USR1 <pid>` to print a top-30 diff).
+
 ## Next Steps
 
 1. Start developing - all changes are live!

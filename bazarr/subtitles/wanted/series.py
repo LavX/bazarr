@@ -10,7 +10,7 @@ from functools import reduce
 
 from utilities.path_mappings import path_mappings
 from subtitles.indexer.series import store_subtitles, list_missing_subtitles
-from subtitles.indexer.series import store_subtitles
+from subtitles.indexer.series import store_subtitles  # noqa: F811
 from sonarr.history import history_log
 from app.notifier import send_notifications
 from app.get_providers import get_providers
@@ -41,7 +41,7 @@ def _wanted_episode(episode, providers_list, job_id=None):
 
         else:
             logging.debug(
-                f"BAZARR Search is throttled by adaptive search for this episode {episode.path} and "
+                f"BAZARR Search is throttled by adaptive search for this episode {episode.path} and "  # noqa: G004
                 f"language: {language}")
 
     found_any = False
@@ -93,7 +93,7 @@ def wanted_download_subtitles(sonarr_episode_id, job_id=None):
     episode_details = database.execute(stmt).first()
 
     if not episode_details:
-        logging.debug(f"BAZARR no episode with that sonarrId can be found in database: {sonarr_episode_id}")
+        logging.debug(f"BAZARR no episode with that sonarrId can be found in database: {sonarr_episode_id}")  # noqa: G004
         return
     elif episode_details.subtitles is None:
         # subtitles indexing for this episode is incomplete, we'll do it again

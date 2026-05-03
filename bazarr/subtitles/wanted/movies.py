@@ -38,7 +38,7 @@ def _wanted_movie(movie, providers_list, job_id=None):
             languages_to_stamp.append(language)
 
         else:
-            logging.info(f"BAZARR Search is throttled by adaptive search for this movie {movie.path} and "
+            logging.info(f"BAZARR Search is throttled by adaptive search for this movie {movie.path} and "  # noqa: G004
                          f"language: {language}")
 
     found_any = False
@@ -86,7 +86,7 @@ def wanted_download_subtitles_movie(radarr_id, job_id=None):
     movie = database.execute(stmt).first()
 
     if not movie:
-        logging.debug(f"BAZARR no movie with that radarrId can be found in database: {radarr_id}")
+        logging.debug(f"BAZARR no movie with that radarrId can be found in database: {radarr_id}")  # noqa: G004
         return
     elif movie.subtitles is None:
         # subtitles indexing for this movie is incomplete, we'll do it again

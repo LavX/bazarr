@@ -1,6 +1,6 @@
 # coding=utf-8
 
-import hashlib
+import hashlib  # noqa: F401
 import os
 import ast
 import json
@@ -597,13 +597,13 @@ while failed_validator:
         failed_validator = False
     except ValidationError as e:
         current_validator_details = e.details[0][0]
-        logging.error(f"Validator failed for {current_validator_details.names[0]}: {e}")
+        logging.error(f"Validator failed for {current_validator_details.names[0]}: {e}")  # noqa: G004
         if hasattr(current_validator_details, 'default') and current_validator_details.default is not empty:
             old_value = settings.get(current_validator_details.names[0], 'undefined')
             settings[current_validator_details.names[0]] = current_validator_details.default
-            logging.warning(f"VALIDATOR RESET: {current_validator_details.names[0]} from '{old_value}' to '{current_validator_details.default}'")
+            logging.warning(f"VALIDATOR RESET: {current_validator_details.names[0]} from '{old_value}' to '{current_validator_details.default}'")  # noqa: G004
         else:
-            logging.critical(f"Value for {current_validator_details.names[0]} doesn't pass validation and there's no "
+            logging.critical(f"Value for {current_validator_details.names[0]} doesn't pass validation and there's no "  # noqa: G004
                              f"default value. This issue must be reported to and fixed by the development team. "
                              f"Bazarr won't work until it's been fixed.")
             stop_bazarr(EXIT_VALIDATION_ERROR)
@@ -667,12 +667,12 @@ def write_config():
               settings_data=encrypt_settings_dict(in_memory_plaintext),
               merge=False)
     except Exception as error:
-        logging.exception(f"Exception raised while trying to save temporary settings file: {error}")
+        logging.exception(f"Exception raised while trying to save temporary settings file: {error}")  # noqa: G004
     else:
         try:
             move(config_yaml_file + '.tmp', config_yaml_file)
         except Exception as error:
-            logging.exception(f"Exception raised while trying to overwrite settings file with temporary settings "
+            logging.exception(f"Exception raised while trying to overwrite settings file with temporary settings "  # noqa: G004
                               f"file: {error}")
 
 
@@ -747,7 +747,7 @@ def get_settings():
     # with '***' (key still present so the wire shape is stable, value
     # hidden); USER_VISIBLE_SECRETS pass through unchanged because the
     # in-memory settings already hold their decrypted plaintext.
-    from secret_store import is_system_secret  # noqa: PLC0415
+    from secret_store import is_system_secret  # noqa: PLC0415, RUF100
     settings_to_return = {}
     for k, v in settings.as_dict().items():
         if isinstance(v, dict):
@@ -1289,7 +1289,7 @@ def migrate_apikey_to_oauth():
         # Add random delay to prevent thundering herd (0-30 seconds)
         import random
         delay = random.uniform(0, 30)
-        logging.debug(f"Migration delay: {delay:.1f}s to prevent server overload")
+        logging.debug(f"Migration delay: {delay:.1f}s to prevent server overload")  # noqa: G004
         time.sleep(delay)
         
         # Decrypt the API key
@@ -1304,7 +1304,7 @@ def migrate_apikey_to_oauth():
             else:
                 decrypted_api_key = api_key
         except Exception as e:
-            logging.error(f"Failed to decrypt API key for migration: {e}")
+            logging.error(f"Failed to decrypt API key for migration: {e}")  # noqa: G004
             return
             
         # Use API key to fetch user data from Plex with retry logic
@@ -1324,7 +1324,7 @@ def migrate_apikey_to_oauth():
                                            headers=headers, timeout=10)
                 
                 if user_response.status_code == 429:  # Rate limited
-                    logging.warning(f"Rate limited by Plex API, attempt {attempt + 1}/{max_retries}")
+                    logging.warning(f"Rate limited by Plex API, attempt {attempt + 1}/{max_retries}")  # noqa: G004
                     if attempt < max_retries - 1:
                         time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
                         continue
@@ -1341,7 +1341,7 @@ def migrate_apikey_to_oauth():
                 break
                 
             except requests.exceptions.Timeout:
-                logging.warning(f"Timeout getting user data, attempt {attempt + 1}/{max_retries}")
+                logging.warning(f"Timeout getting user data, attempt {attempt + 1}/{max_retries}")  # noqa: G004
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
                     continue
@@ -1349,7 +1349,7 @@ def migrate_apikey_to_oauth():
                     logging.error("Migration failed due to timeouts, will retry later")
                     return
             except Exception as e:
-                logging.error(f"Failed to fetch user data for migration: {e}")
+                logging.error(f"Failed to fetch user data for migration: {e}")  # noqa: G004
                 return
             
         # Get user's servers with retry logic
@@ -1361,7 +1361,7 @@ def migrate_apikey_to_oauth():
                                               timeout=10)
                 
                 if servers_response.status_code == 429:  # Rate limited
-                    logging.warning(f"Rate limited getting servers, attempt {attempt + 1}/{max_retries}")
+                    logging.warning(f"Rate limited getting servers, attempt {attempt + 1}/{max_retries}")  # noqa: G004
                     if attempt < max_retries - 1:
                         time.sleep(retry_delay * (attempt + 1))
                         continue
@@ -1415,13 +1415,13 @@ def migrate_apikey_to_oauth():
                             
                             servers.append(server)
                 else:
-                    logging.error(f"Unexpected response format: {content_type}")
+                    logging.error(f"Unexpected response format: {content_type}")  # noqa: G004
                     return
                 
                 break
                 
             except requests.exceptions.Timeout:
-                logging.warning(f"Timeout getting servers, attempt {attempt + 1}/{max_retries}")
+                logging.warning(f"Timeout getting servers, attempt {attempt + 1}/{max_retries}")  # noqa: G004
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
                     continue
@@ -1429,7 +1429,7 @@ def migrate_apikey_to_oauth():
                     logging.error("Migration failed due to timeouts, will retry later")
                     return
             except Exception as e:
-                logging.error(f"Failed to fetch servers for migration: {e}")
+                logging.error(f"Failed to fetch servers for migration: {e}")  # noqa: G004
                 return
             
         # Find the server that matches current manual configuration
@@ -1515,7 +1515,7 @@ def migrate_apikey_to_oauth():
             settings.plex.token = original_token
             
         except Exception as e:
-            logging.error(f"OAuth pre-validation failed: {e}")
+            logging.error(f"OAuth pre-validation failed: {e}")  # noqa: G004
             # Restore original values
             settings.plex.auth_method = original_auth_method
             settings.plex.token = original_token
@@ -1553,8 +1553,8 @@ def migrate_apikey_to_oauth():
         # Save configuration with OAuth settings
         write_config()
         
-        logging.info(f"Migrated Plex configuration to OAuth for user '{username}'")
-        logging.info(f"Selected server: {selected_server['name']} ({selected_connection['uri']})")
+        logging.info(f"Migrated Plex configuration to OAuth for user '{username}'")  # noqa: G004
+        logging.info(f"Selected server: {selected_server['name']} ({selected_connection['uri']})")  # noqa: G004
         logging.info("Legacy manual configuration fields cleared (ip, port, ssl)")
         
         # Final validation test
@@ -1570,7 +1570,7 @@ def migrate_apikey_to_oauth():
             logging.info("Legacy API key permanently removed after successful OAuth migration")
             
         except Exception as e:
-            logging.error(f"Final OAuth validation failed: {e}")
+            logging.error(f"Final OAuth validation failed: {e}")  # noqa: G004
             
             # Restore backup configuration
             logging.info("Restoring backup configuration...")
@@ -1602,11 +1602,11 @@ def migrate_apikey_to_oauth():
                 logging.info("Rollback successful - legacy API key connection restored")
                 logging.error("OAuth migration failed but legacy configuration is working. Please configure OAuth manually through the GUI.")
             except Exception as rollback_error:
-                logging.error(f"Rollback validation also failed: {rollback_error}")
+                logging.error(f"Rollback validation also failed: {rollback_error}")  # noqa: G004
                 logging.error("CRITICAL: Manual intervention required. Please reset Plex settings.")
             
     except Exception as e:
-        logging.error(f"Unexpected error during Plex OAuth migration: {e}")
+        logging.error(f"Unexpected error during Plex OAuth migration: {e}")  # noqa: G004
         # Keep existing configuration intact
 
 
@@ -1620,7 +1620,7 @@ def cleanup_legacy_oauth_config():
         
     # Check if any legacy values exist
     has_legacy_ip = bool(settings.plex.get('ip', '').strip())
-    has_legacy_ssl = settings.plex.get('ssl', False) == True
+    has_legacy_ssl = settings.plex.get('ssl', False) == True  # noqa: E712
     has_legacy_port = settings.plex.get('port', 32400) != 32400
     
     # Only disable auto-migration if migration was actually successful
@@ -1664,7 +1664,7 @@ def migrate_plex_library_to_list():
         old_value = settings.plex.movie_library
         if old_value:  # Only migrate if not empty
             settings.plex.movie_library = [old_value]
-            logging.info(f"Migrated plex.movie_library from string to list: {old_value}")
+            logging.info(f"Migrated plex.movie_library from string to list: {old_value}")  # noqa: G004
             changed = True
         else:
             settings.plex.movie_library = []
@@ -1675,7 +1675,7 @@ def migrate_plex_library_to_list():
         old_value = settings.plex.series_library
         if old_value:  # Only migrate if not empty
             settings.plex.series_library = [old_value]
-            logging.info(f"Migrated plex.series_library from string to list: {old_value}")
+            logging.info(f"Migrated plex.series_library from string to list: {old_value}")  # noqa: G004
             changed = True
         else:
             settings.plex.series_library = []

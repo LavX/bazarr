@@ -9,10 +9,10 @@ import subprocess
 from flask import Response, request, send_file
 from flask_restx import Namespace, Resource
 
-from app.database import TableEpisodes, TableMovies, TableShows, database, select
+from app.database import TableEpisodes, TableMovies, TableShows, database, select  # noqa: F401
 from app.get_args import args
 from utilities.path_mappings import path_mappings
-from api.subtitles.content import resolve_subtitle_path
+from api.subtitles.content import resolve_subtitle_path  # noqa: F401
 
 from ..utils import authenticate
 

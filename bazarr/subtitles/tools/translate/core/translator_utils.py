@@ -11,7 +11,7 @@ from app.config import settings
 from subzero.language import Language
 from subliminal_patch.score import MAX_SCORES
 from languages.custom_lang import CustomLanguage
-from languages.get_languages import alpha3_from_alpha2, language_from_alpha2, language_from_alpha3
+from languages.get_languages import alpha3_from_alpha2, language_from_alpha2, language_from_alpha3  # noqa: F401
 from subtitles.processing import ProcessSubtitlesResult
 from utilities.path_mappings import path_mappings
 
@@ -123,7 +123,7 @@ def get_description(media_type, radarr_id, sonarr_series_id):
                 return (f"You will translate movie that is called {movie.title} from {movie.year} "
                         f"and it has IMDB ID = {movie.imdbId}. Its overview: {movie.overview}")
             else:
-                logger.info(f"No movie found for this radarr_id: {radarr_id}")
+                logger.info(f"No movie found for this radarr_id: {radarr_id}")  # noqa: G004
                 return ""
 
         else:
@@ -136,7 +136,7 @@ def get_description(media_type, radarr_id, sonarr_series_id):
                 return (f"You will translate TV show that is called {series.title} from {series.year} "
                         f"and it has IMDB ID = {series.imdbId}. Its overview: {series.overview}")
             else:
-                logger.info(f"No series found for this sonarr_series_id: {sonarr_series_id}")
+                logger.info(f"No series found for this sonarr_series_id: {sonarr_series_id}")  # noqa: G004
                 return ""
     except Exception:
         logger.exception("Problem with getting media info")

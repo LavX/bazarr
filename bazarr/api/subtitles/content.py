@@ -499,7 +499,7 @@ def _save_subtitle_content(media_type, media_id, language_code):
         store_subtitles_movie(media_path, path_mappings.path_replace_movie(media_path), use_cache=False)
         event_stream(type='movie', payload=media_id)
     elif media_path:
-        logger.warning('Subtitle saved but re-indexing skipped: unknown media_type %s', media_type)
+        logger.warning('Subtitle saved but re-indexing skipped: unknown media_type %s', media_type)  # noqa: F821
 
     new_etag = generate_etag(subtitle_path)
     response = make_response('', 204)

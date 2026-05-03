@@ -16,16 +16,16 @@ import pytest
 # upstream design used `sys.modules.setdefault("app.config", ...)` which
 # becomes a no-op once any other test imports app.config and so the mock
 # never won when run with the broader suite).
-import jellyfin.operations as _ops_module  # noqa: E402
+import jellyfin.operations as _ops_module  # noqa: E402, RUF100
 
-from jellyfin.operations import (  # noqa: E402
+from jellyfin.operations import (  # noqa: E402, RUF100
     jellyfin_test_connection,
     jellyfin_get_libraries,
     jellyfin_refresh_item,
     jellyfin_refresh_all_libraries,
     jellyfin_update_library,
 )
-from fake_jellyfin import FakeJellyfinClient, make_movie, make_series, make_episode  # noqa: E402
+from fake_jellyfin import FakeJellyfinClient, make_movie, make_series, make_episode  # noqa: E402, RUF100
 
 
 
@@ -455,7 +455,7 @@ def test_redact_strips_override_apikey_when_test_connection_fails(settings):
     preview. If the call fails and Jellyfin reflects that key into the
     error string, _redact must scrub it - even though the key is not the
     saved one in settings.jellyfin.apikey."""
-    import logging
+    import logging  # noqa: F401
 
     settings.jellyfin.apikey = "saved-key-DIFFERENT"
     override = "override-key-LEAK-CANDIDATE"

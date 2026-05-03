@@ -30,13 +30,13 @@ def get_video(path, title, sceneName, providers=None, media_type="movie"):
     hints = {"title": title, "type": "movie" if media_type == "movie" else "episode"}
 
     try:
-        logging.debug(f'BAZARR guessing video object using video file path: {path}')
+        logging.debug(f'BAZARR guessing video object using video file path: {path}')  # noqa: G004
         skip_hashing = settings.general.skip_hashing
         video = parse_video(path, hints=hints, skip_hashing=skip_hashing, dry_run=False, providers=providers)
         if sceneName != "None":
             # refine the video object using the sceneName and update the video object accordingly
             scenename_with_extension = sceneName + os.path.splitext(path)[1]
-            logging.debug(f'BAZARR guessing video object using scene name: {scenename_with_extension}')
+            logging.debug(f'BAZARR guessing video object using scene name: {scenename_with_extension}')  # noqa: G004
             scenename_video = parse_video(scenename_with_extension, hints=hints, dry_run=True)
             refine_video_with_scenename(initial_video=video, scenename_video=scenename_video)
             logging.debug('BAZARR resulting video object once refined using scene name: %s',

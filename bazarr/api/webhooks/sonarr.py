@@ -67,7 +67,7 @@ class WebHooksSonarr(Resource):
         args = api_ns_webhooks_sonarr.payload
         event_type = args.get("eventType")
 
-        logging.debug(f"Received Sonarr webhook event: {event_type}")
+        logging.debug(f"Received Sonarr webhook event: {event_type}")  # noqa: G004
 
         if event_type == "Test":
             message = "Received test hook, skipping database search."

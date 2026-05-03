@@ -11,7 +11,7 @@ from app.database import TableLanguagesProfiles, TableSettingsLanguages, TableSe
     update_profile_id_list, database, insert, update, delete, select
 from app.event_handler import event_stream
 from app.config import settings, save_settings, get_settings
-from app.scheduler import scheduler
+from app.scheduler import scheduler  # noqa: F401
 from subtitles.indexer.series import list_missing_subtitles
 from subtitles.indexer.movies import list_missing_subtitles_movies
 

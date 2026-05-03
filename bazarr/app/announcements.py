@@ -2,10 +2,14 @@
 
 import os
 import hashlib
-import requests
 import logging
 import json
+import threading
+
+import requests
 import pretty
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from datetime import datetime
 from operator import itemgetter
@@ -14,6 +18,37 @@ from app.database import TableAnnouncements, database, insert, select
 
 from app.get_args import args
 from app.jobs_queue import jobs_queue
+
+
+_session: requests.Session | None = None
+_session_lock = threading.Lock()
+
+
+def _announcements_session() -> requests.Session:
+    """Lazily-initialized module-level requests.Session for the
+    announcements fetcher. The pool benefit is small here (the job runs
+    every 6 hours and falls back to a second host on jsdelivr failure),
+    but mounting an HTTPAdapter keeps the behaviour consistent with the
+    Sonarr / Radarr pooled clients and avoids urllib3's stock 1-connection
+    default."""
+    global _session
+    if _session is None:
+        with _session_lock:
+            if _session is None:
+                s = requests.Session()
+                adapter = HTTPAdapter(
+                    pool_connections=4,
+                    pool_maxsize=4,
+                    max_retries=Retry(
+                        total=3,
+                        backoff_factor=0.3,
+                        status_forcelist=(502, 503, 504),
+                    ),
+                )
+                s.mount('http://', adapter)
+                s.mount('https://', adapter)
+                _session = s
+    return _session
 
 
 # Announcements as receive by browser must be in the form of a list of dicts converted to JSON
@@ -46,7 +81,7 @@ def get_announcements_to_file(job_id=None, startup=False, wait_for_completion=Fa
         return
 
     try:
-        r = requests.get(
+        r = _announcements_session().get(
             url="https://cdn.jsdelivr.net/gh/LavX/bazarr-binaries@master/announcements.json",
             timeout=30
         )
@@ -54,7 +89,7 @@ def get_announcements_to_file(job_id=None, startup=False, wait_for_completion=Fa
     except Exception:
         try:
             logging.exception("Error trying to get announcements from jsdelivr.net, falling back to Github.")
-            r = requests.get(
+            r = _announcements_session().get(
                 url="https://raw.githubusercontent.com/LavX/bazarr-binaries/refs/heads/master/announcements.json",
                 timeout=30
             )

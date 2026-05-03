@@ -8,14 +8,14 @@ from retry.api import retry
 from deep_translator.exceptions import TooManyRequests, RequestError
 
 from app.config import settings
-from app.database import TableShows, TableEpisodes, TableMovies, database, select
+from app.database import TableShows, TableEpisodes, TableMovies, database, select  # noqa: F401
 from app.jobs_queue import jobs_queue
-from languages.custom_lang import CustomLanguage
-from languages.get_languages import alpha3_from_alpha2, language_from_alpha2, language_from_alpha3
+from languages.custom_lang import CustomLanguage  # noqa: F401
+from languages.get_languages import alpha3_from_alpha2, language_from_alpha2, language_from_alpha3  # noqa: F401
 from radarr.history import history_log_movie
 from sonarr.history import history_log
-from subtitles.processing import ProcessSubtitlesResult
-from utilities.path_mappings import path_mappings
+from subtitles.processing import ProcessSubtitlesResult  # noqa: F401
+from utilities.path_mappings import path_mappings  # noqa: F401
 
 from ..core.translator_utils import add_translator_info, create_process_result, get_title
 
@@ -57,16 +57,16 @@ class LingarrTranslatorService:
                 logger.debug('No lines to translate in subtitle file')
                 return self.dest_srt_file
 
-            logger.debug(f'Starting translation for {self.source_srt_file}')
+            logger.debug(f'Starting translation for {self.source_srt_file}')  # noqa: G004
             translated_lines = self._translate_content(lines_list, job_id=job_id)
 
             if translated_lines is None:
-                logger.error(f'Translation failed for {self.source_srt_file}')
+                logger.error(f'Translation failed for {self.source_srt_file}')  # noqa: G004
                 jobs_queue.update_job_progress(job_id=job_id,
                                                progress_message=f'Translation failed for {self.source_srt_file}')
                 raise RuntimeError(f'Translation failed for {self.source_srt_file}')
 
-            logger.debug(f'BAZARR saving Lingarr translated subtitles to {self.dest_srt_file}')
+            logger.debug(f'BAZARR saving Lingarr translated subtitles to {self.dest_srt_file}')  # noqa: G004
             translation_map = {}
             for item in translated_lines:
                 if isinstance(item, dict) and 'position' in item and 'line' in item:
@@ -78,9 +78,9 @@ class LingarrTranslatorService:
 
             try:
                 subs.save(self.dest_srt_file)
-                add_translator_info(self.dest_srt_file, f"# Subtitles translated with Lingarr # ")
+                add_translator_info(self.dest_srt_file, f"# Subtitles translated with Lingarr # ")  # noqa: F541
             except OSError:
-                logger.error(f'BAZARR is unable to save translated subtitles to {self.dest_srt_file}')
+                logger.error(f'BAZARR is unable to save translated subtitles to {self.dest_srt_file}')  # noqa: G004
                 jobs_queue.update_job_progress(job_id=job_id,
                                                progress_message=f'Translation failed: Unable to save translated '
                                                                 f'subtitles to {self.dest_srt_file}')
@@ -106,7 +106,7 @@ class LingarrTranslatorService:
             return self.dest_srt_file
 
         except Exception as e:
-            logger.error(f'BAZARR encountered an error during Lingarr translation: {str(e)}')
+            logger.error(f'BAZARR encountered an error during Lingarr translation: {str(e)}')  # noqa: G004
             jobs_queue.update_job_progress(job_id=job_id, progress_message=f'Lingarr translation failed: {str(e)}')
             raise
 
@@ -147,7 +147,7 @@ class LingarrTranslatorService:
                 "lines": lines_payload
             }
 
-            logger.debug(f'BAZARR is sending {len(lines_payload)} lines to Lingarr with full media context')
+            logger.debug(f'BAZARR is sending {len(lines_payload)} lines to Lingarr with full media context')  # noqa: G004
 
             headers = {"Content-Type": "application/json"}
             if settings.translator.lingarr_token:
@@ -166,11 +166,11 @@ class LingarrTranslatorService:
                 if isinstance(translated_batch, list):
                     for item in translated_batch:
                         if not isinstance(item, dict) or 'position' not in item or 'line' not in item:
-                            logger.error(f'Invalid response format from Lingarr API: {item}')
+                            logger.error(f'Invalid response format from Lingarr API: {item}')  # noqa: G004
                             return None
                     return translated_batch
                 else:
-                    logger.error(f'Unexpected response format from Lingarr API: {translated_batch}')
+                    logger.error(f'Unexpected response format from Lingarr API: {translated_batch}')  # noqa: G004
                     return None
             elif response.status_code == 401:
                 raise RequestError("Authentication failed: Invalid or missing API key")
@@ -179,7 +179,7 @@ class LingarrTranslatorService:
             elif response.status_code >= 500:
                 raise RequestError(f"Server error: {response.status_code}")
             else:
-                logger.debug(f'Lingarr API error: {response.status_code} - {response.text}')
+                logger.debug(f'Lingarr API error: {response.status_code} - {response.text}')  # noqa: G004
                 return None
 
         except requests.exceptions.Timeout:
@@ -189,13 +189,13 @@ class LingarrTranslatorService:
             logger.debug('Lingarr API connection error')
             raise RequestError("Connection error")
         except requests.exceptions.RequestException as e:
-            logger.debug(f'Lingarr API request failed: {str(e)}')
+            logger.debug(f'Lingarr API request failed: {str(e)}')  # noqa: G004
             raise
         except (TooManyRequests, RequestError) as e:
-            logger.error(f'Lingarr API error after retries: {str(e)}')
+            logger.error(f'Lingarr API error after retries: {str(e)}')  # noqa: G004
             jobs_queue.update_job_progress(job_id=job_id, progress_message=f'Lingarr API error: {str(e)}')
             raise
         except Exception as e:
-            logger.error(f'Unexpected error in Lingarr translation: {str(e)}')
+            logger.error(f'Unexpected error in Lingarr translation: {str(e)}')  # noqa: G004
             jobs_queue.update_job_progress(job_id=job_id, progress_message=f'Translation error: {str(e)}')
             raise

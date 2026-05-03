@@ -55,7 +55,7 @@ configure_captcha_func()
 
 # configure logging
 configure_logging(settings.general.debug or args.debug)
-import logging  # noqa E402
+import logging  # noqa: E402
 
 # restore backup if required
 restore_from_backup()
@@ -73,11 +73,11 @@ def is_virtualenv():
 if not args.no_update:
     try:
         if os.name == 'nt':
-            import win32api, win32con  # noqa E401
-        import lxml, numpy, webrtcvad, setuptools, PIL  # noqa E401
+            import win32api, win32con  # noqa: E401, F401
+        import lxml, numpy, webrtcvad, setuptools, PIL  # noqa: E401, F401
     except ImportError:
         try:
-            import pip  # noqa W0611
+            import pip  # noqa: F401
         except ImportError:
             logging.info('BAZARR unable to install requirements (pip not installed).')
         else:
@@ -93,7 +93,7 @@ if not args.no_update:
                         pip_command.insert(4, '--user')
                     subprocess.check_output(pip_command, stderr=subprocess.STDOUT)
                 except subprocess.CalledProcessError as e:
-                    logging.exception(f'BAZARR requirements.txt installation result: {e.stdout}')
+                    logging.exception(f'BAZARR requirements.txt installation result: {e.stdout}')  # noqa: G004
                     os._exit(EXIT_REQUIREMENTS_ERROR)
                 else:
                     logging.info('BAZARR requirements installed.')
@@ -165,7 +165,7 @@ write_config()
 
 
 # Remove deprecated providers from enabled providers in config
-from subliminal_patch.extensions import provider_registry  # noqa E401
+from subliminal_patch.extensions import provider_registry  # noqa: E402
 existing_providers = provider_registry.names()
 enabled_providers = settings.general.enabled_providers
 settings.general.enabled_providers = [x for x in enabled_providers if x in existing_providers]
@@ -221,5 +221,5 @@ init_binaries()
 path_mappings.update()
 
 # Initialize Plex OAuth configuration
-from app.config import initialize_plex
+from app.config import initialize_plex  # noqa: E402
 initialize_plex()

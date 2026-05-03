@@ -51,7 +51,7 @@ def embedded_subs_reader(file, file_size, episode_file_id=None, movie_file_id=No
             # Avoid commentary subtitles
             name = detected_language.get("name", "").lower()
             if "commentary" in name:
-                logging.debug(f"Ignoring commentary subtitle: {name}")
+                logging.debug(f"Ignoring commentary subtitle: {name}")  # noqa: G004
                 continue
 
             if "language" not in detected_language:
@@ -60,7 +60,7 @@ def embedded_subs_reader(file, file_size, episode_file_id=None, movie_file_id=No
                 language = _handle_alpha3(detected_language)
 
             if not language and und_default_language:
-                logging.debug(f"Undefined language embedded subtitles track treated as {language}")
+                logging.debug(f"Undefined language embedded subtitles track treated as {language}")  # noqa: G004
                 language = und_default_language
 
             if not language:
@@ -95,7 +95,7 @@ def embedded_audio_reader(file, file_size, episode_file_id=None, movie_file_id=N
                 continue
 
             if isinstance(detected_language['language'], str):
-                logging.error(f"Cannot identify audio track language for this file: {file}. Value detected is "
+                logging.error(f"Cannot identify audio track language for this file: {file}. Value detected is "  # noqa: G004
                               f"{detected_language['language']}.")
                 continue
 
@@ -297,13 +297,13 @@ def parse_video_metadata(file, file_size, episode_file_id=None, movie_file_id=No
                 content = f.read().strip()
                 if content:
                     video_path = content
-                    logging.debug(f"Stream URL extracted from .strm file: {video_path}")
+                    logging.debug(f"Stream URL extracted from .strm file: {video_path}")  # noqa: G004
         except Exception:
-            logging.exception(f"Failed to read content of .strm file: {file}")
+            logging.exception(f"Failed to read content of .strm file: {file}")  # noqa: G004
 
     # see if file exists (perhaps offline)
     if not video_path.lower().startswith('http') and not os.path.exists(video_path):
-        logging.error(f'Video file "{video_path}" cannot be found for analysis')
+        logging.error(f'Video file "{video_path}" cannot be found for analysis')  # noqa: G004
         return None
 
     # if we have ffprobe available
@@ -311,14 +311,14 @@ def parse_video_metadata(file, file_size, episode_file_id=None, movie_file_id=No
         try:
             data["ffprobe"] = know(video_path=video_path, context={"provider": "ffmpeg", "ffmpeg": ffprobe_path})
         except KnowitException as e:
-            logging.error(f"BAZARR ffprobe cannot analyze this video file {file}. Could it be corrupted? {e}")
+            logging.error(f"BAZARR ffprobe cannot analyze this video file {file}. Could it be corrupted? {e}")  # noqa: G004
             return None
     # or if we have mediainfo available
     elif mediainfo_path:
         try:
             data["mediainfo"] = know(video_path=video_path, context={"provider": "mediainfo", "mediainfo": mediainfo_path})
         except KnowitException as e:
-            logging.error(f"BAZARR mediainfo cannot analyze this video file {file}. Could it be corrupted? {e}")
+            logging.error(f"BAZARR mediainfo cannot analyze this video file {file}. Could it be corrupted? {e}")  # noqa: G004
             return None
     # else, we warn user of missing binary
     else:

@@ -38,7 +38,7 @@ def sync_subtitles(video_path,
     if forced:
         logging.debug('BAZARR cannot sync forced subtitles. Skipping sync routine.')
     else:
-        logging.debug(f'BAZARR automatic syncing is enabled in settings. We\'ll try to sync this '
+        logging.debug(f'BAZARR automatic syncing is enabled in settings. We\'ll try to sync this '  # noqa: G004
                       f'subtitles: {srt_path}.')
         if sonarr_episode_id:
             use_subsync_threshold = settings.subsync.use_subsync_threshold
@@ -70,7 +70,7 @@ def sync_subtitles(video_path,
                 if callback:
                     callback()
             except Exception:
-                logging.exception(f'BAZARR an unhandled exception occurs during the synchronization process for this '
+                logging.exception(f'BAZARR an unhandled exception occurs during the synchronization process for this '  # noqa: G004
                                   f'subtitle file: {srt_path}')
                 return False
             else:
@@ -80,7 +80,7 @@ def sync_subtitles(video_path,
                 del subsync
                 gc.collect()
         else:
-            logging.debug(f"BAZARR subsync skipped because subtitles score isn't below this "
+            logging.debug(f"BAZARR subsync skipped because subtitles score isn't below this "  # noqa: G004
                           f"threshold value: {subsync_threshold}%")
 
     return False

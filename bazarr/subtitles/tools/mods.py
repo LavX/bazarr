@@ -110,7 +110,7 @@ def subtitles_apply_mods(language, subtitle_path, mods, video_path):
         sub.content = f.read()
 
     if not sub.is_valid():
-        logging.exception(f'BAZARR Invalid subtitle file: {subtitle_path}')
+        logging.exception(f'BAZARR Invalid subtitle file: {subtitle_path}')  # noqa: G004
         return
 
     content = sub.get_modified_content(format=sub.format)

@@ -2,7 +2,7 @@
 import pytest
 from unittest.mock import patch, MagicMock
 from subliminal_patch.providers.opensubtitles_scraper import OpenSubtitlesScraperMixin, _LANG_3_TO_2
-from subliminal_patch.providers.opensubtitles import OpenSubtitlesSubtitle, _OpenSubtitlesSubtitle
+from subliminal_patch.providers.opensubtitles import OpenSubtitlesSubtitle, _OpenSubtitlesSubtitle  # noqa: F401
 from subliminal_patch.exceptions import APIThrottled
 from subliminal.exceptions import ServiceUnavailable
 from subliminal_patch.core import Movie, Episode

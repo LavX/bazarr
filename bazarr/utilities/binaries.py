@@ -11,7 +11,21 @@ import stat
 from whichcraft import which
 from dogpile.cache import make_region
 
-region = make_region().configure('dogpile.cache.memory')
+from utilities.locked_lru import LockedLRU
+
+# Bounded thread-safe LRU + 1h TTL. Only used to memoise md5() and
+# get_binaries_from_json() results across a few binary paths. In practice
+# there are at most ~4 entries (ffmpeg, ffprobe, mediainfo, the JSON blob);
+# maxsize=8 communicates that intent, with headroom for platform variants.
+# The 1h TTL rotates the md5 cache often enough to pick up auto-updated
+# ffmpeg/ffprobe binaries within a reasonable window. LockedLRU is used
+# instead of bare LRUCache because get_binary() can be invoked from
+# concurrent request threads via the video analyzer.
+region = make_region().configure(
+    'dogpile.cache.memory',
+    arguments={'cache_dict': LockedLRU(maxsize=8)},
+    expiration_time=3600,
+)
 
 
 class BinaryNotFound(Exception):
@@ -44,7 +58,7 @@ def get_binary(name):
     installed_exe = which(name)
 
     if installed_exe and os.path.isfile(installed_exe):
-        logging.debug(f'BAZARR returning this binary: {installed_exe}')
+        logging.debug(f'BAZARR returning this binary: {installed_exe}')  # noqa: G004
         return installed_exe
     else:
         logging.debug('BAZARR binary not found in path, searching for it...')
@@ -72,27 +86,27 @@ def get_binary(name):
             logging.debug('BAZARR binary not found in binaries.json')
             raise BinaryNotFound
         else:
-            logging.debug(f'BAZARR found this in binaries.json: {binary}')
+            logging.debug(f'BAZARR found this in binaries.json: {binary}')  # noqa: G004
 
         if os.path.isfile(exe) and md5(exe) == binary['checksum']:
-            logging.debug(f'BAZARR returning this existing and up-to-date binary: {exe}')
+            logging.debug(f'BAZARR returning this existing and up-to-date binary: {exe}')  # noqa: G004
             return exe
         else:
             try:
-                logging.debug(f'BAZARR creating directory tree for {exe_dir}')
+                logging.debug(f'BAZARR creating directory tree for {exe_dir}')  # noqa: G004
                 os.makedirs(exe_dir, exist_ok=True)
-                logging.debug(f'BAZARR downloading {name} from {binary["url"]}')
+                logging.debug(f'BAZARR downloading {name} from {binary["url"]}')  # noqa: G004
                 r = requests.get(binary['url'])
-                logging.debug(f'BAZARR saving {name} to {exe_dir}')
+                logging.debug(f'BAZARR saving {name} to {exe_dir}')  # noqa: G004
                 with open(exe, 'wb') as f:
                     f.write(r.content)
                 if system != 'Windows':
-                    logging.debug(f'BAZARR adding execute permission on {exe}')
+                    logging.debug(f'BAZARR adding execute permission on {exe}')  # noqa: G004
                     st = os.stat(exe)
                     os.chmod(exe, st.st_mode | stat.S_IEXEC)
             except Exception:
-                logging.exception(f'BAZARR unable to download {name} to {exe_dir}')
+                logging.exception(f'BAZARR unable to download {name} to {exe_dir}')  # noqa: G004
                 raise BinaryNotFound
             else:
-                logging.debug(f'BAZARR returning this new binary: {exe}')
+                logging.debug(f'BAZARR returning this new binary: {exe}')  # noqa: G004
                 return exe

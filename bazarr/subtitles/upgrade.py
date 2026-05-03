@@ -95,7 +95,7 @@ def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, wait_for_com
         if item['subtitles_path'] not in item['external_subtitles']:
             current_sub = _find_current_subtitle_for_language(item['language'], item['external_subtitles'])
             if current_sub:
-                logging.debug(f"Upgrade candidate {item['id']} ({item['seriesTitle']} S{item['season']:02d}E"
+                logging.debug(f"Upgrade candidate {item['id']} ({item['seriesTitle']} S{item['season']:02d}E"  # noqa: G004
                               f"{item['episode']:02d}): history path no longer on disk, using current subtitle "
                               f"for same language ({current_sub})")
                 item['subtitles_path'] = current_sub
@@ -197,12 +197,12 @@ def upgrade_movies_subtitles(job_id=None, radarr_ids=None, wait_for_completion=F
     for x in all_rows:
         if not _language_still_desired(x.language, x.profileId):
             if x.id in movies_to_upgrade:
-                logging.debug(f"Upgrade candidate {x.id} ({x.title}) dropped: language {x.language} no longer desired "
+                logging.debug(f"Upgrade candidate {x.id} ({x.title}) dropped: language {x.language} no longer desired "  # noqa: G004
                               f"in profile {x.profileId}")
             continue
         if x.video_path != x.path:
             if x.id in movies_to_upgrade:
-                logging.debug(f"Upgrade candidate {x.id} ({x.title}) dropped: video_path mismatch "
+                logging.debug(f"Upgrade candidate {x.id} ({x.title}) dropped: video_path mismatch "  # noqa: G004
                               f"(history={x.video_path} != current={x.path})")
             continue
         movies_data.append({
@@ -226,12 +226,12 @@ def upgrade_movies_subtitles(job_id=None, radarr_ids=None, wait_for_completion=F
             # try to find a current subtitle for the same language (file may have been renamed/re-downloaded)
             current_sub = _find_current_subtitle_for_language(item['language'], item['external_subtitles'])
             if current_sub:
-                logging.debug(f"Upgrade candidate {item['id']} ({item['title']}): history path no longer on disk, "
+                logging.debug(f"Upgrade candidate {item['id']} ({item['title']}): history path no longer on disk, "  # noqa: G004
                               f"using current subtitle for same language ({current_sub})")
                 item['subtitles_path'] = current_sub
             else:
                 if item['id'] in movies_to_upgrade:
-                    logging.debug(f"Upgrade candidate {item['id']} ({item['title']}) dropped: no subtitle for language "
+                    logging.debug(f"Upgrade candidate {item['id']} ({item['title']}) dropped: no subtitle for language "  # noqa: G004
                                   f"{item['language']} found on disk")
                 continue
 
@@ -367,8 +367,8 @@ def get_upgradable_episode_subtitles(history_id_list=None):
         .subquery()
 
     minimum_timestamp, query_actions = get_queries_condition_parameters()
-    logging.debug(f"Minimum timestamp used for subtitles upgrade: {minimum_timestamp}")
-    logging.debug(f"These actions are considered for subtitles upgrade: {query_actions}")
+    logging.debug(f"Minimum timestamp used for subtitles upgrade: {minimum_timestamp}")  # noqa: G004
+    logging.debug(f"These actions are considered for subtitles upgrade: {query_actions}")  # noqa: G004
 
     upgradable_episodes_conditions = [(TableHistory.action.in_(query_actions)),
                                       (TableHistory.timestamp > minimum_timestamp),
@@ -389,7 +389,7 @@ def get_upgradable_episode_subtitles(history_id_list=None):
         .where(reduce(operator.and_, upgradable_episodes_conditions))
         .order_by(TableHistory.timestamp.desc())) \
         .all()
-    logging.debug(f"{len(subtitles_to_upgrade)} subtitles are candidates and we've selected the latest timestamp for "
+    logging.debug(f"{len(subtitles_to_upgrade)} subtitles are candidates and we've selected the latest timestamp for "  # noqa: G004
                   f"each of them.")
 
     upgradable_episode_subtitles = {}
@@ -400,22 +400,22 @@ def get_upgradable_episode_subtitles(history_id_list=None):
 
         # exclude subtitles with ID that as been "upgraded from" and shouldn't be considered
         if any(x.upgradedFromId == subtitle_to_upgrade.id for x in subtitles_to_upgrade):
-            logging.debug(f"TableHistory ID {subtitle_to_upgrade.id} is the original subtitles event and has already "
+            logging.debug(f"TableHistory ID {subtitle_to_upgrade.id} is the original subtitles event and has already "  # noqa: G004
                           f"been upgraded so we'll skip it.")
             continue
 
         # check if we have the original subtitles ID in database
         if subtitle_to_upgrade.upgradedFromId:
             upgradable_episode_subtitles.update({subtitle_to_upgrade.id: subtitle_to_upgrade.upgradedFromId})
-            logging.debug(f"The original subtitles ID for TableHistory ID {subtitle_to_upgrade.id} stored in DB is: "
+            logging.debug(f"The original subtitles ID for TableHistory ID {subtitle_to_upgrade.id} stored in DB is: "  # noqa: G004
                           f"{subtitle_to_upgrade.upgradedFromId}")
             continue
         else:
             upgradable_episode_subtitles.update({subtitle_to_upgrade.id: None})
-            logging.debug(f"It seems to be the first time we've seen this TableHistory ID {subtitle_to_upgrade.id}.")
+            logging.debug(f"It seems to be the first time we've seen this TableHistory ID {subtitle_to_upgrade.id}.")  # noqa: G004
             continue
 
-    logging.debug(f"We've found {len(upgradable_episode_subtitles)} episode subtitles IDs to be upgradable")
+    logging.debug(f"We've found {len(upgradable_episode_subtitles)} episode subtitles IDs to be upgradable")  # noqa: G004
     return upgradable_episode_subtitles
 
 
@@ -434,8 +434,8 @@ def get_upgradable_movies_subtitles(history_id_list=None):
         .subquery()
 
     minimum_timestamp, query_actions = get_queries_condition_parameters()
-    logging.debug(f"Minimum timestamp used for subtitles upgrade: {minimum_timestamp}")
-    logging.debug(f"These actions are considered for subtitles upgrade: {query_actions}")
+    logging.debug(f"Minimum timestamp used for subtitles upgrade: {minimum_timestamp}")  # noqa: G004
+    logging.debug(f"These actions are considered for subtitles upgrade: {query_actions}")  # noqa: G004
 
     upgradable_movies_conditions = [(TableHistoryMovie.action.in_(query_actions)),
                                     (TableHistoryMovie.timestamp > minimum_timestamp),
@@ -455,7 +455,7 @@ def get_upgradable_movies_subtitles(history_id_list=None):
         .where(reduce(operator.and_, upgradable_movies_conditions))
         .order_by(TableHistoryMovie.timestamp.desc())) \
         .all()
-    logging.debug(f"{len(subtitles_to_upgrade)} subtitles are candidates and we've selected the latest timestamp for "
+    logging.debug(f"{len(subtitles_to_upgrade)} subtitles are candidates and we've selected the latest timestamp for "  # noqa: G004
                   f"each of them.")
 
     upgradable_movie_subtitles = {}
@@ -466,23 +466,23 @@ def get_upgradable_movies_subtitles(history_id_list=None):
 
         # exclude subtitles with ID that as been "upgraded from" and shouldn't be considered
         if any(x.upgradedFromId == subtitle_to_upgrade.id for x in subtitles_to_upgrade):
-            logging.debug(f"TableHistoryMovie ID {subtitle_to_upgrade.id} is the original subtitles event and has "
+            logging.debug(f"TableHistoryMovie ID {subtitle_to_upgrade.id} is the original subtitles event and has "  # noqa: G004
                           f"already been upgraded so we'll skip it.")
             continue
 
         # check if we have the original subtitles ID in database
         if subtitle_to_upgrade.upgradedFromId:
             upgradable_movie_subtitles.update({subtitle_to_upgrade.id: subtitle_to_upgrade.upgradedFromId})
-            logging.debug(f"The original subtitles ID for TableHistoryMovie ID {subtitle_to_upgrade.id} stored in DB "
+            logging.debug(f"The original subtitles ID for TableHistoryMovie ID {subtitle_to_upgrade.id} stored in DB "  # noqa: G004
                           f"is: {subtitle_to_upgrade.upgradedFromId}")
             continue
         else:
             upgradable_movie_subtitles.update({subtitle_to_upgrade.id: None})
-            logging.debug(f"It seems to be the first time we've seen this TableHistoryMovie ID "
+            logging.debug(f"It seems to be the first time we've seen this TableHistoryMovie ID "  # noqa: G004
                           f"{subtitle_to_upgrade.id}.")
             continue
 
-    logging.debug(f"We've found {len(upgradable_movie_subtitles)} movie subtitles IDs to be upgradable")
+    logging.debug(f"We've found {len(upgradable_movie_subtitles)} movie subtitles IDs to be upgradable")  # noqa: G004
     return upgradable_movie_subtitles
 
 

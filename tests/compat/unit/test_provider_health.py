@@ -2,7 +2,7 @@
 
 Covers the timeout+retry discard policy in subliminal_patch.provider_health.
 """
-import time
+import time  # noqa: F401
 
 import pytest
 

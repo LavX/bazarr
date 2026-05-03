@@ -3,7 +3,7 @@
 import json
 import requests
 import os
-import logging
+import logging  # noqa: F401
 
 from flask_restx import Resource, Namespace, reqparse
 from bs4 import BeautifulSoup as bso

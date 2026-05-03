@@ -192,10 +192,10 @@ def test_list_subtitles_hi_fallback_one_stream(
             return_value=[fake_streams["en_hi"]],
         )
         fake = _MemoizedFFprobeVideoContainer.get_subtitles("")[0]
-        assert fake.disposition.hearing_impaired == True
+        assert fake.disposition.hearing_impaired == True  # noqa: E712
         subs = provider.list_subtitles(video_single_language, {language})
         assert subs[0].language == Language("eng", hi=False)
-        assert subs[0].hearing_impaired == False
+        assert subs[0].hearing_impaired == False  # noqa: E712
 
 
 def test_list_subtitles_custom_language_from_fese(
@@ -241,8 +241,8 @@ def test_list_subtitles_hi_fallback_multiple_language_streams(
         )
         subs = provider.list_subtitles(video_single_language, languages)
         assert len(subs) == 2
-        assert subs[0].hearing_impaired == False  # English subittle
-        assert subs[1].hearing_impaired == False  # Spanish subtitle
+        assert subs[0].hearing_impaired == False  # English subittle  # noqa: E712
+        assert subs[1].hearing_impaired == False  # Spanish subtitle  # noqa: E712
 
 
 def test_list_subtitles_hi_fallback_multiple_language_streams_multiple_input_languages(
@@ -279,8 +279,8 @@ def test_list_subtitles_hi_fallback_multiple_hi_streams(
         )
         subs = provider.list_subtitles(video_single_language, {language})
         assert len(subs) == 2
-        assert subs[0].hearing_impaired == False
-        assert subs[1].hearing_impaired == False
+        assert subs[0].hearing_impaired == False  # noqa: E712
+        assert subs[1].hearing_impaired == False  # noqa: E712
 
 
 def test_list_subtitles_only_forced(video_single_language):

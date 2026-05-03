@@ -6,6 +6,7 @@ import logging
 import errno
 from literals import EXIT_INTERRUPT, EXIT_NORMAL, EXIT_PORT_ALREADY_IN_USE_ERROR
 from utilities.central import restart_bazarr, stop_bazarr
+from utilities.tracemalloc_dumper import install as install_tracemalloc_dumper
 
 from waitress.server import create_server
 from time import sleep
@@ -18,7 +19,7 @@ from .database import close_database
 from .app import create_app
 
 app = create_app()
-from compat import register as register_compat
+from compat import register as register_compat  # noqa: E402
 register_compat(app, base_url=base_url)
 app.register_blueprint(api_bp, url_prefix=base_url.rstrip('/') + '/api')
 app.register_blueprint(ui_bp, url_prefix=base_url.rstrip('/'))
@@ -38,6 +39,8 @@ class Server:
         self.address = str(settings.general.ip)
         self.port = int(args.port) if args.port else int(settings.general.port)
         self.interrupted = False
+
+        install_tracemalloc_dumper()
 
         while not self.connected:
             sleep(0.1)

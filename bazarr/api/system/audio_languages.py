@@ -67,7 +67,7 @@ class AudioLanguages(Resource):
                     name = language_from_alpha2(code2)
                     result.append({'code2': code2, 'name': name or lang_name})
             except Exception:
-                logging.debug(f"Could not resolve audio language: {lang_name}")
+                logging.debug(f"Could not resolve audio language: {lang_name}")  # noqa: G004
                 continue
 
         return sorted(result, key=itemgetter('name'))

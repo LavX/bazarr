@@ -5,7 +5,7 @@ import tempfile
 import os
 
 from subliminal_patch.providers.titlovi import TitloviProvider 
-from subliminal_patch.providers.titlovi import TitloviSubtitle 
+from subliminal_patch.providers.titlovi import TitloviSubtitle  # noqa: F401
 from dogpile.cache.region import register_backend as register_cache_backend
 from subliminal_patch.core import Episode
 from subzero.language import Language

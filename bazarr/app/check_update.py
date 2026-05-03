@@ -37,22 +37,22 @@ def _fetch_repo_releases(repo, label=None):
     releases = []
     url = f'https://api.github.com/repos/{repo}/releases?per_page=100'
     try:
-        logging.debug(f'BAZARR getting releases from Github: {url}')
+        logging.debug(f'BAZARR getting releases from Github: {url}')  # noqa: G004
         r = requests.get(url, allow_redirects=True, timeout=15)
         r.raise_for_status()
     except requests.exceptions.HTTPError:
-        logging.exception(f"Error trying to get releases from Github ({repo}). Http error.")
+        logging.exception(f"Error trying to get releases from Github ({repo}). Http error.")  # noqa: G004
     except requests.exceptions.ConnectionError:
-        logging.exception(f"Error trying to get releases from Github ({repo}). Connection Error.")
+        logging.exception(f"Error trying to get releases from Github ({repo}). Connection Error.")  # noqa: G004
     except requests.exceptions.Timeout:
-        logging.exception(f"Error trying to get releases from Github ({repo}). Timeout Error.")
+        logging.exception(f"Error trying to get releases from Github ({repo}). Timeout Error.")  # noqa: G004
     except requests.exceptions.RequestException:
-        logging.exception(f"Error trying to get releases from Github ({repo}).")
+        logging.exception(f"Error trying to get releases from Github ({repo}).")  # noqa: G004
     else:
         try:
             releases_data = r.json()
         except ValueError:
-            logging.error(f"Error parsing JSON from Github releases response ({repo}). Skipping.")
+            logging.error(f"Error parsing JSON from Github releases response ({repo}). Skipping.")  # noqa: G004
             return releases
         for release in releases_data:
             download_link = None
@@ -67,7 +67,7 @@ def _fetch_repo_releases(repo, label=None):
             if label:
                 entry['repo'] = label
             releases.append(entry)
-        logging.debug(f'BAZARR fetched {len(releases)} releases from {repo}')
+        logging.debug(f'BAZARR fetched {len(releases)} releases from {repo}')  # noqa: G004
     return releases
 
 
@@ -87,7 +87,7 @@ def check_releases(job_id=None, startup=False, wait_for_completion=False):
 
     with open(os.path.join(args.config_dir, 'config', 'releases.txt'), 'w') as f:
         json.dump(releases, f)
-    logging.debug(f'BAZARR saved {len(releases)} releases to releases.txt')
+    logging.debug(f'BAZARR saved {len(releases)} releases to releases.txt')  # noqa: G004
 
     if job_id:
         jobs_queue.update_job_name(job_id=job_id, new_job_name="Updated Release Info")
@@ -106,9 +106,9 @@ def check_if_new_update():
     elif settings.general.branch == 'development':
         use_prerelease = True
     else:
-        logging.error(f'BAZARR unknown branch provided to updater: {settings.general.branch}')
+        logging.error(f'BAZARR unknown branch provided to updater: {settings.general.branch}')  # noqa: G004
         return
-    logging.debug(f'BAZARR updater is using {settings.general.branch} branch')
+    logging.debug(f'BAZARR updater is using {settings.general.branch} branch')  # noqa: G004
 
     check_releases(startup=True)
 
@@ -131,7 +131,7 @@ def check_if_new_update():
                 release = next((item for item in data if not item["prerelease"]), None)
 
         if release and 'name' in release:
-            logging.debug(f'BAZARR last release available is {release["name"]}')
+            logging.debug(f'BAZARR last release available is {release["name"]}')  # noqa: G004
             if deprecated_python_version():
                 logging.warning('BAZARR is using a deprecated Python version, you must update Python to get latest '
                                 'version available.')
@@ -148,12 +148,12 @@ def check_if_new_update():
 
             # skip update process if latest release is v0.9.1.1 which is the latest pre-semver compatible release
             if new_version and release['name'] != 'v0.9.1.1':
-                logging.debug(f'BAZARR newer release available and will be downloaded: {release["name"]}')
+                logging.debug(f'BAZARR newer release available and will be downloaded: {release["name"]}')  # noqa: G004
                 download_release(url=release['download_link'])
             # rolling back from nightly to stable release
             elif current_version:
                 if current_version.prerelease and not use_prerelease:
-                    logging.debug(f'BAZARR previous stable version will be downloaded: {release["name"]}')
+                    logging.debug(f'BAZARR previous stable version will be downloaded: {release["name"]}')  # noqa: G004
                     download_release(url=release['download_link'])
             else:
                 logging.debug('BAZARR no newer release have been found')
@@ -172,9 +172,9 @@ def download_release(url):
     try:
         os.makedirs(update_dir, exist_ok=True)
     except Exception:
-        logging.debug(f'BAZARR unable to create update directory {update_dir}')
+        logging.debug(f'BAZARR unable to create update directory {update_dir}')  # noqa: G004
     else:
-        logging.debug(f'BAZARR downloading release from Github: {url}')
+        logging.debug(f'BAZARR downloading release from Github: {url}')  # noqa: G004
         r = requests.get(url, allow_redirects=True, timeout=300)
     if r:
         try:
@@ -195,7 +195,7 @@ def apply_update():
 
     if os.path.isdir(update_dir):
         if os.path.isfile(bazarr_zip):
-            logging.debug(f'BAZARR is trying to unzip this release to {bazarr_dir}: {bazarr_zip}')
+            logging.debug(f'BAZARR is trying to unzip this release to {bazarr_dir}: {bazarr_zip}')  # noqa: G004
             try:
                 with ZipFile(bazarr_zip, 'r') as archive:
                     zip_root_directory = ''
@@ -247,7 +247,7 @@ def apply_update():
 def update_cleaner(zipfile, bazarr_dir, config_dir):
     with ZipFile(zipfile, 'r') as archive:
         file_in_zip = archive.namelist()
-    logging.debug(f'BAZARR zip file contain {len(file_in_zip)} directories and files')
+    logging.debug(f'BAZARR zip file contain {len(file_in_zip)} directories and files')  # noqa: G004
     separator = os.path.sep
     if os.path.sep == '\\':
         logging.debug('BAZARR upgrade leftover cleaner is running on Windows. We\'ll fix the zip file separator '
@@ -278,7 +278,7 @@ def update_cleaner(zipfile, bazarr_dir, config_dir):
         # when config directory is a child of Bazarr installation directory
         dir_to_ignore.append(f'^{os.path.relpath(config_dir, bazarr_dir)}{separator}')
     dir_to_ignore_regex_string = '(?:% s)' % '|'.join(dir_to_ignore)
-    logging.debug(f'BAZARR upgrade leftover cleaner will ignore directories matching this '
+    logging.debug(f'BAZARR upgrade leftover cleaner will ignore directories matching this '  # noqa: G004
                   f'regex: {dir_to_ignore_regex_string}')
     dir_to_ignore_regex = re.compile(dir_to_ignore_regex_string)
 
@@ -286,10 +286,10 @@ def update_cleaner(zipfile, bazarr_dir, config_dir):
     # prevent deletion of leftover Apprise.py/pyi files after 1.8.0 version that caused issue on case-insensitive
     # filesystem. This could be removed in a couple of major versions.
     file_to_ignore += ['Apprise.py', 'Apprise.pyi', 'apprise.py', 'apprise.pyi']
-    logging.debug(f'BAZARR upgrade leftover cleaner will ignore those files: {", ".join(file_to_ignore)}')
+    logging.debug(f'BAZARR upgrade leftover cleaner will ignore those files: {", ".join(file_to_ignore)}')  # noqa: G004
     extension_to_ignore = ['.pyc']
     logging.debug(
-        f'BAZARR upgrade leftover cleaner will ignore files with those extensions: {", ".join(extension_to_ignore)}')
+        f'BAZARR upgrade leftover cleaner will ignore files with those extensions: {", ".join(extension_to_ignore)}')  # noqa: G004
 
     file_on_disk = []
     folder_list = []
@@ -312,14 +312,14 @@ def update_cleaner(zipfile, bazarr_dir, config_dir):
                 filepath = os.path.join(current_dir, file)
                 if not dir_to_ignore_regex.findall(filepath):
                     file_on_disk.append(filepath)
-    logging.debug(f'BAZARR directory contain {len(file_on_disk)} files')
-    logging.debug(f'BAZARR directory contain {len(folder_list)} directories')
+    logging.debug(f'BAZARR directory contain {len(file_on_disk)} files')  # noqa: G004
+    logging.debug(f'BAZARR directory contain {len(folder_list)} directories')  # noqa: G004
     file_on_disk += folder_list
-    logging.debug(f'BAZARR directory contain {len(file_on_disk)} directories and files')
+    logging.debug(f'BAZARR directory contain {len(file_on_disk)} directories and files')  # noqa: G004
 
     file_to_remove = list(set(file_on_disk) - set(file_in_zip))
-    logging.debug(f'BAZARR will delete {len(file_to_remove)} directories and files')
-    logging.debug(f'BAZARR will delete this: {", ".join(file_to_remove)}')
+    logging.debug(f'BAZARR will delete {len(file_to_remove)} directories and files')  # noqa: G004
+    logging.debug(f'BAZARR will delete this: {", ".join(file_to_remove)}')  # noqa: G004
 
     for file in file_to_remove:
         filepath = os.path.join(bazarr_dir, file)
@@ -329,4 +329,4 @@ def update_cleaner(zipfile, bazarr_dir, config_dir):
             else:
                 os.remove(filepath)
         except Exception:
-            logging.debug(f'BAZARR upgrade leftover cleaner cannot delete {filepath}')
+            logging.debug(f'BAZARR upgrade leftover cleaner cannot delete {filepath}')  # noqa: G004

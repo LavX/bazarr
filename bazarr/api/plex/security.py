@@ -1,7 +1,7 @@
 # coding=utf-8
 
 import secrets
-import os
+import os  # noqa: F401
 import time
 import logging
 from typing import Dict, Optional
@@ -129,7 +129,7 @@ def encrypt_api_key():
             logger.info("Successfully encrypted Plex API key")
             return True
     except Exception as e:
-        logger.error(f"Failed to encrypt API key: {e}")
+        logger.error(f"Failed to encrypt API key: {e}")  # noqa: G004
         return False
     
     return False

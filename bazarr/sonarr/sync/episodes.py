@@ -13,8 +13,8 @@ from constants import MINIMUM_VIDEO_SIZE
 from app.database import database, TableShows, TableEpisodes, delete, update, insert, select, get_exclusion_clause
 from app.config import settings
 from utilities.path_mappings import path_mappings
-from subtitles.indexer.series import store_subtitles, series_full_scan_subtitles
-from subtitles.mass_download import episode_download_subtitles
+from subtitles.indexer.series import store_subtitles, series_full_scan_subtitles  # noqa: F401
+from subtitles.mass_download import episode_download_subtitles  # noqa: F401
 from app.event_handler import event_stream
 from sonarr.info import get_sonarr_info
 from app.jobs_queue import jobs_queue
@@ -38,7 +38,7 @@ EPISODE_INSERT_CHUNK_SIZE = 50
 
 def trace(message):
     if settings.general.debug:
-        logging.debug(FEATURE_PREFIX + message)
+        logging.debug(FEATURE_PREFIX + message)  # noqa: G003
 
 
 def get_episodes_monitored_table(series_id):
@@ -69,7 +69,7 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
     manual refresh, the insert/update branches in update_one_series)
     omit it and we fetch on demand as before.
     """
-    logging.debug(f'BAZARR Starting episodes sync from Sonarr for series ID {series_id}.')
+    logging.debug('BAZARR Starting episodes sync from Sonarr for series ID %s.', series_id)
     apikey_sonarr = settings.sonarr.apikey
 
     # Get current episodes for the series in ONE narrow-column SELECT.
@@ -203,14 +203,20 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
     # Remove old episodes from DB
     episodes_to_delete = list(set(current_episodes_id_db_list) - set(current_episodes_sonarr))
 
+    rows_changed = False
+
     if len(episodes_to_delete):
         try:
             database.execute(delete(TableEpisodes).where(TableEpisodes.sonarrEpisodeId.in_(episodes_to_delete)))
         except IntegrityError as e:
-            logging.error(f"BAZARR cannot delete episodes because of {e}")
+            logging.error(f"BAZARR cannot delete episodes because of {e}")  # noqa: G004
         else:
-            for removed_episode in episodes_to_delete:
-                event_stream(type='episode', action='delete', payload=removed_episode)
+            # Per-row episode delete events used to fire one socketio
+            # packet per row here (5000 packets for an initial sync of a
+            # 5000-episode library). The frontend only needs to know that
+            # episodes for this series changed; we coalesce all per-row
+            # episode events into a single series.update emit at the end.
+            rows_changed = True
 
     # Insert new episodes in DB. Batch inserts in fixed-size chunks to
     # stay under bind-parameter limits (SQLite builds with the legacy
@@ -229,22 +235,22 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
             try:
                 database.execute(insert(TableEpisodes).values(chunk))
             except IntegrityError as batch_err:
-                logging.debug(f'BAZARR batched episode insert failed ({batch_err}); '
-                              f'falling back to per-row insert with update recovery')
+                logging.debug('BAZARR batched episode insert failed (%s); '
+                              'falling back to per-row insert with update recovery', batch_err)
                 for added_episode in chunk:
                     try:
                         database.execute(insert(TableEpisodes).values(added_episode))
                     except IntegrityError as e:
-                        logging.error(f"BAZARR cannot insert episodes because of {e}. We'll try to update it instead.")
+                        logging.error(f"BAZARR cannot insert episodes because of {e}. We'll try to update it instead.")  # noqa: G004
                         del added_episode['created_at_timestamp']
                         episodes_to_update.append(added_episode)
                     else:
                         store_subtitles(added_episode['path'], path_mappings.path_replace(added_episode['path']))
-                        event_stream(type='episode', payload=added_episode['sonarrEpisodeId'])
+                        rows_changed = True
             else:
                 for added_episode in chunk:
                     store_subtitles(added_episode['path'], path_mappings.path_replace(added_episode['path']))
-                    event_stream(type='episode', payload=added_episode['sonarrEpisodeId'])
+                    rows_changed = True
 
     # Update existing episodes in DB
     if len(episodes_to_update):
@@ -264,17 +270,17 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
                                  .values(updated_episode)
                                  .where(TableEpisodes.sonarrEpisodeId == updated_episode['sonarrEpisodeId']))
             except IntegrityError as e:
-                logging.error(f"BAZARR cannot update episodes because of {e}")
+                logging.error(f"BAZARR cannot update episodes because of {e}")  # noqa: G004
             else:
                 if (previous_episode_file_id != updated_episode['episode_file_id'] or
                         previous_episode_path != updated_episode['path']):
                     # Store subtitles for updated episode where path or episode_file_id changed
-                    logging.debug(f'BAZARR updating subtitles for episode {updated_episode["path"]}')
+                    logging.debug('BAZARR updating subtitles for episode %s', updated_episode["path"])
                     store_subtitles(updated_episode['path'], path_mappings.path_replace(updated_episode['path']))
                 else:
-                    logging.debug(f'BAZARR skipping subtitle update for episode {updated_episode["path"]} as path '
-                                  f'and episode_file_id unchanged')
-                event_stream(type='episode', action='update', payload=previous_episode_id)
+                    logging.debug('BAZARR skipping subtitle update for episode %s as path '
+                                  'and episode_file_id unchanged', updated_episode["path"])
+                rows_changed = True
 
     # Downloading missing subtitles
     series_data = database.execute(
@@ -288,15 +294,15 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
     else:
         if defer_search:
             logging.debug(
-                f'BAZARR searching for missing subtitles is deferred until scheduled task execution for this series: '
-                f'{series_data.title} ({series_data.year})')
+                'BAZARR searching for missing subtitles is deferred until scheduled task execution for this series: '
+                '%s (%s)', series_data.title, series_data.year)
         else:
             for episode in episodes_to_update + episodes_to_add:
                 episode_title = (f'{series_data.title} - S{episode["season"]:02d}E{episode["episode"]:02d} '
                                  f'- {episode["title"]}')
                 if _is_there_missing_subtitles(episode_id=episode['sonarrEpisodeId']):
                     if os.path.exists(path_mappings.path_replace(episode['path'])):
-                        logging.debug(f'BAZARR downloading missing subtitles for this episode: {episode_title}')
+                        logging.debug('BAZARR downloading missing subtitles for this episode: %s', episode_title)
                         jobs_queue.feed_jobs_pending_queue(job_name=f'Downloading missing subtitles for '
                                                                     f'{episode_title}',
                                                            module='subtitles.mass_download.series',
@@ -305,20 +311,27 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
                                                            kwargs={'no': episode['sonarrEpisodeId']},
                                                            is_signalr=is_signalr)
                     else:
-                        logging.debug(f'BAZARR cannot find this episode file yet (Sonarr may be slow to import episode '
-                                      f'between disks?). Searching for missing subtitles is deferred until scheduled '
-                                      f'task execution for this episode: {episode_title}')
+                        logging.debug('BAZARR cannot find this episode file yet (Sonarr may be slow to import episode '
+                                      'between disks?). Searching for missing subtitles is deferred until scheduled '
+                                      'task execution for this episode: %s', episode_title)
                 else:
                     if is_signalr and settings.general.notify_if_nothing_is_missing_for_signalr_event:
                         send_notifications(series_id, episode['sonarrEpisodeId'],
                                            "There are no missing subtitles in this episode.")
-                    logging.debug(f'BAZARR no missing subtitles for this episode: {episode_title}')
+                    logging.debug('BAZARR no missing subtitles for this episode: %s', episode_title)
 
-    logging.debug(f'BAZARR All episodes from series ID {series_id} synced from Sonarr into database.')
+    # One coalesced socketio packet per series replaces what used to be
+    # up to thousands of per-row episode events. The frontend already
+    # handles series.update for refresh purposes (used elsewhere via
+    # update_series). When nothing changed, stay silent.
+    if rows_changed:
+        event_stream(type='series', action='update', payload=int(series_id))
+
+    logging.debug('BAZARR All episodes from series ID %s synced from Sonarr into database.', series_id)
 
 
 def sync_one_episode(episode_id, defer_search=False, is_signalr=False):
-    logging.debug(f'BAZARR syncing this specific episode from Sonarr: {episode_id}')
+    logging.debug('BAZARR syncing this specific episode from Sonarr: %s', episode_id)
     apikey_sonarr = settings.sonarr.apikey
 
     # Check if there's a row in database for this episode ID
@@ -356,11 +369,11 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False):
                 delete(TableEpisodes)
                 .where(TableEpisodes.sonarrEpisodeId == episode_id))
         except IntegrityError as e:
-            logging.error(f"BAZARR cannot delete episode {existing_episode.path} because of {e}")
+            logging.error(f"BAZARR cannot delete episode {existing_episode.path} because of {e}")  # noqa: G004
         else:
             event_stream(type='episode', action='delete', payload=int(episode_id))
             logging.debug(
-                f'BAZARR deleted this episode from the database:{path_mappings.path_replace(existing_episode.path)}')
+                'BAZARR deleted this episode from the database:%s', path_mappings.path_replace(existing_episode.path))
         return
 
     # Update existing episodes in DB
@@ -372,12 +385,12 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False):
                 .values(episode)
                 .where(TableEpisodes.sonarrEpisodeId == episode_id))
         except IntegrityError as e:
-            logging.error(f"BAZARR cannot update episode {episode['path']} because of {e}")
+            logging.error(f"BAZARR cannot update episode {episode['path']} because of {e}")  # noqa: G004
         else:
             store_subtitles(episode['path'], path_mappings.path_replace(episode['path']))
             event_stream(type='episode', action='update', payload=int(episode_id))
             logging.debug(
-                f'BAZARR updated this episode into the database:{path_mappings.path_replace(episode["path"])}')
+                'BAZARR updated this episode into the database:%s', path_mappings.path_replace(episode["path"]))
 
     # Insert new episodes in DB
     elif episode and not existing_episode:
@@ -387,18 +400,18 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False):
                 insert(TableEpisodes)
                 .values(episode))
         except IntegrityError as e:
-            logging.error(f"BAZARR cannot insert episode {episode['path']} because of {e}")
+            logging.error(f"BAZARR cannot insert episode {episode['path']} because of {e}")  # noqa: G004
         else:
             store_subtitles(episode['path'], path_mappings.path_replace(episode['path']))
             event_stream(type='episode', action='update', payload=int(episode_id))
             logging.debug(
-                f'BAZARR inserted this episode into the database:{path_mappings.path_replace(episode["path"])}')
+                'BAZARR inserted this episode into the database:%s', path_mappings.path_replace(episode["path"]))
 
     # Downloading missing subtitles
     if defer_search:
         logging.debug(
-            f'BAZARR searching for missing subtitles is deferred until scheduled task execution for this episode: '
-            f'{path_mappings.path_replace(episode["path"])}')
+            'BAZARR searching for missing subtitles is deferred until scheduled task execution for this episode: '
+            '%s', path_mappings.path_replace(episode["path"]))
     else:
         series_title = database.execute(
             select(TableShows.title)
@@ -408,7 +421,7 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False):
                               f'{episode["title"]}')
 
         if os.path.exists(path_mappings.path_replace(episode["path"])):
-            logging.debug(f'BAZARR downloading missing subtitles for this episode: {episode_full_title}')
+            logging.debug('BAZARR downloading missing subtitles for this episode: %s', episode_full_title)
             if _is_there_missing_subtitles(episode_id=episode_id):
                 jobs_queue.feed_jobs_pending_queue(job_name=f'Downloading missing subtitles for {series_title}',
                                                    module='subtitles.mass_download.series',
@@ -420,11 +433,11 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False):
                 if is_signalr and settings.general.notify_if_nothing_is_missing_for_signalr_event:
                     send_notifications(episode["sonarrSeriesId"], episode_id,
                                        "There are no missing subtitles in this episode.")
-                logging.debug(f'BAZARR no missing subtitles for this episode: {episode_full_title}')
+                logging.debug('BAZARR no missing subtitles for this episode: %s', episode_full_title)
         else:
-            logging.debug(f'BAZARR cannot find this file yet (Sonarr may be slow to import episode between disks?). '
-                          f'Searching for missing subtitles is deferred until scheduled task execution for this episode'
-                          f': {episode_full_title}')
+            logging.debug('BAZARR cannot find this file yet (Sonarr may be slow to import episode between disks?). '
+                          'Searching for missing subtitles is deferred until scheduled task execution for this episode'
+                          ': %s', episode_full_title)
 
 
 def _is_there_missing_subtitles(series_id: int = None, episode_id: int = None) -> bool:

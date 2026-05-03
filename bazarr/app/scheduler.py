@@ -31,6 +31,7 @@ from utilities.health import check_health
 from utilities.backup import backup_to_zip
 
 from .config import settings
+from .database import database
 from .get_args import args
 from .event_handler import event_stream
 
@@ -61,6 +62,27 @@ def in_a_century():
     return century.year
 
 
+def _release_session_after_job(event):
+    """Drop the scoped_session bound to this APScheduler worker thread
+    after every job completes (success OR failure). Without this, the
+    thread-keyed scoped_session accumulates identity-map and Row state
+    across job runs, since the Flask request-teardown that normally
+    calls database.remove() never fires for scheduler-driven jobs.
+
+    APScheduler dispatches event listeners synchronously in the same
+    thread that ran the job (apscheduler/schedulers/base.py
+    _dispatch_event), so calling database.remove() here correctly
+    releases the session keyed to this worker thread.
+    """
+    try:
+        database.remove()
+    except Exception:
+        # Listener errors must not propagate into APScheduler's event
+        # bus or it will start swallowing other listeners. Log and move
+        # on; a failed cleanup is recoverable on the next job's listener.
+        logging.exception("BAZARR failed to release database session after job")
+
+
 class Scheduler:
 
     def __init__(self):
@@ -76,7 +98,7 @@ class Scheduler:
             logging.error("BAZARR cannot use the specified timezone and will use UTC instead.")
             self.timezone = tz.gettz("UTC")
         else:
-            logging.info(f"Scheduler will use this timezone: {self.timezone}")
+            logging.info(f"Scheduler will use this timezone: {self.timezone}")  # noqa: G004
 
         self.aps_scheduler = BackgroundScheduler({'apscheduler.timezone': self.timezone})
 
@@ -93,6 +115,8 @@ class Scheduler:
 
         self.aps_scheduler.add_listener(task_listener_add, EVENT_JOB_SUBMITTED)
         self.aps_scheduler.add_listener(task_listener_remove, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
+        self.aps_scheduler.add_listener(_release_session_after_job,
+                                        EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
 
         # configure all tasks
         self.__cache_cleanup_task()

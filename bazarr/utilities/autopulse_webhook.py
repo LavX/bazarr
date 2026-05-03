@@ -49,7 +49,7 @@ def generate_autopulse_config(decrypted_token=None):
         return _generate_config_from_template(autopulse_template, server_url, decrypted_token, server_name)
             
     except Exception as e:
-        logging.error(f"BAZARR error generating Autopulse config: {str(e)}")
+        logging.error(f"BAZARR error generating Autopulse config: {str(e)}")  # noqa: G004
         return None
 
 
@@ -76,7 +76,7 @@ def _get_autopulse_template():
             'database': 'sqlite'   # Default to SQLite database
         }
         
-        logging.debug(f"BAZARR requesting Autopulse template from: {autopulse_url}")
+        logging.debug(f"BAZARR requesting Autopulse template from: {autopulse_url}")  # noqa: G004
         
         response = _make_autopulse_request(
             autopulse_url,
@@ -90,20 +90,20 @@ def _get_autopulse_template():
             logging.debug("BAZARR received Autopulse configuration template")
             return template_data
         elif response.status_code == 401:
-            logging.warning(f"BAZARR Autopulse template API authentication failed (401). Check your credentials. Did you forget to save your settings?")
+            logging.warning(f"BAZARR Autopulse template API authentication failed (401). Check your credentials. Did you forget to save your settings?")  # noqa: F541, G004
             return None
         elif response.status_code == 400:
-            logging.warning(f"BAZARR Autopulse template API bad request (400). Check your webhook URL and credentials. Did you forget to save your settings?")
+            logging.warning(f"BAZARR Autopulse template API bad request (400). Check your webhook URL and credentials. Did you forget to save your settings?")  # noqa: F541, G004
             return None
         else:
-            logging.warning(f"BAZARR Autopulse template API failed with status {response.status_code}")
+            logging.warning(f"BAZARR Autopulse template API failed with status {response.status_code}")  # noqa: G004
             return None
             
     except requests.exceptions.RequestException as e:
-        logging.debug(f"BAZARR Autopulse template API request failed: {str(e)}. Did you forget to save your external webhook settings?")
+        logging.debug(f"BAZARR Autopulse template API request failed: {str(e)}. Did you forget to save your external webhook settings?")  # noqa: G004
         return None
     except Exception as e:
-        logging.error(f"BAZARR unexpected error calling Autopulse template API: {str(e)}")
+        logging.error(f"BAZARR unexpected error calling Autopulse template API: {str(e)}")  # noqa: G004
         return None
 
 
@@ -194,7 +194,7 @@ def _generate_config_from_template(template_data, server_url, decrypted_token, s
         }
         
     except Exception as e:
-        logging.error(f"BAZARR error generating config from template: {str(e)}")
+        logging.error(f"BAZARR error generating config from template: {str(e)}")  # noqa: G004
         return None
 
 
@@ -225,24 +225,24 @@ def call_external_webhook(subtitle_path, media_path, language, media_type):
         
         headers = {'User-Agent': os.environ.get("SZ_USER_AGENT", 'Bazarr')}
         
-        logging.debug(f"BAZARR calling external webhook: {webhook_url} for path: {parent_dir}")
+        logging.debug(f"BAZARR calling external webhook: {webhook_url} for path: {parent_dir}")  # noqa: G004
         
         # Make the webhook call with retry for network issues
         response = _make_webhook_request(full_url, auth, headers)
         
         if response.status_code == 200:
-            logging.info(f"BAZARR external webhook successful for {parent_dir}")
+            logging.info(f"BAZARR external webhook successful for {parent_dir}")  # noqa: G004
         elif response.status_code == 401:
-            logging.warning(f"BAZARR external webhook authentication failed (401) for {parent_dir}. Did you forget to save your external webhook settings?")
+            logging.warning(f"BAZARR external webhook authentication failed (401) for {parent_dir}. Did you forget to save your external webhook settings?")  # noqa: G004
         elif response.status_code == 400:
-            logging.warning(f"BAZARR external webhook bad request (400) for {parent_dir}. Check your webhook URL and credentials. Did you forget to save your external webhook settings?")
+            logging.warning(f"BAZARR external webhook bad request (400) for {parent_dir}. Check your webhook URL and credentials. Did you forget to save your external webhook settings?")  # noqa: G004
         else:
-            logging.warning(f"BAZARR external webhook failed with status {response.status_code} for {parent_dir}")
+            logging.warning(f"BAZARR external webhook failed with status {response.status_code} for {parent_dir}")  # noqa: G004
             
     except requests.exceptions.RequestException as e:
-        logging.error(f"BAZARR external webhook failed for {media_path}: {str(e)}. Did you forget to save your external webhook settings?")
+        logging.error(f"BAZARR external webhook failed for {media_path}: {str(e)}. Did you forget to save your external webhook settings?")  # noqa: G004
     except Exception as e:
-        logging.error(f"BAZARR unexpected error calling external webhook for {media_path}: {str(e)}")
+        logging.error(f"BAZARR unexpected error calling external webhook for {media_path}: {str(e)}")  # noqa: G004
 
 
 @retry(exceptions=(requests.exceptions.RequestException,), tries=3, delay=1, backoff=2, jitter=(0, 1))
@@ -279,8 +279,8 @@ def test_external_webhook_connection():
         webhook_url = _get_webhook_url()
         auth = _get_webhook_auth()
         
-        logging.debug(f"BAZARR webhook test - URL: {webhook_url}")
-        logging.debug(f"BAZARR webhook test - Auth: {auth is not None}")
+        logging.debug(f"BAZARR webhook test - URL: {webhook_url}")  # noqa: G004
+        logging.debug(f"BAZARR webhook test - Auth: {auth is not None}")  # noqa: G004
         
         if not webhook_url:
             logging.debug("BAZARR webhook test - No URL configured")
@@ -295,7 +295,7 @@ def test_external_webhook_connection():
         
         headers = {'User-Agent': os.environ.get("SZ_USER_AGENT", 'Bazarr')}
         
-        logging.debug(f"BAZARR testing external webhook: {test_url}")
+        logging.debug(f"BAZARR testing external webhook: {test_url}")  # noqa: G004
         
         response = requests.get(
             test_url,
@@ -337,7 +337,7 @@ def _get_webhook_url():
         if webhook_url:
             # Basic URL validation
             if not webhook_url.startswith(('http://', 'https://')):
-                logging.warning(f"BAZARR invalid webhook URL format: {webhook_url} (must start with http:// or https://)")
+                logging.warning(f"BAZARR invalid webhook URL format: {webhook_url} (must start with http:// or https://)")  # noqa: G004
                 return None
             return webhook_url
     
@@ -369,7 +369,7 @@ def _detect_path_rewrite():
         return pattern_result
         
     except Exception as e:
-        logging.debug(f"BAZARR path rewrite detection failed: {e}")
+        logging.debug(f"BAZARR path rewrite detection failed: {e}")  # noqa: G004
         return _empty_rewrite_config()
 
 
@@ -401,7 +401,7 @@ def _detect_smart_path_differences():
         return _empty_rewrite_config()
         
     except Exception as e:
-        logging.debug(f"BAZARR smart path detection failed: {e}")
+        logging.debug(f"BAZARR smart path detection failed: {e}")  # noqa: G004
         return _empty_rewrite_config()
 
 

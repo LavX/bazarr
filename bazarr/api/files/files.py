@@ -35,5 +35,5 @@ class BrowseBazarrFS(Resource):
         except Exception:
             return []
         for item in result['directories']:
-            data.append({'name': item['name'], 'children': True, 'path': item['path']})
+            data.append({'name': item['name'], 'children': True, 'path': item['path']})  # noqa: PERF401
         return marshal(data, self.get_response_model)

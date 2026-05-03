@@ -60,7 +60,7 @@ def subtitle():
 def test_subtitle(subtitle):
     assert subtitle.language == Language.fromietf("fr")
     assert subtitle.id == "d28b4d5b-7dcc-47b3-8232-fb02f081d135"
-    assert subtitle.hearing_impaired == False
+    assert subtitle.hearing_impaired == False  # noqa: E712
     assert subtitle.releases == ["480p.AMZN.WEB-DL.NTb"]
     assert subtitle.qualities == []
 
@@ -96,7 +96,7 @@ def test_subtitle_get_matches_release_group(episodes):
             "hearingImpaired": False,
             "downloadUri": "/download/abc",
             "qualities": [],
-            "qualities": [],
+            "qualities": [],  # noqa: F601
         },
     )
     matches = sub.get_matches(episodes["breaking_bad_s01e01"])

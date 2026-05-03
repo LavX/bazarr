@@ -1,9 +1,9 @@
 # coding=utf-8
 
 import logging
-import requests
 
 from app.config import settings, get_ssl_verify
+from sonarr.http_session import sonarr_session
 from sonarr.info import sonarr_headers, url_api_sonarr
 
 
@@ -14,7 +14,7 @@ def notify_sonarr(sonarr_series_id):
             'name': 'RescanSeries',
             'seriesId': int(sonarr_series_id)
         }
-        requests.post(url, json=data, timeout=int(settings.sonarr.http_timeout), verify=get_ssl_verify('sonarr'),
-                      headers=sonarr_headers(settings.sonarr.apikey))
+        sonarr_session().post(url, json=data, timeout=int(settings.sonarr.http_timeout), verify=get_ssl_verify('sonarr'),
+                              headers=sonarr_headers(settings.sonarr.apikey))
     except Exception:
         logging.exception('BAZARR cannot notify Sonarr')

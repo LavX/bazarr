@@ -35,7 +35,7 @@ def process_episode_translation(item, source_language, target_language, forced, 
     ).first()
 
     if not episode:
-        logger.error(f'Episode {sonarr_episode_id} not found')
+        logger.error(f'Episode {sonarr_episode_id} not found')  # noqa: G004
         return False
 
     # Get series title
@@ -63,7 +63,7 @@ def process_episode_translation(item, source_language, target_language, forced, 
         )
 
     if not source_subtitle_path:
-        logger.error(f'No subtitle found for episode {sonarr_episode_id} (requested source: {source_language})')
+        logger.error(f'No subtitle found for episode {sonarr_episode_id} (requested source: {source_language})')  # noqa: G004
         return False
 
     # Use detected language if available
@@ -92,7 +92,7 @@ def process_episode_translation(item, source_language, target_language, forced, 
         event_stream(type='episode', payload=sonarr_episode_id)
         return True
     except Exception as e:
-        logger.error(f'Translation failed for episode {sonarr_episode_id}: {e}')
+        logger.error(f'Translation failed for episode {sonarr_episode_id}: {e}')  # noqa: G004
         return False
 
 def process_movie_translation(item, source_language, target_language, forced, hi, subtitle_path, job_id=None):
@@ -110,7 +110,7 @@ def process_movie_translation(item, source_language, target_language, forced, hi
     ).first()
 
     if not movie:
-        logger.error(f'Movie {radarr_id} not found')
+        logger.error(f'Movie {radarr_id} not found')  # noqa: G004
         return False
 
     # Update job name with actual movie title
@@ -131,7 +131,7 @@ def process_movie_translation(item, source_language, target_language, forced, hi
         )
 
     if not source_subtitle_path:
-        logger.error(f'No subtitle found for movie {radarr_id} (requested source: {source_language})')
+        logger.error(f'No subtitle found for movie {radarr_id} (requested source: {source_language})')  # noqa: G004
         return False
 
     # Use detected language if available
@@ -159,7 +159,7 @@ def process_movie_translation(item, source_language, target_language, forced, hi
         event_stream(type='movie', payload=radarr_id)
         return True
     except Exception as e:
-        logger.error(f'Translation failed for movie {radarr_id}: {e}')
+        logger.error(f'Translation failed for movie {radarr_id}: {e}')  # noqa: G004
         return False
 
 def find_subtitle_by_language(subtitles, language_code, video_path, media_type='movie'):
@@ -288,7 +288,7 @@ def extract_embedded_subtitle(video_path, language_code2, media_type):
     """
     target_alpha3 = alpha3_from_alpha2(language_code2)
     if not target_alpha3:
-        logger.error(f'Cannot convert language code {language_code2} to alpha3')
+        logger.error(f'Cannot convert language code {language_code2} to alpha3')  # noqa: G004
         return None
 
     # Look up file metadata needed by parse_video_metadata
@@ -348,7 +348,7 @@ def extract_embedded_subtitle(video_path, language_code2, media_type):
         track_id += 1
 
     if found_track is None:
-        logger.debug(f'No extractable embedded subtitle found for language {language_code2} in {video_path}')
+        logger.debug(f'No extractable embedded subtitle found for language {language_code2} in {video_path}')  # noqa: G004
         return None
 
     # Build output path in Bazarr's config dir so Jellyfin won't pick it up
@@ -360,7 +360,7 @@ def extract_embedded_subtitle(video_path, language_code2, media_type):
 
     # Skip extraction if already done
     if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-        logger.debug(f'Using previously extracted subtitle: {output_path}')
+        logger.debug(f'Using previously extracted subtitle: {output_path}')  # noqa: G004
         return output_path
 
     # Extract using ffmpeg
@@ -379,7 +379,7 @@ def extract_embedded_subtitle(video_path, language_code2, media_type):
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if result.returncode != 0:
-            logger.error(f'ffmpeg extraction failed for {video_path}: {result.stderr}')
+            logger.error(f'ffmpeg extraction failed for {video_path}: {result.stderr}')  # noqa: G004
             if os.path.exists(output_path):
                 os.remove(output_path)
             return None
@@ -390,16 +390,16 @@ def extract_embedded_subtitle(video_path, language_code2, media_type):
             if '\r' in content:
                 with open(output_path, 'w', encoding='utf-8') as f:
                     f.write(content.replace('\r', ''))
-            logger.info(f'Extracted embedded {language_code2} subtitle to: {output_path}')
+            logger.info(f'Extracted embedded {language_code2} subtitle to: {output_path}')  # noqa: G004
             return output_path
         return None
     except subprocess.TimeoutExpired:
-        logger.error(f'ffmpeg extraction timed out for {video_path}')
+        logger.error(f'ffmpeg extraction timed out for {video_path}')  # noqa: G004
         if os.path.exists(output_path):
             os.remove(output_path)
         return None
     except Exception as e:
-        logger.error(f'Failed to extract embedded subtitle: {e}')
+        logger.error(f'Failed to extract embedded subtitle: {e}')  # noqa: G004
         if os.path.exists(output_path):
             os.remove(output_path)
         return None

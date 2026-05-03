@@ -48,7 +48,7 @@ def movies_download_subtitles(no, job_id=None, job_sub_function=False):
     movie = database.execute(stmt).first()
 
     if not movie:
-        logging.debug(f"BAZARR no movie with that radarrId can be found in database: {no}")
+        logging.debug(f"BAZARR no movie with that radarrId can be found in database: {no}")  # noqa: G004
         jobs_queue.update_job_progress(job_id=job_id, progress_message="Movie not found in database.")
         return
     elif movie.subtitles is None:
@@ -63,7 +63,7 @@ def movies_download_subtitles(no, job_id=None, job_sub_function=False):
     moviePath = path_mappings.path_replace_movie(movie.path)
 
     if not os.path.exists(moviePath):
-        logging.debug(f"BAZARR movie file not found. Path mapping issue?: {moviePath}")
+        logging.debug(f"BAZARR movie file not found. Path mapping issue?: {moviePath}")  # noqa: G004
         jobs_queue.update_job_progress(job_id=job_id, progress_message=f"Movie path doesn't exists: {moviePath}")
         raise OSError
 

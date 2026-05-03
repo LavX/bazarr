@@ -15,16 +15,16 @@ from time import sleep
 from constants import HEADERS
 from app.event_handler import event_stream
 from sonarr.sync.episodes import sync_episodes, sync_one_episode
-from sonarr.sync.series import update_series, update_one_series
-from radarr.sync.movies import update_movies, update_one_movie
+from sonarr.sync.series import update_series, update_one_series  # noqa: F401
+from radarr.sync.movies import update_movies, update_one_movie  # noqa: F401
 from sonarr.info import get_sonarr_info, url_sonarr
 from radarr.info import url_radarr
 from app.database import TableShows, TableMovies, database, select
-from app.jobs_queue import jobs_queue
+from app.jobs_queue import jobs_queue  # noqa: F401
 
 from .config import settings
 from .scheduler import scheduler
-from .get_args import args
+from .get_args import args  # noqa: F401
 
 sonarr_queue = deque()
 radarr_queue = deque()
@@ -48,7 +48,7 @@ class SonarrSignalrClientLegacy:
     def start(self):
         if get_sonarr_info.is_legacy():
             logging.warning(
-                f'BAZARR can only sync from Sonarr v3 SignalR feed to get real-time update. You should consider '
+                f'BAZARR can only sync from Sonarr v3 SignalR feed to get real-time update. You should consider '  # noqa: G004
                 f'upgrading your version({get_sonarr_info.version()}).')
         else:
             self.connected = False
@@ -295,22 +295,22 @@ def dispatcher(data):
             return
 
         if topic == 'series':
-            logging.debug(f'Event received from Sonarr for series: {series_title} ({series_year})')
+            logging.debug(f'Event received from Sonarr for series: {series_title} ({series_year})')  # noqa: G004
             if episodesChanged:
                 # this will happen if a season's monitored status is changed.
                 sync_episodes(series_id=media_id, defer_search=settings.sonarr.defer_search_signalr, is_signalr=True)
             else:
                 update_one_series(series_id=media_id, action=action, is_signalr=True)
         elif topic == 'episode':
-            logging.debug(f'Event received from Sonarr for episode: {series_title} ({series_year}) - '
+            logging.debug(f'Event received from Sonarr for episode: {series_title} ({series_year}) - '  # noqa: G004
                           f'S{season_number:0>2}E{episode_number:0>2} - {episode_title}')
             sync_one_episode(episode_id=media_id, defer_search=settings.sonarr.defer_search_signalr, is_signalr=True)
         elif topic == 'movie':
-            logging.debug(f'Event received from Radarr for movie: {movie_title} ({movie_year})')
+            logging.debug(f'Event received from Radarr for movie: {movie_title} ({movie_year})')  # noqa: G004
             update_one_movie(movie_id=media_id, action=action, defer_search=settings.radarr.defer_search_signalr,
                              is_signalr=True)
     except Exception as e:
-        logging.debug(f'BAZARR an exception occurred while parsing SignalR feed: {repr(e)}')
+        logging.debug(f'BAZARR an exception occurred while parsing SignalR feed: {repr(e)}')  # noqa: G004
     finally:
         event_stream(type='badges')
         return

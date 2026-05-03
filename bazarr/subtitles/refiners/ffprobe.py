@@ -35,7 +35,7 @@ def refine_from_ffprobe(path, video):
                                     episode_file_id=file_id.episode_file_id)
 
     if not data or ('ffprobe' not in data and 'mediainfo' not in data):
-        logging.debug(f"No cache available for this file: {path}")
+        logging.debug(f"No cache available for this file: {path}")  # noqa: G004
         return video
 
     if data['ffprobe']:

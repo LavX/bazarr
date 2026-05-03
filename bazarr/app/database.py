@@ -10,9 +10,9 @@ import signal
 from dogpile.cache import make_region
 from datetime import datetime
 
-from sqlalchemy import create_engine, inspect, DateTime, ForeignKey, Integer, LargeBinary, Text, func, text, BigInteger
+from sqlalchemy import create_engine, inspect, DateTime, ForeignKey, Index, Integer, LargeBinary, Text, func, text, BigInteger
 # importing here to be indirectly imported in other modules later
-from sqlalchemy import update, delete, select, func  # noqa W0611
+from sqlalchemy import update, delete, select, func  # noqa: F401, F811
 from sqlalchemy.orm import scoped_session, sessionmaker, mapped_column, close_all_sessions
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.pool import NullPool
@@ -30,14 +30,20 @@ if POSTGRES_ENABLED_ENV:
 else:
     postgresql = settings.postgresql.enabled
 
-region = make_region().configure('dogpile.cache.memory')
+# Single-entry cache for update_profile_id_list(). No LRU bound is needed
+# (one key only). The 60s TTL is a safety net so a missed manual
+# invalidation does not pin stale profile data forever.
+region = make_region().configure(
+    'dogpile.cache.memory',
+    expiration_time=60,
+)
 
 migrations_directory = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'migrations')
 
 if postgresql:
     # insert is different between database types
-    from sqlalchemy.dialects.postgresql import insert  # noqa E402
-    from sqlalchemy.engine import URL, make_url  # noqa E402
+    from sqlalchemy.dialects.postgresql import insert
+    from sqlalchemy.engine import URL, make_url
 
     postgres_database = os.getenv("POSTGRES_DATABASE", settings.postgresql.database)
     postgres_username = os.getenv("POSTGRES_USERNAME", settings.postgresql.username)
@@ -70,14 +76,34 @@ if postgresql:
             port=postgres_port,
             database=postgres_database
         )
-    logger.debug(f"Connecting to PostgreSQL database: {url.render_as_string(hide_password=True)}")
-    
-    engine = create_engine(url, poolclass=NullPool, isolation_level="AUTOCOMMIT")
+    logger.debug(f"Connecting to PostgreSQL database: {url.render_as_string(hide_password=True)}")  # noqa: G004
+
+    # Postgres: use SQLAlchemy's default QueuePool. NullPool would force a
+    # fresh TCP+TLS handshake for every database.execute(...) call (~266
+    # callsites), which is catastrophic on Postgres. pool_pre_ping issues a
+    # cheap SELECT 1 before handing out a checked-out connection so stale
+    # connections (server-side timeout, network blip, db restart) are
+    # transparently recycled instead of surfacing as OperationalError.
+    # pool_recycle=1800 proactively retires connections after 30 minutes,
+    # which is below typical idle-timeout ceilings on managed Postgres.
+    engine = create_engine(
+        url,
+        pool_size=5,
+        max_overflow=10,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+        isolation_level="AUTOCOMMIT",
+    )
 else:
     # insert is different between database types
-    from sqlalchemy.dialects.sqlite import insert  # noqa E402
+    from sqlalchemy.dialects.sqlite import insert
     url = f'sqlite:///{os.path.join(args.config_dir, "db", "bazarr.db")}'
-    logger.debug(f"Connecting to SQLite database: {url}")
+    logger.debug(f"Connecting to SQLite database: {url}")  # noqa: G004
+    # SQLite: keep NullPool. SQLite's single-writer file-lock model produces
+    # "database is locked" errors when connections are pooled and shared
+    # across threads, so the safest pattern is one fresh connection per
+    # statement and let the WAL / busy_timeout PRAGMAs below absorb
+    # contention. Do NOT switch this to QueuePool.
     engine = create_engine(url, poolclass=NullPool, isolation_level="AUTOCOMMIT")
 
     from sqlalchemy.engine import Engine
@@ -93,7 +119,24 @@ else:
         cursor.execute("PRAGMA busy_timeout=60000")
         cursor.close()
 
-session_factory = sessionmaker(bind=engine)
+# Dev-only slow-query log. Gated by BAZARR_SQL_PROFILE env var; this
+# is a cheap function call and a hard early-return when disabled, so
+# we wire it once for both engines without branching.
+from utilities.sql_profiler import install_slow_query_log  # noqa: E402
+install_slow_query_log(engine)
+
+# sessionmaker defaults are wrong for this codebase's access pattern.
+# autoflush=False: bazarr writes through Core insert() / update() / delete()
+# constructs, never via session.add(); there is nothing for the session to
+# auto-flush, and leaving autoflush on would silently flush any future ORM
+# mutation right before unrelated SELECTs run, which is a surprise vector.
+# expire_on_commit=False: the engine runs in AUTOCOMMIT, so every statement
+# commits on its own. With the SQLAlchemy default (expire_on_commit=True),
+# every ORM instance returned by the session would be marked expired the
+# instant its statement commits, forcing an implicit re-SELECT the next
+# time any attribute is accessed. Disabling preserves the loaded values
+# for the natural lifetime of the consuming code.
+session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 database = scoped_session(session_factory)
 
 
@@ -138,7 +181,7 @@ class TableBlacklist(Base):
     provider = mapped_column(Text)
     sonarr_episode_id = mapped_column(Integer, ForeignKey('table_episodes.sonarrEpisodeId', ondelete='CASCADE'))
     sonarr_series_id = mapped_column(Integer, ForeignKey('table_shows.sonarrSeriesId', ondelete='CASCADE'))
-    subs_id = mapped_column(Text)
+    subs_id = mapped_column(Text, index=True)
     timestamp = mapped_column(DateTime, default=datetime.now)
 
 
@@ -149,7 +192,7 @@ class TableBlacklistMovie(Base):
     language = mapped_column(Text)
     provider = mapped_column(Text)
     radarr_id = mapped_column(Integer, ForeignKey('table_movies.radarrId', ondelete='CASCADE'))
-    subs_id = mapped_column(Text)
+    subs_id = mapped_column(Text, index=True)
     timestamp = mapped_column(DateTime, default=datetime.now)
 
 
@@ -161,7 +204,7 @@ class TableEpisodes(Base):
     audio_language = mapped_column(Text)
     created_at_timestamp = mapped_column(DateTime)
     episode = mapped_column(Integer, nullable=False)
-    episode_file_id = mapped_column(Integer)
+    episode_file_id = mapped_column(Integer, index=True)
     failedAttempts = mapped_column(Text)
     ffprobe_cache = mapped_column(LargeBinary)
     file_size = mapped_column(BigInteger)
@@ -173,7 +216,7 @@ class TableEpisodes(Base):
     sceneName = mapped_column(Text)
     season = mapped_column(Integer, nullable=False)
     sonarrEpisodeId = mapped_column(Integer, primary_key=True)
-    sonarrSeriesId = mapped_column(Integer, ForeignKey('table_shows.sonarrSeriesId', ondelete='CASCADE'))
+    sonarrSeriesId = mapped_column(Integer, ForeignKey('table_shows.sonarrSeriesId', ondelete='CASCADE'), index=True)
     subtitles = mapped_column(Text)
     title = mapped_column(Text, nullable=False)
     tvdbId = mapped_column(Integer)
@@ -186,16 +229,20 @@ class TableEpisodes(Base):
 
 class TableHistory(Base):
     __tablename__ = 'table_history'
+    __table_args__ = (
+        Index('ix_table_history_video_path_language_timestamp',
+              'video_path', 'language', 'timestamp'),
+    )
 
     id = mapped_column(Integer, primary_key=True)
-    action = mapped_column(Integer, nullable=False)
+    action = mapped_column(Integer, nullable=False, index=True)
     description = mapped_column(Text, nullable=False)
     language = mapped_column(Text)
     provider = mapped_column(Text)
     score = mapped_column(Integer)
     score_out_of = mapped_column(Integer, nullable=True)
-    sonarrEpisodeId = mapped_column(Integer, ForeignKey('table_episodes.sonarrEpisodeId', ondelete='CASCADE'))
-    sonarrSeriesId = mapped_column(Integer, ForeignKey('table_shows.sonarrSeriesId', ondelete='CASCADE'))
+    sonarrEpisodeId = mapped_column(Integer, ForeignKey('table_episodes.sonarrEpisodeId', ondelete='CASCADE'), index=True)
+    sonarrSeriesId = mapped_column(Integer, ForeignKey('table_shows.sonarrSeriesId', ondelete='CASCADE'), index=True)
     subs_id = mapped_column(Text)
     subtitles_path = mapped_column(Text)
     timestamp = mapped_column(DateTime, nullable=False, default=datetime.now)
@@ -207,13 +254,17 @@ class TableHistory(Base):
 
 class TableHistoryMovie(Base):
     __tablename__ = 'table_history_movie'
+    __table_args__ = (
+        Index('ix_table_history_movie_video_path_language_timestamp',
+              'video_path', 'language', 'timestamp'),
+    )
 
     id = mapped_column(Integer, primary_key=True)
-    action = mapped_column(Integer, nullable=False)
+    action = mapped_column(Integer, nullable=False, index=True)
     description = mapped_column(Text, nullable=False)
     language = mapped_column(Text)
     provider = mapped_column(Text)
-    radarrId = mapped_column(Integer, ForeignKey('table_movies.radarrId', ondelete='CASCADE'))
+    radarrId = mapped_column(Integer, ForeignKey('table_movies.radarrId', ondelete='CASCADE'), index=True)
     score = mapped_column(Integer)
     score_out_of = mapped_column(Integer, nullable=True)
     subs_id = mapped_column(Text)
@@ -257,7 +308,7 @@ class TableMovies(Base):
     overview = mapped_column(Text)
     path = mapped_column(Text, nullable=False, unique=True)
     poster = mapped_column(Text)
-    profileId = mapped_column(Integer, ForeignKey('table_languages_profiles.profileId', ondelete='SET NULL'))
+    profileId = mapped_column(Integer, ForeignKey('table_languages_profiles.profileId', ondelete='SET NULL'), index=True)
     radarrId = mapped_column(Integer, primary_key=True)
     resolution = mapped_column(Text)
     sceneName = mapped_column(Text)
@@ -316,7 +367,7 @@ class TableShows(Base):
     overview = mapped_column(Text)
     path = mapped_column(Text, nullable=False, unique=True)
     poster = mapped_column(Text)
-    profileId = mapped_column(Integer, ForeignKey('table_languages_profiles.profileId', ondelete='SET NULL'))
+    profileId = mapped_column(Integer, ForeignKey('table_languages_profiles.profileId', ondelete='SET NULL'), index=True)
     seriesType = mapped_column(Text)
     sonarrSeriesId = mapped_column(Integer, primary_key=True)
     sortTitle = mapped_column(Text)
@@ -400,26 +451,26 @@ def get_exclusion_clause(exclusion_type):
     if exclusion_type == 'series':
         tagsList = settings.sonarr.excluded_tags
         for tag in tagsList:
-            where_clause.append(~(TableShows.tags.contains(f"\'{tag}\'")))
+            where_clause.append(~(TableShows.tags.contains(f"\'{tag}\'")))  # noqa: PERF401
     else:
         tagsList = settings.radarr.excluded_tags
         for tag in tagsList:
-            where_clause.append(~(TableMovies.tags.contains(f"\'{tag}\'")))
+            where_clause.append(~(TableMovies.tags.contains(f"\'{tag}\'")))  # noqa: PERF401
 
     if exclusion_type == 'series':
         monitoredOnly = settings.sonarr.only_monitored
         if monitoredOnly:
-            where_clause.append((TableEpisodes.monitored == 'True'))  # noqa E712
-            where_clause.append((TableShows.monitored == 'True'))  # noqa E712
+            where_clause.append((TableEpisodes.monitored == 'True'))
+            where_clause.append((TableShows.monitored == 'True'))
     else:
         monitoredOnly = settings.radarr.only_monitored
         if monitoredOnly:
-            where_clause.append((TableMovies.monitored == 'True'))  # noqa E712
+            where_clause.append((TableMovies.monitored == 'True'))
 
     if exclusion_type == 'series':
         typesList = settings.sonarr.excluded_series_types
         for item in typesList:
-            where_clause.append((TableShows.seriesType != item))
+            where_clause.append((TableShows.seriesType != item))  # noqa: PERF401
 
         exclude_season_zero = settings.sonarr.exclude_season_zero
         if exclude_season_zero:
@@ -517,7 +568,7 @@ def get_audio_profile_languages(audio_languages_list_str):
                 )
             else:
                 if und_default_language:
-                    logging.debug(f"Undefined language audio track treated as {und_default_language}")
+                    logging.debug(f"Undefined language audio track treated as {und_default_language}")  # noqa: G004
                     audio_languages.append(
                         {"name": und_default_language,
                          "code2": alpha2_from_language(und_default_language) or None,

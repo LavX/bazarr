@@ -28,7 +28,7 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
         logging.error('No subtitles to delete.')
         return False
 
-    if not os.path.splitext(subtitles_path)[1] in SUBTITLE_EXTENSIONS:
+    if not os.path.splitext(subtitles_path)[1] in SUBTITLE_EXTENSIONS:  # noqa: E713
         logging.error('BAZARR can only delete subtitles files.')
         return False
 
@@ -71,7 +71,7 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
         try:
             os.remove(pr(subtitles_path))
         except OSError:
-            logging.exception(f'BAZARR cannot delete subtitles file: {subtitles_path}')
+            logging.exception(f'BAZARR cannot delete subtitles file: {subtitles_path}')  # noqa: G004
             store_subtitles(prr(media_path), media_path)
             return False
         else:
@@ -101,7 +101,7 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
         try:
             os.remove(pr(subtitles_path))
         except OSError:
-            logging.exception(f'BAZARR cannot delete subtitles file: {subtitles_path}')
+            logging.exception(f'BAZARR cannot delete subtitles file: {subtitles_path}')  # noqa: G004
             store_subtitles_movie(prr(media_path), media_path)
             return False
         else:

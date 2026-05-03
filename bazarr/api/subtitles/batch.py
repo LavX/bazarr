@@ -7,7 +7,7 @@ from sqlalchemy import and_, or_, func
 from app.config import settings
 from app.database import TableHistory, TableHistoryMovie, TableEpisodes, TableMovies, database, select
 from app.jobs_queue import jobs_queue
-from subtitles.mass_operations import mass_batch_operation, VALID_ACTIONS
+from subtitles.mass_operations import mass_batch_operation, VALID_ACTIONS  # noqa: F401
 from ..utils import authenticate
 
 ACTION_LABELS = {

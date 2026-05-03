@@ -58,7 +58,7 @@ def _record_failed_attempt(ip):
 
         count = _login_attempts[ip][0]
         if count >= _MAX_ATTEMPTS:
-            logging.warning(f'Login rate limit triggered for {ip} after {count} failed attempts')
+            logging.warning(f'Login rate limit triggered for {ip} after {count} failed attempts')  # noqa: G004
 
 
 def _clear_failed_attempts(ip):

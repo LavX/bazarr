@@ -32,6 +32,6 @@ def _get_conflicting(path):
     conflicting = []
     for installed in unique_package_names:
         if installed in libs_packages:
-            conflicting.append(installed)
+            conflicting.append(installed)  # noqa: PERF401
 
     return conflicting

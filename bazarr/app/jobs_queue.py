@@ -169,7 +169,7 @@ class JobsQueue:
                     progress_max=progress_max,)
             )
         
-        logging.debug(f"Task {job_name} ({new_job_id}) added to queue")
+        logging.debug(f"Task {job_name} ({new_job_id}) added to queue")  # noqa: G004
         event_stream(type='jobs', action='update', payload={"job_id": new_job_id, "progress_value": None,
                                                             "status": "pending"})
         return new_job_id
@@ -430,7 +430,7 @@ class JobsQueue:
                 except ValueError:
                     return False
                 else:
-                    logging.debug(f"Task {job.job_name} ({job.job_id}) removed from queue")
+                    logging.debug(f"Task {job.job_name} ({job.job_id}) removed from queue")  # noqa: G004
                     event_stream(type='jobs', action='delete', payload={"job_id": job.job_id})
                     return True
         return False
@@ -458,7 +458,7 @@ class JobsQueue:
                 except ValueError:
                     return False
                 except Exception as e:
-                    logging.exception(f"Unhandled exception while trying to move job {job.job_name} ({job.job_id}) in "
+                    logging.exception(f"Unhandled exception while trying to move job {job.job_name} ({job.job_id}) in "  # noqa: G004
                                       f"pending queue: {e}")
                     return False
                 else:
@@ -467,10 +467,10 @@ class JobsQueue:
                     elif move_destination == 'bottom':
                         self.jobs_pending_queue.append(job)
                     else:
-                        logging.error(f"Invalid move destination: {move_destination}. Accepted values are 'top' and "
+                        logging.error(f"Invalid move destination: {move_destination}. Accepted values are 'top' and "  # noqa: G004
                                       f"'bottom'")
                         return False
-                    logging.debug(f"Task {job.job_name} ({job.job_id}) moved to {move_destination} of the pending "
+                    logging.debug(f"Task {job.job_name} ({job.job_id}) moved to {move_destination} of the pending "  # noqa: G004
                                   f"queue")
                     event_stream(type='jobs', action='update', payload={"job_id": job.job_id})
                     return True
@@ -489,7 +489,7 @@ class JobsQueue:
         for job in self.jobs_running_queue:
             if job.job_id == job_id:
                 job.cancelled = True
-                logging.info(f"Job {job.job_name} ({job.job_id}) marked for cancellation")
+                logging.info(f"Job {job.job_name} ({job.job_id}) marked for cancellation")  # noqa: G004
                 return True
         return False
 
@@ -523,7 +523,7 @@ class JobsQueue:
         :rtype: bool
         """
         if queue_name in ['pending', 'failed', 'completed']:
-            logging.debug(f"Emptying jobs queue for {queue_name} jobs")
+            logging.debug(f"Emptying jobs queue for {queue_name} jobs")  # noqa: G004
             getattr(self, f'jobs_{queue_name}_queue').clear()
             return True
         return False
@@ -609,7 +609,7 @@ class JobsQueue:
                 payload["progress_message"] = job.progress_message
             event_stream(type='jobs', action='update', payload=payload)
 
-            logging.debug(f"Running job {job.job_name} (id {job.job_id}): "
+            logging.debug(f"Running job {job.job_name} (id {job.job_id}): "  # noqa: G004
                           f"{job.module}.{job.func}({job.args}, {job.kwargs})")
             
             # Use import lock to prevent deadlocks
@@ -618,7 +618,7 @@ class JobsQueue:
             
             job.job_returned_value = getattr(module, job.func)(*job.args, **job.kwargs)
         except JobCancelled:
-            logging.info(f"Job {job.job_name} ({job.job_id}) was cancelled by user")
+            logging.info(f"Job {job.job_name} ({job.job_id}) was cancelled by user")  # noqa: G004
             job.status = 'completed'
             job.progress_message = "Cancelled by user"
             job.last_run_time = datetime.now()
@@ -626,7 +626,7 @@ class JobsQueue:
             self.jobs_completed_queue.append(job)
             return False
         except Exception as e:
-            logging.exception(f"Exception raised while running function: {e}")
+            logging.exception(f"Exception raised while running function: {e}")  # noqa: G004
             job.status = 'failed'
             job.last_run_time = datetime.now()
             self.jobs_running_queue.remove(job)
@@ -649,7 +649,7 @@ class JobsQueue:
                 }
                 event_stream(type='jobs', action='update', payload=payload)
             except Exception as e:
-                logging.exception(f"Exception raised while sending event: {e}")
+                logging.exception(f"Exception raised while sending event: {e}")  # noqa: G004
 
 
 jobs_queue = JobsQueue()

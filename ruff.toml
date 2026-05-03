@@ -1,0 +1,33 @@
+# Bazarr+ ruff config. Conservative ruleset: keep ruff's defaults (E + F),
+# add PERF (perflint) and G (logging-format). RUF100 catches dead noqa
+# directives so cleanup work removes them rather than letting them rot.
+# New rules are baselined with `# noqa` on the existing offenders so
+# this PR is regression prevention only, not a cleanup pass. Future
+# PRs may remove specific noqa lines as offenders are fixed.
+target-version = "py312"
+
+# Vendored or generated trees. We do not own these and do not lint them.
+extend-exclude = [
+    "libs",
+    "custom_libs",
+    "bazarr/ai-subtitle-translator",
+    "frontend",
+    "bazarr-binaries",
+    ".worktrees",
+    ".vite",
+    ".pytest_cache",
+    ".ruff_cache",
+]
+
+[lint]
+select = ["E", "F", "PERF", "G", "RUF100"]
+
+# Ruff defaults flag E501 (line length). The existing codebase has
+# many over-100-char lines that aren't in PERF/G scope. Leave E501 off
+# in this baseline; flag it as a separate cleanup pass if desired.
+ignore = ["E501"]
+
+[lint.per-file-ignores]
+# Migrations are auto-generated Alembic files; we accept their style
+# without policing PERF/G specifically.
+"migrations/versions/*.py" = ["G004", "PERF"]

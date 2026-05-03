@@ -36,7 +36,7 @@ def browse_bazarr_filesystem(path='#'):
             dir_list = [f for f in os.listdir(path) if os.path.isdir(os.path.join(path, f))]
     else:
         if _is_path_blocked(path):
-            logging.warning(f'Filesystem browse blocked for restricted path: {path}')
+            logging.warning(f'Filesystem browse blocked for restricted path: {path}')  # noqa: G004
             return {'directories': [], 'parent': os.path.dirname(path)}
         dir_list = [f for f in os.listdir(path) if os.path.isdir(os.path.join(path, f))]
 

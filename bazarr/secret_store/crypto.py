@@ -88,7 +88,7 @@ def get_master_key(settings_obj=None) -> str:
     bazarr config to be loaded.
     """
     if settings_obj is None:
-        from app.config import settings as settings_obj  # noqa: PLC0415
+        from app.config import settings as settings_obj  # noqa: PLC0415, RUF100
 
     general = settings_obj.general
     key = getattr(general, "secrets_encryption_key", None)

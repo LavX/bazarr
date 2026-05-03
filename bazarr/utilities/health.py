@@ -44,7 +44,7 @@ def get_health_issues():
             .where(TableShowsRootfolder.accessible == 0)) \
             .all()
         for item in rootfolder:
-            health_issues.append({'object': path_mappings.path_replace(item.path),
+            health_issues.append({'object': path_mappings.path_replace(item.path),  # noqa: PERF401
                                   'issue': item.error})
 
     # get Radarr rootfolder issues
@@ -56,7 +56,7 @@ def get_health_issues():
             .where(TableMoviesRootfolder.accessible == 0)) \
             .all()
         for item in rootfolder:
-            health_issues.append({'object': path_mappings.path_replace_movie(item.path),
+            health_issues.append({'object': path_mappings.path_replace_movie(item.path),  # noqa: PERF401
                                   'issue': item.error})
 
     # get languages profiles duplicate ids issues when there's a cutoff set

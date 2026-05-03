@@ -2,9 +2,9 @@
 # fmt: off
 
 import logging
-import time
+import time  # noqa: F401
 import requests
-from collections import namedtuple
+from collections import namedtuple  # noqa: F401
 from datetime import timedelta
 
 from app.config import settings
@@ -40,7 +40,7 @@ class AniListClient(object):
         mapped_tag = tag_map.get(candidate_id_name, candidate_id_name)        
         
         obj = [obj for obj in anime_list if mapped_tag in obj and str(obj[mapped_tag]) == str(candidate_id_value)]
-        logger.debug(f"Based on '{mapped_tag}': '{candidate_id_value}', anime-list matched: {obj}")
+        logger.debug(f"Based on '{mapped_tag}': '{candidate_id_value}', anime-list matched: {obj}")  # noqa: G004
 
         if len(obj) > 0:
             anilist_id = obj[0].get("anilist_id")
@@ -49,7 +49,7 @@ class AniListClient(object):
             
             return anilist_id
         else:
-            logger.debug(f"Could not find corresponding AniList ID with '{mapped_tag}': {candidate_id_value}")
+            logger.debug(f"Could not find corresponding AniList ID with '{mapped_tag}': {candidate_id_value}")  # noqa: G004
         
         return None
 
@@ -74,7 +74,7 @@ def refine_anilist_ids(video):
         
     candidate_id_value = getattr(video, candidate_id_name, None)
     if not candidate_id_value:
-        logger.error(f"Found no value for property {candidate_id_name} of video.")
+        logger.error(f"Found no value for property {candidate_id_name} of video.")  # noqa: G004
         return video
     
     anilist_id = anilist_client.get_series_id(candidate_id_name, candidate_id_value)

@@ -6,15 +6,15 @@ decrypter. Auto-migration end-to-end (load plaintext config -> live
 plaintext memory -> persist as ciphertext -> reload -> decrypt back) is
 covered in commit 5's test_secret_store_e2e.py.
 """
-from unittest.mock import patch
+from unittest.mock import patch  # noqa: F401
 
 import pytest
 
 from secret_store.crypto import (
     SECRET_MARKER_PREFIX,
     encrypt_secret,
-    get_master_key,
-    is_encrypted,
+    get_master_key,  # noqa: F401
+    is_encrypted,  # noqa: F401
 )
 from secret_store.migration import (
     decrypt_settings_dict,
