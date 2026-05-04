@@ -335,6 +335,53 @@ def test_proxy_service_returns_connection_error_when_no_ip_reachable(monkeypatch
         assert "Cannot connect" in body["error"]
 
 
+def test_format_host_header_brackets_ipv6():
+    """RFC 7230 §5.4 requires IPv6 literals in the Host header to be
+    bracketed. urlparse(...).hostname strips brackets, so the helper
+    has to put them back. Codex P2 round 3."""
+    from app.ui import _format_host_header
+    # IPv6 with non-default port
+    assert _format_host_header("::1", 8989, "http") == "[::1]:8989"
+    # IPv6 with default HTTP port -> port omitted, brackets kept
+    assert _format_host_header("::1", 80, "http") == "[::1]"
+    # IPv6 link-local
+    assert _format_host_header("fe80::1", 8989, "http") == "[fe80::1]:8989"
+    # IPv4 unchanged
+    assert _format_host_header("127.0.0.1", 8989, "http") == "127.0.0.1:8989"
+    # Hostname unchanged
+    assert _format_host_header("sonarr.example.com", 443, "https") == "sonarr.example.com"
+    # Hostname with non-default https port
+    assert _format_host_header("sonarr.example.com", 8443, "https") == "sonarr.example.com:8443"
+    # original_port=None -> omitted
+    assert _format_host_header("sonarr.example.com", None, "http") == "sonarr.example.com"
+
+
+def test_proxy_service_brackets_ipv6_in_host_header(monkeypatch):
+    """Verify the IPv6 Host header makes it through proxy_service intact.
+    Without the bracketing fix, Sonarr/Radarr behind certain HTTP parsers
+    return 400 because Host: ::1:8989 is ambiguous (which colon is the
+    port separator?). Codex P2 round 3."""
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **kw: [_addr("::1")])
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = {"version": "4.0.0.0"}
+    with patch("app.ui.requests.get", return_value=resp) as fake_get:
+        app = _build_app()
+        client = app.test_client()
+        _login(client)
+        # Note: Flask's test_client URL-encodes %5B/%5D; we use the
+        # already-encoded form so the value reaches base_url unchanged.
+        client.get("/test/sonarr?url=http%3A//%5B%3A%3A1%5D%3A8989&apikey=k")
+        called_url = fake_get.call_args_list[0].args[0]
+        called_headers = fake_get.call_args_list[0].kwargs["headers"]
+        # Pinned URL still uses ::1 in bracketed form (the netloc
+        # construction already brackets IPv6)
+        assert "[::1]" in called_url
+        # Host header brackets the IPv6 literal correctly
+        assert called_headers["Host"] == "[::1]:8989"
+
+
 def test_proxy_service_pins_to_resolved_ip_for_http(monkeypatch):
     """DNS-rebinding mitigation preserved on HTTP: request goes to the
     resolved IP with Host: header set to the original hostname. TLS

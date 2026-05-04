@@ -305,6 +305,26 @@ def _validate_test_base_url(base):
     return parsed
 
 
+def _format_host_header(hostname, original_port, scheme):
+    """Build an RFC 7230 §5.4-compliant Host header value.
+
+    IPv6 literals MUST be bracketed in the Host header (`[::1]:8989`,
+    not `::1:8989`) because the colon is otherwise ambiguous with the
+    port separator. urlparse(...).hostname strips brackets, so we have
+    to put them back when emitting the header. Codex P2 from PR #95
+    review round 3.
+
+    Port is included only when non-default for the scheme, matching the
+    convention urllib3 follows when it generates Host headers itself.
+    """
+    is_ipv6 = ':' in hostname
+    host = f'[{hostname}]' if is_ipv6 else hostname
+    default_port = 443 if scheme == 'https' else 80
+    if original_port and original_port != default_port:
+        return f'{host}:{original_port}'
+    return host
+
+
 def _build_request_url(base_parsed, status_path, resolved_ip, hostname, pin):
     """Construct the (request_url, request_headers) pair for one probe.
 
@@ -332,7 +352,7 @@ def _build_request_url(base_parsed, status_path, resolved_ip, hostname, pin):
     pinned_netloc = (f'[{resolved_ip}]:{port}' if ':' in resolved_ip
                      else f'{resolved_ip}:{port}')
     pinned_url = parsed._replace(netloc=pinned_netloc).geturl()
-    headers['Host'] = hostname
+    headers['Host'] = _format_host_header(hostname, parsed.port, parsed.scheme)
     return pinned_url, headers
 
 
