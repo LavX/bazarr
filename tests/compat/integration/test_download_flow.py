@@ -77,8 +77,9 @@ def test_serve_subtitle_content_rejects_invalid_token():
 
 
 def test_fetch_subtitle_bytes_invokes_guard_before_download():
-    """_fetch_subtitle_bytes runs the SSRF guard, calls pool.download_subtitle(sub),
-    then returns sub.content bytes."""
+    """_fetch_subtitle_bytes runs the SSRF guard (resolve_safe_url, which
+    walks the redirect chain through assert_safe_outbound on every hop),
+    calls pool.download_subtitle(sub), then returns sub.content bytes."""
     from compat import service
     fake_sub = MagicMock()
     fake_sub.download_link = "https://safe.example.com/sub.srt"
@@ -86,10 +87,11 @@ def test_fetch_subtitle_bytes_invokes_guard_before_download():
     fake_sub.provider_name = "opensubtitlescom"
     fake_sub.content = b"1\n00:00:00,000 --> 00:00:01,000\nhi"
 
-    with patch("compat.service.assert_safe_outbound") as guard, \
+    with patch("compat.service.resolve_safe_url") as guard, \
+         patch("compat.service.assert_safe_outbound"), \
          patch("compat.service._get_compat_pool") as pool:
         pool.return_value.download_subtitle = MagicMock(return_value=None)
         out = service._fetch_subtitle_bytes(fake_sub)
-        assert guard.called, "assert_safe_outbound MUST be called before fetch"
+        assert guard.called, "resolve_safe_url MUST be called before fetch"
         assert out == fake_sub.content
         pool.return_value.download_subtitle.assert_called_once_with(fake_sub)

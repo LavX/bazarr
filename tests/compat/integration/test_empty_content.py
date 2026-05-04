@@ -21,7 +21,8 @@ def test_fetch_subtitle_bytes_returns_empty_on_missing_content():
     sub.url = None
     sub.provider_name = "os"
     sub.content = None  # provider returned nothing
-    with patch("compat.service.assert_safe_outbound"), \
+    with patch("compat.service.resolve_safe_url"), \
+         patch("compat.service.assert_safe_outbound"), \
          patch("compat.service._get_compat_pool") as pool:
         pool.return_value.download_subtitle = MagicMock(return_value=None)
         out = service._fetch_subtitle_bytes(sub)

@@ -81,6 +81,19 @@ def _jti_from_request() -> str | None:
 compat_bp = Blueprint("compat", __name__)
 
 
+@compat_bp.before_request
+def _enforce_runtime_disable():
+    """Refuse traffic when the operator toggles compat_endpoint.enabled
+    off at runtime. The blueprint is mounted at startup based on the
+    boot-time value, so without this guard a previously-enabled endpoint
+    keeps serving with the old token until restart. Codex P2: re-check
+    the live setting on every request and 503 if it has been disabled.
+    """
+    from app.config import settings
+    if not bool(settings.compat_endpoint.enabled):
+        return jsonify({"error": "compat endpoint disabled"}), 503
+
+
 @compat_bp.after_request
 def _strip_cors(resp):
     """Explicit CORS scope override (B4). No CORS for /api/v1/*."""

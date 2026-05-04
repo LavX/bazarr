@@ -37,6 +37,7 @@ def _guarantee_compat_secrets():
     """
     from app.config import settings
     _defaults = {
+        "enabled": True,
         "token": "t" * 32,
         "jwt_secret": "j" * 32,
         "file_id_secret": "f" * 32,
