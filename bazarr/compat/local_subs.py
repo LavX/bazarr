@@ -7,11 +7,20 @@ DB lookup and path-safety logic it needs inline.
 """
 from __future__ import annotations
 
+import ast as _ast
+import logging
 import os
 import struct
 import threading
 from collections import OrderedDict
 
+
+# Bound through a local name so the call site reads `_parse_literal(raw)`,
+# matching the same safe-parse contract Bazarr uses elsewhere
+# (see bazarr/api/utils.py for the same pattern on `subtitles` / `tags`).
+_parse_literal = _ast.literal_eval
+
+logger = logging.getLogger("bazarr.compat.local_subs")
 
 _CHUNK_SIZE = 64 * 1024  # 64 KB - OpenSubtitles algorithm constant
 
@@ -80,11 +89,6 @@ class _HashCache:
 
 
 _hash_cache = _HashCache()
-
-
-import logging
-
-logger = logging.getLogger("bazarr.compat.local_subs")
 
 
 def _tt(imdb_id: str | None) -> str:
@@ -246,14 +250,6 @@ def _resolve_media(imdb_id: str | None, season: int | None,
         if hit:
             return hit
     return None
-
-
-import ast as _ast
-
-# Bound through a local name so the call site is `_parse_literal(raw)`,
-# matching the same safe-parse contract Bazarr uses elsewhere
-# (see bazarr/api/utils.py for the same pattern on `subtitles` / `tags`).
-_parse_literal = _ast.literal_eval
 
 
 _CONVERTIBLE_FORMATS = frozenset({"srt", "ass", "ssa", "vtt", "sub", "smi", "ttml", "dfxp"})
