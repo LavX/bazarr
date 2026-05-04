@@ -121,6 +121,12 @@ class JobsQueue:
         self._job_id_lock = Lock()  # Separate lock for ID generation
         self._import_lock = Lock()  # Lock for module imports
 
+        # Throttle progress events: buffer latest payload per job, flush every 250 ms
+        self._progress_buffer = {}
+        self._progress_buffer_lock = Lock()
+        flush_thread = Thread(target=self._flush_progress_loop, daemon=True)
+        flush_thread.start()
+
     def feed_jobs_pending_queue(self, job_name, module, func, args: list = None, kwargs: dict = None,
                                 is_progress=False, is_signalr=False, progress_max: int = 0,):
         """
@@ -268,6 +274,15 @@ class JobsQueue:
         else:
             return None
 
+    def _flush_progress_loop(self):
+        while True:
+            sleep(0.25)
+            with self._progress_buffer_lock:
+                payloads = list(self._progress_buffer.values())
+                self._progress_buffer.clear()
+            for payload in payloads:
+                event_stream(type='jobs', action='update', payload=payload)
+
     def update_job_progress(self, job_id: int, progress_value: Union[int, str, None] = None,
                             progress_max: Union[int, None] = None, progress_message: str = ""):
         """
@@ -292,7 +307,8 @@ class JobsQueue:
                 if job.cancelled:
                     raise JobCancelled(f"Job {job.job_name} ({job.job_id}) was cancelled")
                 payload = self._build_progress_payload(job, progress_value, progress_max, progress_message)
-                event_stream(type='jobs', action='update', payload=payload)
+                with self._progress_buffer_lock:
+                    self._progress_buffer[job_id] = payload
                 return True
         return False
 
@@ -640,6 +656,10 @@ class JobsQueue:
             return True
         finally:
             try:
+                # Discard any buffered progress for this job so the completion
+                # event is always the last thing the client sees for it.
+                with self._progress_buffer_lock:
+                    self._progress_buffer.pop(job.job_id, None)
                 # Send a complete event payload with status and progress_value
                 # progress_value being None forces frontend to fetch a full job payload
                 payload = {
@@ -653,3 +673,4 @@ class JobsQueue:
 
 
 jobs_queue = JobsQueue()
+
