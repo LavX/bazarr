@@ -248,6 +248,70 @@ def _resolve_media(imdb_id: str | None, season: int | None,
     return None
 
 
+import ast as _ast
+
+# Bound through a local name so the call site is `_parse_literal(raw)`,
+# matching the same safe-parse contract Bazarr uses elsewhere
+# (see bazarr/api/utils.py for the same pattern on `subtitles` / `tags`).
+_parse_literal = _ast.literal_eval
+
+
+_CONVERTIBLE_FORMATS = frozenset({"srt", "ass", "ssa", "vtt", "sub", "smi", "ttml", "dfxp"})
+
+
+def _parse_subtitles_blob(raw) -> list:
+    """Parse Bazarr's repr-encoded `subtitles` column. Returns [] on any
+    failure. Wrapper exists so tests can mock the parser at one place."""
+    if not raw:
+        return []
+    try:
+        items = _parse_literal(raw)
+    except (ValueError, SyntaxError):
+        return []
+    return items if isinstance(items, list) else []
+
+
+def _parse_lang_code(code: str) -> tuple[str, str | None]:
+    """Parse a Bazarr lang code into (base, modifier).
+
+    "en"           -> ("en", None)
+    "en:hi"        -> ("en", "hi")
+    "pt-BR:forced" -> ("pt-BR", "forced")
+    """
+    if ":" in code:
+        base, mod = code.split(":", 1)
+    else:
+        base, mod = code, None
+    if mod and mod not in ("hi", "forced"):
+        mod = None
+    return base, mod
+
+
+def _parse_request_bcp47(code: str) -> tuple[str, str | None]:
+    """Split a BCP-47 request code into (base_alpha2, region)."""
+    if "-" in code:
+        base, region = code.split("-", 1)
+        return base.lower(), region.upper()
+    return code.lower(), None
+
+
+def _lang_matches(entry_base: str, request_base: str,
+                  request_region: str | None) -> bool:
+    e_parts = entry_base.split("-", 1)
+    e_base = e_parts[0].lower()
+    e_region = e_parts[1].upper() if len(e_parts) > 1 else None
+    if e_base != request_base.lower():
+        return False
+    if request_region is None:
+        return True
+    return e_region == request_region.upper()
+
+
+def _resolve_format(path: str) -> str | None:
+    ext = os.path.splitext(path)[1].lower().lstrip(".")
+    return ext if ext in _CONVERTIBLE_FORMATS else None
+
+
 # Module-level `database` symbol so tests can patch via
 # `compat.local_subs.database`. Real reference imported lazily.
 try:
