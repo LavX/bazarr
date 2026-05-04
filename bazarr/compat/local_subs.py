@@ -312,6 +312,77 @@ def _resolve_format(path: str) -> str | None:
     return ext if ext in _CONVERTIBLE_FORMATS else None
 
 
+def _select_local_subs(raw_subtitles, media_dir: str,
+                      requested_languages: list[str]) -> list[dict]:
+    """Filter Bazarr's `subtitles` column entries by requested languages
+    and surviving on-disk files.
+
+    Returns a list of intermediate dicts (NOT yet OS.com-shaped). Each:
+      {"lang": str, "modifier": "hi"|"forced"|None, "fmt": str,
+       "path": str (realpath inside media_dir), "filename": str,
+       "size": int, "mtime": float}
+
+    Path safety: each entry is realpath'd and required to live inside
+    realpath(media_dir). The caller is responsible for path-mapping the
+    raw subtitle paths *before* passing them in (the raw `subtitles`
+    column stores Sonarr/Radarr-side paths).
+    """
+    items = _parse_subtitles_blob(raw_subtitles)
+    if not items:
+        return []
+    requests = [_parse_request_bcp47(c) for c in requested_languages if c]
+    if not requests:
+        return []
+
+    media_dir_real = os.path.realpath(media_dir)
+    out: list[dict] = []
+    for item in items:
+        if not (isinstance(item, list) and len(item) >= 2):
+            continue
+        lang_code, raw_path = item[0], item[1]
+        if not (isinstance(lang_code, str) and isinstance(raw_path, str)
+                and raw_path):
+            continue
+
+        entry_base, modifier = _parse_lang_code(lang_code)
+
+        if not any(_lang_matches(entry_base, rb, rr) for rb, rr in requests):
+            continue
+
+        try:
+            real = os.path.realpath(raw_path)
+        except (OSError, ValueError):
+            continue
+        try:
+            common = os.path.commonpath([real, media_dir_real])
+        except ValueError:
+            continue
+        if common != media_dir_real:
+            continue
+        if not os.path.isfile(real):
+            continue
+
+        fmt = _resolve_format(real)
+        if fmt is None:
+            continue
+
+        try:
+            st = os.stat(real)
+        except OSError:
+            continue
+
+        out.append({
+            "lang": entry_base,
+            "modifier": modifier,
+            "fmt": fmt,
+            "path": real,
+            "filename": os.path.basename(real),
+            "size": st.st_size,
+            "mtime": st.st_mtime,
+        })
+    return out
+
+
 # Module-level `database` symbol so tests can patch via
 # `compat.local_subs.database`. Real reference imported lazily.
 try:
