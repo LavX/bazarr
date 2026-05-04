@@ -851,6 +851,14 @@ def serve_subtitle_content(stream_token: str) -> tuple[bytes, str]:
     ok, fpayload = auth.parse_file_id(fid)
     if not ok:
         raise FileNotFoundError("file_id expired or not found")
+
+    # Local-library payloads carry an explicit kind discriminator; serve
+    # them from disk (with on-the-fly format conversion) instead of the
+    # provider fanout pool.
+    if fpayload.get("kind") == "local":
+        from .local_subs import serve_local
+        return serve_local(fpayload)
+
     sub = fpayload.get("sub")
     # Surface the guard symbol so tests can patch it.
     _ = assert_safe_outbound
