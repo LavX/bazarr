@@ -358,6 +358,48 @@ def _convert_to_srt(raw: bytes, fmt: str) -> bytes:
         return b""
 
 
+_MAX_SUB_BYTES = 5 * 1024 * 1024
+
+
+def serve_local(payload: dict) -> tuple[bytes, str]:
+    """Validate, read, and (if needed) convert a local subtitle to SRT.
+
+    Returns (bytes, "application/x-subrip"). Empty bytes is a valid
+    response: it's the plugin signal for "broken sub, blocklist".
+    """
+    path = payload.get("path") or ""
+    media_dir = payload.get("media_dir") or ""
+    fmt = payload.get("fmt") or "srt"
+
+    try:
+        real = os.path.realpath(path)
+    except (OSError, ValueError):
+        raise FileNotFoundError("invalid path")
+    try:
+        media_dir_real = os.path.realpath(media_dir)
+        if os.path.commonpath([real, media_dir_real]) != media_dir_real:
+            raise FileNotFoundError("subtitle moved outside media dir")
+    except ValueError:
+        raise FileNotFoundError("invalid media dir")
+
+    if not os.path.isfile(real):
+        raise FileNotFoundError("subtitle missing on disk")
+
+    try:
+        size = os.path.getsize(real)
+    except OSError:
+        raise FileNotFoundError("subtitle stat failed")
+    if size > _MAX_SUB_BYTES:
+        raise FileNotFoundError(f"subtitle file too large ({size} bytes)")
+
+    with open(real, "rb") as f:
+        raw = f.read()
+
+    if fmt == "srt":
+        return _normalize_srt(raw), "application/x-subrip"
+    return _convert_to_srt(raw, fmt), "application/x-subrip"
+
+
 def _fetch_media_row(media_type: str, media_id: int):
     """Fetch the row needed to enumerate subtitles + media path."""
     from app.database import select, TableMovies, TableEpisodes
