@@ -305,23 +305,35 @@ def _validate_test_base_url(base):
     return parsed
 
 
-def _build_pinned_request(base_parsed, status_path, resolved_ip, hostname):
-    """Construct the (pinned_url, pinned_headers) tuple for a single
-    (IP, status_path) attempt. Path is hard-coded by the caller to a
-    known status endpoint; the user only contributes scheme, host, port,
-    and reverse-proxy base path.
+def _build_request_url(base_parsed, status_path, resolved_ip, hostname, pin):
+    """Construct the (request_url, request_headers) pair for one probe.
+
+    When `pin=True`, the URL is rewritten to use `resolved_ip` in the
+    netloc and a `Host:` header is set so DNS rebinding between resolve
+    and connect cannot redirect the request. This mode is correct for
+    HTTP and for HTTPS with TLS verification disabled.
+
+    When `pin=False`, the original hostname is preserved so urllib3 can
+    set SNI to the hostname and validate the TLS certificate against
+    it. This mode is correct for HTTPS with verify_ssl enabled. Pinning
+    in that case would replace the hostname with an IP literal in the
+    URL, urllib3 would set SNI to the IP, the server's cert (issued for
+    e.g. sonarr.example.com) would not match the IP, and TLS hostname
+    validation would fail every legitimate test. Codex P2.
     """
     base_path = (base_parsed.path or '').rstrip('/')
     test_path = base_path + status_path
     test_url = base_parsed._replace(path=test_path).geturl()
+    headers = dict(HEADERS)
+    if not pin:
+        return test_url, headers
     parsed = urlparse(test_url)
     port = parsed.port or (443 if parsed.scheme == 'https' else 80)
     pinned_netloc = (f'[{resolved_ip}]:{port}' if ':' in resolved_ip
                      else f'{resolved_ip}:{port}')
     pinned_url = parsed._replace(netloc=pinned_netloc).geturl()
-    pinned_headers = dict(HEADERS)
-    pinned_headers['Host'] = hostname
-    return pinned_url, pinned_headers
+    headers['Host'] = hostname
+    return pinned_url, headers
 
 
 @check_login
@@ -360,6 +372,22 @@ def proxy_service(service):
     except (ValueError, socket.gaierror) as e:
         return dict(status=False, error=f'Request blocked: {e}', code=0)
 
+    verify = (get_ssl_verify(service)
+              if config['has_verify_ssl_setting'] else True)
+    # Pin to a resolved IP only when TLS hostname validation is NOT
+    # going to do the work for us. For HTTPS + verify=True, the cert's
+    # SAN/CN check provides equivalent DNS-rebinding mitigation: an
+    # attacker who poisons DNS still cannot mint a valid cert for the
+    # hostname. Pinning in that case would replace the hostname with
+    # the IP literal in the URL, SNI would be set to the IP, and a
+    # legitimate cert installation would fail TLS validation. Codex P2.
+    pin_to_ip = not (base_parsed.scheme == 'https' and verify is True)
+    # When pinning is off, dual-stack fallback is unnecessary: urllib3
+    # already iterates DNS-resolved addresses internally during the
+    # actual GET. Iterate only the first usable IP slot in that case;
+    # `_build_request_url(pin=False)` ignores it.
+    candidate_ips = resolved_ips if pin_to_ip else resolved_ips[:1]
+
     last_response_code = 0
     last_error = None
     last_connection_error = None
@@ -369,23 +397,21 @@ def proxy_service(service):
     # ConnectionError so dual-stack hosts where one address family is
     # not actually listening (e.g. localhost -> ::1 first but only
     # 127.0.0.1 binds) still produce a successful test.
-    for resolved_ip in resolved_ips:
+    for resolved_ip in candidate_ips:
         if reachable_ip and reachable_ip != resolved_ip:
             # Already proven a different IP is reachable; do not
             # cross-probe additional addresses.
             break
         for status_path in config['paths']:
-            pinned_url, pinned_headers = _build_pinned_request(
-                base_parsed, status_path, resolved_ip, hostname
+            request_url, request_headers = _build_request_url(
+                base_parsed, status_path, resolved_ip, hostname, pin_to_ip
             )
             if apikey:
-                pinned_headers['X-Api-Key'] = apikey
-            verify = (get_ssl_verify(service)
-                      if config['has_verify_ssl_setting'] else True)
+                request_headers['X-Api-Key'] = apikey
             try:
-                result = requests.get(pinned_url, allow_redirects=False,
+                result = requests.get(request_url, allow_redirects=False,
                                       verify=verify,
-                                      timeout=5, headers=pinned_headers)
+                                      timeout=5, headers=request_headers)
             except requests.ConnectionError as e:
                 last_connection_error = repr(e)
                 # Cannot reach this IP; try the next one. Skip the

@@ -335,9 +335,11 @@ def test_proxy_service_returns_connection_error_when_no_ip_reachable(monkeypatch
         assert "Cannot connect" in body["error"]
 
 
-def test_proxy_service_pins_to_resolved_ip_with_host_header(monkeypatch):
-    """DNS-rebinding mitigation preserved: request goes to the resolved IP
-    with Host: header set to the original hostname."""
+def test_proxy_service_pins_to_resolved_ip_for_http(monkeypatch):
+    """DNS-rebinding mitigation preserved on HTTP: request goes to the
+    resolved IP with Host: header set to the original hostname. TLS
+    hostname validation does not run for HTTP, so pinning is the only
+    DNS-rebinding mitigation available."""
     monkeypatch.setattr("app.config.settings.auth.type", None)
     monkeypatch.setattr(socket, "getaddrinfo",
                         lambda *a, **kw: [_addr("203.0.113.42")])
@@ -347,8 +349,58 @@ def test_proxy_service_pins_to_resolved_ip_with_host_header(monkeypatch):
         app = _build_app()
         client = app.test_client()
         _login(client)
+        client.get("/test/sonarr?url=http://sonarr.example.com&apikey=k")
+        called_url = fake_get.call_args_list[0].args[0]
+        called_headers = fake_get.call_args_list[0].kwargs["headers"]
+        assert "203.0.113.42" in called_url
+        assert called_headers.get("Host") == "sonarr.example.com"
+
+
+def test_proxy_service_does_not_pin_for_https_with_verify(monkeypatch):
+    """Codex P2: when HTTPS is in use with verify_ssl=True, pinning the
+    URL to the resolved IP would set SNI to the IP and fail TLS
+    hostname validation against a cert legitimately issued for the
+    hostname. The hostname must be preserved in the URL so urllib3
+    sets SNI correctly and the cert validates."""
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **kw: [_addr("203.0.113.42")])
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = {"version": "4.0.0.0"}
+    with patch("app.ui.requests.get", return_value=resp) as fake_get, \
+         patch("app.ui.get_ssl_verify", return_value=True):
+        app = _build_app()
+        client = app.test_client()
+        _login(client)
+        client.get("/test/sonarr?url=https://sonarr.example.com&apikey=k")
+        called_url = fake_get.call_args_list[0].args[0]
+        called_headers = fake_get.call_args_list[0].kwargs["headers"]
+        # Hostname preserved -> TLS cert can validate
+        assert "sonarr.example.com" in called_url
+        assert "203.0.113.42" not in called_url
+        # No Host header override needed when URL already has the hostname
+        assert "Host" not in called_headers
+        # verify=True flowed through
+        assert fake_get.call_args_list[0].kwargs["verify"] is True
+
+
+def test_proxy_service_pins_for_https_when_verify_disabled(monkeypatch):
+    """Belt-and-suspenders for the verify=False case: with TLS
+    validation explicitly disabled, the only DNS-rebinding mitigation
+    left is IP pinning, so we DO pin in that case."""
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **kw: [_addr("203.0.113.42")])
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = {"version": "4.0.0.0"}
+    with patch("app.ui.requests.get", return_value=resp) as fake_get, \
+         patch("app.ui.get_ssl_verify", return_value=False):
+        app = _build_app()
+        client = app.test_client()
+        _login(client)
         client.get("/test/sonarr?url=https://sonarr.example.com&apikey=k")
         called_url = fake_get.call_args_list[0].args[0]
         called_headers = fake_get.call_args_list[0].kwargs["headers"]
         assert "203.0.113.42" in called_url
         assert called_headers.get("Host") == "sonarr.example.com"
+        assert fake_get.call_args_list[0].kwargs["verify"] is False
