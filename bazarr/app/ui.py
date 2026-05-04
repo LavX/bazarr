@@ -209,6 +209,157 @@ def _resolve_and_validate(url_str):
     return safe_ip, hostname, parsed
 
 
+def _resolve_and_validate_constrained(url_str):
+    """Relaxed twin of _resolve_and_validate for the connection-test path.
+
+    Caller hard-codes the request path to /api/system/status or
+    /api/v3/system/status, so an authenticated UI session can only probe
+    whether a Sonarr/Radarr-shaped service is listening at the user's
+    typed host:port. The bounded surface justifies allowing loopback,
+    link-local, and private targets that the strict guard rejects.
+
+    Loopback supports bare-metal installs where Bazarr+ and Sonarr both
+    bind to localhost. IPv6 link-local (fe80::/10) is the default for
+    every IPv6 NIC on a single-host install. IPv4 link-local
+    (169.254.0.0/16) is the DHCP fallback. None of these are valid
+    rejection targets once the path is locked.
+
+    The IP-class guard is reduced to a sanity filter: only multicast
+    and unspecified addresses are rejected because those cannot host a
+    TCP service. Everything else passes.
+
+    Returns (resolved_ip, hostname, parsed) or raises ValueError.
+    """
+    parsed = urlparse(url_str)
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("No hostname in URL")
+    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    addrs = socket.getaddrinfo(hostname, port)
+    if not addrs:
+        raise ValueError("DNS resolution returned no results")
+    safe_ip = None
+    for _, _, _, _, sockaddr in addrs:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if ip.is_multicast or ip.is_unspecified:
+            continue
+        safe_ip = sockaddr[0]
+        break
+    if safe_ip is None:
+        raise ValueError(
+            "No usable address resolved (multicast and unspecified are not valid TCP targets)"
+        )
+    return safe_ip, hostname, parsed
+
+
+_TEST_STATUS_PATHS = ('/api/system/status', '/api/v3/system/status')
+
+
+def _validate_test_base_url(base):
+    """Reject obviously hostile or nonsensical inputs. Allow reverse-proxy
+    base paths like /sonarr but refuse anything that smuggles a different
+    request via .., query string, or fragment.
+    """
+    parsed = urlparse(base)
+    if parsed.scheme not in ('http', 'https'):
+        raise ValueError('unsupported protocol')
+    if not parsed.hostname:
+        raise ValueError('missing host')
+    if parsed.query or parsed.fragment:
+        raise ValueError('query strings and fragments are not allowed in url')
+    if '..' in (parsed.path or ''):
+        raise ValueError('relative path segments are not allowed in url')
+    return parsed
+
+
+def _build_pinned_request(base_parsed, status_path, service):
+    """Construct the (pinned_url, pinned_headers, hostname) tuple for a
+    Sonarr/Radarr connection test. Path is hard-coded by the caller to
+    a known status endpoint; the user only contributes scheme, host, port,
+    and reverse-proxy base path.
+    """
+    base_path = (base_parsed.path or '').rstrip('/')
+    test_path = base_path + status_path
+    test_url = base_parsed._replace(path=test_path).geturl()
+    resolved_ip, hostname, parsed = _resolve_and_validate_constrained(test_url)
+    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    pinned_netloc = (f'[{resolved_ip}]:{port}' if ':' in resolved_ip
+                     else f'{resolved_ip}:{port}')
+    pinned_url = parsed._replace(netloc=pinned_netloc).geturl()
+    pinned_headers = dict(HEADERS)
+    pinned_headers['Host'] = hostname
+    return pinned_url, pinned_headers
+
+
+@check_login
+@ui_bp.route('/test/<service>', methods=['GET'])
+def proxy_service(service):
+    """Constrained connection tester for Sonarr/Radarr.
+
+    Frontend supplies only base URL and apikey via query params; backend
+    appends the known /api/[v3/]system/status path itself, so the surface
+    available to an authenticated UI session is bounded to a status probe
+    against the user-typed host:port. Loopback and link-local are allowed
+    targets here (bare-metal installs, single-NIC IPv6 hosts) because the
+    locked path makes the bounded surface safe.
+
+    See LavX/bazarr#92 for the original report and rationale.
+    """
+    if service not in ('sonarr', 'radarr'):
+        return dict(status=False, error='unsupported service', code=0)
+    base = (request.args.get('url') or '').strip()
+    apikey = (request.args.get('apikey') or '').strip()
+    if not base:
+        return dict(status=False, error='missing url', code=0)
+    if not apikey:
+        return dict(status=False, error='missing apikey', code=0)
+
+    try:
+        base_parsed = _validate_test_base_url(base)
+    except ValueError as e:
+        return dict(status=False, error=f'Request blocked: {e}', code=0)
+
+    last_response_code = 0
+    last_error = None
+    for status_path in _TEST_STATUS_PATHS:
+        try:
+            pinned_url, pinned_headers = _build_pinned_request(
+                base_parsed, status_path, service
+            )
+        except (ValueError, socket.gaierror) as e:
+            return dict(status=False, error=f'Request blocked: {e}', code=0)
+        pinned_headers['X-Api-Key'] = apikey
+        try:
+            result = requests.get(pinned_url, allow_redirects=False,
+                                  verify=get_ssl_verify(service),
+                                  timeout=5, headers=pinned_headers)
+        except Exception as e:
+            return dict(status=False, error=repr(e))
+        last_response_code = result.status_code
+        if result.status_code == 200:
+            try:
+                version = result.json()['version']
+                return dict(status=True, version=version, code=result.status_code)
+            except Exception:
+                last_error = 'Error Occurred. Check your settings.'
+                continue
+        elif result.status_code == 401:
+            return dict(status=False, error='Access Denied. Check API key.',
+                        code=result.status_code)
+        elif result.status_code == 404:
+            last_error = 'Cannot get version. Maybe unsupported legacy API call?'
+            continue
+        elif 300 <= result.status_code <= 399:
+            return dict(status=False, error='Wrong URL Base.', code=result.status_code)
+        else:
+            return dict(status=False,
+                        error=result.raise_for_status(),
+                        code=result.status_code)
+    return dict(status=False,
+                error=last_error or 'Cannot reach Sonarr/Radarr at the configured URL.',
+                code=last_response_code)
+
+
 @check_login
 @ui_bp.route('/test', methods=['GET'])
 @ui_bp.route('/test/<protocol>/<path:url>', methods=['GET'])
