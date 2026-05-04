@@ -547,6 +547,8 @@ validators = [
               default=1000, cast=int, gte=1, lte=1000000),
     Validator('compat_endpoint.downloads_window_seconds',
               default=86400, cast=int, gte=60, lte=2592000),
+    Validator('compat_endpoint.serve_local_subs',
+              default=True, is_type_of=bool),
     # OMDB: optional title/year resolution for movies that aren't in the
     # local library. Free tier at omdbapi.com (1000 req/day). Empty = skip.
     Validator('omdb.apikey', default='', cast=str),

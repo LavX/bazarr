@@ -84,3 +84,23 @@ def test_ttl_bounds_accept_valid_value():
     })
     s.validators.validate_all()
     assert s.compat_endpoint.cache_ttl_seconds == 1800
+
+
+def test_serve_local_subs_default_true():
+    """Empty config: serve_local_subs defaults to True (the new flag is on
+    by default for any operator who does not explicitly disable it)."""
+    s = _make_settings({})
+    s.validators.validate_all()
+    assert s.compat_endpoint.serve_local_subs is True
+
+
+def test_serve_local_subs_explicit_false_is_respected():
+    s = _make_settings({"compat_endpoint": {"serve_local_subs": False}})
+    s.validators.validate_all()
+    assert s.compat_endpoint.serve_local_subs is False
+
+
+def test_serve_local_subs_rejects_non_bool():
+    s = _make_settings({"compat_endpoint": {"serve_local_subs": "yes please"}})
+    with pytest.raises(ValidationError):
+        s.validators.validate_all()
