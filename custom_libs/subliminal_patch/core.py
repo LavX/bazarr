@@ -477,14 +477,17 @@ class SZProviderPool(ProviderPool):
     def list_subtitles_prioritized(self, video, languages, min_score=0, provider_order=None, compute_score=None):
         """List subtitles with priority-based provider search.
 
-        Search providers in priority order. If a provider returns subtitles
-        that meet the minimum score, don't query remaining providers.
+        Search providers in priority order. Stop only when every requested
+        language has at least one subtitle meeting min_score, or all providers
+        have been exhausted.
         """
         from .score import compute_score as default_compute_score
         compute_score = compute_score or default_compute_score
 
         all_subtitles = []
         providers_to_search = provider_order if provider_order else list(self.providers)
+        required_languages = {lang.alpha3 for lang in languages} if languages else set()
+        satisfied_languages = set()
 
         for name in providers_to_search:
             if name in self.discarded_providers:
@@ -515,8 +518,7 @@ class SZProviderPool(ProviderPool):
             if not valid_subtitles:
                 continue
 
-            # Check if any subtitle meets minimum score
-            found_good_subtitle = False
+            # Check which requested languages are satisfied by this provider's results
             for subtitle in valid_subtitles:
                 try:
                     matches = subtitle.get_matches(video)
@@ -525,14 +527,13 @@ class SZProviderPool(ProviderPool):
                     continue
                 score, _ = compute_score(matches, subtitle, video, False)
                 if score >= min_score:
-                    logger.info('Provider %s returned subtitle meeting min_score %d', name, min_score)
-                    found_good_subtitle = True
-                    break
+                    satisfied_languages.add(subtitle.language.alpha3)
 
             all_subtitles.extend(valid_subtitles)
 
-            if found_good_subtitle:
-                return all_subtitles  # Stop searching other providers
+            if required_languages and satisfied_languages >= required_languages:
+                logger.info('All requested languages satisfied after provider %s, stopping search', name)
+                return all_subtitles
 
         return all_subtitles
 
@@ -1375,3 +1376,4 @@ def refine(video, episode_refiners=None, movie_refiners=None, **kwargs):
             refiner_manager[refiner].plugin(video, **kwargs)
         except:
             logger.error('Failed to refine video: %s', traceback.format_exc())
+

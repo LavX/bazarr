@@ -109,13 +109,19 @@ jobs:
       - name: Determine Version
         id: version
         run: |
-          # Priority: workflow input > git tag > git describe > commit sha
+          # Priority: workflow input > git tag on HEAD > git ref > git describe
           if [ -n "${{ inputs.version_tag }}" ]; then
             VERSION="${{ inputs.version_tag }}"
           elif [ -n "${{ github.ref_name }}" ] && [[ "${{ github.ref_name }}" == v* ]]; then
             VERSION="${{ github.ref_name }}"
           else
-            VERSION=$(git describe --tags --always 2>/dev/null || echo "dev")
+            # Check if current commit has a version tag
+            TAG_ON_HEAD=$(git tag --points-at HEAD | grep '^v' | sort -V | tail -1)
+            if [ -n "$TAG_ON_HEAD" ]; then
+              VERSION="$TAG_ON_HEAD"
+            else
+              VERSION=$(git describe --tags --always 2>/dev/null || echo "dev")
+            fi
           fi
           
           # Remove 'v' prefix for semver
