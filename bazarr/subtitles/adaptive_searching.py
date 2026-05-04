@@ -153,12 +153,12 @@ def is_search_given_up(desired_language, attempt_string):
     elif max_age.endswith('d'):
         threshold = timedelta(days=int(max_age[:-1]))
     else:
-        logging.debug(f"Adaptive searching: cannot parse adaptive_searching_max_age from config: {max_age}")
+        logging.debug(f"Adaptive searching: cannot parse adaptive_searching_max_age from config: {max_age}")  # noqa: G004
         return False
 
     given_up = (last_ts - first_ts) >= threshold
     if given_up:
-        logging.debug(f"Adaptive searching: giving up on {desired_language} — span between first and last attempt "
+        logging.debug(f"Adaptive searching: giving up on {desired_language}: span between first and last attempt "  # noqa: G004
                       f"({last_ts - first_ts}) exceeds threshold ({threshold})")
     return given_up
 
