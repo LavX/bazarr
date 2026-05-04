@@ -191,6 +191,45 @@ def _resolve_by_query(query: str, media_type: str) -> tuple[str, int] | None:
         return None
 
 
+try:
+    from utilities.path_mappings import path_mappings
+except Exception:
+    path_mappings = None
+
+
+def _resolve_by_moviehash(moviehash: str, media_type: str) -> tuple[str, int] | None:
+    if not moviehash:
+        return None
+    target = str(moviehash).strip().lower()
+    if not target or len(target) != 16:
+        return None
+    from app.database import select, TableMovies, TableEpisodes
+    try:
+        if media_type == "episode":
+            rows = database.execute(
+                select(TableEpisodes.sonarrEpisodeId, TableEpisodes.path)
+            ).all()
+            for r in rows:
+                local = path_mappings.path_replace(r.path) if path_mappings else r.path
+                h = _hash_cache.get(local)
+                if h and h.lower() == target:
+                    return ("episode", int(r.sonarrEpisodeId))
+            return None
+        else:
+            rows = database.execute(
+                select(TableMovies.radarrId, TableMovies.path)
+            ).all()
+            for r in rows:
+                local = path_mappings.path_replace_movie(r.path) if path_mappings else r.path
+                h = _hash_cache.get(local)
+                if h and h.lower() == target:
+                    return ("movie", int(r.radarrId))
+            return None
+    except Exception as e:
+        logger.debug("compat local: moviehash resolve failed: %s", e)
+        return None
+
+
 def _resolve_media(imdb_id: str | None, season: int | None,
                    episode: int | None, media_type: str,
                    query: str | None, moviehash: str | None) -> tuple[str, int] | None:
@@ -200,6 +239,10 @@ def _resolve_media(imdb_id: str | None, season: int | None,
             return hit
     if query:
         hit = _resolve_by_query(query, media_type)
+        if hit:
+            return hit
+    if moviehash:
+        hit = _resolve_by_moviehash(moviehash, media_type)
         if hit:
             return hit
     return None

@@ -88,3 +88,47 @@ def test_resolve_query_unparseable_returns_none():
             query="garbage.dat", moviehash=None,
         )
     assert result is None
+
+
+def test_resolve_by_moviehash_iterates_library_files(tmp_path):
+    from compat import local_subs
+    f = tmp_path / "video.mkv"
+    f.write_bytes(b"\x00" * (1 << 20))
+
+    fake_episode = MagicMock(sonarrEpisodeId=7, path=str(f))
+
+    with patch("compat.local_subs.database") as db, \
+         patch("compat.local_subs._hash_cache") as hc, \
+         patch("compat.local_subs.path_mappings") as pm:
+        db.execute.side_effect = [
+            MagicMock(all=lambda: [fake_episode]),
+        ]
+        pm.path_replace.side_effect = lambda p: p
+        pm.path_replace_movie.side_effect = lambda p: p
+        hc.get.return_value = "deadbeefcafebabe"
+        result = local_subs._resolve_media(
+            imdb_id=None, season=None, episode=None, media_type="episode",
+            query=None, moviehash="deadbeefcafebabe",
+        )
+    assert result == ("episode", 7)
+
+
+def test_resolve_by_moviehash_no_match_returns_none(tmp_path):
+    from compat import local_subs
+    f = tmp_path / "video.mkv"
+    f.write_bytes(b"\x00" * 1024)
+    fake_episode = MagicMock(sonarrEpisodeId=7, path=str(f))
+    with patch("compat.local_subs.database") as db, \
+         patch("compat.local_subs._hash_cache") as hc, \
+         patch("compat.local_subs.path_mappings") as pm:
+        db.execute.side_effect = [
+            MagicMock(all=lambda: [fake_episode]),
+        ]
+        pm.path_replace.side_effect = lambda p: p
+        pm.path_replace_movie.side_effect = lambda p: p
+        hc.get.return_value = "0000000000000001"
+        result = local_subs._resolve_media(
+            imdb_id=None, season=None, episode=None, media_type="episode",
+            query=None, moviehash="ffffffffffffffff",
+        )
+    assert result is None
