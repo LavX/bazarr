@@ -1078,7 +1078,14 @@ def save_settings(settings_items):
         settings.validators.validate()
         validate_log_regex()
     except ValidationError:
+        # Re-decrypt after reload: settings.reload() pulls the on-disk
+        # ciphertext back into the live Dynaconf object, so without this
+        # second pass downstream code would see `enc:v1:` strings for
+        # API keys, auth credentials, provider passwords, and compat
+        # tokens until the next process restart. Codex P1.
         settings.reload()
+        migrate_legacy_plex_encryption(settings)
+        decrypt_settings_in_place(settings)
         raise
     else:
         write_config()
