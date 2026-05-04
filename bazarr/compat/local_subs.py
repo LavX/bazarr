@@ -130,11 +130,76 @@ def _resolve_by_imdb(imdb_id: str, season: int | None, episode: int | None,
         return None
 
 
+def _guessit_filename(filename: str) -> dict:
+    """Run guessit; return plain dict (never raises)."""
+    if not filename:
+        return {}
+    try:
+        from subliminal_patch.core import guessit as _g
+        return dict(_g(filename) or {})
+    except Exception as e:
+        logger.debug("compat local: guessit failed on %r: %s", filename, e)
+        return {}
+
+
+def _resolve_by_query(query: str, media_type: str) -> tuple[str, int] | None:
+    from app.database import select, TableMovies, TableShows, TableEpisodes
+    g = _guessit_filename(query)
+    title = (g.get("title") or "").strip()
+    if not title:
+        return None
+    try:
+        if media_type == "episode":
+            season = g.get("season")
+            episode = g.get("episode")
+            if season is None or episode is None:
+                return None
+            show = database.execute(
+                select(TableShows.sonarrSeriesId)
+                .where(TableShows.title.ilike(title))
+            ).first()
+            if not show:
+                show = database.execute(
+                    select(TableShows.sonarrSeriesId)
+                    .where(TableShows.alternativeTitles.ilike(f"%{title}%"))
+                ).first()
+            if not show:
+                return None
+            ep = database.execute(
+                select(TableEpisodes.sonarrEpisodeId)
+                .where(TableEpisodes.sonarrSeriesId == show.sonarrSeriesId)
+                .where(TableEpisodes.season == int(season))
+                .where(TableEpisodes.episode == int(episode))
+            ).first()
+            return ("episode", int(ep.sonarrEpisodeId)) if ep else None
+        else:
+            year = g.get("year")
+            rows = database.execute(
+                select(TableMovies.radarrId, TableMovies.year)
+                .where(TableMovies.title.ilike(title))
+            ).all()
+            if not rows:
+                return None
+            if year is not None:
+                year_str = str(year)
+                for r in rows:
+                    if str(r.year) == year_str:
+                        return ("movie", int(r.radarrId))
+            return ("movie", int(rows[0].radarrId))
+    except Exception as e:
+        logger.debug("compat local: query resolve failed: %s", e)
+        return None
+
+
 def _resolve_media(imdb_id: str | None, season: int | None,
                    episode: int | None, media_type: str,
                    query: str | None, moviehash: str | None) -> tuple[str, int] | None:
     if imdb_id:
         hit = _resolve_by_imdb(imdb_id, season, episode, media_type)
+        if hit:
+            return hit
+    if query:
+        hit = _resolve_by_query(query, media_type)
         if hit:
             return hit
     return None

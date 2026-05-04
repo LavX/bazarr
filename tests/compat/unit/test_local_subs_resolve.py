@@ -47,3 +47,44 @@ def test_resolve_imdb_miss_no_other_keys_returns_none():
             media_type="episode", query=None, moviehash=None,
         )
     assert result is None
+
+
+def test_resolve_by_guessit_episode_title_exact():
+    from compat import local_subs
+    fake_guess = {"title": "Breaking Bad", "season": 1, "episode": 2}
+    with patch("compat.local_subs._guessit_filename", return_value=fake_guess), \
+         patch("compat.local_subs.database") as db:
+        db.execute.side_effect = [
+            MagicMock(first=lambda: _show_row()),
+            MagicMock(first=lambda: _episode_row()),
+        ]
+        result = local_subs._resolve_media(
+            imdb_id="", season=None, episode=None, media_type="episode",
+            query="Breaking.Bad.S01E02.1080p.mkv", moviehash=None,
+        )
+    assert result == ("episode", 42)
+
+
+def test_resolve_by_guessit_movie_year_match():
+    from compat import local_subs
+    fake_guess = {"title": "Inception", "year": 2010}
+    with patch("compat.local_subs._guessit_filename", return_value=fake_guess), \
+         patch("compat.local_subs.database") as db:
+        wrong_year = _movie_row(radarrId=11, year="2009")
+        right_year = _movie_row(radarrId=22, year="2010")
+        db.execute.return_value.all.return_value = [wrong_year, right_year]
+        result = local_subs._resolve_media(
+            imdb_id="", season=None, episode=None, media_type="movie",
+            query="Inception.2010.mkv", moviehash=None,
+        )
+    assert result == ("movie", 22)
+
+
+def test_resolve_query_unparseable_returns_none():
+    from compat import local_subs
+    with patch("compat.local_subs._guessit_filename", return_value={}):
+        result = local_subs._resolve_media(
+            imdb_id="", season=None, episode=None, media_type="episode",
+            query="garbage.dat", moviehash=None,
+        )
+    assert result is None
