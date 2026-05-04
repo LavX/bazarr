@@ -11,7 +11,7 @@ from subliminal_patch.core_persistent import list_all_subtitles_parallel
 from app.config import settings
 from app.get_providers import get_providers_sorted, get_providers_auth
 from . import auth, cache as C, response_mapper as M
-from utilities.url_guard import assert_safe_outbound, UnsafeURLError  # noqa: F401
+from utilities.url_guard import assert_safe_outbound, resolve_safe_url, UnsafeURLError  # noqa: F401
 
 logger = logging.getLogger("bazarr.compat.service")
 
@@ -795,9 +795,15 @@ def _fetch_subtitle_bytes(sub) -> bytes:
     # guard just because `startswith` is byte-exact. Codex flagged this
     # as a bypass: the request would still hit the cloud-metadata
     # endpoint via pool.download_subtitle() with no SSRF check applied.
+    #
+    # Also walk the redirect chain via HEAD before invoking the pool. The
+    # provider HTTP client follows redirects automatically, so a public
+    # URL that 30x-redirects to 127.0.0.1 or 169.254.169.254 would
+    # otherwise fetch the private target with no per-hop SSRF check.
+    # Codex P1: pre-resolve every Location and refuse any unsafe hop.
     url = getattr(sub, "download_link", None) or getattr(sub, "url", None)
     if isinstance(url, str) and url[:8].lower().startswith(("http://", "https://")):
-        assert_safe_outbound(url)  # raises UnsafeURLError on private/loopback/etc.
+        resolve_safe_url(url)  # raises UnsafeURLError on any unsafe hop
 
     provider_name = getattr(sub, "provider_name", None)
     if not provider_name:
