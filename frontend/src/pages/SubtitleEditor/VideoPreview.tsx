@@ -201,6 +201,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
     const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const isPlayingRef = useRef(false);
     const lastReportedMsRef = useRef(-1);
+    const retryCountRef = useRef(0);
 
     const [playing, setPlaying] = useState(false);
     const [buffering, setBuffering] = useState(false);
@@ -209,6 +210,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
     const [currentMs, setCurrentMs] = useState(0);
     const [duration, setDuration] = useState(0);
     const [videoError, setVideoError] = useState(false);
+    const [streamKey, setStreamKey] = useState(0);
 
     const hasMedia = mediaType != null && mediaId != null;
     const apiKey = Environment.apiKey ?? "";
@@ -323,6 +325,12 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
         })
         .catch(() => setDirectPlay(false));
     }, [hasMedia, mediaType, mediaId, apiKey, onAudioTracksLoaded]);
+
+    // Reset retry state when media changes
+    useEffect(() => {
+      retryCountRef.current = 0;
+      setStreamKey(0);
+    }, [mediaType, mediaId]);
 
     // For transcoded mode, track the seek offset in the ffmpeg ?t= param
     const [seekOffsetSec, setSeekOffsetSec] = useState(0);
@@ -570,11 +578,28 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
     );
 
     const handlePlay = useCallback(() => {
+      retryCountRef.current = 0;
       isPlayingRef.current = true;
       setPlaying(true);
       onPlayStateChange?.(true);
       startTimeReporting();
     }, [onPlayStateChange, startTimeReporting]);
+
+    const handleVideoError = useCallback(() => {
+      if (!nativeSeek && retryCountRef.current < 3) {
+        retryCountRef.current++;
+        const video = videoRef.current;
+        if (video) {
+          const absoluteSec = seekOffsetSecRef.current + video.currentTime;
+          seekOffsetSecRef.current = absoluteSec;
+          setSeekOffsetSec(absoluteSec);
+        }
+        autoPlayAfterSeekRef.current = true;
+        setStreamKey((k) => k + 1);
+      } else {
+        setVideoError(true);
+      }
+    }, [nativeSeek]);
 
     const handlePause = useCallback(() => {
       isPlayingRef.current = false;
@@ -678,6 +703,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
           aria-label="Video preview"
         >
           <video
+            key={streamKey}
             ref={videoRef}
             src={videoSrc}
             muted={useExternalAudio}
@@ -688,7 +714,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
             onLoadedMetadata={handleLoadedMetadata}
             onWaiting={() => setBuffering(true)}
             onCanPlay={() => setBuffering(false)}
-            onError={() => setVideoError(true)}
+            onError={handleVideoError}
           />
           {audioSrc && (
             <audio
