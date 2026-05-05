@@ -49,6 +49,40 @@ def test_resolve_imdb_miss_no_other_keys_returns_none():
     assert result is None
 
 
+def test_imdb_candidates_includes_zero_padded_forms():
+    """Jellyfin and other OS-compat clients strip leading zeros on imdb_id.
+    Bazarr's DB stores the Sonarr/Radarr-supplied form, which keeps them.
+    The candidate set must include both for the lookup to succeed."""
+    from compat.local_subs import _imdb_candidates
+    cands = _imdb_candidates("481369")
+    assert "tt481369" in cands
+    assert "tt0481369" in cands  # 7-digit pad — the actual stored form for tt0481369
+    # Should also tolerate the zero-padded request
+    cands2 = _imdb_candidates("tt0481369")
+    assert "tt0481369" in cands2
+    assert "tt481369" in cands2  # bare-digit form too
+
+
+def test_resolve_by_imdb_movie_with_zero_stripped_request_hits_padded_db_row():
+    """Plugin sends 481369 (no leading zero); DB has tt0481369. Lookup
+    must succeed — Codex/Jellyfin contract."""
+    from compat import local_subs
+    from unittest.mock import patch, MagicMock
+    fake_movie = MagicMock(radarrId=99, imdbId="tt0481369", year="2007")
+    with patch("compat.local_subs.database") as db:
+        db.execute.return_value.first.return_value = fake_movie
+        result = local_subs._resolve_media(
+            imdb_id="481369",  # zero-stripped, as Jellyfin sends it
+            season=None, episode=None, media_type="movie",
+            query=None, moviehash=None,
+        )
+    assert result == ("movie", 99)
+    # Verify candidates list was used (IN clause)
+    call_args = db.execute.call_args[0][0]
+    compiled = str(call_args.compile(compile_kwargs={"literal_binds": True}))
+    assert "tt0481369" in compiled and "tt481369" in compiled
+
+
 def test_resolve_by_guessit_episode_title_exact():
     from compat import local_subs
     fake_guess = {"title": "Breaking Bad", "season": 1, "episode": 2}

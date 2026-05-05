@@ -102,17 +102,36 @@ def _tt(imdb_id: str | None) -> str:
     return f"tt{s}" if s.lstrip("0").isdigit() or s.isdigit() else ""
 
 
+def _imdb_candidates(imdb_id: str | None) -> list[str]:
+    """Build the set of plausible IMDb id strings the DB might store.
+
+    Jellyfin/OS-compat clients commonly strip leading zeros (sending
+    `481369` for `tt0481369`); Sonarr/Radarr keep them. So we generate
+    candidates: the as-supplied form, plus zero-padded widths 7, 8, 9
+    that cover historical and current IMDb id lengths. Empty list when
+    the input has no digits.
+    """
+    norm = _tt(imdb_id)
+    if not norm:
+        return []
+    digits = norm[2:].lstrip("0") or "0"
+    candidates = {norm, f"tt{digits}"}
+    for width in (7, 8, 9):
+        candidates.add(f"tt{digits.zfill(width)}")
+    return sorted(candidates)
+
+
 def _resolve_by_imdb(imdb_id: str, season: int | None, episode: int | None,
                     media_type: str) -> tuple[str, int] | None:
     from app.database import select, TableMovies, TableShows, TableEpisodes
-    imdb = _tt(imdb_id)
-    if not imdb:
+    candidates = _imdb_candidates(imdb_id)
+    if not candidates:
         return None
     try:
         if media_type == "episode":
             show = database.execute(
                 select(TableShows.sonarrSeriesId)
-                .where(TableShows.imdbId == imdb)
+                .where(TableShows.imdbId.in_(candidates))
             ).first()
             if not show:
                 return None
@@ -126,7 +145,7 @@ def _resolve_by_imdb(imdb_id: str, season: int | None, episode: int | None,
         else:
             row = database.execute(
                 select(TableMovies.radarrId)
-                .where(TableMovies.imdbId == imdb)
+                .where(TableMovies.imdbId.in_(candidates))
             ).first()
             return ("movie", int(row.radarrId)) if row else None
     except Exception as e:
