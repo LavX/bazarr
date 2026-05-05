@@ -416,17 +416,31 @@ def serve_local(payload: dict) -> tuple[bytes, str]:
 
 
 def _fetch_media_row(media_type: str, media_id: int):
-    """Fetch the row needed to enumerate subtitles + media path."""
-    from app.database import select, TableMovies, TableEpisodes
+    """Fetch the row needed to enumerate subtitles, media path, and the
+    metadata that goes into `feature_details` (title/year/imdb/season/
+    episode). Episodes need a join to TableShows for series-level fields.
+    """
+    from app.database import select, TableMovies, TableEpisodes, TableShows
     try:
         if media_type == "episode":
             return database.execute(
-                select(TableEpisodes.subtitles, TableEpisodes.path)
+                select(
+                    TableEpisodes.subtitles, TableEpisodes.path,
+                    TableEpisodes.season, TableEpisodes.episode,
+                    TableEpisodes.title.label("episode_title"),
+                    TableShows.title.label("series_title"),
+                    TableShows.year, TableShows.imdbId,
+                )
+                .join(TableShows,
+                      TableEpisodes.sonarrSeriesId == TableShows.sonarrSeriesId)
                 .where(TableEpisodes.sonarrEpisodeId == int(media_id))
             ).first()
         else:
             return database.execute(
-                select(TableMovies.subtitles, TableMovies.path)
+                select(
+                    TableMovies.subtitles, TableMovies.path,
+                    TableMovies.title, TableMovies.year, TableMovies.imdbId,
+                )
                 .where(TableMovies.radarrId == int(media_id))
             ).first()
     except Exception as e:
@@ -602,6 +616,28 @@ def search_local(
         if not candidates:
             return []
 
+        # Pull metadata for feature_details (Jellyfin's plugin filters
+        # entries lacking it). Episodes use series_title; movies use
+        # title.
+        if media_type_resolved == "episode":
+            md_title = getattr(row, "series_title", "") or ""
+            md_episode_title = getattr(row, "episode_title", "") or ""
+            md_year_raw = getattr(row, "year", None)
+            md_imdb = getattr(row, "imdbId", "") or ""
+            md_season = getattr(row, "season", None)
+            md_episode = getattr(row, "episode", None)
+        else:
+            md_title = getattr(row, "title", "") or ""
+            md_episode_title = ""
+            md_year_raw = getattr(row, "year", None)
+            md_imdb = getattr(row, "imdbId", "") or ""
+            md_season = None
+            md_episode = None
+        try:
+            md_year = int(str(md_year_raw)[:4]) if md_year_raw else 0
+        except (TypeError, ValueError):
+            md_year = 0
+
         req_lang_map = _build_request_to_lang_map(languages)
         out: list[dict] = []
         for c in candidates:
@@ -625,6 +661,13 @@ def search_local(
                 media_type=media_type_resolved,
                 media_id=media_id,
                 requested_language=requested_language,
+                imdb_id=md_imdb,
+                title=md_title,
+                year=md_year,
+                season=md_season,
+                episode=md_episode,
+                episode_title=md_episode_title,
+                hash_matched=bool(moviehash) and moviehash_match == "only",
             ))
         return out
     except Exception as e:

@@ -339,10 +339,19 @@ def languages_response() -> dict:
 def local_to_os_entry(*, file_id: int, lang: str, modifier: str | None,
                       filename: str, upload_mtime: float,
                       media_type: str, media_id: int,
-                      requested_language: str | None) -> dict:
-    """OS.com-shaped entry for a locally-stored subtitle. Synthetic high
-    download_count pins locals above provider entries via the existing
-    single-key sort in service._do_fanout."""
+                      requested_language: str | None,
+                      imdb_id: str = "", title: str = "",
+                      year: int = 0,
+                      season: int | None = None,
+                      episode: int | None = None,
+                      episode_title: str = "",
+                      hash_matched: bool = False) -> dict:
+    """OS.com-shaped entry for a locally-stored subtitle.
+
+    Schema parity with `subtitle_to_os_entry` is required: the Jellyfin
+    plugin (and other OS-compat clients) silently drop entries missing
+    expected fields like `feature_details`, `uploader`, `fps`, etc.
+    """
     upload_iso = (
         dt.datetime.fromtimestamp(int(upload_mtime), dt.timezone.utc)
           .strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -352,6 +361,15 @@ def local_to_os_entry(*, file_id: int, lang: str, modifier: str | None,
     subtitle_id = f"local-{media_type}-{int(media_id)}-{lang}"
     if modifier:
         subtitle_id = f"{subtitle_id}:{modifier}"
+
+    feat_type = "Episode" if media_type == "episode" else "Movie"
+    if media_type == "episode":
+        movie_name = episode_title or title
+    elif year and title:
+        movie_name = f"{year} - {title}"
+    else:
+        movie_name = title
+
     return {
         "id": f"subtitle-{int(file_id)}",
         "type": "subtitle",
@@ -359,12 +377,30 @@ def local_to_os_entry(*, file_id: int, lang: str, modifier: str | None,
             "subtitle_id": subtitle_id,
             "language": language_out,
             "release": filename,
-            "hearing_impaired": modifier == "hi",
-            "foreign_parts_only": modifier == "forced",
-            "from_trusted": True,
-            "ratings": 10.0,
+            "comments": filename,
             "download_count": 999_999,
+            "ratings": 10.0,
+            "votes": 0,
+            "from_trusted": True,
+            "hd": False,
+            "hearing_impaired": modifier == "hi",
+            "moviehash_match": bool(hash_matched),
+            "ai_translated": False,
+            "machine_translated": False,
+            "foreign_parts_only": modifier == "forced",
+            "fps": 0.0,
             "upload_date": upload_iso,
+            "uploader": {"name": "bazarr:local"},
+            "feature_details": {
+                "feature_type": feat_type,
+                "imdb_id": _imdb_to_int(imdb_id),
+                "season_number": int(season) if season is not None else 0,
+                "episode_number": int(episode) if episode is not None else 0,
+                "title": title,
+                "movie_name": movie_name,
+                "year": int(year) if year else 0,
+            },
+            "url": "",
             "files": [{"file_id": int(file_id), "file_name": filename}],
         },
     }

@@ -4,6 +4,7 @@ def test_local_to_os_entry_basic():
         file_id=42, lang="en", modifier=None, filename="movie.en.srt",
         upload_mtime=1700000000.0, media_type="movie", media_id=99,
         requested_language="en",
+        imdb_id="tt1375666", title="Inception", year=2010,
     )
     assert e["id"] == "subtitle-42"
     assert e["type"] == "subtitle"
@@ -20,6 +21,24 @@ def test_local_to_os_entry_basic():
     assert len(files) == 1
     assert files[0]["file_id"] == 42
     assert files[0]["file_name"] == "movie.en.srt"
+    # Schema-parity fields the Jellyfin plugin requires
+    assert a["comments"] == "movie.en.srt"
+    assert a["votes"] == 0
+    assert a["hd"] is False
+    assert a["moviehash_match"] is False
+    assert a["ai_translated"] is False
+    assert a["machine_translated"] is False
+    assert a["fps"] == 0.0
+    assert a["uploader"] == {"name": "bazarr:local"}
+    assert a["url"] == ""
+    fd = a["feature_details"]
+    assert fd["feature_type"] == "Movie"
+    assert fd["imdb_id"] == 1375666
+    assert fd["season_number"] == 0
+    assert fd["episode_number"] == 0
+    assert fd["title"] == "Inception"
+    assert fd["movie_name"] == "2010 - Inception"
+    assert fd["year"] == 2010
 
 
 def test_local_to_os_entry_hi_flag():

@@ -31,6 +31,7 @@ def test_e2e_search_then_download_then_stream(app, tmp_path, monkeypatch):
     fake_movie = MagicMock(
         radarrId=99, path=str(media_dir / "Inception.mkv"),
         subtitles=raw_subs,
+        title="Inception", year="2010", imdbId="tt1375666",
     )
 
     def _resolve(imdb_id, season, episode, media_type, query, moviehash):
