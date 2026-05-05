@@ -712,6 +712,7 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
                 media_type=media_type,
                 languages=requested_languages or [],
                 query=query, moviehash=moviehash,
+                moviehash_match=moviehash_match,
             )
         except Exception as e:
             logger.warning("compat: search_local failed (continuing without locals): %s", e)

@@ -521,10 +521,17 @@ def search_local(
     languages: list[str],
     query: str | None = None,
     moviehash: str | None = None,
+    moviehash_match: str | None = None,
 ) -> list[dict]:
     """OS.com-shaped entries for locally-available subtitles.
 
     Empty list on resolve miss or no matches. Never raises.
+
+    `moviehash_match="only"` honors the OS.com perfect-match contract:
+    only return locals when the media row was resolved via the moviehash
+    path (which proves the on-disk file matches the client's hash).
+    Locals resolved via imdb/query are NOT hash-validated and would
+    silently break the strict-hash workflow if surfaced under "only".
     """
     if not languages:
         return []
@@ -532,8 +539,16 @@ def search_local(
         from .response_mapper import local_to_os_entry
         from . import auth as _auth
 
-        resolved = _resolve_media(imdb_id, season, episode, media_type,
-                                   query, moviehash)
+        if moviehash_match == "only":
+            # Strict hash mode: only the moviehash resolution path can
+            # certify that the local file actually matches the client's
+            # hash. Skip imdb/query — they'd produce false positives.
+            if not moviehash:
+                return []
+            resolved = _resolve_by_moviehash(moviehash, media_type)
+        else:
+            resolved = _resolve_media(imdb_id, season, episode, media_type,
+                                       query, moviehash)
         if resolved is None:
             return []
         media_type_resolved, media_id = resolved
