@@ -334,3 +334,78 @@ def languages_response() -> dict:
     ]
     return {"data": [{"language_code": c, "language_name": c.upper()}
                      for c in codes]}
+
+
+def local_to_os_entry(*, file_id: int, lang: str, modifier: str | None,
+                      filename: str, upload_mtime: float,
+                      media_type: str, media_id: int,
+                      requested_language: str | None,
+                      imdb_id: str = "", title: str = "",
+                      year: int = 0,
+                      season: int | None = None,
+                      episode: int | None = None,
+                      episode_title: str = "",
+                      hash_matched: bool = False) -> dict:
+    """OS.com-shaped entry for a locally-stored subtitle.
+
+    Schema parity with `subtitle_to_os_entry` is required: the Jellyfin
+    plugin (and other OS-compat clients) silently drop entries missing
+    expected fields like `feature_details`, `uploader`, `fps`, etc.
+    """
+    upload_iso = (
+        dt.datetime.fromtimestamp(int(upload_mtime), dt.timezone.utc)
+          .strftime("%Y-%m-%dT%H:%M:%SZ")
+        if upload_mtime else _EPOCH_ISO
+    )
+    language_out = requested_language or lang
+    subtitle_id = f"local-{media_type}-{int(media_id)}-{lang}"
+    if modifier:
+        subtitle_id = f"{subtitle_id}:{modifier}"
+
+    feat_type = "Episode" if media_type == "episode" else "Movie"
+    if media_type == "episode":
+        movie_name = episode_title or title
+    elif year and title:
+        movie_name = f"{year} - {title}"
+    else:
+        movie_name = title
+
+    # Append the per-file id so two locals with the same lang+modifier
+    # (e.g. two distinct on-disk `.en.srt` files) don't collide on
+    # subtitle_id and get de-duplicated by the client. Codex P2.
+    subtitle_id = f"{subtitle_id}-{int(file_id)}"
+
+    return {
+        "id": f"subtitle-{int(file_id)}",
+        "type": "subtitle",
+        "attributes": {
+            "subtitle_id": subtitle_id,
+            "language": language_out,
+            "release": filename,
+            "comments": filename,
+            "download_count": 999_999,
+            "ratings": 10.0,
+            "votes": 0,
+            "from_trusted": True,
+            "hd": False,
+            "hearing_impaired": modifier == "hi",
+            "moviehash_match": bool(hash_matched),
+            "ai_translated": False,
+            "machine_translated": False,
+            "foreign_parts_only": modifier == "forced",
+            "fps": 0.0,
+            "upload_date": upload_iso,
+            "uploader": {"name": "bazarr:local"},
+            "feature_details": {
+                "feature_type": feat_type,
+                "imdb_id": _imdb_to_int(imdb_id),
+                "season_number": int(season) if season is not None else 0,
+                "episode_number": int(episode) if episode is not None else 0,
+                "title": title,
+                "movie_name": movie_name,
+                "year": int(year) if year else 0,
+            },
+            "url": "",
+            "files": [{"file_id": int(file_id), "file_name": filename}],
+        },
+    }

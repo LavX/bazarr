@@ -11,6 +11,7 @@ from subliminal_patch.core_persistent import list_all_subtitles_parallel
 from app.config import settings
 from app.get_providers import get_providers_sorted, get_providers_auth
 from . import auth, cache as C, response_mapper as M
+from .local_subs import search_local
 from utilities.url_guard import assert_safe_outbound, resolve_safe_url, UnsafeURLError  # noqa: F401
 
 logger = logging.getLogger("bazarr.compat.service")
@@ -700,6 +701,24 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
             score=(int(score), int(max_score)),
             requested_language=req_lang,
         ))
+    # Surface locally-stored subtitles alongside provider results when the
+    # operator hasn't disabled the feature. Locals carry a synthetic high
+    # download_count, so the existing single-key sort below pins them to
+    # the top of the list naturally.
+    if bool(settings.compat_endpoint.serve_local_subs):
+        try:
+            local_entries = search_local(
+                imdb_id=imdb_id, season=season, episode=episode,
+                media_type=media_type,
+                languages=requested_languages or [],
+                query=query, moviehash=moviehash,
+                moviehash_match=moviehash_match,
+            )
+        except Exception as e:
+            logger.warning("compat: search_local failed (continuing without locals): %s", e)
+            local_entries = []
+        if local_entries:
+            entries = local_entries + entries
     entries.sort(key=lambda e: -int(e["attributes"].get("download_count", 0)))
     return M.search_envelope(entries, per_page=50, page=1)
 
@@ -851,6 +870,14 @@ def serve_subtitle_content(stream_token: str) -> tuple[bytes, str]:
     ok, fpayload = auth.parse_file_id(fid)
     if not ok:
         raise FileNotFoundError("file_id expired or not found")
+
+    # Local-library payloads carry an explicit kind discriminator; serve
+    # them from disk (with on-the-fly format conversion) instead of the
+    # provider fanout pool.
+    if fpayload.get("kind") == "local":
+        from .local_subs import serve_local
+        return serve_local(fpayload)
+
     sub = fpayload.get("sub")
     # Surface the guard symbol so tests can patch it.
     _ = assert_safe_outbound

@@ -44,8 +44,15 @@ def build_key(media_type: str, imdb_id: str, season: int | None,
         ",".join(sorted(enabled_providers or [])).encode()
     ).hexdigest()[:16]
     req_langs = ",".join(sorted(requested_languages or []))
+    # Local-sub merging changes envelope shape (locals are pinned to the
+    # top), so it must influence the cache key. Without this, toggling the
+    # serve_local_subs flag would keep returning the previous cached
+    # envelope until natural TTL expiry.
+    from app.config import settings as _cfg
+    local_flag = int(bool(_cfg.compat_endpoint.serve_local_subs))
     extras = hashlib.sha256(
-        f"{query or ''}|{moviehash or ''}|{moviehash_match or ''}|{req_langs}".encode()
+        f"{query or ''}|{moviehash or ''}|{moviehash_match or ''}"
+        f"|{req_langs}|local={local_flag}".encode()
     ).hexdigest()[:16]
     return (
         f"compat:v2:{media_type}:{imdb_id}:{season or 0}:{episode or 0}"
