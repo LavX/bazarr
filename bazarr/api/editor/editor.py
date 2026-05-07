@@ -10,6 +10,7 @@ import struct
 import subprocess
 import threading
 import time
+from urllib.parse import quote
 
 from flask import Response, request, send_file
 from flask_restx import Namespace, Resource
@@ -234,6 +235,17 @@ def _hls_encoder_lock(cache_dir):
         return lock
 
 
+def _is_playlist_complete(playlist_path):
+    """A finished HLS VOD playlist ends with #EXT-X-ENDLIST. Anything else
+    (an empty file, a manifest still being appended, or a manifest from an
+    encoder that was killed mid-stream) is partial."""
+    try:
+        with open(playlist_path) as f:
+            return '#EXT-X-ENDLIST' in f.read()
+    except OSError:
+        return False
+
+
 def _kill_idle_hls_encoders():
     """Terminate ffmpeg HLS encoders whose cache dirs haven't been touched recently.
 
@@ -263,6 +275,14 @@ def _kill_idle_hls_encoders():
                 logger.exception('Failed to terminate ffmpeg for %s', cache_dir)
             with _hls_encoder_processes_guard:
                 _hls_encoder_processes.pop(cache_dir, None)
+            # Drop the now-incomplete manifest. Without this, the next request
+            # for the same session would short-circuit on "playlist exists,
+            # marker gone" and serve the truncated playlist forever, stalling
+            # at the last segment that was written before the kill.
+            try:
+                os.unlink(os.path.join(cache_dir, 'playlist.m3u8'))
+            except OSError:
+                pass
 
 
 def _evict_stale_hls_dirs():
@@ -304,8 +324,13 @@ def _spawn_hls_encoder(video_path, audio_track_idx, start_time_sec, cache_dir):
     playlist = os.path.join(cache_dir, 'playlist.m3u8')
     encoding_marker = os.path.join(cache_dir, '.encoding')
 
-    # Already finished encoding (playlist has #EXT-X-ENDLIST, no encoding marker).
-    if os.path.isfile(playlist) and not os.path.isfile(encoding_marker):
+    # Reusable cache: a complete playlist (closed with #EXT-X-ENDLIST) and no
+    # active encoding marker. Anything else falls through to a fresh spawn.
+    if (
+        os.path.isfile(playlist)
+        and not os.path.isfile(encoding_marker)
+        and _is_playlist_complete(playlist)
+    ):
         return
 
     lock = _hls_encoder_lock(cache_dir)
@@ -315,15 +340,16 @@ def _spawn_hls_encoder(video_path, audio_track_idx, start_time_sec, cache_dir):
 
     try:
         # Re-check inside the lock.
-        if os.path.isfile(playlist) and not os.path.isfile(encoding_marker):
+        if (
+            os.path.isfile(playlist)
+            and not os.path.isfile(encoding_marker)
+            and _is_playlist_complete(playlist)
+        ):
             return
         if os.path.isfile(encoding_marker):
             return
 
         os.makedirs(cache_dir, exist_ok=True)
-        # Touch the marker before spawning so concurrent requests see it.
-        with open(encoding_marker, 'w') as f:
-            f.write(str(int(time.time())))
 
         probe_data = _probe_video(video_path)
         video_codec = None
@@ -437,7 +463,21 @@ def _spawn_hls_encoder(video_path, audio_track_idx, start_time_sec, cache_dir):
                 except OSError:
                     pass
 
-        threading.Thread(target=encode, daemon=True).start()
+        # Marker creation deferred to here — after probe / ffmpeg lookup / cmd
+        # build have all succeeded. If any of those raised, we'd have left a
+        # stale .encoding behind that future requests would see and skip,
+        # stranding the session permanently. Now the marker only exists when
+        # the encoder thread is about to take ownership of it.
+        with open(encoding_marker, 'w') as f:
+            f.write(str(int(time.time())))
+        try:
+            threading.Thread(target=encode, daemon=True).start()
+        except Exception:
+            try:
+                os.unlink(encoding_marker)
+            except OSError:
+                pass
+            raise
     finally:
         lock.release()
 
@@ -540,8 +580,46 @@ class EditorHls(Resource):
             if not os.path.isfile(target):
                 return 'Encoding starting, retry shortly', 503
 
-            response = send_file(target, mimetype='application/vnd.apple.mpegurl')
-            # Tell hls.js this is a live-ish playlist that may grow until ENDLIST.
+            # Native HLS clients (Safari / iOS) can't inject custom request
+            # headers on segment requests, so the apikey has to ride in the
+            # URL. The manifest's segment lines and #EXT-X-MAP URI are
+            # relative paths that resolve without the playlist URL's query
+            # string, so we rewrite them server-side to carry the apikey when
+            # the request authenticated via query. Header-auth paths (hls.js
+            # with xhrSetup) don't include apikey on the request and skip
+            # this branch, keeping the manifest clean.
+            apikey_query = request.args.get('apikey')
+            if apikey_query:
+                try:
+                    with open(target) as f:
+                        manifest = f.read()
+                except OSError:
+                    return 'Encoding starting, retry shortly', 503
+                encoded = quote(apikey_query, safe='')
+                rewritten = []
+                for line in manifest.splitlines(keepends=True):
+                    stripped = line.rstrip('\n').rstrip('\r')
+                    if stripped.startswith('#EXT-X-MAP:'):
+                        rewritten.append(
+                            re.sub(
+                                r'URI="([^"?]+)"',
+                                f'URI="\\1?apikey={encoded}"',
+                                line,
+                            )
+                        )
+                    elif stripped and not stripped.startswith('#'):
+                        sep = '\n' if line.endswith('\n') else ''
+                        rewritten.append(f'{stripped}?apikey={encoded}{sep}')
+                    else:
+                        rewritten.append(line)
+                response = Response(
+                    ''.join(rewritten),
+                    mimetype='application/vnd.apple.mpegurl',
+                )
+            else:
+                response = send_file(target, mimetype='application/vnd.apple.mpegurl')
+            # Tell clients this is a live-ish playlist that may grow until
+            # ENDLIST appears, so they refetch instead of caching it.
             response.headers['Cache-Control'] = 'no-cache'
             return response
 
