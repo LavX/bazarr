@@ -15,6 +15,7 @@ import {
   faVideoSlash,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import Hls, { type ErrorData } from "hls.js";
 import { Environment } from "@/utilities/env";
 
 export interface VideoPreviewHandle {
@@ -63,13 +64,6 @@ const containerStyle: CSSProperties = {
   flexDirection: "column",
   width: "100%",
   flexShrink: 0,
-};
-
-const videoWrapperStyle: CSSProperties = {
-  position: "relative",
-  width: "100%",
-  background: "#000",
-  lineHeight: 0,
 };
 
 // Convert subtitle text with tags into safe display HTML
@@ -200,7 +194,10 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
     const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const isPlayingRef = useRef(false);
     const lastReportedMsRef = useRef(-1);
-    const retryCountRef = useRef(0);
+    // Set when we tear down hls.js to start a new session at a different
+    // start time (track switch or seek-before-current-session-start) so the
+    // new stream resumes playback automatically once it loads.
+    const shouldAutoplayAfterAttachRef = useRef(false);
 
     const [playing, setPlaying] = useState(false);
     const [buffering, setBuffering] = useState(false);
@@ -209,101 +206,65 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
     const [currentMs, setCurrentMs] = useState(0);
     const [duration, setDuration] = useState(0);
     const [videoError, setVideoError] = useState(false);
-    const [streamKey, setStreamKey] = useState(0);
+
+    // HLS session: which audio track ffmpeg is encoding and what source-time
+    // offset it began at. Updated atomically (one setState) so the URL never
+    // ends up momentarily mismatched between track and start-time. The video
+    // element's currentTime is *local* to this session; the user-facing
+    // position is `startSec + video.currentTime`.
+    const [hlsSession, setHlsSession] = useState({
+      audioTrack: 0,
+      startSec: 0,
+    });
+    const hlsSessionRef = useRef(hlsSession);
+    useEffect(() => {
+      hlsSessionRef.current = hlsSession;
+    }, [hlsSession]);
 
     const hasMedia = mediaType != null && mediaId != null;
     const apiKey = Environment.apiKey ?? "";
 
-    // Check if the browser can play this video natively (no transcode needed)
-    const [directPlay, setDirectPlay] = useState<boolean | null>(null);
-    const [remuxMode, setRemuxMode] = useState(false);
+    // Codec info popup data is purely informational now; the HLS encoder
+    // server-side picks copy vs transcode based on its own probe. Aspect ratio
+    // is pinned on the wrapper so the video element doesn't collapse to zero
+    // height while hls.js is attaching, which avoids layout shift on first
+    // load and on every audio-track switch.
     const [videoCodecInfo, setVideoCodecInfo] = useState("");
     const [browserCodecs, setBrowserCodecs] = useState("");
+    const [aspectRatio, setAspectRatio] = useState<string | undefined>(
+      undefined,
+    );
     useEffect(() => {
       if (!hasMedia) return;
-      // Reset playback-mode state before the new probe completes, otherwise
-      // videoSrc gets computed with the previous directPlay value against the
-      // new baseVideoUrl during the in-flight fetch.
-      setDirectPlay(null);
-      setRemuxMode(false);
+      let cancelled = false;
       const infoUrl = `${Environment.baseUrl}/api/editor/info?mediaType=${mediaType}&mediaId=${mediaId}&apikey=${encodeURIComponent(apiKey)}`;
       fetch(infoUrl)
         .then((r) => (r.ok ? r.json() : null))
         .then((data) => {
-          if (!data) {
-            setDirectPlay(false);
-            return;
-          }
+          if (cancelled || !data) return;
           if (data.duration) setDuration(Math.round(data.duration * 1000));
           if (data.audioTracks && onAudioTracksLoaded) {
             onAudioTracksLoaded(data.audioTracks);
           }
-
-          // Ask the browser if it can play this codec/container combo
-          const testVideo = document.createElement("video");
+          if (data.resolution && typeof data.resolution === "string") {
+            const dims = data.resolution
+              .split("x")
+              .map((s: string) => parseInt(s, 10));
+            const w = dims[0];
+            const h = dims[1];
+            if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
+              setAspectRatio(`${w} / ${h}`);
+            }
+          }
           const vCodec = (data.videoCodec || "").toLowerCase();
           const aCodec = (data.audioCodec || "").toLowerCase();
-          const ext = (data.container || "").toLowerCase();
-
-          // Build MIME type with codecs for canPlayType check
-          const codecMap: Record<string, string> = {
-            h264: "avc1.64001E",
-            avc: "avc1.64001E",
-            hevc: "hvc1.1.6.L93.B0",
-            h265: "hvc1.1.6.L93.B0",
-            vp9: "vp09.00.10.08",
-            vp8: "vp8",
-            av1: "av01.0.04M.08",
-          };
-          const audioCodecMap: Record<string, string> = {
-            aac: "mp4a.40.2",
-            opus: "opus",
-            vorbis: "vorbis",
-            ac3: "ac-3",
-            eac3: "ec-3",
-            mp3: "mp4a.69",
-          };
-
-          const vCodecStr = codecMap[vCodec] || "";
-          const aCodecStr = audioCodecMap[aCodec] || "";
-          const container = ext === "webm" ? "webm" : "mp4";
-          // MKV is excluded: browsers can't efficiently seek MKV over HTTP ranges
-          const servableContainer = [".mp4", ".m4v", ".webm"].includes(
-            `.${ext}`,
-          );
-
-          // Test video codec independently (audio will be transcoded to AAC by backend if needed)
-          const canPlayVideo = vCodecStr
-            ? !!testVideo.canPlayType(
-                `video/${container}; codecs="${vCodecStr}"`,
-              )
-            : false;
-          const canPlayAudio = aCodecStr
-            ? !!testVideo.canPlayType(
-                `video/${container}; codecs="${aCodecStr}"`,
-              )
-            : false;
-          const canPlayBoth = canPlayVideo && canPlayAudio;
-
-          // Direct play: browser handles both codecs AND file container is directly servable.
-          // Remux: browser handles video codec but not audio. Copy video, transcode audio to AAC.
-          // Direct play also requires the default audio track. For audioTrack > 0 we always
-          // remux so ffmpeg can map the requested track into the served stream, which keeps
-          // the video element single (no parallel <audio> element to drift against).
-          const isDirect = canPlayBoth && servableContainer && audioTrack === 0;
-          const isRemux = canPlayVideo && !isDirect;
-          setDirectPlay(isDirect);
-          setRemuxMode(isRemux);
-
-          const mode = isDirect
-            ? "direct play"
-            : isRemux
-              ? "remux (audio transcode)"
-              : "transcoding";
           const parts = [vCodec, aCodec, data.resolution].filter(Boolean);
-          setVideoCodecInfo(`${parts.join(" / ")} (${mode})`);
+          setVideoCodecInfo(parts.join(" / "));
 
-          // Detect what this browser can play
+          // Browser codec capability table for the popup tooltip. Informational
+          // only; hls.js + the server-side HLS encoder make the actual playback
+          // decisions.
+          const testVideo = document.createElement("video");
           const testCodecs: Array<[string, string, string]> = [
             ["H.264", "video/mp4", "avc1.64001E"],
             ["HEVC", "video/mp4", "hvc1.1.6.L93.B0"],
@@ -330,47 +291,112 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
             `Browser supports: ${supported.join(", ") || "none"}\nNot supported: ${unsupported.join(", ") || "none"}`,
           );
         })
-        .catch(() => setDirectPlay(false));
-    }, [hasMedia, mediaType, mediaId, apiKey, onAudioTracksLoaded, audioTrack]);
+        .catch(() => {
+          // /info failure is non-fatal; HLS playback still attempts.
+        });
+      return () => {
+        cancelled = true;
+      };
+    }, [hasMedia, mediaType, mediaId, apiKey, onAudioTracksLoaded]);
 
-    // Reset retry state when media changes
+    // Media-change reset: fresh session at start of file. Bail out if the
+    // session is already in the right state (initial mount with default props).
     useEffect(() => {
-      retryCountRef.current = 0;
+      const prev = hlsSessionRef.current;
+      if (prev.audioTrack === audioTrack && prev.startSec === 0) return;
+      shouldAutoplayAfterAttachRef.current = false;
+      setHlsSession({ audioTrack, startSec: 0 });
+      // audioTrack is intentionally outside the deps; we only reset on media
+      // swap. Audio-track changes are handled by their own effect below so
+      // they can capture the current playback position.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [mediaType, mediaId]);
 
-    // For transcoded mode, track the seek offset in the ffmpeg ?t= param
-    const [seekOffsetSec, setSeekOffsetSec] = useState(0);
-    const seekOffsetSecRef = useRef(0);
+    // Audio-track change: spawn a new HLS session that begins at the user's
+    // current position so they don't have to wait for ffmpeg to encode from
+    // t=0 to where they were.
     useEffect(() => {
-      seekOffsetSecRef.current = seekOffsetSec;
-    }, [seekOffsetSec]);
+      setHlsSession((prev) => {
+        if (prev.audioTrack === audioTrack) return prev;
+        const video = videoRef.current;
+        const currentLocalSec = video ? video.currentTime : 0;
+        shouldAutoplayAfterAttachRef.current = isPlayingRef.current;
+        return {
+          audioTrack,
+          startSec: prev.startSec + currentLocalSec,
+        };
+      });
+    }, [audioTrack]);
 
-    const baseVideoUrl = hasMedia
-      ? `${Environment.baseUrl}/api/editor/video?mediaType=${encodeURIComponent(mediaType)}&mediaId=${mediaId}&audioTrack=${audioTrack}&apikey=${encodeURIComponent(apiKey)}`
+    // HLS playlist URL is path-based so segments resolve correctly via relative
+    // URLs in the manifest. startSec is part of the path so segment URLs inherit
+    // the same session.
+    const hlsUrl = hasMedia
+      ? `${Environment.baseUrl}/api/editor/hls/${encodeURIComponent(mediaType)}/${mediaId}/${hlsSession.audioTrack}/${Math.floor(hlsSession.startSec)}/playlist.m3u8`
       : "";
-    // Only direct-play supports native seeking, it's served as a file with HTTP Range support.
-    // Remux is a live ffmpeg pipe, setting video.currentTime on a non-seekable stream doesn't
-    // work. Remux seeks by reloading the stream with ?t=, same as transcode mode.
-    const nativeSeek = directPlay === true;
-    // Don't set src until directPlay is resolved.
-    const videoSrc =
-      !baseVideoUrl || directPlay === null
-        ? ""
-        : directPlay
-          ? `${baseVideoUrl}&direct=1`
-          : remuxMode
-            ? `${baseVideoUrl}&remux=1${seekOffsetSec > 0 ? `&t=${seekOffsetSec.toFixed(1)}` : ""}`
-            : `${baseVideoUrl}${seekOffsetSec > 0 ? `&t=${seekOffsetSec.toFixed(1)}` : ""}`;
 
-    // Time reporting: directPlay uses video.currentTime directly, transcode adds offset
+    // Set up hls.js (or native HLS on Safari) on the video element. Re-runs when
+    // the playlist URL changes (media swap or audio-track change). hls.js owns
+    // segment fetching, buffering, and seek-back within the cached buffer.
+    useEffect(() => {
+      const video = videoRef.current;
+      if (!video || !hlsUrl) return;
+
+      setVideoError(false);
+      let hls: Hls | null = null;
+
+      if (Hls.isSupported()) {
+        hls = new Hls({
+          xhrSetup: (xhr) => {
+            if (apiKey) xhr.setRequestHeader("X-API-KEY", apiKey);
+          },
+          // Generous back-buffer so seek-back within the recently played window
+          // is instant (no segment refetch).
+          backBufferLength: 90,
+          maxBufferLength: 30,
+        });
+        hls.loadSource(hlsUrl);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.ERROR, (_event, data: ErrorData) => {
+          if (!data.fatal) return;
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+            // Most often a transient segment 404 because ffmpeg hasn't written
+            // it yet. hls.js retries internally on non-fatal; on fatal network
+            // we give it one explicit kick.
+            hls?.startLoad();
+          } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+            hls?.recoverMediaError();
+          } else {
+            setVideoError(true);
+          }
+        });
+      } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        // Safari / iOS native HLS: can't inject custom headers on segment
+        // fetches, so the API key has to ride in the URL.
+        video.src = `${hlsUrl}?apikey=${encodeURIComponent(apiKey)}`;
+      } else {
+        setVideoError(true);
+      }
+
+      return () => {
+        hls?.destroy();
+        if (video) {
+          video.removeAttribute("src");
+          video.load();
+        }
+      };
+    }, [hlsUrl, apiKey]);
+
+    // Time reporting: video.currentTime is local to the current HLS session;
+    // the user-facing absolute position is startSec + local.
     const startTimeReporting = useCallback(() => {
       if (timerRef.current) return;
       timerRef.current = setInterval(() => {
         const video = videoRef.current;
         if (!video) return;
-        const absoluteMs = nativeSeek
-          ? Math.round(video.currentTime * 1000)
-          : Math.round((seekOffsetSecRef.current + video.currentTime) * 1000);
+        const absoluteMs = Math.round(
+          (hlsSessionRef.current.startSec + video.currentTime) * 1000,
+        );
         setCurrentMs(absoluteMs);
         if (
           onTimeUpdate &&
@@ -380,7 +406,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
           onTimeUpdate(absoluteMs);
         }
       }, 100);
-    }, [onTimeUpdate, nativeSeek]);
+    }, [onTimeUpdate]);
 
     const stopTimeReporting = useCallback(() => {
       if (timerRef.current) {
@@ -393,37 +419,47 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
       return () => stopTimeReporting();
     }, [stopTimeReporting]);
 
-    // Seek handling: native vs transcode
-    const autoPlayAfterSeekRef = useRef(false);
+    // External seek (parent passes new absolute currentTimeMs). Goes through
+    // the same three-case logic as the user-initiated seek helper: spawn a new
+    // session for before-startSec or far-forward-beyond-buffered targets, do
+    // a native seek otherwise.
     useEffect(() => {
-      if (!hasMedia || directPlay === null) return;
-      const targetSec = currentTimeMs / 1000;
+      if (!hasMedia) return;
+      const video = videoRef.current;
+      if (!video) return;
+      const targetAbsoluteSec = currentTimeMs / 1000;
+      const startSec = hlsSessionRef.current.startSec;
+      const localTargetSec = targetAbsoluteSec - startSec;
+      const NEAR_BUFFER_SLACK_SEC = 10;
 
-      if (nativeSeek) {
-        const video = videoRef.current;
-        if (video) {
-          video.currentTime = targetSec;
-          setCurrentMs(currentTimeMs);
-        }
+      let needsNewSession;
+      if (targetAbsoluteSec < startSec) {
+        needsNewSession = true;
+      } else if (video.buffered.length === 0) {
+        needsNewSession = localTargetSec > NEAR_BUFFER_SLACK_SEC;
       } else {
-        // Remux/transcode: reload the video stream with ?t= parameter
-        if (Math.abs(targetSec - seekOffsetSec) > 1) {
-          autoPlayAfterSeekRef.current = isPlayingRef.current;
-          const video = videoRef.current;
-          if (video && isPlayingRef.current) {
-            video.pause();
+        let withinReach = false;
+        for (let i = 0; i < video.buffered.length; i++) {
+          if (
+            localTargetSec >= video.buffered.start(i) - NEAR_BUFFER_SLACK_SEC &&
+            localTargetSec <= video.buffered.end(i) + NEAR_BUFFER_SLACK_SEC
+          ) {
+            withinReach = true;
+            break;
           }
-          seekOffsetSecRef.current = targetSec;
-          setSeekOffsetSec(targetSec);
-          setCurrentMs(currentTimeMs);
-          // User-initiated seek: re-arm the retry budget so a previous burst
-          // of errors doesn't make the new stream fall straight to the
-          // "Video unavailable" overlay.
-          retryCountRef.current = 0;
         }
+        needsNewSession = !withinReach;
       }
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [currentTimeMs, seekId, hasMedia, directPlay]);
+
+      if (needsNewSession) {
+        shouldAutoplayAfterAttachRef.current = isPlayingRef.current;
+        setHlsSession((prev) => ({ ...prev, startSec: targetAbsoluteSec }));
+        setCurrentMs(currentTimeMs);
+      } else if (Math.abs(localTargetSec - video.currentTime) > 0.25) {
+        video.currentTime = localTargetSec;
+        setCurrentMs(currentTimeMs);
+      }
+    }, [currentTimeMs, seekId, hasMedia]);
 
     // Sync volume and playback rate
     useEffect(() => {
@@ -446,55 +482,76 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
       }
     }, []);
 
-    const seekRelative = useCallback(
-      (deltaMs: number) => {
+    // Internal seek helper. Shared by seekRelative, seekTo, and seek bar onChange.
+    // Three cases:
+    //   1. Target before current session's startSec: spawn new session at target.
+    //   2. Target far past what hls.js currently has buffered: spawn new session
+    //      at target, because ffmpeg likely hasn't encoded that far yet and the
+    //      segment isn't in the playlist (hls.js would just play the latest
+    //      available segment instead of seeking).
+    //   3. Target within / near the buffered range: native video.currentTime;
+    //      hls.js fetches nearby segments quickly.
+    const seekToAbsoluteMs = useCallback(
+      (targetMs: number) => {
         const video = videoRef.current;
         if (!video) return;
-        const absoluteMs = nativeSeek
-          ? Math.round(video.currentTime * 1000)
-          : Math.round((seekOffsetSecRef.current + video.currentTime) * 1000);
-        const targetMs = Math.max(0, Math.min(duration, absoluteMs + deltaMs));
-        const targetSec = targetMs / 1000;
-        if (nativeSeek) {
-          video.currentTime = targetSec;
-          setCurrentMs(targetMs);
-          onTimeUpdate?.(targetMs);
+        const clampedMs = Math.max(0, Math.min(duration, targetMs));
+        const targetAbsoluteSec = clampedMs / 1000;
+        const startSec = hlsSessionRef.current.startSec;
+        const localTargetSec = targetAbsoluteSec - startSec;
+
+        // Slack around buffered ranges, in seconds. Inside this window hls.js
+        // can fetch the missing segment quickly; outside it, ffmpeg almost
+        // certainly hasn't encoded that far and a fresh session is faster.
+        const NEAR_BUFFER_SLACK_SEC = 10;
+
+        let needsNewSession;
+        if (targetAbsoluteSec < startSec) {
+          needsNewSession = true;
+        } else if (video.buffered.length === 0) {
+          // Just-loaded session with no buffer yet. Native seek only if target
+          // is within slack of the session start; otherwise ffmpeg won't reach
+          // that far for a long time.
+          needsNewSession = localTargetSec > NEAR_BUFFER_SLACK_SEC;
         } else {
-          const wasPlaying = isPlayingRef.current;
-          if (wasPlaying) video.pause();
-          seekOffsetSecRef.current = targetSec;
-          setSeekOffsetSec(targetSec);
-          setCurrentMs(targetMs);
-          onTimeUpdate?.(targetMs);
-          if (wasPlaying) autoPlayAfterSeekRef.current = true;
-          retryCountRef.current = 0;
+          let withinReach = false;
+          for (let i = 0; i < video.buffered.length; i++) {
+            if (
+              localTargetSec >=
+                video.buffered.start(i) - NEAR_BUFFER_SLACK_SEC &&
+              localTargetSec <= video.buffered.end(i) + NEAR_BUFFER_SLACK_SEC
+            ) {
+              withinReach = true;
+              break;
+            }
+          }
+          needsNewSession = !withinReach;
         }
+
+        if (needsNewSession) {
+          shouldAutoplayAfterAttachRef.current = isPlayingRef.current;
+          setHlsSession((prev) => ({ ...prev, startSec: targetAbsoluteSec }));
+        } else {
+          video.currentTime = localTargetSec;
+        }
+        setCurrentMs(clampedMs);
+        onTimeUpdate?.(clampedMs);
       },
-      [nativeSeek, duration, onTimeUpdate],
+      [duration, onTimeUpdate],
+    );
+
+    const seekRelative = useCallback(
+      (deltaMs: number) => {
+        seekToAbsoluteMs(currentMs + deltaMs);
+      },
+      [currentMs, seekToAbsoluteMs],
     );
 
     const seekTo = useCallback(
       (ms: number) => {
-        const targetMs = Math.max(0, Math.min(duration, ms));
-        const targetSec = targetMs / 1000;
-        const video = videoRef.current;
-        if (!video) return;
-        if (nativeSeek) {
-          video.currentTime = targetSec;
-          setCurrentMs(targetMs);
-          onTimeUpdate?.(targetMs);
-        } else {
-          const wasPlaying = isPlayingRef.current;
-          if (wasPlaying) video.pause();
-          seekOffsetSecRef.current = targetSec;
-          setSeekOffsetSec(targetSec);
-          setCurrentMs(targetMs);
-          onTimeUpdate?.(targetMs);
-          if (wasPlaying) autoPlayAfterSeekRef.current = true;
-          retryCountRef.current = 0;
-        }
+        seekToAbsoluteMs(ms);
       },
-      [nativeSeek, duration, onTimeUpdate],
+      [seekToAbsoluteMs],
     );
 
     useImperativeHandle(
@@ -507,38 +564,11 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
     );
 
     const handlePlay = useCallback(() => {
-      // Don't reset retryCountRef here: a stream that plays for a few ms,
-      // errors, retries, plays again briefly, errors again, would loop forever
-      // and respawn ffmpeg every time. The counter only resets on a user
-      // intervention (seek or media change).
       isPlayingRef.current = true;
       setPlaying(true);
       onPlayStateChange?.(true);
       startTimeReporting();
     }, [onPlayStateChange, startTimeReporting]);
-
-    const handleVideoError = useCallback(() => {
-      // Some browsers fire `error` for `<video src="">`. We can hit that
-      // empty-src window during the initial /info probe (directPlay === null)
-      // or during a media-change fetch. Don't burn retries or escalate to the
-      // error overlay just because the src isn't ready yet.
-      if (!videoSrc) return;
-      if (!nativeSeek && retryCountRef.current < 3) {
-        retryCountRef.current++;
-        const video = videoRef.current;
-        if (video) {
-          const absoluteSec = seekOffsetSecRef.current + video.currentTime;
-          seekOffsetSecRef.current = absoluteSec;
-          setSeekOffsetSec(absoluteSec);
-        }
-        // Only resume play after retry if the user was actually playing.
-        // A buffer-drop error while paused shouldn't auto-start playback.
-        autoPlayAfterSeekRef.current = isPlayingRef.current;
-        setStreamKey((k) => k + 1);
-      } else {
-        setVideoError(true);
-      }
-    }, [nativeSeek, videoSrc]);
 
     const handlePause = useCallback(() => {
       isPlayingRef.current = false;
@@ -547,36 +577,42 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
       stopTimeReporting();
       const video = videoRef.current;
       if (video && onTimeUpdate) {
-        const absoluteMs = nativeSeek
-          ? Math.round(video.currentTime * 1000)
-          : Math.round((seekOffsetSecRef.current + video.currentTime) * 1000);
+        const absoluteMs = Math.round(
+          (hlsSessionRef.current.startSec + video.currentTime) * 1000,
+        );
         setCurrentMs(absoluteMs);
         onTimeUpdate(absoluteMs);
       }
-    }, [onPlayStateChange, stopTimeReporting, onTimeUpdate, nativeSeek]);
+    }, [onPlayStateChange, stopTimeReporting, onTimeUpdate]);
 
     const handleLoadedMetadata = useCallback(() => {
       const video = videoRef.current;
-      if (video) {
-        if (nativeSeek) {
-          setDuration(Math.round(video.duration * 1000));
-        }
-        // Remux/transcode: duration was already set from /api/editor/info.
-        setVideoError(false);
-        video.volume = volume;
-        // After a stream-key remount the new <video> DOM node mounts at default
-        // playbackRate=1.0 even though the UI selector still shows e.g. 1.5x.
-        // Reapply alongside volume so the rate survives error retries.
-        video.playbackRate = playbackRate;
-        // Auto-play if user was playing before the seek (transcode/remux mode only).
-        if (autoPlayAfterSeekRef.current) {
-          autoPlayAfterSeekRef.current = false;
-          video.play().catch(() => {
-            /* ignored */
-          });
-        }
+      if (!video) return;
+      // Duration is the *full source* duration, only known from /info. The
+      // video element's duration is the remaining stream from session start
+      // and is only useful as a fallback when /info hasn't resolved.
+      if (!duration && Number.isFinite(video.duration)) {
+        setDuration(
+          Math.round((hlsSessionRef.current.startSec + video.duration) * 1000),
+        );
       }
-    }, [volume, nativeSeek, playbackRate]);
+      // Latch aspect ratio from the loaded video if /info didn't have it.
+      if (!aspectRatio && video.videoWidth > 0 && video.videoHeight > 0) {
+        setAspectRatio(`${video.videoWidth} / ${video.videoHeight}`);
+      }
+      setVideoError(false);
+      video.volume = volume;
+      video.playbackRate = playbackRate;
+      // Resume playback after a session change (track switch or seek-before-
+      // start) if the user was playing prior to the tear-down. hls.js attach
+      // resets the video to paused, so we explicitly call play() here.
+      if (shouldAutoplayAfterAttachRef.current) {
+        shouldAutoplayAfterAttachRef.current = false;
+        video.play().catch(() => {
+          /* user-gesture restrictions or transient: ignored */
+        });
+      }
+    }, [duration, aspectRatio, volume, playbackRate]);
 
     const handleKeyDown = useCallback(
       (e: React.KeyboardEvent) => {
@@ -624,26 +660,31 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
 
     return (
       <div style={containerStyle}>
-        {/* Video area */}
+        {/* Video area. aspectRatio is pinned (when known) so the wrapper
+            doesn't collapse to zero height while hls.js is attaching, which
+            avoids layout shift on first load and on every track switch. */}
         <div
-          style={videoWrapperStyle}
+          style={{
+            position: "relative",
+            width: "100%",
+            background: "#000",
+            lineHeight: 0,
+            aspectRatio,
+          }}
           tabIndex={0}
           onKeyDown={handleKeyDown}
           role="region"
           aria-label="Video preview"
         >
           <video
-            key={streamKey}
             ref={videoRef}
-            src={videoSrc}
-            style={{ width: "100%", display: "block" }}
+            style={{ width: "100%", height: "100%", display: "block" }}
             preload="metadata"
             onPlay={handlePlay}
             onPause={handlePause}
             onLoadedMetadata={handleLoadedMetadata}
             onWaiting={() => setBuffering(true)}
             onCanPlay={() => setBuffering(false)}
-            onError={handleVideoError}
           />
 
           {/* Loading spinner */}
@@ -727,7 +768,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
             )}
           </span>
 
-          {directPlay !== null && (
+          {videoCodecInfo && (
             <span
               title={
                 [videoCodecInfo, browserCodecs].filter(Boolean).join("\n\n") ||
@@ -738,20 +779,12 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
                 fontFamily: "'JetBrains Mono', monospace",
                 padding: "1px 5px",
                 borderRadius: "var(--bz-radius-xs)",
-                background: directPlay
-                  ? "rgba(105, 219, 124, 0.15)"
-                  : remuxMode
-                    ? "rgba(77, 171, 247, 0.15)"
-                    : "rgba(255, 202, 40, 0.15)",
-                color: directPlay
-                  ? "#69db7c"
-                  : remuxMode
-                    ? "#4dabf7"
-                    : "#ffca28",
+                background: "rgba(77, 171, 247, 0.15)",
+                color: "#4dabf7",
                 whiteSpace: "nowrap",
               }}
             >
-              {directPlay ? "Direct" : remuxMode ? "Remux" : "Transcode"}
+              HLS
             </span>
           )}
           <span style={{ flex: 1 }} />
