@@ -145,12 +145,10 @@ def _serve_file_with_ranges(file_path, mimetype):
         response.headers['Content-Range'] = f'bytes {start}-{end}/{file_size}'
         response.headers['Content-Length'] = length
         response.headers['Accept-Ranges'] = 'bytes'
-        response.headers['X-Accel-Buffering'] = 'no'
         return response
 
     response = send_file(file_path, mimetype=mimetype)
     response.headers['Accept-Ranges'] = 'bytes'
-    response.headers['X-Accel-Buffering'] = 'no'
     return response
 
 
@@ -323,80 +321,6 @@ class EditorVideo(Resource):
             'pipe:1',
         ]
         return _stream_ffmpeg(cmd, 'video/mp4')
-
-
-@api_ns_editor.route('editor/audio')
-class EditorAudio(Resource):
-    @authenticate
-    def get(self):
-        """Extract audio track as AAC, cached as file for native seeking."""
-        resolved = _resolve_or_abort()
-        if len(resolved) == 2:
-            return resolved
-
-        video_path = resolved[0]
-
-        import hashlib
-        import threading
-        audio_track = request.args.get('audioTrack', '0')
-        try:
-            audio_track_idx = int(audio_track)
-        except (ValueError, TypeError):
-            audio_track_idx = 0
-        file_stat = os.stat(video_path)
-        path_hash = hashlib.md5(video_path.encode()).hexdigest()
-        audio_cache_dir = os.path.join(PEAKS_CACHE_DIR, 'audio')
-        os.makedirs(audio_cache_dir, exist_ok=True)
-        track_suffix = f'_t{audio_track_idx}' if audio_track_idx > 0 else ''
-        cache_file = os.path.join(audio_cache_dir, f'{path_hash}_{int(file_stat.st_mtime)}{track_suffix}.m4a')
-        tmp_file = os.path.join(audio_cache_dir, f'{path_hash}_{int(file_stat.st_mtime)}{track_suffix}.extracting.m4a')
-
-        # Already cached: serve immediately
-        if os.path.isfile(cache_file):
-            return _serve_file_with_ranges(cache_file, 'audio/mp4')
-
-        # Extraction in progress (tmp file exists): tell frontend to wait
-        if os.path.isfile(tmp_file):
-            return {'status': 'extracting'}, 202
-
-        # Start extraction in background thread
-        def extract():
-            try:
-                ffmpeg = _get_ffmpeg()
-                cmd = [
-                    ffmpeg,
-                    '-i', video_path,
-                    '-vn',
-                    '-map', f'0:a:{audio_track_idx}',
-                    '-c:a', 'aac',
-                    '-b:a', '24k',
-                    '-ac', '1',
-                    '-ar', '16000',
-                    '-movflags', '+faststart',
-                    '-v', 'error',
-                    '-y',
-                    tmp_file,
-                ]
-                result = subprocess.run(cmd, capture_output=True, timeout=600)
-                if result.returncode == 0 and os.path.isfile(tmp_file):
-                    os.replace(tmp_file, cache_file)
-                    logger.info('Audio cache ready: %s (%d bytes)', cache_file, os.path.getsize(cache_file))
-                else:
-                    stderr_out = result.stderr.decode(errors='replace')[:500]
-                    logger.error('Audio extraction failed: %s', stderr_out)
-                    try:
-                        os.unlink(tmp_file)
-                    except OSError:
-                        pass
-            except Exception:
-                logger.exception('Audio extraction error')
-                try:
-                    os.unlink(tmp_file)
-                except OSError:
-                    pass
-
-        threading.Thread(target=extract, daemon=True).start()
-        return {'status': 'extracting'}, 202
 
 
 @api_ns_editor.route('editor/peaks')
@@ -829,4 +753,3 @@ class EditorSync(Resource):
         msg = job.get('message', 'Unknown error')
         _editor_sync_jobs.pop(job_key, None)
         return {'status': 'failed', 'message': msg}, 200
-

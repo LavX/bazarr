@@ -197,7 +197,6 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
     ref,
   ) {
     const videoRef = useRef<HTMLVideoElement>(null);
-    const audioRef = useRef<HTMLAudioElement>(null);
     const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const isPlayingRef = useRef(false);
     const lastReportedMsRef = useRef(-1);
@@ -222,6 +221,11 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
     const [browserCodecs, setBrowserCodecs] = useState("");
     useEffect(() => {
       if (!hasMedia) return;
+      // Reset playback-mode state before the new probe completes, otherwise
+      // videoSrc gets computed with the previous directPlay value against the
+      // new baseVideoUrl during the in-flight fetch.
+      setDirectPlay(null);
+      setRemuxMode(false);
       const infoUrl = `${Environment.baseUrl}/api/editor/info?mediaType=${mediaType}&mediaId=${mediaId}&apikey=${encodeURIComponent(apiKey)}`;
       fetch(infoUrl)
         .then((r) => (r.ok ? r.json() : null))
@@ -283,7 +287,10 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
 
           // Direct play: browser handles both codecs AND file container is directly servable.
           // Remux: browser handles video codec but not audio. Copy video, transcode audio to AAC.
-          const isDirect = canPlayBoth && servableContainer;
+          // Direct play also requires the default audio track. For audioTrack > 0 we always
+          // remux so ffmpeg can map the requested track into the served stream, which keeps
+          // the video element single (no parallel <audio> element to drift against).
+          const isDirect = canPlayBoth && servableContainer && audioTrack === 0;
           const isRemux = canPlayVideo && !isDirect;
           setDirectPlay(isDirect);
           setRemuxMode(isRemux);
@@ -324,7 +331,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
           );
         })
         .catch(() => setDirectPlay(false));
-    }, [hasMedia, mediaType, mediaId, apiKey, onAudioTracksLoaded]);
+    }, [hasMedia, mediaType, mediaId, apiKey, onAudioTracksLoaded, audioTrack]);
 
     // Reset retry state when media changes
     useEffect(() => {
@@ -355,52 +362,6 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
             ? `${baseVideoUrl}&remux=1${seekOffsetSec > 0 ? `&t=${seekOffsetSec.toFixed(1)}` : ""}`
             : `${baseVideoUrl}${seekOffsetSec > 0 ? `&t=${seekOffsetSec.toFixed(1)}` : ""}`;
 
-    // For remux/transcode, ffmpeg bakes the correct audio track into the video stream,
-    // no separate element needed.
-    // External audio is only needed for direct-play with a non-default track, because the
-    // browser can't select audio tracks from a raw file.
-    const useExternalAudio = directPlay === true && audioTrack > 0;
-    const audioBaseUrl =
-      useExternalAudio && hasMedia
-        ? `${Environment.baseUrl}/api/editor/audio?mediaType=${mediaType}&mediaId=${mediaId}&audioTrack=${audioTrack}&apikey=${encodeURIComponent(apiKey)}`
-        : "";
-    const [audioReady, setAudioReady] = useState(false);
-    const [audioExtracting, setAudioExtracting] = useState(false);
-    useEffect(() => {
-      if (!audioBaseUrl) {
-        setAudioReady(false);
-        setAudioExtracting(false);
-        return;
-      }
-      let cancelled = false;
-      const poll = async () => {
-        for (let i = 0; i < 120; i++) {
-          if (cancelled) return;
-          try {
-            const resp = await fetch(audioBaseUrl, { method: "HEAD" });
-            if (resp.status === 200) {
-              if (!cancelled) {
-                setAudioReady(true);
-                setAudioExtracting(false);
-              }
-              return;
-            }
-            if (resp.status === 202) {
-              if (!cancelled) setAudioExtracting(true);
-            }
-          } catch {
-            /* retry */
-          }
-          await new Promise((r) => setTimeout(r, 3000));
-        }
-      };
-      poll();
-      return () => {
-        cancelled = true;
-      };
-    }, [audioBaseUrl]);
-    const audioSrc = audioReady ? audioBaseUrl : "";
-
     // Time reporting: directPlay uses video.currentTime directly, transcode adds offset
     const startTimeReporting = useCallback(() => {
       if (timerRef.current) return;
@@ -417,17 +378,6 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
         ) {
           lastReportedMsRef.current = absoluteMs;
           onTimeUpdate(absoluteMs);
-        }
-        // Correct drift between the external audio element and video (direct-play
-        // with non-default audio track: two independent elements that can diverge)
-        const audio = audioRef.current;
-        if (audio && !audio.paused) {
-          const expected = nativeSeek
-            ? video.currentTime
-            : seekOffsetSecRef.current + video.currentTime;
-          if (Math.abs(audio.currentTime - expected) > 0.15) {
-            audio.currentTime = expected;
-          }
         }
       }, 100);
     }, [onTimeUpdate, nativeSeek]);
@@ -454,9 +404,6 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
         if (video) {
           video.currentTime = targetSec;
           setCurrentMs(currentTimeMs);
-          if (audioRef.current && useExternalAudio) {
-            audioRef.current.currentTime = targetSec;
-          }
         }
       } else {
         // Remux/transcode: reload the video stream with ?t= parameter
@@ -466,13 +413,13 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
           if (video && isPlayingRef.current) {
             video.pause();
           }
-          // Seek the separate audio element directly (it's a cached file, supports range requests)
-          if (audioRef.current && useExternalAudio) {
-            audioRef.current.currentTime = targetSec;
-          }
           seekOffsetSecRef.current = targetSec;
           setSeekOffsetSec(targetSec);
           setCurrentMs(currentTimeMs);
+          // User-initiated seek: re-arm the retry budget so a previous burst
+          // of errors doesn't make the new stream fall straight to the
+          // "Video unavailable" overlay.
+          retryCountRef.current = 0;
         }
       }
       // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -481,34 +428,23 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
     // Sync volume and playback rate
     useEffect(() => {
       const video = videoRef.current;
-      const audio = audioRef.current;
       if (video) {
-        video.volume = useExternalAudio ? 0 : volume;
+        video.volume = volume;
         video.playbackRate = playbackRate;
       }
-      if (audio) {
-        audio.volume = volume;
-        audio.playbackRate = playbackRate;
-      }
-    }, [volume, useExternalAudio, playbackRate]);
+    }, [volume, playbackRate]);
 
     const togglePlayPause = useCallback(() => {
       const video = videoRef.current;
-      const audio = audioRef.current;
       if (!video) return;
       if (video.paused) {
         video.play().catch(() => {
           /* ignored */
         });
-        if (audio && useExternalAudio)
-          audio.play().catch(() => {
-            /* ignored */
-          });
       } else {
         video.pause();
-        if (audio && useExternalAudio) audio.pause();
       }
-    }, [useExternalAudio]);
+    }, []);
 
     const seekRelative = useCallback(
       (deltaMs: number) => {
@@ -521,23 +457,20 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
         const targetSec = targetMs / 1000;
         if (nativeSeek) {
           video.currentTime = targetSec;
-          if (audioRef.current && useExternalAudio)
-            audioRef.current.currentTime = targetSec;
           setCurrentMs(targetMs);
           onTimeUpdate?.(targetMs);
         } else {
           const wasPlaying = isPlayingRef.current;
           if (wasPlaying) video.pause();
-          if (audioRef.current && useExternalAudio)
-            audioRef.current.currentTime = targetSec;
           seekOffsetSecRef.current = targetSec;
           setSeekOffsetSec(targetSec);
           setCurrentMs(targetMs);
           onTimeUpdate?.(targetMs);
           if (wasPlaying) autoPlayAfterSeekRef.current = true;
+          retryCountRef.current = 0;
         }
       },
-      [nativeSeek, duration, useExternalAudio, onTimeUpdate],
+      [nativeSeek, duration, onTimeUpdate],
     );
 
     const seekTo = useCallback(
@@ -548,23 +481,20 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
         if (!video) return;
         if (nativeSeek) {
           video.currentTime = targetSec;
-          if (audioRef.current && useExternalAudio)
-            audioRef.current.currentTime = targetSec;
           setCurrentMs(targetMs);
           onTimeUpdate?.(targetMs);
         } else {
           const wasPlaying = isPlayingRef.current;
           if (wasPlaying) video.pause();
-          if (audioRef.current && useExternalAudio)
-            audioRef.current.currentTime = targetSec;
           seekOffsetSecRef.current = targetSec;
           setSeekOffsetSec(targetSec);
           setCurrentMs(targetMs);
           onTimeUpdate?.(targetMs);
           if (wasPlaying) autoPlayAfterSeekRef.current = true;
+          retryCountRef.current = 0;
         }
       },
-      [nativeSeek, duration, useExternalAudio, onTimeUpdate],
+      [nativeSeek, duration, onTimeUpdate],
     );
 
     useImperativeHandle(
@@ -577,7 +507,10 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
     );
 
     const handlePlay = useCallback(() => {
-      retryCountRef.current = 0;
+      // Don't reset retryCountRef here: a stream that plays for a few ms,
+      // errors, retries, plays again briefly, errors again, would loop forever
+      // and respawn ffmpeg every time. The counter only resets on a user
+      // intervention (seek or media change).
       isPlayingRef.current = true;
       setPlaying(true);
       onPlayStateChange?.(true);
@@ -585,6 +518,11 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
     }, [onPlayStateChange, startTimeReporting]);
 
     const handleVideoError = useCallback(() => {
+      // Some browsers fire `error` for `<video src="">`. We can hit that
+      // empty-src window during the initial /info probe (directPlay === null)
+      // or during a media-change fetch. Don't burn retries or escalate to the
+      // error overlay just because the src isn't ready yet.
+      if (!videoSrc) return;
       if (!nativeSeek && retryCountRef.current < 3) {
         retryCountRef.current++;
         const video = videoRef.current;
@@ -593,19 +531,20 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
           seekOffsetSecRef.current = absoluteSec;
           setSeekOffsetSec(absoluteSec);
         }
-        autoPlayAfterSeekRef.current = true;
+        // Only resume play after retry if the user was actually playing.
+        // A buffer-drop error while paused shouldn't auto-start playback.
+        autoPlayAfterSeekRef.current = isPlayingRef.current;
         setStreamKey((k) => k + 1);
       } else {
         setVideoError(true);
       }
-    }, [nativeSeek]);
+    }, [nativeSeek, videoSrc]);
 
     const handlePause = useCallback(() => {
       isPlayingRef.current = false;
       setPlaying(false);
       onPlayStateChange?.(false);
       stopTimeReporting();
-      if (audioRef.current && useExternalAudio) audioRef.current.pause();
       const video = videoRef.current;
       if (video && onTimeUpdate) {
         const absoluteMs = nativeSeek
@@ -614,13 +553,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
         setCurrentMs(absoluteMs);
         onTimeUpdate(absoluteMs);
       }
-    }, [
-      onPlayStateChange,
-      stopTimeReporting,
-      onTimeUpdate,
-      nativeSeek,
-      useExternalAudio,
-    ]);
+    }, [onPlayStateChange, stopTimeReporting, onTimeUpdate, nativeSeek]);
 
     const handleLoadedMetadata = useCallback(() => {
       const video = videoRef.current;
@@ -630,21 +563,20 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
         }
         // Remux/transcode: duration was already set from /api/editor/info.
         setVideoError(false);
-        video.volume = useExternalAudio ? 0 : volume;
-        // Auto-play if user was playing before the seek (transcode mode only)
+        video.volume = volume;
+        // After a stream-key remount the new <video> DOM node mounts at default
+        // playbackRate=1.0 even though the UI selector still shows e.g. 1.5x.
+        // Reapply alongside volume so the rate survives error retries.
+        video.playbackRate = playbackRate;
+        // Auto-play if user was playing before the seek (transcode/remux mode only).
         if (autoPlayAfterSeekRef.current) {
           autoPlayAfterSeekRef.current = false;
           video.play().catch(() => {
             /* ignored */
           });
-          if (audioRef.current && useExternalAudio) {
-            audioRef.current.play().catch(() => {
-              /* ignored */
-            });
-          }
         }
       }
-    }, [volume, useExternalAudio, nativeSeek]);
+    }, [volume, nativeSeek, playbackRate]);
 
     const handleKeyDown = useCallback(
       (e: React.KeyboardEvent) => {
@@ -704,7 +636,6 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
             key={streamKey}
             ref={videoRef}
             src={videoSrc}
-            muted={useExternalAudio}
             style={{ width: "100%", display: "block" }}
             preload="metadata"
             onPlay={handlePlay}
@@ -714,71 +645,11 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
             onCanPlay={() => setBuffering(false)}
             onError={handleVideoError}
           />
-          {audioSrc && (
-            <audio
-              ref={audioRef}
-              src={audioSrc}
-              preload="auto"
-              onLoadedData={() => {
-                const audio = audioRef.current;
-                if (audio) {
-                  audio.volume = volume;
-                  // Sync audio to video position
-                  const video = videoRef.current;
-                  if (video) {
-                    audio.currentTime = nativeSeek
-                      ? video.currentTime
-                      : seekOffsetSecRef.current + video.currentTime;
-                  }
-                  if (isPlayingRef.current) {
-                    audio.play().catch(() => {
-                      /* ignored */
-                    });
-                  }
-                }
-              }}
-            />
-          )}
 
           {/* Loading spinner */}
           {buffering && (
             <div style={spinnerStyle}>
               <FontAwesomeIcon icon={faPlay} spin />
-            </div>
-          )}
-
-          {/* Audio extracting overlay */}
-          {audioExtracting && (
-            <div
-              style={{
-                position: "absolute",
-                bottom: 36,
-                left: 0,
-                right: 0,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 8,
-                padding: "6px 12px",
-                background: "rgba(0, 0, 0, 0.75)",
-                backdropFilter: "blur(4px)",
-                pointerEvents: "none",
-              }}
-            >
-              <span
-                style={{
-                  display: "inline-block",
-                  width: 10,
-                  height: 10,
-                  borderRadius: "50%",
-                  background: "var(--mantine-color-brand-5)",
-                  animation: "pulse 1.5s ease-in-out infinite",
-                }}
-              />
-              <span style={{ fontSize: 11, color: "#e8e8f0", fontWeight: 500 }}>
-                Extracting audio, please wait...
-              </span>
-              <style>{`@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }`}</style>
             </div>
           )}
 
