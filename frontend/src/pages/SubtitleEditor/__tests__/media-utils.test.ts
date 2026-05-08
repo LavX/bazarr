@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  findActiveCueIndex,
+  getActiveCueText,
+} from "@/pages/SubtitleEditor/EditorPage";
+import {
   formatTime,
   renderSubtitleHtml,
 } from "@/pages/SubtitleEditor/VideoPreview";
@@ -120,6 +124,30 @@ describe("renderSubtitleHtml", () => {
     // eslint-disable-next-line testing-library/render-result-naming-convention
     const result = renderSubtitleHtml("<b><i>bold italic</i></b>");
     expect(result).toBe("<b><i>bold italic</i></b>");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// EditorPage: playback cue lookup
+// ---------------------------------------------------------------------------
+describe("playback cue lookup", () => {
+  const cues = [
+    { id: "a", startMs: 1000, endMs: 2000, text: "first" },
+    { id: "b", startMs: 2500, endMs: 3500, text: "second" },
+  ];
+
+  it("finds the cue under the playhead", () => {
+    expect(findActiveCueIndex(cues, 3000)).toBe(1);
+    expect(getActiveCueText(cues, 3000)).toBe("second");
+  });
+
+  it("does not depend on editor selection", () => {
+    expect(getActiveCueText(cues, 3000)).not.toBe(cues[0].text);
+  });
+
+  it("returns no text while the playhead is in a gap", () => {
+    expect(findActiveCueIndex(cues, 2250)).toBe(-1);
+    expect(getActiveCueText(cues, 2250)).toBeUndefined();
   });
 });
 

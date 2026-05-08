@@ -66,6 +66,17 @@ import type { VideoPreviewHandle } from "./VideoPreview";
 import VideoPreview from "./VideoPreview";
 import WaveformTimeline from "./WaveformTimeline";
 
+export function findActiveCueIndex(cues: Cue[], playbackTimeMs: number) {
+  return cues.findIndex(
+    (cue) => playbackTimeMs >= cue.startMs && playbackTimeMs <= cue.endMs,
+  );
+}
+
+export function getActiveCueText(cues: Cue[], playbackTimeMs: number) {
+  const index = findActiveCueIndex(cues, playbackTimeMs);
+  return index >= 0 ? cues[index].text : undefined;
+}
+
 export default function EditorPage() {
   const { mediaType, mediaId, language } = useParams();
   const navigate = useNavigate();
@@ -1711,6 +1722,7 @@ export default function EditorPage() {
     selectedIndex >= 0 && selectedIndex < docState.cues.length
       ? docState.cues[selectedIndex]
       : null;
+  const activeSubtitleText = getActiveCueText(docState.cues, playbackTimeMs);
 
   return (
     <div
@@ -2203,18 +2215,10 @@ export default function EditorPage() {
             mediaId={mediaId ? Number(mediaId) : undefined}
             currentTimeMs={userSeekMs ?? 0}
             seekId={seekCounter}
-            currentSubtitleText={
-              selectedCue &&
-              playbackTimeMs >= selectedCue.startMs &&
-              playbackTimeMs <= selectedCue.endMs
-                ? selectedCue.text
-                : undefined
-            }
+            currentSubtitleText={activeSubtitleText}
             onTimeUpdate={(ms) => {
               setPlaybackTimeMs(ms);
-              const idx = docState.cues.findIndex(
-                (c) => ms >= c.startMs && ms <= c.endMs,
-              );
+              const idx = findActiveCueIndex(docState.cues, ms);
               if (idx >= 0 && idx !== selectedIndex) {
                 setSelectedIndex(idx);
               }

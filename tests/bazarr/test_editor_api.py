@@ -340,6 +340,49 @@ class TestParseRangeHeader:
 
 
 # ---------------------------------------------------------------------------
+# HLS command building
+# ---------------------------------------------------------------------------
+
+class TestHlsCommandBuilding:
+    """Tests for ffmpeg HLS command construction."""
+
+    def test_nonzero_start_transcodes_video_for_frame_accurate_seek(self, tmp_path):
+        probe = _make_probe_json(video_codec='hevc', audio_codec='ac3')
+        cmd = editor_module._build_hls_ffmpeg_command(
+            ffmpeg='/usr/bin/ffmpeg',
+            video_path='/video/movie.mkv',
+            audio_track_idx=0,
+            start_time_sec=3533.35,
+            cache_dir=str(tmp_path),
+            probe_data=probe,
+        )
+
+        assert cmd[:4] == ['/usr/bin/ffmpeg', '-ss', '3533.35', '-i']
+        assert _value_after(cmd, '-c:v') == 'libx264'
+        assert '-tag:v' not in cmd
+
+    def test_zero_start_keeps_hevc_stream_copy(self, tmp_path):
+        probe = _make_probe_json(video_codec='hevc', audio_codec='ac3')
+        cmd = editor_module._build_hls_ffmpeg_command(
+            ffmpeg='/usr/bin/ffmpeg',
+            video_path='/video/movie.mkv',
+            audio_track_idx=0,
+            start_time_sec=0,
+            cache_dir=str(tmp_path),
+            probe_data=probe,
+        )
+
+        assert '-ss' not in cmd
+        assert _value_after(cmd, '-c:v') == 'copy'
+        assert _value_after(cmd, '-tag:v') == 'hvc1'
+
+
+def _value_after(items, key):
+    idx = items.index(key)
+    return items[idx + 1]
+
+
+# ---------------------------------------------------------------------------
 # _validate_params
 # ---------------------------------------------------------------------------
 

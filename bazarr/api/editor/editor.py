@@ -1,10 +1,16 @@
 # coding=utf-8
 
+import hashlib
 import json
 import logging
 import os
+import re
+import shutil
 import struct
 import subprocess
+import threading
+import time
+from urllib.parse import quote
 
 from flask import Response, request, send_file
 from flask_restx import Namespace, Resource
@@ -21,6 +27,42 @@ logger = logging.getLogger(__name__)
 api_ns_editor = Namespace('Editor', description='Video editor streaming and metadata')
 
 PEAKS_CACHE_DIR = os.path.join(args.config_dir, 'cache', 'peaks')
+HLS_CACHE_DIR = os.path.join(args.config_dir, 'cache', 'hls')
+
+# Bump this whenever the HLS encoding strategy changes in a way that makes
+# existing cache directories unsafe to reuse.
+HLS_CACHE_VERSION = 'hls-v2'
+
+# Idle TTL after which an HLS cache directory becomes eligible for eviction.
+# Each request to the playlist or any segment refreshes the directory's atime,
+# so this only fires for sessions the user has actually walked away from.
+HLS_IDLE_TTL_SECONDS = 30 * 60
+
+# Cap on how long we wait inside a request for ffmpeg's first segment to land
+# before responding with whatever exists. hls.js will refetch if the playlist
+# is empty or short.
+HLS_FIRST_SEGMENT_WAIT_SECONDS = 8.0
+
+# Whitelist of files we'll serve from an HLS cache directory.
+HLS_FILENAME_RE = re.compile(r'^(playlist\.m3u8|init\.mp4|segment_\d{1,6}\.m4s)$')
+
+# Tracks ffmpeg encoder threads keyed by cache directory so we don't
+# double-spawn for concurrent first requests on the same session.
+_hls_encoder_locks: dict[str, threading.Lock] = {}
+_hls_encoder_locks_guard = threading.Lock()
+
+# Tracks live ffmpeg subprocesses keyed by cache directory so we can terminate
+# encoders for sessions the user has walked away from. Without this, switching
+# tracks or seeking-before-session-start leaves the original ffmpeg encoding the
+# rest of the file in the background, accumulating CPU + disk pressure.
+_hls_encoder_processes: dict[str, subprocess.Popen] = {}
+_hls_encoder_processes_guard = threading.Lock()
+
+# How long a session must be untouched (no segment requests) before its ffmpeg
+# is considered abandoned and gets killed. Short enough that a track switch
+# clears the old encoder quickly; long enough that a user briefly seeking
+# elsewhere doesn't lose the original session.
+HLS_ENCODER_IDLE_TIMEOUT_SECONDS = 60
 
 
 def _resolve_video_path(media_type, media_id):
@@ -80,7 +122,7 @@ def _probe_video(video_path):
 
 
 def _can_direct_play(video_path, probe_data=None):
-    """Check if the video can be served directly to the browser (h264 in mp4/m4v container)."""
+    """Check if the video can be served directly to the browser."""
     ext = os.path.splitext(video_path)[1].lower()
     if ext not in ('.mp4', '.m4v'):
         return False
@@ -93,8 +135,7 @@ def _can_direct_play(video_path, probe_data=None):
     for stream in probe_data.get('streams', []):
         if stream.get('codec_type') == 'video':
             codec = stream.get('codec_name', '').lower()
-            if codec in ('h264', 'avc'):
-                return True
+            return codec in ('h264', 'avc')
     return False
 
 
@@ -145,49 +186,11 @@ def _serve_file_with_ranges(file_path, mimetype):
         response.headers['Content-Range'] = f'bytes {start}-{end}/{file_size}'
         response.headers['Content-Length'] = length
         response.headers['Accept-Ranges'] = 'bytes'
-        response.headers['X-Accel-Buffering'] = 'no'
         return response
 
     response = send_file(file_path, mimetype=mimetype)
     response.headers['Accept-Ranges'] = 'bytes'
-    response.headers['X-Accel-Buffering'] = 'no'
     return response
-
-
-def _stream_ffmpeg(cmd, mimetype):
-    """Run an ffmpeg command and stream its stdout as a Flask Response."""
-    def generate():
-        process = None
-        try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-            )
-            while True:
-                chunk = process.stdout.read(64 * 1024)
-                if not chunk:
-                    break
-                yield chunk
-            process.wait()
-            if process.returncode != 0:
-                logger.error('ffmpeg exited with code %d for cmd: %s', process.returncode, ' '.join(cmd[:5]))
-        except Exception:
-            logger.exception('Error during ffmpeg streaming')
-        finally:
-            if process and process.poll() is None:
-                process.kill()
-                process.wait()
-
-    return Response(
-        generate(),
-        mimetype=mimetype,
-        headers={
-            'Cache-Control': 'no-cache',
-            'Accept-Ranges': 'none',
-            'X-Accel-Buffering': 'no',
-        },
-    )
 
 
 def _validate_params():
@@ -230,173 +233,467 @@ def _resolve_or_abort():
     return (video_path,)
 
 
-@api_ns_editor.route('editor/video')
-class EditorVideo(Resource):
-    @authenticate
-    def get(self):
-        """Stream video as fragmented MP4 for browser playback."""
-        resolved = _resolve_or_abort()
-        if len(resolved) == 2:
-            return resolved
+def _hls_cache_dir(media_type, media_id, audio_track_idx, start_time_sec, mtime):
+    """Stable cache dir per (media, audio track, start time, file mtime) tuple.
 
-        video_path = resolved[0]
+    start_time_sec lets callers spawn fresh sessions that begin somewhere other
+    than the start of the file (e.g., after a track switch at minute 30). Each
+    distinct start point gets its own cache so concurrent sessions don't race.
 
-        # If frontend says the browser can play this file natively, serve it directly
-        # This covers h264, hevc (on Safari/Edge), vp9 (Chrome), av1, etc.
-        if request.args.get('direct') == '1':
-            ext = os.path.splitext(video_path)[1].lower()
-            mime_map = {'.mp4': 'video/mp4', '.m4v': 'video/mp4', '.webm': 'video/webm', '.mkv': 'video/x-matroska'}
-            mime = mime_map.get(ext, 'video/mp4')
-            return _serve_file_with_ranges(video_path, mime)
+    The start time is keyed at millisecond precision (3 decimals). Truncating
+    to whole seconds would let a request for 30.789 reuse an already-finished
+    playlist generated for 30.123 in the same int-second bucket -- the stream
+    contents wouldn't actually start at 30.789, so the user-facing clock
+    (startSec + video.currentTime) would drift by up to ~999 ms.
+    """
+    raw = (
+        f"{HLS_CACHE_VERSION}:{media_type}:{media_id}:{audio_track_idx}:"
+        f"{start_time_sec:.3f}:{int(mtime)}"
+    )
+    key = hashlib.md5(raw.encode()).hexdigest()[:16]
+    return os.path.join(HLS_CACHE_DIR, key)
 
-        # Remux or transcode on the fly with ffmpeg
+
+def _hls_encoder_lock(cache_dir):
+    """Per-cache-dir lock so concurrent first requests don't race on ffmpeg spawn."""
+    with _hls_encoder_locks_guard:
+        lock = _hls_encoder_locks.get(cache_dir)
+        if lock is None:
+            lock = threading.Lock()
+            _hls_encoder_locks[cache_dir] = lock
+        return lock
+
+
+def _is_playlist_complete(playlist_path):
+    """A finished HLS VOD playlist ends with #EXT-X-ENDLIST. Anything else
+    (an empty file, a manifest still being appended, or a manifest from an
+    encoder that was killed mid-stream) is partial."""
+    try:
+        with open(playlist_path) as f:
+            return '#EXT-X-ENDLIST' in f.read()
+    except OSError:
+        return False
+
+
+def _kill_idle_hls_encoders():
+    """Terminate ffmpeg HLS encoders whose cache dirs haven't been touched recently.
+
+    Each segment request bumps the cache directory's atime via os.utime, so the
+    ffmpeg keeps running as long as hls.js is fetching segments. When the user
+    switches sessions (track change, seek-before-start), the old session goes
+    silent and its ffmpeg is killed here on the next sweep.
+    """
+    cutoff = time.time() - HLS_ENCODER_IDLE_TIMEOUT_SECONDS
+    with _hls_encoder_processes_guard:
+        items = list(_hls_encoder_processes.items())
+    for cache_dir, process in items:
+        if process.poll() is not None:
+            # Encoder exited on its own.
+            with _hls_encoder_processes_guard:
+                _hls_encoder_processes.pop(cache_dir, None)
+            continue
         try:
-            ffmpeg = _get_ffmpeg()
-        except Exception:
-            logger.exception('ffmpeg binary not available')
-            return 'ffmpeg not found', 500
-
-        # If frontend says remux=1, the browser can play the video codec natively,
-        # just need audio transcoded to AAC. Copy video stream (very fast).
-        if request.args.get('remux') == '1':
-            video_args = ['-c:v', 'copy']
-        else:
-            # Check if the video codec can be copied or needs full transcode
-            probe_data = _probe_video(video_path)
-            video_codec = None
-            if probe_data:
-                for stream in probe_data.get('streams', []):
-                    if stream.get('codec_type') == 'video':
-                        video_codec = stream.get('codec_name', '').lower()
-                        break
-
-            if video_codec in ('h264', 'avc'):
-                video_args = ['-c:v', 'copy']
-            else:
-                video_args = ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-tune', 'fastdecode']
-
-        # Support seeking via ?t= parameter (seconds)
-        # Use -ss before -i for fast keyframe seek, then -ss after -i for precise frame
-        pre_seek = []
-        post_seek = []
-        start_time = request.args.get('t')
-        if start_time:
+            atime = os.stat(cache_dir).st_atime
+        except OSError:
+            atime = 0
+        if atime < cutoff:
             try:
-                t = float(start_time)
-                if t > 0:
-                    # Fast seek to 5s before target, then precise seek to exact frame
-                    pre_seek = ['-ss', str(max(0, t - 5))]
-                    post_seek = ['-ss', str(min(5, t))]
-            except (ValueError, TypeError):
+                process.terminate()
+                logger.info('Terminated idle HLS encoder for %s', cache_dir)
+            except Exception:
+                logger.exception('Failed to terminate ffmpeg for %s', cache_dir)
+            with _hls_encoder_processes_guard:
+                _hls_encoder_processes.pop(cache_dir, None)
+            # Drop the now-incomplete manifest. Without this, the next request
+            # for the same session would short-circuit on "playlist exists,
+            # marker gone" and serve the truncated playlist forever, stalling
+            # at the last segment that was written before the kill.
+            try:
+                os.unlink(os.path.join(cache_dir, 'playlist.m3u8'))
+            except OSError:
                 pass
 
-        audio_track = request.args.get('audioTrack', '0')
+
+def _evict_stale_hls_dirs():
+    """Remove HLS cache directories that have been idle longer than the TTL."""
+    if not os.path.isdir(HLS_CACHE_DIR):
+        return
+    cutoff = time.time() - HLS_IDLE_TTL_SECONDS
+    for entry in os.listdir(HLS_CACHE_DIR):
+        path = os.path.join(HLS_CACHE_DIR, entry)
         try:
-            audio_track_idx = int(audio_track)
-        except (ValueError, TypeError):
-            audio_track_idx = 0
+            stat = os.stat(path)
+        except OSError:
+            continue
+        if not os.path.isdir(path):
+            continue
+        # Skip dirs with an active encoding marker; ffmpeg might still be writing.
+        if os.path.isfile(os.path.join(path, '.encoding')):
+            continue
+        if stat.st_atime < cutoff:
+            shutil.rmtree(path, ignore_errors=True)
+            with _hls_encoder_locks_guard:
+                _hls_encoder_locks.pop(path, None)
+            with _hls_encoder_processes_guard:
+                _hls_encoder_processes.pop(path, None)
 
-        # Check if the requested audio track exists
-        probe_data = _probe_video(video_path)
-        has_audio = False
-        if probe_data:
-            audio_streams = [s for s in probe_data.get('streams', []) if s.get('codec_type') == 'audio']
-            has_audio = audio_track_idx < len(audio_streams)
 
-        audio_args = []
-        if has_audio:
-            audio_args = ['-map', f'0:a:{audio_track_idx}', '-c:a', 'aac']
-        else:
-            audio_args = ['-an']
+def _build_hls_ffmpeg_command(
+    ffmpeg,
+    video_path,
+    audio_track_idx,
+    start_time_sec,
+    cache_dir,
+    probe_data,
+):
+    """Build the ffmpeg command used for one editor HLS session."""
+    video_codec = None
+    if probe_data:
+        for stream in probe_data.get('streams', []):
+            if stream.get('codec_type') == 'video':
+                video_codec = stream.get('codec_name', '').lower()
+                break
 
-        cmd = [
-            ffmpeg,
-            *pre_seek,
-            '-i', video_path,
-            *post_seek,
-            '-map', '0:v:0',
-            *audio_args,
-            *video_args,
-            '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
-            '-f', 'mp4',
-            '-v', 'error',
-            'pipe:1',
+    exact_start = start_time_sec > 0
+    if exact_start:
+        video_args = [
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-crf', '28',
+            '-g', '48',
+            '-keyint_min', '48',
+            '-sc_threshold', '0',
         ]
-        return _stream_ffmpeg(cmd, 'video/mp4')
+        extra_video_tags = []
+    elif video_codec in ('h264', 'avc'):
+        video_args = ['-c:v', 'copy']
+        extra_video_tags = []
+    elif video_codec in ('hevc', 'h265'):
+        video_args = ['-c:v', 'copy']
+        extra_video_tags = ['-tag:v', 'hvc1']
+    else:
+        video_args = [
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-crf', '28',
+            '-g', '48',
+            '-keyint_min', '48',
+            '-sc_threshold', '0',
+        ]
+        extra_video_tags = []
+
+    has_audio = False
+    if probe_data:
+        audio_streams = [
+            s for s in probe_data.get('streams', []) if s.get('codec_type') == 'audio'
+        ]
+        has_audio = audio_track_idx < len(audio_streams)
+
+    if has_audio:
+        audio_args = [
+            '-map', f'0:a:{audio_track_idx}',
+            '-c:a', 'aac',
+            '-ac', '2',
+            '-b:a', '128k',
+        ]
+    else:
+        audio_args = ['-an']
+
+    pre_input = ['-ss', str(start_time_sec)] if start_time_sec > 0 else []
+    return [
+        ffmpeg,
+        *pre_input,
+        '-i', video_path,
+        '-map', '0:v:0',
+        *audio_args,
+        *video_args,
+        *extra_video_tags,
+        '-f', 'hls',
+        '-hls_time', '4',
+        '-hls_list_size', '0',
+        '-hls_segment_type', 'fmp4',
+        '-hls_fmp4_init_filename', 'init.mp4',
+        '-hls_segment_filename', os.path.join(cache_dir, 'segment_%03d.m4s'),
+        '-v', 'error',
+        '-y',
+        os.path.join(cache_dir, 'playlist.m3u8'),
+    ]
 
 
-@api_ns_editor.route('editor/audio')
-class EditorAudio(Resource):
-    @authenticate
-    def get(self):
-        """Extract audio track as AAC, cached as file for native seeking."""
-        resolved = _resolve_or_abort()
-        if len(resolved) == 2:
-            return resolved
+def _spawn_hls_encoder(video_path, audio_track_idx, start_time_sec, cache_dir):
+    """Start ffmpeg writing HLS to cache_dir in a background thread.
 
-        video_path = resolved[0]
+    start_time_sec is applied as an input seek (-ss before -i). Sessions that
+    start after zero re-encode video, which lets ffmpeg accurately decode from
+    the previous keyframe and discard frames before start_time_sec. That keeps
+    the frontend clock, visible video, and subtitle overlay aligned without
+    forcing the browser to seek into a non-keyframe fMP4 fragment.
 
-        import hashlib
-        import threading
-        audio_track = request.args.get('audioTrack', '0')
-        try:
-            audio_track_idx = int(audio_track)
-        except (ValueError, TypeError):
-            audio_track_idx = 0
-        file_stat = os.stat(video_path)
-        path_hash = hashlib.md5(video_path.encode()).hexdigest()
-        audio_cache_dir = os.path.join(PEAKS_CACHE_DIR, 'audio')
-        os.makedirs(audio_cache_dir, exist_ok=True)
-        track_suffix = f'_t{audio_track_idx}' if audio_track_idx > 0 else ''
-        cache_file = os.path.join(audio_cache_dir, f'{path_hash}_{int(file_stat.st_mtime)}{track_suffix}.m4a')
-        tmp_file = os.path.join(audio_cache_dir, f'{path_hash}_{int(file_stat.st_mtime)}{track_suffix}.extracting.m4a')
+    Idempotent: returns immediately if a complete playlist already exists or
+    another thread is currently encoding.
+    """
+    playlist = os.path.join(cache_dir, 'playlist.m3u8')
+    encoding_marker = os.path.join(cache_dir, '.encoding')
 
-        # Already cached: serve immediately
-        if os.path.isfile(cache_file):
-            return _serve_file_with_ranges(cache_file, 'audio/mp4')
+    # Reusable cache: a complete playlist (closed with #EXT-X-ENDLIST) and no
+    # active encoding marker. Anything else falls through to a fresh spawn.
+    if (
+        os.path.isfile(playlist)
+        and not os.path.isfile(encoding_marker)
+        and _is_playlist_complete(playlist)
+    ):
+        return
 
-        # Extraction in progress (tmp file exists): tell frontend to wait
-        if os.path.isfile(tmp_file):
-            return {'status': 'extracting'}, 202
+    lock = _hls_encoder_lock(cache_dir)
+    if not lock.acquire(blocking=False):
+        # Another thread is spawning ffmpeg; let it finish.
+        return
 
-        # Start extraction in background thread
-        def extract():
+    try:
+        # Re-check inside the lock.
+        if (
+            os.path.isfile(playlist)
+            and not os.path.isfile(encoding_marker)
+            and _is_playlist_complete(playlist)
+        ):
+            return
+        if os.path.isfile(encoding_marker):
+            return
+
+        os.makedirs(cache_dir, exist_ok=True)
+
+        probe_data = _probe_video(video_path)
+        ffmpeg = _get_ffmpeg()
+        cmd = _build_hls_ffmpeg_command(
+            ffmpeg, video_path, audio_track_idx, start_time_sec, cache_dir, probe_data,
+        )
+
+        def encode():
+            process = None
             try:
-                ffmpeg = _get_ffmpeg()
-                cmd = [
-                    ffmpeg,
-                    '-i', video_path,
-                    '-vn',
-                    '-map', f'0:a:{audio_track_idx}',
-                    '-c:a', 'aac',
-                    '-b:a', '24k',
-                    '-ac', '1',
-                    '-ar', '16000',
-                    '-movflags', '+faststart',
-                    '-v', 'error',
-                    '-y',
-                    tmp_file,
-                ]
-                result = subprocess.run(cmd, capture_output=True, timeout=600)
-                if result.returncode == 0 and os.path.isfile(tmp_file):
-                    os.replace(tmp_file, cache_file)
-                    logger.info('Audio cache ready: %s (%d bytes)', cache_file, os.path.getsize(cache_file))
-                else:
-                    stderr_out = result.stderr.decode(errors='replace')[:500]
-                    logger.error('Audio extraction failed: %s', stderr_out)
-                    try:
-                        os.unlink(tmp_file)
-                    except OSError:
-                        pass
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+                with _hls_encoder_processes_guard:
+                    _hls_encoder_processes[cache_dir] = process
+                # No wall-clock timeout. A 4-hour movie at libx264 ultrafast
+                # could legitimately take >2h on slow hardware, and a hard
+                # kill there would truncate the playlist. The right safety
+                # net is _kill_idle_hls_encoders, which only acts when the
+                # session has actually been abandoned (no segment requests
+                # for HLS_ENCODER_IDLE_TIMEOUT_SECONDS).
+                # communicate() returns (stdout, stderr); stdout is DEVNULL
+                # so we only care about the stderr half.
+                _, stderr_data = process.communicate()
+                if process.returncode != 0 and process.returncode != -15:
+                    # rc=-15 is SIGTERM, which is what _kill_idle_hls_encoders
+                    # sends; not an error.
+                    logger.error(
+                        'HLS encode failed for %s (rc=%d): %s',
+                        video_path, process.returncode,
+                        stderr_data.decode(errors='replace')[:500],
+                    )
             except Exception:
-                logger.exception('Audio extraction error')
+                logger.exception('HLS encoding error for %s', video_path)
+            finally:
+                if process is not None:
+                    with _hls_encoder_processes_guard:
+                        # Pop only if it's still us (a newer encoder for the
+                        # same dir might have replaced the entry).
+                        if _hls_encoder_processes.get(cache_dir) is process:
+                            _hls_encoder_processes.pop(cache_dir, None)
                 try:
-                    os.unlink(tmp_file)
+                    os.unlink(encoding_marker)
                 except OSError:
                     pass
 
-        threading.Thread(target=extract, daemon=True).start()
-        return {'status': 'extracting'}, 202
+        # Marker creation deferred to here — after probe / ffmpeg lookup / cmd
+        # build have all succeeded. If any of those raised, we'd have left a
+        # stale .encoding behind that future requests would see and skip,
+        # stranding the session permanently. Now the marker only exists when
+        # the encoder thread is about to take ownership of it.
+        with open(encoding_marker, 'w') as f:
+            f.write(str(int(time.time())))
+        try:
+            threading.Thread(target=encode, daemon=True).start()
+        except Exception:
+            try:
+                os.unlink(encoding_marker)
+            except OSError:
+                pass
+            raise
+    finally:
+        lock.release()
+
+
+def _wait_for_first_segment(cache_dir, deadline):
+    """Block (briefly) until the playlist has at least one segment listed."""
+    playlist = os.path.join(cache_dir, 'playlist.m3u8')
+    while time.time() < deadline:
+        if os.path.isfile(playlist):
+            try:
+                with open(playlist, 'r') as f:
+                    if any(line.strip().endswith('.m4s') for line in f):
+                        return True
+            except OSError:
+                pass
+        time.sleep(0.1)
+    return False
+
+
+@api_ns_editor.route(
+    'editor/hls/<string:media_type>/<int:media_id>/<int:audio_track>/<string:start_time>/<string:filename>'
+)
+class EditorHls(Resource):
+    @authenticate
+    def get(self, media_type, media_id, audio_track, start_time, filename):
+        """HLS playlist + segments served from a per-session cache directory.
+
+        URL path encodes (mediaType, mediaId, audioTrack, startTime) so segment
+        URLs in the playlist (which are relative) inherit the same session.
+        startTime is the source-time offset in seconds where ffmpeg begins
+        encoding; the frontend uses it to create new sessions for track switches
+        or seek-before-current-session-start without restarting from t=0.
+
+        startTime is parsed as a float so the frontend can preserve sub-second
+        precision (e.g., switching tracks at 30.567s passes through unrounded
+        instead of snapping the user-facing clock to a whole second).
+
+        First request to playlist.m3u8 spawns ffmpeg; segments are served as
+        ffmpeg writes them. hls.js handles segment fetching, buffer management,
+        and seek-back within the cached portion.
+        """
+        if media_type not in ('episode', 'movie'):
+            return 'mediaType must be "episode" or "movie"', 400
+        if not HLS_FILENAME_RE.match(filename):
+            return 'Invalid HLS filename', 400
+        if audio_track < 0:
+            return 'audioTrack must be >= 0', 400
+        try:
+            start_time_sec = float(start_time)
+        except ValueError:
+            return 'startTime must be a number', 400
+        if start_time_sec < 0 or not (start_time_sec == start_time_sec):  # rejects NaN
+            return 'startTime must be >= 0', 400
+
+        resolved = _resolve_video_path(media_type, media_id)
+        if isinstance(resolved, tuple):
+            return resolved
+        video_path = resolved
+        if not os.path.isfile(video_path):
+            return 'Video file not found on disk', 404
+
+        try:
+            mtime = os.stat(video_path).st_mtime
+        except OSError:
+            return 'Video file not accessible', 404
+
+        cache_dir = _hls_cache_dir(media_type, media_id, audio_track, start_time_sec, mtime)
+        target = os.path.join(cache_dir, filename)
+
+        # Defense-in-depth: ensure the resolved target stays inside the HLS
+        # cache root. The filename regex above already blocks path traversal,
+        # but we cross-check after symlink resolution. Comparing realpath
+        # against itself (the previous form) breaks deployments where
+        # args.config_dir is itself a symlink (Docker bind mounts etc.).
+        real_cache_root = os.path.realpath(HLS_CACHE_DIR)
+        real_target = os.path.realpath(target)
+        if not (
+            real_target == real_cache_root
+            or real_target.startswith(real_cache_root + os.sep)
+        ):
+            return 'Invalid HLS path', 400
+
+        if filename == 'playlist.m3u8':
+            # Lazy-sweep on every playlist request: kill any ffmpeg encoders
+            # whose sessions have gone idle (user switched tracks / sessions),
+            # then evict directories that have been cold long enough.
+            try:
+                _kill_idle_hls_encoders()
+            except Exception:
+                logger.exception('HLS encoder sweep error')
+            try:
+                _evict_stale_hls_dirs()
+            except OSError:
+                logger.exception('HLS cache eviction error')
+
+            try:
+                _spawn_hls_encoder(video_path, audio_track, start_time_sec, cache_dir)
+            except Exception:
+                logger.exception('Failed to spawn HLS encoder for %s', video_path)
+                return 'ffmpeg not available', 500
+
+            # Wait briefly for ffmpeg to write the first segment so the player
+            # gets a useful playlist on the first response.
+            _wait_for_first_segment(
+                cache_dir, time.time() + HLS_FIRST_SEGMENT_WAIT_SECONDS,
+            )
+
+            if not os.path.isfile(target):
+                return 'Encoding starting, retry shortly', 503
+
+            # Native HLS clients (Safari / iOS) can't inject custom request
+            # headers on segment requests, so the apikey has to ride in the
+            # URL. The manifest's segment lines and #EXT-X-MAP URI are
+            # relative paths that resolve without the playlist URL's query
+            # string, so we rewrite them server-side to carry the apikey when
+            # the request authenticated via query. Header-auth paths (hls.js
+            # with xhrSetup) don't include apikey on the request and skip
+            # this branch, keeping the manifest clean.
+            apikey_query = request.args.get('apikey')
+            if apikey_query:
+                try:
+                    with open(target) as f:
+                        manifest = f.read()
+                except OSError:
+                    return 'Encoding starting, retry shortly', 503
+                encoded = quote(apikey_query, safe='')
+                rewritten = []
+                for line in manifest.splitlines(keepends=True):
+                    stripped = line.rstrip('\n').rstrip('\r')
+                    if stripped.startswith('#EXT-X-MAP:'):
+                        rewritten.append(
+                            re.sub(
+                                r'URI="([^"?]+)"',
+                                f'URI="\\1?apikey={encoded}"',
+                                line,
+                            )
+                        )
+                    elif stripped and not stripped.startswith('#'):
+                        sep = '\n' if line.endswith('\n') else ''
+                        rewritten.append(f'{stripped}?apikey={encoded}{sep}')
+                    else:
+                        rewritten.append(line)
+                response = Response(
+                    ''.join(rewritten),
+                    mimetype='application/vnd.apple.mpegurl',
+                )
+            else:
+                response = send_file(target, mimetype='application/vnd.apple.mpegurl')
+            # Tell clients this is a live-ish playlist that may grow until
+            # ENDLIST appears, so they refetch instead of caching it.
+            response.headers['Cache-Control'] = 'no-cache'
+            return response
+
+        # Init segment or media segment.
+        if not os.path.isfile(target):
+            # Segment may not have been written yet by ffmpeg; brief wait.
+            deadline = time.time() + 5.0
+            while time.time() < deadline and not os.path.isfile(target):
+                time.sleep(0.1)
+            if not os.path.isfile(target):
+                return 'Segment not yet available', 404
+
+        mimetype = 'video/mp4' if filename.endswith('.mp4') else 'video/iso.segment'
+        response = _serve_file_with_ranges(target, mimetype)
+        # Touch parent dir so eviction TTL tracks last access.
+        try:
+            os.utime(cache_dir, None)
+        except OSError:
+            pass
+        return response
 
 
 @api_ns_editor.route('editor/peaks')
@@ -829,4 +1126,3 @@ class EditorSync(Resource):
         msg = job.get('message', 'Unknown error')
         _editor_sync_jobs.pop(job_key, None)
         return {'status': 'failed', 'message': msg}, 200
-
