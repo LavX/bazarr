@@ -24,7 +24,7 @@
     "@tanstack/react-table": "^8.21.3",
     "@tanstack/react-virtual": "^3.13.23",
     "@wavesurfer/react": "^1.0.12",
-    "axios": "^1.13.6",
+    "axios": "^1.16.0",
     "braces": "^3.0.3",
     "hls.js": "^1.6.16",
     "react": "^19.2.6",
