@@ -58,7 +58,12 @@ PIPOCAS_LANGUAGE_MAP = {
 
 def get_pipocas_language(language):
     """Map a Language to pipocas.tv internal language string."""
-    key = (language.alpha3, language.country)
+    # language.country is a babelfish.Country object (or None); the map
+    # uses alpha2 strings, so coerce before lookup. Without this,
+    # Brazilian Portuguese ('por', Country('BR')) misses the ('por','BR')
+    # entry and falls through to generic Portuguese.
+    country_code = language.country.alpha2 if language.country else None
+    key = (language.alpha3, country_code)
     if key in PIPOCAS_LANGUAGE_MAP:
         return PIPOCAS_LANGUAGE_MAP[key]
 
