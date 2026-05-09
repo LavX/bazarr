@@ -59,6 +59,7 @@ def download_best_subtitles(
     only_one=False,
     use_original_format=False,
     use_provider_priority=True,
+    fallback_allowed=False,
     **kwargs
 ):
     downloaded_subtitles = defaultdict(list)
@@ -90,6 +91,7 @@ def download_best_subtitles(
             hearing_impaired=hearing_impaired,
             only_one=only_one,
             use_original_format=use_original_format,
+            fallback_allowed=fallback_allowed,
         )
         logger.info("Downloaded %d subtitle(s)", len(subtitles))
         downloaded_subtitles[video].extend(subtitles)

@@ -64,7 +64,7 @@ def check_login(actual_method):
                 })
         elif settings.auth.type == 'form':
             if 'logged_in' not in session:
-                return abort(401, message="Unauthorized")
+                return abort(401)
         return actual_method(*args, **kwargs)
     return wrapper
 
@@ -128,14 +128,14 @@ def catch_all(path):
     return render_template("index.html", BAZARR_SERVER_INJECT=inject, baseUrl=template_url)
 
 
-@check_login
 @ui_bp.route('/' + FILE_LOG)
+@check_login
 def download_log():
     return send_file(get_log_file_path(), max_age=0, as_attachment=True)
 
 
-@check_login
 @ui_bp.route('/images/series/<path:url>', methods=['GET'])
+@check_login
 def series_images(url):
     url = url.strip("/")
     apikey = settings.sonarr.apikey
@@ -149,8 +149,8 @@ def series_images(url):
         return Response(stream_with_context(req.iter_content(2048)), content_type=req.headers['content-type'])
 
 
-@check_login
 @ui_bp.route('/images/movies/<path:url>', methods=['GET'])
+@check_login
 def movies_images(url):
     apikey = settings.radarr.apikey
     baseUrl = settings.radarr.base_url
@@ -163,8 +163,8 @@ def movies_images(url):
         return Response(stream_with_context(req.iter_content(2048)), content_type=req.headers['content-type'])
 
 
-@check_login
 @ui_bp.route('/system/backup/download/<path:filename>', methods=['GET'])
+@check_login
 def backup_download(filename):
     fullpath = os.path.normpath(os.path.join(settings.backup.folder, filename))
     if not fullpath.startswith(settings.backup.folder):
@@ -356,8 +356,8 @@ def _build_request_url(base_parsed, status_path, resolved_ip, hostname, pin):
     return pinned_url, headers
 
 
-@check_login
 @ui_bp.route('/test/<service>', methods=['GET'])
+@check_login
 def proxy_service(service):
     """Constrained connection tester for Sonarr/Radarr.
 
@@ -477,9 +477,9 @@ def proxy_service(service):
                 code=last_response_code)
 
 
-@check_login
 @ui_bp.route('/test', methods=['GET'])
 @ui_bp.route('/test/<protocol>/<path:url>', methods=['GET'])
+@check_login
 def proxy(protocol, url):
     if protocol.lower() not in ['http', 'https']:
         return dict(status=False, error='Unsupported protocol', code=0)
