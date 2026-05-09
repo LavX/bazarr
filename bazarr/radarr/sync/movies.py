@@ -69,10 +69,10 @@ def update_movie(updated_movie):
         if (previous_movie_file_id != updated_movie['movie_file_id'] or
                 previous_movie_path != updated_movie['path']):
             # Store subtitles for updated movie where path or movie_file_id changed
-            logging.debug(f'BAZARR updating subtitles for movie {updated_movie["path"]}')
+            logging.debug(f'BAZARR updating subtitles for movie {updated_movie["path"]}')  # noqa: G004
             store_subtitles_movie(updated_movie['path'], path_mappings.path_replace_movie(updated_movie['path']))
         else:
-            logging.debug(f'BAZARR skipping subtitle update for movie {updated_movie["path"]} as path '
+            logging.debug(f'BAZARR skipping subtitle update for movie {updated_movie["path"]} as path '  # noqa: G004
                           f'and movie_file_id unchanged')
 
         event_stream(type='movie', action='update', payload=previous_movie_id)

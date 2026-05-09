@@ -462,9 +462,11 @@ Includes all upstream providers plus fork additions:
 - Nekur
 - OpenSubtitles.com
 - **OpenSubtitles.org (Bazarr+ web scraper, no API needed)**
+- Pipocas.tv
 - Podnapisi
 - RegieLive
 - Sous-Titres.eu
+- SubClub.eu
 - SubX
 - subf2m.co
 - Subs.sab.bz

@@ -83,6 +83,8 @@ USER_VISIBLE_SECRETS = frozenset({
     "legendasdivx.password",
     "legendasnet.username",
     "legendasnet.password",
+    "pipocas.username",
+    "pipocas.password",
     "xsubs.username",
     "xsubs.password",
     "deathbycaptcha.username",
