@@ -12,7 +12,7 @@ ARG VCS_REF
 # =============================================================================
 # Stage 1: Install Python Dependencies (cached heavily)
 # =============================================================================
-FROM python:3.14-slim-bookworm AS python-builder
+FROM python:3.14-slim-trixie AS python-builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -36,7 +36,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # =============================================================================
 # Stage 2: Production Image
 # =============================================================================
-FROM python:3.14-slim-bookworm AS production
+FROM python:3.14-slim-trixie AS production
 
 ARG BAZARR_VERSION
 ARG BUILD_DATE
@@ -52,11 +52,10 @@ LABEL org.opencontainers.image.title="Bazarr+" \
       org.opencontainers.image.vendor="LavX" \
       org.opencontainers.image.licenses="GPL-3.0"
 
-# Enable non-free repository for unrar and install runtime dependencies
-# Use apt cache mount to speed up repeated builds
+# Install runtime dependencies. RAR archives from subtitle providers are
+# extracted via p7zip's 7z binary, so no non-free repo or unrar package needed.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    sed -i 's/Components: main/Components: main non-free non-free-firmware/' /etc/apt/sources.list.d/debian.sources && \
     apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libxml2 \
@@ -64,7 +63,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libpq5 \
     mediainfo \
     p7zip-full \
-    unrar \
     bash \
     gosu \
     curl \
