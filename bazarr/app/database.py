@@ -4,6 +4,7 @@ import atexit
 import json
 import logging
 import os
+import sqlite3
 import flask_migrate
 
 from dogpile.cache import make_region
@@ -38,6 +39,41 @@ region = make_region().configure(
 )
 
 migrations_directory = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'migrations')
+
+
+def configure_sqlite_connection(dbapi_connection, connection_record):
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=FULL")
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA busy_timeout=60000")
+    finally:
+        cursor.close()
+
+
+def optimize_sqlite_database(engine_to_optimize):
+    if engine_to_optimize.dialect.name != 'sqlite':
+        return False
+    if sqlite3.sqlite_version_info < (3, 46, 0):
+        logger.debug("Skipping PRAGMA optimize on SQLite %s", sqlite3.sqlite_version)
+        return False
+
+    try:
+        with engine_to_optimize.connect() as connection:
+            connection.execute(text("PRAGMA optimize"))
+    except Exception:
+        logger.exception("Unable to run SQLite PRAGMA optimize.")
+        return False
+    return True
+
+
+def log_sqlite_runtime_version(engine_to_log):
+    if engine_to_log.dialect.name != 'sqlite':
+        return False
+    logging.info("SQLite runtime version: %s", sqlite3.sqlite_version)
+    return True
+
 
 if postgresql:
     # insert is different between database types
@@ -108,15 +144,7 @@ else:
     from sqlalchemy.engine import Engine
     from sqlalchemy import event
 
-    @event.listens_for(Engine, "connect")
-    def set_sqlite_pragma(dbapi_connection, connection_record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA synchronous=FULL")
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA busy_timeout=60000")
-        cursor.close()
+    event.listen(Engine, "connect", configure_sqlite_connection)
 
 # Dev-only slow-query log. Gated by BAZARR_SQL_PROFILE env var; this
 # is a cheap function call and a hard early-return when disabled, so
@@ -419,6 +447,7 @@ def create_db_revision(app):
 
 
 def migrate_db(app):
+    log_sqlite_runtime_version(engine)
     logging.debug("Upgrading database schema")
     app.config["SQLALCHEMY_DATABASE_URI"] = url
     db = SQLAlchemy(app, metadata=metadata)
@@ -440,6 +469,7 @@ def migrate_db(app):
         database.execute(
             insert(System)
             .values(configured='0', updated='0'))
+    optimize_sqlite_database(engine)
 
 
 def get_exclusion_clause(exclusion_type):
