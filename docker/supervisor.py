@@ -104,7 +104,7 @@ BACKEND_PORT = 6768  # internal port for bazarr backend
 DEFAULT_PORT = 6767  # external port users connect to
 
 # Paths that get proxied to the backend
-PROXY_PREFIXES = ("/api/", "/images/", "/test/", "/bazarr.log")
+PROXY_PREFIXES = ("/api/", "/images/", "/test/", "/system/backup/download/", "/bazarr.log")
 
 
 # ---------------------------------------------------------------------------
