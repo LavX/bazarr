@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>External Integration (Jellyfin & VLSub) - Bazarr+ Guides</title>
+  <meta name="description" content="Set up Bazarr+'s External Integration endpoint, install the Jellyfin plugin and VLSub Bazarr+ extension, and manage the API token.">
+  <link rel="canonical" href="https://lavx.github.io/bazarr/guides/external-integration.html">
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="External Integration (Jellyfin & VLSub) - Bazarr+ Guides">
+  <meta property="og:description" content="Set up Bazarr+'s External Integration endpoint, install the Jellyfin plugin and VLSub Bazarr+ extension, and manage the API token.">
+  <meta property="og:url" content="https://lavx.github.io/bazarr/guides/external-integration.html">
+  <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="External Integration (Jellyfin & VLSub) - Bazarr+ Guides">
+  <meta name="twitter:description" content="Set up Bazarr+'s External Integration endpoint, install the Jellyfin plugin and VLSub Bazarr+ extension, and manage the API token.">
+  <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
+
+  <!-- Geist font: async preload -->
+  <link rel="preload" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" as="style" crossorigin>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" media="print" onload="this.media='all'">
+  <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css"></noscript>
+
+  <link rel="icon" href="../screenshots/logo128.png" type="image/png">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+
+<a href="#main-content" class="skip-link">Skip to content</a>
+
+<!-- Grain overlay -->
+<svg class="grain" aria-hidden="true">
+  <filter id="grain-filter">
+    <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/>
+  </filter>
+  <rect width="100%" height="100%" filter="url(#grain-filter)"/>
+</svg>
+
+<!-- Ambient gradients -->
+<div class="ambient" aria-hidden="true"></div>
+
+<nav class="sticky-nav" aria-label="Site navigation">
+  <div class="container">
+    <img src="../screenshots/logo128.png" alt="Bazarr+" class="nav-logo" width="22" height="22">
+    <a href="../">Home</a>
+    <a href="../#comparison-heading">Compare</a>
+    <a href="../#quick-start">Install</a>
+    <a href="../#screenshots-heading">Screenshots</a>
+    <a href="../#faq-heading">FAQ</a>
+    <a href="./" class="nav-active">Guides</a>
+    <a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a>
+  </div>
+</nav>
+
+<main id="main-content" class="guide-page">
+  <div class="container">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <a href="../">Home</a><span class="sep">/</span><a href="./">Guides</a><span class="sep">/</span><span>External Integration</span>
+    </nav>
+    <h1>External Integration (Jellyfin &amp; VLSub) <span class="badge-new" aria-label="New in v2.2">v2.2</span></h1>
+
+    <article class="content">
+
+      <p class="lede">Bazarr+ v2.2 (Synapse) ships an OpenSubtitles-compatible REST endpoint that lets external clients query your Bazarr+ instance as a federated subtitle service. Two first-party clients ship alongside it: a Jellyfin plugin and a VLC extension.</p>
+
+      <h2 id="what-is-external-integration">What is External Integration</h2>
+      <p>Bazarr+ already searches and downloads subtitles from your configured providers (OpenSubtitles.com, OpenSubtitles.org via the scraper, Subscene, Addic7ed, and many more) according to your priority order, your hashes, your language profiles, and your filters.</p>
+      <p>External Integration exposes that pipeline over a stable REST API at <code>/compat/*</code>. Any client that speaks the OpenSubtitles wire format can talk to Bazarr+ and use <em>your</em> provider configuration. No provider keys leave your server, no rate limit gets shared with the public OpenSubtitles API.</p>
+      <p>Two first-party clients are published and ready to use:</p>
+      <ul>
+        <li><strong><a href="https://github.com/LavX/jellyfin-plugin-bazarr-plus" target="_blank" rel="noopener">Jellyfin plugin: Bazarr+ Subtitles</a></strong> &mdash; subtitle search and download from inside Jellyfin 10.11+, served by your Bazarr+ providers.</li>
+        <li><strong><a href="https://github.com/LavX/vlsub-bazarr-plus" target="_blank" rel="noopener">VLSub Bazarr+</a></strong> &mdash; VLC 3.0+ Lua extension. Hash-based and title-based search inside VLC; downloads load straight into the current playback.</li>
+      </ul>
+
+      <div class="note">
+        <strong>What it is not.</strong> External Integration is not a way to share your library publicly. The endpoint is bearer-token authenticated, rate-limited per token, and SSRF-guarded. Only clients that have your token can search.
+      </div>
+
+      <h2 id="enabling-the-endpoint">Enabling the endpoint in Bazarr+</h2>
+      <ol class="steps">
+        <li>In Bazarr+, go to <strong>Settings &gt; External Integration</strong>.</li>
+        <li>Toggle <strong>Enable External Integration</strong> on. Bazarr+ generates the JWT and HMAC secrets on first enable.</li>
+        <li>A prominent restart-required banner will appear. Click <strong>Restart Bazarr+</strong>.</li>
+        <li>After the restart finishes, return to the same page. Copy the <strong>API Token</strong> shown in the panel. You will paste this into the Jellyfin plugin and the VLSub configuration.</li>
+      </ol>
+
+      <div class="note note-warning">
+        <strong>Treat the token like a password.</strong> Anyone who has the token can search and download via your Bazarr+ instance. Don't paste it into chat threads, public configs, or screenshots. Rotate it (next section) if you ever suspect it leaked.
+      </div>
+
+      <h2 id="rotating-the-token">Rotating or revoking the token</h2>
+      <p>On the same Settings page, the <strong>Regenerate</strong> button mints a fresh token and revokes the previous one immediately. Old clients will start getting 401s and need the new token pasted in. Use this when:</p>
+      <ul>
+        <li>The token has been exposed (committed to a repo, posted in a screenshot, sent over an unencrypted channel).</li>
+        <li>You are decommissioning a client and want to make sure it can't talk to Bazarr+ any more.</li>
+        <li>You just want to rotate periodically as good hygiene.</li>
+      </ul>
+      <p>The signed download tokens (which are minted per <code>/compat/download</code> and used to fetch subtitle bytes) are tied to the JWT they were issued under. Regenerating invalidates outstanding download URLs as well.</p>
+
+      <h2 id="installing-the-jellyfin-plugin">Installing the Jellyfin plugin</h2>
+      <p>The recommended path is the plugin repository. Jellyfin can install and update from a manifest URL.</p>
+
+      <ol class="steps">
+        <li>In Jellyfin, go to <strong>Dashboard &gt; Plugins &gt; Repositories</strong> and click the <strong>+</strong> button.</li>
+        <li>Add a repository:
+          <ul>
+            <li><strong>Name</strong>: <code class="inline">Bazarr+ Subtitles</code></li>
+            <li><strong>URL</strong>: <code class="inline">https://LavX.github.io/jellyfin-plugin-bazarr-plus/manifest.json</code></li>
+          </ul>
+        </li>
+        <li>Open the <strong>Catalog</strong> tab. Under <em>Subtitles</em>, find <strong>Bazarr+ Subtitles</strong> and click <strong>Install</strong>.</li>
+        <li>Restart Jellyfin when prompted.</li>
+        <li>Go to <strong>Dashboard &gt; Plugins &gt; My Plugins &gt; Bazarr+ Subtitles &gt; Settings</strong>.</li>
+        <li>Fill in:
+          <ul>
+            <li><strong>Bazarr+ URL</strong>: e.g. <code class="inline">https://bazarr.example.com</code> or <code class="inline">http://bazarr.local:6767</code>.</li>
+            <li><strong>Bazarr+ API Token</strong>: paste the token from Bazarr+'s External Integration page.</li>
+          </ul>
+        </li>
+        <li><strong>Save.</strong></li>
+        <li>Enable the provider per library at <strong>Dashboard &gt; Libraries &gt; [your library] &gt; Subtitle Downloaders</strong>.</li>
+        <li>Scan a library or click <strong>Find Subtitles</strong> on an item to verify end to end.</li>
+      </ol>
+
+      <p>Manual install (downloading the release ZIP and dropping it into Jellyfin's <code>plugins/</code> directory) and build-from-source instructions are in the <a href="https://github.com/LavX/jellyfin-plugin-bazarr-plus#installation" target="_blank" rel="noopener">plugin README</a>.</p>
+
+      <h2 id="installing-vlsub">Installing VLSub Bazarr+</h2>
+      <p>VLSub Bazarr+ is a single Lua extension file plus a small library tree. The provided installer scripts handle both native VLC installs and Flatpak/Snap setups across Linux, macOS, and Windows.</p>
+
+      <h3 id="vlsub-linux-mac">Linux and macOS</h3>
+      <div class="code-wrap">
+        <div class="code-header">
+          <span class="code-lang">Shell</span>
+          <button class="copy-btn" data-copy="curl -sSL https://raw.githubusercontent.com/LavX/vlsub-bazarr-plus/main/scripts/install.sh | bash" aria-label="Copy install command">Copy</button>
+        </div>
+        <pre><code>curl -sSL https://raw.githubusercontent.com/LavX/vlsub-bazarr-plus/main/scripts/install.sh | bash</code></pre>
+      </div>
+
+      <h3 id="vlsub-windows">Windows</h3>
+      <div class="code-wrap">
+        <div class="code-header">
+          <span class="code-lang">PowerShell</span>
+          <button class="copy-btn" data-copy="iwr -useb https://raw.githubusercontent.com/LavX/vlsub-bazarr-plus/main/scripts/install.ps1 | iex" aria-label="Copy install command">Copy</button>
+        </div>
+        <pre><code>iwr -useb https://raw.githubusercontent.com/LavX/vlsub-bazarr-plus/main/scripts/install.ps1 | iex</code></pre>
+      </div>
+
+      <h3 id="vlsub-configure">Configure VLSub</h3>
+      <ol class="steps">
+        <li>Restart VLC after install so the new extension is picked up.</li>
+        <li>In VLC, open <strong>View &gt; VLSub Bazarr+</strong>.</li>
+        <li>Click <strong>Config</strong> in the extension window.</li>
+        <li>Fill in:
+          <ul>
+            <li><strong>Bazarr+ URL</strong>: e.g. <code class="inline">http://bazarr.local:6767</code>.</li>
+            <li><strong>API Token</strong>: paste the token from Bazarr+'s External Integration page.</li>
+            <li><strong>Languages</strong>: pick up to three.</li>
+          </ul>
+        </li>
+        <li>Save and close. From now on, <strong>View &gt; VLSub Bazarr+</strong> while a video is playing searches by hash first, then by title, and downloads the chosen result next to the video file.</li>
+      </ol>
+
+      <p>The full installer detects native, Flatpak, and Snap VLC installations and writes to the right location for each. Manual install steps are in the <a href="https://github.com/LavX/vlsub-bazarr-plus#installation" target="_blank" rel="noopener">VLSub Bazarr+ README</a>.</p>
+
+      <h2 id="how-the-pipeline-works">How the pipeline works</h2>
+      <p>When a Jellyfin or VLSub client searches:</p>
+      <ol>
+        <li>The client calls <code>/compat/search</code> on Bazarr+ with an IMDB id (or a title + season/episode + language).</li>
+        <li>Bazarr+ runs <em>your</em> configured providers in parallel, with a bounded thread pool and dogpile coalescing so identical concurrent searches share a single backend call.</li>
+        <li>The compat layer normalizes provider responses into the OpenSubtitles wire format the client expects, with download counts, ratings, FPS, HD flag, hash-match indicator, and language metadata.</li>
+        <li>When the user picks a result, the client calls <code>/compat/download</code>. Bazarr+ returns a one-shot HMAC-signed stream URL with a TTL.</li>
+        <li>The client follows the stream URL. Bazarr+ validates the token and rate-limits per JWT before serving the bytes.</li>
+      </ol>
+      <p>For TVDB-keyed providers like Gestdown, Bazarr+ hydrates season/episode and TVDB series id from an IMDB id so they "just work". The OMDB refiner (broken since the Python 3 migration upstream) is also revived in v2.2 and can be enabled with a free OMDB API key on the same Settings page.</p>
+
+      <h2 id="security-notes">Security notes</h2>
+      <ul>
+        <li><strong>Bearer-token auth</strong> with <code>jti</code> revocation. Logout immediately revokes the active JWT.</li>
+        <li><strong>Rate limited per token</strong> with a sliding window on <code>/compat/download</code>, so a misbehaving client cannot eat the whole pool.</li>
+        <li><strong>Signed download tokens</strong> with a TTL. The client never sees raw provider URLs.</li>
+        <li><strong>SSRF guard with DNS rebinding protection</strong> on every outbound URL the compat layer touches. Loopback, RFC1918, and link-local addresses are blocked, and any IP that fails revalidation post-DNS resolution is refused.</li>
+        <li><strong>Encryption at rest</strong> for the External Integration admin token and every other sensitive credential (provider keys, Sonarr/Radarr keys, Plex token, OpenRouter key). See the v2.2 release notes for the full list.</li>
+      </ul>
+
+      <h2 id="troubleshooting">Troubleshooting</h2>
+      <p><strong>Jellyfin shows "Bazarr+ Subtitles" in the catalog as 404.</strong> The plugin manifest is published from the plugin repo. If you see a 404, no plugin release has been published yet for your Jellyfin version. Use the <a href="https://github.com/LavX/jellyfin-plugin-bazarr-plus#option-b-manual-install-from-a-github-release" target="_blank" rel="noopener">manual install path</a> in the plugin README.</p>
+
+      <p><strong>Plugin returns 401 from Bazarr+.</strong> The API token is wrong or has been rotated. Copy the current token from <strong>Bazarr+ &gt; Settings &gt; External Integration</strong> and paste it again into the plugin settings.</p>
+
+      <p><strong>VLSub finds nothing for hash searches.</strong> Hash-based search only works if at least one of your enabled providers supports the file's hash. Try a title-based search as a fallback (VLSub auto-falls back when hash search returns empty).</p>
+
+      <p><strong>"External Integration" toggle is missing in Settings.</strong> You're on Bazarr+ &lt; v2.2.0. Pull <code class="inline">ghcr.io/lavx/bazarr:v2.2.0</code> or <code class="inline">:latest</code> and restart.</p>
+
+      <h2 id="next-steps">Next steps</h2>
+      <ul>
+        <li><a href="getting-started.html">Getting Started</a> if you have not installed Bazarr+ yet</li>
+        <li><a href="ai-translation.html">AI Translation Setup</a> for OpenRouter-powered subtitle translation</li>
+        <li><a href="migration.html">Migration from upstream</a> if you are switching from stock Bazarr</li>
+      </ul>
+
+    </article>
+  </div>
+</main>
+
+<!-- Footer -->
+<footer>
+  <div class="container">
+    <div class="footer-inner">
+      <p class="footer-credit">Built by <a href="https://github.com/LavX" target="_blank" rel="noopener">LavX</a>. Based on <a href="https://github.com/morpheus65535/bazarr" target="_blank" rel="noopener">Bazarr</a> by morpheus65535.</p>
+      <ul class="footer-links">
+        <li><a href="./">Guides</a></li>
+        <li><a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a></li>
+        <li><a href="https://github.com/LavX/bazarr/issues" target="_blank" rel="noopener">Issues</a></li>
+        <li><a href="https://github.com/LavX/bazarr/wiki" target="_blank" rel="noopener">Wiki</a></li>
+      </ul>
+    </div>
+  </div>
+</footer>
+
+<script src="../js/site.js"></script>
+
+</body>
+</html>
