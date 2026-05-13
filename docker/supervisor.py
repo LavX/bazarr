@@ -25,67 +25,12 @@ from pathlib import Path
 
 from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
 
-# Add bundled libs to path so we can import yaml (PyYAML), cryptography
-# (Fernet), and itsdangerous (legacy URLSafeSerializer fallback). The
-# supervisor reads config.yaml directly without going through the bazarr
-# settings pipeline, so it has to do the decrypt itself.
+# Add bundled libs to path so we can import yaml (PyYAML). The supervisor
+# reads config.yaml directly without going through the bazarr settings
+# pipeline, but it must not expose authenticated-only values.
 APP_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(APP_DIR / "libs"))
-import base64  # noqa: E402
-import hashlib  # noqa: E402
 import yaml  # noqa: E402
-from cryptography.fernet import Fernet, InvalidToken  # noqa: E402
-from itsdangerous import BadPayload, BadSignature, URLSafeSerializer  # noqa: E402
-
-# Same marker as bazarr.secret_store.crypto.SECRET_MARKER_PREFIX. Kept as
-# a literal here (instead of importing from bazarr/) so the supervisor
-# doesn't pull in the full bazarr bootstrap (Dynaconf, validators, etc.)
-# just to decrypt one value.
-_SECRET_MARKER_PREFIX = "enc:v1:"
-
-
-def _fernet_key_from_master(master_key: str) -> bytes:
-    """Mirrors bazarr.secret_store.crypto._fernet_key_from_master. Same KDF
-    so encrypt-via-bazarr and decrypt-via-supervisor agree on the key."""
-    digest = hashlib.sha256(master_key.encode("utf-8")).digest()
-    return base64.urlsafe_b64encode(digest)
-
-
-def _decrypt_apikey_if_encrypted(apikey: str, master_key: str) -> str:
-    """If the apikey carries the secret_store marker prefix, decrypt it.
-
-    Tries Fernet (current AEAD format) first, then falls back to the
-    legacy URLSafeSerializer payload shape so a config written before
-    the AEAD migration still serves login bytes correctly until the
-    backend re-saves under Fernet.
-
-    Tolerant: a missing master_key, a corrupt payload, or a value with no
-    marker is returned unchanged. The supervisor MUST keep starting even
-    when the credential is unreadable - the user can still fix things
-    once the backend boots and the Settings page renders.
-    """
-    if not isinstance(apikey, str) or not apikey.startswith(_SECRET_MARKER_PREFIX):
-        return apikey
-    if not master_key:
-        return apikey
-    payload_text = apikey[len(_SECRET_MARKER_PREFIX):]
-
-    # Current format: Fernet (AES-128-CBC + HMAC-SHA256)
-    try:
-        return Fernet(_fernet_key_from_master(master_key)).decrypt(
-            payload_text.encode("ascii")
-        ).decode("utf-8")
-    except (InvalidToken, ValueError):
-        pass
-
-    # Legacy URLSafeSerializer payload (pre-AEAD)
-    try:
-        payload = URLSafeSerializer(master_key).loads(payload_text)
-    except (BadSignature, BadPayload, ValueError):
-        return apikey
-    if isinstance(payload, dict) and "secret" in payload:
-        return payload["secret"]
-    return apikey
 
 # Unbuffered print so logs appear immediately when redirected to a file
 _print = print
@@ -348,26 +293,14 @@ async def _proxy_websocket(request: web.Request, target_url: str) -> web.WebSock
 
 
 def _read_bazarr_config(config_dir: str) -> dict:
-    """Read the bazarr config.yaml to extract apiKey and baseUrl.
-
-    The apikey on disk is encrypted under general.secrets_encryption_key
-    via bazarr.secret_store. Decrypt it before injecting into index.html
-    so the SPA receives the same plaintext value the backend serves over
-    /api/system/settings. Without this, the bundle gets the ciphertext as
-    its X-API-KEY and every authenticated API call returns 401.
-    """
+    """Read the bazarr config.yaml to extract frontend-safe defaults."""
     config_path = Path(config_dir) / "config" / "config.yaml"
     defaults = {"baseUrl": "/", "apiKey": "", "canUpdate": False, "hasUpdate": False}
     try:
         if config_path.is_file():
             with open(config_path) as f:
                 cfg = yaml.safe_load(f) or {}
-            auth = cfg.get("auth", {})
             general = cfg.get("general", {})
-            apikey = auth.get("apikey") or ""
-            if apikey:
-                master_key = general.get("secrets_encryption_key") or ""
-                defaults["apiKey"] = _decrypt_apikey_if_encrypted(apikey, master_key)
             if general.get("base_url"):
                 defaults["baseUrl"] = general["base_url"]
     except Exception as e:
@@ -427,7 +360,7 @@ def _build_static_allowlist(static_root: Path) -> "dict[str, str]":
     return mapping
 
 
-def create_static_handler(config_dir: str):
+def create_static_handler(config_dir: str, backend: BackendManager | None = None):
     static_root = STATIC_DIR.resolve()
     # Trust anchor: enumerated at startup from the filesystem, never from user input.
     # Dict values are the trusted absolute asset paths; dict.get(user_key) yields
@@ -453,6 +386,9 @@ def create_static_handler(config_dir: str):
         ext = os.path.splitext(path)[1].lower()
         if ext in STATIC_FILE_EXTENSIONS:
             return web.Response(status=404, text="Not found")
+
+        if backend and backend.get_status().get("state") == BackendManager.STATE_RUNNING:
+            return await proxy_handler(request)
 
         # Serve patched index.html for SPA routing
         return web.Response(
@@ -522,7 +458,7 @@ def create_app(config_dir: str, backend: BackendManager) -> web.Application:
             app.router.add_route("*", f"/{base}{prefix}" + "{path:.*}", proxy_handler)
 
     # Static file catch-all
-    app.router.add_route("GET", "/{path:.*}", create_static_handler(config_dir))
+    app.router.add_route("GET", "/{path:.*}", create_static_handler(config_dir, backend))
 
     return app
 

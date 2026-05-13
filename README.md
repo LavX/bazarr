@@ -464,6 +464,7 @@ Includes all upstream providers plus fork additions:
 - **OpenSubtitles.org (Bazarr+ web scraper, no API needed)**
 - Pipocas.tv
 - Podnapisi
+- Prijevodi-Online
 - RegieLive
 - Sous-Titres.eu
 - SubClub.eu
