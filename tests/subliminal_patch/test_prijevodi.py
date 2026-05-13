@@ -68,7 +68,8 @@ def test_list_subtitles_sr(region, got_s01e06, requests_mock, data):
     with PrijevodiOnlineProvider() as provider:
         subtitles = provider.list_subtitles(got_s01e06, {Language('srp')})
 
-    assert len(subtitles) == 4
+    assert len(subtitles) == 6
+    assert {s.subtitle_id for s in subtitles} == {21710, 21728, 21748, 21757, 22259, 37142}
     assert all(s.language == Language('srp') for s in subtitles)
     assert all(s.season == 1 for s in subtitles)
     assert all(s.episode == 6 for s in subtitles)

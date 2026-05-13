@@ -56,3 +56,22 @@ async def test_spa_routes_are_proxied_when_backend_is_running(monkeypatch, tmp_p
     response = await match_info.handler(request)
 
     assert response.text == "proxied"
+
+
+@pytest.mark.asyncio
+async def test_spa_routes_do_not_boot_app_while_backend_is_starting(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        supervisor,
+        "_get_index_html",
+        lambda config_dir: '<script>window.Bazarr = {"apiKey": ""}</script><script src="/assets/app.js"></script>',
+    )
+
+    handler = supervisor.create_static_handler(str(tmp_path), _Backend(state="starting"))
+    request = make_mocked_request("GET", "/system/releases")
+
+    response = await handler(request)
+
+    assert response.status == 503
+    assert "Bazarr+ is starting up" in response.text
+    assert "window.Bazarr" not in response.text
+    assert "/assets/app.js" not in response.text

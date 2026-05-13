@@ -16,6 +16,7 @@ Usage:
 """
 
 import asyncio
+import html
 import json
 import mimetypes
 import os
@@ -332,6 +333,54 @@ def _get_index_html(config_dir: str) -> str:
     return content
 
 
+def _get_startup_html(status: dict) -> str:
+    """Return a tiny startup page that reloads without booting the SPA."""
+    stage = html.escape(str(status.get("stage", "Starting backend")))
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="2">
+  <title>Bazarr+ is starting up</title>
+  <style>
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #111827;
+      color: #f9fafb;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }}
+    main {{
+      width: min(28rem, calc(100vw - 2rem));
+      text-align: center;
+    }}
+    h1 {{
+      margin: 0 0 0.75rem;
+      font-size: 1.5rem;
+      font-weight: 700;
+    }}
+    p {{
+      margin: 0;
+      color: #cbd5e1;
+      line-height: 1.5;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Bazarr+ is starting up</h1>
+    <p>{stage}. This page will reload automatically.</p>
+  </main>
+  <script>
+    setTimeout(function () {{ window.location.reload(); }}, 2000);
+  </script>
+</body>
+</html>"""
+
+
 STATIC_FILE_EXTENSIONS = {
     ".js", ".css", ".map", ".json", ".webmanifest",
     ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
@@ -390,7 +439,16 @@ def create_static_handler(config_dir: str, backend: BackendManager | None = None
         if backend and backend.get_status().get("state") == BackendManager.STATE_RUNNING:
             return await proxy_handler(request)
 
-        # Serve patched index.html for SPA routing
+        status = backend.get_status() if backend else {}
+        if backend:
+            return web.Response(
+                status=503,
+                text=_get_startup_html(status),
+                content_type="text/html",
+                headers={"Cache-Control": "no-store"},
+            )
+
+        # Serve patched index.html for SPA routing when no backend manager is wired.
         return web.Response(
             text=_get_index_html(config_dir),
             content_type="text/html",

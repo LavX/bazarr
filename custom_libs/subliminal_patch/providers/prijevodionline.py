@@ -25,8 +25,22 @@ except ImportError:
 # We match only the dot-notation assignment so we don't accidentally match
 # the empty-string initialiser in the object literal.
 _KEY_RE = re.compile(r"epizode\.key\s*=\s*['\"]([0-9a-f]{32})['\"]")
+_LANGUAGE_BY_URL_SEGMENT = {
+    'hr': Language('hrv'),
+    'sr': Language('srp'),
+    'cg': Language('mne'),
+}
 
 logger = logging.getLogger(__name__)
+
+
+def _language_from_href(href):
+    slug = href.rsplit('/', 1)[-1].lower()
+    for segment in reversed(slug.split('-')):
+        language = _LANGUAGE_BY_URL_SEGMENT.get(segment)
+        if language:
+            return language
+    return None
 
 
 class PrijevodiOnlineSubtitle(Subtitle):
@@ -183,15 +197,8 @@ class PrijevodiOnlineProvider(Provider):
                 continue
             href = link['href']
 
-            # Detect language from URL suffix (-hr = Croatian, -sr = Serbian, -cg = Montenegrin)
-            href_lower = href.lower()
-            if href_lower.endswith('-hr'):
-                sub_lang = Language('hrv')
-            elif href_lower.endswith('-sr'):
-                sub_lang = Language('srp')
-            elif href_lower.endswith('-cg'):
-                sub_lang = Language('mne')
-            else:
+            sub_lang = _language_from_href(href)
+            if not sub_lang:
                 continue
 
             if sub_lang not in languages and Language('hbs') not in languages:
@@ -272,4 +279,3 @@ class PrijevodiOnlineProvider(Provider):
                 subtitle.content = fix_line_ending(zf.read(names[0]))
         else:
             raise ProviderError('Unrecognized archive format for subtitle {}'.format(subtitle.id))
-
