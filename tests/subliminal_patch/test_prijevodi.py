@@ -31,6 +31,7 @@ def got_s01e06():
         6,
         release_group="REWARD",
         resolution="720p",
+        source="Blu-ray",
         video_codec="H.264",
     )
 
@@ -99,7 +100,7 @@ def test_get_matches_reward_release(region, got_s01e06, requests_mock, data):
 
     reward = next((s for s in subtitles if s.subtitle_id == 37142), None)
     assert reward is not None
-    assert reward.release_info == '720p.BluRay.X264-REWARD / Preveo dragan4e'
+    assert reward.release_info == '720p.BluRay.X264-REWARD, Preveo dragan4e'
 
     matches = reward.get_matches(got_s01e06)
     assert 'series' in matches
