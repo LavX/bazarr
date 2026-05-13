@@ -436,11 +436,13 @@ def create_static_handler(config_dir: str, backend: BackendManager | None = None
         if ext in STATIC_FILE_EXTENSIONS:
             return web.Response(status=404, text="Not found")
 
-        if backend and backend.get_status().get("state") == BackendManager.STATE_RUNNING:
+        status = backend.get_status() if backend else {}
+        state = status.get("state")
+
+        if backend and state == BackendManager.STATE_RUNNING:
             return await proxy_handler(request)
 
-        status = backend.get_status() if backend else {}
-        if backend:
+        if backend and state == BackendManager.STATE_STARTING:
             return web.Response(
                 status=503,
                 text=_get_startup_html(status),

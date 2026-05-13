@@ -75,3 +75,17 @@ async def test_spa_routes_do_not_boot_app_while_backend_is_starting(monkeypatch,
     assert "Bazarr+ is starting up" in response.text
     assert "window.Bazarr" not in response.text
     assert "/assets/app.js" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_crashed_backend_serves_app_for_reconnection_flow(monkeypatch, tmp_path):
+    app_shell = '<script>window.Bazarr = {"apiKey": ""}</script><script src="/assets/app.js"></script>'
+    monkeypatch.setattr(supervisor, "_get_index_html", lambda config_dir: app_shell)
+
+    handler = supervisor.create_static_handler(str(tmp_path), _Backend(state="crashed"))
+    request = make_mocked_request("GET", "/system/releases")
+
+    response = await handler(request)
+
+    assert response.status == 200
+    assert response.text == app_shell
