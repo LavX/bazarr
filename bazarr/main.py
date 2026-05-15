@@ -22,6 +22,10 @@ os.environ["BAZARR_VERSION"] = bazarr_version.lstrip('v')
 import app.libs  # noqa: E402
 
 from app.get_args import args  # noqa: E402
+from app.requirements import ensure_requirements  # noqa: E402
+
+ensure_requirements(args.no_update)
+
 from app.check_update import apply_update, check_releases, check_if_new_update  # noqa: E402
 from app.config import settings, configure_proxy_func, base_url  # noqa: E402, F401
 from init import *  # noqa: E402, F403

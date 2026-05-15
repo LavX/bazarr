@@ -137,6 +137,22 @@ def test_subliminal_is_loaded_from_python_environment_not_custom_libs():
     assert not subliminal_path.is_relative_to(custom_subliminal_dir)
 
 
+def test_startup_requirements_probe_covers_unvendored_runtime_imports():
+    from app.requirements import RUNTIME_IMPORTS
+
+    assert {
+        "setuptools",
+        "signalrcore",
+        "subliminal",
+        "flask_compress",
+        "py7zr",
+        "deathbycaptcha",
+        "click_option_group",
+        "tomlkit",
+        "yaml",
+    } <= set(RUNTIME_IMPORTS)
+
+
 def test_legacy_sonarr_signalr_support_is_removed():
     repo_root = Path(__file__).resolve().parents[2]
 
@@ -170,3 +186,19 @@ def test_sonarr_sub_v4_api_compat_paths_are_removed():
     sonarr_episodes = (repo_root / "bazarr" / "sonarr" / "sync" / "episodes.py").read_text()
     assert "Sonarr v3" not in sonarr_episodes
     assert "get_sonarr_info.is_legacy()" not in sonarr_episodes
+
+
+def test_sonarr_signalr_core_support_requires_known_v4(monkeypatch):
+    from sonarr.info import GetSonarrInfo
+
+    info = GetSonarrInfo()
+
+    monkeypatch.setattr(info, "version", lambda: "unknown")
+    assert info.semver() is None
+    assert info.supports_signalr_core() is False
+
+    monkeypatch.setattr(info, "version", lambda: "3.0.10")
+    assert info.supports_signalr_core() is False
+
+    monkeypatch.setattr(info, "version", lambda: "4.0.9.2421")
+    assert info.supports_signalr_core() is True

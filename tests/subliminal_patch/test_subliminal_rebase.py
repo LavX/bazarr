@@ -187,6 +187,72 @@ def test_video_compatibility_surface_survives_rebase():
     assert Language("spa") in movie.subtitle_languages
 
 
+def test_video_subtitle_languages_remains_mutable_for_subzero_updates():
+    video = subliminal.video.Episode(
+        "Show.S01E02.mkv",
+        series="Show",
+        season=1,
+        episode=2,
+    )
+
+    video.subtitle_languages.add(Language("eng"))
+    video.subtitle_languages.update({Language("spa")})
+
+    assert video.subtitle_languages == {Language("eng"), Language("spa")}
+
+    video.subtitle_languages = {Language("hun")}
+
+    assert video.subtitle_languages == {Language("hun")}
+
+
+def test_provider_pool_keeps_configured_priority_order_for_early_stop(monkeypatch):
+    from subliminal_patch.core import SZProviderPool
+
+    class FakeSubtitle:
+        id = "preferred-english"
+        language = Language("eng")
+        provider_name = "preferred"
+
+        def get_matches(self, video):
+            return {"series", "season", "episode", "title"}
+
+    calls = []
+
+    def fake_list_subtitles_provider(self, provider, video, languages):
+        calls.append(provider)
+        return [FakeSubtitle()] if provider == "preferred" else []
+
+    monkeypatch.setattr(SZProviderPool, "list_subtitles_provider", fake_list_subtitles_provider)
+
+    video = subliminal.video.Episode("Show.S01E02.mkv", series="Show", season=1, episode=2)
+    pool = SZProviderPool(providers=["preferred", "fallback"])
+    subtitles = pool.list_subtitles_prioritized(
+        video,
+        {Language("eng")},
+        min_score=1,
+        compute_score=lambda matches, subtitle, video, hearing_impaired: (1, None),
+    )
+
+    assert calls == ["preferred"]
+    assert len(subtitles) == 1
+
+
+def test_provider_pool_update_treats_priority_reorder_as_update():
+    from subliminal_patch.core import SZProviderPool
+
+    pool = SZProviderPool(providers=["first", "second"])
+
+    updated = pool.update(
+        providers=["second", "first"],
+        provider_configs={},
+        blacklist=[],
+        ban_list={"must_contain": [], "must_not_contain": []},
+    )
+
+    assert updated is True
+    assert pool.providers == ["second", "first"]
+
+
 def test_cache_key_mangler_uses_fixed_size_sha1_keys():
     from subliminal.cache import sha1_key_mangler
 
@@ -263,6 +329,37 @@ def test_tvsubtitles_patch_keeps_bazarr_subtitle_metadata_with_upstream_26_const
     assert subtitle.subtitle_id == "42"
     assert subtitle.release_info == "WEB, GROUP"
     assert subtitle.matches == set()
+
+
+def test_tvsubtitles_patch_converts_upstream_languages_for_bazarr_filtering():
+    from subliminal_patch.providers.tvsubtitles import TVsubtitlesProvider
+
+    class Response:
+        content = (
+            b'<a href="/subtitle-42.html"><div class="subtitlen">'
+            b'<h5><img src="images/flags/en.gif"/> GROUP</h5>'
+            b'<p title="rip">WEB</p>'
+            b"</div></a>"
+        )
+
+        def raise_for_status(self):
+            return None
+
+    class Session:
+        def get(self, url, timeout):
+            return Response()
+
+    provider = TVsubtitlesProvider()
+    provider.session = Session()
+    provider.search_show_id = lambda series, year=None: 123
+    provider.get_episode_ids = lambda show_id, season: {2: 456}
+    video = subliminal.video.Episode("Show.S01E02.mkv", series="Show", season=1, episode=2)
+
+    subtitles = provider.list_subtitles(video, {Language("eng")})
+
+    assert len(subtitles) == 1
+    assert subtitles[0].language == Language("eng")
+    assert type(subtitles[0].language) is Language
 
 
 def test_podnapisi_patch_uses_upstream_26_json_search_endpoint():

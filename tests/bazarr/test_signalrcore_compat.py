@@ -36,6 +36,7 @@ def test_signalrcore_stop_patch_closes_websocket_when_not_connected():
 
     transport.stop()
 
+    transport.connection_checker.stop.assert_called_once()
     transport._ws.close.assert_called_once()
     assert transport.state == TransportState.disconnected
 

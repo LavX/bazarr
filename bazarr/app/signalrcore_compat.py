@@ -7,8 +7,9 @@ def patch_signalrcore_stop():
 
     def stop(self):
         self.manually_closing = True
-        if self.is_connected():
-            self.connection_checker.stop()
+        connection_checker = getattr(self, "connection_checker", None)
+        if connection_checker is not None:
+            connection_checker.stop()
         if self._ws is not None:
             self._ws.close()
         self._set_state(TransportState.disconnected)

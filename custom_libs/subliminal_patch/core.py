@@ -216,10 +216,14 @@ class _LanguageEquals(list):
 
 
 class SZProviderPool(ProviderPool):
+    @staticmethod
+    def _dedupe_provider_names(providers):
+        return list(dict.fromkeys(providers or []))
+
     def __init__(self, providers=None, provider_configs=None, blacklist=None, ban_list=None, throttle_callback=None,
                  pre_download_hook=None, post_download_hook=None, language_hook=None, language_equals=None):
         #: Name of providers to use
-        self.providers = set(providers or [])
+        self.providers = self._dedupe_provider_names(providers)
 
         #: Initialized providers
         self.initialized_providers = {}
@@ -255,22 +259,22 @@ class SZProviderPool(ProviderPool):
         # Check if the pool was initialized enough hours ago
         self._check_lifetime()
 
-        providers = set(providers or [])
+        providers = self._dedupe_provider_names(providers)
+        provider_names = set(providers)
 
         # Check if any new provider has been added
         updated = providers != self.providers or ban_list != self.ban_list
-        removed_providers = set(sorted(set(self.providers) - set(providers)))
+        removed_providers = set(self.providers) - provider_names
 
         logger.debug("Discarded providers: %s | New providers: %s", self.discarded_providers, providers)
-        self.discarded_providers.difference_update(set(providers))
+        self.discarded_providers.difference_update(provider_names)
         logger.debug("Updated discarded providers: %s", self.discarded_providers)
 
         removed_providers.update(self.discarded_providers)
 
         logger.debug("Removed providers: %s", removed_providers)
 
-        self.providers.difference_update(removed_providers)
-        self.providers.update(providers)
+        self.providers = [provider for provider in providers if provider not in removed_providers]
 
         # Terminate and delete removed providers from instance
         for removed in removed_providers:

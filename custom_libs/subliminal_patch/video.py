@@ -89,4 +89,9 @@ class Video(Video_):
 
     @property
     def subtitle_languages(self):
-        return self._subtitle_languages | {subtitle.language for subtitle in self.subtitles}
+        self._subtitle_languages.update(subtitle.language for subtitle in self.subtitles)
+        return self._subtitle_languages
+
+    @subtitle_languages.setter
+    def subtitle_languages(self, languages):
+        self._subtitle_languages = set(languages or [])

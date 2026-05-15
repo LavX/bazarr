@@ -15,7 +15,7 @@ from app.event_handler import event_stream
 from sonarr.sync.episodes import sync_episodes, sync_one_episode
 from sonarr.sync.series import update_series, update_one_series  # noqa: F401
 from radarr.sync.movies import update_movies, update_one_movie  # noqa: F401
-from sonarr.info import url_sonarr
+from sonarr.info import get_sonarr_info, url_sonarr
 from radarr.info import url_radarr
 from app.database import TableShows, TableMovies, database, select
 from app.jobs_queue import jobs_queue  # noqa: F401
@@ -42,6 +42,16 @@ class SonarrSignalrClient:
         self.connected = False
 
     def start(self):
+        if not get_sonarr_info.supports_signalr_core():
+            logging.warning(
+                'BAZARR requires Sonarr v4 or newer for the SignalR feed. '
+                'Current Sonarr version is %s, Sonarr live updates are disabled.',
+                get_sonarr_info.version(),
+            )
+            self.connected = False
+            event_stream(type='badges')
+            return
+
         self.configure()
         logging.info('BAZARR trying to connect to Sonarr SignalR feed...')
         while self.connection.transport.state.value not in [0, 1, 2]:

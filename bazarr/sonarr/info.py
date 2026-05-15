@@ -48,9 +48,8 @@ class GetSonarrInfo:
         semver_version = None
         if isinstance(self.version(), str) and self.version() not in ['', 'unknown']:
             split_version = self.version().split('.')
-            if len(split_version) >= 3 and all(
-                    split_version[i].isdigit() for i in range(len(split_version))):
-                semver_version = semver.Version(*split_version)
+            if len(split_version) >= 3 and all(split_version[i].isdigit() for i in range(3)):
+                semver_version = semver.Version(*(int(part) for part in split_version[:3]))
         return semver_version
 
     def is_deprecated(self):
@@ -60,6 +59,14 @@ class GetSonarrInfo:
         """
         sonarr_version = self.semver()
         return sonarr_version is not None and sonarr_version < semver.Version(4, 0, 0)
+
+    def supports_signalr_core(self):
+        """
+        Determine if Sonarr supports the SignalR Core feed used by Bazarr.
+        @return: bool
+        """
+        sonarr_version = self.semver()
+        return sonarr_version is not None and sonarr_version >= semver.Version(4, 0, 0)
 
 
 get_sonarr_info = GetSonarrInfo()

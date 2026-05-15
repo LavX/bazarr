@@ -91,4 +91,7 @@ class TVsubtitlesProvider(_TVsubtitlesProvider):
 
     def query(self, show_id, series, season, episode, year=None):
         episode = min(episode) if episode and isinstance(episode, list) else episode
-        return super(TVsubtitlesProvider, self).query(show_id, series, season, episode, year)
+        subtitles = super(TVsubtitlesProvider, self).query(show_id, series, season, episode, year)
+        for subtitle in subtitles:
+            subtitle.language = Language.rebuild(subtitle.language)
+        return subtitles
