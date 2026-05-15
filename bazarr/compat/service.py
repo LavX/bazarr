@@ -430,8 +430,8 @@ def _tvdb_v4_episode_lookup(video) -> bool:
         # don't have them yet (v4's episode match omits series fields).
         if not getattr(video, "series", None) or not getattr(video, "year", None):
             try:
-                from subliminal.refiners.tvdb import get_series
-                s_data = get_series(int(series_id))
+                from subliminal.refiners.tvdb import tvdb_client
+                s_data = tvdb_client.get_series(int(series_id))
                 if s_data:
                     if not getattr(video, "series", None):
                         video.series = s_data.get("seriesName") or ""
@@ -548,7 +548,7 @@ def _tvdb_lookup_by_imdb(video) -> None:
     when available. Subliminal's stock TVDB refiner requires a series name,
     which we don't have on library miss."""
     try:
-        from subliminal.refiners.tvdb import tvdb_client, get_series_episode
+        from subliminal.refiners.tvdb import tvdb_client
         imdb = _tt(getattr(video, "series_imdb_id", None)
                    or getattr(video, "imdb_id", None))
         if not imdb:
@@ -571,7 +571,7 @@ def _tvdb_lookup_by_imdb(video) -> None:
             except (TypeError, ValueError):
                 pass
         if getattr(video, "season", None) and getattr(video, "episode", None):
-            ep = get_series_episode(tvdb_id, int(video.season), int(video.episode))
+            ep = tvdb_client.get_series_episode(tvdb_id, int(video.season), int(video.episode))
             if ep:
                 if not getattr(video, "tvdb_id", None):
                     video.tvdb_id = ep.get("id")

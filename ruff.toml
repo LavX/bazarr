@@ -10,7 +10,9 @@ target-version = "py312"
 extend-exclude = [
     "libs",
     "custom_libs",
+    "ai-subtitle-translator",
     "bazarr/ai-subtitle-translator",
+    "opensubtitles-scraper",
     "frontend",
     "bazarr-binaries",
     ".worktrees",
