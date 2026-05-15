@@ -7,8 +7,8 @@ from functools import reduce
 from api.swaggerui import subtitles_language_model
 from app.database import TableEpisodes, TableShows, TableHistory, TableBlacklist, database, select, func
 from subtitles.upgrade import get_upgradable_episode_subtitles,  _language_still_desired
+from utilities.pretty_date import pretty_date
 
-import pretty
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
 from ..utils import authenticate, postprocess
 
@@ -161,7 +161,7 @@ class EpisodesHistory(Resource):
             # Make timestamp pretty
             if item['timestamp']:
                 item["parsed_timestamp"] = item['timestamp'].strftime('%x %X')
-                item['timestamp'] = pretty.date(item["timestamp"])
+                item['timestamp'] = pretty_date(item["timestamp"])
 
             # Parse matches and dont_matches
             if item['matches']:

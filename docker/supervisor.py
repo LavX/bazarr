@@ -26,9 +26,8 @@ from pathlib import Path
 
 from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
 
-# Add bundled libs to path so we can import yaml (PyYAML). The supervisor
-# reads config.yaml directly without going through the bazarr settings
-# pipeline, but it must not expose authenticated-only values.
+# Add bundled libs to path before reading config.yaml. PyYAML itself is
+# installed from requirements.txt.
 APP_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(APP_DIR / "libs"))
 import yaml  # noqa: E402

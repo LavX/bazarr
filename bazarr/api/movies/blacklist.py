@@ -1,7 +1,5 @@
 # coding=utf-8
 
-import pretty
-
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
 
 from app.database import TableMovies, TableBlacklistMovie, database, select
@@ -11,6 +9,7 @@ from utilities.path_mappings import path_mappings
 from subtitles.mass_download import movies_download_subtitles
 from app.event_handler import event_stream
 from api.swaggerui import subtitles_language_model
+from utilities.pretty_date import pretty_date
 
 from ..utils import authenticate, postprocess
 
@@ -64,7 +63,7 @@ class MoviesBlacklist(Resource):
             'provider': x.provider,
             'subs_id': x.subs_id,
             'language': x.language,
-            'timestamp': pretty.date(x.timestamp),
+            'timestamp': pretty_date(x.timestamp),
             'parsed_timestamp': x.timestamp.strftime('%x %X'),
         }) for x in data.all()], self.get_response_model, envelope='data')
 

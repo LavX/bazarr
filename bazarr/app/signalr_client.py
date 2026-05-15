@@ -1,13 +1,11 @@
 # coding=utf-8
 
 import logging
-import json
 import time
 import threading
 
-from requests import Session
-from signalr import Connection
 from requests.exceptions import ConnectionError
+from app.signalrcore_compat import patch_signalrcore_stop
 from signalrcore.hub_connection_builder import HubConnectionBuilder
 from collections import deque
 from time import sleep
@@ -17,7 +15,7 @@ from app.event_handler import event_stream
 from sonarr.sync.episodes import sync_episodes, sync_one_episode
 from sonarr.sync.series import update_series, update_one_series  # noqa: F401
 from radarr.sync.movies import update_movies, update_one_movie  # noqa: F401
-from sonarr.info import get_sonarr_info, url_sonarr
+from sonarr.info import url_sonarr
 from radarr.info import url_radarr
 from app.database import TableShows, TableMovies, database, select
 from app.jobs_queue import jobs_queue  # noqa: F401
@@ -26,90 +24,14 @@ from .config import settings
 from .scheduler import scheduler
 from .get_args import args  # noqa: F401
 
+patch_signalrcore_stop()
+
 sonarr_queue = deque()
 radarr_queue = deque()
 
 last_series_event_data = None
 last_episode_event_data = None
 last_movie_event_data = None
-
-
-class SonarrSignalrClientLegacy:
-    def __init__(self):
-        super(SonarrSignalrClientLegacy, self).__init__()
-        self.apikey_sonarr = None
-        self.session = Session()
-        self.session.timeout = 60
-        self.session.verify = False
-        self.session.headers = HEADERS
-        self.connection = None
-        self.connected = False
-
-    def start(self):
-        if get_sonarr_info.is_legacy():
-            logging.warning(
-                f'BAZARR can only sync from Sonarr v3 SignalR feed to get real-time update. You should consider '  # noqa: G004
-                f'upgrading your version({get_sonarr_info.version()}).')
-        else:
-            self.connected = False
-            event_stream(type='badges')
-            logging.info('BAZARR trying to connect to Sonarr SignalR feed...')
-            self.configure()
-            while not self.connection.started:
-                try:
-                    self.connection.start()
-                except ConnectionError:
-                    time.sleep(5)
-                except json.decoder.JSONDecodeError:
-                    logging.error("BAZARR cannot parse JSON returned by SignalR feed. This is caused by a permissions "
-                                  "issue when Sonarr try to access its /config/.config directory."
-                                  "Typically permissions are too permissive - only the user and group Sonarr runs as "
-                                  "should have Read/Write permissions (e.g. files 664 / folders 775). You should fix "
-                                  "permissions on that directory and restart Sonarr. Also, if you're a Docker image "
-                                  "user, you should make sure you properly defined PUID/PGID environment variables. "
-                                  "Otherwise, please contact Sonarr support.")
-                    self.stop()
-                    break
-                else:
-                    self.connected = True
-                    event_stream(type='badges')
-                    logging.info('BAZARR SignalR client for Sonarr is connected and waiting for events.')
-                    if settings.sonarr.series_sync_on_live:
-                        scheduler.execute_job_now(taskid="update_series")
-
-    def stop(self, log=True):
-        try:
-            self.connection.close()
-        except Exception:
-            self.connection.started = False
-        if log:
-            logging.info('BAZARR SignalR client for Sonarr is now disconnected.')
-
-    def restart(self):
-        if self.connection:
-            if self.connection.started:
-                self.stop(log=False)
-        if settings.general.use_sonarr:
-            self.start()
-
-    def exception_handler(self):
-        sonarr_queue.clear()
-        self.connected = False
-        event_stream(type='badges')
-        logging.error('BAZARR connection to Sonarr SignalR feed has been lost.')
-        self.restart()
-
-    def configure(self):
-        self.apikey_sonarr = settings.sonarr.apikey
-        self.connection = Connection(f"{url_sonarr()}/signalr", self.session)
-        self.connection.qs = {'apikey': self.apikey_sonarr}
-        sonarr_hub = self.connection.register_hub('')  # Sonarr doesn't use named hub
-
-        sonarr_method = ['series', 'episode']
-        for item in sonarr_method:
-            sonarr_hub.client.on(item, feed_queue)
-
-        self.connection.exception += self.exception_handler
 
 
 class SonarrSignalrClient:
@@ -417,7 +339,6 @@ radarr_queue_thread = threading.Thread(target=consume_queue, args=(radarr_queue,
 radarr_queue_thread.daemon = True
 radarr_queue_thread.start()
 
-# instantiate proper SignalR client
-sonarr_signalr_client = SonarrSignalrClientLegacy() if get_sonarr_info.version().startswith(('0.', '2.', '3.')) else \
-    SonarrSignalrClient()
+# instantiate SignalR clients
+sonarr_signalr_client = SonarrSignalrClient()
 radarr_signalr_client = RadarrSignalrClient()

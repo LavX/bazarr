@@ -31,21 +31,12 @@ class GetSonarrInfo:
         if settings.general.use_sonarr:
             headers = {**HEADERS, "X-Api-Key": settings.sonarr.apikey}
             try:
-                sv = f"{url_sonarr()}/api/system/status"
-                sonarr_json = sonarr_session().get(sv, timeout=int(settings.sonarr.http_timeout), verify=get_ssl_verify('sonarr'),
-                                                   headers=headers).json()
-                if 'version' in sonarr_json:
-                    sonarr_version = sonarr_json['version']
-                else:
-                    raise JSONDecodeError
-            except JSONDecodeError:
-                try:
-                    sv = f"{url_sonarr()}/api/v3/system/status"
-                    sonarr_version = sonarr_session().get(sv, timeout=int(settings.sonarr.http_timeout), verify=get_ssl_verify('sonarr'),
-                                                          headers=headers).json()['version']
-                except (RequestException, JSONDecodeError, KeyError):
-                    logging.debug('BAZARR cannot get Sonarr version')
-                    sonarr_version = 'unknown'
+                sv = f"{url_sonarr()}/api/v3/system/status"
+                sonarr_version = sonarr_session().get(sv, timeout=int(settings.sonarr.http_timeout),
+                                                      verify=get_ssl_verify('sonarr'), headers=headers).json()['version']
+            except (RequestException, JSONDecodeError, KeyError):
+                logging.debug('BAZARR cannot get Sonarr version')
+                sonarr_version = 'unknown'
             except Exception:
                 logging.debug('BAZARR cannot get Sonarr version')
                 sonarr_version = 'unknown'
@@ -62,27 +53,13 @@ class GetSonarrInfo:
                 semver_version = semver.Version(*split_version)
         return semver_version
 
-    def is_legacy(self):
-        """
-        Call self.version() and parse the result to determine if it's a legacy version of Sonarr API
-        @return: bool
-        """
-        sonarr_version = self.version()
-        if sonarr_version.startswith(('0.', '2.')):
-            return True
-        else:
-            return False
-
     def is_deprecated(self):
         """
-                Call self.version() and parse the result to determine if it's a deprecated version of Sonarr
-                @return: bool
-                """
-        sonarr_version = self.version()
-        if sonarr_version.startswith(('0.', '2.')):
-            return True
-        else:
-            return False
+        Call self.version() and parse the result to determine if it's a deprecated version of Sonarr.
+        @return: bool
+        """
+        sonarr_version = self.semver()
+        return sonarr_version is not None and sonarr_version < semver.Version(4, 0, 0)
 
 
 get_sonarr_info = GetSonarrInfo()
@@ -110,7 +87,7 @@ def url_sonarr():
 
 
 def url_api_sonarr():
-    return url_sonarr() + f'/api{"/v3" if not get_sonarr_info.is_legacy() else ""}/'
+    return url_sonarr() + '/api/v3/'
 
 
 def sonarr_headers(apikey_sonarr):

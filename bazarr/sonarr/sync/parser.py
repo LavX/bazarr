@@ -10,7 +10,6 @@ from constants import MINIMUM_VIDEO_SIZE
 from languages.get_languages import audio_language_from_name
 from utilities.path_mappings import path_mappings
 from utilities.video_analyzer import embedded_audio_reader
-from sonarr.info import get_sonarr_info
 
 from .converter import SonarrFormatVideoCodec, SonarrFormatAudioCodec
 
@@ -52,14 +51,6 @@ def seriesParser(show, action, tags_dict, language_profiles, serie_default_profi
     lastAired = parser.parse(show['lastAired']).strftime("%Y-%m-%d") if 'lastAired' in show and show['lastAired'] else None
 
     audio_language = []
-    if not settings.general.parse_embedded_audio_track:
-        if get_sonarr_info.is_legacy():
-            audio_language = profile_id_to_language(show['qualityProfileId'], audio_profiles)
-        else:
-            if 'languageProfileId' in show:
-                audio_language = profile_id_to_language(show['languageProfileId'], audio_profiles)
-            else:
-                audio_language = []
 
     parsed_series = {
         'title': show["title"],
@@ -94,14 +85,6 @@ def seriesParser(show, action, tags_dict, language_profiles, serie_default_profi
                 parsed_series['profileId'] = None
 
     return parsed_series
-
-
-def profile_id_to_language(id_, profiles):
-    profiles_to_return = []
-    for profile in profiles:
-        if id_ == profile[0]:
-            profiles_to_return.append(profile[1])  # noqa: PERF401
-    return profiles_to_return
 
 
 def episodeParser(episode):

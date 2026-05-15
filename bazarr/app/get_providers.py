@@ -5,7 +5,6 @@ import json
 import datetime
 import logging
 import subliminal_patch
-import pretty
 import time
 import socket
 import requests
@@ -26,6 +25,7 @@ from app.config import settings
 from languages.get_languages import CustomLanguage
 from app.event_handler import event_stream
 from utilities.binaries import get_binary
+from utilities.pretty_date import pretty_date
 from radarr.blacklist import blacklist_log_movie
 from sonarr.blacklist import blacklist_log
 
@@ -546,7 +546,7 @@ def list_throttled_providers():
     providers = [x for x in settings.general.enabled_providers if x in existing_providers]
     for provider in providers:
         reason, until, throttle_desc = tp.get(provider, (None, None, None))
-        throttled_providers.append([provider, reason, pretty.date(until)])
+        throttled_providers.append([provider, reason, pretty_date(until)])
     return throttled_providers
 
 

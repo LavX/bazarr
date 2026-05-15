@@ -1,7 +1,6 @@
 # coding=utf-8
 
 import operator
-import pretty
 import ast
 
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
@@ -10,6 +9,7 @@ from functools import reduce
 from app.database import TableMovies, TableHistoryMovie, TableBlacklistMovie, database, select, func
 from subtitles.upgrade import get_upgradable_movies_subtitles, _language_still_desired
 from api.swaggerui import subtitles_language_model
+from utilities.pretty_date import pretty_date
 
 from api.utils import authenticate, postprocess
 
@@ -152,7 +152,7 @@ class MoviesHistory(Resource):
             # Make timestamp pretty
             if item['timestamp']:
                 item["parsed_timestamp"] = item['timestamp'].strftime('%x %X')
-                item['timestamp'] = pretty.date(item["timestamp"])
+                item['timestamp'] = pretty_date(item["timestamp"])
 
             # Parse matches and dont_matches
             if item['matches']:
