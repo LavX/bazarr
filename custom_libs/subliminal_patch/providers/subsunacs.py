@@ -21,9 +21,26 @@ from subliminal.subtitle import fix_line_ending
 from subliminal.cache import region
 from subzero.language import Language
 from py7zr import is_7zfile, SevenZipFile
+from py7zr.io import BytesIOFactory
 from .utils import FIRST_THOUSAND_OR_SO_USER_AGENTS as AGENT_LIST
 
 logger = logging.getLogger(__name__)
+
+SUBTITLE_ARCHIVE_MEMORY_LIMIT = 100 * 1024 * 1024
+SUBTITLE_ARCHIVE_FILE_COUNT_LIMIT = 256
+SUBTITLE_ARCHIVE_SUBTITLE_FILE_COUNT_LIMIT = 64
+
+
+def _is_ignored_txt_file(file_name):
+    return file_name.lower().endswith('.txt') and re.search(
+        r'subsunacs\.net|танете част|прочети|^read ?me|procheti',
+        file_name,
+        re.I,
+    )
+
+
+def _is_subtitle_file(file_name):
+    return file_name.lower().endswith(('srt', '.sub', '.txt')) and not _is_ignored_txt_file(file_name)
 
 
 def fix_tv_naming(title):
@@ -116,7 +133,7 @@ class SubsUnacsSubtitle(Subtitle):
 
 class SubsUnacsProvider(Provider):
     """SubsUnacs Provider."""
-    languages = {Language(l) for l in [
+    languages = {Language(language_code) for language_code in [
         'bul', 'eng'
     ]}
     video_types = (Episode, Movie)
@@ -187,29 +204,29 @@ class SubsUnacsProvider(Provider):
 
                     try:
                         year = int(element.find_next_sibling('span', {'class' : 'smGray'}).text.strip('\xa0()'))
-                    except:
+                    except Exception:
                         year = None
 
                     td = row.findAll('td')
 
                     try:
                         num_cds = int(td[1].get_text())
-                    except:
+                    except Exception:
                         num_cds = None
 
                     try:
                         fps = float(td[2].get_text())
-                    except:
+                    except Exception:
                         fps = None
 
                     try:
                         rating = float(td[3].find('img').get('title'))
-                    except:
+                    except Exception:
                         rating = None
 
                     try:
                         uploader = td[5].get_text()
-                    except:
+                    except Exception:
                         uploader = None
 
                     logger.info('Found subtitle link %r', link)
@@ -225,7 +242,7 @@ class SubsUnacsProvider(Provider):
         return subtitles
 
     def list_subtitles(self, video, languages):
-        return [s for l in languages for s in self.query(l, video)]
+        return [subtitle for language in languages for subtitle in self.query(language, video)]
 
     def download_subtitle(self, subtitle):
         if subtitle.content:
@@ -243,26 +260,40 @@ class SubsUnacsProvider(Provider):
         type = 'episode' if isinstance(video, Episode) else 'movie'
 
         is_7zip = isinstance(archiveStream, SevenZipFile)
+        file_content = None
         if is_7zip:
-            file_content = archiveStream.readall()
-            file_list = sorted(file_content)
+            file_list = sorted(archiveStream.getnames())
+            if len(file_list) > SUBTITLE_ARCHIVE_FILE_COUNT_LIMIT:
+                logger.warning('Ignoring archive with too many files: %d', len(file_list))
+                return []
+            file_list = [file_name for file_name in file_list if _is_subtitle_file(file_name)]
+            if len(file_list) > SUBTITLE_ARCHIVE_SUBTITLE_FILE_COUNT_LIMIT:
+                logger.warning('Ignoring archive with too many subtitle candidates: %d', len(file_list))
+                return []
+            file_content = BytesIOFactory(limit=SUBTITLE_ARCHIVE_MEMORY_LIMIT)
+            if file_list:
+                archiveStream.extract(targets=file_list, factory=file_content)
         else:
-            file_list = sorted(archiveStream.namelist())
+            all_files = sorted(archiveStream.namelist())
+            if len(all_files) > SUBTITLE_ARCHIVE_FILE_COUNT_LIMIT:
+                logger.warning('Ignoring archive with too many files: %d', len(all_files))
+                return []
+            file_list = [file_name for file_name in all_files if _is_subtitle_file(file_name)]
+            if len(file_list) > SUBTITLE_ARCHIVE_SUBTITLE_FILE_COUNT_LIMIT:
+                logger.warning('Ignoring archive with too many subtitle candidates: %d', len(file_list))
+                return []
 
         for file_name in file_list:
-            if file_name.lower().endswith(('srt', '.sub', '.txt')):
-                file_is_txt = True if file_name.lower().endswith('.txt') else False
-                if file_is_txt and re.search(r'subsunacs\.net|танете част|прочети|^read ?me|procheti', file_name, re.I):
-                    logger.info('Ignore readme txt file %r', file_name)
-                    continue
-                logger.info('Found subtitle file %r', file_name)
-                subtitle = SubsUnacsSubtitle(language, file_name, type, video, link, fps, num_cds)
-                if is_7zip:
-                    subtitle.content = fix_line_ending(file_content[file_name].read())
-                else:
-                    subtitle.content = fix_line_ending(archiveStream.read(file_name))
-                if subtitle.is_valid():
-                    subtitles.append(subtitle)
+            logger.info('Found subtitle file %r', file_name)
+            subtitle = SubsUnacsSubtitle(language, file_name, type, video, link, fps, num_cds)
+            if is_7zip:
+                extracted_file = file_content.get(file_name)
+                extracted_file.seek(0)
+                subtitle.content = fix_line_ending(extracted_file.read())
+            else:
+                subtitle.content = fix_line_ending(archiveStream.read(file_name))
+            if subtitle.is_valid():
+                subtitles.append(subtitle)
 
         return subtitles
 
@@ -273,7 +304,7 @@ class SubsUnacsProvider(Provider):
         if request is NO_VALUE:
             request = self.session.get(link, headers={
                 'Referer': 'https://subsunacs.net/search.php'
-                })
+                }, timeout=10)
             request.raise_for_status()
             region.set(cache_key, request)
         else:
@@ -287,7 +318,7 @@ class SubsUnacsProvider(Provider):
                 return self.process_archive_subtitle_files(ZipFile(archive_stream), language, video, link, fps, num_cds)
             elif archive_stream.seek(0) == 0 and is_7zfile(archive_stream):
                 return self.process_archive_subtitle_files(SevenZipFile(archive_stream), language, video, link, fps, num_cds)
-        except:
+        except Exception:
             pass
 
         logger.error('Ignore unsupported archive %r', request.headers)

@@ -17,6 +17,7 @@ FROM python:3.14-slim-trixie AS python-builder
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    git \
     libffi-dev \
     libpq-dev \
     libxml2-dev \
@@ -81,8 +82,7 @@ RUN chmod +x /entrypoint.sh
 # Set work directory
 WORKDIR /app/bazarr
 
-# Copy libs directories (change less frequently than main app code)
-COPY libs ./libs
+# Copy Bazarr-owned compatibility libraries before main app code
 COPY custom_libs ./custom_libs
 COPY migrations ./migrations
 

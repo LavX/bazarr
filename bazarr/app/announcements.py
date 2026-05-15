@@ -7,7 +7,6 @@ import json
 import threading
 
 import requests
-import pretty
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -18,6 +17,7 @@ from app.database import TableAnnouncements, database, insert, select
 
 from app.get_args import args
 from app.jobs_queue import jobs_queue
+from utilities.pretty_date import pretty_date
 
 
 _session: requests.Session | None = None
@@ -65,7 +65,7 @@ def _announcements_session() -> requests.Session:
 
 
 def parse_announcement_dict(announcement_dict):
-    announcement_dict['timestamp'] = pretty.date(announcement_dict['timestamp'])
+    announcement_dict['timestamp'] = pretty_date(announcement_dict['timestamp'])
     announcement_dict['link'] = announcement_dict.get('link', '')
     announcement_dict['dismissible'] = announcement_dict.get('dismissible', True)
     announcement_dict['enabled'] = announcement_dict.get('enabled', True)

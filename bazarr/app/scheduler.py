@@ -1,7 +1,6 @@
 # coding=utf-8
 
 import os
-import pretty
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -29,6 +28,7 @@ from subtitles.mass_operations import mass_batch_operation
 from utilities.cache import cache_maintenance
 from utilities.health import check_health
 from utilities.backup import backup_to_zip
+from utilities.pretty_date import pretty_date
 
 from .config import settings
 from .database import database
@@ -190,14 +190,14 @@ class Scheduler:
                     # Never for IntervalTrigger jobs
                     next_run = NEVER_DATE
                 else:
-                    next_run = pretty.date(job.next_run_time.replace(tzinfo=None))
+                    next_run = pretty_date(job.next_run_time.replace(tzinfo=None))
             if isinstance(job.trigger, CronTrigger):
                 if a_long_time_from_now(job):
                     # Never for CronTrigger jobs
                     next_run = NEVER_DATE
                 else:
                     if job.next_run_time:
-                        next_run = pretty.date(job.next_run_time.replace(tzinfo=None))
+                        next_run = pretty_date(job.next_run_time.replace(tzinfo=None))
 
             if job.id in self.__running_tasks:
                 running = True

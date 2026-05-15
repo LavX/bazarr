@@ -135,14 +135,12 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
     else:
         episodes = episodes_data
     if episodes:
-        if get_sonarr_info.is_legacy():
-            # We skip this for legacy versions of Sonarr since it already have episodeFile structure included
-            pass
-        elif get_sonarr_info.semver() >= semver.Version(*(4, 0, 9, 2421)):
+        sonarr_version = get_sonarr_info.semver()
+        if sonarr_version and sonarr_version >= semver.Version(*(4, 0, 9, 2421)):
             # We skip this if the episodes already contain an episodeFile structure (added with Sonarr v4.0.9.2421)
             pass
         else:
-            # For Sonarr v3 or greater but lower than 4.0.9.2421, we need to update episodes to integrate the
+            # For Sonarr lower than 4.0.9.2421, we need to update episodes to integrate the
             # episodeFile API endpoint results
             episodeFiles = get_episodesFiles_from_sonarr_api(apikey_sonarr=apikey_sonarr, series_id=series_id)
             if episodeFiles:
@@ -348,8 +346,7 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False):
             return
 
         else:
-            # For Sonarr v3, we need to update episodes to integrate the episodeFile API endpoint results
-            if not get_sonarr_info.is_legacy() and existing_episode and episode_data['hasFile']:
+            if existing_episode and episode_data['hasFile']:
                 episode_data['episodeFile'] = \
                     get_episodesFiles_from_sonarr_api(apikey_sonarr=apikey_sonarr,
                                                       episode_file_id=episode_data['episodeFileId'])

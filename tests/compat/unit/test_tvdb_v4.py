@@ -81,7 +81,7 @@ def test_v4_episode_lookup_populates_series_and_episode_fields():
     }
     series_v1 = {"seriesName": "Game of Thrones", "firstAired": "2011-04-17"}
     with patch("subliminal_patch.refiners.tvdb_v4.get_client") as gc, \
-         patch("subliminal.refiners.tvdb.get_series", return_value=series_v1):
+         patch("subliminal.refiners.tvdb.tvdb_client.get_series", return_value=series_v1):
         gc.return_value.search_by_imdb_id.return_value = v4_match
         assert _tvdb_v4_episode_lookup(video) is True
     assert video.series_tvdb_id == 121361

@@ -5,46 +5,11 @@ import logging
 
 from app.config import settings, get_ssl_verify
 from sonarr.http_session import sonarr_session
-from sonarr.info import get_sonarr_info, sonarr_headers, url_api_sonarr
+from sonarr.info import sonarr_headers, url_api_sonarr
 
 
 def get_profile_list():
-    apikey_sonarr = settings.sonarr.apikey
-    profiles_list = []
-
-    # Get profiles data from Sonarr
-    if get_sonarr_info.is_legacy():
-        url_sonarr_api_series = f"{url_api_sonarr()}profile"
-    else:
-        if not get_sonarr_info.version().startswith('3.'):
-            # return an empty list when using Sonarr >= v4 that does not support series languages profiles anymore
-            return profiles_list
-        url_sonarr_api_series = f"{url_api_sonarr()}languageprofile"
-
-    try:
-        profiles_json = sonarr_session().get(url_sonarr_api_series, timeout=int(settings.sonarr.http_timeout), verify=get_ssl_verify('sonarr'),
-                                             headers=sonarr_headers(apikey_sonarr))
-    except requests.exceptions.ConnectionError:
-        logging.exception("BAZARR Error trying to get profiles from Sonarr. Connection Error.")
-        return None
-    except requests.exceptions.Timeout:
-        logging.exception("BAZARR Error trying to get profiles from Sonarr. Timeout Error.")
-        return None
-    except requests.exceptions.RequestException:
-        logging.exception("BAZARR Error trying to get profiles from Sonarr.")
-        return None
-    else:
-        # Parsing data returned from Sonarr
-        if get_sonarr_info.is_legacy():
-            for profile in profiles_json.json():
-                if 'language' in profile:
-                    profiles_list.append([profile['id'], profile['language'].capitalize()])  # noqa: PERF401
-        else:
-            for profile in profiles_json.json():
-                if 'name' in profile:
-                    profiles_list.append([profile['id'], profile['name'].capitalize()])  # noqa: PERF401
-
-    return profiles_list
+    return []
 
 
 def get_tags():

@@ -10,7 +10,6 @@ os.environ.setdefault("BAZARR_VERSION", "test")
 # Add bazarr source trees to sys.path so that `from app.config import ...`
 # resolves correctly, matching what tests/bazarr/conftest.py does.
 _repo = os.path.join(os.path.dirname(__file__), "../..")
-sys.path.insert(0, os.path.join(_repo, "libs"))
 sys.path.insert(0, os.path.join(_repo, "bazarr"))
 sys.path.insert(0, os.path.join(_repo, "custom_libs"))
 

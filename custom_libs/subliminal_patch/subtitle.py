@@ -5,9 +5,6 @@ from __future__ import absolute_import
 import logging
 import traceback
 
-import re
-import types
-
 import chardet
 import pysrt
 import pysubs2
@@ -16,7 +13,10 @@ from copy import deepcopy
 from subzero.modification import SubtitleModifications
 from subzero.language import Language
 from subliminal import Subtitle as Subtitle_
-from subliminal.subtitle import Episode, Movie, sanitize_release_group, get_equivalent_release_groups
+from subliminal.subtitle import LanguageType
+from subliminal.score import get_equivalent_release_groups
+from subliminal.utils import sanitize_release_group
+from subliminal.video import Episode, Movie
 from subliminal_patch.utils import sanitize
 from ftfy import fix_text
 from codecs import BOM_UTF8, BOM_UTF16_BE, BOM_UTF16_LE, BOM_UTF32_BE, BOM_UTF32_LE
@@ -62,7 +62,36 @@ class Subtitle(Subtitle_):
     use_original_format = False
     # format = "srt" # default format is srt
 
-    def __init__(self, language, hearing_impaired=False, page_link=None, encoding=None, mods=None, original_format=False):
+    def __init__(
+        self,
+        language,
+        subtitle_id="",
+        *legacy_args,
+        hearing_impaired=False,
+        foreign_only=None,
+        page_link=None,
+        encoding=None,
+        subtitle_format=None,
+        subtitle_path=None,
+        fps=None,
+        embedded=False,
+        force_guess_encoding=True,
+        auto_fix_srt=False,
+        mods=None,
+        original_format=False,
+    ):
+        if isinstance(subtitle_id, bool) or subtitle_id is None:
+            if hearing_impaired is False:
+                hearing_impaired = bool(subtitle_id)
+            subtitle_id = ""
+
+            if legacy_args and page_link is None:
+                page_link = legacy_args[0]
+                legacy_args = legacy_args[1:]
+        elif legacy_args and page_link is None:
+            page_link = legacy_args[0]
+            legacy_args = legacy_args[1:]
+
         # language needs to be cloned because it is actually a reference to the provider language object
         # if a new copy is not created then all subsequent subtitles for this provider will incorrectly be modified
         # at least until Bazarr is restarted or the provider language object is recreated somehow
@@ -72,13 +101,57 @@ class Subtitle(Subtitle_):
         if hearing_impaired:
             language = Language.rebuild(language, hi=True)
 
-        super(Subtitle, self).__init__(language, hearing_impaired=hearing_impaired, page_link=page_link,
-                                       encoding=encoding)
+        super(Subtitle, self).__init__(
+            language,
+            str(subtitle_id),
+            hearing_impaired=hearing_impaired,
+            foreign_only=foreign_only,
+            page_link=page_link,
+            encoding=encoding,
+            subtitle_format=subtitle_format,
+            subtitle_path=subtitle_path,
+            fps=fps,
+            embedded=embedded,
+            force_guess_encoding=force_guess_encoding,
+            auto_fix_srt=auto_fix_srt,
+        )
         self.mods = mods
         self._is_valid = False
         self.use_original_format = original_format
-        self._og_format = None
+        self._og_format = subtitle_format
         self.matches = set()
+
+    @property
+    def subtitle_id(self):
+        return self._subtitle_id
+
+    @subtitle_id.setter
+    def subtitle_id(self, value):
+        self._subtitle_id = value
+
+    @property
+    def hearing_impaired(self):
+        return self.language_type.is_hearing_impaired()
+
+    @hearing_impaired.setter
+    def hearing_impaired(self, value):
+        foreign_only = self.language_type.is_foreign_only()
+        self.language_type = LanguageType.from_flags(
+            hearing_impaired=value,
+            foreign_only=foreign_only,
+        )
+
+    @property
+    def foreign_only(self):
+        return self.language_type.is_foreign_only()
+
+    @foreign_only.setter
+    def foreign_only(self, value):
+        hearing_impaired = self.language_type.is_hearing_impaired()
+        self.language_type = LanguageType.from_flags(
+            hearing_impaired=hearing_impaired,
+            foreign_only=value,
+        )
 
     @property
     def format(self):
@@ -115,7 +188,7 @@ class Subtitle(Subtitle_):
 
     @property
     def numeric_id(self):
-        raise NotImplemented
+        raise NotImplementedError
 
     def get_fps(self):
         """
@@ -175,7 +248,7 @@ class Subtitle(Subtitle_):
                 self.content.decode(self.encoding)
                 self._guessed_encoding = self.encoding
                 return self._guessed_encoding
-            except:
+            except Exception:
                 # provider specified encoding is invalid, fallback to guessing
                 pass
 
@@ -313,8 +386,8 @@ class Subtitle(Subtitle_):
                     logger.info("Got FPS from MicroDVD subtitle: %s", subs.fps)
                 else:
                     logger.info("Got format: %s", subs.format)
+                    self._og_format = subs.format
                     if self.use_original_format:
-                        self._og_format = subs.format
                         self._is_valid = True
                         return True
 
@@ -332,7 +405,7 @@ class Subtitle(Subtitle_):
                 self.content = subs.to_string(format_="srt").encode(encoding=self.get_encoding())
             else:
                 self.content = subs.to_string(format_=self.format)
-        except:
+        except Exception:
             logger.exception("Couldn't convert subtitle %s to .srt format: %s", self, traceback.format_exc())
             return False
 
