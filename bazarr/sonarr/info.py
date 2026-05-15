@@ -49,7 +49,14 @@ class GetSonarrInfo:
         if isinstance(self.version(), str) and self.version() not in ['', 'unknown']:
             split_version = self.version().split('.')
             if len(split_version) >= 3 and all(split_version[i].isdigit() for i in range(3)):
-                prerelease = split_version[3] if len(split_version) > 3 and split_version[3].isdigit() else None
+                # Sonarr nightly/develop builds report e.g. "4.0.9.2421-develop". A non-digit
+                # 4th segment must NOT be silently dropped: that would yield Version(4,0,9),
+                # which compares >= Version(4,0,9,2421) (release outranks prerelease) and
+                # falsely tells sync_episodes() the server inlines episodeFile. Return None
+                # in that case so the legacy enrichment path stays engaged.
+                if len(split_version) > 3 and not split_version[3].isdigit():
+                    return None
+                prerelease = split_version[3] if len(split_version) > 3 else None
                 semver_version = semver.Version(*(int(part) for part in split_version[:3]), prerelease=prerelease)
         return semver_version
 

@@ -283,3 +283,20 @@ def test_sonarr_signalr_core_support_requires_known_v4(monkeypatch):
 
     monkeypatch.setattr(info, "version", lambda: "4.0.9.2244")
     assert info.semver() < semver.Version(4, 0, 9, "2421")
+
+
+def test_sonarr_semver_returns_none_for_nightly_build_suffix(monkeypatch):
+    """Nightly/develop builds report a non-digit 4th segment (e.g. 4.0.9.2421-develop).
+    semver() must NOT drop the suffix and fabricate a Version(4,0,9), because that
+    would compare >= Version(4,0,9,2421) and trick sync_episodes() into skipping the
+    legacy episodeFile enrichment. Return None so the safe fallback path stays engaged.
+    """
+    from sonarr.info import GetSonarrInfo
+
+    info = GetSonarrInfo()
+
+    monkeypatch.setattr(info, "version", lambda: "4.0.9.2421-develop")
+    assert info.semver() is None
+
+    monkeypatch.setattr(info, "version", lambda: "5.0.0.689-prerelease.0")
+    assert info.semver() is None

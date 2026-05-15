@@ -290,7 +290,12 @@ async def _proxy_websocket(request: web.Request, target_url: str) -> web.WebSock
 
 
 def _read_bazarr_config(config_dir: str) -> dict:
-    """Read the bazarr config.yaml to extract frontend-safe defaults."""
+    """Read the bazarr config.yaml to extract frontend defaults. The apiKey
+    has to match the running bazarr's value: this shell is served during
+    crash/restart, and once bazarr recovers the SPA keeps using whatever
+    window.Bazarr.apiKey it was bootstrapped with as its X-API-KEY. An empty
+    value strands every /api/* call at 401 with no recovery path under
+    auth.type=None until the user manually reloads."""
     config_path = Path(config_dir) / "config" / "config.yaml"
     defaults = {"baseUrl": "/", "apiKey": "", "canUpdate": False, "hasUpdate": False}
     try:
@@ -300,6 +305,9 @@ def _read_bazarr_config(config_dir: str) -> dict:
             general = cfg.get("general", {})
             if general.get("base_url"):
                 defaults["baseUrl"] = general["base_url"]
+            auth = cfg.get("auth", {})
+            if auth.get("apikey"):
+                defaults["apiKey"] = auth["apikey"]
     except Exception as e:
         print(f"[supervisor] Warning: could not read config: {e}")
     return defaults
