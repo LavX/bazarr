@@ -60,6 +60,36 @@ def reinitialize_on_error(exceptions: tuple, attempts=1):
     return real_decorator
 
 
+def _is_original_subliminal_subtitle(cls):
+    return (
+        cls is not Subtitle and
+        getattr(cls, "__module__", None) == "subliminal.subtitle" and
+        getattr(cls, "__name__", None) == "Subtitle"
+    )
+
+
+def _patch_subtitle_bases(subtitle_class):
+    if subtitle_class is None:
+        return
+
+    new_bases = []
+
+    for base in subtitle_class.__bases__:
+        if base == _Subtitle or _is_original_subliminal_subtitle(base):
+            new_bases.append(Subtitle)
+            continue
+
+        if any(_is_original_subliminal_subtitle(parent) for parent in getattr(base, "__bases__", ())):
+            base.__bases__ = tuple(
+                Subtitle if _is_original_subliminal_subtitle(parent) else parent
+                for parent in base.__bases__
+            )
+
+        new_bases.append(base)
+
+    subtitle_class.__bases__ = tuple(new_bases)
+
+
 # register providers
 # fixme: this is bad
 for name in os.listdir(os.path.dirname(__file__)):
@@ -92,16 +122,10 @@ for name in os.listdir(os.path.dirname(__file__)):
                 cls.__bases__ = tuple(new_bases)
 
                 # patch subtitle bases
-                new_bases = []
-                for base in cls.subtitle_class.__bases__:
-                    if base == _Subtitle:
-                        base = Subtitle
-                    else:
-                        if _Subtitle in base.__bases__:
-                            base.__bases__ = (Subtitle,)
-                    new_bases.append(base)
+                _patch_subtitle_bases(cls.subtitle_class)
 
-                cls.subtitle_class.__bases__ = tuple(new_bases)
+            elif hasattr(cls, "subtitle_class"):
+                _patch_subtitle_bases(cls.subtitle_class)
 
             # inject our requests.Session wrapper for automatic retry but not for specific providers that are already
             # struggling and that we don't want to hurt more
@@ -124,4 +148,3 @@ for name in os.listdir(os.path.dirname(__file__)):
         if name not in CUSTOM_SESSION_EXCLUDED_PROVIDERS:
             subliminal_mod.Session = RetryingSession
         subliminal_mod.guess_matches = guess_matches
-

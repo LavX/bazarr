@@ -12,9 +12,6 @@ class ProviderRegistry(object):
     def __init__(self):
         self.providers = OrderedDict()
 
-    def __cmp__(self, d):
-        return cmp(self.providers, d)
-
     def __contains__(self, item):
         return item in self.providers
 
@@ -55,7 +52,22 @@ try:
 except ValueError:
     pass
 
+for entry_point in (
+        'opensubtitles = babelfish.converters.opensubtitles:OpenSubtitlesConverter',
+        'opensubtitles = subliminal.converters.opensubtitles:OpenSubtitlesConverter',
+):
+    try:
+        babelfish.language_converters.unregister(entry_point)
+    except ValueError:
+        pass
+
+try:
+    del babelfish.language_converters.converters['opensubtitles']
+except KeyError:
+    pass
+
 babelfish.language_converters.register('addic7ed = subliminal_patch.language:PatchedAddic7edConverter')
+babelfish.language_converters.register('opensubtitles = subliminal_patch.language:PatchedOpenSubtitlesConverter')
 babelfish.language_converters.register('szopensubtitles = subliminal_patch.language:PatchedOpenSubtitlesConverter')
 subliminal.refiner_manager.register('sz_metadata = subliminal_patch.refiners.metadata:refine')
 subliminal.refiner_manager.register('sz_omdb = subliminal_patch.refiners.omdb:refine')

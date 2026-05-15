@@ -92,7 +92,10 @@ class SZOMDBClient(OMDBClient):
 
         return j
 
-    def search(self, title, type=None, year=None, page=1):
+    def search(self, title, type=None, year=None, page=1, is_movie=None):
+        if type is None and is_movie is not None:
+            type = "movie" if is_movie else "series"
+
         # build the params
         params = {'s': title, 'type': type, 'y': year, 'page': page}
 

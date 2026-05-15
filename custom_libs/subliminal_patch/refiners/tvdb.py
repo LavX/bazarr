@@ -3,14 +3,27 @@
 from __future__ import absolute_import
 import datetime
 
-from subliminal.refiners.tvdb import Episode, logger, search_series, series_re, sanitize, get_series, \
-    get_series_episode, region, tvdb_client
+from subliminal.cache import region
+from subliminal.refiners.tvdb import Episode, logger, series_re, tvdb_client
+from subliminal.utils import sanitize
 
 from .util import fix_session_bases
 
 TVDB_SEASON_EXPIRATION_TIME = datetime.timedelta(days=1).total_seconds()
 
 fix_session_bases(tvdb_client.session)
+
+
+def search_series(name):
+    return tvdb_client.search_series(name)
+
+
+def get_series(series_id):
+    return tvdb_client.get_series(series_id)
+
+
+def get_series_episode(series_id, season, episode):
+    return tvdb_client.get_series_episode(series_id, season, episode)
 
 
 @region.cache_on_arguments(expiration_time=TVDB_SEASON_EXPIRATION_TIME)

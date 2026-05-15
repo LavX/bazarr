@@ -4,7 +4,6 @@ import functools
 import hashlib
 import logging
 import os
-import re
 import shutil
 import tempfile
 from typing import List
@@ -67,7 +66,7 @@ class EmbeddedSubtitlesProvider(Provider):
     provider_name = "embeddedsubtitles"
 
     languages = {Language("por", "BR"), Language("spa", "MX"), Language("zho", "TW")} | {
-        Language.fromalpha2(l) for l in language_converters["alpha2"].codes
+        Language.fromalpha2(code) for code in language_converters["alpha2"].codes
     }
     languages.update(set(Language.rebuild(lang, hi=True) for lang in languages))
     languages.update(set(Language.rebuild(lang, forced=True) for lang in languages))
@@ -245,7 +244,11 @@ class EmbeddedSubtitlesProvider(Provider):
 
 class _MemoizedFFprobeVideoContainer(FFprobeVideoContainer):
     def get_subtitles(self, *args, **kwargs):
-        return super().get_subtitles(*args, **kwargs)
+        try:
+            return list(self._cached_subtitle_streams)
+        except AttributeError:
+            self._cached_subtitle_streams = list(super().get_subtitles(*args, **kwargs))
+            return list(self._cached_subtitle_streams)
 
 
 @functools.lru_cache(maxsize=8096)

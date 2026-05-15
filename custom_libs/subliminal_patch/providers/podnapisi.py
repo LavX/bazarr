@@ -1,112 +1,118 @@
 # coding=utf-8
 
 from __future__ import absolute_import
-import logging
+
 import io
-import re
+import json
+import logging
 import ssl
-
-from urllib3 import poolmanager
-
 from zipfile import ZipFile
 
-from guessit import guessit
-
-from requests.adapters import HTTPAdapter
-
-from subliminal.utils import sanitize
-from subliminal_patch.subtitle import guess_matches
-from subliminal_patch.providers.mixins import ProviderSubtitleArchiveMixin
-from subliminal_patch.exceptions import TooManyRequests
-
-
-try:
-    from lxml import etree
-except ImportError:
-    try:
-        import xml.etree.cElementTree as etree
-    except ImportError:
-        import xml.etree.ElementTree as etree
 from babelfish import language_converters
+from guessit import guessit
+from requests.adapters import HTTPAdapter
+from urllib3 import poolmanager
+
+from subliminal.providers.podnapisi import PodnapisiProvider as _PodnapisiProvider
+from subliminal.providers.podnapisi import PodnapisiSubtitle as _PodnapisiSubtitle
 from subliminal.video import Episode, Movie
-from subliminal.providers.podnapisi import PodnapisiProvider as _PodnapisiProvider, \
-    PodnapisiSubtitle as _PodnapisiSubtitle
-from subliminal_patch.utils import sanitize, fix_inconsistent_naming as _fix_inconsistent_naming
+from subliminal_patch.providers.mixins import ProviderSubtitleArchiveMixin
+from subliminal_patch.subtitle import guess_matches
+from subliminal_patch.utils import fix_inconsistent_naming as _fix_inconsistent_naming
+from subliminal_patch.utils import sanitize
 from subzero.language import Language
 
 logger = logging.getLogger(__name__)
 
 
 def fix_inconsistent_naming(title):
-    """Fix titles with inconsistent naming using dictionary and sanitize them.
+    """Fix titles with inconsistent naming using dictionary and sanitize them."""
+    replacements = {}
+    normalized_title = title.replace("Marvels", "").replace("Marvel's", "")
+    if normalized_title != title:
+        replacements[title] = normalized_title
 
-    :param str title: original title.
-    :return: new title.
-    :rtype: str
+    return _fix_inconsistent_naming(title, replacements)
 
-    """
-    d = {}
-    nt = title.replace("Marvels", "").replace("Marvel's", "")
-    if nt != title:
-        d[title] = nt
 
-    return _fix_inconsistent_naming(title, d)
+def _to_int(value):
+    if value in (None, ""):
+        return None
+    return int(value)
+
+
+def _flags(data):
+    flags = data or []
+    if isinstance(flags, str):
+        flags = [flags]
+    return set(flags)
+
+
+def _is_foreign_only(flags):
+    return bool(flags & {"f", "foreign", "foreign_only", "foreign_part", "foreign_parts", "forced"})
 
 
 class PodnapisiSubtitle(_PodnapisiSubtitle):
     provider_name = 'podnapisi'
     hearing_impaired_verifiable = True
 
-    def __init__(self, language, hearing_impaired, page_link, pid, releases, title, season=None, episode=None,
-                 year=None, asked_for_release_group=None, asked_for_episode=None):
-        super(PodnapisiSubtitle, self).__init__(language, hearing_impaired, page_link, pid, releases, title,
-                                                season=season, episode=episode, year=year)
-        self.release_info = u", ".join(releases)
+    def __init__(
+        self,
+        language,
+        subtitle_id,
+        *,
+        hearing_impaired=False,
+        page_link=None,
+        releases=None,
+        title=None,
+        season=None,
+        episode=None,
+        year=None,
+        asked_for_release_group=None,
+        asked_for_episode=None,
+    ):
+        super(PodnapisiSubtitle, self).__init__(
+            language,
+            subtitle_id,
+            hearing_impaired=hearing_impaired,
+            page_link=page_link,
+            releases=releases,
+            title=title,
+            season=season,
+            episode=episode,
+            year=year,
+        )
+        self.pid = subtitle_id
+        self.release_info = u", ".join(self.releases)
         self.asked_for_release_group = asked_for_release_group
         self.asked_for_episode = asked_for_episode
         self.matches = set()
 
     def get_matches(self, video):
-        """
-        patch: set guessit to single_value
-        :param video:
-        :return:
-        """
         matches = set()
 
-        # episode
         if isinstance(video, Episode):
-            # series
             if video.series and (fix_inconsistent_naming(self.title) in (
                     fix_inconsistent_naming(name) for name in [video.series] + video.alternative_series)):
                 matches.add('series')
-            # year
             if video.original_series and self.year is None or video.year and video.year == self.year:
                 matches.add('year')
-            # season
             if video.season and self.season == video.season:
                 matches.add('season')
-            # episode
             if video.episode and self.episode == video.episode:
                 matches.add('episode')
-            # guess
             for release in self.releases:
                 matches |= guess_matches(video, guessit(release, {'type': 'episode'}))
-        # movie
         elif isinstance(video, Movie):
-            # title
             if video.title and (sanitize(self.title) in (
                     sanitize(name) for name in [video.title] + video.alternative_titles)):
                 matches.add('title')
-            # year
             if video.year and self.year == video.year:
                 matches.add('year')
-            # guess
             for release in self.releases:
                 matches |= guess_matches(video, guessit(release, {'type': 'movie'}))
 
         self.matches = matches
-
         return matches
 
 
@@ -116,30 +122,29 @@ class PodnapisiAdapter(HTTPAdapter):
         ctx.set_ciphers('DEFAULT@SECLEVEL=0')
         ctx.check_hostname = False
         self.poolmanager = poolmanager.PoolManager(
-                num_pools=connections,
-                maxsize=maxsize,
-                block=block,
-                ssl_version=ssl.PROTOCOL_TLS,
-                ssl_context=ctx
+            num_pools=connections,
+            maxsize=maxsize,
+            block=block,
+            ssl_version=ssl.PROTOCOL_TLS,
+            ssl_context=ctx
         )
 
 
 class PodnapisiProvider(_PodnapisiProvider, ProviderSubtitleArchiveMixin):
     languages = ({Language('por', 'BR'), Language('srp', script='Latn'), Language('srp', script='Cyrl')} |
-                 {Language.fromalpha2(l) for l in language_converters['alpha2'].codes})
-    languages.update(set(Language.rebuild(l, forced=True) for l in languages))
-    languages.update(set(Language.rebuild(l, hi=True) for l in languages))
+                 {Language.fromalpha2(code) for code in language_converters['alpha2'].codes})
+    languages.update(set(Language.rebuild(language, forced=True) for language in languages))
+    languages.update(set(Language.rebuild(language, hi=True) for language in languages))
 
     video_types = (Episode, Movie)
-
-    server_url = 'https://podnapisi.net/subtitles/'
+    server_url = 'https://www.podnapisi.net/subtitles'
     only_foreign = False
     also_foreign = False
     verify_ssl = True
     subtitle_class = PodnapisiSubtitle
     hearing_impaired_verifiable = True
 
-    def __init__(self, only_foreign=False, also_foreign=False, verify_ssl=True):
+    def __init__(self, only_foreign=False, also_foreign=False, verify_ssl=True, timeout=10):
         self.only_foreign = only_foreign
         self.also_foreign = also_foreign
         self.verify_ssl = verify_ssl
@@ -147,15 +152,15 @@ class PodnapisiProvider(_PodnapisiProvider, ProviderSubtitleArchiveMixin):
         if only_foreign:
             logger.info("Only searching for foreign/forced subtitles")
 
-        super(PodnapisiProvider, self).__init__()
+        super(PodnapisiProvider, self).__init__(timeout=timeout)
 
     def initialize(self):
-        super().initialize()
+        super(PodnapisiProvider, self).initialize()
         self.session.mount('https://', PodnapisiAdapter())
         self.session.verify = self.verify_ssl
 
     def list_subtitles(self, video, languages):
-        if video.is_special:
+        if getattr(video, "is_special", False):
             logger.info("%s can't search for specials right now, skipping", self)
             return []
 
@@ -164,128 +169,117 @@ class PodnapisiProvider(_PodnapisiProvider, ProviderSubtitleArchiveMixin):
             titles = [fix_inconsistent_naming(title) for title in [video.series] + video.alternative_series]
             season = video.season
             episode = video.episode
-        else:
+        elif isinstance(video, Movie):
             titles = [video.title] + video.alternative_titles
+        else:
+            return []
 
         for title in titles:
-            subtitles = [s for l in languages for s in
-                         self.query(l, title, video, season=season, episode=episode, year=video.year,
-                                    only_foreign=self.only_foreign, also_foreign=self.also_foreign)]
+            subtitles = [
+                subtitle
+                for language in languages
+                for subtitle in self.query(language, title, video=video, season=season, episode=episode,
+                                           year=video.year)
+            ]
             if subtitles:
                 return subtitles
 
         return []
 
-    def query(self, language, keyword, video, season=None, episode=None, year=None, only_foreign=False,
-              also_foreign=False):
-        search_language = str(language).lower()
+    def query(self, language, keyword, video=None, season=None, episode=None, year=None,
+              only_foreign=None, also_foreign=None):
+        if self.session is None:
+            return []
 
-        # sr-Cyrl specialcase
+        only_foreign = self.only_foreign if only_foreign is None else only_foreign
+        also_foreign = self.also_foreign if also_foreign is None else also_foreign
+        api_language = Language.rebuild(language, hi=False, forced=False)
+        search_language = str(api_language).lower()
         if search_language == "sr-cyrl":
             search_language = "sr"
 
-        # set parameters, see http://www.podnapisi.net/forum/viewtopic.php?f=62&t=26164#p212652
-        params = {'sXML': 1, 'sL': search_language, 'sK': keyword}
-
+        params = {'keywords': keyword, 'language': search_language}
         is_episode = False
-        if season and episode:
+        if season is not None and episode is not None:
             is_episode = True
-            params['sTS'] = season
-            params['sTE'] = episode
-
+            params['seasons'] = season
+            params['episodes'] = min(episode) if isinstance(episode, list) else episode
+            params['movie_type'] = ['tv-series', 'mini-series']
+        else:
+            params['movie_type'] = 'movie'
         if year:
-            params['sY'] = year
+            params['year'] = year
 
-        # loop over paginated results
         logger.info('Searching subtitles %r', params)
         subtitles = []
         pids = set()
         while True:
-            # query the server
-            content = None
-            try:
-                content = self.session.get(self.server_url + 'search/old', params=params, timeout=30)
-                xml = etree.fromstring(content.content)
-            except etree.ParseError:
-                if '429 Too Many Requests' in content.text:
-                    raise TooManyRequests
-                logger.error("Wrong data returned: %r", content.text)
-                break
+            response = self.session.get(self.server_url + '/search/advanced', params=params, timeout=self.timeout)
+            response.raise_for_status()
+            result = json.loads(response.text)
 
-            # exit if no results
-            if (xml.find('pagination/results') is None or not xml.find('pagination/results').text or not
-                    int(xml.find('pagination/results').text)):
-                logger.debug('No subtitles found')
-                break
-
-            # loop over subtitles
-            for subtitle_xml in xml.findall('subtitle'):
-                # read xml elements
-                pid = subtitle_xml.find('pid').text
-                # ignore duplicates, see http://www.podnapisi.net/forum/viewtopic.php?f=62&t=26164&start=10#p213321
+            for data in result['data']:
+                pid = str(data['id'])
                 if pid in pids:
+                    logger.debug('Ignoring duplicate %r', pid)
                     continue
 
-                _language = Language.fromietf(subtitle_xml.find('language').text)
-                hearing_impaired = 'n' in (subtitle_xml.find('flags').text or '')
-                foreign = 'f' in (subtitle_xml.find('flags').text or '')
+                movie = data.get('movie') or {}
+                if is_episode and movie.get('type') == 'movie':
+                    logger.error('Wrong type detected: movie for episode')
+                    continue
+
+                flags = _flags(data.get('flags'))
+                hearing_impaired = 'n' in flags or 'hearing_impaired' in flags
+                foreign = _is_foreign_only(flags)
                 if only_foreign and not foreign:
                     continue
-
-                elif not only_foreign and not also_foreign and foreign:
+                if not only_foreign and not also_foreign and foreign:
                     continue
 
-                elif also_foreign and foreign:
-                    _language = Language.rebuild(_language, forced=True)
-
-                # set subtitle language to hi if it's hearing_impaired
+                subtitle_language = Language.fromietf(data['language'])
+                if foreign and also_foreign:
+                    subtitle_language = Language.rebuild(subtitle_language, forced=True)
                 if hearing_impaired:
-                    _language = Language.rebuild(_language, hi=True)
-
-                if language != _language:
+                    subtitle_language = Language.rebuild(subtitle_language, hi=True)
+                if language != subtitle_language:
                     continue
 
-                page_link = subtitle_xml.find('url').text
-                releases = []
-                if subtitle_xml.find('release').text:
-                    for release in subtitle_xml.find('release').text.split():
-                        releases.append(re.sub(r'\.+$', '', release))  # remove trailing dots
-                title = subtitle_xml.find('title').text
-                r_season = int(subtitle_xml.find('tvSeason').text)
-                r_episode = int(subtitle_xml.find('tvEpisode').text)
-                r_year = int(subtitle_xml.find('year').text)
-
-                if is_episode:
-                    subtitle = self.subtitle_class(_language, hearing_impaired, page_link, pid, releases, title,
-                                                   season=r_season, episode=r_episode, year=r_year,
-                                                   asked_for_release_group=video.release_group,
-                                                   asked_for_episode=episode)
-                else:
-                    subtitle = self.subtitle_class(_language, hearing_impaired, page_link, pid, releases, title,
-                                                   year=r_year, asked_for_release_group=video.release_group)
-
+                episode_info = movie.get('episode_info') or {}
+                subtitle = self.subtitle_class(
+                    language=subtitle_language,
+                    subtitle_id=pid,
+                    hearing_impaired=hearing_impaired,
+                    page_link=data.get('url'),
+                    releases=(data.get('releases') or []) + (data.get('custom_releases') or []),
+                    title=movie.get('title'),
+                    season=_to_int(episode_info.get('season')) if is_episode else None,
+                    episode=_to_int(episode_info.get('episode')) if is_episode else None,
+                    year=_to_int(movie.get('year')),
+                    asked_for_release_group=getattr(video, "release_group", None),
+                    asked_for_episode=episode,
+                )
 
                 logger.debug('Found subtitle %r', subtitle)
                 subtitles.append(subtitle)
                 pids.add(pid)
 
-            # stop on last page
-            if int(xml.find('pagination/current').text) >= int(xml.find('pagination/count').text):
+            if int(result['page']) >= int(result['all_pages']):
                 break
 
-            # increment current page
-            params['page'] = int(xml.find('pagination/current').text) + 1
+            params['page'] = int(result['page']) + 1
             logger.debug('Getting page %d', params['page'])
-            xml = None
 
         return subtitles
 
     def download_subtitle(self, subtitle):
-        # download as a zip
         logger.info('Downloading subtitle %r', subtitle)
-        r = self.session.get(self.server_url + subtitle.pid + '/download', params={'container': 'zip'}, timeout=30)
-        r.raise_for_status()
+        response = self.session.get(
+            self.server_url + f'/{subtitle.subtitle_id}/download',
+            params={'container': 'zip'},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
 
-        # open the zip
-        with ZipFile(io.BytesIO(r.content)) as zf:
+        with ZipFile(io.BytesIO(response.content)) as zf:
             subtitle.content = self.get_subtitle_from_archive(subtitle, zf)

@@ -1,14 +1,13 @@
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import
-from babelfish import LanguageReverseConverter
+# coding=utf-8
 
-from ..exceptions import ConfigurationError
+from babelfish import LanguageReverseConverter
+from subliminal.exceptions import ConfigurationError
 
 
 class ShooterConverter(LanguageReverseConverter):
     def __init__(self):
         self.from_shooter = {'chn': ('zho',), 'eng': ('eng',)}
-        self.to_shooter = {v: k for k, v in self.from_shooter.items()}
+        self.to_shooter = {value: key for key, value in self.from_shooter.items()}
         self.codes = set(self.from_shooter.keys())
 
     def convert(self, alpha3, country=None, script=None):
