@@ -26,10 +26,7 @@ from pathlib import Path
 
 from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
 
-# Add bundled libs to path before reading config.yaml. PyYAML itself is
-# installed from requirements.txt.
 APP_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(APP_DIR / "libs"))
 import yaml  # noqa: E402
 
 # Unbuffered print so logs appear immediately when redirected to a file

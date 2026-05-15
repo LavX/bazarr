@@ -6,7 +6,6 @@ on:
     paths:
       - frontend/**
       - bazarr/**
-      - libs/**
       - custom_libs/**
       - tests/**
       - docs/**

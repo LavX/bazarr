@@ -5,8 +5,8 @@ underlying linked list on every read (the LRU "touch") as well as on
 writes. Bazarr serves requests via Waitress with threads=100, and the
 shared dogpile memory regions are hit from those request threads.
 dogpile's per-key mutex covers get_or_create() but bypasses set() and
-delete() (see libs/dogpile/cache/region.py:1372 and :1417), so we cannot
-rely on it to serialise access to the LRU structure itself.
+delete(), so we cannot rely on it to serialise access to the LRU
+structure itself.
 
 The lock is a single threading.Lock rather than per-key because the LRU
 mutation is global to the structure (eviction can rewire any node).

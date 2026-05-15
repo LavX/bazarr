@@ -6,7 +6,7 @@ import ast
 from importlib.util import find_spec
 
 bazarr_directory = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "bazarr")
-libs_directory = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "libs")
+custom_libs_directory = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "custom_libs")
 
 
 def test_all_imports():
@@ -44,12 +44,12 @@ def get_valid_module_path(path, module, level):
     # elif bazarr dir + module isdir
     elif os.path.isdir(os.path.join(bazarr_directory, module_file)):
         return os.path.join(bazarr_directory, module_file, "__init__.py")
-    # elif libs dir + module.py isfile
-    elif os.path.isfile(os.path.join(libs_directory, module_file + ".py")):
-        return os.path.join(libs_directory, module_file + ".py")
-    # elif libs dir + module isdir
-    elif os.path.isdir(os.path.join(libs_directory, module_file)):
-        return os.path.join(libs_directory, module_file, "__init__.py")
+    # elif custom_libs dir + module.py isfile
+    elif os.path.isfile(os.path.join(custom_libs_directory, module_file + ".py")):
+        return os.path.join(custom_libs_directory, module_file + ".py")
+    # elif custom_libs dir + module isdir
+    elif os.path.isdir(os.path.join(custom_libs_directory, module_file)):
+        return os.path.join(custom_libs_directory, module_file, "__init__.py")
     # else base module
     else:
         return None
@@ -62,7 +62,7 @@ def check_for_import(imported_modules, path, file):
             continue
 
         import_path = path
-        if type(module) == str:
+        if isinstance(module, str):
             module_name = module.strip()
             functions_name = []
             level = None

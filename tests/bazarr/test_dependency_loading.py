@@ -28,6 +28,17 @@ def test_pytest_conftest_imports_without_pkg_resources_deprecation_warning():
     assert result.returncode == 0, result.stderr
 
 
+def test_pkg_resources_shim_only_exposes_distribution_versions():
+    from importlib import metadata
+
+    import pkg_resources
+
+    distribution = pkg_resources.get_distribution("PyYAML")
+
+    assert distribution.version == metadata.version("PyYAML")
+    assert not hasattr(pkg_resources, "resource_filename")
+
+
 def test_flask_compress_is_loaded_from_python_environment_not_custom_libs():
     import flask_compress
 
@@ -104,11 +115,24 @@ def test_msgpack_is_not_bundled_and_can_follow_signalrcore_dependency():
     repo_root = Path(__file__).resolve().parents[2]
     libs_dir = repo_root / "libs"
     msgpack_path = Path(msgpack.__file__).resolve()
-    libs_versions = (repo_root / "libs" / "version.txt").read_text()
 
+    assert not libs_dir.exists()
     assert not (libs_dir / "msgpack").exists()
     assert not msgpack_path.is_relative_to(libs_dir)
-    assert "msgpack==" not in libs_versions
+
+
+def test_third_party_libs_directory_is_not_part_of_runtime_or_tests():
+    repo_root = Path(__file__).resolve().parents[2]
+
+    assert not (repo_root / "libs").exists()
+    assert "COPY libs" not in (repo_root / "Dockerfile").read_text()
+    ci_lines = (repo_root / ".github" / "workflows" / "ci.yml").read_text().splitlines()
+    assert "      - libs/**" not in ci_lines
+    assert "\nlibs\n" not in (repo_root / ".github" / "files_to_copy").read_text()
+    assert 'APP_DIR / "libs"' not in (repo_root / "docker" / "supervisor.py").read_text()
+    assert "../libs" not in (repo_root / "tests" / "conftest.py").read_text()
+    assert '"libs"' not in (repo_root / "tests" / "compat" / "conftest.py").read_text()
+    assert "../libs/" not in (repo_root / "bazarr" / "app" / "libs.py").read_text()
 
 
 def test_py_pretty_dependency_is_replaced_by_local_utility():
@@ -177,6 +201,14 @@ def test_startup_requirements_probe_rejects_wrong_pinned_versions(monkeypatch):
     monkeypatch.setattr(requirements.metadata, "version", lambda distribution: "2.5.0")
 
     assert requirements.missing_runtime_requirements() == ["subliminal"]
+
+
+def test_startup_requirements_probe_supports_upper_bound_specs():
+    from app.requirements import _satisfies_spec
+
+    assert _satisfies_spec("1.2.58", "<=1.2.58")
+    assert _satisfies_spec("1.2.57", "<=1.2.58")
+    assert not _satisfies_spec("1.2.59", "<=1.2.58")
 
 
 def test_startup_requirements_probe_rejects_removed_vendor_origins(monkeypatch):
