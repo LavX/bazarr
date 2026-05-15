@@ -26,12 +26,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Copy ONLY requirements first for maximum caching
-# This layer will only rebuild when requirements.txt changes
-COPY requirements.txt ./
+# This layer will only rebuild when requirements files change
+COPY requirements.txt postgres-requirements.txt ./
 
 # Use pip cache mount to avoid re-downloading packages across builds
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --prefix=/install -r requirements.txt
+    pip install --prefix=/install -r requirements.txt -r postgres-requirements.txt
 
 # =============================================================================
 # Stage 2: Production Image
