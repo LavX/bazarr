@@ -506,6 +506,40 @@ const SettingsSubtitlesView: FunctionComponent = () => {
               different framerate than the video, but it can increase
               processing time.
             </Message>
+            <CollapseBox
+              indent
+              settingKey="settings-subsync-force_audio"
+              on={(v) => v === true || v === "true"}
+            >
+              <Check
+                label="Prefer Original Language Audio Track"
+                settingKey="settings-subsync-use_original_language"
+              ></Check>
+              <Message>
+                When enabled, subsync overrides the default audio track with the
+                one matching the show or movie's original language (from
+                Sonarr/Radarr metadata). Falls back to the default audio track
+                if the original language is not present in the file (e.g.
+                dubbed-only release).
+              </Message>
+            </CollapseBox>
+            <CollapseBox
+              indent
+              settingKey="settings-subsync-force_audio"
+              on={(v) => v === false || v === "false"}
+            >
+              <Check
+                label="Prefer Original Language Audio Track"
+                settingKey="settings-subsync-auto_use_original_language"
+              ></Check>
+              <Message>
+                When enabled, automatic synchronization aligns to the audio
+                track matching the show or movie's original language (from
+                Sonarr/Radarr metadata) instead of using the embedded subtitle
+                as reference. Falls back to ffsubsync's default reference if the
+                original language is not present in the file.
+              </Message>
+            </CollapseBox>
             <Check
               label="Do Not Fix Framerate Mismatch"
               settingKey="settings-subsync-no_fix_framerate"
