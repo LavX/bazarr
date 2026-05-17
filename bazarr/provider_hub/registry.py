@@ -80,6 +80,7 @@ class HubProxyProvider(Provider):
             "provider": self.provider_name,
             "provider_payload": subtitle.provider_payload,
             "language": language_to_payload(subtitle.language),
+            "config": self.config,
         }
         result = self._worker().request("download", request, timeout=self.timeout)
         worker_download_to_content(subtitle, result.payload)

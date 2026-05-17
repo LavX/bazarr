@@ -267,7 +267,7 @@ _FFMPEG_BINARY = get_binary("ffmpeg")
 
 
 def get_providers_auth():
-    return {
+    provider_configs = {
         'addic7ed': {
             'username': settings.addic7ed.username,
             'password': settings.addic7ed.password,
@@ -413,6 +413,33 @@ def get_providers_auth():
             'api_key': settings.subsro.api_key,
         }
     }
+    try:
+        from provider_hub.service import runtime_provider_configs
+        provider_configs.update(runtime_provider_configs())
+    except Exception:
+        logging.exception("Unable to load Provider Hub provider config")
+    try:
+        from provider_hub.state import active_installations
+        for installation in active_installations():
+            manifest = installation.manifest
+            schema = manifest.get("config_schema") if isinstance(manifest, dict) else {}
+            properties = schema.get("properties") if isinstance(schema, dict) else {}
+            if not isinstance(properties, dict):
+                continue
+            section = settings.get(installation.provider_id, {}) if hasattr(settings, "get") else {}
+            config = dict(provider_configs.get(installation.provider_id, {}))
+            for key, field in properties.items():
+                if not isinstance(field, dict):
+                    continue
+                if "default" in field and key not in config:
+                    config[key] = field["default"]
+                value = section.get(key) if hasattr(section, "get") else getattr(section, key, None)
+                if value not in (None, ""):
+                    config[key] = value
+            provider_configs[installation.provider_id] = config
+    except Exception:
+        logging.exception("Unable to load Provider Hub settings config")
+    return provider_configs
 
 
 def _handle_mgb(name, exception, ids, language):

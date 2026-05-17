@@ -160,6 +160,24 @@ def test_manifest_rejects_unsafe_declared_files(bad_path):
         validate_manifest(manifest, built_in_provider_ids=set())
 
 
+def test_manifest_rejects_secret_field_missing_from_config_schema():
+    from provider_hub.manifest import ManifestValidationError, validate_manifest
+
+    manifest = _manifest(secret_fields=["missing_secret"])
+
+    with pytest.raises(ManifestValidationError, match="secret field"):
+        validate_manifest(manifest, built_in_provider_ids=set())
+
+
+def test_manifest_rejects_entry_module_not_declared():
+    from provider_hub.manifest import ManifestValidationError, validate_manifest
+
+    manifest = _manifest(entry_module="missing")
+
+    with pytest.raises(ManifestValidationError, match="entry_module"):
+        validate_manifest(manifest, built_in_provider_ids=set())
+
+
 def test_manifest_rejects_built_in_provider_shadowing():
     from provider_hub.manifest import ManifestValidationError, validate_manifest
 
@@ -276,9 +294,14 @@ def test_venv_installer_uses_isolated_hash_checked_pip(monkeypatch, tmp_path):
     assert "--require-hashes" in install_cmd
     assert "--only-binary=:all:" in install_cmd
     assert "--no-warn-script-location" in install_cmd
-    assert "cloudscraper==1.2.58" in install_cmd
+    assert "-r" in install_cmd
     assert "/usr/local" not in install_cmd
     assert "custom_libs" not in install_cmd
+    requirements_files = list(tmp_path.glob("envs/examplehub/1.0.0/*/requirements.txt"))
+    assert len(requirements_files) == 1
+    requirements_text = requirements_files[0].read_text(encoding="utf-8")
+    assert "cloudscraper==1.2.58" in requirements_text
+    assert "--hash=sha256:" + ("c" * 64) in requirements_text
 
 
 def test_active_provider_hub_installation_registers_proxy(tmp_path, monkeypatch):
@@ -399,6 +422,17 @@ def test_provider_hub_scheduler_task_is_registered_on_scheduler():
     assert kwargs["replace_existing"] is True
 
 
+def test_provider_hub_update_task_refreshes_catalog_before_checking_updates(monkeypatch):
+    from provider_hub import tasks
+
+    calls = []
+    monkeypatch.setattr(tasks, "refresh_catalog", lambda: calls.append("refresh"))
+    monkeypatch.setattr(tasks, "check_updates", lambda: calls.append("check") or {"state": "completed"})
+
+    assert tasks.provider_hub_check_updates() == {"state": "completed"}
+    assert calls == ["refresh", "check"]
+
+
 def test_apply_update_without_available_manifest_does_not_stage(tmp_path, monkeypatch):
     from provider_hub.service import apply_update
     from provider_hub.state import load_state
@@ -434,6 +468,66 @@ def test_apply_update_without_available_manifest_does_not_stage(tmp_path, monkey
     assert provider.get("staged_version") is None
     assert "No update manifest" in provider["last_error"]
     assert load_state()["installations"][provider_id]["state"] == "active"
+
+
+def test_apply_update_uses_latest_catalog_manifest(tmp_path, monkeypatch):
+    from provider_hub.service import apply_update
+    from provider_hub.state import load_state
+
+    provider_id = "activehub"
+    state_file = tmp_path / "state.json"
+    update_manifest = _manifest(provider_id=provider_id, version="1.1.0")
+    state_file.write_text(
+        json.dumps(
+            {
+                "catalog_entries": {
+                    f"official:{provider_id}:1.1.0": {
+                        "source": "official",
+                        "source_name": "Official",
+                        "provider_id": provider_id,
+                        "name": "Active Hub",
+                        "version": "1.1.0",
+                        "trusted": True,
+                        "manifest": update_manifest,
+                    }
+                },
+                "installations": {
+                    provider_id: {
+                        "provider_id": provider_id,
+                        "name": "Active Hub",
+                        "active_version": "1.0.0",
+                        "active_path": "/old/bundle",
+                        "python_path": "/old/python",
+                        "state": "active",
+                        "pending_restart": False,
+                        "manifest": _manifest(provider_id=provider_id, version="1.0.0"),
+                    }
+                },
+                "jobs": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    monkeypatch.setattr("provider_hub.service._fetch_bundle", lambda manifest: tmp_path / "bundle")
+    class FakeEnvironment:
+        def __init__(self, root):
+            self.root = root
+
+        def install(self, validated):
+            return tmp_path / "env"
+
+    monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
+    monkeypatch.setattr("provider_hub.service.python_executable", lambda env_path: tmp_path / "python")
+    monkeypatch.setattr("provider_hub.service._smoke_validate_worker", lambda manifest, bundle_path, python_path: None)
+
+    provider = apply_update(provider_id)
+
+    assert provider["state"] == "staged"
+    assert provider["pending_restart"] is True
+    assert provider["staged_version"] == "1.1.0"
+    installation = load_state()["installations"][provider_id]
+    assert installation["staged_manifest"] == update_manifest
 
 
 def test_provider_hub_restart_activation_promotes_staged_install(tmp_path, monkeypatch):
@@ -527,6 +621,110 @@ def test_provider_hub_restart_activation_keeps_active_on_staged_failure(tmp_path
     assert installation["manifest"] == old_manifest
     assert installation["pending_restart"] is False
     assert installation["last_error"]
+
+
+def test_provider_hub_restart_activation_finalizes_removed_installation(tmp_path, monkeypatch):
+    from provider_hub.service import activate_staged_installations
+    from provider_hub.state import load_state
+
+    provider_id = "removedhub"
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "installations": {
+                    provider_id: {
+                        "provider_id": provider_id,
+                        "name": "Removed Hub Provider",
+                        "active_version": "1.0.0",
+                        "active_path": "/old/bundle",
+                        "python_path": "/old/python",
+                        "state": "removed",
+                        "pending_restart": True,
+                        "manifest": _manifest(provider_id=provider_id),
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    assert activate_staged_installations() == []
+    assert provider_id not in load_state()["installations"]
+
+
+def test_provider_hub_config_redacts_secret_and_preserves_placeholder(tmp_path, monkeypatch):
+    from provider_hub.service import SECRET_PLACEHOLDER, runtime_provider_configs, update_provider
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    state = load_state()
+    state["installations"] = {
+        "examplehub": {
+            "provider_id": "examplehub",
+            "name": "Example Hub Provider",
+            "active_version": "1.0.0",
+            "state": "active",
+            "pending_restart": False,
+            "manifest": _manifest(dependencies={"requirements": []}),
+            "config": {},
+        }
+    }
+    save_state(state)
+
+    redacted = update_provider(
+        "examplehub",
+        enabled=True,
+        config={"api_key": "real-secret", "region": "eu"},
+    )
+
+    assert redacted["enabled"] is True
+    assert redacted["config"]["api_key"] == SECRET_PLACEHOLDER
+    assert redacted["config"]["region"] == "eu"
+    assert "real-secret" not in json.dumps(redacted)
+    assert runtime_provider_configs()["examplehub"]["api_key"] == "real-secret"
+
+    redacted = update_provider(
+        "examplehub",
+        config={"api_key": SECRET_PLACEHOLDER, "region": "us"},
+    )
+
+    assert redacted["config"]["api_key"] == SECRET_PLACEHOLDER
+    assert redacted["config"]["region"] == "us"
+    assert runtime_provider_configs()["examplehub"] == {
+        "api_key": "real-secret",
+        "region": "us",
+    }
+
+    update_provider("examplehub", config={"api_key": "new-secret"})
+
+    assert runtime_provider_configs()["examplehub"]["api_key"] == "new-secret"
+
+
+def test_get_providers_auth_includes_active_provider_hub_config(tmp_path, monkeypatch):
+    from app.get_providers import get_providers_auth
+    from provider_hub.service import update_provider
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    state = load_state()
+    state["installations"] = {
+        "examplehub": {
+            "provider_id": "examplehub",
+            "name": "Example Hub Provider",
+            "active_version": "1.0.0",
+            "state": "active",
+            "pending_restart": False,
+            "manifest": _manifest(dependencies={"requirements": []}),
+            "config": {},
+        }
+    }
+    save_state(state)
+    update_provider("examplehub", config={"api_key": "runtime-secret", "region": "eu"})
+
+    assert get_providers_auth()["examplehub"]["api_key"] == "runtime-secret"
+    assert get_providers_auth()["examplehub"]["region"] == "eu"
 
 
 def test_stage_install_failure_preserves_active_install_and_records_last_error(tmp_path, monkeypatch):
@@ -677,6 +875,36 @@ def test_empty_state_seeds_official_trusted_catalog_source(tmp_path, monkeypatch
 
     assert sources[OFFICIAL_CATALOG_SOURCE_ID]["url"] == OFFICIAL_CATALOG_URL
     assert sources[OFFICIAL_CATALOG_SOURCE_ID]["trusted"] is True
+
+
+def test_list_catalog_auto_refreshes_unchecked_sources(tmp_path, monkeypatch):
+    from provider_hub.service import list_catalog
+
+    def fake_get(url, timeout):
+        if "api.github.com" in url:
+            return _FakeResponse({"sha": "d" * 40})
+        return _FakeResponse(
+            {
+                "providers": [
+                    {
+                        "manifest": _manifest(
+                            provider_id="autocataloghub",
+                            dependencies={"requirements": []},
+                        )
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "state.json"))
+
+    catalog = list_catalog(auto_refresh=True)
+
+    assert catalog["sources"][0]["last_checked_at"]
+    assert catalog["sources"][0]["last_error"] is None
+    assert catalog["entries"][0]["provider_id"] == "autocataloghub"
+    assert catalog["entries"][0]["trusted"] is True
 
 
 def test_custom_catalog_source_rejects_non_github_url(tmp_path, monkeypatch):
@@ -1095,7 +1323,8 @@ def test_hub_proxy_provider_search_and_download_uses_worker_payload():
     worker = FakeWorker()
     manifest = validate_manifest(_manifest(provider_id="proxyhub"), built_in_provider_ids=set())
     provider_cls = _make_provider_class(manifest, worker_client=worker)
-    provider = provider_cls(timeout=9)
+    provider_config = {"profile_name": "smoke-profile", "api_token": "secret-token"}
+    provider = provider_cls(timeout=9, **provider_config)
     movie = Movie("/media/example.mkv", "Example Movie", year=2024)
 
     subtitles = provider.list_subtitles(movie, {Language("eng")})
@@ -1106,7 +1335,9 @@ def test_hub_proxy_provider_search_and_download_uses_worker_payload():
     assert subtitles[0].content == b"hello"
     assert worker.requests[0][0] == "search"
     assert worker.requests[0][2] == 9
+    assert worker.requests[0][1]["config"] == provider_config
     assert worker.requests[1][0] == "download"
+    assert worker.requests[1][1]["config"] == provider_config
 
 
 def test_worker_runner_executes_simple_bundle(tmp_path):
@@ -1122,16 +1353,27 @@ import base64
 
 class ExampleProvider:
     def search(self, video, languages, config):
+        if config.get("profile_name") != "smoke-profile" or config.get("api_token") != "secret-token":
+            raise ValueError("missing smoke config")
         return [{
             "provider": "example",
             "id": "sub-1",
             "language": languages[0],
             "release_info": video.get("title"),
             "matches": ["title"],
-            "provider_payload": {"provider": "example", "schema": 1, "data": {"id": "sub-1"}},
+            "provider_payload": {
+                "provider": "example",
+                "schema": 1,
+                "profile_name": config["profile_name"],
+                "data": {"id": "sub-1"},
+            },
         }]
 
     def download(self, provider_payload, language, config):
+        if config.get("profile_name") != "smoke-profile" or config.get("api_token") != "secret-token":
+            raise ValueError("missing smoke config")
+        if provider_payload.get("profile_name") != config["profile_name"]:
+            raise ValueError("profile mismatch")
         content = b"hello from worker"
         return {
             "content_b64": base64.b64encode(content).decode("ascii"),
@@ -1161,7 +1403,7 @@ class ExampleProvider:
             {
                 "video": {"title": "Example Movie"},
                 "languages": [{"alpha3": "eng", "hi": False, "forced": False}],
-                "config": {},
+                "config": {"profile_name": "smoke-profile", "api_token": "secret-token"},
             },
             timeout=3,
         )
@@ -1172,7 +1414,7 @@ class ExampleProvider:
             {
                 "provider_payload": search.payload["candidates"][0]["provider_payload"],
                 "language": {"alpha3": "eng"},
-                "config": {},
+                "config": {"profile_name": "smoke-profile", "api_token": "secret-token"},
             },
             timeout=3,
         )

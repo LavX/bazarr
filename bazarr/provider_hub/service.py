@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import tempfile
 import uuid
@@ -28,6 +29,10 @@ class CatalogSourceError(ValueError):
 
 class ProviderHubInstallError(RuntimeError):
     """Raised when a Provider Hub install could not be staged."""
+
+
+SECRET_PLACEHOLDER = "********"
+_VERSION_TOKEN_RE = re.compile(r"\d+|[A-Za-z]+")
 
 
 def utcnow_iso() -> str:
@@ -117,8 +122,20 @@ def remove_catalog_source(name: str) -> bool:
     return True
 
 
-def list_catalog() -> dict[str, Any]:
+def _catalog_needs_auto_refresh(state: dict[str, Any]) -> bool:
+    for source in (state.get("catalog_sources") or {}).values():
+        if not isinstance(source, dict):
+            continue
+        if source.get("enabled", True) and source.get("last_checked_at") is None:
+            return True
+    return False
+
+
+def list_catalog(auto_refresh: bool = False) -> dict[str, Any]:
     state = load_state()
+    if auto_refresh and _catalog_needs_auto_refresh(state):
+        refresh_catalog()
+        state = load_state()
     return {
         "sources": list((state.get("catalog_sources") or {}).values()),
         "entries": list((state.get("catalog_entries") or {}).values()),
@@ -192,15 +209,119 @@ def refresh_catalog() -> dict[str, Any]:
     return {"refreshed_at": now, "sources": sources_count, "entries": entries_count}
 
 
-def list_providers() -> list[dict[str, Any]]:
-    state = load_state()
-    return list((state.get("installations") or {}).values())
+def _manifest_secret_fields(installation: dict[str, Any]) -> set[str]:
+    manifest = installation.get("manifest")
+    if not isinstance(manifest, dict):
+        manifest = installation.get("staged_manifest")
+    if not isinstance(manifest, dict):
+        return set()
+    secret_fields = manifest.get("secret_fields") or []
+    if not isinstance(secret_fields, list):
+        return set()
+    return {item for item in secret_fields if isinstance(item, str)}
 
 
-def get_provider(provider_id: str) -> dict[str, Any] | None:
+def _encrypt_secret_value(value: Any) -> Any:
+    if not isinstance(value, str) or not value:
+        return value
+    try:
+        from secret_store import encrypt_secret
+        return encrypt_secret(value)
+    except Exception:
+        return value
+
+
+def _decrypt_secret_value(value: Any) -> Any:
+    if not isinstance(value, str) or not value:
+        return value
+    try:
+        from secret_store import decrypt_secret
+        return decrypt_secret(value)
+    except Exception:
+        return value
+
+
+def _redact_installation(installation: dict[str, Any]) -> dict[str, Any]:
+    redacted = dict(installation)
+    config = redacted.get("config")
+    if not isinstance(config, dict):
+        return redacted
+    secret_fields = _manifest_secret_fields(redacted)
+    redacted_config = dict(config)
+    for field in secret_fields:
+        if redacted_config.get(field):
+            redacted_config[field] = SECRET_PLACEHOLDER
+    redacted["config"] = redacted_config
+    return redacted
+
+
+def _effective_installation_config(installation: dict[str, Any]) -> dict[str, Any]:
+    config = installation.get("config")
+    if not isinstance(config, dict):
+        return {}
+    secret_fields = _manifest_secret_fields(installation)
+    effective = dict(config)
+    for field in secret_fields:
+        if field in effective:
+            effective[field] = _decrypt_secret_value(effective[field])
+    return effective
+
+
+def update_provider(provider_id: str, enabled: bool | None = None, config: dict[str, Any] | None = None) -> dict[str, Any] | None:
     state = load_state()
     provider = (state.get("installations") or {}).get(provider_id)
-    return provider if isinstance(provider, dict) else None
+    if not isinstance(provider, dict):
+        return None
+
+    if enabled is not None:
+        provider["enabled"] = bool(enabled)
+
+    if config is not None:
+        if not isinstance(config, dict):
+            raise ValueError("config must be an object")
+        secret_fields = _manifest_secret_fields(provider)
+        current = provider.get("config")
+        next_config = dict(current if isinstance(current, dict) else {})
+        for key, value in config.items():
+            if key in secret_fields and value == SECRET_PLACEHOLDER:
+                continue
+            next_config[key] = _encrypt_secret_value(value) if key in secret_fields else value
+        provider["config"] = next_config
+
+    state.setdefault("installations", {})[provider_id] = provider
+    save_state(state)
+    return _redact_installation(provider)
+
+
+def runtime_provider_configs() -> dict[str, dict[str, Any]]:
+    state = load_state()
+    configs = {}
+    for provider_id, installation in (state.get("installations") or {}).items():
+        if not isinstance(installation, dict):
+            continue
+        if installation.get("state") != "active" or installation.get("pending_restart"):
+            continue
+        configs[provider_id] = _effective_installation_config(installation)
+    return configs
+
+
+def list_providers(redact: bool = True) -> list[dict[str, Any]]:
+    state = load_state()
+    providers = list((state.get("installations") or {}).values())
+    if not redact:
+        return providers
+    return [
+        _redact_installation(provider) if isinstance(provider, dict) else provider
+        for provider in providers
+    ]
+
+
+def get_provider(provider_id: str, redact: bool = True) -> dict[str, Any] | None:
+    state = load_state()
+    provider = (state.get("installations") or {}).get(provider_id)
+    if not isinstance(provider, dict):
+        return None
+    return _redact_installation(provider) if redact else provider
 
 
 def _built_in_provider_ids() -> set[str]:
@@ -277,8 +398,6 @@ def _trust_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
 def _catalog_manifest_trusted(manifest: dict[str, Any], state: dict[str, Any]) -> bool:
     provider_id = manifest.get("provider_id")
     version = manifest.get("version")
-    source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
-    commit = source.get("commit") if isinstance(source, dict) else None
     sources = state.get("catalog_sources") or {}
 
     for entry in (state.get("catalog_entries") or {}).values():
@@ -340,6 +459,8 @@ def _staged_installation(validated, existing, bundle_path: Path, staged_python_p
         "last_error": None,
         "trusted": bool(source_trusted),
         "manifest": existing.get("manifest") if existing.get("active_version") else validated.raw,
+        "enabled": existing.get("enabled", False),
+        "config": existing.get("config", {}),
     }
 
 
@@ -373,6 +494,8 @@ def _failed_installation(validated, existing, error: Exception, source_trusted: 
         "last_error": message,
         "trusted": bool(source_trusted),
         "manifest": validated.raw,
+        "enabled": existing.get("enabled", False),
+        "config": existing.get("config", {}),
     }
 
 
@@ -402,15 +525,20 @@ def stage_install(manifest: dict[str, Any]) -> dict[str, Any]:
     installation = _staged_installation(validated, current, bundle_path, staged_python_path, source_trusted)
     installations[validated.provider_id] = installation
     save_state(state)
-    return installation
+    return _redact_installation(installation)
 
 
 def activate_staged_installations() -> list[str]:
     state = load_state()
+    installations = state.get("installations") or {}
     activated = []
     changed = False
-    for provider_id, installation in (state.get("installations") or {}).items():
+    for provider_id, installation in list(installations.items()):
         if not isinstance(installation, dict):
+            continue
+        if installation.get("pending_restart") and installation.get("state") == "removed":
+            del installations[provider_id]
+            changed = True
             continue
         if not installation.get("pending_restart") or installation.get("state") != "staged":
             continue
@@ -490,17 +618,49 @@ def check_updates() -> dict[str, Any]:
     return job
 
 
+def _version_key(version: Any) -> list[tuple[int, int | str]]:
+    tokens: list[tuple[int, int | str]] = []
+    for token in _VERSION_TOKEN_RE.findall(str(version or "")):
+        if token.isdigit():
+            tokens.append((0, int(token)))
+        else:
+            tokens.append((1, token.lower()))
+    return tokens
+
+
+def _latest_catalog_manifest(state: dict[str, Any], provider_id: str, active_version: Any) -> dict[str, Any] | None:
+    active_key = _version_key(active_version)
+    candidates: list[tuple[list[tuple[int, int | str]], dict[str, Any]]] = []
+    for entry in (state.get("catalog_entries") or {}).values():
+        if not isinstance(entry, dict) or entry.get("provider_id") != provider_id:
+            continue
+        manifest = entry.get("manifest")
+        if not isinstance(manifest, dict):
+            continue
+        version_key = _version_key(manifest.get("version") or entry.get("version"))
+        if active_key and version_key <= active_key:
+            continue
+        candidates.append((version_key, manifest))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
 def apply_update(provider_id: str) -> dict[str, Any] | None:
-    provider = get_provider(provider_id)
+    provider = get_provider(provider_id, redact=False)
     if not provider:
         return None
-    manifest = provider.get("available_manifest")
+    state = load_state()
+    manifest = provider.get("available_manifest") or _latest_catalog_manifest(
+        state,
+        provider_id,
+        provider.get("active_version") or provider.get("staged_version"),
+    )
     if not isinstance(manifest, dict):
         provider["last_error"] = "No update manifest is available"
-        state = load_state()
         state.setdefault("installations", {})[provider_id] = provider
         save_state(state)
-        return provider
+        return _redact_installation(provider)
     try:
         return stage_install(manifest)
     except ProviderHubInstallError:

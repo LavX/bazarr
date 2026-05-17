@@ -17,7 +17,7 @@ class ProviderHubCatalog(Resource):
     @api_ns_provider_hub.response(200, 'Success')
     @api_ns_provider_hub.response(401, 'Not Authenticated')
     def get(self):
-        return service.list_catalog()
+        return service.list_catalog(auto_refresh=True)
 
 
 @api_ns_provider_hub.route('provider-hub/catalog/refresh')
@@ -84,17 +84,17 @@ class ProviderHubProvider(Resource):
     @api_ns_provider_hub.response(401, 'Not Authenticated')
     @api_ns_provider_hub.response(404, 'Provider not found')
     def patch(self, provider_id):
-        provider = service.get_provider(provider_id)
+        payload = request.json or {}
+        try:
+            provider = service.update_provider(
+                provider_id,
+                enabled=payload.get("enabled") if "enabled" in payload else None,
+                config=payload.get("config") if "config" in payload else None,
+            )
+        except ValueError as error:
+            return str(error), 400
         if not provider:
             return 'Provider not found', 404
-        payload = request.json or {}
-        for key in ("enabled", "config"):
-            if key in payload:
-                provider[key] = payload[key]
-        state = service.load_state() if hasattr(service, "load_state") else None
-        if state is not None:
-            state.setdefault("installations", {})[provider_id] = provider
-            service.save_state(state)
         return provider
 
 

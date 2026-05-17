@@ -51,6 +51,11 @@ class PluginEnvironment:
             )
 
         if manifest.dependency_requirements:
+            requirements_path = env_path / "requirements.txt"
+            requirements_path.write_text(
+                "\n".join(requirement.pip_line for requirement in manifest.dependency_requirements) + "\n",
+                encoding="utf-8",
+            )
             cmd = [
                 str(python_exe),
                 "-m",
@@ -60,10 +65,9 @@ class PluginEnvironment:
                 "--no-warn-script-location",
                 "--require-hashes",
                 "--only-binary=:all:",
+                "-r",
+                str(requirements_path),
             ]
-            for requirement in manifest.dependency_requirements:
-                cmd.append(f"{requirement.name}=={requirement.version}")
-                cmd.extend(f"--hash={digest}" for digest in requirement.hashes)
 
             env = {
                 "PATH": os.environ.get("PATH", ""),
