@@ -8,6 +8,8 @@
 .gitattributes
 
 # Development files
+.worktrees/
+.playwright-mcp/
 dev-setup/
 dev-requirements.txt
 .release-it.json

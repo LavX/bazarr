@@ -30,6 +30,21 @@ from radarr.blacklist import blacklist_log_movie
 from sonarr.blacklist import blacklist_log
 
 _TRACEBACK_RE = re.compile(r'File "(.*?providers[\\/].*?)", line (\d+)')
+_PROVIDER_HUB_REGISTRATION_DONE = False
+
+
+def _ensure_provider_hub_registered():
+    global _PROVIDER_HUB_REGISTRATION_DONE
+    if _PROVIDER_HUB_REGISTRATION_DONE:
+        return
+
+    try:
+        from provider_hub.registry import register_active_provider_classes
+        register_active_provider_classes()
+    except Exception:
+        logging.exception("Unable to register active Provider Hub providers")
+    finally:
+        _PROVIDER_HUB_REGISTRATION_DONE = True
 
 
 def time_until_midnight(timezone) -> datetime.timedelta:
@@ -187,6 +202,7 @@ def get_language_equals(settings_=None):
 
 
 def get_providers():
+    _ensure_provider_hub_registered()
     providers_list = []
     existing_providers = provider_registry.names()
     providers = [x for x in settings.general.enabled_providers if x in existing_providers]

@@ -427,6 +427,97 @@ class TableShowsRootfolder(Base):
     path = mapped_column(Text)
 
 
+class TableProviderHubCatalogSource(Base):
+    __tablename__ = 'provider_hub_catalog_sources'
+
+    id = mapped_column(Integer, primary_key=True)
+    name = mapped_column(Text, nullable=False, unique=True)
+    type = mapped_column(Text, nullable=False)
+    url = mapped_column(Text, nullable=False)
+    enabled = mapped_column(Integer, nullable=False, default=1)
+    trust_key = mapped_column(Text)
+    etag = mapped_column(Text)
+    last_checked_at = mapped_column(DateTime)
+    last_error = mapped_column(Text)
+
+
+class TableProviderHubCatalogEntry(Base):
+    __tablename__ = 'provider_hub_catalog_entries'
+
+    id = mapped_column(Integer, primary_key=True)
+    source_id = mapped_column(Integer, ForeignKey('provider_hub_catalog_sources.id', ondelete='CASCADE'), index=True)
+    provider_id = mapped_column(Text, nullable=False, index=True)
+    version = mapped_column(Text, nullable=False)
+    manifest_json = mapped_column(Text, nullable=False)
+    bundle_url = mapped_column(Text)
+    sha256 = mapped_column(Text)
+    signature = mapped_column(Text)
+    compatibility = mapped_column(Text)
+    published_at = mapped_column(DateTime)
+    deprecated = mapped_column(Integer, nullable=False, default=0)
+
+
+class TableProviderHubInstallation(Base):
+    __tablename__ = 'provider_hub_installations'
+
+    provider_id = mapped_column(Text, primary_key=True)
+    active_version = mapped_column(Text)
+    staged_version = mapped_column(Text)
+    active_path = mapped_column(Text)
+    staged_path = mapped_column(Text)
+    state = mapped_column(Text, nullable=False, default='inactive')
+    pending_restart = mapped_column(Integer, nullable=False, default=0)
+    installed_at = mapped_column(DateTime)
+    activated_at = mapped_column(DateTime)
+    last_error = mapped_column(Text)
+    manifest_json = mapped_column(Text)
+
+
+class TableProviderHubConfig(Base):
+    __tablename__ = 'provider_hub_config'
+
+    provider_id = mapped_column(Text, primary_key=True)
+    enabled = mapped_column(Integer, nullable=False, default=0)
+    priority = mapped_column(Integer)
+    config_json = mapped_column(Text, nullable=False, default='{}')
+    schema_version = mapped_column(Integer, nullable=False, default=1)
+    updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class TableProviderHubSecret(Base):
+    __tablename__ = 'provider_hub_secrets'
+
+    id = mapped_column(Integer, primary_key=True)
+    provider_id = mapped_column(Text, nullable=False, index=True)
+    field = mapped_column(Text, nullable=False)
+    encrypted_value = mapped_column(Text, nullable=False)
+    updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class TableProviderHubJob(Base):
+    __tablename__ = 'provider_hub_jobs'
+
+    id = mapped_column(Text, primary_key=True)
+    provider_id = mapped_column(Text, index=True)
+    action = mapped_column(Text, nullable=False)
+    state = mapped_column(Text, nullable=False)
+    message = mapped_column(Text)
+    created_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+    updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class TableProviderHubInstallEvent(Base):
+    __tablename__ = 'provider_hub_install_events'
+
+    id = mapped_column(Integer, primary_key=True)
+    provider_id = mapped_column(Text, nullable=False, index=True)
+    job_id = mapped_column(Text, index=True)
+    action = mapped_column(Text, nullable=False)
+    state = mapped_column(Text, nullable=False)
+    message = mapped_column(Text)
+    created_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
 def init_db():
     # Idempotent: bazarr can end up importing `init` under both `bazarr.init`
     # and `init` aliases when tests cross module-namespace boundaries

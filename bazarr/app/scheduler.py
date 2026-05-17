@@ -29,6 +29,7 @@ from utilities.cache import cache_maintenance
 from utilities.health import check_health
 from utilities.backup import backup_to_zip
 from utilities.pretty_date import pretty_date
+from provider_hub.tasks import provider_hub_check_updates
 
 from .config import settings
 from .database import database
@@ -134,6 +135,7 @@ class Scheduler:
         self.__search_wanted_subtitles_task()
         self.__upgrade_subtitles_task()
         self.__mass_sync_task()
+        self.__provider_hub_update_task()
         self.__randomize_interval_task()
         self.__automatic_backup()
         if args.no_tasks:
@@ -357,6 +359,13 @@ class Scheduler:
             mass_batch_operation, 'cron', year=in_a_century(), max_instances=1,
             coalesce=True, misfire_grace_time=15, id='mass_sync_subtitles',
             name='Mass Sync All Subtitles', replace_existing=True)
+
+    def __provider_hub_update_task(self):
+        self.aps_scheduler.add_job(
+            provider_hub_check_updates, 'interval', hours=6, max_instances=1,
+            coalesce=True, misfire_grace_time=15, id='provider_hub_update_check',
+            name='Check Provider Hub Updates', replace_existing=True,
+            kwargs=dict(wait_for_completion=True))
 
     def __randomize_interval_task(self):
         for job in self.aps_scheduler.get_jobs():

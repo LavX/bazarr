@@ -47,6 +47,7 @@ else:
 from app.database import (System, database, update, migrate_db, create_db_revision, upgrade_languages_profile_values,  # noqa: E402
                           fix_languages_profiles_with_duplicate_ids)
 from app.notifier import update_notifier  # noqa: E402
+from provider_hub.service import activate_staged_installations  # noqa: E402
 from languages.get_languages import load_language_in_db  # noqa: E402
 from app.jobs_queue import jobs_queue  # noqa: E402
 from app.signalr_client import sonarr_signalr_client, radarr_signalr_client  # noqa: E402
@@ -62,6 +63,7 @@ else:
     migrate_db(app)
     upgrade_languages_profile_values()
     fix_languages_profiles_with_duplicate_ids()
+    activate_staged_installations()
 
 configure_proxy_func()
 

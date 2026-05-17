@@ -28,6 +28,11 @@ VERSION
 .superpowers/
 docs/superpowers/
 .coverage
+.playwright-mcp
+.codex
+.agents
+.pytest_cache
+.ruff_cache
 
 # Git worktrees
 .worktrees/
