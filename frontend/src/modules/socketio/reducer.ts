@@ -1,11 +1,11 @@
-import { cleanNotifications, showNotification } from "@mantine/notifications";
+import { showNotification } from "@mantine/notifications";
 import { isArray, isEmpty, isNumber } from "lodash";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { notification } from "@/modules/task";
 import { LOG } from "@/utilities/console";
-import { setCriticalError, setOnlineStatus } from "@/utilities/event";
+import { setOnlineStatus } from "@/utilities/event";
 
 export function createDefaultReducer(): SocketIO.Reducer[] {
   return [

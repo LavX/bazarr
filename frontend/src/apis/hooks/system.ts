@@ -271,6 +271,10 @@ export function useSystemReleases() {
   });
 }
 
+export function getPostLoginRedirectTarget(baseUrl = Environment.baseUrl) {
+  return baseUrl || "/";
+}
+
 export function useSystem() {
   const client = useQueryClient();
   const { mutate: logout, isPending: isLoggingOut } = useMutation({
@@ -300,7 +304,7 @@ export function useSystem() {
         sessionStorage.setItem("password_upgrade_token", data.upgrade_token);
       }
       // TODO: Hard-coded value
-      window.location.replace(Environment.baseUrl);
+      window.location.replace(getPostLoginRedirectTarget());
     },
   });
 

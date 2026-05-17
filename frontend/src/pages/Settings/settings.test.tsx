@@ -42,6 +42,18 @@ const cases: RenderTestCase[] = [
   {
     name: "providers page",
     ui: SettingsProvidersView,
+    setupEach: () => {
+      server.use(
+        http.get("/api/provider-hub/catalog", () => {
+          return HttpResponse.json({ sources: [], entries: [] });
+        }),
+      );
+      server.use(
+        http.get("/api/provider-hub/providers", () => {
+          return HttpResponse.json({ data: [] });
+        }),
+      );
+    },
   },
   // TODO: Test Radarr Page
   {

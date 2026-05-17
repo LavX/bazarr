@@ -7,7 +7,7 @@ import React, {
   useState,
 } from "react";
 import { matchPath, NavLink, RouteObject, useLocation } from "react-router";
-import { AppShell, Badge, Collapse, Divider, Stack, Text } from "@mantine/core";
+import { AppShell, Badge, Collapse, Stack, Text } from "@mantine/core";
 import { useHover } from "@mantine/hooks";
 import { IconDefinition } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";

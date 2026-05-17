@@ -23,7 +23,7 @@ export default defineConfig(({ mode, command }) => {
   const ws = env.VITE_ALLOW_WEBSOCKET === "true";
   const secure = env.VITE_PROXY_SECURE === "true";
 
-  const imagesFolder = mode === "development" ? "public/images" : "images";
+  const imagesFolder = command === "serve" ? "public/images" : "images";
 
   return {
     plugins: [

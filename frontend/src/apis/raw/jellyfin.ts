@@ -1,5 +1,7 @@
 import BaseApi from "./base";
 
+/* eslint-disable camelcase */
+
 interface JellyfinTestResult {
   success: boolean;
   server_name?: string;

@@ -387,7 +387,7 @@ export default function EditorPage() {
   const cursorPosRef = useRef<number>(0);
   const detailPaneRef = useRef<DetailPaneHandle>(null);
   const videoPreviewRef = useRef<VideoPreviewHandle>(null);
-  const [_videoPlaying, setVideoPlaying] = useState(false);
+  const [, setVideoPlaying] = useState(false);
   const [userSeekMs, setUserSeekMs] = useState<number | null>(null);
   const [seekCounter, setSeekCounter] = useState(0);
   const [playbackTimeMs, setPlaybackTimeMs] = useState(0);
@@ -1051,34 +1051,6 @@ export default function EditorPage() {
     },
     [docState.cues],
   );
-
-  const _handleReloadAfterSync = useCallback(() => {
-    if (!mediaType || !mediaId || !language) return;
-    queryClient
-      .invalidateQueries({
-        queryKey: [
-          QueryKeys.Subtitles,
-          "content",
-          mediaType,
-          Number(mediaId),
-          language,
-        ],
-      })
-      .then(() =>
-        queryClient.refetchQueries({
-          queryKey: [
-            QueryKeys.Subtitles,
-            "content",
-            mediaType,
-            Number(mediaId),
-            language,
-          ],
-        }),
-      )
-      .then(() => {
-        loadedRef.current = false;
-      });
-  }, [mediaType, mediaId, language, queryClient]);
 
   const handleApplyTranslation = useCallback(
     (translations: Map<number, string>) => {

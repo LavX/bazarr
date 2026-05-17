@@ -5,6 +5,7 @@ import history from "./history";
 import jellyfin from "./jellyfin";
 import movies from "./movies";
 import plex from "./plex";
+import providerHub from "./providerHub";
 import providers from "./providers";
 import series from "./series";
 import subtitles from "./subtitles";
@@ -24,6 +25,7 @@ const api = {
   system,
   utils,
   plex,
+  providerHub,
 };
 
 export default api;

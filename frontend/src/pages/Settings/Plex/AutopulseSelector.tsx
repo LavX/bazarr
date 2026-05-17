@@ -158,7 +158,7 @@ const AutopulseSelector: FunctionComponent<AutopulseSelectorProps> = (
                       message: "Autopulse configuration copied to clipboard",
                       color: "green",
                     });
-                  } catch (error) {
+                  } catch {
                     notifications.show({
                       title: "Copy Failed",
                       message:

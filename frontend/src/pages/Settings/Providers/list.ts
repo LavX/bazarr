@@ -18,7 +18,7 @@ type Input<T, N> = {
   };
 };
 
-type AvailableInput =
+export type AvailableInput =
   | Input<Text, "text">
   | Input<string, "password">
   | Input<boolean, "switch">

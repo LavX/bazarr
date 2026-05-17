@@ -3,6 +3,7 @@ export * from "./histories";
 export * from "./languages";
 export * from "./movies";
 export * from "./providers";
+export * from "./providerHub";
 export * from "./series";
 export * from "./status";
 export * from "./subtitles";

@@ -12,7 +12,6 @@ import {
   useCancelTranslatorJob,
   useTranslatorJob,
   useTranslatorModels,
-  useTranslatorStatus,
 } from "@/apis/hooks/translator";
 import client from "@/apis/raw/client";
 
@@ -220,14 +219,9 @@ export default function TranslatePanel({
 
   const [applied, setApplied] = useState(false);
 
-  const { data: translatorStatus } = useTranslatorStatus(open);
   const { data: modelsData } = useTranslatorModels(open);
   const { data: serverLanguages } = useLanguages();
   const cancelJob = useCancelTranslatorJob();
-
-  const _isTranslatorAvailable =
-    translatorStatus?.healthy === true &&
-    translatorStatus?.config?.apiKeyConfigured === true;
 
   const languageOptions = useMemo(() => {
     if (!serverLanguages) return [];

@@ -256,7 +256,6 @@ export function useSubtitleContent(
 }
 
 export function useSubtitleSave() {
-  const client = useQueryClient();
   return useMutation({
     mutationKey: [QueryKeys.Subtitles, "save"],
     mutationFn: (params: {
