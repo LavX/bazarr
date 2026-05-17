@@ -12,6 +12,7 @@ import TextPopover from "@/components/TextPopover";
 import styles from "./Card.module.scss";
 
 interface CardProps {
+  ariaLabel?: string;
   description?: string;
   header?: React.ReactNode;
   lineClamp?: number | undefined;
@@ -21,6 +22,7 @@ interface CardProps {
 }
 
 export const Card: FunctionComponent<CardProps> = ({
+  ariaLabel,
   header,
   description,
   plus,
@@ -29,7 +31,12 @@ export const Card: FunctionComponent<CardProps> = ({
   titleStyles,
 }) => {
   return (
-    <UnstyledButton p="lg" onClick={onClick} className={styles.card}>
+    <UnstyledButton
+      p="lg"
+      aria-label={ariaLabel}
+      onClick={onClick}
+      className={styles.card}
+    >
       {plus ? (
         <Center>
           <FontAwesomeIcon size="2x" icon={faPlus}></FontAwesomeIcon>

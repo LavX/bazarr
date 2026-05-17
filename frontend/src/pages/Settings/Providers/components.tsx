@@ -10,6 +10,7 @@ import {
 } from "react";
 import {
   AutocompleteProps,
+  Badge,
   Button,
   Divider,
   Group,
@@ -53,6 +54,7 @@ type SettingsKey =
   | "settings-general-enabled_integrations";
 
 interface ProviderViewProps {
+  addLabel?: string;
   availableOptions: Readonly<ProviderInfo[]>;
   settingsKey: SettingsKey;
 }
@@ -109,6 +111,7 @@ const resolveProviderPriorities = (
 };
 
 export const ProviderView: FunctionComponent<ProviderViewProps> = ({
+  addLabel,
   availableOptions,
   settingsKey,
 }) => {
@@ -168,9 +171,16 @@ export const ProviderView: FunctionComponent<ProviderViewProps> = ({
               key={BuildKey(v.key, idx)}
               header={
                 <Group justify="space-between" wrap="nowrap">
-                  <MantineText fw={700}>
-                    {v.name ?? capitalize(v.key)}
-                  </MantineText>
+                  <Group gap="xs" wrap="nowrap" style={{ minWidth: 0 }}>
+                    <MantineText fw={700} truncate>
+                      {v.name ?? capitalize(v.key)}
+                    </MantineText>
+                    {v.source === "plugin" && (
+                      <Badge size="xs" variant="light">
+                        Plugin
+                      </Badge>
+                    )}
+                  </Group>
                   <MantineText size="xs" c="var(--bz-text-tertiary)">
                     Priority: {priority}
                   </MantineText>
@@ -190,7 +200,11 @@ export const ProviderView: FunctionComponent<ProviderViewProps> = ({
   return (
     <SimpleGrid cols={3}>
       {cards}
-      <Card plus onClick={() => select()}></Card>
+      <Card
+        plus
+        ariaLabel={addLabel ?? "Add provider"}
+        onClick={() => select()}
+      ></Card>
     </SimpleGrid>
   );
 };
@@ -210,8 +224,13 @@ const SelectItem: AutocompleteProps["renderOption"] = ({ option }) => {
   const provider = option as ProviderSelect;
 
   return (
-    <Stack gap={1}>
-      <MantineText size="md">{provider.value}</MantineText>
+    <Stack gap={2}>
+      <Group gap="xs" wrap="nowrap">
+        <MantineText size="md">{provider.value}</MantineText>
+        <Badge size="xs" variant="light">
+          {provider.payload.source === "plugin" ? "Plugin" : "Shipped"}
+        </Badge>
+      </Group>
       <MantineText size="xs">{provider.payload.description}</MantineText>
     </Stack>
   );
@@ -470,6 +489,13 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
       <FormContext.Provider value={form}>
         <Stack>
           <Stack gap="xs">
+            {payload === null && (
+              <Message>
+                Choose a shipped provider or an active installed plugin.
+                Installed plugins are enabled for searches only after you add
+                them here and save settings.
+              </Message>
+            )}
             <Selector
               data-autofocus
               searchable
@@ -519,6 +545,6 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
 };
 
 const ProviderModal = withModal(ProviderTool, "provider-tool", {
-  title: "Provider",
-  size: "calc(50vw)",
+  title: "Provider settings",
+  size: "min(860px, 92vw)",
 });

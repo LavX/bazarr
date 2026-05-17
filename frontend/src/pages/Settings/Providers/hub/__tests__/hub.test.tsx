@@ -22,6 +22,29 @@ const manifest = {
   },
 };
 
+const smokeManifest = {
+  ...manifest,
+  provider_id: "smokehub",
+  name: "SmokeHub",
+  description: "Deterministic Provider Hub smoke provider.",
+  version: "0.2.0",
+  config_schema: {
+    type: "object",
+    properties: {
+      profile_name: {
+        type: "string",
+        title: "Profile name",
+      },
+      api_token: {
+        type: "string",
+        title: "API token",
+        secret: true,
+      },
+    },
+  },
+  secret_fields: ["api_token"],
+};
+
 describe("Settings > Providers (Provider Hub)", () => {
   beforeEach(() => {
     server.use(
@@ -89,20 +112,85 @@ describe("Settings > Providers (Provider Hub)", () => {
     });
   });
 
-  it("lists installed hub providers on My Providers", async () => {
+  it("shows installed hub plugins separately and can uninstall them", async () => {
+    const uninstallRequest = vi.fn();
+    server.use(
+      http.delete("/api/provider-hub/installations/officialhub", () => {
+        uninstallRequest();
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+
     customRender(<SettingsProvidersView />);
 
     const panel = await screen.findByRole("tabpanel", {
       name: /My Providers/i,
     });
 
+    await screen.findByText(/Restart Bazarr\+ to activate/i);
+
     expect(
-      await within(panel).findByText("Installed hub providers"),
+      within(panel).getByText("Enabled search providers"),
     ).toBeInTheDocument();
+    expect(within(panel).getByText("Installed plugins")).toBeInTheDocument();
     expect(
       within(panel).getByText("Official Hub Provider"),
     ).toBeInTheDocument();
-    expect(within(panel).getByText("Restart required")).toBeInTheDocument();
+
+    await userEvent.click(within(panel).getByLabelText("Provider actions"));
+    await userEvent.click(await screen.findByText("Uninstall"));
+
+    await waitFor(() => expect(uninstallRequest).toHaveBeenCalledTimes(1));
+  });
+
+  it("offers active hub plugins in the same add-provider flow as shipped providers", async () => {
+    server.use(
+      http.get("/api/provider-hub/providers", () => {
+        return HttpResponse.json({
+          data: [
+            {
+              provider_id: "smokehub",
+              name: "SmokeHub",
+              active_version: "0.2.0",
+              staged_version: null,
+              state: "active",
+              pending_restart: false,
+              trusted: true,
+              active_path: "/config/provider_hub/bundles/smokehub",
+              python_path: "/config/provider_hub/envs/smokehub/bin/python",
+              last_error: null,
+              manifest: smokeManifest,
+            },
+          ],
+        });
+      }),
+    );
+
+    customRender(<SettingsProvidersView />);
+
+    const panel = await screen.findByRole("tabpanel", {
+      name: /My Providers/i,
+    });
+
+    await userEvent.click(
+      await within(panel).findByRole("button", {
+        name: /Add search provider/i,
+      }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: /Provider settings/i,
+    });
+    await userEvent.click(
+      within(dialog).getByPlaceholderText("Click to Select a Provider"),
+    );
+    const [smokeOption] = await screen.findAllByText("SmokeHub");
+    await userEvent.click(smokeOption);
+
+    expect(screen.getByLabelText("Profile name")).toBeInTheDocument();
+    expect(screen.getByLabelText("API token")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Provider Hub plugin is installed but not enabled/i),
+    ).toBeInTheDocument();
   });
 
   it("preserves the trusted-source attribution when installing from catalog", async () => {

@@ -33,6 +33,7 @@ export interface ProviderInfo {
   message?: string;
   inputs?: AvailableInput[];
   priority?: number;
+  source?: "plugin" | "shipped";
 }
 
 export const logLevelOptions: SelectorOption<string>[] = [

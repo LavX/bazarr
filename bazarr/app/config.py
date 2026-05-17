@@ -810,6 +810,18 @@ def validate_log_regex():
             raise ValidationError(f"Exclude filter: invalid regular expression: {settings.log.exclude_filter}")
 
 
+def _settings_mapping(parent, key):
+    try:
+        mapping = parent[key]
+    except KeyError:
+        parent[key] = {}
+        mapping = parent[key]
+    if mapping is None:
+        parent[key] = {}
+        mapping = parent[key]
+    return mapping
+
+
 def save_settings(settings_items):
     configure_debug = False
     configure_captcha = False
@@ -1035,9 +1047,10 @@ def save_settings(settings_items):
 
         if settings_keys[0] == 'settings':
             if len(settings_keys) == 3:
-                settings[settings_keys[1]][settings_keys[2]] = value
+                _settings_mapping(settings, settings_keys[1])[settings_keys[2]] = value
             elif len(settings_keys) == 4:
-                settings[settings_keys[1]][settings_keys[2]][settings_keys[3]] = value
+                section = _settings_mapping(settings, settings_keys[1])
+                _settings_mapping(section, settings_keys[2])[settings_keys[3]] = value
 
         if settings_keys[0] == 'subzero':
             mod = settings_keys[1]

@@ -7,12 +7,7 @@ import {
   faStore,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import {
-  useProviderHubCatalog,
-  useProviderHubProviders,
-  useProviderHubTest,
-  useProviderHubUninstall,
-} from "@/apis/hooks";
+import { useProviderHubCatalog, useProviderHubProviders } from "@/apis/hooks";
 import type { ProviderHubInstallation } from "@/apis/raw/providerHub";
 import {
   Check,
@@ -30,7 +25,6 @@ import {
   UpdateBanner,
   UpdatesPanel,
 } from "@/pages/Settings/Providers/hub";
-import { ProviderCard } from "@/pages/Settings/Providers/hub/components/ProviderCard";
 import { summarizeUpdates } from "@/pages/Settings/Providers/hub/utils";
 import { antiCaptchaOption } from "@/pages/Settings/Providers/options";
 import { ProviderView } from "./components";
@@ -40,7 +34,6 @@ import {
   ProviderInfo,
   ProviderList,
 } from "./list";
-import styles from "@/pages/Settings/Providers/hub/hub.module.scss";
 
 type TabKey = "my-providers" | "marketplace" | "updates" | "activity";
 
@@ -124,7 +117,9 @@ function providerHubOption(provider: ProviderHubInstallation): ProviderInfo {
       (typeof manifest?.summary === "string" ? manifest.summary : undefined) ??
       "Installed Provider Hub provider.",
     inputs: schemaToInputs(manifest),
-    message: "Managed by Provider Hub.",
+    message:
+      "Provider Hub plugin is installed but not enabled until you add it here and save settings. Its credentials are stored with the rest of Provider settings.",
+    source: "plugin",
   };
 }
 
@@ -160,52 +155,12 @@ const EnabledProvidersSection: FunctionComponent<{
       simultaneously and the best result is selected.
     </Message>
     <ProviderView
+      addLabel="Add search provider"
       availableOptions={providerOptions}
       settingsKey="settings-general-enabled_providers"
     />
   </Stack>
 );
-
-const InstalledHubProvidersSection: FunctionComponent<{
-  providers: ProviderHubInstallation[] | undefined;
-}> = ({ providers }) => {
-  const testProvider = useProviderHubTest();
-  const uninstallProvider = useProviderHubUninstall();
-  const installed = useMemo(
-    () => (providers ?? []).filter((provider) => provider.state !== "removed"),
-    [providers],
-  );
-
-  if (installed.length === 0) {
-    return null;
-  }
-
-  return (
-    <Stack gap="md">
-      <div>
-        <div className={styles.eyebrow}>Provider Hub</div>
-        <h3 className={styles.panelTitle} style={{ fontSize: 18 }}>
-          Installed hub providers
-        </h3>
-        <p className={styles.panelDescription}>
-          Active hub providers can be added to Enabled providers above. Staged
-          providers activate after restart.
-        </p>
-      </div>
-      <div className={styles.cardGrid}>
-        {installed.map((provider) => (
-          <ProviderCard
-            key={provider.provider_id}
-            provider={provider}
-            onTest={(providerId) => testProvider.mutate(providerId)}
-            onUninstall={(providerId) => uninstallProvider.mutate(providerId)}
-            isTesting={testProvider.isPending}
-          />
-        ))}
-      </div>
-    </Stack>
-  );
-};
 
 const AntiCaptchaSection: FunctionComponent = () => (
   <Stack gap="xs">
@@ -246,6 +201,7 @@ const AntiCaptchaSection: FunctionComponent = () => (
 
 const IntegrationsSection: FunctionComponent = () => (
   <ProviderView
+    addLabel="Add integration"
     availableOptions={IntegrationList}
     settingsKey="settings-general-enabled_integrations"
   />
@@ -328,9 +284,7 @@ const SettingsProvidersView: FunctionComponent = () => {
             enabledProviders={
               <EnabledProvidersSection providerOptions={providerOptions} />
             }
-            installedHubProviders={
-              <InstalledHubProvidersSection providers={providers.data} />
-            }
+            installedPlugins={providers.data}
             antiCaptcha={<AntiCaptchaSection />}
             integrations={<IntegrationsSection />}
           />

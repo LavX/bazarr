@@ -115,7 +115,7 @@ const Layout: FunctionComponent<Props> = (props) => {
               {children}
             </Container>
           </FormContext.Provider>
-          {/* Floating save — sticky bottom, after form fields in DOM for correct tab order */}
+          {/* Floating save, sticky bottom, after form fields in DOM for correct tab order */}
           <Transition
             transition={reducedMotion ? "fade" : "slide-up"}
             mounted={totalStagedCount > 0}
@@ -163,14 +163,19 @@ const Layout: FunctionComponent<Props> = (props) => {
                     Save
                     <Badge
                       size="sm"
-                      circle
+                      radius="xl"
                       ml={8}
-                      aria-hidden="true"
-                      variant="outline"
+                      aria-label={`${totalStagedCount} unsaved change${totalStagedCount !== 1 ? "s" : ""}`}
+                      variant="filled"
                       style={{
-                        color: "inherit",
-                        borderColor: "currentColor",
-                        opacity: 0.7,
+                        minWidth: 22,
+                        height: 22,
+                        paddingInline: 7,
+                        background: "var(--mantine-color-white)",
+                        color: "var(--mantine-color-brand-7)",
+                        fontWeight: 800,
+                        lineHeight: "22px",
+                        boxShadow: "0 0 0 1px rgba(255, 255, 255, 0.42)",
                       }}
                     >
                       {totalStagedCount}
