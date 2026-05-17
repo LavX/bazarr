@@ -433,6 +433,22 @@ def test_provider_hub_update_task_refreshes_catalog_before_checking_updates(monk
     assert calls == ["refresh", "check"]
 
 
+def test_provider_hub_updates_check_endpoint_refreshes_catalog_before_check(monkeypatch):
+    from api.provider_hub.provider_hub import ProviderHubUpdatesCheck
+    from api.provider_hub import provider_hub
+
+    calls = []
+    monkeypatch.setattr(provider_hub.service, "refresh_catalog", lambda: calls.append("refresh"))
+    monkeypatch.setattr(
+        provider_hub.service,
+        "check_updates",
+        lambda: calls.append("check") or {"state": "completed"},
+    )
+
+    assert ProviderHubUpdatesCheck.post.__wrapped__(ProviderHubUpdatesCheck()) == {"state": "completed"}
+    assert calls == ["refresh", "check"]
+
+
 def test_apply_update_without_available_manifest_does_not_stage(tmp_path, monkeypatch):
     from provider_hub.service import apply_update
     from provider_hub.state import load_state

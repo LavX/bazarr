@@ -146,6 +146,7 @@ class ProviderHubUpdatesCheck(Resource):
     @api_ns_provider_hub.response(200, 'Success')
     @api_ns_provider_hub.response(401, 'Not Authenticated')
     def post(self):
+        service.refresh_catalog()
         return service.check_updates()
 
 
