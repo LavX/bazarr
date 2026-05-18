@@ -127,13 +127,7 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
                   : "Restart Bazarr+ to activate this plugin"
             }
           >
-            <Button size="xs" variant="light" color="yellow" disabled>
-              {pendingRemoval
-                ? "Restart to remove"
-                : pendingUpdate
-                  ? "Restart to update"
-                  : "Restart to activate"}
-            </Button>
+            <span className={styles.hubCardPendingText}>Pending restart</span>
           </Tooltip>
         );
       case "broken":
@@ -247,7 +241,7 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
           )}
           <TrustBadge trusted={entry.trusted} />
         </Group>
-        {ctaButton}
+        <div className={styles.hubCardAction}>{ctaButton}</div>
       </div>
     </div>
   );

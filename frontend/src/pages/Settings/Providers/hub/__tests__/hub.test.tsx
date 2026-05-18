@@ -223,9 +223,10 @@ describe("Settings > Providers (Provider Hub)", () => {
     });
 
     expect(within(panel).getByText("Install staged")).toBeInTheDocument();
+    expect(within(panel).getByText("Pending restart")).toBeInTheDocument();
     expect(
-      within(panel).getByRole("button", { name: /Restart to activate/i }),
-    ).toBeDisabled();
+      within(panel).queryByRole("button", { name: /Restart to activate/i }),
+    ).not.toBeInTheDocument();
 
     await userEvent.click(
       within(panel).getByLabelText("Official Hub Provider actions"),
@@ -271,9 +272,10 @@ describe("Settings > Providers (Provider Hub)", () => {
     });
 
     expect(within(panel).getByText("Removal staged")).toBeInTheDocument();
+    expect(within(panel).getByText("Pending restart")).toBeInTheDocument();
     expect(
-      within(panel).getByRole("button", { name: /Restart to remove/i }),
-    ).toBeDisabled();
+      within(panel).queryByRole("button", { name: /Restart to remove/i }),
+    ).not.toBeInTheDocument();
     expect(
       within(panel).queryByLabelText("Official Hub Provider actions"),
     ).not.toBeInTheDocument();
@@ -287,7 +289,7 @@ describe("Settings > Providers (Provider Hub)", () => {
       within(updatesPanel).getByText("Staged for restart"),
     ).toBeInTheDocument();
     expect(
-      within(updatesPanel).getByText("Restart to remove"),
+      within(updatesPanel).getByText("Pending restart"),
     ).toBeInTheDocument();
     expect(within(updatesPanel).getByText("v1.0.0")).toBeInTheDocument();
   });

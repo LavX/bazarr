@@ -235,6 +235,7 @@ $tones: (
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  flex-wrap: wrap;
   margin-top: auto;
 }
 
@@ -242,6 +243,31 @@ $tones: (
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+.hubCardAction {
+  display: flex;
+  justify-content: flex-end;
+  flex: 0 0 auto;
+  max-width: 100%;
+  margin-left: auto;
+}
+
+.hubCardAction :global(.mantine-Button-root) {
+  max-width: 100%;
+}
+
+.hubCardPendingText {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  color: var(--bz-text-tertiary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 /* Marketplace grid */

@@ -26,12 +26,6 @@ function stagedTargetLabel(provider: ProviderHubInstallation) {
   return `v${provider.staged_version ?? "staged"}`;
 }
 
-function footerLabel(provider: ProviderHubInstallation) {
-  if (provider.state === "removed") return "Restart to remove";
-  if (provider.active_version) return "Restart to update";
-  return "Restart to activate";
-}
-
 export const UpdateCard: FunctionComponent<UpdateCardProps> = ({
   provider,
   latest,
@@ -103,19 +97,21 @@ export const UpdateCard: FunctionComponent<UpdateCardProps> = ({
         <Group gap={6} className={styles.hubCardPills}>
           <TrustBadge trusted={trusted} />
         </Group>
-        {provider.pending_restart ? (
-          <span className={styles.hubCardMeta}>{footerLabel(provider)}</span>
-        ) : (
-          <Button
-            size="xs"
-            variant="light"
-            loading={isApplying}
-            onClick={() => onApply(provider.provider_id)}
-            leftSection={<FontAwesomeIcon icon={faRotate} />}
-          >
-            Apply update
-          </Button>
-        )}
+        <div className={styles.hubCardAction}>
+          {provider.pending_restart ? (
+            <span className={styles.hubCardPendingText}>Pending restart</span>
+          ) : (
+            <Button
+              size="xs"
+              variant="light"
+              loading={isApplying}
+              onClick={() => onApply(provider.provider_id)}
+              leftSection={<FontAwesomeIcon icon={faRotate} />}
+            >
+              Apply update
+            </Button>
+          )}
+        </div>
       </div>
     </div>
   );
