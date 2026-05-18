@@ -126,4 +126,4 @@ class ProviderWorkerClient:
 
 
 def worker_command(python_exe: str | os.PathLike[str], runner: str | os.PathLike[str]) -> list[str]:
-    return [str(python_exe), "-I", str(Path(runner))]
+    return [str(python_exe), "-I", "-B", str(Path(runner))]

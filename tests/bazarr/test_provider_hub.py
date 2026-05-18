@@ -802,6 +802,63 @@ def test_provider_hub_connection_test_runs_worker_health(tmp_path, monkeypatch):
     assert load_state()["installations"]["examplehub"]["last_error"] is None
 
 
+def test_provider_hub_connection_test_ignores_runtime_pycache(tmp_path, monkeypatch):
+    from provider_hub.state import load_state, save_state
+
+    class FakeWorkerClient:
+        def __init__(self, command, cwd=None, env=None):
+            self.command = command
+            self.cwd = cwd
+            self.env = env
+
+        def request(self, op, payload=None, timeout=30):
+            return type("Result", (), {"payload": {"initialized": True}, "events": []})()
+
+        def stop(self):
+            return None
+
+    provider_content = b"class ExampleProvider: pass\n"
+    bundle_path = tmp_path / "bundle"
+    bundle_path.mkdir()
+    (bundle_path / "provider.py").write_bytes(provider_content)
+    pycache_path = bundle_path / "__pycache__"
+    pycache_path.mkdir()
+    (pycache_path / "provider.cpython-314.pyc").write_bytes(b"runtime bytecode")
+
+    python_path = tmp_path / "venv" / "bin" / "python"
+    python_path.parent.mkdir(parents=True)
+    python_path.write_text("", encoding="utf-8")
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    monkeypatch.setattr("provider_hub.service.ProviderWorkerClient", FakeWorkerClient)
+
+    state = load_state()
+    state["installations"] = {
+        "examplehub": {
+            "provider_id": "examplehub",
+            "name": "Example Hub Provider",
+            "active_version": "1.0.0",
+            "active_path": str(bundle_path),
+            "python_path": str(python_path),
+            "state": "active",
+            "pending_restart": False,
+            "manifest": _manifest(
+                provider_content=provider_content,
+                dependencies={"requirements": []},
+            ),
+            "config": {},
+        }
+    }
+    save_state(state)
+
+    from provider_hub.service import test_provider_connection
+
+    result = test_provider_connection("examplehub")
+
+    assert result["ok"] is True
+    assert not pycache_path.exists()
+
+
 def test_stage_install_failure_preserves_active_install_and_records_last_error(tmp_path, monkeypatch):
     from provider_hub.service import ProviderHubInstallError, stage_install
     from provider_hub.state import load_state
@@ -1496,3 +1553,16 @@ class ExampleProvider:
         assert download.payload["empty"] is False
     finally:
         client.stop()
+
+
+def test_worker_command_disables_bytecode_in_isolated_mode(tmp_path):
+    from provider_hub.worker import worker_command
+
+    runner = tmp_path / "runner.py"
+
+    assert worker_command("/venv/bin/python", runner) == [
+        "/venv/bin/python",
+        "-I",
+        "-B",
+        str(runner),
+    ]

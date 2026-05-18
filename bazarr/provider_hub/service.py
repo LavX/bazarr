@@ -333,6 +333,11 @@ def _record_provider_last_error(provider_id: str, message: str | None) -> None:
     save_state(state)
 
 
+def _remove_bundle_runtime_artifacts(bundle_path: Path) -> None:
+    for cache_dir in list(bundle_path.rglob("__pycache__")):
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
+
 def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
     provider = get_provider(provider_id, redact=False)
     if not provider:
@@ -360,6 +365,7 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
 
         manifest = validate_manifest(manifest_data, built_in_provider_ids=_built_in_provider_ids())
         bundle_path = Path(active_path)
+        _remove_bundle_runtime_artifacts(bundle_path)
         verify_bundle_tree(manifest, bundle_path)
 
         runner = Path(__file__).with_name("worker_runner.py")
@@ -375,7 +381,7 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
             result = client.request("health", {}, timeout=10)
         finally:
             client.stop()
-            shutil.rmtree(bundle_path / "__pycache__", ignore_errors=True)
+            _remove_bundle_runtime_artifacts(bundle_path)
 
         _record_provider_last_error(provider_id, None)
         return {
@@ -439,6 +445,7 @@ def _write_manifest_file(manifest, root: Path) -> None:
 def _fetch_bundle(manifest) -> Path:
     target = _bundle_path_for(manifest)
     if target.exists():
+        _remove_bundle_runtime_artifacts(target)
         verify_bundle_tree(manifest, target)
         return target
 
@@ -496,6 +503,7 @@ def _catalog_manifest_trusted(manifest: dict[str, Any], state: dict[str, Any]) -
 
 
 def _smoke_validate_worker(manifest, bundle_path: Path, python_path: Path) -> None:
+    _remove_bundle_runtime_artifacts(bundle_path)
     runner = Path(__file__).with_name("worker_runner.py")
     client = ProviderWorkerClient(
         worker_command(python_path, runner),
@@ -509,7 +517,7 @@ def _smoke_validate_worker(manifest, bundle_path: Path, python_path: Path) -> No
         client.request("health", {}, timeout=10)
     finally:
         client.stop()
-        shutil.rmtree(bundle_path / "__pycache__", ignore_errors=True)
+        _remove_bundle_runtime_artifacts(bundle_path)
 
 
 def _staged_installation(validated, existing, bundle_path: Path, staged_python_path: Path, source_trusted: bool):
@@ -625,8 +633,10 @@ def activate_staged_installations() -> list[str]:
             staged_python_path = installation.get("staged_python_path")
             if not staged_path or not staged_python_path:
                 raise ProviderHubInstallError("staged bundle or python path is missing")
-            verify_bundle_tree(manifest, staged_path)
-            _smoke_validate_worker(manifest, Path(staged_path), Path(staged_python_path))
+            staged_bundle_path = Path(staged_path)
+            _remove_bundle_runtime_artifacts(staged_bundle_path)
+            verify_bundle_tree(manifest, staged_bundle_path)
+            _smoke_validate_worker(manifest, staged_bundle_path, Path(staged_python_path))
         except Exception as error:
             installation["last_error"] = str(error)
             installation["staged_version"] = None
