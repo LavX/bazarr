@@ -103,6 +103,17 @@ describe("Settings > Providers (Provider Hub)", () => {
   });
 
   it("surfaces the restart-required banner when a hub provider is staged", async () => {
+    const restartRequest = vi.fn();
+    server.use(
+      http.post("/api/system", ({ request }) => {
+        const url = new URL(request.url);
+        if (url.searchParams.get("action") === "restart") {
+          restartRequest();
+        }
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+
     customRender(<SettingsProvidersView />);
 
     await waitFor(() => {
@@ -110,6 +121,12 @@ describe("Settings > Providers (Provider Hub)", () => {
         screen.getByText(/Restart Bazarr\+ to activate/i),
       ).toBeInTheDocument();
     });
+
+    await userEvent.click(
+      screen.getByRole("button", { name: /Restart Bazarr now/i }),
+    );
+
+    await waitFor(() => expect(restartRequest).toHaveBeenCalledTimes(1));
   });
 
   it("shows installed hub plugins separately and can uninstall them", async () => {

@@ -52,8 +52,7 @@ export const UpdatesPanel: FunctionComponent<UpdatesPanelProps> = ({
                 }`}
           </h2>
           <p className={styles.panelDescription}>
-            Review and stage updates from your catalog. Staged versions activate
-            on the next restart.
+            Review and stage updates from your catalog.
           </p>
         </div>
         <Button
@@ -76,14 +75,9 @@ export const UpdatesPanel: FunctionComponent<UpdatesPanelProps> = ({
         <Stack gap="md">
           {stagedRows.length > 0 && (
             <Stack gap="xs">
-              <Group justify="space-between">
-                <Text size="sm" fw={600}>
-                  Staged for restart
-                </Text>
-                <Text size="xs" c="dimmed">
-                  Restart Bazarr+ to activate
-                </Text>
-              </Group>
+              <Text size="sm" fw={600}>
+                Staged
+              </Text>
               <div className={styles.cardGrid}>
                 {stagedRows.map((p) => {
                   const latest = getLatestCatalogEntry(catalog, p.provider_id);

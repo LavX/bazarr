@@ -1,5 +1,5 @@
 import { FunctionComponent } from "react";
-import { Button, Group, Tooltip } from "@mantine/core";
+import { Button, Group } from "@mantine/core";
 import {
   faArrowRight,
   faPuzzlePiece,
@@ -11,7 +11,6 @@ import type {
   ProviderHubCatalogEntry,
   ProviderHubInstallation,
 } from "@/apis/raw/providerHub";
-import { ProviderStatusBadge } from "@/pages/Settings/Providers/hub/components/StatusBadge";
 import { TrustBadge } from "@/pages/Settings/Providers/hub/components/TrustBadge";
 import styles from "@/pages/Settings/Providers/hub/hub.module.scss";
 
@@ -80,19 +79,9 @@ export const UpdateCard: FunctionComponent<UpdateCardProps> = ({
     <div className={styles.hubCardFooter}>
       <Group gap={6} className={styles.hubCardPills}>
         <TrustBadge trusted={latest.trusted} />
-        {provider.pending_restart && (
-          <ProviderStatusBadge
-            state={provider.state}
-            pendingRestart={provider.pending_restart}
-          />
-        )}
       </Group>
       {provider.pending_restart ? (
-        <Tooltip label="Already staged. Restart Bazarr+ to activate.">
-          <Button size="xs" variant="light" color="yellow" disabled>
-            Restart required
-          </Button>
-        </Tooltip>
+        <span className={styles.hubCardMeta}>Staged</span>
       ) : (
         <Button
           size="xs"

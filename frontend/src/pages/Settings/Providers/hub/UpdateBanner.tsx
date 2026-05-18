@@ -3,10 +3,12 @@ import { Button } from "@mantine/core";
 import {
   faCircleArrowUp,
   faClock,
+  faPowerOff,
   faXmark,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import clsx from "clsx";
+import { useSystem } from "@/apis/hooks";
 import type {
   ProviderHubCatalog,
   ProviderHubInstallation,
@@ -27,6 +29,7 @@ export const UpdateBanner: FunctionComponent<UpdateBannerProps> = ({
   onSwitchToUpdates,
   onDismiss,
 }) => {
+  const { restart, isMutating } = useSystem();
   const summary = summarizeUpdates(providers, catalog);
   const hasUpdates = summary.available.length > 0;
   const hasRestart = summary.pendingRestart.length > 0;
@@ -53,8 +56,14 @@ export const UpdateBanner: FunctionComponent<UpdateBannerProps> = ({
           </div>
         </div>
         <div className={styles.bannerActions}>
-          <Button size="xs" variant="light" onClick={onSwitchToUpdates}>
-            Review staged
+          <Button
+            size="xs"
+            variant="light"
+            leftSection={<FontAwesomeIcon icon={faPowerOff} />}
+            loading={isMutating}
+            onClick={() => restart()}
+          >
+            Restart Bazarr now
           </Button>
         </div>
       </div>
