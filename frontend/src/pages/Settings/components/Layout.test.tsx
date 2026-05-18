@@ -53,6 +53,19 @@ describe("Settings layout", () => {
     expect(screen.getByText("Test Content")).toBeInTheDocument();
   });
 
+  it("can render a fluid content area", () => {
+    customRender(
+      <Layout name="Test Settings" fluid>
+        <Text>Test Content</Text>
+      </Layout>,
+    );
+
+    expect(screen.getByTestId("settings-layout-content")).toHaveStyle({
+      maxWidth: "none",
+      width: "100%",
+    });
+  });
+
   it("shows a readable pending-change count on the floating save button", async () => {
     customRender(
       <Layout name="Test Settings">

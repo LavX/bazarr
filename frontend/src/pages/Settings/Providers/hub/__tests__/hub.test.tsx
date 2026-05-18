@@ -104,6 +104,7 @@ describe("Settings > Providers (Provider Hub)", () => {
 
   it("surfaces the restart-required banner when a hub provider is staged", async () => {
     const restartRequest = vi.fn();
+    sessionStorage.clear();
     server.use(
       http.post("/api/system", ({ request }) => {
         const url = new URL(request.url);
@@ -127,6 +128,9 @@ describe("Settings > Providers (Provider Hub)", () => {
     );
 
     await waitFor(() => expect(restartRequest).toHaveBeenCalledTimes(1));
+    expect(
+      sessionStorage.getItem("bazarr.restart.reload_after_reconnect"),
+    ).toBe("1");
   });
 
   it("shows installed hub plugins separately and can uninstall them", async () => {

@@ -1,4 +1,10 @@
-import { FunctionComponent, useCallback, useEffect, useState } from "react";
+import {
+  FunctionComponent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { Outlet, useNavigate } from "react-router";
 import {
   Alert,
@@ -33,6 +39,7 @@ import { notification } from "@/modules/task";
 import CriticalError from "@/pages/errors/CriticalError";
 import { RouterNames } from "@/Router/RouterNames";
 import { Environment } from "@/utilities";
+import { consumeRestartReloadPending } from "@/utilities/restart";
 import AppHeader from "./Header";
 import styleVars from "@/assets/_variables.module.scss";
 
@@ -52,6 +59,7 @@ const App: FunctionComponent = () => {
   const [online, setOnline] = useState(false);
   const [hasConnected, setHasConnected] = useState(false);
   const [supervisor, setSupervisor] = useState<SupervisorStatus | null>(null);
+  const previousOnline = useRef(false);
 
   const queryClient = useQueryClient();
   const settings = useSystemSettings();
@@ -97,6 +105,24 @@ const App: FunctionComponent = () => {
       setHasConnected(true);
     }
   });
+
+  useEffect(() => {
+    const reconnected = online && hasConnected && !previousOnline.current;
+    previousOnline.current = online;
+
+    if (!reconnected) {
+      return;
+    }
+
+    void queryClient.invalidateQueries();
+    void queryClient.refetchQueries({ type: "active" });
+
+    if (consumeRestartReloadPending()) {
+      window.setTimeout(() => {
+        window.location.reload();
+      }, 250);
+    }
+  }, [hasConnected, online, queryClient]);
 
   const [upgradeModalOpen, setUpgradeModalOpen] = useState(false);
   const [upgrading, setUpgrading] = useState(false);

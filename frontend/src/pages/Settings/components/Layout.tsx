@@ -34,10 +34,11 @@ import { usePrompt } from "@/utilities/routers";
 interface Props {
   name: string;
   children: ReactNode;
+  fluid?: boolean;
 }
 
 const Layout: FunctionComponent<Props> = (props) => {
-  const { children, name } = props;
+  const { children, fluid = false, name } = props;
 
   const { data: settings, isLoading, isRefetching } = useSystemSettings();
   const { mutate, mutateAsync, isPending: isMutating } = useSettingsMutation();
@@ -111,7 +112,21 @@ const Layout: FunctionComponent<Props> = (props) => {
         <form onSubmit={form.onSubmit(submit)} style={{ position: "relative" }}>
           <LoadingOverlay visible={settings === undefined} />
           <FormContext.Provider value={form}>
-            <Container size="xl" mx={0} pb={80}>
+            <Container
+              data-testid="settings-layout-content"
+              fluid={fluid}
+              size="xl"
+              mx={0}
+              pb={80}
+              style={
+                fluid
+                  ? {
+                      maxWidth: "none",
+                      width: "100%",
+                    }
+                  : undefined
+              }
+            >
               {children}
             </Container>
           </FormContext.Provider>

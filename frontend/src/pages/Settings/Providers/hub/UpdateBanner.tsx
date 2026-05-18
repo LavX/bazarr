@@ -14,6 +14,7 @@ import type {
   ProviderHubInstallation,
 } from "@/apis/raw/providerHub";
 import { summarizeUpdates } from "@/pages/Settings/Providers/hub/utils";
+import { markRestartReloadPending } from "@/utilities/restart";
 import styles from "@/pages/Settings/Providers/hub/hub.module.scss";
 
 interface UpdateBannerProps {
@@ -33,6 +34,11 @@ export const UpdateBanner: FunctionComponent<UpdateBannerProps> = ({
   const summary = summarizeUpdates(providers, catalog);
   const hasUpdates = summary.available.length > 0;
   const hasRestart = summary.pendingRestart.length > 0;
+
+  const handleRestart = () => {
+    markRestartReloadPending();
+    restart();
+  };
 
   if (!hasUpdates && !hasRestart) return null;
 
@@ -61,7 +67,7 @@ export const UpdateBanner: FunctionComponent<UpdateBannerProps> = ({
             variant="light"
             leftSection={<FontAwesomeIcon icon={faPowerOff} />}
             loading={isMutating}
-            onClick={() => restart()}
+            onClick={handleRestart}
           >
             Restart Bazarr now
           </Button>

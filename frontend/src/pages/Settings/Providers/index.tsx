@@ -217,7 +217,7 @@ const SettingsProvidersView: FunctionComponent = () => {
   const updateBadge = summary.available.length + summary.pendingRestart.length;
 
   return (
-    <Layout name="Providers">
+    <Layout name="Providers" fluid>
       <UpdateBanner
         providers={providers.data}
         catalog={catalog.data}
