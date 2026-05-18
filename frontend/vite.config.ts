@@ -127,6 +127,17 @@ export default defineConfig(({ mode, command }) => {
         output: {
           manualChunks: chunks,
         },
+        external: [
+          "fsevents",
+          "path",
+          "process",
+          "perf_hooks",
+          "fs/promises",
+          "node:path",
+          "node:process",
+          "node:perf_hooks",
+          "node:fs/promises",
+        ],
       },
     },
     test: {
