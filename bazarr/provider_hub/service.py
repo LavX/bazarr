@@ -324,6 +324,78 @@ def get_provider(provider_id: str, redact: bool = True) -> dict[str, Any] | None
     return _redact_installation(provider) if redact else provider
 
 
+def _record_provider_last_error(provider_id: str, message: str | None) -> None:
+    state = load_state()
+    provider = state.setdefault("installations", {}).get(provider_id)
+    if not isinstance(provider, dict):
+        return
+    provider["last_error"] = message
+    save_state(state)
+
+
+def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
+    provider = get_provider(provider_id, redact=False)
+    if not provider:
+        return None
+
+    if provider.get("pending_restart") or provider.get("state") != "active":
+        return {
+            "provider_id": provider_id,
+            "ok": False,
+            "status": "pending_restart",
+            "message": "Restart Bazarr+ before testing this staged plugin",
+        }
+
+    manifest_data = provider.get("manifest")
+    active_path = provider.get("active_path")
+    python_path = provider.get("python_path")
+
+    try:
+        if not isinstance(manifest_data, dict):
+            raise ProviderHubInstallError("active manifest is missing")
+        if not active_path:
+            raise ProviderHubInstallError("active bundle path is missing")
+        if not python_path:
+            raise ProviderHubInstallError("provider Python path is missing")
+
+        manifest = validate_manifest(manifest_data, built_in_provider_ids=_built_in_provider_ids())
+        bundle_path = Path(active_path)
+        verify_bundle_tree(manifest, bundle_path)
+
+        runner = Path(__file__).with_name("worker_runner.py")
+        client = ProviderWorkerClient(
+            worker_command(python_path, runner),
+            cwd=bundle_path,
+            env={
+                "BAZARR_PROVIDER_HUB_BUNDLE": str(bundle_path),
+                "BAZARR_PROVIDER_HUB_MANIFEST": json.dumps(manifest.raw),
+            },
+        )
+        try:
+            result = client.request("health", {}, timeout=10)
+        finally:
+            client.stop()
+            shutil.rmtree(bundle_path / "__pycache__", ignore_errors=True)
+
+        _record_provider_last_error(provider_id, None)
+        return {
+            "provider_id": provider_id,
+            "ok": True,
+            "status": "ready",
+            "message": "Worker health check passed",
+            "details": result.payload,
+        }
+    except Exception as error:
+        message = str(error) or error.__class__.__name__
+        _record_provider_last_error(provider_id, message)
+        return {
+            "provider_id": provider_id,
+            "ok": False,
+            "status": "failed",
+            "message": message,
+        }
+
+
 def _built_in_provider_ids() -> set[str]:
     provider_ids = set(provider_registry.names())
     try:

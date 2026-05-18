@@ -105,10 +105,10 @@ class ProviderHubProviderTest(Resource):
     @api_ns_provider_hub.response(401, 'Not Authenticated')
     @api_ns_provider_hub.response(404, 'Provider not found')
     def post(self, provider_id):
-        provider = service.get_provider(provider_id)
-        if not provider:
+        result = service.test_provider_connection(provider_id)
+        if not result:
             return 'Provider not found', 404
-        return {"provider_id": provider_id, "status": "pending_restart" if provider.get("pending_restart") else "ready"}
+        return result
 
 
 @api_ns_provider_hub.route('provider-hub/installations')

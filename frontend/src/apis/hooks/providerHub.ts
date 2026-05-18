@@ -1,7 +1,9 @@
+import { showNotification } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import type { ProviderHubInstallRequest } from "@/apis/raw/providerHub";
+import { notification } from "@/modules/task";
 
 const providerHubKey = [QueryKeys.ProviderHub];
 
@@ -88,8 +90,20 @@ export function useProviderHubTest() {
   return useMutation({
     mutationKey: [...providerHubKey, QueryKeys.Actions, "test"],
     mutationFn: (providerId: string) => api.providerHub.test(providerId),
-    onSuccess: () => {
+    onSuccess: (result) => {
+      showNotification(
+        result.ok
+          ? notification.info("Provider test passed", result.message)
+          : notification.warn("Provider test needs attention", result.message),
+      );
       client.invalidateQueries({ queryKey: providerHubKey });
+    },
+    onError: (error) => {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Provider connection test failed";
+      showNotification(notification.error("Provider test failed", message));
     },
   });
 }

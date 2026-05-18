@@ -743,6 +743,65 @@ def test_get_providers_auth_includes_active_provider_hub_config(tmp_path, monkey
     assert get_providers_auth()["examplehub"]["region"] == "eu"
 
 
+def test_provider_hub_connection_test_runs_worker_health(tmp_path, monkeypatch):
+    from provider_hub.state import load_state, save_state
+
+    requests = []
+
+    class FakeWorkerClient:
+        def __init__(self, command, cwd=None, env=None):
+            self.command = command
+            self.cwd = cwd
+            self.env = env
+
+        def request(self, op, payload=None, timeout=30):
+            requests.append((op, payload, timeout, self.cwd, self.env))
+            return type("Result", (), {"payload": {"initialized": True}, "events": []})()
+
+        def stop(self):
+            requests.append(("stop", None, None, self.cwd, self.env))
+
+    bundle_path = tmp_path / "bundle"
+    bundle_path.mkdir()
+    python_path = tmp_path / "venv" / "bin" / "python"
+    python_path.parent.mkdir(parents=True)
+    python_path.write_text("", encoding="utf-8")
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    monkeypatch.setattr("provider_hub.service.verify_bundle_tree", lambda _manifest, _path: None)
+    monkeypatch.setattr("provider_hub.service.ProviderWorkerClient", FakeWorkerClient)
+
+    state = load_state()
+    state["installations"] = {
+        "examplehub": {
+            "provider_id": "examplehub",
+            "name": "Example Hub Provider",
+            "active_version": "1.0.0",
+            "active_path": str(bundle_path),
+            "python_path": str(python_path),
+            "state": "active",
+            "pending_restart": False,
+            "manifest": _manifest(dependencies={"requirements": []}),
+            "config": {"region": "eu"},
+            "last_error": "old failure",
+        }
+    }
+    save_state(state)
+
+    from provider_hub.service import test_provider_connection
+
+    result = test_provider_connection("examplehub")
+
+    assert result["ok"] is True
+    assert result["status"] == "ready"
+    assert result["message"] == "Worker health check passed"
+    assert requests[0][0] == "health"
+    assert requests[0][2] == 10
+    assert str(requests[0][3]) == str(bundle_path)
+    assert json.loads(requests[0][4]["BAZARR_PROVIDER_HUB_MANIFEST"])["provider_id"] == "examplehub"
+    assert load_state()["installations"]["examplehub"]["last_error"] is None
+
+
 def test_stage_install_failure_preserves_active_install_and_records_last_error(tmp_path, monkeypatch):
     from provider_hub.service import ProviderHubInstallError, stage_install
     from provider_hub.state import load_state

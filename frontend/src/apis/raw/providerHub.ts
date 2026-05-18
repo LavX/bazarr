@@ -62,6 +62,14 @@ export interface ProviderHubJob {
   updated_at?: string | null;
 }
 
+export interface ProviderHubTestResult {
+  provider_id: string;
+  ok: boolean;
+  status: string;
+  message: string;
+  details?: LooseObject;
+}
+
 class ProviderHubApi extends BaseApi {
   constructor() {
     super("/provider-hub");
@@ -106,10 +114,9 @@ class ProviderHubApi extends BaseApi {
   }
 
   async test(providerId: string) {
-    const response = await this.postRaw<{
-      provider_id: string;
-      status: string;
-    }>(`/providers/${providerId}/test`);
+    const response = await this.postRaw<ProviderHubTestResult>(
+      `/providers/${providerId}/test`,
+    );
     return response.data;
   }
 

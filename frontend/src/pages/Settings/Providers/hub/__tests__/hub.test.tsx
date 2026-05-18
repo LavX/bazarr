@@ -132,6 +132,14 @@ describe("Settings > Providers (Provider Hub)", () => {
   it("shows installed hub plugins separately and can uninstall them", async () => {
     const uninstallRequest = vi.fn();
     server.use(
+      http.post("/api/provider-hub/providers/officialhub/test", () => {
+        return HttpResponse.json({
+          provider_id: "officialhub",
+          ok: true,
+          status: "ready",
+          message: "Worker health check passed",
+        });
+      }),
       http.delete("/api/provider-hub/installations/officialhub", () => {
         uninstallRequest();
         return new HttpResponse(null, { status: 204 });
@@ -153,6 +161,11 @@ describe("Settings > Providers (Provider Hub)", () => {
     expect(
       within(panel).getByText("Official Hub Provider"),
     ).toBeInTheDocument();
+
+    await userEvent.click(within(panel).getByLabelText("Provider actions"));
+    await userEvent.click(await screen.findByText("Test connection"));
+
+    await screen.findByText("Worker health check passed");
 
     await userEvent.click(within(panel).getByLabelText("Provider actions"));
     await userEvent.click(await screen.findByText("Uninstall"));
