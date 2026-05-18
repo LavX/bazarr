@@ -678,8 +678,17 @@ def remove_installation(provider_id: str) -> bool:
         return False
     item = installations[provider_id]
     if isinstance(item, dict):
+        if not item.get("active_version"):
+            del installations[provider_id]
+            save_state(state)
+            return True
         item["state"] = "removed"
         item["pending_restart"] = True
+        item["staged_version"] = None
+        item["staged_path"] = None
+        item["staged_python_path"] = None
+        item["staged_manifest"] = None
+        item["last_error"] = None
     save_state(state)
     return True
 

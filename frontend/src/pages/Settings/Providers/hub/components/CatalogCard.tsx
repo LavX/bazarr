@@ -1,10 +1,13 @@
 import { FunctionComponent, useMemo } from "react";
-import { Button, Group, Tooltip } from "@mantine/core";
+import { ActionIcon, Button, Group, Menu, Tooltip } from "@mantine/core";
 import {
   faCheck,
   faDownload,
+  faEllipsis,
   faPuzzlePiece,
   faRotate,
+  faTrash,
+  faVial,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import clsx from "clsx";
@@ -12,6 +15,7 @@ import type {
   ProviderHubCatalogEntry,
   ProviderHubInstallation,
 } from "@/apis/raw/providerHub";
+import { ProviderStatusBadge } from "@/pages/Settings/Providers/hub/components/StatusBadge";
 import { TrustBadge } from "@/pages/Settings/Providers/hub/components/TrustBadge";
 import { parseManifest } from "@/pages/Settings/Providers/hub/utils";
 import styles from "@/pages/Settings/Providers/hub/hub.module.scss";
@@ -21,16 +25,39 @@ interface CatalogCardProps {
   installed: ProviderHubInstallation | null;
   onInstall: (entry: ProviderHubCatalogEntry) => void;
   isInstalling: boolean;
+  onTest?: (id: string) => void;
+  onUninstall?: (id: string) => void;
+  isTesting?: boolean;
 }
 
 type CtaState = "install" | "installed" | "update" | "restart" | "broken";
+
+function isPendingRemoval(installed: ProviderHubInstallation | null) {
+  return installed?.pending_restart === true && installed.state === "removed";
+}
+
+function isPendingInstall(installed: ProviderHubInstallation | null) {
+  return (
+    installed?.pending_restart === true &&
+    installed.state === "staged" &&
+    !installed.active_version
+  );
+}
+
+function isPendingUpdate(installed: ProviderHubInstallation | null) {
+  return (
+    installed?.pending_restart === true &&
+    installed.state === "staged" &&
+    Boolean(installed.active_version)
+  );
+}
 
 function deriveCta(
   entry: ProviderHubCatalogEntry,
   installed: ProviderHubInstallation | null,
   manifestValid: boolean,
 ): CtaState {
-  if (!manifestValid) return "broken";
+  if (!installed && !manifestValid) return "broken";
   if (!installed) return "install";
   if (installed.pending_restart) return "restart";
   if (installed.active_version && installed.active_version !== entry.version) {
@@ -44,9 +71,23 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
   installed,
   onInstall,
   isInstalling,
+  onTest,
+  onUninstall,
+  isTesting,
 }) => {
   const manifest = useMemo(() => parseManifest(entry), [entry]);
   const cta = deriveCta(entry, installed, manifest !== null);
+  const displayName = entry.name ?? installed?.name ?? entry.provider_id;
+  const pendingRemoval = isPendingRemoval(installed);
+  const pendingInstall = isPendingInstall(installed);
+  const pendingUpdate = isPendingUpdate(installed);
+  const canShowActions = installed !== null && !pendingRemoval;
+  const canTest = installed?.state === "active" && !installed.pending_restart;
+  const removeLabel = pendingInstall
+    ? "Cancel staged install"
+    : pendingUpdate
+      ? "Uninstall instead"
+      : "Uninstall";
 
   const ctaButton = (() => {
     switch (cta) {
@@ -77,9 +118,21 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
         );
       case "restart":
         return (
-          <Tooltip label="Restart Bazarr+ to activate the staged version">
+          <Tooltip
+            label={
+              pendingRemoval
+                ? "Restart Bazarr+ to remove this plugin"
+                : pendingUpdate
+                  ? "Restart Bazarr+ to activate the staged update"
+                  : "Restart Bazarr+ to activate this plugin"
+            }
+          >
             <Button size="xs" variant="light" color="yellow" disabled>
-              Restart required
+              {pendingRemoval
+                ? "Restart to remove"
+                : pendingUpdate
+                  ? "Restart to update"
+                  : "Restart to activate"}
             </Button>
           </Tooltip>
         );
@@ -142,20 +195,56 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
             <FontAwesomeIcon icon={faPuzzlePiece} />
           </div>
           <div style={{ minWidth: 0 }}>
-            <div className={styles.hubCardTitle}>
-              {entry.name ?? entry.provider_id}
-            </div>
+            <div className={styles.hubCardTitle}>{displayName}</div>
             <div className={styles.hubCardMeta}>
               v{entry.version} from {sourceLabel}
             </div>
           </div>
         </div>
+        {canShowActions && installed && (
+          <Menu position="bottom-end" withinPortal>
+            <Menu.Target>
+              <ActionIcon
+                variant="subtle"
+                color="gray"
+                aria-label={`${displayName} actions`}
+              >
+                <FontAwesomeIcon icon={faEllipsis} />
+              </ActionIcon>
+            </Menu.Target>
+            <Menu.Dropdown>
+              <Menu.Item
+                leftSection={<FontAwesomeIcon icon={faVial} />}
+                onClick={() => onTest?.(installed.provider_id)}
+                disabled={!onTest || !canTest || isTesting}
+              >
+                {canTest ? "Test connection" : "Test after restart"}
+              </Menu.Item>
+              <Menu.Divider />
+              <Menu.Item
+                color="red"
+                leftSection={<FontAwesomeIcon icon={faTrash} />}
+                onClick={() => onUninstall?.(installed.provider_id)}
+                disabled={!onUninstall}
+              >
+                {removeLabel}
+              </Menu.Item>
+            </Menu.Dropdown>
+          </Menu>
+        )}
       </div>
       {description && (
         <div className={styles.hubCardDescription}>{description}</div>
       )}
       <div className={styles.hubCardFooter}>
         <Group gap={6} className={styles.hubCardPills}>
+          {installed && (
+            <ProviderStatusBadge
+              state={installed.state}
+              pendingRestart={installed.pending_restart}
+              activeVersion={installed.active_version}
+            />
+          )}
           <TrustBadge trusted={entry.trusted} />
         </Group>
         {ctaButton}

@@ -670,6 +670,80 @@ def test_provider_hub_restart_activation_finalizes_removed_installation(tmp_path
     assert provider_id not in load_state()["installations"]
 
 
+def test_provider_hub_uninstall_discards_staged_install_without_restart(tmp_path, monkeypatch):
+    from provider_hub.service import remove_installation
+    from provider_hub.state import load_state
+
+    provider_id = "stagedonlyhub"
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "installations": {
+                    provider_id: {
+                        "provider_id": provider_id,
+                        "name": "Staged Only Hub Provider",
+                        "active_version": None,
+                        "staged_version": "1.0.0",
+                        "staged_path": "/new/bundle",
+                        "staged_python_path": "/new/python",
+                        "state": "staged",
+                        "pending_restart": True,
+                        "manifest": _manifest(provider_id=provider_id),
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    assert remove_installation(provider_id) is True
+    assert provider_id not in load_state()["installations"]
+
+
+def test_provider_hub_uninstall_stages_active_removal_and_discards_staged_update(tmp_path, monkeypatch):
+    from provider_hub.service import remove_installation
+    from provider_hub.state import load_state
+
+    provider_id = "updatedhub"
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "installations": {
+                    provider_id: {
+                        "provider_id": provider_id,
+                        "name": "Updated Hub Provider",
+                        "active_version": "1.0.0",
+                        "active_path": "/old/bundle",
+                        "python_path": "/old/python",
+                        "staged_version": "1.1.0",
+                        "staged_path": "/new/bundle",
+                        "staged_python_path": "/new/python",
+                        "staged_manifest": _manifest(provider_id=provider_id, version="1.1.0"),
+                        "state": "staged",
+                        "pending_restart": True,
+                        "manifest": _manifest(provider_id=provider_id),
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    assert remove_installation(provider_id) is True
+    installation = load_state()["installations"][provider_id]
+    assert installation["state"] == "removed"
+    assert installation["pending_restart"] is True
+    assert installation["active_version"] == "1.0.0"
+    assert installation["staged_version"] is None
+    assert installation["staged_path"] is None
+    assert installation["staged_python_path"] is None
+    assert installation["staged_manifest"] is None
+
+
 def test_provider_hub_config_redacts_secret_and_preserves_placeholder(tmp_path, monkeypatch):
     from provider_hub.service import SECRET_PLACEHOLDER, runtime_provider_configs, update_provider
     from provider_hub.state import load_state, save_state

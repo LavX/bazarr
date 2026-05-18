@@ -53,12 +53,11 @@ export const UpdateBanner: FunctionComponent<UpdateBannerProps> = ({
         <div className={styles.bannerBody}>
           <div className={styles.bannerTitle}>
             {n === 1
-              ? "1 provider is staged. Restart Bazarr+ to activate."
-              : `${n} providers are staged. Restart Bazarr+ to activate.`}
+              ? "1 Provider Hub change is staged. Restart Bazarr+ to apply it."
+              : `${n} Provider Hub changes are staged. Restart Bazarr+ to apply them.`}
           </div>
           <div className={styles.bannerSubtitle}>
-            Staged versions sit alongside the active version until the next
-            restart.
+            Staged installs, updates, and removals finish after restart.
           </div>
         </div>
         <div className={styles.bannerActions}>

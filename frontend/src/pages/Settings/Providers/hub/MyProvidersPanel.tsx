@@ -1,16 +1,9 @@
 import { FunctionComponent, ReactNode } from "react";
 import { Stack } from "@mantine/core";
-import {
-  useProviderHubTest,
-  useProviderHubUninstall,
-} from "@/apis/hooks/providerHub";
-import type { ProviderHubInstallation } from "@/apis/raw/providerHub";
-import { ProviderCard } from "@/pages/Settings/Providers/hub/components/ProviderCard";
 import styles from "@/pages/Settings/Providers/hub/hub.module.scss";
 
 interface MyProvidersPanelProps {
   enabledProviders: ReactNode;
-  installedPlugins?: ProviderHubInstallation[];
   antiCaptcha: ReactNode;
   integrations: ReactNode;
 }
@@ -37,13 +30,9 @@ const SectionHeader: FunctionComponent<SectionHeaderProps> = ({
 
 export const MyProvidersPanel: FunctionComponent<MyProvidersPanelProps> = ({
   enabledProviders,
-  installedPlugins = [],
   antiCaptcha,
   integrations,
 }) => {
-  const testProvider = useProviderHubTest();
-  const uninstall = useProviderHubUninstall();
-
   return (
     <Stack gap="xl">
       <Stack gap="md">
@@ -54,30 +43,6 @@ export const MyProvidersPanel: FunctionComponent<MyProvidersPanelProps> = ({
         />
         {enabledProviders}
       </Stack>
-
-      {installedPlugins.length > 0 && (
-        <Stack gap="md">
-          <SectionHeader
-            eyebrow="Provider Hub"
-            title="Installed plugins"
-            description="Manage installed Provider Hub plugins here. Active plugins are searchable only after you add them to Enabled search providers and save settings."
-          />
-          <div className={styles.cardGrid}>
-            {installedPlugins.map((provider) => (
-              <ProviderCard
-                key={provider.provider_id}
-                provider={provider}
-                onTest={(providerId) => testProvider.mutate(providerId)}
-                onUninstall={(providerId) => uninstall.mutate(providerId)}
-                isTesting={
-                  testProvider.isPending &&
-                  testProvider.variables === provider.provider_id
-                }
-              />
-            ))}
-          </div>
-        </Stack>
-      )}
 
       <Stack gap="md">
         <SectionHeader

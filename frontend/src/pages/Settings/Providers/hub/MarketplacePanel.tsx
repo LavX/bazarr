@@ -2,7 +2,11 @@ import { FunctionComponent, useCallback, useMemo, useState } from "react";
 import { Button, Chip, Group, SegmentedControl, Stack } from "@mantine/core";
 import { faSliders, faStore } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { useProviderHubInstall } from "@/apis/hooks";
+import {
+  useProviderHubInstall,
+  useProviderHubTest,
+  useProviderHubUninstall,
+} from "@/apis/hooks";
 import type {
   ProviderHubCatalog,
   ProviderHubCatalogEntry,
@@ -25,6 +29,30 @@ interface MarketplacePanelProps {
 
 type TrustFilter = "all" | "trusted" | "community";
 
+function sourceNameFromInstallation(provider: ProviderHubInstallation) {
+  const source = provider.manifest?.source as LooseObject | undefined;
+  return (
+    (typeof source?.name === "string" ? source.name : undefined) ??
+    (typeof source?.repo === "string" ? source.repo : undefined) ??
+    "Installed"
+  );
+}
+
+function catalogEntryFromInstallation(
+  provider: ProviderHubInstallation,
+): ProviderHubCatalogEntry {
+  const version =
+    provider.staged_version ?? provider.active_version ?? "installed";
+  return {
+    source: sourceNameFromInstallation(provider),
+    provider_id: provider["provider_id"],
+    name: provider.name,
+    version,
+    trusted: Boolean(provider.trusted),
+    manifest: provider.manifest ?? null,
+  };
+}
+
 export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
   catalog,
   providers,
@@ -35,6 +63,8 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   const install = useProviderHubInstall();
+  const testProvider = useProviderHubTest();
+  const uninstall = useProviderHubUninstall();
 
   const sources = catalog?.sources ?? [];
 
@@ -73,9 +103,20 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
     return Array.from(seen.values());
   }, [catalog?.entries]);
 
+  const marketplaceEntries = useMemo(() => {
+    const catalogProviderIds = new Set(
+      latestPerProvider.map((entry) => entry.provider_id),
+    );
+    const installedOnlyEntries = (providers ?? [])
+      .filter((provider) => !catalogProviderIds.has(provider.provider_id))
+      .map(catalogEntryFromInstallation);
+
+    return [...latestPerProvider, ...installedOnlyEntries];
+  }, [latestPerProvider, providers]);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return latestPerProvider.filter((entry) => {
+    return marketplaceEntries.filter((entry) => {
       if (trustFilter === "trusted" && !entry.trusted) return false;
       if (trustFilter === "community" && entry.trusted) return false;
       if (activeSources.length > 0) {
@@ -95,7 +136,7 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
         .toLowerCase();
       return haystack.includes(q);
     });
-  }, [latestPerProvider, query, trustFilter, activeSources]);
+  }, [marketplaceEntries, query, trustFilter, activeSources]);
 
   const handleInstall = useCallback(
     (entry: ProviderHubCatalogEntry) => {
@@ -105,7 +146,7 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
     [install],
   );
 
-  const noSources = sources.length === 0;
+  const noSources = sources.length === 0 && marketplaceEntries.length === 0;
   const noResults = !noSources && filtered.length === 0;
 
   return (
@@ -115,9 +156,8 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
           <div className={styles.eyebrow}>Marketplace</div>
           <h2 className={styles.panelTitle}>Browse the catalog</h2>
           <p className={styles.panelDescription}>
-            Discover community-maintained subtitle providers from your
-            configured catalog sources. Install one to add it to your provider
-            list.
+            Browse and manage Provider Hub plugins from your configured catalog
+            sources. Installed plugins can be tested or removed here.
           </p>
         </div>
         <Button
@@ -189,6 +229,12 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
               installed={installedById.get(entry.provider_id) ?? null}
               onInstall={handleInstall}
               isInstalling={install.isPending}
+              onTest={(providerId) => testProvider.mutate(providerId)}
+              onUninstall={(providerId) => uninstall.mutate(providerId)}
+              isTesting={
+                testProvider.isPending &&
+                testProvider.variables === entry.provider_id
+              }
             />
           ))}
         </div>

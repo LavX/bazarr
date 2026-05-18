@@ -284,7 +284,6 @@ const SettingsProvidersView: FunctionComponent = () => {
             enabledProviders={
               <EnabledProvidersSection providerOptions={providerOptions} />
             }
-            installedPlugins={providers.data}
             antiCaptcha={<AntiCaptchaSection />}
             integrations={<IntegrationsSection />}
           />

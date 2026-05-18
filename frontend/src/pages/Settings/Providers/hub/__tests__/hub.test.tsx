@@ -119,7 +119,7 @@ describe("Settings > Providers (Provider Hub)", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText(/Restart Bazarr\+ to activate/i),
+        screen.getByText(/Restart Bazarr\+ to apply/i),
       ).toBeInTheDocument();
     });
 
@@ -133,9 +133,28 @@ describe("Settings > Providers (Provider Hub)", () => {
     ).toBe("1");
   });
 
-  it("shows installed hub plugins separately and can uninstall them", async () => {
+  it("manages installed hub plugins from the Marketplace card", async () => {
     const uninstallRequest = vi.fn();
     server.use(
+      http.get("/api/provider-hub/providers", () => {
+        return HttpResponse.json({
+          data: [
+            {
+              provider_id: "officialhub",
+              name: "Official Hub Provider",
+              active_version: "1.0.0",
+              staged_version: null,
+              state: "active",
+              pending_restart: false,
+              trusted: true,
+              active_path: "/config/provider_hub/active/officialhub",
+              python_path: "/config/provider_hub/venvs/officialhub/bin/python",
+              last_error: null,
+              manifest,
+            },
+          ],
+        });
+      }),
       http.post("/api/provider-hub/providers/officialhub/test", () => {
         return HttpResponse.json({
           provider_id: "officialhub",
@@ -152,29 +171,125 @@ describe("Settings > Providers (Provider Hub)", () => {
 
     customRender(<SettingsProvidersView />);
 
-    const panel = await screen.findByRole("tabpanel", {
+    const myProvidersPanel = await screen.findByRole("tabpanel", {
       name: /My Providers/i,
     });
 
-    await screen.findByText(/Restart Bazarr\+ to activate/i);
+    expect(
+      within(myProvidersPanel).getByText("Enabled search providers"),
+    ).toBeInTheDocument();
+    expect(
+      within(myProvidersPanel).queryByText("Installed plugins"),
+    ).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("tab", { name: /Marketplace/i }));
+    const marketplacePanel = await screen.findByRole("tabpanel", {
+      name: /Marketplace/i,
+    });
 
     expect(
-      within(panel).getByText("Enabled search providers"),
-    ).toBeInTheDocument();
-    expect(within(panel).getByText("Installed plugins")).toBeInTheDocument();
-    expect(
-      within(panel).getByText("Official Hub Provider"),
+      within(marketplacePanel).getByText("Official Hub Provider"),
     ).toBeInTheDocument();
 
-    await userEvent.click(within(panel).getByLabelText("Provider actions"));
+    await userEvent.click(
+      within(marketplacePanel).getByLabelText("Official Hub Provider actions"),
+    );
     await userEvent.click(await screen.findByText("Test connection"));
 
     await screen.findByText("Worker health check passed");
 
-    await userEvent.click(within(panel).getByLabelText("Provider actions"));
+    await userEvent.click(
+      within(marketplacePanel).getByLabelText("Official Hub Provider actions"),
+    );
     await userEvent.click(await screen.findByText("Uninstall"));
 
     await waitFor(() => expect(uninstallRequest).toHaveBeenCalledTimes(1));
+  });
+
+  it("shows staged install actions as activation pending and cancelable", async () => {
+    const uninstallRequest = vi.fn();
+    server.use(
+      http.delete("/api/provider-hub/installations/officialhub", () => {
+        uninstallRequest();
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+
+    customRender(<SettingsProvidersView />);
+
+    await userEvent.click(screen.getByRole("tab", { name: /Marketplace/i }));
+    const panel = await screen.findByRole("tabpanel", {
+      name: /Marketplace/i,
+    });
+
+    expect(within(panel).getByText("Install staged")).toBeInTheDocument();
+    expect(
+      within(panel).getByRole("button", { name: /Restart to activate/i }),
+    ).toBeDisabled();
+
+    await userEvent.click(
+      within(panel).getByLabelText("Official Hub Provider actions"),
+    );
+
+    expect(
+      await screen.findByRole("menuitem", { name: "Test after restart" }),
+    ).toHaveAttribute("data-disabled", "true");
+
+    await userEvent.click(await screen.findByText("Cancel staged install"));
+
+    await waitFor(() => expect(uninstallRequest).toHaveBeenCalledTimes(1));
+  });
+
+  it("shows staged uninstall as removal pending without another uninstall action", async () => {
+    server.use(
+      http.get("/api/provider-hub/providers", () => {
+        return HttpResponse.json({
+          data: [
+            {
+              provider_id: "officialhub",
+              name: "Official Hub Provider",
+              active_version: "1.0.0",
+              staged_version: null,
+              state: "removed",
+              pending_restart: true,
+              trusted: true,
+              active_path: "/config/provider_hub/active/officialhub",
+              python_path: "/config/provider_hub/venvs/officialhub/bin/python",
+              last_error: null,
+              manifest,
+            },
+          ],
+        });
+      }),
+    );
+
+    customRender(<SettingsProvidersView />);
+
+    await userEvent.click(screen.getByRole("tab", { name: /Marketplace/i }));
+    const panel = await screen.findByRole("tabpanel", {
+      name: /Marketplace/i,
+    });
+
+    expect(within(panel).getByText("Removal staged")).toBeInTheDocument();
+    expect(
+      within(panel).getByRole("button", { name: /Restart to remove/i }),
+    ).toBeDisabled();
+    expect(
+      within(panel).queryByLabelText("Official Hub Provider actions"),
+    ).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("tab", { name: /Updates/i }));
+    const updatesPanel = await screen.findByRole("tabpanel", {
+      name: /Updates/i,
+    });
+
+    expect(
+      within(updatesPanel).getByText("Staged for restart"),
+    ).toBeInTheDocument();
+    expect(
+      within(updatesPanel).getByText("Restart to remove"),
+    ).toBeInTheDocument();
+    expect(within(updatesPanel).getByText("v1.0.0")).toBeInTheDocument();
   });
 
   it("offers active hub plugins in the same add-provider flow as shipped providers", async () => {

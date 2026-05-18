@@ -38,21 +38,21 @@ export const UpdatesPanel: FunctionComponent<UpdatesPanelProps> = ({
   const availableRows = summary.available;
 
   const empty = stagedRows.length === 0 && availableRows.length === 0;
+  const changeCount = availableRows.length + stagedRows.length;
+  const title = empty
+    ? "All providers up to date"
+    : stagedRows.length > 0 && availableRows.length === 0
+      ? `${stagedRows.length} staged change${stagedRows.length === 1 ? "" : "s"}`
+      : `${changeCount} provider change${changeCount === 1 ? "" : "s"}`;
 
   return (
     <Stack gap="md">
       <div className={styles.panelHeader}>
         <div>
           <div className={styles.eyebrow}>Updates</div>
-          <h2 className={styles.panelTitle}>
-            {empty
-              ? "All providers up to date"
-              : `${availableRows.length + stagedRows.length} update${
-                  availableRows.length + stagedRows.length === 1 ? "" : "s"
-                }`}
-          </h2>
+          <h2 className={styles.panelTitle}>{title}</h2>
           <p className={styles.panelDescription}>
-            Review and stage updates from your catalog.
+            Review catalog updates and staged Provider Hub changes.
           </p>
         </div>
         <Button
@@ -76,12 +76,11 @@ export const UpdatesPanel: FunctionComponent<UpdatesPanelProps> = ({
           {stagedRows.length > 0 && (
             <Stack gap="xs">
               <Text size="sm" fw={600}>
-                Staged
+                Staged for restart
               </Text>
               <div className={styles.cardGrid}>
                 {stagedRows.map((p) => {
                   const latest = getLatestCatalogEntry(catalog, p.provider_id);
-                  if (!latest) return null;
                   return (
                     <UpdateCard
                       key={p.provider_id}

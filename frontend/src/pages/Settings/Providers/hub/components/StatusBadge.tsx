@@ -56,9 +56,43 @@ export const StatusBadge: FunctionComponent<StatusBadgeProps> = ({
 export const ProviderStatusBadge: FunctionComponent<{
   state: ProviderState;
   pendingRestart?: boolean;
-}> = ({ state, pendingRestart }) => {
+  activeVersion?: string | null;
+}> = ({ state, pendingRestart, activeVersion }) => {
   const meta: StatusMeta = getProviderStateMeta(state);
   if (pendingRestart) {
+    if (state === "removed") {
+      return (
+        <StatusBadge
+          tone="warning"
+          label="Removal staged"
+          icon={meta.icon}
+          variant="dot"
+          tooltip="Restart Bazarr+ to remove this plugin"
+        />
+      );
+    }
+    if (state === "staged" && activeVersion) {
+      return (
+        <StatusBadge
+          tone="warning"
+          label="Update staged"
+          icon={meta.icon}
+          variant="dot"
+          tooltip="Restart Bazarr+ to activate the staged update"
+        />
+      );
+    }
+    if (state === "staged") {
+      return (
+        <StatusBadge
+          tone="warning"
+          label="Install staged"
+          icon={meta.icon}
+          variant="dot"
+          tooltip="Restart Bazarr+ to activate this plugin"
+        />
+      );
+    }
     return (
       <StatusBadge
         tone="warning"
