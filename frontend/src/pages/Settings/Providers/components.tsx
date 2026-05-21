@@ -188,7 +188,11 @@ const SortableProviderTile: FunctionComponent<SortableProviderTileProps> = ({
   } = useSortable({ id: provider.key });
 
   const displayName = provider.name ?? capitalize(provider.key);
-  const meta = getShippedMeta(provider.key, provider.inputs);
+  const shipped = getShippedMeta(provider.key, provider.inputs);
+  // Plugin providers carry their language list on the ProviderInfo (from the
+  // manifest); shipped providers fall back to provider-languages.json.
+  const languages = provider.languages ?? shipped.languages;
+  const meta = { ...shipped, languages };
   const showAllLangs = meta.languages.length <= LANGUAGE_CHIP_THRESHOLD;
   const langTooltip = meta.languages
     .map((code) => getLanguageName(code))
@@ -323,10 +327,14 @@ export const ProviderView: FunctionComponent<ProviderViewProps> = ({
   const sortedItems = useMemo(() => {
     if (!providers) return [];
 
+    // Never drop an enabled key just because its option isn't loaded yet
+    // (e.g. plugin providers whose hub query hasn't returned on a fresh page
+    // load after a restart). Render a minimal placeholder so the tile stays
+    // visible and the saved enabled-providers list never silently shrinks.
     const decorated = providers
-      .flatMap((key) => {
+      .map((key) => {
         const item = availableOptions.find((opt) => opt.key === key);
-        return item ? [item] : [];
+        return item ?? ({ key } satisfies ProviderInfo);
       })
       .map((v) => ({ v, priority: priorities[v.key] ?? 100 }));
 

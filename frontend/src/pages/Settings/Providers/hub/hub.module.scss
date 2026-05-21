@@ -544,6 +544,10 @@ $tones: (
   align-items: center;
   gap: 12px;
   min-width: 0;
+  // Reserve room for the rank watermark numeral that sits in the top-right
+  // (top:6px right:14px, ~28px wide for two-digit ranks). Without this,
+  // a "Plugin" badge sliding to the right of a short name can collide.
+  padding-right: 44px;
 }
 
 .providerTileAvatar {

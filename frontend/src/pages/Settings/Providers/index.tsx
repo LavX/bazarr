@@ -105,6 +105,12 @@ function schemaToInputs(
 
 function providerHubOption(provider: ProviderHubInstallation): ProviderInfo {
   const manifest = provider.manifest;
+  const manifestLanguages = manifest?.languages;
+  const languages = Array.isArray(manifestLanguages)
+    ? manifestLanguages.filter(
+        (entry): entry is string => typeof entry === "string",
+      )
+    : undefined;
   return {
     key: provider.provider_id,
     name:
@@ -120,6 +126,7 @@ function providerHubOption(provider: ProviderHubInstallation): ProviderInfo {
     message:
       "Provider Hub plugin is installed but not enabled until you add it here and save settings. Its credentials are stored with the rest of Provider settings.",
     source: "plugin",
+    languages,
   };
 }
 

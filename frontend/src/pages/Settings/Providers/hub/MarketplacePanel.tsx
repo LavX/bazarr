@@ -228,7 +228,10 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
               entry={entry}
               installed={installedById.get(entry.provider_id) ?? null}
               onInstall={handleInstall}
-              isInstalling={install.isPending}
+              isInstalling={
+                install.isPending &&
+                install.variables?.manifest?.provider_id === entry.provider_id
+              }
               onTest={(providerId) => testProvider.mutate(providerId)}
               onUninstall={(providerId) => uninstall.mutate(providerId)}
               isTesting={

@@ -12,7 +12,12 @@ from guessit import guessit
 from babelfish import language_converters
 from subzero.language import Language
 from subliminal import Episode, Movie
-from subliminal.exceptions import ConfigurationError, ProviderError, DownloadLimitExceeded
+from subliminal.exceptions import (
+    ConfigurationError,
+    DownloadLimitExceeded,
+    ProviderError,
+    ServiceUnavailable,
+)
 from subliminal_patch.exceptions import APIThrottled
 from .mixins import ProviderRetryMixin
 from subliminal_patch.subtitle import Subtitle
@@ -290,6 +295,13 @@ class SubdlProvider(ProviderRetryMixin, Provider):
             raise APIThrottled("Too many requests")
         elif res.status_code == 403:
             raise ConfigurationError("Invalid API key")
+        elif 500 <= res.status_code < 600:
+            # Upstream api.subdl.com is transient-down (502/503/504). Convert
+            # to ServiceUnavailable so the throttle bucket is semantic and the
+            # logged URL doesn't carry the api_key query string.
+            raise ServiceUnavailable(
+                f"subdl returned {res.status_code} for {res.request.path_url.split('?', 1)[0]}"
+            )
         elif res.status_code != 200:
             res.raise_for_status()
 
