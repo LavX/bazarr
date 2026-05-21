@@ -68,7 +68,7 @@ unidecode==1.4.0
 urllib3==2.6.3
 waitress==3.0.2
 webrtcvad-wheels>=2.0.14  # binary wheels for cp36..cp313; upstream webrtcvad is source-only and unmaintained since 2017
-werkzeug==3.1.6
+werkzeug==3.1.8
 whichcraft==0.6.1
 
 # Provider captcha support
