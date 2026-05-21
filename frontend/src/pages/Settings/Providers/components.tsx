@@ -32,16 +32,15 @@ import {
 } from "@dnd-kit/core";
 import {
   arrayMove,
+  rectSortingStrategy,
   SortableContext,
   sortableKeyboardCoordinates,
   useSortable,
-  verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import {
   faArrowLeft,
   faCircleInfo,
-  faGripVertical,
   faLanguage,
   faMagnifyingGlass,
   faPlus,
@@ -70,6 +69,7 @@ import {
 } from "@/pages/Settings/utilities/SettingsProvider";
 import { BuildKey } from "@/utilities";
 import { ASSERT } from "@/utilities/console";
+import { getAvatarPaletteIndex } from "./avatar-palette";
 import { ProviderInfo, ProviderList } from "./list";
 import {
   ALL_LANGUAGE_OPTIONS,
@@ -137,123 +137,155 @@ const resolveProviderPriorities = (
   return {};
 };
 
-interface SortableProviderRowProps {
+interface SortableProviderTileProps {
   provider: ProviderInfo;
   priority: number;
+  rank: number;
   onSelect: () => void;
 }
 
-const SortableProviderRow: FunctionComponent<SortableProviderRowProps> = ({
+function rankAccentClass(rank: number): string | undefined {
+  if (rank === 1) return styles.providerTileRankGold;
+  if (rank === 2) return styles.providerTileRankSilver;
+  if (rank === 3) return styles.providerTileRankBronze;
+  return undefined;
+}
+
+function avatarClass(providerKey: string): string {
+  const index = getAvatarPaletteIndex(providerKey);
+  const className = (styles as Record<string, string | undefined>)[
+    `providerTileAvatar${index}`
+  ];
+  return className ?? styles.providerTileAvatar0;
+}
+
+function authChipClass(auth: AuthKind): string | undefined {
+  switch (auth) {
+    case "none":
+      return styles.providerTileChipAuthNone;
+    case "account":
+      return styles.providerTileChipAuthAccount;
+    case "apikey":
+      return styles.providerTileChipAuthApikey;
+    case "cookies":
+      return styles.providerTileChipAuthCookies;
+  }
+}
+
+const SortableProviderTile: FunctionComponent<SortableProviderTileProps> = ({
   provider,
   priority,
+  rank,
   onSelect,
 }) => {
   const {
     attributes,
     listeners,
     setNodeRef,
-    setActivatorNodeRef,
     transform,
     transition,
     isDragging,
   } = useSortable({ id: provider.key });
 
-  const clamped = Math.max(1, Math.min(priority, 100));
-  const railW = Math.max(2, 6 - (clamped / 100) * 4);
   const displayName = provider.name ?? capitalize(provider.key);
   const meta = getShippedMeta(provider.key, provider.inputs);
   const showAllLangs = meta.languages.length <= LANGUAGE_CHIP_THRESHOLD;
   const langTooltip = meta.languages
     .map((code) => getLanguageName(code))
     .join(", ");
-  const rowStyle = {
+
+  const tileStyle = {
     transform: CSS.Transform.toString(transform),
     transition,
-    "--bz-priority-rail": `${railW.toFixed(2)}px`,
     zIndex: isDragging ? 10 : undefined,
     opacity: isDragging ? 0.85 : undefined,
     boxShadow: isDragging ? "var(--bz-shadow-float)" : undefined,
   } as CSSProperties;
 
-  const handleRowClick = (event: React.MouseEvent) => {
-    if (
-      (event.target as HTMLElement).closest(`.${styles.priorityDragHandle}`)
-    ) {
-      return;
-    }
-    onSelect();
-  };
-
   const handleKeyDown = (event: React.KeyboardEvent) => {
     if (event.target !== event.currentTarget) return;
-    if (event.key === "Enter" || event.key === " ") {
+    // Space is reserved for @dnd-kit's KeyboardSensor (lift/drop). Enter opens
+    // the configuration drawer.
+    if (event.key === "Enter") {
       event.preventDefault();
       onSelect();
     }
   };
 
+  const initial = displayName.trim().charAt(0).toUpperCase() || "?";
+  const rankClassName = rankAccentClass(rank);
+
   return (
     <div
       ref={setNodeRef}
-      className={styles.priorityRow}
-      style={rowStyle}
-      role="button"
-      tabIndex={0}
+      className={styles.providerTile}
+      style={tileStyle}
+      {...attributes}
+      {...listeners}
       aria-label={`${displayName} (priority ${priority})`}
-      onClick={handleRowClick}
+      onClick={onSelect}
       onKeyDown={handleKeyDown}
     >
-      <span className={styles.priorityRail} aria-hidden="true" />
-      <button
-        ref={setActivatorNodeRef}
-        type="button"
-        className={styles.priorityDragHandle}
-        aria-label={`Drag to reorder ${displayName}`}
-        {...attributes}
-        {...listeners}
+      <span
+        aria-hidden="true"
+        className={
+          rankClassName
+            ? `${styles.providerTileRank} ${rankClassName}`
+            : styles.providerTileRank
+        }
       >
-        <FontAwesomeIcon icon={faGripVertical} />
-      </button>
-      <span className={styles.priorityBody}>
-        <span className={styles.priorityNameRow}>
-          <span className={styles.priorityName}>{displayName}</span>
+        {rank}
+      </span>
+      <div className={styles.providerTileHeader}>
+        <span
+          aria-hidden="true"
+          className={`${styles.providerTileAvatar} ${avatarClass(provider.key)}`}
+        >
+          {initial}
+        </span>
+        <span className={styles.providerTileNameRow}>
+          <span className={styles.providerTileName} title={displayName}>
+            {displayName}
+          </span>
           {provider.source === "plugin" && (
             <Badge size="xs" variant="light">
               Plugin
             </Badge>
           )}
         </span>
-        {provider.description && (
-          <span
-            className={styles.priorityDescription}
-            title={provider.description}
-          >
-            {provider.description}
-          </span>
-        )}
-        <span className={styles.priorityChips}>
-          <Badge size="xs" variant="outline" color="gray">
-            {AUTH_LABEL[meta.auth]}
-          </Badge>
-          {meta.testable && (
-            <Badge size="xs" variant="outline" color="gray">
-              Testable
-            </Badge>
-          )}
-          {meta.languages.length > 0 &&
-            showAllLangs &&
-            meta.languages.map((code) => (
-              <Badge key={code} size="xs" variant="outline" color="gray">
-                {getLanguageName(code)}
-              </Badge>
-            ))}
-          {meta.languages.length > LANGUAGE_CHIP_THRESHOLD && (
-            <Badge size="xs" variant="outline" color="gray" title={langTooltip}>
-              {meta.languages.length} languages
-            </Badge>
-          )}
+      </div>
+      {provider.description && (
+        <span className={styles.providerTileDesc} title={provider.description}>
+          {provider.description}
         </span>
-      </span>
+      )}
+      <div className={styles.providerTileMeta}>
+        <Badge
+          size="xs"
+          variant="outline"
+          color="gray"
+          className={authChipClass(meta.auth)}
+        >
+          {AUTH_LABEL[meta.auth]}
+        </Badge>
+        {meta.testable && (
+          <Badge size="xs" variant="outline" color="gray">
+            Testable
+          </Badge>
+        )}
+        {meta.languages.length > 0 &&
+          showAllLangs &&
+          meta.languages.map((code) => (
+            <Badge key={code} size="xs" variant="outline" color="gray">
+              {getLanguageName(code)}
+            </Badge>
+          ))}
+        {meta.languages.length > LANGUAGE_CHIP_THRESHOLD && (
+          <Badge size="xs" variant="outline" color="gray" title={langTooltip}>
+            {meta.languages.length} languages
+          </Badge>
+        )}
+      </div>
     </div>
   );
 };
@@ -344,39 +376,40 @@ export const ProviderView: FunctionComponent<ProviderViewProps> = ({
 
   return (
     <>
-      <Stack gap="xs" className={styles.priorityList}>
-        <UnstyledButton
-          className={styles.priorityAddRow}
-          onClick={() => select()}
-          aria-label={addLabel ?? "Add provider"}
-        >
-          <span className={styles.priorityAddIcon} aria-hidden="true">
-            <FontAwesomeIcon icon={faPlus} />
-          </span>
-          <span className={styles.priorityAddText}>
-            {addLabel ?? "Add provider"}
-          </span>
-        </UnstyledButton>
-        <DndContext
-          sensors={sensors}
-          collisionDetection={closestCenter}
-          onDragEnd={handleDragEnd}
-        >
-          <SortableContext
-            items={itemIds}
-            strategy={verticalListSortingStrategy}
-          >
-            {sortedItems.map(({ v, priority }) => (
-              <SortableProviderRow
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragEnd={handleDragEnd}
+      >
+        <SortableContext items={itemIds} strategy={rectSortingStrategy}>
+          <div className={styles.providerTileGrid}>
+            {sortedItems.map(({ v, priority }, idx) => (
+              <SortableProviderTile
                 key={v.key}
                 provider={v}
                 priority={priority}
+                rank={idx + 1}
                 onSelect={() => select(v)}
               />
             ))}
-          </SortableContext>
-        </DndContext>
-      </Stack>
+            <UnstyledButton
+              className={styles.providerAddTile}
+              onClick={() => select()}
+              aria-label={addLabel ?? "Add provider"}
+            >
+              <span className={styles.providerAddTileIcon} aria-hidden="true">
+                <FontAwesomeIcon icon={faPlus} />
+              </span>
+              <span>{addLabel ?? "Add search provider"}</span>
+            </UnstyledButton>
+            {sortedItems.length === 0 && (
+              <p className={styles.providerEmptyHint}>
+                Add your first search provider to start downloading subtitles.
+              </p>
+            )}
+          </div>
+        </SortableContext>
+      </DndContext>
       <Drawer
         opened={drawerPayload !== null && settings !== null}
         onClose={closeDrawer}

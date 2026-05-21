@@ -160,6 +160,12 @@ body::after {
   /* Hover tokens */
   --bz-hover-bg: rgba(255, 255, 255, 0.04);
   --bz-hover-bg-emphasis: rgba(255, 255, 255, 0.07);
+
+  /* Auth-method accents (used by provider tiles) */
+  --bz-auth-none-fg: #51cf66;
+  --bz-auth-account-fg: #7cc4ff;
+  --bz-auth-apikey-fg: #ffd166;
+  --bz-auth-cookies-fg: #ff8fa3;
 }
 
 :root[data-mantine-color-scheme="light"] {
@@ -187,6 +193,12 @@ body::after {
 
   --bz-hover-bg: rgba(0, 0, 0, 0.04);
   --bz-hover-bg-emphasis: rgba(0, 0, 0, 0.07);
+
+  /* Auth-method accents (used by provider tiles) */
+  --bz-auth-none-fg: #2b8a3e;
+  --bz-auth-account-fg: #1971c2;
+  --bz-auth-apikey-fg: #b3811f;
+  --bz-auth-cookies-fg: #c2255c;
 }
 
 // Floaty main content area
