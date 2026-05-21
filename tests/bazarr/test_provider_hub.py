@@ -1805,3 +1805,335 @@ def test_patch_catalog_source_updates_dev_ref(tmp_path, monkeypatch):
     assert source is not None
     assert source["dev_ref"] == "feat/branch"
     assert source["last_checked_at"] is not None
+
+
+def _empty_state_file(tmp_path):
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps({"catalog_sources": {}, "installations": {}, "jobs": []}),
+        encoding="utf-8",
+    )
+    return state_file
+
+
+def test_record_job_writes_lifecycle_pending_running_completed(tmp_path, monkeypatch):
+    from provider_hub.service import list_jobs, record_job
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    observed = []
+    with record_job(
+        "stage_update",
+        target_kind="provider",
+        target_id="examplehub",
+        target_name="Example",
+        from_version="1.0.0",
+        to_version="1.1.0",
+    ) as job:
+        observed.append(list_jobs()[-1]["state"])
+        job.update(message="staged")
+
+    jobs = list_jobs()
+    assert len(jobs) == 1
+    last = jobs[-1]
+    assert observed == ["running"]
+    assert last["state"] == "completed"
+    assert last["action"] == "stage_update"
+    assert last["target_id"] == "examplehub"
+    assert last["from_version"] == "1.0.0"
+    assert last["to_version"] == "1.1.0"
+    assert last["message"] == "staged"
+    assert last["duration_ms"] is not None
+    assert last["started_at"] is not None
+    assert last["completed_at"] is not None
+    assert last["error"] is None
+
+
+def test_record_job_marks_failed_with_exception(tmp_path, monkeypatch):
+    from provider_hub.service import list_jobs, record_job
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    with pytest.raises(ValueError):
+        with record_job("install", target_kind="provider", target_id="examplehub") as job:
+            job.update(message="kicking off")
+            raise ValueError("boom")
+
+    last = list_jobs()[-1]
+    assert last["state"] == "failed"
+    assert last["error"] == "boom"
+    assert last["duration_ms"] is not None
+    assert last["message"] == "kicking off"
+
+
+def test_record_job_trims_history_to_limit(tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.service import list_jobs, record_job
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+    monkeypatch.setattr(service, "_JOB_LOG_LIMIT", 3)
+
+    for index in range(5):
+        with record_job("check_updates", target_kind="system") as job:
+            job.update(message=f"check {index}")
+
+    jobs = list_jobs()
+    assert len(jobs) == 3
+    assert [job["message"] for job in jobs] == ["check 2", "check 3", "check 4"]
+
+
+def test_check_updates_emits_lifecycle_job(tmp_path, monkeypatch):
+    from provider_hub.service import check_updates, list_jobs
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    job = check_updates()
+
+    assert job["state"] == "completed"
+    assert job["action"] == "check_updates"
+    assert job["duration_ms"] is not None
+    assert "No new updates available" in job["message"]
+    assert job["id"] == list_jobs()[-1]["id"]
+
+
+def test_check_updates_reports_available_updates(tmp_path, monkeypatch):
+    from provider_hub.service import check_updates
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    state = load_state()
+    state["installations"]["examplehub"] = {
+        "provider_id": "examplehub",
+        "name": "Example",
+        "active_version": "1.0.0",
+        "state": "active",
+        "pending_restart": False,
+        "manifest": {"provider_id": "examplehub", "version": "1.0.0"},
+    }
+    state["catalog_entries"]["official:examplehub:1.1.0"] = {
+        "provider_id": "examplehub",
+        "version": "1.1.0",
+        "source": "official",
+        "manifest": {"provider_id": "examplehub", "version": "1.1.0"},
+    }
+    save_state(state)
+
+    job = check_updates()
+
+    assert job["state"] == "completed"
+    assert job["details"]["updates_available"] == 1
+    assert "1.0.0 -> 1.1.0" in job["message"]
+
+
+def test_add_catalog_source_records_activity_job(tmp_path, monkeypatch):
+    from provider_hub.service import add_catalog_source, list_jobs
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source(
+        "community",
+        "https://github.com/example/providers/blob/main/catalog.json",
+        dev_ref="feat/foo",
+    )
+
+    job = list_jobs()[-1]
+    assert job["action"] == "add_source"
+    assert job["state"] == "completed"
+    assert job["target_kind"] == "source"
+    assert job["target_id"] == "community"
+    assert job["details"]["dev_ref"] == "feat/foo"
+    assert "Added catalog source" in job["message"]
+
+
+def test_update_catalog_source_records_version_diff(tmp_path, monkeypatch):
+    from provider_hub.service import add_catalog_source, list_jobs, update_catalog_source
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source(
+        "community",
+        "https://github.com/example/providers/blob/main/catalog.json",
+        dev_ref="feat/old",
+    )
+    update_catalog_source("community", dev_ref="feat/new")
+
+    job = list_jobs()[-1]
+    assert job["action"] == "update_source"
+    assert job["state"] == "completed"
+    assert job["from_version"] == "feat/old"
+    assert job["to_version"] == "feat/new"
+
+
+def test_remove_catalog_source_records_failed_when_missing(tmp_path, monkeypatch):
+    from provider_hub.service import list_jobs, remove_catalog_source
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    assert remove_catalog_source("ghost") is False
+    job = list_jobs()[-1]
+    assert job["action"] == "remove_source"
+    assert job["state"] == "completed"
+    assert "not found" in job["message"]
+
+
+def test_refresh_catalog_records_summary(tmp_path, monkeypatch):
+    from provider_hub.service import list_jobs, refresh_catalog
+
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "catalog_sources": {
+                    "official": {
+                        "id": "official",
+                        "name": "Official Bazarr Provider Catalog",
+                        "type": "github",
+                        "url": "https://github.com/LavX/bazarr-provider-catalog/blob/main/catalog.json",
+                        "enabled": True,
+                        "official": True,
+                        "trusted": True,
+                        "dev_ref": None,
+                        "last_checked_at": None,
+                        "last_error": None,
+                    },
+                },
+                "catalog_entries": {},
+                "installations": {},
+                "jobs": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    def fake_get(url, timeout):
+        if "api.github.com" in url:
+            return _FakeResponse({"sha": "f" * 40})
+        return _FakeResponse({"providers": []})
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+
+    refresh_catalog()
+    job = list_jobs()[-1]
+    assert job["action"] == "refresh_catalog"
+    assert job["state"] == "completed"
+    assert job["details"]["sources_total"] == 1
+    assert job["details"]["sources_ok"] == 1
+    assert "Refreshed 1 source(s)" in job["message"]
+
+
+def test_remove_installation_records_uninstall_job(tmp_path, monkeypatch):
+    from provider_hub.service import list_jobs, remove_installation
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    state = load_state()
+    state["installations"]["examplehub"] = {
+        "provider_id": "examplehub",
+        "name": "Example",
+        "active_version": "1.0.0",
+        "state": "active",
+        "pending_restart": False,
+    }
+    save_state(state)
+
+    assert remove_installation("examplehub") is True
+    job = list_jobs()[-1]
+    assert job["action"] == "uninstall"
+    assert job["state"] == "completed"
+    assert job["target_id"] == "examplehub"
+    assert job["from_version"] == "1.0.0"
+    assert "Staged removal" in job["message"]
+
+
+def test_stage_install_records_install_job_on_success(tmp_path, monkeypatch):
+    from provider_hub.service import list_jobs, stage_install
+
+    provider_content = b"class ExampleProvider: pass\n"
+    commit = "a" * 40
+    manifest = _manifest(
+        files={"provider.py": _sha256(provider_content)},
+        dependencies={"requirements": []},
+        source={
+            "type": "github",
+            "repo": "owner/repo",
+            "ref": "main",
+            "commit": commit,
+            "catalog_url": "https://github.com/owner/repo/blob/main/catalog.json",
+            "trusted": True,
+        },
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+
+    def fake_get(url, timeout):
+        return _FakeResponse(content=provider_content)
+
+    class FakeEnvironment:
+        def __init__(self, root):
+            self.root = Path(root)
+
+        def install(self, validated):
+            env_path = self.root / "envs" / validated.provider_id / validated.version / "test"
+            python_path = env_path / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            python_path.parent.mkdir(parents=True, exist_ok=True)
+            python_path.write_text("", encoding="utf-8")
+            return env_path
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
+    monkeypatch.setattr(
+        "provider_hub.service._smoke_validate_worker",
+        lambda manifest, bundle_path, python_path: None,
+    )
+
+    stage_install(manifest)
+
+    job = list_jobs()[-1]
+    assert job["action"] == "install"
+    assert job["state"] == "completed"
+    assert job["target_id"] == "examplehub"
+    assert job["to_version"] == "1.0.0"
+    assert job["from_version"] is None
+    assert "Staged install" in job["message"]
+
+
+def test_stage_install_records_failed_job_on_smoke_error(tmp_path, monkeypatch):
+    from provider_hub.service import ProviderHubInstallError, list_jobs, stage_install
+
+    provider_content = b"class ExampleProvider: pass\n"
+    manifest = _manifest(
+        file_payloads={"provider.py": provider_content},
+        dependencies={"requirements": []},
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+
+    def fake_get(url, timeout):
+        return _FakeResponse(content=provider_content)
+
+    class FakeEnvironment:
+        def __init__(self, root):
+            self.root = Path(root)
+
+        def install(self, validated):
+            env_path = self.root / "envs" / validated.provider_id / validated.version / "test"
+            python_path = env_path / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            python_path.parent.mkdir(parents=True, exist_ok=True)
+            python_path.write_text("", encoding="utf-8")
+            return env_path
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
+    monkeypatch.setattr(
+        "provider_hub.service._smoke_validate_worker",
+        lambda manifest, bundle_path, python_path: (_ for _ in ()).throw(RuntimeError("worker broke")),
+    )
+
+    with pytest.raises(ProviderHubInstallError):
+        stage_install(manifest)
+
+    job = list_jobs()[-1]
+    assert job["action"] == "install"
+    assert job["state"] == "failed"
+    assert "worker broke" in job["error"]

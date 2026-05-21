@@ -9,10 +9,10 @@ export interface ProviderHubCatalogSource {
   url: string;
   enabled?: boolean;
   trusted: boolean;
-  dev_ref?: string | null;
   last_checked_at?: string | null;
   last_error?: string | null;
   resolved_commit?: string | null;
+  dev_ref?: string | null;
 }
 
 export interface ProviderHubCatalogEntry {
@@ -59,7 +59,19 @@ export interface ProviderHubJob {
   action?: string;
   state?: string;
   message?: string | null;
+  target_kind?: "provider" | "source" | "system" | null;
+  target_id?: string | null;
+  target_name?: string | null;
+  source_id?: string | null;
+  source_name?: string | null;
+  from_version?: string | null;
+  to_version?: string | null;
+  error?: string | null;
+  details?: Record<string, unknown> | null;
+  duration_ms?: number | null;
   created_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
   updated_at?: string | null;
 }
 

@@ -217,3 +217,35 @@ export function formatAbsoluteTime(iso: string | null | undefined): string {
     .replace("T", " ")
     .replace(/\.\d+Z$/, " UTC");
 }
+
+export function formatDuration(durationMs: number | null | undefined): string {
+  if (durationMs == null || Number.isNaN(durationMs)) return "";
+  if (durationMs < 1) return "<1ms";
+  if (durationMs < 1000) return `${Math.round(durationMs)}ms`;
+  const seconds = durationMs / 1000;
+  if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = Math.round(seconds - minutes * 60);
+  return remainder > 0 ? `${minutes}m ${remainder}s` : `${minutes}m`;
+}
+
+const ACTION_LABELS: Record<string, string> = {
+  install: "Install plugin",
+  stage_update: "Stage update",
+  activate: "Activate plugin",
+  uninstall: "Uninstall plugin",
+  test_connection: "Test connection",
+  refresh_catalog: "Refresh catalog",
+  check_updates: "Check updates",
+  add_source: "Add source",
+  update_source: "Update source",
+  remove_source: "Remove source",
+};
+
+export function getActionLabel(action: string | null | undefined): string {
+  if (!action) return "Unknown action";
+  return (
+    ACTION_LABELS[action] ??
+    action.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+  );
+}

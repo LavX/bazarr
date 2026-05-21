@@ -1,10 +1,12 @@
 # coding=utf-8
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import shutil
 import tempfile
+import time
 import uuid
 
 import requests
@@ -33,10 +35,125 @@ class ProviderHubInstallError(RuntimeError):
 
 SECRET_PLACEHOLDER = "********"
 _VERSION_TOKEN_RE = re.compile(r"\d+|[A-Za-z]+")
+_JOB_LOG_LIMIT = 200
 
 
 def utcnow_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _persist_job(job: dict[str, Any]) -> None:
+    state = load_state()
+    jobs = state.setdefault("jobs", [])
+    if not isinstance(jobs, list):
+        jobs = []
+        state["jobs"] = jobs
+    job_id = job.get("id")
+    replaced = False
+    for index, existing in enumerate(jobs):
+        if isinstance(existing, dict) and existing.get("id") == job_id:
+            jobs[index] = dict(job)
+            replaced = True
+            break
+    if not replaced:
+        jobs.append(dict(job))
+    if len(jobs) > _JOB_LOG_LIMIT:
+        del jobs[: len(jobs) - _JOB_LOG_LIMIT]
+    save_state(state)
+
+
+class _JobHandle:
+    """Mutable wrapper for the dict callers receive inside ``record_job``."""
+
+    def __init__(self, data: dict[str, Any]):
+        self.data = data
+
+    def update(self, **fields: Any) -> None:
+        """Merge ``fields`` into the job payload and persist immediately.
+
+        ``details`` is shallow-merged so callers can extend the metadata bag
+        across multiple stages without clobbering earlier keys.
+        """
+        details = fields.pop("details", None)
+        if details is not None:
+            current = self.data.get("details") or {}
+            if not isinstance(current, dict):
+                current = {}
+            current.update(details)
+            self.data["details"] = current
+        for key, value in fields.items():
+            self.data[key] = value
+        self.data["updated_at"] = utcnow_iso()
+        _persist_job(self.data)
+
+
+@contextlib.contextmanager
+def record_job(
+    action: str,
+    *,
+    target_kind: str = "system",
+    target_id: str | None = None,
+    target_name: str | None = None,
+    source_id: str | None = None,
+    source_name: str | None = None,
+    from_version: str | None = None,
+    to_version: str | None = None,
+    message: str | None = None,
+    details: dict[str, Any] | None = None,
+):
+    """Record the full lifecycle of a Provider Hub action.
+
+    Writes one job row that transitions pending -> running -> completed/failed,
+    capturing duration and any exception trace. The yielded handle exposes
+    ``data`` (the live job dict) and ``update(**fields)`` so callers can fill
+    in fields they only learn mid-flight (e.g. resolved ``to_version``).
+    """
+    job_id = str(uuid.uuid4())
+    now = utcnow_iso()
+    job = {
+        "id": job_id,
+        "action": action,
+        "state": "pending",
+        "target_kind": target_kind,
+        "target_id": target_id,
+        "target_name": target_name,
+        "source_id": source_id,
+        "source_name": source_name,
+        "from_version": from_version,
+        "to_version": to_version,
+        "message": message,
+        "error": None,
+        "details": dict(details) if isinstance(details, dict) else {},
+        "duration_ms": None,
+        "created_at": now,
+        "started_at": None,
+        "completed_at": None,
+        "updated_at": now,
+    }
+    handle = _JobHandle(job)
+    _persist_job(job)
+    started_perf = time.perf_counter()
+    job["state"] = "running"
+    job["started_at"] = utcnow_iso()
+    job["updated_at"] = job["started_at"]
+    _persist_job(job)
+    try:
+        yield handle
+    except BaseException as error:
+        job["state"] = "failed"
+        job["error"] = str(error) or error.__class__.__name__
+        job["completed_at"] = utcnow_iso()
+        job["updated_at"] = job["completed_at"]
+        job["duration_ms"] = int((time.perf_counter() - started_perf) * 1000)
+        _persist_job(job)
+        raise
+    else:
+        if job.get("state") != "failed":
+            job["state"] = "completed"
+        job["completed_at"] = utcnow_iso()
+        job["updated_at"] = job["completed_at"]
+        job["duration_ms"] = int((time.perf_counter() - started_perf) * 1000)
+        _persist_job(job)
 
 
 _DEV_REF_RE = re.compile(r"^[A-Za-z0-9._\-/]{1,200}$")
@@ -109,43 +226,64 @@ def _fetch_github_catalog(
 def add_catalog_source(
     name: str, url: str, trusted: bool = False, dev_ref: str | None = None
 ) -> dict[str, Any]:
-    if not name or not isinstance(name, str):
-        raise CatalogSourceError("Catalog source name is required")
-    url = _validate_github_catalog_url(url)
-    if name == OFFICIAL_CATALOG_SOURCE_ID and url != OFFICIAL_CATALOG_URL:
-        raise CatalogSourceError("The official catalog source id is reserved")
-    is_official = name == OFFICIAL_CATALOG_SOURCE_ID and url == OFFICIAL_CATALOG_URL
-    dev_ref_value = _validate_dev_ref(dev_ref)
+    with record_job(
+        "add_source",
+        target_kind="source",
+        target_id=name,
+        target_name=name,
+    ) as job:
+        if not name or not isinstance(name, str):
+            raise CatalogSourceError("Catalog source name is required")
+        url = _validate_github_catalog_url(url)
+        if name == OFFICIAL_CATALOG_SOURCE_ID and url != OFFICIAL_CATALOG_URL:
+            raise CatalogSourceError("The official catalog source id is reserved")
+        is_official = name == OFFICIAL_CATALOG_SOURCE_ID and url == OFFICIAL_CATALOG_URL
+        dev_ref_value = _validate_dev_ref(dev_ref)
 
-    state = load_state()
-    sources = state.setdefault("catalog_sources", {})
-    source = {
-        "id": name,
-        "name": name,
-        "type": "github",
-        "url": url,
-        "enabled": True,
-        "official": is_official,
-        "trusted": is_official,
-        "dev_ref": dev_ref_value,
-        "last_checked_at": None,
-        "last_error": None,
-    }
-    sources[name] = source
-    save_state(state)
-    return source
+        state = load_state()
+        sources = state.setdefault("catalog_sources", {})
+        source = {
+            "id": name,
+            "name": name,
+            "type": "github",
+            "url": url,
+            "enabled": True,
+            "official": is_official,
+            "trusted": is_official,
+            "dev_ref": dev_ref_value,
+            "last_checked_at": None,
+            "last_error": None,
+        }
+        sources[name] = source
+        save_state(state)
+        job.update(
+            source_id=name,
+            source_name=name,
+            message=f"Added catalog source '{name}'",
+            details={"url": url, "trusted": is_official, "dev_ref": dev_ref_value},
+        )
+        return source
 
 
 def remove_catalog_source(name: str) -> bool:
-    if name == OFFICIAL_CATALOG_SOURCE_ID:
-        return False
-    state = load_state()
-    sources = state.setdefault("catalog_sources", {})
-    if name not in sources:
-        return False
-    del sources[name]
-    save_state(state)
-    return True
+    with record_job(
+        "remove_source",
+        target_kind="source",
+        target_id=name,
+        target_name=name,
+    ) as job:
+        if name == OFFICIAL_CATALOG_SOURCE_ID:
+            job.update(message="Refused to remove the official catalog source")
+            return False
+        state = load_state()
+        sources = state.setdefault("catalog_sources", {})
+        if name not in sources:
+            job.update(message=f"Catalog source '{name}' not found")
+            return False
+        del sources[name]
+        save_state(state)
+        job.update(message=f"Removed catalog source '{name}'")
+        return True
 
 
 _UNSET = object()
@@ -178,14 +316,30 @@ def update_catalog_source(name: str, dev_ref=_UNSET) -> dict[str, Any] | None:
     stored on the source dict. Returns the updated source, or ``None`` if no
     source matches the identifier (by id or by display name).
     """
-    state = load_state()
-    _key, source = _find_catalog_source(state, name)
-    if source is None:
-        return None
-    if dev_ref is not _UNSET:
-        source["dev_ref"] = _validate_dev_ref(dev_ref)
-    save_state(state)
-    return source
+    with record_job(
+        "update_source",
+        target_kind="source",
+        target_id=name,
+        target_name=name,
+    ) as job:
+        state = load_state()
+        _key, source = _find_catalog_source(state, name)
+        if source is None:
+            job.update(message=f"Catalog source '{name}' not found")
+            return None
+        previous_dev_ref = source.get("dev_ref")
+        if dev_ref is not _UNSET:
+            source["dev_ref"] = _validate_dev_ref(dev_ref)
+        save_state(state)
+        job.update(
+            source_id=source.get("id"),
+            source_name=source.get("name"),
+            from_version=previous_dev_ref,
+            to_version=source.get("dev_ref"),
+            message=f"Updated catalog source '{source.get('name') or name}'",
+            details={"dev_ref": source.get("dev_ref")},
+        )
+        return source
 
 
 def get_catalog_source(name: str) -> dict[str, Any] | None:
@@ -226,61 +380,81 @@ def _normalize_catalog_manifest(manifest: dict[str, Any], source: dict[str, Any]
 
 
 def refresh_catalog() -> dict[str, Any]:
-    state = load_state()
-    now = utcnow_iso()
-    entries = state.setdefault("catalog_entries", {})
-    refreshed_sources = set()
-    refreshed_entry_keys = set()
-    entries_count = 0
-    sources_count = 0
-    for source in (state.get("catalog_sources") or {}).values():
-        if isinstance(source, dict):
-            sources_count += 1
-            source["last_checked_at"] = now
-            try:
-                catalog, commit = _fetch_github_catalog(
-                    source["url"], override_ref=source.get("dev_ref")
-                )
-                source["resolved_commit"] = commit
-                source["last_error"] = None
-                refreshed_sources.add(source.get("id") or source["name"])
-            except Exception as error:
-                source["last_error"] = str(error)
-                continue
+    with record_job("refresh_catalog", target_kind="system") as job:
+        state = load_state()
+        now = utcnow_iso()
+        entries = state.setdefault("catalog_entries", {})
+        refreshed_sources = set()
+        refreshed_entry_keys = set()
+        entries_count = 0
+        sources_count = 0
+        failed_sources: list[str] = []
+        for source in (state.get("catalog_sources") or {}).values():
+            if isinstance(source, dict):
+                sources_count += 1
+                source["last_checked_at"] = now
+                try:
+                    catalog, commit = _fetch_github_catalog(
+                        source["url"], override_ref=source.get("dev_ref")
+                    )
+                    source["resolved_commit"] = commit
+                    source["last_error"] = None
+                    refreshed_sources.add(source.get("id") or source["name"])
+                except Exception as error:
+                    source["last_error"] = str(error)
+                    failed_sources.append(source.get("name") or source.get("id") or "?")
+                    continue
 
-            for item in catalog.get("providers", []):
-                if not isinstance(item, dict):
-                    continue
-                manifest = item.get("manifest") if isinstance(item.get("manifest"), dict) else item
-                if not isinstance(manifest, dict):
-                    continue
-                manifest = _normalize_catalog_manifest(manifest, source, commit)
-                provider_id = manifest.get("provider_id") or item.get("provider_id")
-                version = manifest.get("version") or item.get("version")
-                if not provider_id or not version:
-                    continue
-                key = f"{source['name']}:{provider_id}:{version}"
-                source_id = source.get("id") or source["name"]
-                entries[key] = {
-                    "source": source_id,
-                    "source_name": source["name"],
-                    "provider_id": provider_id,
-                    "name": manifest.get("name") or item.get("name") or provider_id,
-                    "version": version,
-                    "trusted": bool(source.get("trusted", False)),
-                    "manifest": manifest,
-                    "resolved_commit": commit,
-                }
-                refreshed_entry_keys.add(key)
-                entries_count += 1
-    for key, entry in list(entries.items()):
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("source") in refreshed_sources:
-            if key not in refreshed_entry_keys:
-                del entries[key]
-    save_state(state)
-    return {"refreshed_at": now, "sources": sources_count, "entries": entries_count}
+                for item in catalog.get("providers", []):
+                    if not isinstance(item, dict):
+                        continue
+                    manifest = item.get("manifest") if isinstance(item.get("manifest"), dict) else item
+                    if not isinstance(manifest, dict):
+                        continue
+                    manifest = _normalize_catalog_manifest(manifest, source, commit)
+                    provider_id = manifest.get("provider_id") or item.get("provider_id")
+                    version = manifest.get("version") or item.get("version")
+                    if not provider_id or not version:
+                        continue
+                    key = f"{source['name']}:{provider_id}:{version}"
+                    source_id = source.get("id") or source["name"]
+                    entries[key] = {
+                        "source": source_id,
+                        "source_name": source["name"],
+                        "provider_id": provider_id,
+                        "name": manifest.get("name") or item.get("name") or provider_id,
+                        "version": version,
+                        "trusted": bool(source.get("trusted", False)),
+                        "manifest": manifest,
+                        "resolved_commit": commit,
+                    }
+                    refreshed_entry_keys.add(key)
+                    entries_count += 1
+        for key, entry in list(entries.items()):
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("source") in refreshed_sources:
+                if key not in refreshed_entry_keys:
+                    del entries[key]
+        save_state(state)
+        ok_sources = sources_count - len(failed_sources)
+        if failed_sources:
+            summary = (
+                f"Refreshed {ok_sources}/{sources_count} sources, "
+                f"{entries_count} entries. Failed: {', '.join(failed_sources)}"
+            )
+        else:
+            summary = f"Refreshed {sources_count} source(s), {entries_count} entries"
+        job.update(
+            message=summary,
+            details={
+                "sources_total": sources_count,
+                "sources_ok": ok_sources,
+                "sources_failed": failed_sources,
+                "entries": entries_count,
+            },
+        )
+        return {"refreshed_at": now, "sources": sources_count, "entries": entries_count}
 
 
 def _manifest_secret_fields(installation: dict[str, Any]) -> set[str]:
@@ -417,63 +591,85 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
     if not provider:
         return None
 
-    if provider.get("pending_restart") or provider.get("state") != "active":
-        return {
-            "provider_id": provider_id,
-            "ok": False,
-            "status": "pending_restart",
-            "message": "Restart Bazarr+ before testing this staged plugin",
-        }
+    target_name = provider.get("name") or provider_id
 
-    manifest_data = provider.get("manifest")
-    active_path = provider.get("active_path")
-    python_path = provider.get("python_path")
+    with record_job(
+        "test_connection",
+        target_kind="provider",
+        target_id=provider_id,
+        target_name=target_name,
+    ) as job:
+        if provider.get("pending_restart") or provider.get("state") != "active":
+            job.update(
+                message="Restart Bazarr+ before testing this staged plugin",
+                details={"status": "pending_restart"},
+            )
+            return {
+                "provider_id": provider_id,
+                "ok": False,
+                "status": "pending_restart",
+                "message": "Restart Bazarr+ before testing this staged plugin",
+            }
 
-    try:
-        if not isinstance(manifest_data, dict):
-            raise ProviderHubInstallError("active manifest is missing")
-        if not active_path:
-            raise ProviderHubInstallError("active bundle path is missing")
-        if not python_path:
-            raise ProviderHubInstallError("provider Python path is missing")
+        manifest_data = provider.get("manifest")
+        active_path = provider.get("active_path")
+        python_path = provider.get("python_path")
 
-        manifest = validate_manifest(manifest_data, built_in_provider_ids=_built_in_provider_ids())
-        bundle_path = Path(active_path)
-        _remove_bundle_runtime_artifacts(bundle_path)
-        verify_bundle_tree(manifest, bundle_path)
-
-        runner = Path(__file__).with_name("worker_runner.py")
-        client = ProviderWorkerClient(
-            worker_command(python_path, runner),
-            cwd=bundle_path,
-            env={
-                "BAZARR_PROVIDER_HUB_BUNDLE": str(bundle_path),
-                "BAZARR_PROVIDER_HUB_MANIFEST": json.dumps(manifest.raw),
-            },
-        )
         try:
-            result = client.request("health", {}, timeout=10)
-        finally:
-            client.stop()
-            _remove_bundle_runtime_artifacts(bundle_path)
+            if not isinstance(manifest_data, dict):
+                raise ProviderHubInstallError("active manifest is missing")
+            if not active_path:
+                raise ProviderHubInstallError("active bundle path is missing")
+            if not python_path:
+                raise ProviderHubInstallError("provider Python path is missing")
 
-        _record_provider_last_error(provider_id, None)
-        return {
-            "provider_id": provider_id,
-            "ok": True,
-            "status": "ready",
-            "message": "Worker health check passed",
-            "details": result.payload,
-        }
-    except Exception as error:
-        message = str(error) or error.__class__.__name__
-        _record_provider_last_error(provider_id, message)
-        return {
-            "provider_id": provider_id,
-            "ok": False,
-            "status": "failed",
-            "message": message,
-        }
+            manifest = validate_manifest(manifest_data, built_in_provider_ids=_built_in_provider_ids())
+            bundle_path = Path(active_path)
+            _remove_bundle_runtime_artifacts(bundle_path)
+            verify_bundle_tree(manifest, bundle_path)
+
+            runner = Path(__file__).with_name("worker_runner.py")
+            client = ProviderWorkerClient(
+                worker_command(python_path, runner),
+                cwd=bundle_path,
+                env={
+                    "BAZARR_PROVIDER_HUB_BUNDLE": str(bundle_path),
+                    "BAZARR_PROVIDER_HUB_MANIFEST": json.dumps(manifest.raw),
+                },
+            )
+            try:
+                result = client.request("health", {}, timeout=10)
+            finally:
+                client.stop()
+                _remove_bundle_runtime_artifacts(bundle_path)
+
+            _record_provider_last_error(provider_id, None)
+            job.update(
+                message="Worker health check passed",
+                details={"status": "ready"},
+            )
+            return {
+                "provider_id": provider_id,
+                "ok": True,
+                "status": "ready",
+                "message": "Worker health check passed",
+                "details": result.payload,
+            }
+        except Exception as error:
+            message = str(error) or error.__class__.__name__
+            _record_provider_last_error(provider_id, message)
+            job.data["state"] = "failed"
+            job.update(
+                error=message,
+                message=message,
+                details={"status": "failed"},
+            )
+            return {
+                "provider_id": provider_id,
+                "ok": False,
+                "status": "failed",
+                "message": message,
+            }
 
 
 def _built_in_provider_ids() -> set[str]:
@@ -658,28 +854,52 @@ def stage_install(manifest: dict[str, Any]) -> dict[str, Any]:
     state = load_state()
     source_trusted = _catalog_manifest_trusted(validated.raw, state)
     existing = (state.get("installations") or {}).get(validated.provider_id)
+    existing_version = (
+        existing.get("active_version") if isinstance(existing, dict) else None
+    )
+    manifest_source = validated.raw.get("source") if isinstance(validated.raw, dict) else None
+    catalog_url = manifest_source.get("catalog_url") if isinstance(manifest_source, dict) else None
+    is_update = bool(existing_version)
+    action = "stage_update" if is_update else "install"
 
-    try:
-        bundle_path = _fetch_bundle(validated)
-        env_path = PluginEnvironment(provider_hub_dir()).install(validated)
-        staged_python_path = python_executable(env_path)
-        _smoke_validate_worker(validated, bundle_path, staged_python_path)
-    except Exception as error:
+    with record_job(
+        action,
+        target_kind="provider",
+        target_id=validated.provider_id,
+        target_name=validated.raw.get("name") or validated.provider_id,
+        from_version=existing_version,
+        to_version=validated.version,
+        details={"catalog_url": catalog_url, "trusted": source_trusted},
+    ) as job:
+        try:
+            bundle_path = _fetch_bundle(validated)
+            env_path = PluginEnvironment(provider_hub_dir()).install(validated)
+            staged_python_path = python_executable(env_path)
+            _smoke_validate_worker(validated, bundle_path, staged_python_path)
+        except Exception as error:
+            state = load_state()
+            installations = state.setdefault("installations", {})
+            current = installations.get(validated.provider_id, existing)
+            installation = _failed_installation(validated, current, error, source_trusted)
+            installations[validated.provider_id] = installation
+            save_state(state)
+            raise ProviderHubInstallError(str(error)) from error
+
         state = load_state()
         installations = state.setdefault("installations", {})
         current = installations.get(validated.provider_id, existing)
-        installation = _failed_installation(validated, current, error, source_trusted)
+        installation = _staged_installation(validated, current, bundle_path, staged_python_path, source_trusted)
         installations[validated.provider_id] = installation
         save_state(state)
-        raise ProviderHubInstallError(str(error)) from error
-
-    state = load_state()
-    installations = state.setdefault("installations", {})
-    current = installations.get(validated.provider_id, existing)
-    installation = _staged_installation(validated, current, bundle_path, staged_python_path, source_trusted)
-    installations[validated.provider_id] = installation
-    save_state(state)
-    return _redact_installation(installation)
+        if is_update:
+            message = (
+                f"Staged update {existing_version} -> {validated.version} "
+                f"(restart Bazarr+ to activate)"
+            )
+        else:
+            message = f"Staged install of v{validated.version} (restart Bazarr+ to activate)"
+        job.update(message=message)
+        return _redact_installation(installation)
 
 
 def activate_staged_installations() -> list[str]:
@@ -691,55 +911,87 @@ def activate_staged_installations() -> list[str]:
         if not isinstance(installation, dict):
             continue
         if installation.get("pending_restart") and installation.get("state") == "removed":
-            del installations[provider_id]
-            changed = True
+            target_name = installation.get("name") or provider_id
+            with record_job(
+                "uninstall",
+                target_kind="provider",
+                target_id=provider_id,
+                target_name=target_name,
+                from_version=installation.get("active_version"),
+            ) as job:
+                del installations[provider_id]
+                changed = True
+                job.update(message=f"Removed plugin '{target_name}' on restart")
             continue
         if not installation.get("pending_restart") or installation.get("state") != "staged":
             continue
-        try:
-            manifest = validate_manifest(installation.get("manifest") or {}, built_in_provider_ids=_built_in_provider_ids())
-            if isinstance(installation.get("staged_manifest"), dict):
-                manifest = validate_manifest(
-                    installation.get("staged_manifest"),
-                    built_in_provider_ids=_built_in_provider_ids(),
+
+        previous_version = installation.get("active_version")
+        target_version = installation.get("staged_version")
+        target_name = installation.get("name") or provider_id
+
+        with record_job(
+            "activate",
+            target_kind="provider",
+            target_id=provider_id,
+            target_name=target_name,
+            from_version=previous_version,
+            to_version=target_version,
+        ) as job:
+            try:
+                manifest = validate_manifest(installation.get("manifest") or {}, built_in_provider_ids=_built_in_provider_ids())
+                if isinstance(installation.get("staged_manifest"), dict):
+                    manifest = validate_manifest(
+                        installation.get("staged_manifest"),
+                        built_in_provider_ids=_built_in_provider_ids(),
+                    )
+                staged_path = installation.get("staged_path")
+                staged_python_path = installation.get("staged_python_path")
+                if not staged_path or not staged_python_path:
+                    raise ProviderHubInstallError("staged bundle or python path is missing")
+                staged_bundle_path = Path(staged_path)
+                _remove_bundle_runtime_artifacts(staged_bundle_path)
+                verify_bundle_tree(manifest, staged_bundle_path)
+                _smoke_validate_worker(manifest, staged_bundle_path, Path(staged_python_path))
+            except Exception as error:
+                installation["last_error"] = str(error)
+                installation["staged_version"] = None
+                installation["staged_path"] = None
+                installation["staged_python_path"] = None
+                installation["staged_manifest"] = None
+                installation["pending_restart"] = False
+                if installation.get("active_version"):
+                    installation["state"] = "active"
+                else:
+                    installation["state"] = "failed"
+                changed = True
+                job.data["state"] = "failed"
+                job.update(
+                    error=str(error) or error.__class__.__name__,
+                    message=f"Activation failed: {error}",
                 )
-            staged_path = installation.get("staged_path")
-            staged_python_path = installation.get("staged_python_path")
-            if not staged_path or not staged_python_path:
-                raise ProviderHubInstallError("staged bundle or python path is missing")
-            staged_bundle_path = Path(staged_path)
-            _remove_bundle_runtime_artifacts(staged_bundle_path)
-            verify_bundle_tree(manifest, staged_bundle_path)
-            _smoke_validate_worker(manifest, staged_bundle_path, Path(staged_python_path))
-        except Exception as error:
-            installation["last_error"] = str(error)
+                continue
+            installation["active_version"] = installation.get("staged_version")
+            if installation.get("staged_path"):
+                installation["active_path"] = installation.get("staged_path")
+            if installation.get("staged_python_path"):
+                installation["python_path"] = installation.get("staged_python_path")
             installation["staged_version"] = None
             installation["staged_path"] = None
             installation["staged_python_path"] = None
             installation["staged_manifest"] = None
+            installation["manifest"] = manifest.raw
+            installation["state"] = "active"
             installation["pending_restart"] = False
-            if installation.get("active_version"):
-                installation["state"] = "active"
-            else:
-                installation["state"] = "failed"
+            installation["last_error"] = None
+            installation["activated_at"] = utcnow_iso()
+            activated.append(provider_id)
             changed = True
-            continue
-        installation["active_version"] = installation.get("staged_version")
-        if installation.get("staged_path"):
-            installation["active_path"] = installation.get("staged_path")
-        if installation.get("staged_python_path"):
-            installation["python_path"] = installation.get("staged_python_path")
-        installation["staged_version"] = None
-        installation["staged_path"] = None
-        installation["staged_python_path"] = None
-        installation["staged_manifest"] = None
-        installation["manifest"] = manifest.raw
-        installation["state"] = "active"
-        installation["pending_restart"] = False
-        installation["last_error"] = None
-        installation["activated_at"] = utcnow_iso()
-        activated.append(provider_id)
-        changed = True
+            if previous_version:
+                msg = f"Activated update {previous_version} -> {target_version}"
+            else:
+                msg = f"Activated plugin '{target_name}' v{target_version}"
+            job.update(message=msg)
     if changed:
         save_state(state)
     return activated
@@ -751,36 +1003,72 @@ def remove_installation(provider_id: str) -> bool:
     if provider_id not in installations:
         return False
     item = installations[provider_id]
-    if isinstance(item, dict):
-        if not item.get("active_version"):
-            del installations[provider_id]
-            save_state(state)
-            return True
-        item["state"] = "removed"
-        item["pending_restart"] = True
-        item["staged_version"] = None
-        item["staged_path"] = None
-        item["staged_python_path"] = None
-        item["staged_manifest"] = None
-        item["last_error"] = None
-    save_state(state)
-    return True
+    target_name = (
+        item.get("name") if isinstance(item, dict) else None
+    ) or provider_id
+    active_version = item.get("active_version") if isinstance(item, dict) else None
+
+    with record_job(
+        "uninstall",
+        target_kind="provider",
+        target_id=provider_id,
+        target_name=target_name,
+        from_version=active_version,
+    ) as job:
+        if isinstance(item, dict):
+            if not item.get("active_version"):
+                del installations[provider_id]
+                save_state(state)
+                job.update(message=f"Removed pending install of '{target_name}'")
+                return True
+            item["state"] = "removed"
+            item["pending_restart"] = True
+            item["staged_version"] = None
+            item["staged_path"] = None
+            item["staged_python_path"] = None
+            item["staged_manifest"] = None
+            item["last_error"] = None
+        save_state(state)
+        job.update(message=f"Staged removal of '{target_name}' (restart Bazarr+ to finalize)")
+        return True
 
 
 def check_updates() -> dict[str, Any]:
-    state = load_state()
-    job_id = str(uuid.uuid4())
-    job = {
-        "id": job_id,
-        "action": "check_updates",
-        "state": "completed",
-        "message": "Catalog metadata checked. Untrusted updates require manual staging.",
-        "created_at": utcnow_iso(),
-        "updated_at": utcnow_iso(),
-    }
-    state.setdefault("jobs", []).append(job)
-    save_state(state)
-    return job
+    job_id: str | None = None
+    with record_job("check_updates", target_kind="system") as job:
+        job_id = job.data["id"]
+        state = load_state()
+        available = 0
+        provider_summaries: list[str] = []
+        for provider_id, installation in (state.get("installations") or {}).items():
+            if not isinstance(installation, dict):
+                continue
+            active_version = installation.get("active_version")
+            if not active_version:
+                continue
+            latest = _latest_catalog_manifest(state, provider_id, active_version)
+            if not isinstance(latest, dict):
+                continue
+            latest_version = latest.get("version")
+            if not latest_version:
+                continue
+            available += 1
+            display_name = installation.get("name") or provider_id
+            provider_summaries.append(
+                f"{display_name}: {active_version} -> {latest_version}"
+            )
+        if available:
+            message = (
+                f"{available} update(s) available: {', '.join(provider_summaries)}"
+            )
+        else:
+            message = "Catalog metadata checked. No new updates available."
+        job.update(
+            message=message,
+            details={"updates_available": available, "providers": provider_summaries},
+        )
+    persisted = get_job(job_id) if job_id else None
+    return persisted or {}
 
 
 def _version_key(version: Any) -> list[tuple[int, int | str]]:
@@ -822,9 +1110,22 @@ def apply_update(provider_id: str) -> dict[str, Any] | None:
         provider.get("active_version") or provider.get("staged_version"),
     )
     if not isinstance(manifest, dict):
-        provider["last_error"] = "No update manifest is available"
-        state.setdefault("installations", {})[provider_id] = provider
-        save_state(state)
+        target_name = provider.get("name") or provider_id
+        with record_job(
+            "stage_update",
+            target_kind="provider",
+            target_id=provider_id,
+            target_name=target_name,
+            from_version=provider.get("active_version") or provider.get("staged_version"),
+        ) as job:
+            provider["last_error"] = "No update manifest is available"
+            state.setdefault("installations", {})[provider_id] = provider
+            save_state(state)
+            job.data["state"] = "failed"
+            job.update(
+                error="No update manifest is available",
+                message="No update manifest is available",
+            )
         return _redact_installation(provider)
     try:
         return stage_install(manifest)

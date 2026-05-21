@@ -6,7 +6,9 @@ import type {
 } from "@/apis/raw/providerHub";
 import {
   formatAbsoluteTime,
+  formatDuration,
   formatRelativeTime,
+  getActionLabel,
   getJobStateMeta,
   getLatestCatalogEntry,
   getProviderStateMeta,
@@ -212,5 +214,46 @@ describe("formatAbsoluteTime", () => {
   it("returns empty for null/invalid", () => {
     expect(formatAbsoluteTime(null)).toBe("");
     expect(formatAbsoluteTime("nope")).toBe("");
+  });
+});
+
+describe("formatDuration", () => {
+  it("returns empty for null/undefined", () => {
+    expect(formatDuration(null)).toBe("");
+    expect(formatDuration(undefined)).toBe("");
+  });
+
+  it("formats sub-millisecond and millisecond values", () => {
+    expect(formatDuration(0)).toBe("<1ms");
+    expect(formatDuration(120)).toBe("120ms");
+  });
+
+  it("formats seconds with one decimal under 10s and integer above", () => {
+    expect(formatDuration(1500)).toBe("1.5s");
+    expect(formatDuration(45000)).toBe("45s");
+  });
+
+  it("formats minutes with optional remainder seconds", () => {
+    expect(formatDuration(60000)).toBe("1m");
+    expect(formatDuration(90000)).toBe("1m 30s");
+  });
+});
+
+describe("getActionLabel", () => {
+  it("returns friendly labels for known actions", () => {
+    expect(getActionLabel("install")).toBe("Install plugin");
+    expect(getActionLabel("stage_update")).toBe("Stage update");
+    expect(getActionLabel("refresh_catalog")).toBe("Refresh catalog");
+    expect(getActionLabel("check_updates")).toBe("Check updates");
+  });
+
+  it("title-cases unknown snake_case actions", () => {
+    expect(getActionLabel("frobnicate_thing")).toBe("Frobnicate Thing");
+  });
+
+  it("falls back to 'Unknown action' for empty input", () => {
+    expect(getActionLabel(undefined)).toBe("Unknown action");
+    expect(getActionLabel(null)).toBe("Unknown action");
+    expect(getActionLabel("")).toBe("Unknown action");
   });
 });
