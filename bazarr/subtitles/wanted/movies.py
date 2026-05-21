@@ -78,6 +78,20 @@ def _wanted_movie(movie, providers_list, job_id=None):
                         f"(falling back to provider search)"
                     )
                 else:
+                    # Guard: skip if we already have a translate history entry
+                    # for this target language. Why: the previous translate
+                    # history_log write is what blocks re-queuing after a
+                    # restart while the queued job hasn't run yet. Without this
+                    # check, the wanted-scan would re-queue every cycle.
+                    already_translated = database.execute(
+                        select(TableHistoryMovie.id)
+                        .where(TableHistoryMovie.radarrId == movie.radarrId)
+                        .where(TableHistoryMovie.language == lang_code)
+                        .where(TableHistoryMovie.action == 6)
+                        .limit(1)
+                    ).first()
+                    if already_translated:
+                        continue
                     try:
                         from subtitles.tools.translate.main import translate_subtitles_file
                         from subtitles.tools.translate.core.translator_utils import create_process_result
