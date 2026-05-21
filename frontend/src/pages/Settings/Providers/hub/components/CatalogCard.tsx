@@ -1,5 +1,5 @@
 import { FunctionComponent, useMemo } from "react";
-import { ActionIcon, Button, Group, Menu, Tooltip } from "@mantine/core";
+import { ActionIcon, Badge, Button, Group, Menu, Tooltip } from "@mantine/core";
 import {
   faCheck,
   faDownload,
@@ -18,7 +18,16 @@ import type {
 import { ProviderStatusBadge } from "@/pages/Settings/Providers/hub/components/StatusBadge";
 import { TrustBadge } from "@/pages/Settings/Providers/hub/components/TrustBadge";
 import { parseManifest } from "@/pages/Settings/Providers/hub/utils";
+import {
+  AUTH_LABEL,
+  detectAuthFromManifest,
+  getLanguageName,
+  getLanguagesFromManifest,
+} from "@/pages/Settings/Providers/meta";
+import { getProviderLanguages } from "@/pages/Settings/Providers/provider-languages";
 import styles from "@/pages/Settings/Providers/hub/hub.module.scss";
+
+const LANGUAGE_CHIP_THRESHOLD = 3;
 
 interface CatalogCardProps {
   entry: ProviderHubCatalogEntry;
@@ -160,6 +169,13 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
     (manifest?.summary as string | undefined) ??
     "";
 
+  const auth = detectAuthFromManifest(manifest);
+  const manifestLangs = getLanguagesFromManifest(manifest);
+  const fallbackLangs = getProviderLanguages(entry.provider_id);
+  const languages = manifestLangs.length > 0 ? manifestLangs : fallbackLangs;
+  const showAllLangs = languages.length <= LANGUAGE_CHIP_THRESHOLD;
+  const langTooltip = languages.map((c) => getLanguageName(c)).join(", ");
+
   return (
     <div className={clsx(styles.hubCard)}>
       <div className={styles.hubCardHeader}>
@@ -230,6 +246,23 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
       {description && (
         <div className={styles.hubCardDescription}>{description}</div>
       )}
+      <div className={styles.hubCardChips}>
+        <Badge size="xs" variant="outline" color="gray">
+          {AUTH_LABEL[auth]}
+        </Badge>
+        {languages.length > 0 &&
+          showAllLangs &&
+          languages.map((code) => (
+            <Badge key={code} size="xs" variant="outline" color="gray">
+              {getLanguageName(code)}
+            </Badge>
+          ))}
+        {languages.length > LANGUAGE_CHIP_THRESHOLD && (
+          <Badge size="xs" variant="outline" color="gray" title={langTooltip}>
+            {languages.length} languages
+          </Badge>
+        )}
+      </div>
       <div className={styles.hubCardFooter}>
         <Group gap={6} className={styles.hubCardPills}>
           {installed && (

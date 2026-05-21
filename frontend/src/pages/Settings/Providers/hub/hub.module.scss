@@ -230,6 +230,12 @@ $tones: (
   flex: 1;
 }
 
+.hubCardChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
 .hubCardFooter {
   display: flex;
   align-items: center;
@@ -474,6 +480,400 @@ $tones: (
   color: var(--bz-text-tertiary);
   word-break: break-all;
   line-height: 1.4;
+}
+
+/* Provider Priority — ranked queue list */
+.priorityList {
+  width: 100%;
+}
+
+.priorityRow {
+  position: relative;
+  display: grid;
+  grid-template-columns: 28px 1fr auto;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 16px 12px 18px;
+  border-radius: var(--bz-radius-md);
+  border: 1px solid var(--bz-border-card);
+  background: var(--bz-surface-card);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--bz-duration-normal) var(--bz-ease-standard),
+    border-color var(--bz-duration-normal) var(--bz-ease-standard),
+    box-shadow var(--bz-duration-normal) var(--bz-ease-standard);
+}
+
+.priorityRow:hover {
+  background: var(--bz-surface-card-hover);
+  border-color: var(--bz-border-hover);
+  box-shadow: var(--bz-shadow-float);
+}
+
+.priorityRow:focus-visible {
+  outline: 2px solid var(--bz-border-hover);
+  outline-offset: -2px;
+}
+
+.priorityDragHandle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--bz-text-tertiary);
+  font-size: 14px;
+  cursor: grab;
+  border-radius: var(--bz-radius-sm);
+  transition:
+    background var(--bz-duration-normal) var(--bz-ease-standard),
+    color var(--bz-duration-normal) var(--bz-ease-standard);
+  touch-action: none;
+}
+
+.priorityDragHandle:hover {
+  background: var(--bz-hover-bg);
+  color: var(--bz-text-primary);
+}
+
+.priorityDragHandle:focus-visible {
+  outline: 2px solid var(--bz-border-hover);
+  outline-offset: 2px;
+}
+
+.priorityDragHandle:active {
+  cursor: grabbing;
+}
+
+.priorityRail {
+  position: absolute;
+  left: 6px;
+  top: 10px;
+  bottom: 10px;
+  width: var(--bz-priority-rail, 2px);
+  border-radius: 2px;
+  background: var(--bz-border-card);
+  transition: background var(--bz-duration-normal) var(--bz-ease-standard);
+}
+
+.priorityRow:hover .priorityRail {
+  background: var(--bz-border-hover);
+}
+
+.priorityChip {
+  font-family:
+    ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.06em;
+  color: var(--bz-text-tertiary);
+  white-space: nowrap;
+}
+
+.priorityBody {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.priorityNameRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.priorityName {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--bz-text-primary);
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 0 1 auto;
+}
+
+.priorityDescription {
+  font-size: 12px;
+  color: var(--bz-text-secondary);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.priorityAddRow {
+  position: relative;
+  display: grid;
+  grid-template-columns: 48px 1fr;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  padding: 12px 16px 12px 22px;
+  border-radius: var(--bz-radius-md);
+  border: 1px dashed var(--bz-border-card);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: var(--bz-text-secondary);
+  transition:
+    background var(--bz-duration-normal) var(--bz-ease-standard),
+    border-color var(--bz-duration-normal) var(--bz-ease-standard),
+    color var(--bz-duration-normal) var(--bz-ease-standard);
+}
+
+.priorityAddRow:hover {
+  border-style: solid;
+  border-color: var(--bz-border-hover);
+  background: var(--bz-hover-bg);
+  color: var(--bz-text-primary);
+}
+
+.priorityAddRow:focus-visible {
+  outline: 2px solid var(--bz-border-hover);
+  outline-offset: -2px;
+}
+
+.priorityAddIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--bz-text-tertiary);
+  font-size: 13px;
+  transition: color var(--bz-duration-normal) var(--bz-ease-standard);
+}
+
+.priorityAddRow:hover .priorityAddIcon {
+  color: var(--bz-text-primary);
+}
+
+.priorityAddText {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.priorityChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+/* Provider settings drawer layout */
+.providerDrawerContent {
+  display: flex;
+  flex-direction: column;
+}
+
+.providerDrawerBody {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0;
+}
+
+.providerDrawerLayout {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+}
+
+.providerDrawerScroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 16px 8px;
+}
+
+.providerDrawerScrollPicker {
+  display: flex;
+  flex-direction: column;
+}
+
+.providerDrawerSections {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.providerDrawerPickerSection {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.providerDrawerActions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--bz-border-card);
+  background: var(--bz-surface-card);
+}
+
+/* Provider picker (add-provider drawer) */
+.providerPickerStack {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.providerPickerList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+  margin-right: -4px;
+}
+
+.providerPickerRow {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  width: 100%;
+  border-radius: var(--bz-radius-md);
+  border: 1px solid var(--bz-border-card);
+  background: var(--bz-surface-card);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--bz-duration-normal) var(--bz-ease-standard),
+    border-color var(--bz-duration-normal) var(--bz-ease-standard),
+    box-shadow var(--bz-duration-normal) var(--bz-ease-standard);
+}
+
+.providerPickerRow:hover {
+  background: var(--bz-surface-card-hover);
+  border-color: var(--bz-border-hover);
+  box-shadow: var(--bz-shadow-float);
+}
+
+.providerPickerRow:focus-visible {
+  outline: 2px solid var(--bz-border-hover);
+  outline-offset: -2px;
+}
+
+.providerPickerHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.providerPickerName {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--bz-text-primary);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.providerPickerDesc {
+  font-size: 12px;
+  color: var(--bz-text-secondary);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.providerPickerChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.providerPickerNote {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--bz-text-secondary);
+  background: var(--bz-hover-bg);
+  border-radius: var(--bz-radius-sm);
+  padding: 6px 8px;
+  margin-top: 2px;
+}
+
+.providerPickerNoteIcon {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--bz-text-tertiary);
+}
+
+.providerPickerFilters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.providerPickerFilter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--bz-border-card);
+  background: transparent;
+  color: var(--bz-text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background var(--bz-duration-normal) var(--bz-ease-standard),
+    border-color var(--bz-duration-normal) var(--bz-ease-standard),
+    color var(--bz-duration-normal) var(--bz-ease-standard);
+}
+
+.providerPickerFilter:hover:not(:disabled) {
+  background: var(--bz-hover-bg);
+  border-color: var(--bz-border-hover);
+  color: var(--bz-text-primary);
+}
+
+.providerPickerFilter:focus-visible {
+  outline: 2px solid var(--bz-border-hover);
+  outline-offset: 2px;
+}
+
+.providerPickerFilter:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.providerPickerFilterActive {
+  background: var(--bz-surface-card-hover);
+  border-color: var(--bz-border-hover);
+  color: var(--bz-text-primary);
+}
+
+.providerPickerFilterCount {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--bz-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.providerPickerFilterActive .providerPickerFilterCount {
+  color: var(--bz-text-secondary);
 }
 
 /* Tab strip - underline accent */

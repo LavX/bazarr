@@ -331,10 +331,7 @@ describe("Settings > Providers (Provider Hub)", () => {
     const dialog = await screen.findByRole("dialog", {
       name: /Provider settings/i,
     });
-    await userEvent.click(
-      within(dialog).getByPlaceholderText("Click to Select a Provider"),
-    );
-    const [smokeOption] = await screen.findAllByText("SmokeHub");
+    const [smokeOption] = await within(dialog).findAllByText("SmokeHub");
     await userEvent.click(smokeOption);
 
     expect(screen.getByLabelText("Profile name")).toBeInTheDocument();

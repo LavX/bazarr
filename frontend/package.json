@@ -13,6 +13,9 @@
   },
   "private": true,
   "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
     "@fontsource-variable/geist": "^5.2.8",
     "@mantine/core": "^9.2.1",
     "@mantine/dropzone": "^9.2.1",
