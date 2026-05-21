@@ -4,7 +4,6 @@
 import ast
 import logging
 import operator
-import os
 import gc
 
 from functools import reduce
@@ -24,35 +23,7 @@ from subliminal_patch.score import MAX_SCORES
 
 from ..adaptive_searching import is_search_active, updateFailedAttempts
 from ..download import generate_subtitles
-
-
-def _find_existing_subtitle_path(subtitles_field, source_lang):
-    """Return on-disk path of an existing external subtitle for source_lang
-    (ignoring :hi / :forced variants), or None. subtitles_field is the raw
-    DB value (a python-literal list of [code, path, length] tuples)."""
-    if not subtitles_field:
-        return None
-    try:
-        entries = ast.literal_eval(subtitles_field)
-    except (ValueError, SyntaxError):
-        return None
-    # First pass: prefer plain (non-HI, non-forced) source language
-    for entry in entries:
-        if not entry or len(entry) < 2:
-            continue
-        code = (entry[0] or '')
-        path = entry[1]
-        if code == source_lang and path and os.path.exists(path):
-            return path
-    # Fallback: accept any source-language variant
-    for entry in entries:
-        if not entry or len(entry) < 2:
-            continue
-        code = (entry[0] or '').split(':')[0]
-        path = entry[1]
-        if code == source_lang and path and os.path.exists(path):
-            return path
-    return None
+from .utils import _find_existing_subtitle_path
 
 
 def _wanted_episode(episode, providers_list, job_id=None):
@@ -111,8 +82,26 @@ def _wanted_episode(episode, providers_list, job_id=None):
                 else:
                     try:
                         from subtitles.tools.translate.main import translate_subtitles_file
+                        from subtitles.tools.translate.core.translator_utils import create_process_result
                         logging.info(f"BAZARR auto-translate (wanted-scan) queuing "
                                      f"{translate_cfg['from']} -> {lang_code} for {video_path}")
+                        # Pre-log a translate history entry before queuing the async
+                        # translation job. Why: translate_subtitles_file (no job_id)
+                        # defers to the jobs queue and returns immediately; without a
+                        # marker the next wanted-scan cycle re-queues the same
+                        # translation before the worker runs.
+                        translate_msg = (f"BAZARR auto-translate (wanted-scan) queued "
+                                         f"{translate_cfg['from']} -> {lang_code}")
+                        pre_result = create_process_result(
+                            message=translate_msg,
+                            video_path=video_path,
+                            orig_to_lang=lang_code,
+                            forced=language.endswith(':forced') or translate_cfg['forced'],
+                            hi=language.endswith(':hi') or translate_cfg['hi'],
+                            dest_srt_file=source_srt,
+                            media_type='episode',
+                        )
+                        history_log(6, episode.sonarrSeriesId, episode.sonarrEpisodeId, pre_result)
                         translate_subtitles_file(
                             video_path=video_path,
                             source_srt_file=source_srt,

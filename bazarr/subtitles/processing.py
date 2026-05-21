@@ -42,7 +42,7 @@ class ProcessSubtitlesResult:
 
 def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_type,
                               series_id=None, episode_id=None, radarr_id=None,
-                              source_score_percent=None):
+                              source_score_percent=None, forced=False):
     """
     After a subtitle is downloaded, check if any profile language is configured to
     auto-translate from the just-downloaded language. If so, queue translation.
@@ -50,6 +50,10 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
     source_score_percent: 0-100 score of the just-downloaded source subtitle. If
     provided and below settings.translator.min_source_score, translation is
     skipped (poorly-matched sources shouldn't seed translations).
+
+    forced: True when the just-downloaded subtitle is a forced track. Forced
+    subtitles cover only foreign-language inserts and are not a valid
+    translation seed, so we skip auto-translate for them.
     """
     try:
         from app.database import get_profile_id, get_profiles_list
@@ -59,7 +63,7 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
         if not subtitle_path or not downloaded_lang:
             return
 
-        if subtitle_path and ':forced' in str(downloaded_lang):
+        if forced:
             return
 
         min_score = settings.translator.min_source_score
@@ -84,6 +88,26 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
         if not profile:
             return
 
+        # Hoisted out of the loop: check_missing_languages is independent of the
+        # profile item being considered, so calling it once per profile item
+        # (potentially N database/indexer queries) is wasteful. Compute the
+        # missing-codes set once and reuse for every item.
+        missing = check_missing_languages(path=video_path, media_type=media_type)
+        missing_codes = set()
+        for lang_obj in missing or []:
+            try:
+                code2 = alpha2_from_alpha3(lang_obj.alpha3)
+            except Exception:
+                code2 = None
+            if not code2:
+                continue
+            if getattr(lang_obj, 'hi', False):
+                missing_codes.add(f'{code2}:hi')
+            elif getattr(lang_obj, 'forced', False):
+                missing_codes.add(f'{code2}:forced')
+            else:
+                missing_codes.add(code2)
+
         for item in profile.get('items', []):
             target_lang = item.get('language')
             translate_from = item.get('translate_from')
@@ -92,22 +116,6 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
                 continue
             if target_lang == downloaded_lang:
                 continue
-
-            missing = check_missing_languages(path=video_path, media_type=media_type)
-            missing_codes = set()
-            for lang_obj in missing or []:
-                try:
-                    code2 = alpha2_from_alpha3(lang_obj.alpha3)
-                except Exception:
-                    code2 = None
-                if not code2:
-                    continue
-                if getattr(lang_obj, 'hi', False):
-                    missing_codes.add(f'{code2}:hi')
-                elif getattr(lang_obj, 'forced', False):
-                    missing_codes.add(f'{code2}:forced')
-                else:
-                    missing_codes.add(code2)
 
             target_codes = {target_lang, f'{target_lang}:hi', f'{target_lang}:forced'}
             if not (missing_codes & target_codes):
@@ -287,6 +295,7 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         episode_id=episode_id if media_type == 'series' else None,
         radarr_id=movie_metadata.radarrId if media_type != 'series' else None,
         source_score_percent=percent_score,
+        forced=subtitle.language.forced,
     )
 
     return ProcessSubtitlesResult(message=message,
