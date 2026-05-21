@@ -9,6 +9,7 @@ export interface ProviderHubCatalogSource {
   url: string;
   enabled?: boolean;
   trusted: boolean;
+  dev_ref?: string | null;
   last_checked_at?: string | null;
   last_error?: string | null;
   resolved_commit?: string | null;
@@ -93,6 +94,14 @@ class ProviderHubApi extends BaseApi {
 
   async removeCatalogSource(name: string) {
     await this.delete(`/catalog/sources/${name}`);
+  }
+
+  async patchCatalogSource(name: string, payload: { dev_ref?: string | null }) {
+    const response = await this.patchRaw<ProviderHubCatalogSource>(
+      `/catalog/sources/${name}`,
+      payload,
+    );
+    return response.data;
   }
 
   async providers() {

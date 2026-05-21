@@ -969,3 +969,13 @@ $tones: (
     animation: none;
   }
 }
+
+.sourceCardDevSection {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--bz-border-card);
+}
+
+.sourceCardDevBadge {
+  font-variant-numeric: tabular-nums;
+}

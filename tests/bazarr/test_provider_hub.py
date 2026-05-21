@@ -1640,3 +1640,168 @@ def test_worker_command_disables_bytecode_in_isolated_mode(tmp_path):
         "-B",
         str(runner),
     ]
+
+
+def test_add_catalog_source_accepts_optional_dev_ref(tmp_path, monkeypatch):
+    from provider_hub.service import add_catalog_source
+
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps({"catalog_sources": {}, "installations": {}, "jobs": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    source = add_catalog_source(
+        "community",
+        "https://github.com/example/providers/blob/main/catalog.json",
+        dev_ref="feat/foo",
+    )
+    assert source["dev_ref"] == "feat/foo"
+
+
+def test_add_catalog_source_rejects_invalid_dev_ref(tmp_path, monkeypatch):
+    import pytest
+    from provider_hub.service import CatalogSourceError, add_catalog_source
+
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps({"catalog_sources": {}, "installations": {}, "jobs": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    with pytest.raises(CatalogSourceError):
+        add_catalog_source(
+            "bad",
+            "https://github.com/example/providers/blob/main/catalog.json",
+            dev_ref="this is not a ref",
+        )
+
+
+def test_update_catalog_source_sets_dev_ref(tmp_path, monkeypatch):
+    from provider_hub.service import add_catalog_source, update_catalog_source
+
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps({"catalog_sources": {}, "installations": {}, "jobs": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    add_catalog_source(
+        "community",
+        "https://github.com/example/providers/blob/main/catalog.json",
+    )
+    updated = update_catalog_source("community", dev_ref="feat/test")
+    assert updated["dev_ref"] == "feat/test"
+    cleared = update_catalog_source("community", dev_ref=None)
+    assert cleared["dev_ref"] is None
+
+
+def test_update_catalog_source_rejects_invalid_dev_ref(tmp_path, monkeypatch):
+    import pytest
+    from provider_hub.service import (
+        CatalogSourceError,
+        add_catalog_source,
+        update_catalog_source,
+    )
+
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps({"catalog_sources": {}, "installations": {}, "jobs": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    add_catalog_source(
+        "community",
+        "https://github.com/example/providers/blob/main/catalog.json",
+    )
+    with pytest.raises(CatalogSourceError):
+        update_catalog_source("community", dev_ref="bad ref with space")
+
+
+def test_update_catalog_source_returns_none_for_unknown(tmp_path, monkeypatch):
+    from provider_hub.service import update_catalog_source
+
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps({"catalog_sources": {}, "installations": {}, "jobs": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    assert update_catalog_source("missing", dev_ref="feat/x") is None
+
+
+def test_refresh_catalog_uses_dev_ref_when_set(tmp_path, monkeypatch):
+    from provider_hub.service import (
+        add_catalog_source,
+        refresh_catalog,
+        update_catalog_source,
+    )
+
+    calls = []
+
+    def fake_get(url, timeout):
+        calls.append(url)
+        if "api.github.com" in url:
+            return _FakeResponse({"sha": "f" * 40})
+        return _FakeResponse({"providers": []})
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps({"catalog_sources": {}, "installations": {}, "jobs": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    add_catalog_source(
+        "community",
+        "https://github.com/example/providers/blob/main/catalog.json",
+    )
+    update_catalog_source("community", dev_ref="feat/test-branch")
+    refresh_catalog()
+
+    assert any(
+        url.endswith("/repos/example/providers/commits/feat/test-branch")
+        for url in calls
+    ), f"calls were: {calls}"
+
+
+def test_patch_catalog_source_updates_dev_ref(tmp_path, monkeypatch):
+    from provider_hub.service import (
+        add_catalog_source,
+        get_catalog_source,
+        refresh_catalog,
+        update_catalog_source,
+    )
+
+    def fake_get(url, timeout):
+        if "api.github.com" in url:
+            return _FakeResponse({"sha": "9" * 40})
+        return _FakeResponse({"providers": []})
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps({"catalog_sources": {}, "installations": {}, "jobs": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    add_catalog_source(
+        "community",
+        "https://github.com/example/providers/blob/main/catalog.json",
+    )
+
+    # Mirrors the PATCH endpoint logic: validate + update, then refresh.
+    update_catalog_source("community", dev_ref="feat/branch")
+    refresh_catalog()
+
+    source = get_catalog_source("community")
+    assert source is not None
+    assert source["dev_ref"] == "feat/branch"
+    assert source["last_checked_at"] is not None

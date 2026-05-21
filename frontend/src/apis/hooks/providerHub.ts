@@ -62,6 +62,20 @@ export function useProviderHubRemoveCatalogSource() {
   });
 }
 
+export function useProviderHubPatchCatalogSource() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationKey: [...providerHubKey, QueryKeys.Actions, "patch-source"],
+    mutationFn: (param: { name: string; dev_ref?: string | null }) =>
+      api.providerHub.patchCatalogSource(param.name, {
+        dev_ref: param.dev_ref,
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: providerHubKey });
+    },
+  });
+}
+
 export function useProviderHubInstall() {
   const client = useQueryClient();
   return useMutation({

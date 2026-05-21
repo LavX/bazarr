@@ -38,6 +38,7 @@ def official_catalog_source() -> dict[str, Any]:
         "enabled": True,
         "official": True,
         "trusted": True,
+        "dev_ref": None,
         "last_checked_at": None,
         "last_error": None,
     }
@@ -106,6 +107,8 @@ def load_state(path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
         else:
             source["official"] = False
             source["trusted"] = False
+        if "dev_ref" not in source:
+            source["dev_ref"] = None
     entries = data.setdefault("catalog_entries", {})
     if isinstance(entries, dict):
         for entry in entries.values():

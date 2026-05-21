@@ -170,6 +170,22 @@ export function parseGitHubUrl(url: string): ParsedGitHubUrl | null {
   return { owner, repo, suggestedName: `${owner}/${repo}` };
 }
 
+export function parseGitHubRef(url: string): string | null {
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+  let pathname: string;
+  try {
+    pathname = new URL(trimmed).pathname;
+  } catch {
+    return null;
+  }
+  const parts = pathname.split("/").filter(Boolean);
+  // /<owner>/<repo>/blob/<ref>/<path...>
+  if (parts.length < 5) return null;
+  if (parts[2] !== "blob" && parts[2] !== "raw") return null;
+  return parts[3] || null;
+}
+
 export function formatRelativeTime(
   iso: string | null | undefined,
   now: Date = new Date(),

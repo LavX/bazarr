@@ -57,6 +57,26 @@ class ProviderHubCatalogSource(Resource):
             return 'Catalog source not found', 404
         return '', 204
 
+    @authenticate
+    @api_ns_provider_hub.response(200, 'Success')
+    @api_ns_provider_hub.response(400, 'Invalid catalog source')
+    @api_ns_provider_hub.response(401, 'Not Authenticated')
+    @api_ns_provider_hub.response(404, 'Catalog source not found')
+    def patch(self, name):
+        payload = request.json or {}
+        kwargs = {}
+        if "dev_ref" in payload:
+            kwargs["dev_ref"] = payload["dev_ref"]
+        try:
+            source = service.update_catalog_source(name, **kwargs)
+        except CatalogSourceError as error:
+            return str(error), 400
+        if source is None:
+            return 'Catalog source not found', 404
+        # Auto-refresh so the UI reflects the new ref immediately.
+        service.refresh_catalog()
+        return service.get_catalog_source(name) or source
+
 
 @api_ns_provider_hub.route('provider-hub/providers')
 class ProviderHubProviders(Resource):

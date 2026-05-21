@@ -2,11 +2,13 @@ import { FunctionComponent, useEffect, useState } from "react";
 import {
   ActionIcon,
   Anchor,
+  Badge,
   Button,
   Drawer,
   Group,
   Menu,
   Stack,
+  Switch,
   Text,
   TextInput,
 } from "@mantine/core";
@@ -19,6 +21,7 @@ import {
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   useProviderHubAddCatalogSource,
+  useProviderHubPatchCatalogSource,
   useProviderHubRefreshCatalog,
   useProviderHubRemoveCatalogSource,
 } from "@/apis/hooks";
@@ -27,6 +30,7 @@ import { EmptyState } from "@/pages/Settings/Providers/hub/components/EmptyState
 import { TrustBadge } from "@/pages/Settings/Providers/hub/components/TrustBadge";
 import {
   formatRelativeTime,
+  parseGitHubRef,
   parseGitHubUrl,
 } from "@/pages/Settings/Providers/hub/utils";
 import styles from "@/pages/Settings/Providers/hub/hub.module.scss";
@@ -37,6 +41,154 @@ interface SourcesDrawerProps {
   sources: ProviderHubCatalogSource[];
   installedSourceUsage: Record<string, number>;
 }
+
+interface SourceRowProps {
+  source: ProviderHubCatalogSource;
+  usage: number;
+  onRemove: (source: ProviderHubCatalogSource) => void;
+}
+
+const SourceRow: FunctionComponent<SourceRowProps> = ({
+  source,
+  usage,
+  onRemove,
+}) => {
+  const patch = useProviderHubPatchCatalogSource();
+
+  const stableRef = parseGitHubRef(source.url) ?? "main";
+  const [devMode, setDevMode] = useState(Boolean(source.dev_ref));
+  const [branch, setBranch] = useState(source.dev_ref ?? stableRef);
+
+  useEffect(() => {
+    setDevMode(Boolean(source.dev_ref));
+    setBranch(source.dev_ref ?? stableRef);
+  }, [source.dev_ref, stableRef]);
+
+  const trimmedBranch = branch.trim();
+  const wouldSet = devMode ? trimmedBranch || null : null;
+  const dirty = (source.dev_ref ?? null) !== wouldSet;
+  const canApply =
+    dirty && (!devMode || trimmedBranch.length > 0) && !patch.isPending;
+
+  const handleApply = () => {
+    patch.mutate({ name: source.id ?? source.name, dev_ref: wouldSet });
+  };
+
+  return (
+    <div className={styles.sourceCard}>
+      <div className={styles.sourceCardHeader}>
+        <div style={{ minWidth: 0 }}>
+          <div className={styles.sourceCardName}>{source.name}</div>
+          <Anchor
+            href={source.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={styles.sourceCardMeta}
+          >
+            {source.url}
+          </Anchor>
+        </div>
+        <Menu position="bottom-end" withinPortal>
+          <Menu.Target>
+            <ActionIcon
+              variant="subtle"
+              color="gray"
+              aria-label={`Actions for ${source.name}`}
+            >
+              <FontAwesomeIcon icon={faEllipsis} />
+            </ActionIcon>
+          </Menu.Target>
+          <Menu.Dropdown>
+            <Menu.Item
+              color="red"
+              leftSection={<FontAwesomeIcon icon={faTrash} />}
+              onClick={() => onRemove(source)}
+            >
+              Remove source
+            </Menu.Item>
+          </Menu.Dropdown>
+        </Menu>
+      </div>
+      <Group justify="space-between" align="center">
+        <Group gap={6}>
+          <TrustBadge trusted={source.trusted} />
+          {source.dev_ref && (
+            <Badge
+              size="xs"
+              variant="light"
+              color="yellow"
+              className={styles.sourceCardDevBadge}
+            >
+              Dev: {source.dev_ref}
+            </Badge>
+          )}
+        </Group>
+        <Group gap={12}>
+          {usage > 0 && (
+            <Text size="xs" c="dimmed">
+              {usage} installed
+            </Text>
+          )}
+          {source.last_checked_at && (
+            <Text size="xs" c="dimmed">
+              Checked {formatRelativeTime(source.last_checked_at)}
+            </Text>
+          )}
+        </Group>
+      </Group>
+      {source.last_error && (
+        <Text size="xs" c="red">
+          {source.last_error}
+        </Text>
+      )}
+      <div className={styles.sourceCardDevSection}>
+        <Switch
+          size="xs"
+          label="Dev mode"
+          checked={devMode}
+          onChange={(event) => setDevMode(event.currentTarget.checked)}
+        />
+        {devMode && (
+          <Group gap="xs" mt="xs" align="flex-end">
+            <TextInput
+              size="xs"
+              label="Branch"
+              placeholder="feat/your-branch"
+              value={branch}
+              onChange={(event) => setBranch(event.currentTarget.value)}
+              style={{ flex: 1 }}
+            />
+            <Button
+              size="xs"
+              variant="light"
+              disabled={!canApply}
+              loading={patch.isPending}
+              onClick={handleApply}
+            >
+              Apply
+            </Button>
+          </Group>
+        )}
+        {!devMode && source.dev_ref && (
+          <Group gap="xs" mt="xs">
+            <Text size="xs" c="dimmed">
+              Stable mode pending. Click Apply to switch back.
+            </Text>
+            <Button
+              size="xs"
+              variant="light"
+              disabled={!canApply}
+              loading={patch.isPending}
+              onClick={handleApply}
+            >
+              Apply
+            </Button>
+          </Group>
+        )}
+      </div>
+    </div>
+  );
+};
 
 export const SourcesDrawer: FunctionComponent<SourcesDrawerProps> = ({
   opened,
@@ -154,73 +306,14 @@ export const SourcesDrawer: FunctionComponent<SourcesDrawerProps> = ({
             />
           ) : (
             <Stack gap="xs">
-              {sources.map((source) => {
-                const usage = installedSourceUsage[source.name] ?? 0;
-                return (
-                  <div
-                    key={source.id ?? source.name}
-                    className={styles.sourceCard}
-                  >
-                    <div className={styles.sourceCardHeader}>
-                      <div style={{ minWidth: 0 }}>
-                        <div className={styles.sourceCardName}>
-                          {source.name}
-                        </div>
-                        <Anchor
-                          href={source.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className={styles.sourceCardMeta}
-                        >
-                          {source.url}
-                        </Anchor>
-                      </div>
-                      <Menu position="bottom-end" withinPortal>
-                        <Menu.Target>
-                          <ActionIcon
-                            variant="subtle"
-                            color="gray"
-                            aria-label={`Actions for ${source.name}`}
-                          >
-                            <FontAwesomeIcon icon={faEllipsis} />
-                          </ActionIcon>
-                        </Menu.Target>
-                        <Menu.Dropdown>
-                          <Menu.Item
-                            color="red"
-                            leftSection={<FontAwesomeIcon icon={faTrash} />}
-                            onClick={() => handleRemove(source)}
-                          >
-                            Remove source
-                          </Menu.Item>
-                        </Menu.Dropdown>
-                      </Menu>
-                    </div>
-                    <Group justify="space-between" align="center">
-                      <Group gap={6}>
-                        <TrustBadge trusted={source.trusted} />
-                      </Group>
-                      <Group gap={12}>
-                        {usage > 0 && (
-                          <Text size="xs" c="dimmed">
-                            {usage} installed
-                          </Text>
-                        )}
-                        {source.last_checked_at && (
-                          <Text size="xs" c="dimmed">
-                            Checked {formatRelativeTime(source.last_checked_at)}
-                          </Text>
-                        )}
-                      </Group>
-                    </Group>
-                    {source.last_error && (
-                      <Text size="xs" c="red">
-                        {source.last_error}
-                      </Text>
-                    )}
-                  </div>
-                );
-              })}
+              {sources.map((source) => (
+                <SourceRow
+                  key={source.id ?? source.name}
+                  source={source}
+                  usage={installedSourceUsage[source.name] ?? 0}
+                  onRemove={handleRemove}
+                />
+              ))}
             </Stack>
           )}
         </Stack>

@@ -39,6 +39,24 @@ def utcnow_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+_DEV_REF_RE = re.compile(r"^[A-Za-z0-9._\-/]{1,200}$")
+
+
+def _validate_dev_ref(dev_ref):
+    if dev_ref is None:
+        return None
+    if not isinstance(dev_ref, str):
+        raise CatalogSourceError("dev_ref must be a string or null")
+    trimmed = dev_ref.strip()
+    if not trimmed:
+        return None
+    if not _DEV_REF_RE.match(trimmed):
+        raise CatalogSourceError(
+            "dev_ref contains characters not allowed in a git ref"
+        )
+    return trimmed
+
+
 def _validate_github_catalog_url(url: str) -> str:
     parsed = urlparse(url)
     if parsed.scheme != "https" or parsed.netloc.lower() != "github.com":
@@ -72,8 +90,12 @@ def _resolve_github_ref(owner: str, repo: str, ref: str) -> str:
     return commit.lower()
 
 
-def _fetch_github_catalog(url: str) -> tuple[dict[str, Any], str]:
+def _fetch_github_catalog(
+    url: str, override_ref: str | None = None
+) -> tuple[dict[str, Any], str]:
     owner, repo, ref, path = _parse_github_file_url(url)
+    if override_ref:
+        ref = override_ref
     commit = _resolve_github_ref(owner, repo, ref)
     raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{commit}/{path}"
     response = requests.get(raw_url, timeout=30)
@@ -84,13 +106,16 @@ def _fetch_github_catalog(url: str) -> tuple[dict[str, Any], str]:
     return payload, commit
 
 
-def add_catalog_source(name: str, url: str, trusted: bool = False) -> dict[str, Any]:
+def add_catalog_source(
+    name: str, url: str, trusted: bool = False, dev_ref: str | None = None
+) -> dict[str, Any]:
     if not name or not isinstance(name, str):
         raise CatalogSourceError("Catalog source name is required")
     url = _validate_github_catalog_url(url)
     if name == OFFICIAL_CATALOG_SOURCE_ID and url != OFFICIAL_CATALOG_URL:
         raise CatalogSourceError("The official catalog source id is reserved")
     is_official = name == OFFICIAL_CATALOG_SOURCE_ID and url == OFFICIAL_CATALOG_URL
+    dev_ref_value = _validate_dev_ref(dev_ref)
 
     state = load_state()
     sources = state.setdefault("catalog_sources", {})
@@ -102,6 +127,7 @@ def add_catalog_source(name: str, url: str, trusted: bool = False) -> dict[str, 
         "enabled": True,
         "official": is_official,
         "trusted": is_official,
+        "dev_ref": dev_ref_value,
         "last_checked_at": None,
         "last_error": None,
     }
@@ -120,6 +146,52 @@ def remove_catalog_source(name: str) -> bool:
     del sources[name]
     save_state(state)
     return True
+
+
+_UNSET = object()
+
+
+def _find_catalog_source(state: dict[str, Any], identifier: str):
+    """Return ``(key, source_dict)`` matching ``identifier`` by id or name.
+
+    Catalog sources are stored under their ``id`` (or the explicit name the
+    caller passed to add_catalog_source). The official source keys on
+    ``"official"`` but exposes the long display name to the UI, so callers
+    can hit either; we look up by exact key first and fall back to matching
+    the ``name`` field.
+    """
+    sources = state.get("catalog_sources") or {}
+    source = sources.get(identifier)
+    if isinstance(source, dict):
+        return identifier, source
+    for key, candidate in sources.items():
+        if isinstance(candidate, dict) and candidate.get("name") == identifier:
+            return key, candidate
+    return None, None
+
+
+def update_catalog_source(name: str, dev_ref=_UNSET) -> dict[str, Any] | None:
+    """Update a catalog source in place.
+
+    Currently only ``dev_ref`` is mutable. Leave it unset to no-op; pass
+    ``None`` to clear it; pass a string to set it. The validated ref is
+    stored on the source dict. Returns the updated source, or ``None`` if no
+    source matches the identifier (by id or by display name).
+    """
+    state = load_state()
+    _key, source = _find_catalog_source(state, name)
+    if source is None:
+        return None
+    if dev_ref is not _UNSET:
+        source["dev_ref"] = _validate_dev_ref(dev_ref)
+    save_state(state)
+    return source
+
+
+def get_catalog_source(name: str) -> dict[str, Any] | None:
+    state = load_state()
+    _key, source = _find_catalog_source(state, name)
+    return source
 
 
 def _catalog_needs_auto_refresh(state: dict[str, Any]) -> bool:
@@ -166,7 +238,9 @@ def refresh_catalog() -> dict[str, Any]:
             sources_count += 1
             source["last_checked_at"] = now
             try:
-                catalog, commit = _fetch_github_catalog(source["url"])
+                catalog, commit = _fetch_github_catalog(
+                    source["url"], override_ref=source.get("dev_ref")
+                )
                 source["resolved_commit"] = commit
                 source["last_error"] = None
                 refreshed_sources.add(source.get("id") or source["name"])
