@@ -92,10 +92,14 @@ def _wanted_movie(movie, providers_list, job_id=None):
                     .order_by(TableHistoryMovie.timestamp.desc())
                     .limit(1)
                 ).first()
-                source_score_pct = (
-                    round((history.score / MAX_SCORES['movie']) * 100, 1)
-                    if history and history.score else 0
-                )
+                if history and history.score:
+                    source_score_pct = round((history.score / MAX_SCORES['movie']) * 100, 1)
+                else:
+                    # No history record — subtitle may have been manually placed or
+                    # predates history tracking. Treat as exactly at threshold so
+                    # we proceed with translation instead of silently falling
+                    # back to provider search.
+                    source_score_pct = min_score
                 if source_score_pct < min_score:
                     logging.debug(
                         f"BAZARR auto-translate (wanted-scan) skipped for {video_path}: "
