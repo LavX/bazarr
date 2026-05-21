@@ -55,7 +55,7 @@ rarfile==4.2
 requests==2.32.5
 retry==0.9.2
 semver==3.0.4
-signalrcore==0.9.71
+signalrcore==1.0.2
 six==1.17.0
 sqlalchemy==2.0.48
 srt==3.5.3
