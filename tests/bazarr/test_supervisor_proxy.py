@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -43,6 +44,29 @@ async def test_backup_download_path_is_proxied_to_backend(monkeypatch, tmp_path)
     match_info = await app.router.resolve(request)
 
     assert match_info.handler is _proxy_marker
+
+
+@pytest.mark.asyncio
+async def test_supervisor_routes_honor_base_url(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        """
+general:
+  base_url: /bazarr
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(supervisor, "proxy_handler", _proxy_marker)
+
+    app = supervisor.create_app(str(tmp_path), _Backend(state="starting"))
+    request = make_mocked_request("GET", "/bazarr/_supervisor/status", app=app)
+
+    match_info = await app.router.resolve(request)
+    response = await match_info.handler(request)
+
+    assert response.status == 200
+    assert json.loads(response.text) == {"state": "starting", "stage_index": 0}
 
 
 @pytest.mark.asyncio

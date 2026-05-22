@@ -637,8 +637,13 @@ def create_app(config_dir: str, backend: BackendManager) -> web.Application:
     base = config.get("baseUrl", "/").strip("/")
 
     # Supervisor-handled endpoints (not proxied)
-    app.router.add_route("GET", "/_supervisor/status", create_supervisor_status_handler(backend))
-    app.router.add_route("GET", "/_supervisor/events", create_supervisor_sse_handler(backend))
+    status_handler = create_supervisor_status_handler(backend)
+    sse_handler = create_supervisor_sse_handler(backend)
+    app.router.add_route("GET", "/_supervisor/status", status_handler)
+    app.router.add_route("GET", "/_supervisor/events", sse_handler)
+    if base:
+        app.router.add_route("GET", f"/{base}/_supervisor/status", status_handler)
+        app.router.add_route("GET", f"/{base}/_supervisor/events", sse_handler)
 
     # API/image proxy routes: register both root and base_url-prefixed versions
     # so deployments with general.base_url (e.g. /bazarr) work correctly

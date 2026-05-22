@@ -3,6 +3,7 @@ import base64
 import json
 import os
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -614,6 +615,62 @@ def test_provider_hub_restart_activation_promotes_staged_install(tmp_path, monke
     assert installation["staged_path"] is None
     assert installation["staged_python_path"] is None
     assert installation["pending_restart"] is False
+    jobs = load_state()["jobs"]
+    assert any(
+        job.get("action") == "activate"
+        and job.get("target_id") == provider_id
+        and job.get("state") == "completed"
+        for job in jobs
+    )
+
+
+def test_provider_hub_state_write_lock_serializes_load_modify_save_cycles(tmp_path, monkeypatch):
+    from provider_hub.state import load_state, save_state, state_write_lock
+
+    state_file = tmp_path / "state.json"
+    state_file.write_text(json.dumps({"installations": {}, "jobs": []}), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    first_loaded = threading.Event()
+    second_entered = threading.Event()
+    errors = []
+
+    def write_first():
+        try:
+            with state_write_lock():
+                state = load_state()
+                state.setdefault("installations", {})["first"] = {"provider_id": "first"}
+                first_loaded.set()
+                if second_entered.wait(0.05):
+                    errors.append("second writer entered before first save")
+                save_state(state)
+        except Exception as error:
+            errors.append(str(error))
+
+    def write_second():
+        try:
+            first_loaded.wait(1)
+            with state_write_lock():
+                second_entered.set()
+                state = load_state()
+                state.setdefault("installations", {})["second"] = {"provider_id": "second"}
+                save_state(state)
+        except Exception as error:
+            errors.append(str(error))
+
+    first = threading.Thread(target=write_first)
+    second = threading.Thread(target=write_second)
+    first.start()
+    second.start()
+    first.join(1)
+    second.join(1)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert errors == []
+    installations = load_state()["installations"]
+    assert "first" in installations
+    assert "second" in installations
 
 
 def test_provider_hub_restart_activation_keeps_active_on_staged_failure(tmp_path, monkeypatch):

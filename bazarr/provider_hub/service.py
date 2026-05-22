@@ -25,8 +25,8 @@ from .state import (
     OFFICIAL_CATALOG_URL,
     catalog_source_for_entry,
     load_state,
+    mutate_state,
     provider_hub_dir,
-    save_state,
     spoofs_official_catalog_source,
 )
 from .venv import PluginEnvironment, python_executable
@@ -106,23 +106,24 @@ def utcnow_iso() -> str:
 
 
 def _persist_job(job: dict[str, Any]) -> None:
-    state = load_state()
-    jobs = state.setdefault("jobs", [])
-    if not isinstance(jobs, list):
-        jobs = []
-        state["jobs"] = jobs
-    job_id = job.get("id")
-    replaced = False
-    for index, existing in enumerate(jobs):
-        if isinstance(existing, dict) and existing.get("id") == job_id:
-            jobs[index] = dict(job)
-            replaced = True
-            break
-    if not replaced:
-        jobs.append(dict(job))
-    if len(jobs) > _JOB_LOG_LIMIT:
-        del jobs[: len(jobs) - _JOB_LOG_LIMIT]
-    save_state(state)
+    def persist(state: dict[str, Any]) -> None:
+        jobs = state.setdefault("jobs", [])
+        if not isinstance(jobs, list):
+            jobs = []
+            state["jobs"] = jobs
+        job_id = job.get("id")
+        replaced = False
+        for index, existing in enumerate(jobs):
+            if isinstance(existing, dict) and existing.get("id") == job_id:
+                jobs[index] = dict(job)
+                replaced = True
+                break
+        if not replaced:
+            jobs.append(dict(job))
+        if len(jobs) > _JOB_LOG_LIMIT:
+            del jobs[: len(jobs) - _JOB_LOG_LIMIT]
+
+    mutate_state(persist)
 
 
 class _JobHandle:
@@ -321,8 +322,6 @@ def add_catalog_source(
         is_official = name == OFFICIAL_CATALOG_SOURCE_ID and url == OFFICIAL_CATALOG_URL
         dev_ref_value = _validate_dev_ref(dev_ref)
 
-        state = load_state()
-        sources = state.setdefault("catalog_sources", {})
         source = {
             "id": name,
             "name": name,
@@ -335,8 +334,11 @@ def add_catalog_source(
             "last_checked_at": None,
             "last_error": None,
         }
-        sources[name] = source
-        save_state(state)
+        def store_source(state: dict[str, Any]) -> dict[str, Any]:
+            state.setdefault("catalog_sources", {})[name] = source
+            return dict(source)
+
+        source = mutate_state(store_source)
         job.update(
             source_id=name,
             source_name=name,
@@ -356,23 +358,28 @@ def remove_catalog_source(name: str) -> bool:
         if name == OFFICIAL_CATALOG_SOURCE_ID:
             job.update(message="Refused to remove the official catalog source")
             return False
-        state = load_state()
-        sources = state.setdefault("catalog_sources", {})
-        if name not in sources:
+
+        def remove_source(state: dict[str, Any]) -> tuple[bool, str]:
+            sources = state.setdefault("catalog_sources", {})
+            if name not in sources:
+                return False, name
+            removed_name = sources[name].get("name", name) if isinstance(sources[name], dict) else name
+            del sources[name]
+            # Drop catalog_entries that came from this source. Without this purge
+            # the marketplace keeps offering stale entries and update checks may
+            # match them as available upgrades, which surprises the user.
+            entries = state.setdefault("catalog_entries", {})
+            for key, entry in list(entries.items()):
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("source") == name or entry.get("source_name") == removed_name:
+                    del entries[key]
+            return True, removed_name
+
+        removed, _removed_name = mutate_state(remove_source)
+        if not removed:
             job.update(message=f"Catalog source '{name}' not found")
             return False
-        removed_name = sources[name].get("name", name) if isinstance(sources[name], dict) else name
-        del sources[name]
-        # Drop catalog_entries that came from this source. Without this purge
-        # the marketplace keeps offering stale entries and update checks may
-        # match them as available upgrades, which surprises the user.
-        entries = state.setdefault("catalog_entries", {})
-        for key, entry in list(entries.items()):
-            if not isinstance(entry, dict):
-                continue
-            if entry.get("source") == name or entry.get("source_name") == removed_name:
-                del entries[key]
-        save_state(state)
         job.update(message=f"Removed catalog source '{name}'")
         return True
 
@@ -413,15 +420,21 @@ def update_catalog_source(name: str, dev_ref=_UNSET) -> dict[str, Any] | None:
         target_id=name,
         target_name=name,
     ) as job:
-        state = load_state()
-        _key, source = _find_catalog_source(state, name)
+        validated_dev_ref = _validate_dev_ref(dev_ref) if dev_ref is not _UNSET else _UNSET
+
+        def update_source(state: dict[str, Any]) -> tuple[dict[str, Any] | None, Any]:
+            _key, source = _find_catalog_source(state, name)
+            if source is None:
+                return None, None
+            previous_dev_ref = source.get("dev_ref")
+            if dev_ref is not _UNSET:
+                source["dev_ref"] = validated_dev_ref
+            return dict(source), previous_dev_ref
+
+        source, previous_dev_ref = mutate_state(update_source)
         if source is None:
             job.update(message=f"Catalog source '{name}' not found")
             return None
-        previous_dev_ref = source.get("dev_ref")
-        if dev_ref is not _UNSET:
-            source["dev_ref"] = _validate_dev_ref(dev_ref)
-        save_state(state)
         job.update(
             source_id=source.get("id"),
             source_name=source.get("name"),
@@ -472,16 +485,17 @@ def _normalize_catalog_manifest(manifest: dict[str, Any], source: dict[str, Any]
 
 def refresh_catalog() -> dict[str, Any]:
     with record_job("refresh_catalog", target_kind="system") as job:
-        state = load_state()
-        now = utcnow_iso()
-        entries = state.setdefault("catalog_entries", {})
-        refreshed_sources = set()
-        refreshed_entry_keys = set()
-        entries_count = 0
-        sources_count = 0
-        failed_sources: list[str] = []
-        for source in (state.get("catalog_sources") or {}).values():
-            if isinstance(source, dict):
+        def refresh(state: dict[str, Any]) -> dict[str, Any]:
+            now = utcnow_iso()
+            entries = state.setdefault("catalog_entries", {})
+            refreshed_sources = set()
+            refreshed_entry_keys = set()
+            entries_count = 0
+            sources_count = 0
+            failed_sources: list[str] = []
+            for source in (state.get("catalog_sources") or {}).values():
+                if not isinstance(source, dict):
+                    continue
                 sources_count += 1
                 source["last_checked_at"] = now
                 try:
@@ -521,14 +535,26 @@ def refresh_catalog() -> dict[str, Any]:
                     }
                     refreshed_entry_keys.add(key)
                     entries_count += 1
-        for key, entry in list(entries.items()):
-            if not isinstance(entry, dict):
-                continue
-            if entry.get("source") in refreshed_sources:
-                if key not in refreshed_entry_keys:
-                    del entries[key]
-        save_state(state)
-        ok_sources = sources_count - len(failed_sources)
+            for key, entry in list(entries.items()):
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("source") in refreshed_sources:
+                    if key not in refreshed_entry_keys:
+                        del entries[key]
+            ok_sources = sources_count - len(failed_sources)
+            return {
+                "refreshed_at": now,
+                "sources": sources_count,
+                "entries": entries_count,
+                "sources_ok": ok_sources,
+                "failed_sources": failed_sources,
+            }
+
+        result = mutate_state(refresh)
+        sources_count = result["sources"]
+        entries_count = result["entries"]
+        ok_sources = result["sources_ok"]
+        failed_sources = result["failed_sources"]
         if failed_sources:
             summary = (
                 f"Refreshed {ok_sources}/{sources_count} sources, "
@@ -545,7 +571,11 @@ def refresh_catalog() -> dict[str, Any]:
                 "entries": entries_count,
             },
         )
-        return {"refreshed_at": now, "sources": sources_count, "entries": entries_count}
+        return {
+            "refreshed_at": result["refreshed_at"],
+            "sources": sources_count,
+            "entries": entries_count,
+        }
 
 
 def _manifest_secret_fields(installation: dict[str, Any]) -> set[str]:
@@ -612,29 +642,35 @@ def _effective_installation_config(installation: dict[str, Any]) -> dict[str, An
 
 
 def update_provider(provider_id: str, enabled: bool | None = None, config: dict[str, Any] | None = None) -> dict[str, Any] | None:
-    state = load_state()
-    provider = (state.get("installations") or {}).get(provider_id)
-    if not isinstance(provider, dict):
-        return None
-
-    if enabled is not None:
-        provider["enabled"] = bool(enabled)
-        _set_bazarr_provider_enabled(provider_id, bool(enabled))
-
     if config is not None:
         if not isinstance(config, dict):
             raise ValueError("config must be an object")
-        secret_fields = _manifest_secret_fields(provider)
-        current = provider.get("config")
-        next_config = dict(current if isinstance(current, dict) else {})
-        for key, value in config.items():
-            if key in secret_fields and value == SECRET_PLACEHOLDER:
-                continue
-            next_config[key] = _encrypt_secret_value(value) if key in secret_fields else value
-        provider["config"] = next_config
 
-    state.setdefault("installations", {})[provider_id] = provider
-    save_state(state)
+    def update_installation(state: dict[str, Any]) -> dict[str, Any] | None:
+        provider = (state.get("installations") or {}).get(provider_id)
+        if not isinstance(provider, dict):
+            return None
+
+        if enabled is not None:
+            provider["enabled"] = bool(enabled)
+            _set_bazarr_provider_enabled(provider_id, bool(enabled))
+
+        if config is not None:
+            secret_fields = _manifest_secret_fields(provider)
+            current = provider.get("config")
+            next_config = dict(current if isinstance(current, dict) else {})
+            for key, value in config.items():
+                if key in secret_fields and value == SECRET_PLACEHOLDER:
+                    continue
+                next_config[key] = _encrypt_secret_value(value) if key in secret_fields else value
+            provider["config"] = next_config
+
+        state.setdefault("installations", {})[provider_id] = provider
+        return dict(provider)
+
+    provider = mutate_state(update_installation)
+    if provider is None:
+        return None
     return _redact_installation(provider)
 
 
@@ -675,12 +711,13 @@ def get_provider(provider_id: str, redact: bool = True) -> dict[str, Any] | None
 
 
 def _record_provider_last_error(provider_id: str, message: str | None) -> None:
-    state = load_state()
-    provider = state.setdefault("installations", {}).get(provider_id)
-    if not isinstance(provider, dict):
-        return
-    provider["last_error"] = message
-    save_state(state)
+    def update_error(state: dict[str, Any]) -> None:
+        provider = state.setdefault("installations", {}).get(provider_id)
+        if not isinstance(provider, dict):
+            return
+        provider["last_error"] = message
+
+    mutate_state(update_error)
 
 
 def _remove_bundle_runtime_artifacts(bundle_path: Path) -> None:
@@ -970,20 +1007,32 @@ def stage_install(manifest: dict[str, Any]) -> dict[str, Any]:
             staged_python_path = python_executable(env_path)
             _smoke_validate_worker(validated, bundle_path, staged_python_path)
         except Exception as error:
-            state = load_state()
+            install_error = error
+
+            def record_failed_install(state: dict[str, Any]) -> dict[str, Any]:
+                installations = state.setdefault("installations", {})
+                current = installations.get(validated.provider_id, existing)
+                installation = _failed_installation(validated, current, install_error, source_trusted)
+                installations[validated.provider_id] = installation
+                return dict(installation)
+
+            mutate_state(record_failed_install)
+            raise ProviderHubInstallError(str(install_error)) from install_error
+
+        def record_staged_install(state: dict[str, Any]) -> dict[str, Any]:
             installations = state.setdefault("installations", {})
             current = installations.get(validated.provider_id, existing)
-            installation = _failed_installation(validated, current, error, source_trusted)
+            installation = _staged_installation(
+                validated,
+                current,
+                bundle_path,
+                staged_python_path,
+                source_trusted,
+            )
             installations[validated.provider_id] = installation
-            save_state(state)
-            raise ProviderHubInstallError(str(error)) from error
+            return dict(installation)
 
-        state = load_state()
-        installations = state.setdefault("installations", {})
-        current = installations.get(validated.provider_id, existing)
-        installation = _staged_installation(validated, current, bundle_path, staged_python_path, source_trusted)
-        installations[validated.provider_id] = installation
-        save_state(state)
+        installation = mutate_state(record_staged_install)
         if not is_update:
             # First install: opt the provider into Bazarr's enabled_providers so
             # the new plugin is search-eligible without a separate UI toggle.
@@ -1090,7 +1139,12 @@ def activate_staged_installations() -> list[str]:
                 msg = f"Activated plugin '{target_name}' v{target_version}"
             job.update(message=msg)
     if changed:
-        save_state(state)
+        updated_installations = state.get("installations") or {}
+
+        def persist_activated(state: dict[str, Any]) -> None:
+            state["installations"] = updated_installations
+
+        mutate_state(persist_activated)
     return activated
 
 
@@ -1112,13 +1166,14 @@ def remove_installation(provider_id: str) -> bool:
         target_name=target_name,
         from_version=active_version,
     ) as job:
-        if isinstance(item, dict):
+        def remove_or_stage(state: dict[str, Any]) -> str:
+            installations = state.setdefault("installations", {})
+            item = installations.get(provider_id)
+            if not isinstance(item, dict):
+                return "missing"
             if not item.get("active_version"):
                 del installations[provider_id]
-                save_state(state)
-                _set_bazarr_provider_enabled(provider_id, False)
-                job.update(message=f"Removed pending install of '{target_name}'")
-                return True
+                return "removed_pending"
             item["state"] = "removed"
             item["pending_restart"] = True
             item["staged_version"] = None
@@ -1126,8 +1181,16 @@ def remove_installation(provider_id: str) -> bool:
             item["staged_python_path"] = None
             item["staged_manifest"] = None
             item["last_error"] = None
-        save_state(state)
+            return "staged"
+
+        result = mutate_state(remove_or_stage)
+        if result == "missing":
+            job.update(message=f"Plugin '{target_name}' not found")
+            return False
         _set_bazarr_provider_enabled(provider_id, False)
+        if result == "removed_pending":
+            job.update(message=f"Removed pending install of '{target_name}'")
+            return True
         job.update(message=f"Staged removal of '{target_name}' (restart Bazarr+ to finalize)")
         return True
 
@@ -1242,8 +1305,11 @@ def apply_update(provider_id: str) -> dict[str, Any] | None:
             from_version=provider.get("active_version") or provider.get("staged_version"),
         ) as job:
             provider["last_error"] = "No update manifest is available"
-            state.setdefault("installations", {})[provider_id] = provider
-            save_state(state)
+
+            def record_missing_manifest(state: dict[str, Any]) -> None:
+                state.setdefault("installations", {})[provider_id] = provider
+
+            mutate_state(record_missing_manifest)
             job.data["state"] = "failed"
             job.update(
                 error="No update manifest is available",

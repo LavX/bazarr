@@ -138,6 +138,7 @@ write_config()
 # would drop it from enabled_providers. main.py runs activate_staged_
 # installations() later, but that's already past this filter.
 from subliminal_patch.extensions import provider_registry  # noqa: E402
+provider_hub_registration_ok = True
 try:
     from provider_hub.service import activate_staged_installations
     activated = activate_staged_installations()
@@ -151,11 +152,15 @@ try:
     if registered:
         logging.info("Registered Provider Hub plugins into provider registry: %s", registered)
 except Exception:  # pragma: no cover - hub failures must not prevent startup
+    provider_hub_registration_ok = False
     logging.exception("Unable to register active Provider Hub providers on startup")
 existing_providers = provider_registry.names()
 enabled_providers = settings.general.enabled_providers
-settings.general.enabled_providers = [x for x in enabled_providers if x in existing_providers]
-write_config()
+if provider_hub_registration_ok:
+    settings.general.enabled_providers = [x for x in enabled_providers if x in existing_providers]
+    write_config()
+else:
+    logging.warning("Skipping enabled_providers cleanup because Provider Hub registration failed")
 
 
 # Initialize provider_priorities if not exists
