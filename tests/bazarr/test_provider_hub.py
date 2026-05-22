@@ -2237,3 +2237,36 @@ def test_manifest_rejects_unsafe_version_path_components():
     for bad in ("../escape", "/abs", "a/b", "a\\b", "..", "."):
         with pytest.raises(ManifestValidationError):
             validate_manifest(_manifest(version=bad), built_in_provider_ids=set())
+
+
+def test_runtime_provider_configs_includes_pending_restart_with_active_version(
+    tmp_path, monkeypatch
+):
+    from provider_hub import service
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+    state = load_state()
+    state["installations"]["examplehub"] = {
+        "provider_id": "examplehub",
+        "name": "Example",
+        "active_version": "1.0.0",
+        "state": "staged",
+        "pending_restart": True,
+        "config": {"api_key": "abc"},
+        "manifest": {"provider_id": "examplehub", "version": "1.0.0"},
+    }
+    state["installations"]["nokey"] = {
+        "provider_id": "nokey",
+        "active_version": None,
+        "state": "staged",
+        "pending_restart": True,
+        "config": {},
+        "manifest": {"provider_id": "nokey", "version": "1.0.0"},
+    }
+    save_state(state)
+
+    configs = service.runtime_provider_configs()
+    assert "examplehub" in configs
+    assert configs["examplehub"].get("api_key") == "abc"
+    assert "nokey" not in configs

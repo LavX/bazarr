@@ -605,7 +605,12 @@ def runtime_provider_configs() -> dict[str, dict[str, Any]]:
     for provider_id, installation in (state.get("installations") or {}).items():
         if not isinstance(installation, dict):
             continue
-        if installation.get("state") != "active" or installation.get("pending_restart"):
+        # The active provider class is keyed off ``active_version`` and stays
+        # registered until restart, even while an update or removal is staged.
+        # Filtering on ``state == active`` would strip the config from a
+        # pending-restart row and the live search would run without
+        # credentials. Use ``active_version`` as the gate instead.
+        if not installation.get("active_version"):
             continue
         configs[provider_id] = _effective_installation_config(installation)
     return configs
