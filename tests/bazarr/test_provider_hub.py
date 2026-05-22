@@ -2137,3 +2137,95 @@ def test_stage_install_records_failed_job_on_smoke_error(tmp_path, monkeypatch):
     assert job["action"] == "install"
     assert job["state"] == "failed"
     assert "worker broke" in job["error"]
+
+
+def test_list_providers_overlays_enabled_from_bazarr_enabled_providers(
+    tmp_path, monkeypatch
+):
+    from provider_hub import service
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+    state = load_state()
+    state["installations"]["examplehub"] = {
+        "provider_id": "examplehub",
+        "name": "Example",
+        "active_version": "1.0.0",
+        "state": "active",
+        "pending_restart": False,
+        "enabled": False,  # stale stored value
+        "manifest": {"provider_id": "examplehub", "version": "1.0.0"},
+    }
+    save_state(state)
+
+    monkeypatch.setattr(
+        service, "_bazarr_enabled_providers", lambda: ["examplehub", "other"]
+    )
+
+    providers = service.list_providers()
+    assert any(
+        p["provider_id"] == "examplehub" and p["enabled"] is True for p in providers
+    )
+
+    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["other"])
+    providers = service.list_providers()
+    assert any(
+        p["provider_id"] == "examplehub" and p["enabled"] is False for p in providers
+    )
+
+
+def test_update_provider_syncs_enabled_providers(tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+    state = load_state()
+    state["installations"]["examplehub"] = {
+        "provider_id": "examplehub",
+        "name": "Example",
+        "active_version": "1.0.0",
+        "state": "active",
+        "pending_restart": False,
+        "enabled": True,
+        "manifest": {"provider_id": "examplehub", "version": "1.0.0"},
+    }
+    save_state(state)
+
+    calls = []
+    monkeypatch.setattr(
+        service,
+        "_set_bazarr_provider_enabled",
+        lambda pid, enabled: calls.append((pid, enabled)) or True,
+    )
+
+    service.update_provider("examplehub", enabled=False)
+    service.update_provider("examplehub", enabled=True)
+    assert calls == [("examplehub", False), ("examplehub", True)]
+
+
+def test_remove_installation_clears_enabled_providers(tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+    state = load_state()
+    state["installations"]["examplehub"] = {
+        "provider_id": "examplehub",
+        "name": "Example",
+        "active_version": "1.0.0",
+        "state": "active",
+        "pending_restart": False,
+        "enabled": True,
+        "manifest": {"provider_id": "examplehub", "version": "1.0.0"},
+    }
+    save_state(state)
+
+    calls = []
+    monkeypatch.setattr(
+        service,
+        "_set_bazarr_provider_enabled",
+        lambda pid, enabled: calls.append((pid, enabled)) or True,
+    )
+
+    service.remove_installation("examplehub")
+    assert calls == [("examplehub", False)]

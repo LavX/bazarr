@@ -38,6 +38,58 @@ _VERSION_TOKEN_RE = re.compile(r"\d+|[A-Za-z]+")
 _JOB_LOG_LIMIT = 200
 
 
+def _bazarr_enabled_providers() -> list[str]:
+    """Return Bazarr's current enabled-providers list, or [] if unavailable.
+
+    ``settings.general.enabled_providers`` is the actual gate that decides
+    which providers run during a search. The hub installation row's stored
+    ``enabled`` flag is a local copy that historically drifted out of sync
+    with this list. Reading the canonical value lazily avoids a circular
+    import (service.py is imported during init before settings finishes
+    loading on some code paths) and keeps the hub view honest.
+    """
+    try:
+        from app.config import settings
+    except Exception:
+        return []
+    raw = getattr(getattr(settings, "general", None), "enabled_providers", None)
+    if isinstance(raw, list):
+        return [str(item) for item in raw]
+    if isinstance(raw, str):
+        trimmed = raw.strip().strip("[]")
+        return [item.strip().strip("'\"") for item in trimmed.split(",") if item.strip()]
+    return []
+
+
+def _set_bazarr_provider_enabled(provider_id: str, enabled: bool) -> bool:
+    """Add ``provider_id`` to (or remove it from) Bazarr's enabled_providers.
+
+    Returns True when the on-disk config changed. Logs and swallows
+    failures so a hub action never aborts on a settings hiccup.
+    """
+    try:
+        from app.config import settings, write_config
+    except Exception:
+        return False
+    current = list(_bazarr_enabled_providers())
+    if enabled and provider_id not in current:
+        current.append(provider_id)
+    elif not enabled and provider_id in current:
+        current = [item for item in current if item != provider_id]
+    else:
+        return False
+    try:
+        settings.general.enabled_providers = current
+        write_config()
+        return True
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception(
+            "Failed to sync enabled_providers for %s", provider_id
+        )
+        return False
+
+
 def utcnow_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -491,6 +543,11 @@ def _decrypt_secret_value(value: Any) -> Any:
 
 def _redact_installation(installation: dict[str, Any]) -> dict[str, Any]:
     redacted = dict(installation)
+    provider_id = redacted.get("provider_id")
+    if provider_id:
+        # enabled_providers in config.yaml is the source of truth; the stored
+        # field on the hub row is a stale shadow we don't trust on read.
+        redacted["enabled"] = str(provider_id) in _bazarr_enabled_providers()
     config = redacted.get("config")
     if not isinstance(config, dict):
         return redacted
@@ -523,6 +580,7 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
 
     if enabled is not None:
         provider["enabled"] = bool(enabled)
+        _set_bazarr_provider_enabled(provider_id, bool(enabled))
 
     if config is not None:
         if not isinstance(config, dict):
@@ -809,7 +867,7 @@ def _staged_installation(validated, existing, bundle_path: Path, staged_python_p
         "last_error": None,
         "trusted": bool(source_trusted),
         "manifest": existing.get("manifest") if existing.get("active_version") else validated.raw,
-        "enabled": existing.get("enabled", False),
+        "enabled": existing.get("enabled", True),
         "config": existing.get("config", {}),
     }
 
@@ -844,7 +902,7 @@ def _failed_installation(validated, existing, error: Exception, source_trusted: 
         "last_error": message,
         "trusted": bool(source_trusted),
         "manifest": validated.raw,
-        "enabled": existing.get("enabled", False),
+        "enabled": existing.get("enabled", True),
         "config": existing.get("config", {}),
     }
 
@@ -891,6 +949,10 @@ def stage_install(manifest: dict[str, Any]) -> dict[str, Any]:
         installation = _staged_installation(validated, current, bundle_path, staged_python_path, source_trusted)
         installations[validated.provider_id] = installation
         save_state(state)
+        if not is_update:
+            # First install: opt the provider into Bazarr's enabled_providers so
+            # the new plugin is search-eligible without a separate UI toggle.
+            _set_bazarr_provider_enabled(validated.provider_id, True)
         if is_update:
             message = (
                 f"Staged update {existing_version} -> {validated.version} "
@@ -1019,6 +1081,7 @@ def remove_installation(provider_id: str) -> bool:
             if not item.get("active_version"):
                 del installations[provider_id]
                 save_state(state)
+                _set_bazarr_provider_enabled(provider_id, False)
                 job.update(message=f"Removed pending install of '{target_name}'")
                 return True
             item["state"] = "removed"
@@ -1029,6 +1092,7 @@ def remove_installation(provider_id: str) -> bool:
             item["staged_manifest"] = None
             item["last_error"] = None
         save_state(state)
+        _set_bazarr_provider_enabled(provider_id, False)
         job.update(message=f"Staged removal of '{target_name}' (restart Bazarr+ to finalize)")
         return True
 
