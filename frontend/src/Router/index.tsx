@@ -5,7 +5,7 @@ import {
   useContext,
   useMemo,
 } from "react";
-import { createBrowserRouter, RouterProvider } from "react-router";
+import { createBrowserRouter, Navigate, RouterProvider } from "react-router";
 import {
   faClock,
   faCogs,
@@ -14,6 +14,7 @@ import {
   faFilm,
   faLaptop,
   faPlay,
+  faStore,
 } from "@fortawesome/free-solid-svg-icons";
 import { useBadges } from "@/apis/hooks";
 import { useEnabledStatus } from "@/apis/hooks/site";
@@ -184,6 +185,12 @@ function useRoutes(): CustomRouteObject[] {
             ],
           },
           {
+            icon: faStore,
+            name: "Subtitle Hub",
+            path: "subtitle-hub",
+            element: <SettingsProvidersView></SettingsProvidersView>,
+          },
+          {
             icon: faCogs,
             name: "Settings",
             path: "settings",
@@ -214,11 +221,6 @@ function useRoutes(): CustomRouteObject[] {
                 path: "languages",
                 name: "Languages",
                 element: <SettingsLanguagesView></SettingsLanguagesView>,
-              },
-              {
-                path: "providers",
-                name: "Subtitle Sources",
-                element: <SettingsProvidersView></SettingsProvidersView>,
               },
               {
                 path: "subtitles",
@@ -257,6 +259,11 @@ function useRoutes(): CustomRouteObject[] {
                 path: "ui",
                 name: "UI",
                 element: <SettingsUIView></SettingsUIView>,
+              },
+              {
+                path: "providers",
+                hidden: true,
+                element: <Navigate to="/subtitle-hub" replace />,
               },
             ],
           },
