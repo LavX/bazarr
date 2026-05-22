@@ -116,7 +116,7 @@ class LingarrTranslatorService:
             raise
 
     # Retry schedule for transient errors (e.g. 502 during back-translator cold-start ~60s):
-    # ~15s -> ~30s -> ~60s -> ~120s (max_delay caps jitter accumulation)
+    # ~15s -> ~30s -> ~60s -> ~120s -> ~120s (max_delay caps last two intervals)
     # Note: retries block the calling thread. Jobs queue uses N worker threads
     # (settings.general.concurrent_jobs / settings.translator.openrouter_max_concurrent
     # for translation jobs) so other jobs are not starved during retry waits.
