@@ -93,6 +93,10 @@ interface ParsedSemver {
   prerelease: string[];
 }
 
+function splitVersionTokens(value: string): string[] {
+  return value.match(/\d+|[A-Za-z]+/g) ?? [];
+}
+
 function parseSemver(version: string): ParsedSemver {
   const withoutBuild = version.split("+", 1)[0] ?? "";
   const prereleaseIndex = withoutBuild.indexOf("-");
@@ -102,12 +106,22 @@ function parseSemver(version: string): ParsedSemver {
       : withoutBuild.slice(0, prereleaseIndex);
   const prereleaseText =
     prereleaseIndex === -1 ? "" : withoutBuild.slice(prereleaseIndex + 1);
-  const core = coreText
-    .split(".")
-    .map((part) => (/^\d+$/.test(part) ? Number(part) : 0));
-  const prerelease = prereleaseText
-    ? prereleaseText.split(".").filter(Boolean)
-    : [];
+  const prerelease: string[] = [];
+  const core = coreText.split(".").map((part) => {
+    const match = part.match(/^(\d+)(.*)$/);
+    if (!match) {
+      prerelease.push(...splitVersionTokens(part));
+      return 0;
+    }
+    const suffix = match[2] ?? "";
+    if (suffix) {
+      prerelease.push(...splitVersionTokens(suffix));
+    }
+    return Number(match[1]);
+  });
+  if (prereleaseText) {
+    prerelease.push(...splitVersionTokens(prereleaseText));
+  }
 
   while (core.length < 3) core.push(0);
   return { core, prerelease };

@@ -1092,7 +1092,56 @@ def test_official_catalog_source_cannot_be_overwritten_or_deleted(tmp_path, monk
             trusted=True,
         )
 
+    with pytest.raises(CatalogSourceError, match="reserved"):
+        add_catalog_source(
+            name="Official Bazarr Provider Catalog",
+            url="https://github.com/example/providers/blob/main/catalog.json",
+            trusted=True,
+        )
+
     assert remove_catalog_source("official") is False
+
+
+def test_existing_state_does_not_trust_sources_spoofing_official_name(tmp_path, monkeypatch):
+    from provider_hub.service import list_catalog
+    from provider_hub.state import OFFICIAL_CATALOG_SOURCE_ID, load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+    state = load_state()
+    state["catalog_sources"]["spoof"] = {
+        "id": "spoof",
+        "name": "Official Bazarr Provider Catalog",
+        "type": "github",
+        "url": "https://github.com/example/providers/blob/main/catalog.json",
+        "enabled": True,
+        "trusted": True,
+    }
+    state["catalog_entries"]["spoof:examplehub:1.0.0"] = {
+        "source": "spoof",
+        "source_name": "Official Bazarr Provider Catalog",
+        "provider_id": "examplehub",
+        "version": "1.0.0",
+        "trusted": True,
+        "manifest": _manifest(),
+    }
+    state["catalog_entries"]["official:officialhub:1.0.0"] = {
+        "source": OFFICIAL_CATALOG_SOURCE_ID,
+        "source_name": "Official Bazarr Provider Catalog",
+        "provider_id": "officialhub",
+        "version": "1.0.0",
+        "trusted": True,
+        "manifest": _manifest(provider_id="officialhub"),
+    }
+    save_state(state)
+
+    catalog = list_catalog()
+    sources = {item["id"]: item for item in catalog["sources"]}
+    entries = {item["provider_id"]: item for item in catalog["entries"]}
+
+    assert sources["spoof"]["name"] == "spoof"
+    assert sources["spoof"]["trusted"] is False
+    assert entries["examplehub"]["trusted"] is False
+    assert entries["officialhub"]["trusted"] is True
 
 
 def test_empty_state_seeds_official_trusted_catalog_source(tmp_path, monkeypatch):
@@ -1649,6 +1698,28 @@ class ExampleProvider:
             timeout=3,
         )
         assert download.payload["empty"] is False
+    finally:
+        client.stop()
+
+
+def test_worker_client_times_out_when_worker_stops_writing_stdout(tmp_path):
+    import sys
+
+    from provider_hub.worker import ProviderWorkerClient, WorkerError
+
+    worker_file = tmp_path / "silent_worker.py"
+    worker_file.write_text(
+        "import time\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    client = ProviderWorkerClient([sys.executable, "-I", "-B", str(worker_file)])
+
+    try:
+        with pytest.raises(WorkerError, match="deadline"):
+            client.request("health", timeout=0.1)
+        assert client.process is not None
+        assert client.process.poll() is not None
     finally:
         client.stop()
 

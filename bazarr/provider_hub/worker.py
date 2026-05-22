@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-import select
+import queue
 import subprocess
 import threading
 import time
@@ -60,6 +60,8 @@ class ProviderWorkerClient:
         self.env = env
         self.process: subprocess.Popen | None = None
         self._lock = threading.Lock()
+        self._stdout_queue: queue.Queue[str | None] | None = None
+        self._stdout_thread: threading.Thread | None = None
 
     def start(self) -> None:
         if self.process and self.process.poll() is None:
@@ -83,6 +85,28 @@ class ProviderWorkerClient:
             text=True,
             start_new_session=True,
         )
+        self._stdout_queue = queue.Queue()
+        self._stdout_thread = threading.Thread(
+            target=self._enqueue_stdout,
+            args=(self.process, self._stdout_queue),
+            daemon=True,
+        )
+        self._stdout_thread.start()
+
+    @staticmethod
+    def _enqueue_stdout(process: subprocess.Popen, stdout_queue: queue.Queue[str | None]) -> None:
+        stdout = process.stdout
+        if stdout is None:
+            stdout_queue.put(None)
+            return
+        try:
+            while True:
+                line = stdout.readline()
+                if not line:
+                    break
+                stdout_queue.put(line)
+        finally:
+            stdout_queue.put(None)
 
     def stop(self, grace_seconds: float = 5.0) -> None:
         process = self.process
@@ -100,22 +124,16 @@ class ProviderWorkerClient:
     def _read_line_with_deadline(self, timeout: float) -> str:
         """Read one NDJSON line from the worker, honoring ``timeout`` seconds.
 
-        ``subprocess.PIPE.readline()`` blocks forever when a plugin hangs,
-        which previously locked the search pool until process restart.
-        We poll the stdout fd with ``select`` and accumulate bytes until a
-        newline appears or the deadline elapses; on timeout the worker is
-        killed so the caller surfaces a clean WorkerError.
+        ``subprocess.PIPE.readline()`` blocks forever when a plugin hangs.
+        Read stdout on a daemon thread and wait on a queue so the timeout path
+        works on platforms where ``select`` cannot poll subprocess pipes.
         """
         process = self.process
         if process is None or process.stdout is None:
             raise WorkerError("worker process did not start")
-        stdout = process.stdout
-        try:
-            stdout_fd = stdout.fileno()
-        except (AttributeError, ValueError, OSError):
-            # Stream isn't fd-backed (test stub etc.); fall back to the
-            # blocking readline. The new tests cover the fd path explicitly.
-            return stdout.readline()
+        stdout_queue = self._stdout_queue
+        if stdout_queue is None:
+            raise WorkerError("worker stdout reader did not start")
         deadline = time.monotonic() + max(0.0, float(timeout))
         chunks: list[str] = []
         while True:
@@ -125,11 +143,11 @@ class ProviderWorkerClient:
                 raise WorkerError(
                     f"worker exceeded {timeout:.1f}s deadline"
                 )
-            ready, _, _ = select.select([stdout_fd], [], [], remaining)
-            if not ready:
+            try:
+                chunk = stdout_queue.get(timeout=remaining)
+            except queue.Empty:
                 continue
-            chunk = stdout.readline()
-            if not chunk:
+            if chunk is None:
                 return "".join(chunks)
             chunks.append(chunk)
             if chunk.endswith("\n"):

@@ -20,7 +20,15 @@ from subliminal_patch.extensions import provider_registry
 
 from .manifest import validate_manifest
 from .bundle import verify_bundle_tree
-from .state import OFFICIAL_CATALOG_SOURCE_ID, OFFICIAL_CATALOG_URL, load_state, provider_hub_dir, save_state
+from .state import (
+    OFFICIAL_CATALOG_SOURCE_ID,
+    OFFICIAL_CATALOG_URL,
+    catalog_source_for_entry,
+    load_state,
+    provider_hub_dir,
+    save_state,
+    spoofs_official_catalog_source,
+)
 from .venv import PluginEnvironment, python_executable
 from .worker import ProviderWorkerClient, worker_command
 
@@ -304,9 +312,12 @@ def add_catalog_source(
     ) as job:
         if not name or not isinstance(name, str):
             raise CatalogSourceError("Catalog source name is required")
+        name = name.strip()
+        if not name:
+            raise CatalogSourceError("Catalog source name is required")
         url = _validate_github_catalog_url(url)
-        if name == OFFICIAL_CATALOG_SOURCE_ID and url != OFFICIAL_CATALOG_URL:
-            raise CatalogSourceError("The official catalog source id is reserved")
+        if spoofs_official_catalog_source(name):
+            raise CatalogSourceError("The official catalog source name is reserved")
         is_official = name == OFFICIAL_CATALOG_SOURCE_ID and url == OFFICIAL_CATALOG_URL
         dev_ref_value = _validate_dev_ref(dev_ref)
 
@@ -843,16 +854,7 @@ def _catalog_manifest_trusted(manifest: dict[str, Any], state: dict[str, Any]) -
     for entry in (state.get("catalog_entries") or {}).values():
         if not isinstance(entry, dict):
             continue
-        source_ref = entry.get("source") or entry.get("source_name")
-        catalog_source = next(
-            (
-                item
-                for item in sources.values()
-                if isinstance(item, dict)
-                and source_ref in (item.get("id"), item.get("name"))
-            ),
-            {},
-        )
+        catalog_source = catalog_source_for_entry(sources, entry)
         if not bool(catalog_source.get("trusted", False)):
             continue
         if entry.get("provider_id") != provider_id or entry.get("version") != version:

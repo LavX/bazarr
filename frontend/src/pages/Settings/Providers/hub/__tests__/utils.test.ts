@@ -110,6 +110,40 @@ describe("getLatestCatalogEntry", () => {
     );
   });
 
+  it("orders alphanumeric prerelease core suffixes below final releases", () => {
+    const prereleaseCatalog: ProviderHubCatalog = {
+      sources: [],
+      entries: [
+        { provider_id: "a", version: "1.0.0rc1", trusted: true },
+        { provider_id: "a", version: "1.0.0", trusted: true },
+      ],
+    };
+
+    expect(getLatestCatalogEntry(prereleaseCatalog, "a")?.version).toBe(
+      "1.0.0",
+    );
+    expect(
+      isUpdateAvailable(
+        { provider_id: "a", state: "active", active_version: "1.0.0rc1" },
+        prereleaseCatalog,
+      ),
+    ).toBe(true);
+  });
+
+  it("sorts alphanumeric prerelease suffix numbers", () => {
+    const prereleaseCatalog: ProviderHubCatalog = {
+      sources: [],
+      entries: [
+        { provider_id: "a", version: "1.0.0rc1", trusted: true },
+        { provider_id: "a", version: "1.0.0rc2", trusted: true },
+      ],
+    };
+
+    expect(getLatestCatalogEntry(prereleaseCatalog, "a")?.version).toBe(
+      "1.0.0rc2",
+    );
+  });
+
   it("ignores build metadata for update comparisons", () => {
     const buildCatalog: ProviderHubCatalog = {
       sources: [],

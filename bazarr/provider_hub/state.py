@@ -10,6 +10,7 @@ from typing import Any
 
 
 OFFICIAL_CATALOG_SOURCE_ID = "official"
+OFFICIAL_CATALOG_SOURCE_NAME = "Official Bazarr Provider Catalog"
 OFFICIAL_CATALOG_URL = "https://github.com/LavX/bazarr-provider-catalog/blob/main/catalog.json"
 
 
@@ -32,7 +33,7 @@ class ProviderHubInstallation:
 def official_catalog_source() -> dict[str, Any]:
     return {
         "id": OFFICIAL_CATALOG_SOURCE_ID,
-        "name": "Official Bazarr Provider Catalog",
+        "name": OFFICIAL_CATALOG_SOURCE_NAME,
         "type": "github",
         "url": OFFICIAL_CATALOG_URL,
         "enabled": True,
@@ -42,6 +43,33 @@ def official_catalog_source() -> dict[str, Any]:
         "last_checked_at": None,
         "last_error": None,
     }
+
+
+def spoofs_official_catalog_source(value: Any) -> bool:
+    normalized = str(value or "").strip().casefold()
+    return normalized in {
+        OFFICIAL_CATALOG_SOURCE_ID.casefold(),
+        OFFICIAL_CATALOG_SOURCE_NAME.casefold(),
+    }
+
+
+def catalog_source_for_entry(
+    sources: dict[str, Any],
+    entry: dict[str, Any],
+) -> dict[str, Any]:
+    source_id = entry.get("source")
+    if isinstance(source_id, str):
+        source = sources.get(source_id)
+        if isinstance(source, dict):
+            return source
+    source_name = entry.get("source_name")
+    if isinstance(source_name, str):
+        for key, source in sources.items():
+            if key == OFFICIAL_CATALOG_SOURCE_ID:
+                continue
+            if isinstance(source, dict) and source.get("name") == source_name:
+                return source
+    return {}
 
 
 def default_state() -> dict[str, Any]:
@@ -102,11 +130,13 @@ def load_state(path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
                 }
             )
             official["id"] = OFFICIAL_CATALOG_SOURCE_ID
-            official["name"] = source.get("name") or official["name"]
+            official["name"] = OFFICIAL_CATALOG_SOURCE_NAME
             sources[source_id] = official
         else:
             source["official"] = False
             source["trusted"] = False
+            if spoofs_official_catalog_source(source.get("id")) or spoofs_official_catalog_source(source.get("name")):
+                source["name"] = source_id
         if "dev_ref" not in source:
             source["dev_ref"] = None
     entries = data.setdefault("catalog_entries", {})
@@ -114,16 +144,7 @@ def load_state(path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
         for entry in entries.values():
             if not isinstance(entry, dict):
                 continue
-            source_ref = entry.get("source") or entry.get("source_name")
-            source = next(
-                (
-                    item
-                    for item in sources.values()
-                    if isinstance(item, dict)
-                    and source_ref in (item.get("id"), item.get("name"))
-                ),
-                {},
-            )
+            source = catalog_source_for_entry(sources, entry)
             entry["trusted"] = bool(source.get("trusted", False))
     data.setdefault("installations", {})
     data.setdefault("jobs", [])
