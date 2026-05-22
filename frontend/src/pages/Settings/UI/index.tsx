@@ -1,16 +1,13 @@
 import { FunctionComponent } from "react";
 import {
+  Check,
   Layout,
   Message,
   Section,
   Selector,
 } from "@/pages/Settings/components";
 import { uiPageSizeKey } from "@/utilities/storage";
-import {
-  colorSchemeOptions,
-  pageSizeOptions,
-  showLiveBadgeOption,
-} from "./options";
+import { colorSchemeOptions, pageSizeOptions } from "./options";
 
 const SettingsUIView: FunctionComponent = () => {
   return (
@@ -32,15 +29,13 @@ const SettingsUIView: FunctionComponent = () => {
         ></Selector>
       </Section>
       <Section header="Badge Display">
-        <Selector
+        <Check
           label="Show Live Badge"
-          options={showLiveBadgeOption}
           settingKey="settings-general-show_live_badge"
-          defaultValue={"auto"}
-        ></Selector>
+        ></Check>
         <Message>
-          Controls whether the “LIVE” badge appears when SignalR is connected.
-          Turn this off if you prefer a cleaner interface. The “DOWN” badge will
+          Controls whether the "LIVE" badge appears when SignalR is connected.
+          Turn this off if you prefer a cleaner interface. The "DOWN" badge will
           always appear when SignalR is disconnected, regardless of this
           setting. This option affects badge visibility only, not the actual
           connection status.
