@@ -9,7 +9,7 @@ babelfish==0.6.1
 beautifulsoup4==4.14.3
 cachetools>=7.1.1
 certifi==2026.2.25
-chardet==5.2.0
+chardet==7.4.3
 charset-normalizer==3.4.6
 click-option-group>=0.5.6
 cloudscraper<=1.2.58  # newer version dropped captcha v1 support
@@ -52,7 +52,7 @@ pysubs2==1.8.0
 python-dateutil==2.9.0
 PyYAML>=6.0.3
 rarfile==4.2
-requests==2.32.5
+requests==2.34.2
 retry==0.9.2
 semver==3.0.4
 signalrcore==1.0.2
