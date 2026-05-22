@@ -27,6 +27,10 @@ export const ActivityPanel: FunctionComponent = () => {
 
   const client = useQueryClient();
   const jobs = useProviderHubJobs();
+  // Depending on the whole `jobs` object retriggers the effect on every
+  // refetch, which then calls refetch() again and busy-loops the API.
+  // Hold the function reference outside the dep array.
+  const refetch = jobs.refetch;
 
   // Wire Live toggle to react-query refetchInterval at runtime.
   useEffect(() => {
@@ -34,8 +38,8 @@ export const ActivityPanel: FunctionComponent = () => {
     client.setQueryDefaults([QueryKeys.ProviderHub, QueryKeys.Jobs], {
       refetchInterval: interval,
     });
-    if (live) jobs.refetch();
-  }, [live, client, jobs]);
+    if (live) refetch();
+  }, [live, client, refetch]);
 
   const sorted = useMemo(() => {
     const list = [...(jobs.data ?? [])];
