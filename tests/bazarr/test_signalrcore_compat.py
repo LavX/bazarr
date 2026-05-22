@@ -5,7 +5,7 @@ import signalrcore
 from signalrcore.transport.base_transport import TransportState
 from signalrcore.transport.websockets.websocket_transport import WebsocketTransport
 
-from app.signalrcore_compat import patch_signalrcore_stop
+from app.signalrcore_compat import build_signalr_connection, patch_signalrcore_stop
 
 
 def _make_transport(state=TransportState.disconnected, ws=None):
@@ -50,3 +50,29 @@ def test_signalrcore_stop_patch_keeps_connected_cleanup_behavior():
     transport.connection_checker.stop.assert_called_once()
     transport._ws.close.assert_called_once()
     assert transport.state == TransportState.disconnected
+
+
+def test_signalrcore_stop_patch_handles_new_transport_client_cleanup():
+    patch_signalrcore_stop()
+    transport = _make_transport(state=TransportState.connected, ws=None)
+    del transport._ws
+    transport._client = MagicMock()
+
+    transport.stop()
+
+    transport.connection_checker.stop.assert_called_once()
+    transport._client.close.assert_called_once()
+    assert transport.state == TransportState.disconnected
+
+
+def test_signalr_connection_builder_forces_json_protocol_version_one():
+    connection = build_signalr_connection(
+        "http://example.invalid/signalr/messages?access_token=test",
+        {"User-Agent": "Bazarr-Test"},
+    )
+    protocol = getattr(connection, "_selected_protocol", None)
+    if protocol is None:
+        protocol = connection.transport.protocol
+
+    assert protocol.protocol == "json"
+    assert protocol.version == 1

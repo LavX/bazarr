@@ -5,8 +5,7 @@ import time
 import threading
 
 from requests.exceptions import ConnectionError
-from app.signalrcore_compat import patch_signalrcore_stop
-from signalrcore.hub_connection_builder import HubConnectionBuilder
+from app.signalrcore_compat import build_signalr_connection, patch_signalrcore_stop
 from collections import deque
 from time import sleep
 
@@ -92,18 +91,10 @@ class SonarrSignalrClient:
 
     def configure(self):
         self.apikey_sonarr = settings.sonarr.apikey
-        self.connection = HubConnectionBuilder() \
-            .with_url(f"{url_sonarr()}/signalr/messages?access_token={self.apikey_sonarr}",
-                      options={
-                          "verify_ssl": False,
-                          "headers": HEADERS
-                      }) \
-            .with_automatic_reconnect({
-                "type": "raw",
-                "keep_alive_interval": 5,
-                "reconnect_interval": 180,
-                "max_attempts": None
-            }).build()
+        self.connection = build_signalr_connection(
+            f"{url_sonarr()}/signalr/messages?access_token={self.apikey_sonarr}",
+            HEADERS,
+        )
         self.connection.on_open(self.on_connect_handler)
         self.connection.on_reconnect(self.on_reconnect_handler)
         self.connection.on_close(lambda: logging.debug('BAZARR SignalR client for Sonarr is disconnected.'))
@@ -159,18 +150,10 @@ class RadarrSignalrClient:
 
     def configure(self):
         self.apikey_radarr = settings.radarr.apikey
-        self.connection = HubConnectionBuilder() \
-            .with_url(f"{url_radarr()}/signalr/messages?access_token={self.apikey_radarr}",
-                      options={
-                          "verify_ssl": False,
-                          "headers": HEADERS
-                      }) \
-            .with_automatic_reconnect({
-                "type": "raw",
-                "keep_alive_interval": 5,
-                "reconnect_interval": 180,
-                "max_attempts": None
-            }).build()
+        self.connection = build_signalr_connection(
+            f"{url_radarr()}/signalr/messages?access_token={self.apikey_radarr}",
+            HEADERS,
+        )
         self.connection.on_open(self.on_connect_handler)
         self.connection.on_reconnect(self.on_reconnect_handler)
         self.connection.on_close(lambda: logging.debug('BAZARR SignalR client for Radarr is disconnected.'))
