@@ -2270,3 +2270,41 @@ def test_runtime_provider_configs_includes_pending_restart_with_active_version(
     assert "examplehub" in configs
     assert configs["examplehub"].get("api_key") == "abc"
     assert "nokey" not in configs
+
+
+def test_remove_catalog_source_purges_catalog_entries(tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+    state = load_state()
+    state["catalog_sources"]["community"] = {
+        "id": "community",
+        "name": "community",
+        "type": "github",
+        "url": "https://github.com/example/providers/blob/main/catalog.json",
+        "enabled": True,
+        "trusted": False,
+    }
+    state["catalog_entries"]["community:foo:1.0.0"] = {
+        "source": "community",
+        "source_name": "community",
+        "provider_id": "foo",
+        "version": "1.0.0",
+        "trusted": False,
+        "manifest": {"provider_id": "foo", "version": "1.0.0"},
+    }
+    state["catalog_entries"]["official:bar:1.0.0"] = {
+        "source": "official",
+        "source_name": "Official Bazarr Provider Catalog",
+        "provider_id": "bar",
+        "version": "1.0.0",
+        "trusted": True,
+        "manifest": {"provider_id": "bar", "version": "1.0.0"},
+    }
+    save_state(state)
+
+    assert service.remove_catalog_source("community") is True
+    remaining = load_state()["catalog_entries"]
+    assert "community:foo:1.0.0" not in remaining
+    assert "official:bar:1.0.0" in remaining

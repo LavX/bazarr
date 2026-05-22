@@ -332,7 +332,17 @@ def remove_catalog_source(name: str) -> bool:
         if name not in sources:
             job.update(message=f"Catalog source '{name}' not found")
             return False
+        removed_name = sources[name].get("name", name) if isinstance(sources[name], dict) else name
         del sources[name]
+        # Drop catalog_entries that came from this source. Without this purge
+        # the marketplace keeps offering stale entries and update checks may
+        # match them as available upgrades, which surprises the user.
+        entries = state.setdefault("catalog_entries", {})
+        for key, entry in list(entries.items()):
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("source") == name or entry.get("source_name") == removed_name:
+                del entries[key]
         save_state(state)
         job.update(message=f"Removed catalog source '{name}'")
         return True
