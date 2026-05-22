@@ -33,6 +33,7 @@ last_episode_event_data = None
 last_movie_event_data = None
 
 SIGNALR_ACTIVE_STATES = {0, 1, 2}
+UNKNOWN_SONARR_VERSION_VALUES = {"", "unknown", None}
 
 
 def _signalr_transport_state_value(connection):
@@ -48,6 +49,13 @@ def _signalr_connection_active(connection):
     return _signalr_transport_state_value(connection) in SIGNALR_ACTIVE_STATES
 
 
+def _sonarr_signalr_core_support_state():
+    version = get_sonarr_info.version()
+    if version in UNKNOWN_SONARR_VERSION_VALUES:
+        return None, version
+    return get_sonarr_info.supports_signalr_core(), version
+
+
 class SonarrSignalrClient:
     def __init__(self):
         super(SonarrSignalrClient, self).__init__()
@@ -56,11 +64,21 @@ class SonarrSignalrClient:
         self.connected = False
 
     def start(self):
-        if not get_sonarr_info.supports_signalr_core():
+        supports_signalr, sonarr_version = _sonarr_signalr_core_support_state()
+        if supports_signalr is None:
+            logging.warning(
+                'BAZARR cannot confirm Sonarr version yet. '
+                'Retrying before starting the Sonarr SignalR feed.'
+            )
+        while supports_signalr is None:
+            time.sleep(5)
+            supports_signalr, sonarr_version = _sonarr_signalr_core_support_state()
+
+        if not supports_signalr:
             logging.warning(
                 'BAZARR requires Sonarr v4 or newer for the SignalR feed. '
                 'Current Sonarr version is %s, Sonarr live updates are disabled.',
-                get_sonarr_info.version(),
+                sonarr_version,
             )
             self.connected = False
             event_stream(type='badges')

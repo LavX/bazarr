@@ -96,6 +96,34 @@ describe("getLatestCatalogEntry", () => {
     expect(getLatestCatalogEntry(catalog, "a")?.version).toBe("1.10.0");
   });
 
+  it("orders prereleases below final releases", () => {
+    const prereleaseCatalog: ProviderHubCatalog = {
+      sources: [],
+      entries: [
+        { provider_id: "a", version: "1.0.0-rc.1", trusted: true },
+        { provider_id: "a", version: "1.0.0", trusted: true },
+      ],
+    };
+
+    expect(getLatestCatalogEntry(prereleaseCatalog, "a")?.version).toBe(
+      "1.0.0",
+    );
+  });
+
+  it("ignores build metadata for update comparisons", () => {
+    const buildCatalog: ProviderHubCatalog = {
+      sources: [],
+      entries: [{ provider_id: "a", version: "1.2.3+foo", trusted: true }],
+    };
+
+    expect(
+      isUpdateAvailable(
+        { provider_id: "a", state: "active", active_version: "1.2.3" },
+        buildCatalog,
+      ),
+    ).toBe(false);
+  });
+
   it("returns null when provider not in catalog", () => {
     expect(getLatestCatalogEntry(catalog, "missing")).toBeNull();
   });

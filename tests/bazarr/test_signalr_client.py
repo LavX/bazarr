@@ -26,12 +26,45 @@ def test_sonarr_signalr_start_handles_missing_transport_before_first_start(monke
     connection = _FakeConnection()
     client = signalr_client.SonarrSignalrClient()
 
+    monkeypatch.setattr(signalr_client.get_sonarr_info, "version", lambda: "4.0.0")
     monkeypatch.setattr(signalr_client.get_sonarr_info, "supports_signalr_core", lambda: True)
     monkeypatch.setattr(client, "configure", lambda: setattr(client, "connection", connection))
 
     client.start()
 
     assert connection.starts == 1
+
+
+def test_sonarr_signalr_start_waits_when_version_is_temporarily_unknown(monkeypatch):
+    connection = _FakeConnection()
+    client = signalr_client.SonarrSignalrClient()
+    versions = iter(["unknown", "4.0.0"])
+    sleep_calls = []
+
+    monkeypatch.setattr(signalr_client.get_sonarr_info, "version", lambda: next(versions))
+    monkeypatch.setattr(signalr_client.get_sonarr_info, "supports_signalr_core", lambda: True)
+    monkeypatch.setattr(signalr_client.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+    monkeypatch.setattr(client, "configure", lambda: setattr(client, "connection", connection))
+
+    client.start()
+
+    assert sleep_calls == [5]
+    assert connection.starts == 1
+
+
+def test_sonarr_signalr_start_disables_known_unsupported_version(monkeypatch):
+    client = signalr_client.SonarrSignalrClient()
+    events = []
+
+    monkeypatch.setattr(signalr_client.get_sonarr_info, "version", lambda: "3.0.0")
+    monkeypatch.setattr(signalr_client.get_sonarr_info, "supports_signalr_core", lambda: False)
+    monkeypatch.setattr(signalr_client, "event_stream", lambda **kwargs: events.append(kwargs))
+    monkeypatch.setattr(client, "configure", lambda: (_ for _ in ()).throw(AssertionError("configure called")))
+
+    client.start()
+
+    assert client.connected is False
+    assert events == [{"type": "badges"}]
 
 
 def test_radarr_signalr_start_handles_missing_transport_before_first_start(monkeypatch):

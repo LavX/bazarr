@@ -15,20 +15,18 @@ down_revision = 'f2f74f2d6d0a'
 branch_labels = None
 depends_on = None
 
-bind = op.get_context().bind
-insp = sa.inspect(bind)
-
-
-def column_exists(table_name, column_name):
-    columns = insp.get_columns(table_name)
+def column_exists(inspector, table_name, column_name):
+    columns = inspector.get_columns(table_name)
     return any(c["name"] == column_name for c in columns)
 
 
 def upgrade():
-    if not column_exists('table_shows', 'originalLanguage'):
+    insp = sa.inspect(op.get_context().bind)
+
+    if not column_exists(insp, 'table_shows', 'originalLanguage'):
         with op.batch_alter_table('table_shows', schema=None) as batch_op:
             batch_op.add_column(sa.Column('originalLanguage', sa.Text(), nullable=True))
-    if not column_exists('table_movies', 'originalLanguage'):
+    if not column_exists(insp, 'table_movies', 'originalLanguage'):
         with op.batch_alter_table('table_movies', schema=None) as batch_op:
             batch_op.add_column(sa.Column('originalLanguage', sa.Text(), nullable=True))
 

@@ -88,14 +88,69 @@ export function parseManifest(
   return null;
 }
 
+interface ParsedSemver {
+  core: number[];
+  prerelease: string[];
+}
+
+function parseSemver(version: string): ParsedSemver {
+  const withoutBuild = version.split("+", 1)[0] ?? "";
+  const prereleaseIndex = withoutBuild.indexOf("-");
+  const coreText =
+    prereleaseIndex === -1
+      ? withoutBuild
+      : withoutBuild.slice(0, prereleaseIndex);
+  const prereleaseText =
+    prereleaseIndex === -1 ? "" : withoutBuild.slice(prereleaseIndex + 1);
+  const core = coreText
+    .split(".")
+    .map((part) => (/^\d+$/.test(part) ? Number(part) : 0));
+  const prerelease = prereleaseText
+    ? prereleaseText.split(".").filter(Boolean)
+    : [];
+
+  while (core.length < 3) core.push(0);
+  return { core, prerelease };
+}
+
+function comparePrereleaseIdentifier(a: string, b: string): number {
+  const aNumeric = /^\d+$/.test(a);
+  const bNumeric = /^\d+$/.test(b);
+  if (aNumeric && bNumeric) {
+    return Number(a) - Number(b);
+  }
+  if (aNumeric !== bNumeric) {
+    return aNumeric ? -1 : 1;
+  }
+  return a.localeCompare(b);
+}
+
 function compareSemverParts(a: string, b: string): number {
-  const aParts = a.split(/[.\-+]/).map((p) => Number(p) || 0);
-  const bParts = b.split(/[.\-+]/).map((p) => Number(p) || 0);
-  const len = Math.max(aParts.length, bParts.length);
+  const aVersion = parseSemver(a);
+  const bVersion = parseSemver(b);
+  const len = Math.max(aVersion.core.length, bVersion.core.length);
   for (let i = 0; i < len; i++) {
-    const av = aParts[i] ?? 0;
-    const bv = bParts[i] ?? 0;
+    const av = aVersion.core[i] ?? 0;
+    const bv = bVersion.core[i] ?? 0;
     if (av !== bv) return av - bv;
+  }
+  if (aVersion.prerelease.length === 0 && bVersion.prerelease.length === 0) {
+    return 0;
+  }
+  if (aVersion.prerelease.length === 0) return 1;
+  if (bVersion.prerelease.length === 0) return -1;
+
+  const prereleaseLen = Math.max(
+    aVersion.prerelease.length,
+    bVersion.prerelease.length,
+  );
+  for (let i = 0; i < prereleaseLen; i++) {
+    const av = aVersion.prerelease[i];
+    const bv = bVersion.prerelease[i];
+    if (av == null) return -1;
+    if (bv == null) return 1;
+    const comparison = comparePrereleaseIdentifier(av, bv);
+    if (comparison !== 0) return comparison;
   }
   return 0;
 }
