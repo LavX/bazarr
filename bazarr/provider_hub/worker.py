@@ -2,22 +2,6 @@
 from __future__ import annotations
 
 import json
-from decimal import Decimal
-
-
-def _json_default(obj):
-    """Coerce values not natively JSON-serializable into safe representations.
-
-    Subliminal's Video objects carry numeric fields (notably ``fps``) as
-    ``decimal.Decimal``, which the stdlib JSON encoder rejects. We convert
-    Decimals to float (lossy precision is acceptable for transport payloads —
-    the provider only uses these for matching, not for arithmetic). Other
-    surprise types fall back to ``str(obj)`` so the worker call surfaces a
-    debuggable payload instead of a hard crash.
-    """
-    if isinstance(obj, Decimal):
-        return float(obj)
-    return str(obj)
 import logging
 import os
 import subprocess
@@ -25,12 +9,28 @@ import threading
 import uuid
 
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from . import WORKER_ABI_VERSION
 
 logger = logging.getLogger(__name__)
+
+
+def _json_default(obj):
+    """Coerce values not natively JSON-serializable into safe representations.
+
+    Subliminal's Video objects carry numeric fields (notably ``fps``) as
+    ``decimal.Decimal``, which the stdlib JSON encoder rejects. We convert
+    Decimals to float (lossy precision is acceptable for transport payloads,
+    the provider only uses these for matching, not for arithmetic). Other
+    surprise types fall back to ``str(obj)`` so the worker call surfaces a
+    debuggable payload instead of a hard crash.
+    """
+    if isinstance(obj, Decimal):
+        return float(obj)
+    return str(obj)
 
 
 class WorkerError(RuntimeError):

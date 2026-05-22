@@ -72,7 +72,7 @@ def main():
         full = f"subliminal_patch.providers.{module_name}"
         try:
             mod = importlib.import_module(full)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             errors[module_name] = f"{type(e).__name__}: {e}"
             continue
 
@@ -98,8 +98,8 @@ def main():
         # Take the largest language set among the classes in the module
         attr, langs = max(provider_classes, key=lambda x: len(list(x[1])))
         try:
-            lang_dicts = [language_to_dict(l) for l in langs]
-        except Exception as e:  # noqa: BLE001
+            lang_dicts = [language_to_dict(lang) for lang in langs]
+        except Exception as e:
             errors[module_name] = f"{type(e).__name__}: {e}"
             continue
 

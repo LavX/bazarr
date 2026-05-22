@@ -139,14 +139,14 @@ write_config()
 # installations() later, but that's already past this filter.
 from subliminal_patch.extensions import provider_registry  # noqa: E402
 try:
-    from provider_hub.service import activate_staged_installations  # noqa: E402
+    from provider_hub.service import activate_staged_installations
     activated = activate_staged_installations()
     if activated:
         logging.info("Activated staged Provider Hub installations on startup: %s", activated)
 except Exception:  # pragma: no cover - hub failures must not prevent startup
     logging.exception("Unable to activate staged Provider Hub installations on startup")
 try:
-    from provider_hub.registry import register_active_provider_classes  # noqa: E402
+    from provider_hub.registry import register_active_provider_classes
     registered = register_active_provider_classes()
     if registered:
         logging.info("Registered Provider Hub plugins into provider registry: %s", registered)
