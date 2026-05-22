@@ -69,7 +69,7 @@ const App: FunctionComponent = () => {
   // When backend reports "running", invalidate the settings cache to trigger
   // an immediate refetch (bypasses any retry/backoff state).
   useEffect(() => {
-    if (settingsLoaded) return;
+    if (settingsLoaded || typeof EventSource === "undefined") return;
 
     const url = `${Environment.baseUrl}/_supervisor/events`;
     const es = new EventSource(url);
