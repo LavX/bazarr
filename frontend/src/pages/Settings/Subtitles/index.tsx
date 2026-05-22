@@ -501,10 +501,9 @@ const SettingsSubtitlesView: FunctionComponent = () => {
             ></Check>
             <Message>
               Use the audio track as the reference for synchronization instead
-              of the embedded subtitle. This can provide better results when
-              the embedded subtitles are not properly synced or have a
-              different framerate than the video, but it can increase
-              processing time.
+              of the embedded subtitle. This can provide better results when the
+              embedded subtitles are not properly synced or have a different
+              framerate than the video, but it can increase processing time.
             </Message>
             <CollapseBox
               indent
