@@ -2229,3 +2229,11 @@ def test_remove_installation_clears_enabled_providers(tmp_path, monkeypatch):
 
     service.remove_installation("examplehub")
     assert calls == [("examplehub", False)]
+
+
+def test_manifest_rejects_unsafe_version_path_components():
+    from provider_hub.manifest import ManifestValidationError, validate_manifest
+
+    for bad in ("../escape", "/abs", "a/b", "a\\b", "..", "."):
+        with pytest.raises(ManifestValidationError):
+            validate_manifest(_manifest(version=bad), built_in_provider_ids=set())

@@ -212,6 +212,17 @@ def validate_manifest(manifest: dict[str, Any], built_in_provider_ids: set[str] 
     )
     name = _require_text(manifest.get("name"), "name")
     version = _require_text(manifest.get("version"), "version")
+    # version becomes a filesystem path component (bundle dir, venv dir);
+    # reject anything that could escape via "../" or absolute paths before
+    # we touch the disk.
+    if (
+        not _EXACT_VERSION_RE.match(version)
+        or version in (".", "..")
+        or any(sep in version for sep in ("/", "\\"))
+    ):
+        raise ManifestValidationError(
+            "version must be a safe identifier (letters, digits, '.', '_', '-', '+', '!', '~')"
+        )
     api_version = _require_text(manifest.get("api_version"), "api_version")
     if api_version != PROVIDER_HUB_API_VERSION:
         raise ManifestValidationError(f"unsupported Provider Hub API version: {api_version}")
