@@ -32,6 +32,21 @@ last_series_event_data = None
 last_episode_event_data = None
 last_movie_event_data = None
 
+SIGNALR_ACTIVE_STATES = {0, 1, 2}
+
+
+def _signalr_transport_state_value(connection):
+    transport = getattr(connection, "transport", None)
+    if transport is None:
+        return None
+
+    state = getattr(transport, "state", None)
+    return getattr(state, "value", state)
+
+
+def _signalr_connection_active(connection):
+    return _signalr_transport_state_value(connection) in SIGNALR_ACTIVE_STATES
+
 
 class SonarrSignalrClient:
     def __init__(self):
@@ -53,10 +68,13 @@ class SonarrSignalrClient:
 
         self.configure()
         logging.info('BAZARR trying to connect to Sonarr SignalR feed...')
-        while self.connection.transport.state.value not in [0, 1, 2]:
+        while not _signalr_connection_active(self.connection):
             try:
-                self.connection.start()
+                started = self.connection.start()
             except ConnectionError:
+                time.sleep(5)
+                continue
+            if not started and not _signalr_connection_active(self.connection):
                 time.sleep(5)
 
     def stop(self):
@@ -65,7 +83,7 @@ class SonarrSignalrClient:
 
     def restart(self):
         if self.connection:
-            if self.connection.transport.state.value in [0, 1, 2]:
+            if _signalr_connection_active(self.connection):
                 self.stop()
         if settings.general.use_sonarr:
             self.start()
@@ -112,10 +130,13 @@ class RadarrSignalrClient:
     def start(self):
         self.configure()
         logging.info('BAZARR trying to connect to Radarr SignalR feed...')
-        while self.connection.transport.state.value not in [0, 1, 2]:
+        while not _signalr_connection_active(self.connection):
             try:
-                self.connection.start()
+                started = self.connection.start()
             except ConnectionError:
+                time.sleep(5)
+                continue
+            if not started and not _signalr_connection_active(self.connection):
                 time.sleep(5)
 
     def stop(self):
@@ -124,7 +145,7 @@ class RadarrSignalrClient:
 
     def restart(self):
         if self.connection:
-            if self.connection.transport.state.value in [0, 1, 2]:
+            if _signalr_connection_active(self.connection):
                 self.stop()
         if settings.general.use_radarr:
             self.start()

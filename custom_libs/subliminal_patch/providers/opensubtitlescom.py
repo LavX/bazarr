@@ -507,13 +507,13 @@ class OpenSubtitlesComProvider(ProviderRetryMixin, Provider):
     def download_subtitle(self, subtitle):
         logger.info('Downloading subtitle %r', subtitle)
 
-        headers = {'Accept': 'application/json', 'Content-Type': 'application/json',
-                   'Authorization': 'Bearer ' + self.token}
         res = self.retry(
             lambda: self.checked(
                 lambda: self.session.post(self.server_url() + 'download',
                                           json={'file_id': subtitle.file_id, 'sub_format': 'srt'},
-                                          headers=headers,
+                                          headers={'Accept': 'application/json',
+                                                   'Content-Type': 'application/json',
+                                                   'Authorization': 'Bearer ' + self.token},
                                           timeout=30),
                 validate_json=True,
                 json_key_name='link'
