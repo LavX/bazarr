@@ -14,16 +14,19 @@ down_revision = '4bb94a033f93'
 branch_labels = None
 depends_on = None
 
-bind = op.get_context().bind
-insp = sa.inspect(bind)
 
-
-def table_exists(table_name):
-    return table_name in insp.get_table_names()
+def table_exists(inspector, table_name):
+    return table_name in inspector.get_table_names()
 
 
 def upgrade():
-    if not table_exists('provider_hub_catalog_sources'):
+    # Alembic imports every revision module up-front to build its graph; the
+    # `op` context isn't bound yet at that point, so resolving the bind at
+    # module top raises NameError and blocks migrate_db on a fresh database.
+    # Defer the inspector to upgrade() where the operation context is live.
+    insp = sa.inspect(op.get_context().bind)
+
+    if not table_exists(insp, 'provider_hub_catalog_sources'):
         op.create_table(
             'provider_hub_catalog_sources',
             sa.Column('id', sa.Integer(), primary_key=True),
@@ -37,7 +40,7 @@ def upgrade():
             sa.Column('last_error', sa.Text(), nullable=True),
         )
 
-    if not table_exists('provider_hub_catalog_entries'):
+    if not table_exists(insp, 'provider_hub_catalog_entries'):
         op.create_table(
             'provider_hub_catalog_entries',
             sa.Column('id', sa.Integer(), primary_key=True),
@@ -55,7 +58,7 @@ def upgrade():
         op.create_index('ix_provider_hub_catalog_entries_source_id', 'provider_hub_catalog_entries', ['source_id'])
         op.create_index('ix_provider_hub_catalog_entries_provider_id', 'provider_hub_catalog_entries', ['provider_id'])
 
-    if not table_exists('provider_hub_installations'):
+    if not table_exists(insp, 'provider_hub_installations'):
         op.create_table(
             'provider_hub_installations',
             sa.Column('provider_id', sa.Text(), primary_key=True),
@@ -71,7 +74,7 @@ def upgrade():
             sa.Column('manifest_json', sa.Text(), nullable=True),
         )
 
-    if not table_exists('provider_hub_config'):
+    if not table_exists(insp, 'provider_hub_config'):
         op.create_table(
             'provider_hub_config',
             sa.Column('provider_id', sa.Text(), primary_key=True),
@@ -82,7 +85,7 @@ def upgrade():
             sa.Column('updated_at', sa.DateTime(), nullable=False),
         )
 
-    if not table_exists('provider_hub_secrets'):
+    if not table_exists(insp, 'provider_hub_secrets'):
         op.create_table(
             'provider_hub_secrets',
             sa.Column('id', sa.Integer(), primary_key=True),
@@ -93,7 +96,7 @@ def upgrade():
         )
         op.create_index('ix_provider_hub_secrets_provider_id', 'provider_hub_secrets', ['provider_id'])
 
-    if not table_exists('provider_hub_jobs'):
+    if not table_exists(insp, 'provider_hub_jobs'):
         op.create_table(
             'provider_hub_jobs',
             sa.Column('id', sa.Text(), primary_key=True),
@@ -106,7 +109,7 @@ def upgrade():
         )
         op.create_index('ix_provider_hub_jobs_provider_id', 'provider_hub_jobs', ['provider_id'])
 
-    if not table_exists('provider_hub_install_events'):
+    if not table_exists(insp, 'provider_hub_install_events'):
         op.create_table(
             'provider_hub_install_events',
             sa.Column('id', sa.Integer(), primary_key=True),
