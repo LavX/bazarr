@@ -105,12 +105,12 @@ class ProviderHubApi extends BaseApi {
   }
 
   async removeCatalogSource(name: string) {
-    await this.delete(`/catalog/sources/${name}`);
+    await this.delete(`/catalog/sources/${encodeURIComponent(name)}`);
   }
 
   async patchCatalogSource(name: string, payload: { dev_ref?: string | null }) {
     const response = await this.patchRaw<ProviderHubCatalogSource>(
-      `/catalog/sources/${name}`,
+      `/catalog/sources/${encodeURIComponent(name)}`,
       payload,
     );
     return response.data;

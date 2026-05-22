@@ -46,7 +46,7 @@ class ProviderHubCatalogSources(Resource):
             return str(error), 400
 
 
-@api_ns_provider_hub.route('provider-hub/catalog/sources/<string:name>')
+@api_ns_provider_hub.route('provider-hub/catalog/sources/<path:name>')
 class ProviderHubCatalogSource(Resource):
     @authenticate
     @api_ns_provider_hub.response(204, 'Success')
