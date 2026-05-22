@@ -28,7 +28,8 @@ def list_all_subtitles(videos, languages, pool_instance, min_score=0):
     for video in videos:
         logger.info("Listing subtitles for %r", video)
         subtitles = pool_instance.list_subtitles_prioritized(
-            video, languages - video.subtitle_languages, min_score=min_score
+            video, languages - video.subtitle_languages, min_score=min_score,
+            exhaustive=True,
         )
         listed_subtitles[video].extend(subtitles)
         logger.info("Found %d subtitle(s)", len(subtitles))
@@ -80,7 +81,14 @@ def download_best_subtitles(
     for video in checked_videos:
         logger.info("Downloading best subtitles for %r", video)
         if use_provider_priority:
-            listed = pool_instance.list_subtitles_prioritized(video, languages - video.subtitle_languages, min_score=min_score)
+            # exhaustive=False is the default, but spelling it out here keeps
+            # the auto/scheduled download intent obvious and prevents a silent
+            # behavior change if the default ever flips. The exhaustive path
+            # is reserved for manual searches (see list_all_subtitles).
+            listed = pool_instance.list_subtitles_prioritized(
+                video, languages - video.subtitle_languages,
+                min_score=min_score, exhaustive=False,
+            )
         else:
             listed = pool_instance.list_subtitles(video, languages - video.subtitle_languages)
         subtitles = pool_instance.download_best_subtitles(

@@ -480,12 +480,17 @@ class SZProviderPool(ProviderPool):
 
         return subtitles
 
-    def list_subtitles_prioritized(self, video, languages, min_score=0, provider_order=None, compute_score=None):
+    def list_subtitles_prioritized(self, video, languages, min_score=0, provider_order=None, compute_score=None,
+                                   exhaustive=False):
         """List subtitles with priority-based provider search.
 
         Search providers in priority order. Stop only when every requested
         language has at least one subtitle meeting min_score, or all providers
         have been exhausted.
+
+        When ``exhaustive=True`` (manual search), the early-exit on satisfied
+        languages is disabled so every provider is queried and the user sees
+        the full set of candidates regardless of score.
         """
         from .score import compute_score as default_compute_score
         compute_score = compute_score or default_compute_score
@@ -537,7 +542,7 @@ class SZProviderPool(ProviderPool):
 
             all_subtitles.extend(valid_subtitles)
 
-            if required_languages and satisfied_languages >= required_languages:
+            if not exhaustive and required_languages and satisfied_languages >= required_languages:
                 logger.info('All requested languages satisfied after provider %s, stopping search', name)
                 return all_subtitles
 
