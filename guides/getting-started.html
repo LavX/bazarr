@@ -182,8 +182,8 @@
       <ol class="steps">
         <li><strong>Set a password.</strong> Bazarr+ uses PBKDF2 with 600k iterations, a significant upgrade from upstream's MD5 hashing. Pick something strong.</li>
         <li><strong>Choose your languages.</strong> Select the subtitle languages you want Bazarr+ to search for. You can set defaults per profile or override per series/movie later.</li>
-        <li><strong>Add subtitle providers.</strong> Enable OpenSubtitles.org in the provider list. The bundled scraper is already connected, so no credentials are needed. Add any additional providers you have accounts with: Addic7ed, Podnapisi, Subscene, and so on.</li>
-        <li><strong>Set provider priority.</strong> Enable the priority toggle in Settings > Subtitle Sources and assign numeric priority values to each provider. Bazarr+ will try them in priority order and can stop early once it finds a match, saving time and API calls.</li>
+        <li><strong>Add subtitle providers.</strong> Enable shipped providers under Settings &gt; Providers, or open Marketplace to install Provider Hub plugins from catalog sources.</li>
+        <li><strong>Set provider priority.</strong> Use Settings &gt; Providers to order providers. Bazarr+ can try them in priority order and stop early once it finds a match, saving time and API calls.</li>
       </ol>
 
       <h2 id="connecting-to-sonarr-and-radarr">Connecting to Sonarr and Radarr</h2>
@@ -203,6 +203,7 @@
 
       <h2 id="next-steps">Next steps</h2>
       <ul>
+        <li><a href="provider-hub.html">Install Provider Hub plugins</a> from the official catalog source</li>
         <li><a href="ai-translation.html">Set up AI translation</a> to translate subtitles into any language using OpenRouter models</li>
         <li><a href="migration.html">Migrating from upstream?</a> Your existing config and database carry over</li>
       </ul>

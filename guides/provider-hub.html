@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Provider Hub - Bazarr+ Guides</title>
+  <meta name="description" content="Install and manage Provider Hub subtitle provider plugins in Bazarr+ v2.3.">
+  <link rel="canonical" href="https://lavx.github.io/bazarr/guides/provider-hub.html">
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Provider Hub - Bazarr+ Guides">
+  <meta property="og:description" content="Install and manage Provider Hub subtitle provider plugins in Bazarr+ v2.3.">
+  <meta property="og:url" content="https://lavx.github.io/bazarr/guides/provider-hub.html">
+  <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Provider Hub - Bazarr+ Guides">
+  <meta name="twitter:description" content="Install and manage Provider Hub subtitle provider plugins in Bazarr+ v2.3.">
+  <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
+
+  <!-- Geist font: async preload -->
+  <link rel="preload" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" as="style" crossorigin>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" media="print" onload="this.media='all'">
+  <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css"></noscript>
+
+  <link rel="icon" href="../screenshots/logo128.png" type="image/png">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+
+<a href="#main-content" class="skip-link">Skip to content</a>
+
+<!-- Grain overlay -->
+<svg class="grain" aria-hidden="true">
+  <filter id="grain-filter">
+    <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/>
+  </filter>
+  <rect width="100%" height="100%" filter="url(#grain-filter)"/>
+</svg>
+
+<!-- Ambient gradients -->
+<div class="ambient" aria-hidden="true"></div>
+
+<nav class="sticky-nav" aria-label="Site navigation">
+  <div class="container">
+    <img src="../screenshots/logo128.png" alt="Bazarr+" class="nav-logo" width="22" height="22">
+    <a href="../">Home</a>
+    <a href="../#comparison-heading">Compare</a>
+    <a href="../#quick-start">Install</a>
+    <a href="../#screenshots-heading">Screenshots</a>
+    <a href="../#faq-heading">FAQ</a>
+    <a href="./" class="nav-active">Guides</a>
+    <a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a>
+  </div>
+</nav>
+
+<main id="main-content" class="guide-page">
+  <div class="container">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <a href="../">Home</a><span class="sep">/</span><a href="./">Guides</a><span class="sep">/</span><span>Provider Hub</span>
+    </nav>
+    <h1>Provider Hub <span class="badge-new" aria-label="New in v2.3">v2.3</span></h1>
+
+    <article class="content">
+
+      <p class="lede">Bazarr+ v2.3.0 (Keystone) introduces Provider Hub: a plugin foundation for subtitle providers. It lets you install providers from catalog sources while Bazarr+ keeps third-party code staged, verified, and isolated.</p>
+
+      <h2 id="what-provider-hub-adds">What Provider Hub adds</h2>
+      <ul>
+        <li><strong>Marketplace</strong>: browse installable subtitle provider plugins from Settings &gt; Providers.</li>
+        <li><strong>Catalog sources</strong>: use the official catalog source or add community GitHub catalog sources.</li>
+        <li><strong>Trust labels</strong>: see whether a provider came from the official source or an untrusted custom source.</li>
+        <li><strong>Staged lifecycle</strong>: installs, updates, and active removals wait for restart before they become live.</li>
+        <li><strong>Worker validation</strong>: plugin code is imported and smoke-tested in a worker before Bazarr+ stages it.</li>
+        <li><strong>Activity log</strong>: catalog refreshes, installs, updates, tests, removals, durations, versions, and errors are visible to operators.</li>
+      </ul>
+
+      <h2 id="installing-a-provider">Installing a provider</h2>
+      <ol class="steps">
+        <li>Open <strong>Settings &gt; Providers</strong>.</li>
+        <li>Open the <strong>Marketplace</strong> tab.</li>
+        <li>Refresh the official catalog source if the list is empty or stale.</li>
+        <li>Review the provider card, including source, trust label, version, supported media, and languages.</li>
+        <li>Click <strong>Install</strong>. Bazarr+ downloads the pinned bundle, verifies hashes, installs dependencies into an isolated environment, and validates the worker.</li>
+        <li>Restart Bazarr+ when the staged-change banner appears.</li>
+        <li>After restart, add the installed plugin to the enabled provider list and save settings.</li>
+      </ol>
+
+      <div class="note">
+        <strong>Existing providers keep working.</strong> Provider Hub is additive. Shipped providers and existing provider settings continue to work after upgrade.
+      </div>
+
+      <h2 id="sources-and-trust">Sources and trust</h2>
+      <p>Bazarr+ ships with an official Provider Hub catalog source. Community sources can be added as GitHub catalog URLs, but Bazarr+ stores custom sources as untrusted even if a caller tries to mark them trusted.</p>
+      <p>That does not block community plugins. It keeps the trust signal honest so operators can tell official catalog entries from custom source entries before installing code.</p>
+
+      <h2 id="restart-lifecycle">Restart lifecycle</h2>
+      <p>Provider Hub does not hot-reload Python provider modules. Live unload and reload of provider code is risky when third-party dependencies are involved. Bazarr+ keeps the currently active provider running until restart, then promotes or removes staged plugins during startup.</p>
+      <p>If you see a pending restart banner, the change is staged correctly. Restart Bazarr+ to make it active.</p>
+
+      <h2 id="catalog-and-sdk">Catalog and SDK</h2>
+      <p>The official catalog lives at <a href="https://github.com/LavX/bazarr-provider-catalog" target="_blank" rel="noopener">LavX/bazarr-provider-catalog</a>. It contains the catalog manifest, provider packages, SDK tooling, and tests for provider authors.</p>
+
+      <p>The SDK is authoring tooling. Installed providers do not import it at runtime.</p>
+
+      <div class="code-wrap">
+        <div class="code-header">
+          <span class="code-lang">Catalog SDK</span>
+          <button class="copy-btn" data-copy="python3 -B -m sdk validate&#10;python3 -B -m sdk hash providers/&lt;id&gt;&#10;python3 -B -m sdk build-catalog&#10;python3 -B -m sdk smoke-test" aria-label="Copy SDK commands">Copy</button>
+        </div>
+        <pre><code>python3 -B -m sdk validate
+python3 -B -m sdk hash providers/&lt;id&gt;
+python3 -B -m sdk build-catalog
+python3 -B -m sdk smoke-test</code></pre>
+      </div>
+
+      <p>Provider packages must declare a manifest, pinned files, SHA-256 hashes, bundle hash, entry module, entry class, supported media, languages, and exact hash-checked dependencies.</p>
+
+      <h2 id="first-catalog-provider">First catalog provider</h2>
+      <p>SubtitleCat is the first real Provider Hub catalog provider. It targets the official catalog and supports movie and episode search without a login, broad language coverage, optional cached machine-translated subtitles, request delay control, and source page links in provider payloads.</p>
+
+      <h2 id="troubleshooting">Troubleshooting</h2>
+      <p><strong>Marketplace is empty.</strong> Refresh the official source under Settings &gt; Providers. If you use a custom source, confirm the GitHub URL and branch are reachable.</p>
+      <p><strong>Provider installed but does not run.</strong> Check for the pending restart banner. Active providers are promoted during startup, not while Python provider code is already loaded.</p>
+      <p><strong>Install failed.</strong> Open the Activity tab. Hash mismatches, missing files, dependency failures, worker import errors, and smoke-test failures are recorded there.</p>
+      <p><strong>Custom source looks untrusted.</strong> That is expected. Custom catalog sources are intentionally labeled untrusted so operators can distinguish them from the official source.</p>
+
+      <h2 id="next-steps">Next steps</h2>
+      <ul>
+        <li><a href="getting-started.html">Getting Started</a> if you have not installed Bazarr+ yet</li>
+        <li><a href="external-integration.html">External Integration</a> for Jellyfin and VLSub clients</li>
+        <li><a href="migration.html">Migration from upstream</a> if you are switching from stock Bazarr</li>
+      </ul>
+
+    </article>
+  </div>
+</main>
+
+<!-- Footer -->
+<footer>
+  <div class="container">
+    <div class="footer-inner">
+      <p class="footer-credit">Built by <a href="https://github.com/LavX" target="_blank" rel="noopener">LavX</a>. Based on <a href="https://github.com/morpheus65535/bazarr" target="_blank" rel="noopener">Bazarr</a> by morpheus65535.</p>
+      <ul class="footer-links">
+        <li><a href="./">Guides</a></li>
+        <li><a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a></li>
+        <li><a href="https://github.com/LavX/bazarr/issues" target="_blank" rel="noopener">Issues</a></li>
+        <li><a href="https://github.com/LavX/bazarr/wiki" target="_blank" rel="noopener">Wiki</a></li>
+      </ul>
+    </div>
+  </div>
+</footer>
+
+<script src="../js/site.js"></script>
+
+</body>
+</html>
