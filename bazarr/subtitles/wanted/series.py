@@ -100,11 +100,7 @@ def _wanted_episode(episode, providers_list, job_id=None):
                         continue
                     try:
                         from subtitles.tools.translate.main import translate_subtitles_file
-                        logging.info(
-                            "BAZARR auto-translate (wanted-scan) queuing %s -> %s for %s",
-                            translate_cfg['from'], lang_code, video_path,
-                        )
-                        translate_subtitles_file(
+                        translate_kwargs = dict(
                             video_path=video_path,
                             source_srt_file=source_srt,
                             from_lang=translate_cfg['from'],
@@ -117,12 +113,30 @@ def _wanted_episode(episode, providers_list, job_id=None):
                             radarr_id=None,
                             metadata=None,
                         )
-                        continue
-                    except Exception as e:
-                        logging.exception(
-                            "BAZARR failed to queue auto-translate for %s: %s",
-                            video_path, str(e),
+                        # Guard: skip if an identical translate job is already
+                        # pending or running. Why: history guard (action=6) only
+                        # blocks re-queue after successful completion; without
+                        # this check, every wanted-scan tick during a pending
+                        # translation would enqueue a duplicate job.
+                        if jobs_queue._is_an_existing_job(
+                            module='subtitles.tools.translate.main',
+                            func='translate_subtitles_file',
+                            args=[],
+                            kwargs=translate_kwargs,
+                        ):
+                            continue
+                        logging.info(
+                            "BAZARR auto-translate (wanted-scan) queuing %s -> %s for %s",
+                            translate_cfg['from'], lang_code, video_path,
                         )
+                        translate_subtitles_file(**translate_kwargs)
+                        continue
+                    except Exception:
+                        logging.exception(
+                            "BAZARR failed to queue auto-translate for %s",
+                            video_path,
+                        )
+                        # Fall through to normal provider search on queuing failure
 
         if is_search_active(desired_language=language, attempt_string=episode.failedAttempts):
             hi_ = "True" if language.endswith(':hi') else "False"

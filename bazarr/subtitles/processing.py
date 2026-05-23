@@ -70,7 +70,7 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
         if source_score_percent is not None and source_score_percent < min_score:
             logging.info(
                 'BAZARR auto-translate skipped: source score %.1f%% '
-                'below threshold %s%% for %s',
+                'below threshold %.1f%% for %s',
                 source_score_percent, min_score, video_path,
             )
             return
@@ -258,7 +258,7 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         if settings.general.use_plex is True:
             if settings.plex.update_series_library is True:
                 # Use specific item refresh instead of full library scan
-                plex_refresh_item(episode_metadata.imdbId, is_movie=False, 
+                plex_refresh_item(episode_metadata.imdbId, is_movie=False,
                                 season=episode_metadata.season, episode=episode_metadata.episode)
             if settings.plex.set_episode_added is True:
                 plex_set_episode_added_date_now(episode_metadata)
