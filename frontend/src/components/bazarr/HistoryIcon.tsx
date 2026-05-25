@@ -5,6 +5,7 @@ import {
   faClosedCaptioning,
   faCloudUploadAlt,
   faDownload,
+  faFilm,
   faLanguage,
   faMagnifyingGlass,
   faRecycle,
@@ -20,6 +21,7 @@ enum HistoryAction {
   Upload,
   Sync,
   Translated,
+  EmbeddedSource,
 }
 
 const HistoryIcon: FunctionComponent<{
@@ -56,6 +58,10 @@ const HistoryIcon: FunctionComponent<{
     case HistoryAction.Translated:
       icon = faLanguage;
       label = "Translated";
+      break;
+    case HistoryAction.EmbeddedSource:
+      icon = faFilm;
+      label = "Embedded Source";
       break;
     default:
       icon = faClosedCaptioning;

@@ -8,7 +8,7 @@ import ast
 from subliminal_patch import core, search_external_subtitles
 
 from languages.custom_lang import CustomLanguage
-from app.database import get_profiles_list, get_profile_cutoff, TableEpisodes, TableShows, \
+from app.database import get_profiles_list, get_profile_cutoff, TableEpisodes, TableShows, TableHistory, \
     get_audio_profile_languages, database, update, select
 from languages.get_languages import alpha2_from_alpha3, get_language_set
 from app.config import settings
@@ -17,6 +17,9 @@ from utilities.path_mappings import path_mappings
 from utilities.video_analyzer import embedded_subs_reader
 from app.event_handler import event_stream
 from subtitles.indexer.utils import guess_external_subtitles, get_external_subtitles_path
+from subtitles.processing import ProcessSubtitlesResult
+from subtitles.utils import _get_scores
+from sonarr.history import history_log
 from app.jobs_queue import jobs_queue
 from subtitles.adaptive_searching import is_search_given_up
 
@@ -26,6 +29,9 @@ gc.enable()
 def store_subtitles(original_path, reversed_path, use_cache=True):
     logging.debug(f'BAZARR started subtitles indexing for this file: {reversed_path}')  # noqa: G004
     actual_subtitles = []
+    # Languages of embedded subtitle tracks detected on this pass. Used after
+    # indexing to record a source-quality history entry (action=7) per language.
+    embedded_languages = []
     if os.path.exists(reversed_path):
         if settings.general.use_embedded_subs:
             logging.debug("BAZARR is trying to index embedded subtitles.")
@@ -59,6 +65,7 @@ def store_subtitles(original_path, reversed_path, use_cache=True):
                                     lang = f"{lang}:hi"
                                 logging.debug(f"BAZARR embedded subtitles detected: {lang}")  # noqa: G004
                                 actual_subtitles.append([lang, None, None])
+                                embedded_languages.append(lang)
                         except Exception as error:
                             logging.debug("BAZARR unable to index this unrecognized language: %s (%s)", subtitle_language, error)
                 except Exception:
@@ -140,7 +147,7 @@ def store_subtitles(original_path, reversed_path, use_cache=True):
             .values(subtitles=str(actual_subtitles))
             .where(TableEpisodes.path == original_path))
         matching_episodes = database.execute(
-            select(TableEpisodes.sonarrEpisodeId)
+            select(TableEpisodes.sonarrEpisodeId, TableEpisodes.sonarrSeriesId)
             .where(TableEpisodes.path == original_path))\
             .all()
 
@@ -148,6 +155,8 @@ def store_subtitles(original_path, reversed_path, use_cache=True):
             if episode:
                 logging.debug(f"BAZARR storing those languages to DB: {actual_subtitles}")  # noqa: G004
                 list_missing_subtitles(epno=episode.sonarrEpisodeId)
+                _log_embedded_history(episode.sonarrSeriesId, episode.sonarrEpisodeId,
+                                      embedded_languages, reversed_path)
             else:
                 logging.debug(f"BAZARR haven't been able to update existing subtitles to DB: {actual_subtitles}")  # noqa: G004
     else:
@@ -156,6 +165,46 @@ def store_subtitles(original_path, reversed_path, use_cache=True):
     logging.debug(f'BAZARR ended subtitles indexing for this file: {reversed_path}')  # noqa: G004
 
     return actual_subtitles
+
+
+def _log_embedded_history(series_id, episode_id, embedded_languages, reversed_path):
+    """Record source-quality history entries for newly detected embedded subtitles.
+
+    Why: Embedded subtitle tracks come from disc/streaming rips and are source
+    quality, but previously had no score in history so they appeared as unknown
+    quality and could be wrongly targeted for upgrade.
+    What: For each embedded language not already recorded, writes a TableHistory
+    entry with action=7 (EmbeddedSource) and score=score_out_of (100%). A history
+    lookup deduplicates so re-indexing the same episode does not duplicate entries.
+    Test: Index an episode with an embedded track twice; assert exactly one
+    action=7 row exists for that episode+language with score == score_out_of.
+    """
+    if not embedded_languages:
+        return
+
+    _, score_out_of, _ = _get_scores('series')
+
+    for lang in embedded_languages:
+        existing = database.execute(
+            select(TableHistory.id)
+            .where(TableHistory.sonarrEpisodeId == episode_id)
+            .where(TableHistory.language == lang)
+            .where(TableHistory.action == 7)).first()
+        if existing:
+            continue
+
+        result = ProcessSubtitlesResult(
+            message=f"{lang} embedded subtitles detected.",
+            reversed_path=reversed_path,
+            downloaded_language_code2=lang.split(':')[0],
+            downloaded_provider="embedded",
+            score=score_out_of,
+            forced=lang.endswith(':forced'),
+            subtitle_id=None,
+            reversed_subtitles_path=None,
+            hearing_impaired=lang.endswith(':hi'))
+        history_log(action=7, sonarr_series_id=series_id, sonarr_episode_id=episode_id,
+                    result=result, fake_provider="embedded", fake_score=score_out_of)
 
 
 def list_missing_subtitles(no=None, epno=None):
