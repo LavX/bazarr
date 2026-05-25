@@ -300,7 +300,7 @@ def get_queries_condition_parameters():
     days_to_upgrade_subs = settings.general.days_to_upgrade_subs
     minimum_timestamp = (datetime.now() - timedelta(days=int(days_to_upgrade_subs)))
 
-    # action=7 (EmbeddedSource) intentionally excluded, embedded subs are source
+    # action=7 (EmbeddedSource) intentionally excluded — embedded subs are source
     # quality and should not be upgraded
     if settings.general.upgrade_manual:
         query_actions = [1, 2, 3, 4, 6]
