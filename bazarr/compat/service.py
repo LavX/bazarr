@@ -9,7 +9,7 @@ from subliminal.video import Episode, Movie, Video
 from subliminal_patch.core_persistent import list_all_subtitles_parallel
 
 from app.config import settings
-from app.get_providers import get_providers_sorted, get_providers_auth
+from app.get_providers import get_provider_language_hook, get_providers_sorted, get_providers_auth
 from . import auth, cache as C, response_mapper as M
 from .local_subs import search_local
 from utilities.url_guard import assert_safe_outbound, resolve_safe_url, UnsafeURLError  # noqa: F401
@@ -31,7 +31,7 @@ def _get_compat_pool():
                 provider_configs=get_providers_auth(),
                 blacklist=None,
                 ban_list=None,
-                language_hook=None,
+                language_hook=get_provider_language_hook(),
                 language_equals=[],
             )
         return _compat_pool

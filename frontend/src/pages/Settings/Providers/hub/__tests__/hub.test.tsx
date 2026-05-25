@@ -341,6 +341,67 @@ describe("Settings > Providers (Provider Hub)", () => {
     ).toBeInTheDocument();
   });
 
+  it("stages per-provider language configuration from the provider drawer", async () => {
+    const updateRequest = vi.fn();
+    server.use(
+      http.get("/api/system/settings", () => {
+        return HttpResponse.json({
+          general: {
+            enabled_providers: ["opensubtitlescom"],
+            provider_priorities: {
+              opensubtitlescom: 10,
+            },
+            provider_languages: {},
+            use_provider_priority: true,
+          },
+          opensubtitlescom: {
+            username: "",
+            password: "",
+            use_hash: true,
+            include_ai_translated: false,
+            include_machine_translated: false,
+          },
+        });
+      }),
+      http.post("/api/system/settings", async ({ request }) => {
+        const data = await request.formData();
+        updateRequest(data.get("settings-general-provider_languages"));
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+
+    customRender(<SettingsProvidersView />);
+
+    const panel = await screen.findByRole("tabpanel", {
+      name: /My Providers/i,
+    });
+    await userEvent.click(await within(panel).findByText("OpenSubtitles.com"));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: /Provider settings/i,
+    });
+    const languageInput =
+      await within(dialog).findByLabelText("Search languages");
+
+    await userEvent.click(languageInput);
+    await userEvent.type(languageInput, "English");
+    await userEvent.click(await screen.findByText("English"));
+    await userEvent.clear(languageInput);
+    await userEvent.type(languageInput, "Bulgarian");
+    await userEvent.click(await screen.findByText("Bulgarian"));
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /Save \d+ pending changes/i }),
+    );
+
+    await waitFor(() =>
+      expect(updateRequest).toHaveBeenCalledWith(
+        JSON.stringify({ opensubtitlescom: ["eng", "bul"] }),
+      ),
+    );
+  });
+
   it("preserves the trusted-source attribution when installing from catalog", async () => {
     const installRequest = vi.fn();
     server.use(

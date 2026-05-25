@@ -169,6 +169,40 @@ def test_language_equals_pool_intance_list_subtitles_return_nothing(movies):
     )
 
 
+def test_language_hook_none_keeps_requested_languages(monkeypatch, movies):
+    calls = []
+
+    class HookedProvider:
+        languages = {core.Language("eng"), core.Language("spa")}
+
+        @classmethod
+        def check(cls, video):
+            return True
+
+        def initialize(self):
+            pass
+
+        def list_subtitles(self, video, languages):
+            calls.append(languages)
+            return []
+
+    original = core.provider_registry.providers.copy()
+    core.provider_registry.providers.clear()
+    core.provider_registry.register("hooked", HookedProvider)
+
+    try:
+        pool = core.SZProviderPool(["hooked"], language_hook=lambda provider: None)
+        pool.list_subtitles(
+            movies["dune"],
+            {core.Language("eng"), core.Language("spa")},
+        )
+    finally:
+        core.provider_registry.providers.clear()
+        core.provider_registry.providers.update(original)
+
+    assert calls == [{core.Language("eng"), core.Language("spa")}]
+
+
 # ---- list_subtitles_prioritized: exhaustive flag behavior ----
 
 def _make_fake_subtitle(language):

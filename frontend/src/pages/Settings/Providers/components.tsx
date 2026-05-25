@@ -116,6 +116,43 @@ const parseProviderPriorities = (
   return null;
 };
 
+const parseProviderLanguages = (
+  value: unknown,
+): Record<string, string[]> | null => {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parseProviderLanguages(parsed);
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  if (typeof value === "object" && !Array.isArray(value)) {
+    const out: Record<string, string[]> = {};
+    for (const [provider, languages] of Object.entries(value)) {
+      if (!Array.isArray(languages)) {
+        continue;
+      }
+      const valid = languages.filter(
+        (language): language is string => typeof language === "string",
+      );
+      if (valid.length > 0) {
+        out[provider] = valid;
+      }
+    }
+    return out;
+  }
+
+  return null;
+};
+
 const resolveProviderPriorities = (
   staged: LooseObject | undefined,
   settings: Settings | null,
@@ -129,6 +166,27 @@ const resolveProviderPriorities = (
 
   const fromSettings = parseProviderPriorities(
     settings?.general?.provider_priorities,
+  );
+  if (fromSettings) {
+    return { ...fromSettings };
+  }
+
+  return {};
+};
+
+const resolveProviderLanguages = (
+  staged: LooseObject | undefined,
+  settings: Settings | null,
+): Record<string, string[]> => {
+  const fromStaged = parseProviderLanguages(
+    staged?.["settings-general-provider_languages"],
+  );
+  if (fromStaged) {
+    return { ...fromStaged };
+  }
+
+  const fromSettings = parseProviderLanguages(
+    settings?.general?.provider_languages,
   );
   if (fromSettings) {
     return { ...fromSettings };
@@ -691,6 +749,7 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
 
   const [info, setInfo] = useState<Nullable<ProviderInfo>>(payload);
   const seededPriorities = resolveProviderPriorities(staged, settings);
+  const seededProviderLanguages = resolveProviderLanguages(staged, settings);
 
   const form = useForm<FormValues>({
     initialValues: {
@@ -698,6 +757,8 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
         ...staged,
         [`settings-general-provider_priorities-${info?.key}`]:
           seededPriorities[info?.key ?? ""] ?? 100,
+        [`settings-general-provider_languages-${info?.key}`]:
+          seededProviderLanguages[info?.key ?? ""] ?? [],
       },
       hooks: {},
     },
@@ -712,6 +773,11 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
       const priorityValue =
         resolveProviderPriorities(staged, settings)[info.key] ?? 100;
       form.setFieldValue(`settings.${priorityKey}`, priorityValue);
+
+      const languagesKey = `settings-general-provider_languages-${info.key}`;
+      const languageValue =
+        resolveProviderLanguages(staged, settings)[info.key] ?? [];
+      form.setFieldValue(`settings.${languagesKey}`, languageValue);
     }
   }, [info?.key]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -729,6 +795,15 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
         delete nextPriorities[payload.key];
         changes["settings-general-provider_priorities"] =
           JSON.stringify(nextPriorities);
+
+        if (settingsKey === "settings-general-enabled_providers") {
+          const providerLanguages = resolveProviderLanguages(staged, settings);
+          const nextProviderLanguages = { ...providerLanguages };
+          delete nextProviderLanguages[payload.key];
+          changes["settings-general-provider_languages"] = JSON.stringify(
+            nextProviderLanguages,
+          );
+        }
 
         onChangeRef.current(changes);
         onClose();
@@ -768,6 +843,28 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
         changes["settings-general-provider_priorities"] =
           JSON.stringify(priorities);
         delete changes[priorityKey];
+
+        if (settingsKey === "settings-general-enabled_providers") {
+          const languageKey = `settings-general-provider_languages-${info.key}`;
+          const providerLanguages = resolveProviderLanguages(
+            values.settings,
+            settings,
+          );
+          const selectedLanguages = values.settings[languageKey];
+
+          if (
+            Array.isArray(selectedLanguages) &&
+            selectedLanguages.length > 0
+          ) {
+            providerLanguages[info.key] = selectedLanguages;
+          } else {
+            delete providerLanguages[info.key];
+          }
+
+          changes["settings-general-provider_languages"] =
+            JSON.stringify(providerLanguages);
+          delete changes[languageKey];
+        }
 
         // Apply submit hooks
         runHooks(hooks, changes);
@@ -904,6 +1001,29 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
     return <Stack gap="xs">{elements}</Stack>;
   }, [info, form, form.values.settings]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const providerLanguageKey = info?.key
+    ? `settings-general-provider_languages-${info.key}`
+    : null;
+
+  const providerLanguageOptions = useMemo(() => {
+    if (!info || settingsKey !== "settings-general-enabled_providers") {
+      return [];
+    }
+
+    const shipped = getShippedMeta(info.key, info.inputs);
+    const languages = info.languages ?? shipped.languages;
+    const available = new Set(languages);
+    const options =
+      languages.length > 0
+        ? ALL_LANGUAGE_OPTIONS.filter((option) => available.has(option.code))
+        : ALL_LANGUAGE_OPTIONS;
+
+    return options.map((option) => ({
+      value: option.code,
+      label: option.name,
+    }));
+  }, [info, settingsKey]);
+
   const displayName =
     info?.name ?? (info?.key ? capitalize(info.key) : undefined);
 
@@ -996,6 +1116,36 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
                   {inputs}
                 </Stack>
               )}
+
+              {info &&
+                providerLanguageKey &&
+                settingsKey === "settings-general-enabled_providers" && (
+                  <Stack gap="xs">
+                    <MultiSelect
+                      label="Search languages"
+                      data={providerLanguageOptions}
+                      value={
+                        (form.values.settings[
+                          providerLanguageKey
+                        ] as string[]) ?? []
+                      }
+                      onChange={(value) =>
+                        form.setFieldValue(
+                          `settings.${providerLanguageKey}`,
+                          value,
+                        )
+                      }
+                      placeholder="All available languages"
+                      searchable
+                      clearable
+                      hidePickedOptions
+                      nothingFoundMessage="No matching language"
+                      maxDropdownHeight={240}
+                      comboboxProps={{ withinPortal: true }}
+                      leftSection={<FontAwesomeIcon icon={faLanguage} />}
+                    />
+                  </Stack>
+                )}
 
               {info?.message && (
                 <Stack gap="xs">

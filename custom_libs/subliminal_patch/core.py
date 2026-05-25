@@ -354,9 +354,8 @@ class SZProviderPool(ProviderPool):
         """
         logger.debug("Languages requested: %r", languages)
 
-        if self.language_hook:
-            languages_search_base = self.language_hook(provider)
-        else:
+        languages_search_base = self.language_hook(provider) if self.language_hook else None
+        if languages_search_base is None:
             languages_search_base = languages
 
         # check video validity
