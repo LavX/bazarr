@@ -1,12 +1,13 @@
 import React, { FunctionComponent, useMemo } from "react";
 import { useNavigate } from "react-router";
-import { Badge, Text, TextProps } from "@mantine/core";
+import { Badge, Group, Text, TextProps } from "@mantine/core";
 import { faEllipsis } from "@fortawesome/free-solid-svg-icons";
 import { ColumnDef } from "@tanstack/react-table";
 import { isString } from "lodash";
 import { useMovieSubtitleModification } from "@/apis/hooks";
 import { useShowOnlyDesired } from "@/apis/hooks/site";
 import { Action } from "@/components";
+import { HistoryIcon } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
 import SimpleTable from "@/components/tables/SimpleTable";
@@ -19,7 +20,27 @@ interface Props {
   movie: Item.Movie | null;
   disabled?: boolean;
   profile?: Language.Profile;
+  history?: History.Movie[];
 }
+
+const ScoreBadge: React.FC<{ score?: string | number | null }> = ({
+  score,
+}) => {
+  if (score === undefined || score === null || score === "") {
+    return (
+      <Text c="dimmed" size="xs">
+        —
+      </Text>
+    );
+  }
+  const pct = typeof score === "string" ? parseFloat(score) : score;
+  const color = pct >= 90 ? "green" : pct >= 70 ? "yellow" : "red";
+  return (
+    <Badge color={color} size="sm" variant="light">
+      {typeof score === "number" ? `${score}%` : score}
+    </Badge>
+  );
+};
 
 function isSubtitleTrack(path: string | undefined | null) {
   return !isString(path) || path.length === 0;
@@ -36,7 +57,7 @@ function buildLanguageKey(sub: Subtitle): string {
   return key;
 }
 
-const Table: FunctionComponent<Props> = ({ movie, profile }) => {
+const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
   const onlyDesired = useShowOnlyDesired();
 
   const profileItems = useProfileItemsToLanguages(profile);
@@ -51,6 +72,29 @@ const Table: FunctionComponent<Props> = ({ movie, profile }) => {
       ),
     [movie?.subtitles],
   );
+
+  const historyMap = useMemo(() => {
+    const map = new Map<string, History.Movie>();
+    history?.forEach((h) => {
+      if (!h.subtitles_path) return;
+      if ([1, 2, 3].includes(h.action)) {
+        if (!map.has(h.subtitles_path)) map.set(h.subtitles_path, h);
+      }
+    });
+    return map;
+  }, [history]);
+
+  const statusMap = useMemo(() => {
+    const map = new Map<string, Set<number>>();
+    history?.forEach((h) => {
+      if (!h.subtitles_path) return;
+      if ([5, 6].includes(h.action)) {
+        if (!map.has(h.subtitles_path)) map.set(h.subtitles_path, new Set());
+        map.get(h.subtitles_path)!.add(h.action);
+      }
+    });
+    return map;
+  }, [history]);
 
   const navigate = useNavigate();
 
@@ -193,13 +237,55 @@ const Table: FunctionComponent<Props> = ({ movie, profile }) => {
         },
       },
       {
+        id: "score",
+        header: "Score",
+        cell: ({ row: { original } }) => {
+          const record = historyMap.get(original.path ?? "");
+          return <ScoreBadge score={record?.score} />;
+        },
+      },
+      {
+        id: "provider",
+        header: "Provider",
+        cell: ({ row: { original } }) => {
+          const record = historyMap.get(original.path ?? "");
+          if (!record?.provider)
+            return (
+              <Text c="dimmed" size="xs">
+                —
+              </Text>
+            );
+          return <Text size="xs">{record.provider}</Text>;
+        },
+      },
+      {
+        id: "status",
+        header: "Status",
+        cell: ({ row: { original } }) => {
+          const actions = statusMap.get(original.path ?? "");
+          if (!actions?.size)
+            return (
+              <Text c="dimmed" size="xs">
+                —
+              </Text>
+            );
+          return (
+            <Group gap={4}>
+              {Array.from(actions).map((action) => (
+                <HistoryIcon key={action} action={action} />
+              ))}
+            </Group>
+          );
+        },
+      },
+      {
         id: "code2",
         cell: ({ row: { original } }) => {
           return <CodeCell item={original} />;
         },
       },
     ],
-    [CodeCell],
+    [CodeCell, historyMap, statusMap],
   );
 
   const data: Subtitle[] = useMemo(() => {
