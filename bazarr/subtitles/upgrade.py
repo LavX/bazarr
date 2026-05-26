@@ -300,6 +300,8 @@ def get_queries_condition_parameters():
     days_to_upgrade_subs = settings.general.days_to_upgrade_subs
     minimum_timestamp = (datetime.now() - timedelta(days=int(days_to_upgrade_subs)))
 
+    # action=7 (EmbeddedSource) intentionally excluded, embedded subs are source
+    # quality and should not be upgraded
     if settings.general.upgrade_manual:
         query_actions = [1, 2, 3, 4, 6]
     else:
@@ -359,14 +361,15 @@ def get_upgradable_episode_subtitles(history_id_list=None):
         return {}
 
     logging.debug("Determining upgradable episode subtitles")
+    minimum_timestamp, query_actions = get_queries_condition_parameters()
     max_id_timestamp = select(TableHistory.video_path,
                               TableHistory.language,
                               func.max(TableHistory.timestamp).label('timestamp')) \
+        .where(TableHistory.action.in_(query_actions)) \
         .group_by(TableHistory.video_path, TableHistory.language) \
         .distinct() \
         .subquery()
 
-    minimum_timestamp, query_actions = get_queries_condition_parameters()
     logging.debug(f"Minimum timestamp used for subtitles upgrade: {minimum_timestamp}")  # noqa: G004
     logging.debug(f"These actions are considered for subtitles upgrade: {query_actions}")  # noqa: G004
 
@@ -426,14 +429,15 @@ def get_upgradable_movies_subtitles(history_id_list=None):
         return {}
 
     logging.debug("Determining upgradable movie subtitles")
+    minimum_timestamp, query_actions = get_queries_condition_parameters()
     max_id_timestamp = select(TableHistoryMovie.video_path,
                               TableHistoryMovie.language,
                               func.max(TableHistoryMovie.timestamp).label('timestamp')) \
+        .where(TableHistoryMovie.action.in_(query_actions)) \
         .group_by(TableHistoryMovie.video_path, TableHistoryMovie.language) \
         .distinct() \
         .subquery()
 
-    minimum_timestamp, query_actions = get_queries_condition_parameters()
     logging.debug(f"Minimum timestamp used for subtitles upgrade: {minimum_timestamp}")  # noqa: G004
     logging.debug(f"These actions are considered for subtitles upgrade: {query_actions}")  # noqa: G004
 
