@@ -18,6 +18,7 @@ from app.event_handler import event_stream
 from .utils import _get_download_code3
 from .post_processing import postprocessing
 from .utils import _get_scores
+from .language_profiles import profile_item_language_code
 
 
 class ProcessSubtitlesResult:
@@ -118,11 +119,11 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
             if target_lang == downloaded_lang:
                 continue
 
-            target_codes = {target_lang, f'{target_lang}:hi', f'{target_lang}:forced'}
-            if not (missing_codes & target_codes):
+            target_code = profile_item_language_code(item)
+            if target_code not in missing_codes:
                 logging.debug(
                     'BAZARR auto-translate skipped: %s already satisfied for %s',
-                    target_lang, video_path,
+                    target_code, video_path,
                 )
                 continue
 
@@ -130,7 +131,7 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
                 'BAZARR auto-translate queuing %s -> %s for %s',
                 downloaded_lang, target_lang, video_path,
             )
-            translate_media_type = 'series' if media_type == 'series' else 'movies'
+            translate_media_type = 'episode' if media_type == 'series' else 'movies'
             translate_subtitles_file(
                 video_path=video_path,
                 source_srt_file=subtitle_path,

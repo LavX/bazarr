@@ -21,6 +21,7 @@ from subliminal_patch.score import MAX_SCORES
 
 from ..adaptive_searching import is_search_active, updateFailedAttempts
 from ..download import generate_subtitles
+from ..language_profiles import build_translate_from_map
 from .utils import _find_existing_subtitle_path
 
 
@@ -32,16 +33,7 @@ def _wanted_movie(movie, providers_list, job_id=None):
         audio_language = 'None'
 
     profile = get_profiles_list(profile_id=movie.profileId) if movie.profileId else None
-    translate_from_map = {}
-    if profile:
-        for prof_item in profile.get('items', []):
-            src = prof_item.get('translate_from')
-            if src:
-                translate_from_map[prof_item.get('language')] = {
-                    'from': src,
-                    'hi': prof_item.get('hi') == 'True',
-                    'forced': prof_item.get('forced') == 'True',
-                }
+    translate_from_map = build_translate_from_map(profile)
 
     languages = []
     languages_to_stamp = []
@@ -50,7 +42,7 @@ def _wanted_movie(movie, providers_list, job_id=None):
     for language in ast.literal_eval(movie.missing_subtitles):
         lang_code = language.split(':')[0]
 
-        translate_cfg = translate_from_map.get(lang_code)
+        translate_cfg = translate_from_map.get(language)
         if translate_cfg:
             source_srt = _find_existing_subtitle_path(
                 movie.subtitles,
@@ -91,7 +83,7 @@ def _wanted_movie(movie, providers_list, job_id=None):
                     already_translated = database.execute(
                         select(TableHistoryMovie.id)
                         .where(TableHistoryMovie.radarrId == movie.radarrId)
-                        .where(TableHistoryMovie.language.like(f"{lang_code}%"))
+                        .where(TableHistoryMovie.language == language)
                         .where(TableHistoryMovie.action == 6)
                         .limit(1)
                     ).first()
@@ -104,8 +96,8 @@ def _wanted_movie(movie, providers_list, job_id=None):
                             source_srt_file=source_srt,
                             from_lang=translate_cfg['from'],
                             to_lang=lang_code,
-                            forced=language.endswith(':forced') or translate_cfg['forced'],
-                            hi=language.endswith(':hi') or translate_cfg['hi'],
+                            forced=translate_cfg['forced'],
+                            hi=translate_cfg['hi'],
                             media_type='movies',
                             sonarr_series_id=None,
                             sonarr_episode_id=None,
