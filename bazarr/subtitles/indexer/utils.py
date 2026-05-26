@@ -41,6 +41,20 @@ def get_external_subtitles_path(file, subtitle):
     return path
 
 
+def normalize_subtitle_language_variant(language, forced=False, hi=False):
+    language_text = str(language)
+    parts = language_text.split(':')
+    base = parts[0]
+    variants = {part.lower() for part in parts[1:]}
+
+    # Keep the same priority as ProcessSubtitlesResult.language_code.
+    if hi or "hi" in variants:
+        return f"{base}:hi"
+    if forced or "forced" in variants:
+        return f"{base}:forced"
+    return base
+
+
 def guess_external_subtitles(dest_folder, subtitles, media_type, previously_indexed_subtitles_to_exclude=None):
     for subtitle, language in subtitles.items():
         subtitle_path = os.path.join(dest_folder, subtitle)

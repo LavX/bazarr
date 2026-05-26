@@ -5,6 +5,7 @@ import {
   faClosedCaptioning,
   faCloudUploadAlt,
   faDownload,
+  faFilm,
   faLanguage,
   faMagnifyingGlass,
   faRecycle,
@@ -14,12 +15,13 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 
 enum HistoryAction {
   Delete = 0,
-  Download,
-  Manual,
-  Upgrade,
-  Upload,
-  Sync,
-  Translated,
+  Download = 1,
+  Manual = 2,
+  Upgrade = 3,
+  Upload = 4,
+  Sync = 5,
+  Translated = 6,
+  EmbeddedSource = 7,
 }
 
 const HistoryIcon: FunctionComponent<{
@@ -56,6 +58,10 @@ const HistoryIcon: FunctionComponent<{
     case HistoryAction.Translated:
       icon = faLanguage;
       label = "Translated";
+      break;
+    case HistoryAction.EmbeddedSource:
+      icon = faFilm;
+      label = "Embedded Source";
       break;
     default:
       icon = faClosedCaptioning;
