@@ -191,6 +191,22 @@ def test_startup_requirements_probe_covers_unvendored_runtime_imports():
     } <= set(RUNTIME_IMPORTS)
 
 
+def test_startup_requirements_probe_uses_security_patched_dependency_versions():
+    from app.requirements import RUNTIME_REQUIREMENTS
+
+    repo_root = Path(__file__).resolve().parents[2]
+    requirements = (repo_root / "requirements.txt").read_text()
+
+    expected_versions = {
+        "dynaconf": ("dynaconf", "==3.2.13"),
+        "urllib3": ("urllib3", "==2.7.0"),
+    }
+
+    for module, (distribution, spec) in expected_versions.items():
+        assert RUNTIME_REQUIREMENTS[module] == (distribution, spec)
+        assert f"{distribution}{spec}" in requirements
+
+
 def test_startup_requirements_probe_rejects_wrong_pinned_versions(monkeypatch):
     from app import requirements
 

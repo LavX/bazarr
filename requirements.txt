@@ -18,7 +18,7 @@ deathbycaptcha-official==4.7.1
 deep-translator==1.11.4
 dnspython==2.8.0
 dogpile.cache==1.5.0
-dynaconf==3.2.12
+dynaconf==3.2.13
 emoji==2.15.0
 enzyme==0.5.2
 fcache==0.6.0
@@ -65,7 +65,7 @@ tld==0.13.2
 tomlkit>=0.15.0
 tzlocal==5.3.1
 unidecode==1.4.0
-urllib3==2.6.3
+urllib3==2.7.0
 waitress==3.0.2
 webrtcvad-wheels>=2.0.14  # binary wheels for cp36..cp313; upstream webrtcvad is source-only and unmaintained since 2017
 werkzeug==3.1.8
