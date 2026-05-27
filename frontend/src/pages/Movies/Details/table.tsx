@@ -27,6 +27,7 @@ import {
   canSynchronizeSubtitle,
   getSubtitleSyncStatusPresentation,
   getSyncEngineLabel,
+  isCompatibleSyncOutputSubtitle,
   isSyncOutputSubtitle,
   sortSyncOutputSubtitles,
 } from "@/utilities/subtitles";
@@ -279,9 +280,8 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
 
     const { radarrId } = movie;
     const syncOutputs = sortSyncOutputSubtitles(
-      (movie.subtitles ?? []).filter(
-        (subtitle) =>
-          subtitle.code2 === item.code2 && isSyncOutputSubtitle(subtitle),
+      (movie.subtitles ?? []).filter((subtitle) =>
+        isCompatibleSyncOutputSubtitle(item, subtitle),
       ),
     );
     const canCompareSyncOutputs =

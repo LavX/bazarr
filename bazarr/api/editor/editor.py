@@ -988,6 +988,22 @@ def run_editor_sync(job_key, video_path, tmp_in, tmp_out, encoding, max_offset, 
 
         logger.info('Editor sync finished, reading result...')
         update_progress('Reading result...', 2, 3)
+
+        if sync_result is not None and getattr(sync_result, 'success', True) is False:
+            messages = []
+            for result_group in ('failed_results', 'skipped_results'):
+                results = getattr(sync_result, result_group, None)
+                if not isinstance(results, (list, tuple)):
+                    continue
+                for engine_result in results:
+                    message = getattr(engine_result, 'message', None)
+                    engine = getattr(engine_result, 'engine', None)
+                    if message and engine:
+                        messages.append(f'{engine}: {message}')
+                    elif message:
+                        messages.append(message)
+            raise RuntimeError('; '.join(messages) or 'No synchronization engine produced output')
+
         engine_results = []
         for engine_result in getattr(sync_result, 'successful_results', []) or []:
             result_path = getattr(engine_result, 'output_path', None)

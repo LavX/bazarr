@@ -1,8 +1,10 @@
 import {
+  buildComparableSubtitleVariantKey,
   buildSubtitleLanguageKey,
   canSynchronizeSubtitle,
   getSubtitleSyncStatusPresentation,
   getSyncEngineLabel,
+  isCompatibleSyncOutputSubtitle,
   isSyncOutputLanguageKey,
   isSyncOutputSubtitle,
 } from "@/utilities/subtitles";
@@ -96,6 +98,52 @@ describe("subtitle language helpers", () => {
     expect(getSyncEngineLabel("sync-ffsubsync")).toBe("FFsubsync");
     expect(getSyncEngineLabel("sync-autosubsync")).toBe("Autosubsync");
     expect(getSyncEngineLabel("sync-alass")).toBe("ALASS");
+  });
+
+  it("normalizes comparable variants without sync modifiers", () => {
+    expect(
+      buildComparableSubtitleVariantKey({
+        code2: "en",
+        name: "English",
+        forced: false,
+        hi: true,
+        modifier: "sync-ffsubsync",
+        language: "en:hi:sync-ffsubsync",
+        path: "/movie/Movie.en.hi.ffsubsync.srt",
+      }),
+    ).toBe("en:hi");
+  });
+
+  it("matches sync outputs only for the same subtitle variant", () => {
+    const regular: Subtitle = {
+      code2: "en",
+      name: "English",
+      forced: false,
+      hi: false,
+      language: "en",
+      path: "/movie/Movie.en.srt",
+    };
+    const regularOutput: Subtitle = {
+      code2: "en",
+      name: "English",
+      forced: false,
+      hi: false,
+      modifier: "sync-ffsubsync",
+      language: "en:sync-ffsubsync",
+      path: "/movie/Movie.en.ffsubsync.srt",
+    };
+    const hiOutput: Subtitle = {
+      code2: "en",
+      name: "English",
+      forced: false,
+      hi: true,
+      modifier: "sync-ffsubsync",
+      language: "en:hi:sync-ffsubsync",
+      path: "/movie/Movie.en.hi.ffsubsync.srt",
+    };
+
+    expect(isCompatibleSyncOutputSubtitle(regular, regularOutput)).toBe(true);
+    expect(isCompatibleSyncOutputSubtitle(regular, hiOutput)).toBe(false);
   });
 
   it("shows an unconfirmed sync state for edited subtitles", () => {

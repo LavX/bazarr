@@ -42,6 +42,27 @@ def _sync_progress_total(enabled_engines):
     return max(len(normalize_enabled_engines(configured_engines)), 1)
 
 
+def _index_keep_all_outputs(video_path, sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None):
+    if sonarr_episode_id:
+        from app.event_handler import event_stream
+        from subtitles.indexer.series import store_subtitles
+        from utilities.path_mappings import path_mappings
+
+        store_subtitles(path_mappings.path_replace_reverse(video_path), video_path)
+        if sonarr_series_id:
+            event_stream(type='series', payload=sonarr_series_id)
+        event_stream(type='episode', payload=sonarr_episode_id)
+        return
+
+    if radarr_id:
+        from app.event_handler import event_stream
+        from subtitles.indexer.movies import store_subtitles_movie
+        from utilities.path_mappings import path_mappings
+
+        store_subtitles_movie(path_mappings.path_replace_reverse_movie(video_path), video_path)
+        event_stream(type='movie', payload=radarr_id)
+
+
 def sync_subtitles(video_path,
                    srt_path,
                    srt_lang,
@@ -148,8 +169,16 @@ def sync_subtitles(video_path,
         sync_result = None
         try:
             sync_result = subsync.sync(**sync_kwargs)
-            if sync_result and sync_result.success and callback:
-                callback()
+            if sync_result and sync_result.success:
+                if callback:
+                    callback()
+                elif getattr(sync_result, 'output_mode', None) == OUTPUT_MODE_KEEP_ALL:
+                    _index_keep_all_outputs(
+                        video_path,
+                        sonarr_series_id=sonarr_series_id,
+                        sonarr_episode_id=sonarr_episode_id,
+                        radarr_id=radarr_id,
+                    )
         except Exception:
             logging.exception(f'BAZARR an unhandled exception occurs during the synchronization process for this '  # noqa: G004
                               f'subtitle file: {srt_path}')

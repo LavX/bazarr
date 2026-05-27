@@ -16,6 +16,7 @@ import {
   buildSubtitleLanguageKey,
   canSynchronizeSubtitle,
   getSyncEngineLabel,
+  isCompatibleSyncOutputSubtitle,
   isSyncOutputSubtitle,
   sortSyncOutputSubtitles,
 } from "@/utilities/subtitles";
@@ -88,11 +89,11 @@ export const Subtitle: FunctionComponent<Props> = ({
   const syncOutputs = useMemo(
     () =>
       sortSyncOutputSubtitles(
-        (availableSubtitles ?? []).filter(
-          (item) => item.code2 === subtitle.code2 && isSyncOutputSubtitle(item),
+        (availableSubtitles ?? []).filter((item) =>
+          isCompatibleSyncOutputSubtitle(subtitle, item),
         ),
       ),
-    [availableSubtitles, subtitle.code2],
+    [availableSubtitles, subtitle],
   );
 
   const canCompareSyncOutputs =

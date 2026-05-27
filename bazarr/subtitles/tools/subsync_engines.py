@@ -269,8 +269,8 @@ def is_sync_engine_language_key(language):
     if not isinstance(language, str):
         return False
 
-    parts = language.split(':', 1)
-    return len(parts) == 2 and parts[1].lower() in SYNC_ENGINE_LANGUAGE_MODIFIERS
+    modifiers = language.split(':')[1:]
+    return any(modifier.lower() in SYNC_ENGINE_LANGUAGE_MODIFIERS for modifier in modifiers)
 
 
 class SubsyncEngineRunner:

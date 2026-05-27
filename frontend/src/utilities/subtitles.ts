@@ -35,6 +35,27 @@ export function buildSubtitleLanguageKey(subtitle: Subtitle): string {
   return key;
 }
 
+export function buildComparableSubtitleVariantKey(subtitle: Subtitle): string {
+  const [base, ...modifiers] = buildSubtitleLanguageKey(subtitle).split(":");
+  const variants = modifiers
+    .map((modifier) => modifier.toLowerCase())
+    .filter((modifier) => !syncOutputLanguageModifiers.includes(modifier))
+    .sort();
+
+  return [base, ...variants].join(":");
+}
+
+export function isCompatibleSyncOutputSubtitle(
+  source: Subtitle,
+  output: Subtitle,
+): boolean {
+  return (
+    isSyncOutputSubtitle(output) &&
+    buildComparableSubtitleVariantKey(output) ===
+      buildComparableSubtitleVariantKey(source)
+  );
+}
+
 export function isSyncOutputSubtitle(subtitle: Subtitle): boolean {
   if (isSyncOutputLanguageKey(subtitle.language)) {
     return true;

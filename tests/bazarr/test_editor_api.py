@@ -625,6 +625,49 @@ class TestRunEditorSync:
         assert _editor_sync_jobs[job_key]['status'] == 'failed'
         assert 'ffsubsync crashed' in _editor_sync_jobs[job_key]['message']
 
+    def test_unsuccessful_sync_result_does_not_return_original_content(self, tmp_path):
+        tmp_in = str(tmp_path / 'input.srt')
+        tmp_out = str(tmp_path / 'input.synced.srt')
+
+        original_content = '1\n00:00:01,000 --> 00:00:02,000\nOriginal\n'
+        with open(tmp_in, 'w') as f:
+            f.write(original_content)
+
+        sync_result = SimpleNamespace(
+            success=False,
+            successful_results=[],
+            failed_results=[SimpleNamespace(engine='alass', message='missing binary')],
+            skipped_results=[],
+        )
+
+        job_key = 'test_sync_unsuccessful_result'
+        _editor_sync_jobs[job_key] = {'status': 'running', 'content': None, 'message': ''}
+
+        mock_subsync = MagicMock()
+        mock_subsync.sync.return_value = sync_result
+        mock_subsync_cls = MagicMock(return_value=mock_subsync)
+        mock_jobs_queue = MagicMock()
+
+        with patch('api.editor.editor.SubSyncer', mock_subsync_cls, create=True), \
+             patch.dict('sys.modules', {'subtitles.tools.subsyncer': MagicMock(SubSyncer=mock_subsync_cls)}), \
+             patch('api.editor.editor.jobs_queue', mock_jobs_queue, create=True), \
+             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue)}), \
+             patch('threading.Timer'):
+            run_editor_sync(
+                job_key=job_key,
+                video_path='/video/test.mkv',
+                tmp_in=tmp_in,
+                tmp_out=tmp_out,
+                encoding='utf-8',
+                max_offset='120',
+                gss=False,
+                reference='a:0',
+            )
+
+        assert _editor_sync_jobs[job_key]['status'] == 'failed'
+        assert _editor_sync_jobs[job_key]['content'] is None
+        assert 'alass: missing binary' in _editor_sync_jobs[job_key]['message']
+
     def test_sync_updates_progress(self, tmp_path):
         """Progress updates should be sent to the jobs_queue."""
         tmp_in = str(tmp_path / 'input.srt')
@@ -877,6 +920,22 @@ class TestEditorSyncPost:
             'mediaId': '1',
             'content': 'data',
             'language': 'hu:sync-ffsubsync',
+        })
+        sync_resource = editor_module.EditorSync()
+
+        with patch.object(editor_module, 'request', mock_request), \
+             patch.object(editor_module, '_resolve_video_path', return_value=('Should not resolve', 404)) as mock_resolve:
+            result = sync_resource.post()
+
+        assert result == ('Generated sync output files cannot be synchronized again.', 400)
+        mock_resolve.assert_not_called()
+
+    def test_rejects_generated_sync_output_language_with_existing_variant(self):
+        mock_request = self._make_post_request({
+            'mediaType': 'episode',
+            'mediaId': '1',
+            'content': 'data',
+            'language': 'hu:hi:sync-ffsubsync',
         })
         sync_resource = editor_module.EditorSync()
 

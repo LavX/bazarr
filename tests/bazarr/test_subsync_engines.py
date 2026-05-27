@@ -582,6 +582,51 @@ def test_sync_subtitles_reports_engine_progress(mocker):
     } in progress_calls
 
 
+def test_sync_subtitles_indexes_keep_all_outputs_without_callback(mocker):
+    from subtitles import sync as sync_module
+    from subtitles.tools.subsync_engines import (
+        OUTPUT_MODE_KEEP_ALL,
+        RESULT_SUCCESS,
+        SyncEngineResult,
+        SyncRunResult,
+    )
+
+    sync_result = SyncRunResult(source_path='/subtitle.hu.srt', output_mode=OUTPUT_MODE_KEEP_ALL)
+    sync_result.results = [
+        SyncEngineResult(engine='ffsubsync', status=RESULT_SUCCESS, output_path='/subtitle.hu.ffsubsync.srt'),
+    ]
+
+    class FakeSubSyncer:
+        def sync(self, **kwargs):
+            return sync_result
+
+    mocker.patch.object(sync_module, 'SubSyncer', return_value=FakeSubSyncer())
+    mock_index = mocker.patch.object(sync_module, '_index_keep_all_outputs')
+
+    result = sync_module.sync_subtitles(
+        video_path='/video.mkv',
+        srt_path='/subtitle.hu.srt',
+        srt_lang='hu',
+        forced=False,
+        hi=False,
+        percent_score=0,
+        sonarr_series_id=10,
+        sonarr_episode_id=20,
+        force_sync=True,
+        output_mode='keep_all',
+        enabled_engines=['ffsubsync'],
+        track_job_progress=False,
+    )
+
+    assert result is True
+    mock_index.assert_called_once_with(
+        '/video.mkv',
+        sonarr_series_id=10,
+        sonarr_episode_id=20,
+        radarr_id=None,
+    )
+
+
 def test_sync_subtitles_marks_skipped_progress_complete(mocker):
     from subtitles import sync as sync_module
 
@@ -676,6 +721,15 @@ def test_sync_engine_outputs_keep_language_modifier():
     assert subtitle_language_with_sync_modifier('en:hi', 'Movie.en.hi.autosubsync.srt') == 'en:hi:sync-autosubsync'
     assert subtitle_language_with_sync_modifier('en:forced', 'Movie.en.forced.alass.srt') == 'en:forced:sync-alass'
     assert subtitle_language_with_sync_modifier('en', 'Movie.en.srt') == 'en'
+
+
+def test_sync_engine_language_key_allows_existing_modifiers():
+    from subtitles.tools.subsync_engines import is_sync_engine_language_key
+
+    assert is_sync_engine_language_key('en:sync-ffsubsync')
+    assert is_sync_engine_language_key('en:hi:sync-ffsubsync')
+    assert is_sync_engine_language_key('en:forced:sync-alass')
+    assert not is_sync_engine_language_key('en:hi')
 
 
 def test_add_sync_engine_outputs_indexes_generated_files(tmp_path):
