@@ -247,9 +247,22 @@ def temporary_engine_output_path(srt_path, engine):
     return Path(temp_path)
 
 
+def sync_engine_from_output_path(path):
+    filename = os.path.basename(str(path)).lower()
+    stem, extension = os.path.splitext(filename)
+    if not extension:
+        return None
+
+    parts = stem.split('.')
+    if len(parts) < 2:
+        return None
+
+    engine = parts[-1]
+    return engine if engine in SYNC_ENGINES else None
+
+
 def is_sync_engine_output(path):
-    filename = os.path.basename(path)
-    return any(marker in filename for marker in SYNC_ENGINE_OUTPUT_MARKERS)
+    return sync_engine_from_output_path(path) is not None
 
 
 def is_sync_engine_language_key(language):
@@ -264,6 +277,18 @@ class SubsyncEngineRunner:
     def __init__(self, failure_store=None, failure_threshold=FAILURE_THRESHOLD):
         self.failure_store = failure_store or DatabaseSubsyncFailureStore(failure_threshold=failure_threshold)
         self.failure_threshold = failure_threshold
+
+    def _existing_keep_all_output_is_current(self, srt_path, output_path, engine):
+        if self.failure_store.failure_count(srt_path, engine) > 0:
+            return False
+
+        try:
+            source_stat = Path(srt_path).stat()
+            output_stat = output_path.stat()
+        except OSError:
+            return False
+
+        return output_stat.st_size > 0 and output_stat.st_mtime_ns >= source_stat.st_mtime_ns
 
     def run(self, srt_path, output_mode, enabled_engines, execute_engine, force_sync=False):
         output_mode = normalize_output_mode(output_mode)
@@ -285,16 +310,6 @@ class SubsyncEngineRunner:
                 else temporary_engine_output_path(srt_path, engine)
             )
 
-            if output_mode == OUTPUT_MODE_KEEP_ALL and final_engine_output_path.is_file() and not force_sync:
-                result.results.append(SyncEngineResult(
-                    engine=engine,
-                    status=RESULT_SKIPPED,
-                    output_path=str(final_engine_output_path),
-                    reason='output_exists',
-                    message='Generated sync output already exists.',
-                ))
-                continue
-
             if self.failure_store.should_skip(srt_path, engine) and not force_sync:
                 result.results.append(SyncEngineResult(
                     engine=engine,
@@ -304,6 +319,17 @@ class SubsyncEngineRunner:
                     message=f'{engine} skipped after {self.failure_threshold} consecutive failures.',
                 ))
                 continue
+
+            if output_mode == OUTPUT_MODE_KEEP_ALL and final_engine_output_path.is_file() and not force_sync:
+                if self._existing_keep_all_output_is_current(srt_path, final_engine_output_path, engine):
+                    result.results.append(SyncEngineResult(
+                        engine=engine,
+                        status=RESULT_SKIPPED,
+                        output_path=str(final_engine_output_path),
+                        reason='output_exists',
+                        message='Generated sync output already exists.',
+                    ))
+                    continue
 
             try:
                 if output_path.is_file():
@@ -345,9 +371,7 @@ class SubsyncEngineRunner:
                 ))
             except Exception as exc:
                 logging.exception('BAZARR %s sync engine failed for %s', engine, srt_path)
-                if output_path.is_file() and (
-                    output_mode == OUTPUT_MODE_OVERWRITE or output_path.stat().st_size == 0
-                ):
+                if output_path.is_file():
                     output_path.unlink()
                 self.failure_store.record_failure(srt_path, engine, str(exc)[:500])
                 result.results.append(SyncEngineResult(

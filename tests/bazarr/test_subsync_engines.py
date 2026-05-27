@@ -2,6 +2,7 @@
 
 import logging
 import inspect
+import os
 import pytest
 import subprocess
 
@@ -128,6 +129,8 @@ def test_existing_generated_output_is_skipped_until_force_resync(tmp_path):
     _write(subtitle, 'original')
     generated = engine_output_path(str(subtitle), 'ffsubsync')
     _write(generated, 'existing')
+    os.utime(subtitle, (100, 100))
+    os.utime(generated, (200, 200))
     calls = []
 
     def execute(engine, output_path):
@@ -158,6 +161,76 @@ def test_existing_generated_output_is_skipped_until_force_resync(tmp_path):
     assert calls == ['ffsubsync']
     assert generated.read_text(encoding='utf-8') == 'new result'
     assert forced.success
+
+
+def test_stale_keep_all_output_is_regenerated(tmp_path):
+    from subtitles.tools.subsync_engines import (
+        OUTPUT_MODE_KEEP_ALL,
+        InMemorySubsyncFailureStore,
+        SubsyncEngineRunner,
+        engine_output_path,
+    )
+
+    subtitle = tmp_path / 'Movie.en.srt'
+    _write(subtitle, 'new source')
+    generated = engine_output_path(str(subtitle), 'ffsubsync')
+    _write(generated, 'stale output')
+    os.utime(generated, (100, 100))
+    os.utime(subtitle, (200, 200))
+    calls = []
+
+    def execute(engine, output_path):
+        calls.append(engine)
+        _write(output_path, 'fresh result')
+        return {}
+
+    result = SubsyncEngineRunner(InMemorySubsyncFailureStore()).run(
+        srt_path=str(subtitle),
+        output_mode=OUTPUT_MODE_KEEP_ALL,
+        enabled_engines=['ffsubsync'],
+        execute_engine=execute,
+    )
+
+    assert calls == ['ffsubsync']
+    assert generated.read_text(encoding='utf-8') == 'fresh result'
+    assert result.success
+
+
+def test_keep_all_output_with_recorded_failure_is_regenerated(tmp_path):
+    from subtitles.tools.subsync_engines import (
+        OUTPUT_MODE_KEEP_ALL,
+        InMemorySubsyncFailureStore,
+        SubsyncEngineRunner,
+        engine_output_path,
+    )
+
+    subtitle = tmp_path / 'Movie.en.srt'
+    _write(subtitle, 'source')
+    generated = engine_output_path(str(subtitle), 'ffsubsync')
+    _write(generated, 'failed output')
+    os.utime(subtitle, (100, 100))
+    os.utime(generated, (200, 200))
+
+    store = InMemorySubsyncFailureStore()
+    store.record_failure(str(subtitle), 'ffsubsync', 'previous failure')
+    calls = []
+
+    def execute(engine, output_path):
+        calls.append(engine)
+        _write(output_path, 'recovered result')
+        return {}
+
+    result = SubsyncEngineRunner(store).run(
+        srt_path=str(subtitle),
+        output_mode=OUTPUT_MODE_KEEP_ALL,
+        enabled_engines=['ffsubsync'],
+        execute_engine=execute,
+    )
+
+    assert calls == ['ffsubsync']
+    assert generated.read_text(encoding='utf-8') == 'recovered result'
+    assert result.success
+    assert store.failure_count(str(subtitle), 'ffsubsync') == 0
 
 
 def test_generated_engine_file_is_not_used_as_source(tmp_path):
@@ -586,11 +659,22 @@ def test_sync_engine_output_detection(filename):
     assert is_sync_engine_output(filename)
 
 
+@pytest.mark.parametrize(
+    'filename',
+    ['Movie.ffsubsync.Release.en.srt', 'Movie.alass.Source.hu.srt', 'Movie.autosubsync.cut.en.hi.srt'],
+)
+def test_sync_engine_output_detection_ignores_engine_tokens_in_titles(filename):
+    from subtitles.tools.subsync_engines import is_sync_engine_output
+
+    assert not is_sync_engine_output(filename)
+
+
 def test_sync_engine_outputs_keep_language_modifier():
     from subtitles.indexer.utils import subtitle_language_with_sync_modifier
 
     assert subtitle_language_with_sync_modifier('en', 'Movie.en.ffsubsync.srt') == 'en:sync-ffsubsync'
-    assert subtitle_language_with_sync_modifier('en:hi', 'Movie.en.autosubsync.srt') == 'en:sync-autosubsync'
+    assert subtitle_language_with_sync_modifier('en:hi', 'Movie.en.hi.autosubsync.srt') == 'en:hi:sync-autosubsync'
+    assert subtitle_language_with_sync_modifier('en:forced', 'Movie.en.forced.alass.srt') == 'en:forced:sync-alass'
     assert subtitle_language_with_sync_modifier('en', 'Movie.en.srt') == 'en'
 
 

@@ -59,6 +59,18 @@ describe("subtitle language helpers", () => {
     ).toBe(true);
   });
 
+  it("does not detect ordinary subtitles with engine tokens in the title", () => {
+    expect(
+      isSyncOutputSubtitle({
+        code2: "hu",
+        name: "Hungarian",
+        forced: false,
+        hi: false,
+        path: "/movie/Movie.ffsubsync.Release.hu.srt",
+      }),
+    ).toBe(false);
+  });
+
   it("does not allow generated sync outputs to be synchronized again", () => {
     expect(
       canSynchronizeSubtitle({
@@ -74,6 +86,7 @@ describe("subtitle language helpers", () => {
 
   it("detects generated sync output language keys", () => {
     expect(isSyncOutputLanguageKey("hu:sync-ffsubsync")).toBe(true);
+    expect(isSyncOutputLanguageKey("hu:hi:sync-ffsubsync")).toBe(true);
     expect(isSyncOutputLanguageKey("hu:sync-autosubsync")).toBe(true);
     expect(isSyncOutputLanguageKey("hu:sync-alass")).toBe(true);
     expect(isSyncOutputLanguageKey("hu")).toBe(false);

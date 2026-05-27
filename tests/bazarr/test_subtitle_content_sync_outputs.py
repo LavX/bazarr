@@ -20,6 +20,8 @@ def test_sync_modifier_language_code_is_valid():
     content = _real_module('api.subtitles.content')
 
     assert content._is_valid_language_code('hu:sync-ffsubsync')
+    assert content._is_valid_language_code('hu:hi:sync-ffsubsync')
+    assert content._is_valid_language_code('hu:forced:sync-alass')
     assert content._is_valid_language_code('pt-BR:sync-autosubsync')
     assert content._is_valid_language_code('eng:sync-alass')
 

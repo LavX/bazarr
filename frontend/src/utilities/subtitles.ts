@@ -5,7 +5,7 @@ const syncEngineLabels: Record<string, string> = {
 };
 
 const syncEngineOrder = ["sync-ffsubsync", "sync-autosubsync", "sync-alass"];
-const syncOutputFilenameMarkers = [".ffsubsync.", ".autosubsync.", ".alass."];
+const syncOutputFilenameEngines = ["ffsubsync", "autosubsync", "alass"];
 const syncOutputLanguageModifiers = Object.keys(syncEngineLabels);
 
 export type SubtitleSyncStatus = {
@@ -45,14 +45,36 @@ export function isSyncOutputSubtitle(subtitle: Subtitle): boolean {
   }
 
   const path = subtitle.path?.toLowerCase() ?? "";
-  return syncOutputFilenameMarkers.some((marker) => path.includes(marker));
+  return syncOutputFilenameEngines.some((engine) =>
+    hasFinalEngineFilenameSegment(path, engine),
+  );
 }
 
 export function isSyncOutputLanguageKey(
   language: string | null | undefined,
 ): boolean {
-  const modifier = language?.split(":", 2)[1]?.toLowerCase();
-  return syncOutputLanguageModifiers.includes(modifier ?? "");
+  const modifiers = language
+    ?.split(":")
+    .slice(1)
+    .map((item) => item.toLowerCase());
+  return (
+    modifiers?.some((modifier) =>
+      syncOutputLanguageModifiers.includes(modifier),
+    ) ?? false
+  );
+}
+
+function hasFinalEngineFilenameSegment(path: string, engine: string): boolean {
+  const filename = path.split(/[\\/]/).pop() ?? "";
+  const marker = `.${engine}.`;
+  const markerIndex = filename.lastIndexOf(marker);
+
+  if (markerIndex <= 0) {
+    return false;
+  }
+
+  const extension = filename.slice(markerIndex + marker.length);
+  return extension.length > 0 && !extension.includes(".");
 }
 
 export function canSynchronizeSubtitle(subtitle: Subtitle): boolean {

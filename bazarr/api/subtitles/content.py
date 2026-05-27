@@ -45,7 +45,8 @@ def _is_safe_path(path):
 # Anchored + char-class prevents `..`, slashes, or shell metachars from reaching
 # the file-system probe paths downstream.
 _LANGUAGE_CODE_RE = re.compile(
-    r'^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,4})?(:([a-z]+|sync-(ffsubsync|autosubsync|alass)))?$'
+    r'^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,4})?'
+    r'(:(forced|hi|sync-(ffsubsync|autosubsync|alass)))*$'
 )
 
 
@@ -57,28 +58,40 @@ def _language_base(code):
     return code.split(':', 1)[0]
 
 
+def _language_modifiers(code):
+    return code.split(':')[1:]
+
+
 def _language_modifier(code):
-    parts = code.split(':', 1)
-    return parts[1] if len(parts) == 2 else ''
+    modifiers = _language_modifiers(code)
+    return modifiers[0] if modifiers else ''
+
+
+def _language_non_sync_modifiers(code):
+    return sorted(
+        modifier.lower()
+        for modifier in _language_modifiers(code)
+        if not modifier.lower().startswith('sync-')
+    )
 
 
 def _is_sync_output_language(code):
-    return _language_modifier(code).startswith('sync-')
+    return any(modifier.lower().startswith('sync-') for modifier in _language_modifiers(code))
 
 
 def _is_forced_language(code):
-    return _language_modifier(code).lower() == 'forced'
+    return any(modifier.lower() == 'forced' for modifier in _language_modifiers(code))
 
 
 def _is_hi_language(code):
-    return _language_modifier(code).lower() == 'hi'
+    return any(modifier.lower() == 'hi' for modifier in _language_modifiers(code))
 
 
 def _sync_engine_from_language(code):
-    modifier = _language_modifier(code)
-    if not modifier.startswith('sync-'):
-        return None
-    return modifier.removeprefix('sync-')
+    for modifier in _language_modifiers(code):
+        if modifier.startswith('sync-'):
+            return modifier.removeprefix('sync-')
+    return None
 
 SUBTITLE_EXTENSIONS = {
     '.srt', '.ass', '.ssa', '.sub', '.idx', '.sup',
@@ -710,6 +723,8 @@ def promote_sync_subtitle(media_type, media_id, target_language, source_language
         return 'Source language must be a generated sync output', 400
     if _language_base(target_language) != _language_base(source_language):
         return 'Source and target languages do not match', 400
+    if _language_non_sync_modifiers(target_language) != _language_non_sync_modifiers(source_language):
+        return 'Source and target language variants do not match', 400
 
     source_result = resolve_subtitle_path(media_type, media_id, source_language)
     if isinstance(source_result[1], int):

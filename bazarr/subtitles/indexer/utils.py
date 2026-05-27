@@ -12,7 +12,7 @@ from constants import MAXIMUM_SUBTITLE_SIZE
 from app.config import settings
 from utilities.path_mappings import path_mappings
 from languages.custom_lang import CustomLanguage
-from subtitles.tools.subsync_engines import SYNC_ENGINES
+from subtitles.tools.subsync_engines import SYNC_ENGINES, sync_engine_from_output_path
 
 
 def get_external_subtitles_path(file, subtitle):
@@ -47,24 +47,22 @@ def normalize_subtitle_language_variant(language, forced=False, hi=False):
     parts = language_text.split(':')
     base = parts[0]
     variants = {part.lower() for part in parts[1:]}
+    normalized_variants = []
 
     # Keep the same priority as ProcessSubtitlesResult.language_code.
     if hi or "hi" in variants:
-        return f"{base}:hi"
+        normalized_variants.append('hi')
     if forced or "forced" in variants:
-        return f"{base}:forced"
+        normalized_variants.append('forced')
     sync_variants = sorted(part for part in variants if part.startswith('sync-'))
-    if sync_variants:
-        return f"{base}:{sync_variants[0]}"
-    return base
+    normalized_variants.extend(sync_variants)
+    if not normalized_variants:
+        return base
+    return ':'.join([base] + normalized_variants)
 
 
 def sync_engine_from_subtitle_name(subtitle):
-    filename = os.path.basename(subtitle).lower()
-    for engine in SYNC_ENGINES:
-        if f'.{engine}.' in filename:
-            return engine
-    return None
+    return sync_engine_from_output_path(subtitle)
 
 
 def _language_code_from_sync_engine_output(subtitle):
@@ -124,8 +122,13 @@ def subtitle_language_with_sync_modifier(language_str, subtitle):
     engine = sync_engine_from_subtitle_name(subtitle)
     if not engine:
         return language_str
-    base_language = str(language_str).split(':')[0]
-    return f'{base_language}:sync-{engine}'
+    parts = [part for part in str(language_str).split(':') if part]
+    if not parts:
+        return language_str
+    base_language = parts[0]
+    modifiers = [part.lower() for part in parts[1:] if not part.lower().startswith('sync-')]
+    modifiers.append(f'sync-{engine}')
+    return ':'.join([base_language] + modifiers)
 
 
 def guess_external_subtitles(dest_folder, subtitles, media_type, previously_indexed_subtitles_to_exclude=None):

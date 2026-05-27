@@ -365,6 +365,7 @@ def _process_subtitle_item(item, action, options, job_id):
             'gss': item['gss'],
             'force_sync': True,
             'job_id': job_id,
+            'track_job_progress': False,
         }
         if item.get('output_mode') is not None:
             sync_kwargs['output_mode'] = item.get('output_mode')
@@ -543,7 +544,7 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
     for i, item in enumerate(all_items, start=1):
         jobs_queue.update_job_progress(
             job_id=job_id,
-            progress_value=i,
+            progress_value=i - 1,
             progress_message=f"{action}: {os.path.basename(item['srt_path'])} ({i}/{total_count})"
         )
 
@@ -557,6 +558,12 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
             logger.error(f'Error during {action} on {item["srt_path"]}: {e}')  # noqa: G004
             all_errors.append(str(e))
             failed += 1
+        finally:
+            jobs_queue.update_job_progress(
+                job_id=job_id,
+                progress_value=i,
+                progress_message=f"{action}: {os.path.basename(item['srt_path'])} ({i}/{total_count})"
+            )
 
     jobs_queue.update_job_name(
         job_id=job_id,

@@ -79,6 +79,7 @@ class TestProcessSubtitleItem:
             gss=True,
             force_sync=True,
             job_id='test_job',
+            track_job_progress=False,
         )
 
     @patch('subtitles.mass_operations.subtitles_apply_mods')
@@ -991,6 +992,38 @@ class TestMassBatchOperationProcessing:
         assert result['queued'] == 1
         assert result['skipped'] == 0
         mock_process.assert_called_once()
+
+    @patch('subtitles.mass_operations.jobs_queue')
+    @patch('subtitles.mass_operations._collect_subtitle_items')
+    def test_sync_progress_does_not_complete_before_item_finishes(self, mock_collect, mock_jq):
+        from subtitles.mass_operations import mass_batch_operation
+
+        mock_collect.return_value = ([
+            {'srt_path': '/subs/test.srt', 'video_path': '/video/test.mkv'},
+        ], 0)
+        progress_calls_before_processing = []
+
+        def process_item(*args, **kwargs):
+            progress_calls_before_processing.extend(mock_jq.update_job_progress.call_args_list)
+            return True
+
+        with patch('subtitles.mass_operations._process_subtitle_item', side_effect=process_item):
+            result = mass_batch_operation(
+                items=[{'type': 'movie', 'radarrId': 1}],
+                action='sync',
+                job_id='test',
+            )
+
+        assert result['queued'] == 1
+        assert any(
+            progress_call.kwargs.get('progress_value') == 0
+            and progress_call.kwargs.get('progress_message') == 'sync: test.srt (1/1)'
+            for progress_call in progress_calls_before_processing
+        )
+        assert not any(
+            progress_call.kwargs.get('progress_value') == 1
+            for progress_call in progress_calls_before_processing
+        )
 
     @patch('subtitles.mass_operations.jobs_queue')
     @patch('subtitles.mass_operations._process_subtitle_item', side_effect=Exception("failed"))
