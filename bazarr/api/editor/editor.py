@@ -1020,7 +1020,7 @@ def run_editor_sync(job_key, video_path, tmp_in, tmp_out, encoding, max_offset, 
         if engine_results:
             synced_content = engine_results[0]['content']
         else:
-            synced_path = tmp_out if os.path.isfile(tmp_out) else tmp_in
+            synced_path = tmp_out
             logger.info('Editor sync result path: %s (exists=%s)', synced_path, os.path.isfile(synced_path))
             if not os.path.isfile(synced_path):
                 raise FileNotFoundError(f'Synced subtitle file not found (expected at {synced_path})')

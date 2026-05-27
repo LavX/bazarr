@@ -668,6 +668,49 @@ class TestRunEditorSync:
         assert _editor_sync_jobs[job_key]['content'] is None
         assert 'alass: missing binary' in _editor_sync_jobs[job_key]['message']
 
+    def test_sync_without_output_does_not_return_original_content(self, tmp_path):
+        tmp_in = str(tmp_path / 'input.srt')
+        tmp_out = str(tmp_path / 'input.synced.srt')
+
+        original_content = '1\n00:00:01,000 --> 00:00:02,000\nOriginal\n'
+        with open(tmp_in, 'w') as f:
+            f.write(original_content)
+
+        sync_result = SimpleNamespace(
+            success=True,
+            successful_results=[],
+            failed_results=[],
+            skipped_results=[],
+        )
+
+        job_key = 'test_sync_no_output'
+        _editor_sync_jobs[job_key] = {'status': 'running', 'content': None, 'message': ''}
+
+        mock_subsync = MagicMock()
+        mock_subsync.sync.return_value = sync_result
+        mock_subsync_cls = MagicMock(return_value=mock_subsync)
+        mock_jobs_queue = MagicMock()
+
+        with patch('api.editor.editor.SubSyncer', mock_subsync_cls, create=True), \
+             patch.dict('sys.modules', {'subtitles.tools.subsyncer': MagicMock(SubSyncer=mock_subsync_cls)}), \
+             patch('api.editor.editor.jobs_queue', mock_jobs_queue, create=True), \
+             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue)}), \
+             patch('threading.Timer'):
+            run_editor_sync(
+                job_key=job_key,
+                video_path='/video/test.mkv',
+                tmp_in=tmp_in,
+                tmp_out=tmp_out,
+                encoding='utf-8',
+                max_offset='120',
+                gss=False,
+                reference='a:0',
+            )
+
+        assert _editor_sync_jobs[job_key]['status'] == 'failed'
+        assert _editor_sync_jobs[job_key]['content'] is None
+        assert 'Synced subtitle file not found' in _editor_sync_jobs[job_key]['message']
+
     def test_sync_updates_progress(self, tmp_path):
         """Progress updates should be sent to the jobs_queue."""
         tmp_in = str(tmp_path / 'input.srt')
