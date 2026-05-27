@@ -6,6 +6,7 @@ import {
   Checkbox,
   Divider,
   LoadingOverlay,
+  SegmentedControl,
   Stack,
   Text,
 } from "@mantine/core";
@@ -116,8 +117,13 @@ interface FormValues {
   maxOffsetSeconds?: string;
   noFixFramerate: boolean;
   gss: boolean;
+  outputMode: "overwrite" | "keep_all";
   hi?: boolean;
   forced?: boolean;
+}
+
+export function syncStartedNotificationMessage(count: number) {
+  return `${count} subtitle sync job(s) started. Track progress in Jobs Manager.`;
 }
 
 const SyncSubtitleForm: FunctionComponent<Props> = ({
@@ -143,6 +149,7 @@ const SyncSubtitleForm: FunctionComponent<Props> = ({
     initialValues: {
       noFixFramerate: false,
       gss: false,
+      outputMode: "overwrite",
       hi: fromPython(subtitle.hi),
       forced: fromPython(subtitle.forced),
     },
@@ -160,14 +167,15 @@ const SyncSubtitleForm: FunctionComponent<Props> = ({
                 max_offset_seconds: parameters.maxOffsetSeconds,
                 no_fix_framerate: toPython(parameters.noFixFramerate),
                 gss: toPython(parameters.gss),
+                output_mode: parameters.outputMode,
               };
               return mutateAsync({ action: "sync", form });
             }),
           );
           showNotification(
             notification.info(
-              "Subtitles synced",
-              `${selections.length} subtitle(s) synced successfully`,
+              "Sync started",
+              syncStartedNotificationMessage(selections.length),
             ),
           );
           onSubmit?.();
@@ -214,6 +222,19 @@ const SyncSubtitleForm: FunctionComponent<Props> = ({
           label="Golden-Section Search"
           {...form.getInputProps("gss")}
         ></Checkbox>
+        <Stack gap={4}>
+          <Text size="sm" fw={500}>
+            Output
+          </Text>
+          <SegmentedControl
+            fullWidth
+            data={[
+              { label: "Overwrite current subtitle", value: "overwrite" },
+              { label: "Keep all engine outputs", value: "keep_all" },
+            ]}
+            {...form.getInputProps("outputMode")}
+          />
+        </Stack>
         <Divider></Divider>
         <Button type="submit" loading={isPending}>
           Sync

@@ -44,6 +44,7 @@ class BatchOperation(Resource):
         'no_fix_framerate': fields.Boolean(default=True),
         'gss': fields.Boolean(default=True),
         'force_resync': fields.Boolean(default=False),
+        'output_mode': fields.String(description='Sync output mode: overwrite or keep_all'),
         'from_lang': fields.String(description='Source language code for translate action'),
         'to_lang': fields.String(description='Target language code for translate action'),
     })

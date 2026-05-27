@@ -1,17 +1,24 @@
 import { FunctionComponent, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
-import { Badge, MantineColor, Tooltip, UnstyledButton } from "@mantine/core";
+import {
+  Badge,
+  Group,
+  MantineColor,
+  Tooltip,
+  UnstyledButton,
+} from "@mantine/core";
 import { useEpisodeSubtitleModification } from "@/apis/hooks";
 import Language from "@/components/bazarr/Language";
+import SyncOutputCompareModal from "@/components/modals/SyncOutputCompareModal";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
 import { toPython } from "@/utilities";
-
-function buildLanguageKey(sub: Subtitle): string {
-  let key = sub.code2;
-  if (sub.hi) key += ":hi";
-  if (sub.forced) key += ":forced";
-  return key;
-}
+import {
+  buildSubtitleLanguageKey,
+  canSynchronizeSubtitle,
+  getSyncEngineLabel,
+  isSyncOutputSubtitle,
+  sortSyncOutputSubtitles,
+} from "@/utilities/subtitles";
 
 interface Props {
   seriesId: number;
@@ -32,6 +39,7 @@ export const Subtitle: FunctionComponent<Props> = ({
   const { remove, download } = useEpisodeSubtitleModification();
 
   const [opened, setOpen] = useState(false);
+  const [compareOpened, setCompareOpened] = useState(false);
 
   const disabled = subtitle.path === null;
 
@@ -70,14 +78,45 @@ export const Subtitle: FunctionComponent<Props> = ({
 
   // For missing subs: translation sources from available subtitles
   const translationSources = useMemo(
-    () => (availableSubtitles ?? []).filter((s) => s.path),
+    () =>
+      (availableSubtitles ?? []).filter(
+        (s) => s.path && !isSyncOutputSubtitle(s),
+      ),
     [availableSubtitles],
   );
 
+  const syncOutputs = useMemo(
+    () =>
+      sortSyncOutputSubtitles(
+        (availableSubtitles ?? []).filter(
+          (item) => item.code2 === subtitle.code2 && isSyncOutputSubtitle(item),
+        ),
+      ),
+    [availableSubtitles, subtitle.code2],
+  );
+
+  const canCompareSyncOutputs =
+    !missing &&
+    !disabled &&
+    !isSyncOutputSubtitle(subtitle) &&
+    syncOutputs.length > 0;
+
   const badgeEl = (
-    <Badge variant={variant}>
-      <Language.Text value={subtitle} long={false}></Language.Text>
-    </Badge>
+    <Group gap={4} wrap="nowrap">
+      <Badge variant={variant} style={{ whiteSpace: "nowrap" }}>
+        <Language.Text value={subtitle} long={false}></Language.Text>
+      </Badge>
+      {isSyncOutputSubtitle(subtitle) && (
+        <Badge
+          color="gray"
+          size="xs"
+          variant="light"
+          style={{ whiteSpace: "nowrap" }}
+        >
+          {getSyncEngineLabel(subtitle.modifier)}
+        </Badge>
+      )}
+    </Group>
   );
 
   if (disabled && !missing) {
@@ -97,51 +136,67 @@ export const Subtitle: FunctionComponent<Props> = ({
   const ctx = badgeEl;
 
   return (
-    <SubtitleToolsMenu
-      menu={{
-        trigger: "click",
-        onOpen: () => setOpen(true),
-        onClose: () => setOpen(false),
-      }}
-      selections={selections}
-      missingLanguage={missing ? subtitle : undefined}
-      translationSources={missing ? translationSources : undefined}
-      mediaId={episodeId}
-      mediaType="episode"
-      onAction={async (action) => {
-        if (action === "view") {
-          navigate(
-            `/subtitles/preview/episode/${episodeId}/${encodeURIComponent(buildLanguageKey(subtitle))}`,
-          );
-        } else if (action === "edit") {
-          navigate(
-            `/subtitles/edit/episode/${episodeId}/${encodeURIComponent(buildLanguageKey(subtitle))}`,
-          );
-        } else if (action === "search") {
-          await download.mutateAsync({
-            seriesId,
-            episodeId,
-            form: {
-              language: subtitle.code2,
-              hi: subtitle.hi,
-              forced: subtitle.forced,
-            },
-          });
-        } else if (action === "delete" && subtitle.path) {
-          await remove.mutateAsync({
-            seriesId,
-            episodeId,
-            form: {
-              language: subtitle.code2,
-              hi: subtitle.hi,
-              forced: subtitle.forced,
-              path: subtitle.path,
-            },
-          });
-        }
-      }}
-    >
-      {ctx}
-    </SubtitleToolsMenu>
+    <>
+      <SubtitleToolsMenu
+        menu={{
+          trigger: "click",
+          onOpen: () => setOpen(true),
+          onClose: () => setOpen(false),
+        }}
+        selections={selections}
+        canSync={canSynchronizeSubtitle(subtitle)}
+        missingLanguage={missing ? subtitle : undefined}
+        translationSources={missing ? translationSources : undefined}
+        canCompareSyncOutputs={canCompareSyncOutputs}
+        mediaId={episodeId}
+        mediaType="episode"
+        onAction={async (action) => {
+          if (action === "view") {
+            navigate(
+              `/subtitles/preview/episode/${episodeId}/${encodeURIComponent(buildSubtitleLanguageKey(subtitle))}`,
+            );
+          } else if (action === "edit") {
+            navigate(
+              `/subtitles/edit/episode/${episodeId}/${encodeURIComponent(buildSubtitleLanguageKey(subtitle))}`,
+            );
+          } else if (action === "search") {
+            await download.mutateAsync({
+              seriesId,
+              episodeId,
+              form: {
+                language: subtitle.code2,
+                hi: subtitle.hi,
+                forced: subtitle.forced,
+              },
+            });
+          } else if (action === "compare-sync") {
+            setCompareOpened(true);
+          } else if (action === "delete" && subtitle.path) {
+            await remove.mutateAsync({
+              seriesId,
+              episodeId,
+              form: {
+                language: subtitle.code2,
+                hi: subtitle.hi,
+                forced: subtitle.forced,
+                path: subtitle.path,
+              },
+            });
+          }
+        }}
+      >
+        {ctx}
+      </SubtitleToolsMenu>
+      {canCompareSyncOutputs && (
+        <SyncOutputCompareModal
+          opened={compareOpened}
+          onClose={() => setCompareOpened(false)}
+          mediaType="episode"
+          mediaId={episodeId}
+          original={subtitle}
+          outputs={syncOutputs}
+        />
+      )}
+    </>
   );
 };

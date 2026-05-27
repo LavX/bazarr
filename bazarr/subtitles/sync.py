@@ -7,6 +7,39 @@ import gc
 from app.config import settings
 from app.jobs_queue import jobs_queue
 from subtitles.tools.subsyncer import SubSyncer
+from subtitles.tools.subsync_engines import (
+    DEFAULT_ENABLED_ENGINES,
+    OUTPUT_MODE_KEEP_ALL,
+    is_sync_engine_output,
+    normalize_enabled_engines,
+)
+
+
+def _sync_complete_job_name(srt_path, sync_result):
+    if not sync_result:
+        return f"Failed to sync {srt_path}"
+
+    if sync_result.success:
+        successes = sync_result.successful_results
+        if sync_result.output_mode == OUTPUT_MODE_KEEP_ALL:
+            count = len(successes)
+            noun = "output" if count == 1 else "outputs"
+            return f"Generated {count} sync {noun} for {srt_path}"
+        engine = successes[0].engine if successes else "sync engine"
+        return f"Synced {srt_path} using {engine}"
+
+    if sync_result.skipped_results and not sync_result.failed_results:
+        return f"Skipped sync for {srt_path}"
+
+    return f"Failed to sync {srt_path}"
+
+
+def _sync_progress_total(enabled_engines):
+    configured_engines = (
+        enabled_engines if enabled_engines is not None
+        else getattr(settings.subsync, 'enabled_engines', DEFAULT_ENABLED_ENGINES)
+    )
+    return max(len(normalize_enabled_engines(configured_engines)), 1)
 
 
 def sync_subtitles(video_path,
@@ -24,19 +57,59 @@ def sync_subtitles(video_path,
                    no_fix_framerate=settings.subsync.no_fix_framerate,
                    reference=None,
                    force_sync=False,
+                   output_mode=None,
+                   enabled_engines=None,
                    callback=None):
     if not settings.subsync.use_subsync and not force_sync:
         logging.debug('BAZARR automatic syncing is disabled in settings. Skipping sync routine.')
         return False
 
-    if not job_id:
-        jobs_queue.add_job_from_function(f"Syncing {srt_path}", is_progress=False)
+    if is_sync_engine_output(srt_path):
+        logging.debug('BAZARR generated sync output cannot be synchronized again. Skipping: %s', srt_path)
+        if job_id:
+            jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Skipped sync for {srt_path}")
+            jobs_queue.update_job_progress(
+                job_id=job_id,
+                progress_value='max',
+                progress_message='Sync skipped',
+            )
         return False
 
+    if not job_id:
+        jobs_queue.add_job_from_function(
+            f"Syncing {srt_path}",
+            is_progress=True,
+            progress_max=_sync_progress_total(enabled_engines),
+        )
+        return False
+
+    progress_total = _sync_progress_total(enabled_engines)
+
     jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Syncing {srt_path}")
+    jobs_queue.update_job_progress(
+        job_id=job_id,
+        progress_value=0,
+        progress_max=progress_total,
+        progress_message='Preparing synchronization',
+    )
+
+    def update_progress(message, value, total):
+        jobs_queue.update_job_progress(
+            job_id=job_id,
+            progress_value=value,
+            progress_max=total,
+            progress_message=message,
+        )
 
     if forced:
         logging.debug('BAZARR cannot sync forced subtitles. Skipping sync routine.')
+        jobs_queue.update_job_progress(
+            job_id=job_id,
+            progress_value='max',
+            progress_message='Sync skipped',
+        )
+        jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Skipped sync for {srt_path}")
+        return False
     else:
         logging.debug(f'BAZARR automatic syncing is enabled in settings. We\'ll try to sync this '  # noqa: G004
                       f'subtitles: {srt_path}.')
@@ -64,23 +137,45 @@ def sync_subtitles(video_path,
                 'radarr_id': radarr_id,
                 'job_id': job_id,
                 'force_sync': force_sync,
+                'output_mode': output_mode,
+                'enabled_engines': enabled_engines,
+                'progress_callback': update_progress,
             }
+            sync_result = None
             try:
-                subsync.sync(**sync_kwargs)
-                if callback:
+                sync_result = subsync.sync(**sync_kwargs)
+                if sync_result and sync_result.success and callback:
                     callback()
             except Exception:
                 logging.exception(f'BAZARR an unhandled exception occurs during the synchronization process for this '  # noqa: G004
                                   f'subtitle file: {srt_path}')
                 return False
             else:
-                return True
+                return bool(sync_result and sync_result.success)
             finally:
-                jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Synced {srt_path}")
+                if sync_result and sync_result.success:
+                    progress_message = 'Sync complete'
+                elif sync_result and sync_result.skipped_results and not sync_result.failed_results:
+                    progress_message = 'Sync skipped'
+                else:
+                    progress_message = 'Sync failed'
+                jobs_queue.update_job_progress(
+                    job_id=job_id,
+                    progress_value='max',
+                    progress_message=progress_message,
+                )
+                jobs_queue.update_job_name(job_id=job_id, new_job_name=_sync_complete_job_name(srt_path, sync_result))
                 del subsync
                 gc.collect()
         else:
             logging.debug(f"BAZARR subsync skipped because subtitles score isn't below this "  # noqa: G004
                           f"threshold value: {subsync_threshold}%")
+            jobs_queue.update_job_progress(
+                job_id=job_id,
+                progress_value='max',
+                progress_message='Sync skipped',
+            )
+            jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Skipped sync for {srt_path}")
+            return False
 
     return False

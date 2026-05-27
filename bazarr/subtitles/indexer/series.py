@@ -16,8 +16,8 @@ from utilities.helper import get_subtitle_destination_folder
 from utilities.path_mappings import path_mappings
 from utilities.video_analyzer import embedded_subs_reader
 from app.event_handler import event_stream
-from subtitles.indexer.utils import guess_external_subtitles, get_external_subtitles_path, \
-    normalize_subtitle_language_variant
+from subtitles.indexer.utils import add_sync_engine_outputs, guess_external_subtitles, get_external_subtitles_path, \
+    normalize_subtitle_language_variant, subtitle_language_with_sync_modifier
 from subtitles.processing import ProcessSubtitlesResult
 from subtitles.utils import _get_scores
 from sonarr.history import history_log
@@ -100,6 +100,7 @@ def store_subtitles(original_path, reversed_path, use_cache=True):
                     full_dest_folder_path = dest_folder
                 elif settings.general.subfolder == "relative":
                     full_dest_folder_path = os.path.join(os.path.dirname(reversed_path), dest_folder)
+            subtitles = add_sync_engine_outputs(full_dest_folder_path, subtitles)
             subtitles = guess_external_subtitles(full_dest_folder_path, subtitles, "series",
                                                  previously_indexed_subtitles_to_exclude)
         except Exception as e:
@@ -138,6 +139,7 @@ def store_subtitles(original_path, reversed_path, use_cache=True):
                         language_str = f'{language}:hi'
                     else:
                         language_str = str(language)
+                    language_str = subtitle_language_with_sync_modifier(language_str, subtitle)
                     logging.debug(f"BAZARR external subtitles detected: {language_str}")  # noqa: G004
                     actual_subtitles.append([language_str, path_mappings.path_replace_reverse(subtitle_path),
                                              subtitle_size])

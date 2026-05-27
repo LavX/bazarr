@@ -129,6 +129,10 @@ declare namespace Settings {
     subsync_movie_threshold: number;
     debug: boolean;
     force_audio: boolean;
+    use_original_language: boolean;
+    auto_use_original_language: boolean;
+    enabled_engines: string[];
+    output_mode: "overwrite" | "keep_all";
     max_offset_seconds: number;
     no_fix_framerate: boolean;
     gss: boolean;

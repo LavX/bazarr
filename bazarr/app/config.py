@@ -493,6 +493,10 @@ validators = [
     Validator('subsync.gss', must_exist=True, default=True, is_type_of=bool),
     Validator('subsync.max_offset_seconds', must_exist=True, default=60, is_type_of=int,
               is_in=[60, 120, 300, 600]),
+    Validator('subsync.enabled_engines', must_exist=True, default=['ffsubsync', 'autosubsync', 'alass'],
+              is_type_of=list),
+    Validator('subsync.output_mode', must_exist=True, default='overwrite', is_type_of=str,
+              is_in=['overwrite', 'keep_all']),
 
     # postgresql section
     Validator('postgresql.enabled', must_exist=True, default=False, is_type_of=bool),

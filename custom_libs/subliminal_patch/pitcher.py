@@ -187,7 +187,7 @@ class AntiCaptchaPitcher(AntiCaptchaProxyLessPitcher):
         )
 
     def get_job(self):
-        task = NoCaptchaTask(website_url=self.website_url, website_key=self.website_key, proxy=self.proxy,
+        task = NoCaptchaTask(website_url=self.website_url, website_key=self.website_key, **self.proxy,
                              user_agent=self.user_agent, cookies=self.cookies, is_invisible=self.is_invisible)
         return self.client.createTask(task)
 
@@ -263,7 +263,7 @@ def load_verification(site_name, session, callback=lambda x: None):
         try:
             session.cookies._cookies.update(cookies)
             return callback(region)
-        except:
+        except Exception:
             return False
     return False
 

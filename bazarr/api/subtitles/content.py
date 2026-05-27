@@ -5,16 +5,22 @@ import hashlib
 import os
 import re
 import tempfile
+from datetime import datetime, timedelta
 
 from flask import make_response, jsonify, request
 from flask_restx import Resource, Namespace
 from werkzeug.utils import secure_filename
 
 from app.config import settings
-from app.database import TableEpisodes, TableMovies, TableShows, database, select
+from app.database import TableEpisodes, TableHistory, TableHistoryMovie, TableMovies, TableShows, database, select
 from app.event_handler import event_stream
+from app.jobs_queue import jobs_queue
+from languages.get_languages import language_from_alpha2
+from radarr.history import history_log_movie
+from sonarr.history import history_log
 from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.indexer.series import store_subtitles
+from subtitles.processing import ProcessSubtitlesResult
 from utilities.helper import get_target_folder
 from utilities.path_mappings import path_mappings
 
@@ -23,6 +29,7 @@ from ..utils import authenticate
 api_ns_subtitle_content = Namespace('SubtitleContent', description='Read subtitle file content')
 
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
+SYNC_STATUS_MTIME_SKEW = timedelta(seconds=1)
 
 
 def _is_safe_path(path):
@@ -33,14 +40,45 @@ def _is_safe_path(path):
     return True
 
 
-# ISO-ish language tags used by Bazarr. e.g. "en", "pt-BR", "en:hi", "en:forced".
+# ISO-ish language tags used by Bazarr. e.g. "en", "pt-BR", "en:hi", "en:forced",
+# "en:sync-ffsubsync".
 # Anchored + char-class prevents `..`, slashes, or shell metachars from reaching
 # the file-system probe paths downstream.
-_LANGUAGE_CODE_RE = re.compile(r'^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,4})?(:[a-z]+)?$')
+_LANGUAGE_CODE_RE = re.compile(
+    r'^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,4})?(:([a-z]+|sync-(ffsubsync|autosubsync|alass)))?$'
+)
 
 
 def _is_valid_language_code(code):
     return isinstance(code, str) and bool(_LANGUAGE_CODE_RE.match(code))
+
+
+def _language_base(code):
+    return code.split(':', 1)[0]
+
+
+def _language_modifier(code):
+    parts = code.split(':', 1)
+    return parts[1] if len(parts) == 2 else ''
+
+
+def _is_sync_output_language(code):
+    return _language_modifier(code).startswith('sync-')
+
+
+def _is_forced_language(code):
+    return _language_modifier(code).lower() == 'forced'
+
+
+def _is_hi_language(code):
+    return _language_modifier(code).lower() == 'hi'
+
+
+def _sync_engine_from_language(code):
+    modifier = _language_modifier(code)
+    if not modifier.startswith('sync-'):
+        return None
+    return modifier.removeprefix('sync-')
 
 SUBTITLE_EXTENSIONS = {
     '.srt', '.ass', '.ssa', '.sub', '.idx', '.sup',
@@ -66,7 +104,8 @@ FORMAT_TO_EXT = {v: k for k, v in FORMAT_MAP.items()}
 def resolve_subtitle_path(media_type, media_id, language_code):
     """Resolve a subtitle file path from a media ID and language code.
 
-    language_code can be like "en", "hu", "en:hi", "en:forced".
+    language_code can be like "en", "hu", "en:hi", "en:forced",
+    "en:sync-ffsubsync".
     Matches against the language field in the subtitles array.
 
     Returns (path, metadata) on success, or (message, status_code) on failure.
@@ -279,7 +318,7 @@ def resolve_subtitle_path(media_type, media_id, language_code):
 
     # Return only path + metadata. Callers have language_code in scope; do
     # NOT include it in the returned tuple because CodeQL's py/path-injection
-    # taint tracker unions taint across all tuple elements — a tainted
+    # taint tracker unions taint across all tuple elements, a tainted
     # `language` in position 1 poisons position 0 (subtitle_path) on unpack
     # even when the path itself passed the commonpath barrier above.
     return resolved_subtitle_path, metadata
@@ -339,6 +378,179 @@ def generate_etag(path):
     stat = os.stat(path)
     tag_input = f"{stat.st_mtime_ns}:{stat.st_size}"
     return hashlib.md5(tag_input.encode()).hexdigest()
+
+
+def _write_bytes_atomically(path, data):
+    subtitle_dir = os.path.dirname(path)
+    fd, tmp_path = tempfile.mkstemp(dir=subtitle_dir)
+    try:
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _apply_subtitle_chmod(path):
+    if settings.general.chmod_enabled:
+        try:
+            chmod_value = int(settings.general.chmod, 8)
+            os.chmod(path, chmod_value)
+        except Exception:
+            pass
+
+
+def _refresh_media_subtitles(media_type, media_id, metadata):
+    media_path = metadata.get('mediaPath', '')
+    if media_type == 'episode' and media_path:
+        store_subtitles(media_path, path_mappings.path_replace(media_path), use_cache=False)
+        event_stream(type='series', payload=metadata['mediaId'])
+        event_stream(type='episode', payload=media_id)
+    elif media_type == 'movie' and media_path:
+        store_subtitles_movie(media_path, path_mappings.path_replace_movie(media_path), use_cache=False)
+        event_stream(type='movie', payload=media_id)
+
+
+def _history_path_for_local_subtitle(media_type, subtitle_path):
+    if media_type == 'episode':
+        return path_mappings.path_replace_reverse(subtitle_path)
+    return path_mappings.path_replace_reverse_movie(subtitle_path)
+
+
+def _latest_sync_history_for_path(media_type, media_id, subtitle_path):
+    history_path = _history_path_for_local_subtitle(media_type, subtitle_path)
+    if media_type == 'episode':
+        return database.execute(
+            select(TableHistory.timestamp)
+            .where(TableHistory.sonarrEpisodeId == media_id)
+            .where(TableHistory.action == 5)
+            .where(TableHistory.subtitles_path == history_path)
+            .order_by(TableHistory.timestamp.desc())
+            .limit(1)
+        ).first()
+    if media_type == 'movie':
+        return database.execute(
+            select(TableHistoryMovie.timestamp)
+            .where(TableHistoryMovie.radarrId == media_id)
+            .where(TableHistoryMovie.action == 5)
+            .where(TableHistoryMovie.subtitles_path == history_path)
+            .order_by(TableHistoryMovie.timestamp.desc())
+            .limit(1)
+        ).first()
+    return None
+
+
+def _normalized_subtitle_path(path):
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _job_targets_subtitle(job, subtitle_path):
+    target_path = _normalized_subtitle_path(subtitle_path)
+    kwargs = getattr(job, 'kwargs', {}) or {}
+    job_srt_path = kwargs.get('srt_path')
+    if job_srt_path and _normalized_subtitle_path(job_srt_path) == target_path:
+        return True
+
+    job_name = getattr(job, 'job_name', '') or ''
+    return subtitle_path in job_name and 'sync' in job_name.lower()
+
+
+def _active_sync_job_for_path(subtitle_path):
+    for queue in (jobs_queue.jobs_running_queue, jobs_queue.jobs_pending_queue):
+        for job in list(queue):
+            if _job_targets_subtitle(job, subtitle_path):
+                status = getattr(job, 'status', None)
+                if status in ('pending', 'running'):
+                    return {
+                        'job_id': getattr(job, 'job_id', None),
+                        'status': status,
+                    }
+    return None
+
+
+def get_subtitle_sync_status(media_type, media_id, language_code):
+    result = resolve_subtitle_path(media_type, media_id, language_code)
+    if isinstance(result[1], int):
+        return result[0], result[1]
+
+    subtitle_path, _ = result
+    try:
+        stat = os.stat(subtitle_path)
+    except FileNotFoundError:
+        return 'Subtitle file or directory not found', 404
+
+    latest_sync = _latest_sync_history_for_path(media_type, media_id, subtitle_path)
+    last_sync_timestamp = latest_sync.timestamp if latest_sync else None
+    last_modified = datetime.fromtimestamp(stat.st_mtime)
+    edited_after_sync = bool(
+        last_sync_timestamp and last_modified > last_sync_timestamp + SYNC_STATUS_MTIME_SKEW
+    )
+    active_job = _active_sync_job_for_path(subtitle_path)
+
+    return {
+        'synced': bool(last_sync_timestamp),
+        'confirmed': bool(last_sync_timestamp) and not edited_after_sync and not active_job,
+        'editedAfterSync': edited_after_sync,
+        'lastModified': stat.st_mtime,
+        'lastSyncTimestamp': last_sync_timestamp.isoformat() if last_sync_timestamp else None,
+        'jobStatus': active_job['status'] if active_job else None,
+        'jobId': active_job['job_id'] if active_job else None,
+    }, 200
+
+
+def _log_promoted_sync_history(media_type, media_id, target_language, source_language, target_path, metadata):
+    media_path = metadata.get('mediaPath')
+    if not media_path:
+        return
+
+    engine = _sync_engine_from_language(source_language) or 'sync engine'
+    try:
+        language_name = language_from_alpha2(_language_base(target_language)) or _language_base(target_language)
+    except Exception:
+        language_name = _language_base(target_language)
+    message = (
+        f"{language_name} subtitles synchronization using {engine} "
+        f"(promoted) was confirmed by user selection."
+    )
+
+    if media_type == 'episode':
+        result = ProcessSubtitlesResult(
+            message=message,
+            reversed_path=path_mappings.path_replace_reverse(media_path),
+            downloaded_language_code2=_language_base(target_language),
+            downloaded_provider=None,
+            score=None,
+            forced=_is_forced_language(target_language),
+            subtitle_id=None,
+            reversed_subtitles_path=path_mappings.path_replace_reverse(target_path),
+            hearing_impaired=_is_hi_language(target_language),
+        )
+        history_log(
+            action=5,
+            sonarr_series_id=metadata.get('mediaId'),
+            sonarr_episode_id=media_id,
+            result=result,
+        )
+    elif media_type == 'movie':
+        result = ProcessSubtitlesResult(
+            message=message,
+            reversed_path=path_mappings.path_replace_reverse_movie(media_path),
+            downloaded_language_code2=_language_base(target_language),
+            downloaded_provider=None,
+            score=None,
+            forced=_is_forced_language(target_language),
+            subtitle_id=None,
+            reversed_subtitles_path=path_mappings.path_replace_reverse_movie(target_path),
+            hearing_impaired=_is_hi_language(target_language),
+        )
+        history_log_movie(action=5, radarr_id=media_id, result=result)
 
 
 def _get_media_metadata(media_type, media_id):
@@ -462,16 +674,8 @@ def _save_subtitle_content(media_type, media_id, language_code):
     if len(encoded) > MAX_FILE_SIZE:
         return f'Content too large ({len(encoded)} bytes, max {MAX_FILE_SIZE})', 413
 
-    subtitle_dir = os.path.dirname(subtitle_path)
-
     try:
-        fd, tmp_path = tempfile.mkstemp(dir=subtitle_dir)
-        try:
-            os.write(fd, encoded)
-        finally:
-            os.close(fd)
-
-        os.replace(tmp_path, subtitle_path)
+        _write_bytes_atomically(subtitle_path, encoded)
     except FileNotFoundError:
         return 'Subtitle file or directory not found', 404
     except PermissionError:
@@ -481,30 +685,91 @@ def _save_subtitle_content(media_type, media_id, language_code):
             return 'No space left on device', 507
         raise
 
-    if settings.general.chmod_enabled:
-        try:
-            chmod_value = int(settings.general.chmod, 8)
-            os.chmod(subtitle_path, chmod_value)
-        except Exception:
-            pass
+    _apply_subtitle_chmod(subtitle_path)
 
-    # Force re-scan subtitles from disk using the media (video) path
-    # media_path is row.path (original/Sonarr path), needs path_replace for local filesystem path
-    media_path = metadata.get('mediaPath', '')
-    if media_type == 'episode' and media_path:
-        store_subtitles(media_path, path_mappings.path_replace(media_path), use_cache=False)
-        event_stream(type='series', payload=metadata['mediaId'])
-        event_stream(type='episode', payload=media_id)
-    elif media_type == 'movie' and media_path:
-        store_subtitles_movie(media_path, path_mappings.path_replace_movie(media_path), use_cache=False)
-        event_stream(type='movie', payload=media_id)
-    elif media_path:
-        logger.warning('Subtitle saved but re-indexing skipped: unknown media_type %s', media_type)  # noqa: F821
+    _refresh_media_subtitles(media_type, media_id, metadata)
 
     new_etag = generate_etag(subtitle_path)
     response = make_response('', 204)
     response.headers['ETag'] = f'"{new_etag}"'
     return response
+
+
+def promote_sync_subtitle(media_type, media_id, target_language, source_language):
+    """Overwrite a base subtitle with one generated by a sync engine."""
+    if not source_language or not isinstance(source_language, str):
+        return 'Request body must include "sourceLanguage"', 400
+    if (
+        not _is_valid_language_code(target_language) or
+        not _is_valid_language_code(source_language)
+    ):
+        return 'Invalid language code', 400
+    if _is_sync_output_language(target_language):
+        return 'Target language must be the original subtitle', 400
+    if not _is_sync_output_language(source_language):
+        return 'Source language must be a generated sync output', 400
+    if _language_base(target_language) != _language_base(source_language):
+        return 'Source and target languages do not match', 400
+
+    source_result = resolve_subtitle_path(media_type, media_id, source_language)
+    if isinstance(source_result[1], int):
+        return source_result[0], source_result[1]
+    target_result = resolve_subtitle_path(media_type, media_id, target_language)
+    if isinstance(target_result[1], int):
+        return target_result[0], target_result[1]
+
+    source_path, _ = source_result
+    target_path, metadata = target_result
+
+    if os.path.realpath(source_path) == os.path.realpath(target_path):
+        return 'Source and target subtitles are the same file', 400
+
+    try:
+        file_size = os.path.getsize(source_path)
+        if file_size > MAX_FILE_SIZE:
+            return f'Subtitle file too large ({file_size} bytes, max {MAX_FILE_SIZE})', 413
+
+        with open(source_path, 'rb') as source_file:
+            data = source_file.read()
+
+        _write_bytes_atomically(target_path, data)
+    except FileNotFoundError:
+        return 'Subtitle file or directory not found', 404
+    except PermissionError:
+        return 'Permission denied when writing subtitle file', 409
+    except OSError as e:
+        if e.errno == 28:  # ENOSPC
+            return 'No space left on device', 507
+        raise
+
+    _apply_subtitle_chmod(target_path)
+    _log_promoted_sync_history(
+        media_type=media_type,
+        media_id=media_id,
+        target_language=target_language,
+        source_language=source_language,
+        target_path=target_path,
+        metadata=metadata,
+    )
+    _refresh_media_subtitles(media_type, media_id, metadata)
+
+    return {
+        'sourceLanguage': source_language,
+        'targetLanguage': target_language,
+        'targetPath': target_path,
+    }, 200
+
+
+def _promote_sync_subtitle_content(media_type, media_id, language_code):
+    data = request.get_json()
+    if not data:
+        return 'Request body must be JSON', 400
+    return promote_sync_subtitle(
+        media_type=media_type,
+        media_id=media_id,
+        target_language=language_code,
+        source_language=data.get('sourceLanguage'),
+    )
 
 
 @api_ns_subtitle_content.route('episodes/<int:sonarrEpisodeId>/subtitles/<language>/content')
@@ -518,6 +783,23 @@ class EpisodeSubtitleContent(Resource):
         return _save_subtitle_content('episode', sonarrEpisodeId, language)
 
 
+@api_ns_subtitle_content.route('episodes/<int:sonarrEpisodeId>/subtitles/<language>/promote')
+class EpisodeSubtitlePromote(Resource):
+    @authenticate
+    def post(self, sonarrEpisodeId, language):
+        return _promote_sync_subtitle_content('episode', sonarrEpisodeId, language)
+
+
+@api_ns_subtitle_content.route('episodes/<int:sonarrEpisodeId>/subtitles/<language>/sync-status')
+class EpisodeSubtitleSyncStatus(Resource):
+    @authenticate
+    def get(self, sonarrEpisodeId, language):
+        response, status_code = get_subtitle_sync_status('episode', sonarrEpisodeId, language)
+        if status_code != 200:
+            return response, status_code
+        return jsonify(response)
+
+
 @api_ns_subtitle_content.route('movies/<int:radarrId>/subtitles/<language>/content')
 class MovieSubtitleContent(Resource):
     @authenticate
@@ -527,6 +809,23 @@ class MovieSubtitleContent(Resource):
     @authenticate
     def put(self, radarrId, language):
         return _save_subtitle_content('movie', radarrId, language)
+
+
+@api_ns_subtitle_content.route('movies/<int:radarrId>/subtitles/<language>/promote')
+class MovieSubtitlePromote(Resource):
+    @authenticate
+    def post(self, radarrId, language):
+        return _promote_sync_subtitle_content('movie', radarrId, language)
+
+
+@api_ns_subtitle_content.route('movies/<int:radarrId>/subtitles/<language>/sync-status')
+class MovieSubtitleSyncStatus(Resource):
+    @authenticate
+    def get(self, radarrId, language):
+        response, status_code = get_subtitle_sync_status('movie', radarrId, language)
+        if status_code != 200:
+            return response, status_code
+        return jsonify(response)
 
 
 def _create_subtitle(media_type, media_id):

@@ -49,6 +49,8 @@ declare namespace Language {
 interface Subtitle {
   code2: Language.CodeType;
   name: string;
+  language?: string;
+  modifier?: string | null;
   forced: boolean;
   hi: boolean;
   path: string | null | undefined; // TODO: FIX ME!!!!!!

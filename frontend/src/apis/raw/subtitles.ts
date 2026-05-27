@@ -1,5 +1,6 @@
 import BaseApi from "./base";
 import client from "./client";
+import type { SubtitleSyncStatus } from "@/utilities/subtitles";
 
 export interface SubtitleContentResponse {
   exists?: boolean;
@@ -39,6 +40,7 @@ export interface BatchOptions {
   noFixFramerate?: boolean;
   gss?: boolean;
   forceResync?: boolean;
+  outputMode?: "overwrite" | "keep_all";
   fromLang?: string;
   toLang?: string;
 }
@@ -49,6 +51,7 @@ interface BatchPayload {
   no_fix_framerate?: boolean;
   gss?: boolean;
   force_resync?: boolean;
+  output_mode?: "overwrite" | "keep_all";
   from_lang?: string;
   to_lang?: string;
 }
@@ -59,6 +62,7 @@ function toBatchPayload(options: BatchOptions): BatchPayload {
     no_fix_framerate: options.noFixFramerate,
     gss: options.gss,
     force_resync: options.forceResync,
+    output_mode: options.outputMode,
     from_lang: options.fromLang,
     to_lang: options.toLang,
   };
@@ -160,6 +164,33 @@ class SubtitlesApi extends BaseApi {
       { headers },
     );
     return { etag: response.headers["etag"] as string | undefined };
+  }
+
+  async promoteSyncOutput(
+    mediaType: string,
+    mediaId: number,
+    targetLanguage: string,
+    sourceLanguage: string,
+  ) {
+    const base = mediaType === "episode" ? "episodes" : "movies";
+    const url = `/${base}/${mediaId}/subtitles/${encodeURIComponent(targetLanguage)}/promote`;
+    const response = await client.axios.post<{
+      sourceLanguage: string;
+      targetLanguage: string;
+      targetPath: string;
+    }>(url, { sourceLanguage });
+    return response.data;
+  }
+
+  async getSyncStatus(
+    mediaType: string,
+    mediaId: number,
+    language: string,
+  ): Promise<SubtitleSyncStatus> {
+    const base = mediaType === "episode" ? "episodes" : "movies";
+    const url = `/${base}/${mediaId}/subtitles/${encodeURIComponent(language)}/sync-status`;
+    const response = await client.axios.get<SubtitleSyncStatus>(url);
+    return response.data;
   }
 
   async createSubtitle(
