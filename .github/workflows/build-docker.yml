@@ -223,7 +223,7 @@ jobs:
         if: steps.release.outputs.is_release == 'true'
         uses: actions/attest-build-provenance@v4
         with:
-          subject-name: ${{ env.DOCKERHUB_IMAGE }}
+          subject-name: docker.io/${{ env.DOCKERHUB_IMAGE }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
 
