@@ -81,6 +81,7 @@ declare namespace Settings {
     use_sonarr: boolean;
     utf8_encode: boolean;
     provider_priorities?: string;
+    provider_languages?: Record<string, string[]> | string;
     wanted_search_frequency: number;
     wanted_search_frequency_movie: number;
     use_external_webhook?: boolean;

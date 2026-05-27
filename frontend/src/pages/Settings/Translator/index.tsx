@@ -292,6 +292,34 @@ const SettingsTranslatorView: FunctionComponent = () => {
             </Tooltip>
           </Group>
           <Group gap="xs" align="center">
+            <MantineText size="sm" c="var(--bz-text-tertiary)">
+              Min Source Score
+            </MantineText>
+            <Number
+              settingKey="settings-translator-min_source_score"
+              min={0}
+              max={100}
+              step={1}
+              w={70}
+              size="xs"
+            />
+            <Tooltip
+              label="Minimum quality score (0-100) a source subtitle must reach before auto-translation triggers via a language profile's 'Translate From' setting. Lower-scoring sources are likely badly synced or poorly matched."
+              multiline
+              w={280}
+              withArrow
+            >
+              <MantineText
+                size="xs"
+                c="var(--bz-text-tertiary)"
+                style={{ cursor: "help" }}
+                component="span"
+              >
+                <FontAwesomeIcon icon={faCircleInfo} />
+              </MantineText>
+            </Tooltip>
+          </Group>
+          <Group gap="xs" align="center">
             <Check
               label="Translation credit"
               settingKey="settings-translator-translator_info"

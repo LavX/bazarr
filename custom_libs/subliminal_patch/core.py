@@ -354,10 +354,9 @@ class SZProviderPool(ProviderPool):
         """
         logger.debug("Languages requested: %r", languages)
 
-        if self.language_hook:
-            languages_search_base = self.language_hook(provider)
-        else:
-            languages_search_base = languages
+        excluded_languages = self.language_hook(provider) if self.language_hook else None
+        if excluded_languages is None:
+            excluded_languages = set()
 
         # check video validity
         if not provider_registry[provider].check(video):
@@ -365,10 +364,10 @@ class SZProviderPool(ProviderPool):
             return []
 
         # check whether we want to search this provider for the languages
-        use_languages = languages_search_base & languages
+        use_languages = languages - excluded_languages
         if not use_languages:
-            logger.info('Skipping provider %r: no language to search for (advanced: %r, requested: %r)', provider,
-                        languages_search_base, languages)
+            logger.info('Skipping provider %r: no language to search for (excluded: %r, requested: %r)', provider,
+                        excluded_languages, languages)
             return []
 
         # check supported languages

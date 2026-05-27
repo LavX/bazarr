@@ -9,15 +9,19 @@ import time  # noqa: F401
 from subliminal_patch import core, search_external_subtitles
 
 from languages.custom_lang import CustomLanguage
-from app.database import get_profiles_list, get_profile_cutoff, TableMovies, get_audio_profile_languages, database, \
-    update, select
+from app.database import get_profiles_list, get_profile_cutoff, TableMovies, TableHistoryMovie, \
+    get_audio_profile_languages, database, update, select
 from languages.get_languages import alpha2_from_alpha3, get_language_set
 from app.config import settings
 from utilities.helper import get_subtitle_destination_folder
 from utilities.path_mappings import path_mappings
 from utilities.video_analyzer import embedded_subs_reader
 from app.event_handler import event_stream
-from subtitles.indexer.utils import guess_external_subtitles, get_external_subtitles_path
+from subtitles.indexer.utils import guess_external_subtitles, get_external_subtitles_path, \
+    normalize_subtitle_language_variant
+from subtitles.processing import ProcessSubtitlesResult
+from subtitles.utils import _get_scores
+from radarr.history import history_log_movie
 from app.jobs_queue import jobs_queue
 from subtitles.adaptive_searching import is_search_given_up
 
@@ -27,6 +31,9 @@ gc.enable()
 def store_subtitles_movie(original_path, reversed_path, use_cache=True):
     logging.debug(f'BAZARR started subtitles indexing for this file: {reversed_path}')  # noqa: G004
     actual_subtitles = []
+    # Languages of embedded subtitle tracks detected on this pass. Used after
+    # indexing to record a source-quality history entry (action=7) per language.
+    embedded_languages = []
     if os.path.exists(reversed_path):
         if settings.general.use_embedded_subs:
             logging.debug("BAZARR is trying to index embedded subtitles.")
@@ -53,13 +60,13 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
                                 continue
 
                             if alpha2_from_alpha3(subtitle_language) is not None:
-                                lang = str(alpha2_from_alpha3(subtitle_language))
-                                if subtitle_forced:
-                                    lang = f'{lang}:forced'
-                                if subtitle_hi:
-                                    lang = f'{lang}:hi'
+                                lang = normalize_subtitle_language_variant(
+                                    alpha2_from_alpha3(subtitle_language),
+                                    forced=subtitle_forced,
+                                    hi=subtitle_hi)
                                 logging.debug(f"BAZARR embedded subtitles detected: {lang}")  # noqa: G004
                                 actual_subtitles.append([lang, None, None])
+                                embedded_languages.append(lang)
                         except Exception as error:
                             logging.debug(f"BAZARR unable to index this unrecognized language: {subtitle_language} "  # noqa: G004
                                           f"({error})")
@@ -151,6 +158,8 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
             if movie:
                 logging.debug(f"BAZARR storing those languages to DB: {actual_subtitles}")  # noqa: G004
                 list_missing_subtitles_movies(no=movie.radarrId)
+                if embedded_languages:
+                    _log_embedded_history_movie(movie.radarrId, embedded_languages, reversed_path)
             else:
                 logging.debug(f"BAZARR haven't been able to update existing subtitles to DB: {actual_subtitles}")  # noqa: G004
     else:
@@ -159,6 +168,52 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
     logging.debug(f'BAZARR ended subtitles indexing for this file: {reversed_path}')  # noqa: G004
 
     return actual_subtitles
+
+
+def _log_embedded_history_movie(radarr_id, embedded_languages, reversed_path):
+    """Record source-quality history entries for newly detected embedded subtitles.
+
+    Why: Embedded subtitle tracks come from disc/streaming rips and are source
+    quality, but previously had no score in history so they appeared as unknown
+    quality and could be wrongly targeted for upgrade.
+    What: For each embedded language not already recorded, writes a
+    TableHistoryMovie entry with action=7 (EmbeddedSource) and score=score_out_of
+    (100%). A history lookup deduplicates so re-indexing the same movie does not
+    duplicate entries.
+    Test: Index a movie with an embedded track twice; assert exactly one action=7
+    row exists for that movie+language with score == score_out_of.
+    """
+    try:
+        _, score_out_of, _ = _get_scores('movie')
+
+        for lang in embedded_languages:
+            lang = normalize_subtitle_language_variant(lang)
+            # Dedup: skip if we already logged action=7 for this movie+language.
+            # Not atomic under AUTOCOMMIT. Concurrent indexing of the same movie
+            # could produce duplicates, but this is rare in practice and consistent
+            # with how other parts of Bazarr dedup history entries.
+            existing = database.execute(
+                select(TableHistoryMovie.id)
+                .where(TableHistoryMovie.radarrId == radarr_id)
+                .where(TableHistoryMovie.language == lang)
+                .where(TableHistoryMovie.action == 7)).first()
+            if existing:
+                continue
+
+            result = ProcessSubtitlesResult(
+                message=f"{lang} embedded subtitles detected.",
+                reversed_path=reversed_path,
+                downloaded_language_code2=lang.split(':')[0],
+                downloaded_provider="embedded",
+                score=score_out_of,
+                forced=lang.endswith(':forced'),
+                subtitle_id=None,
+                reversed_subtitles_path=None,
+                hearing_impaired=lang.endswith(':hi'))
+            history_log_movie(action=7, radarr_id=radarr_id, result=result,
+                              fake_provider="embedded", fake_score=score_out_of)
+    except Exception:
+        logging.exception("BAZARR error writing embedded subtitle history for movie %s", radarr_id)
 
 
 def list_missing_subtitles_movies(no=None):

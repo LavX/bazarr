@@ -136,11 +136,13 @@ def get_upgradable_media_ids():
     from subtitles.upgrade import get_queries_condition_parameters
     minimum_timestamp, query_actions = get_queries_condition_parameters()
 
-    # Movies: only consider the latest history row per (video_path, language)
+    # Movies: only consider the latest eligible history row per (video_path, language)
     max_movie_ts = select(
         TableHistoryMovie.video_path,
         TableHistoryMovie.language,
         func.max(TableHistoryMovie.timestamp).label('timestamp')
+    ).where(
+        TableHistoryMovie.action.in_(query_actions)
     ).group_by(
         TableHistoryMovie.video_path, TableHistoryMovie.language
     ).distinct().subquery()
@@ -165,11 +167,13 @@ def get_upgradable_media_ids():
     ).all()
     movie_ids = [r.radarrId for r in movie_results]
 
-    # Series: only consider the latest history row per (video_path, language)
+    # Series: only consider the latest eligible history row per (video_path, language)
     max_episode_ts = select(
         TableHistory.video_path,
         TableHistory.language,
         func.max(TableHistory.timestamp).label('timestamp')
+    ).where(
+        TableHistory.action.in_(query_actions)
     ).group_by(
         TableHistory.video_path, TableHistory.language
     ).distinct().subquery()

@@ -115,6 +115,80 @@ def test_get_language_equals_injected_settings_hi():
     assert result == [(Language("eng", hi=True), Language("eng"))]
 
 
+def test_get_provider_language_exclusions_parses_configured_languages():
+    config = get_providers.settings
+    original = getattr(config.general, "provider_languages", {})
+    config.set(
+        "general.provider_languages",
+        {
+            "opensubtitlescom": ["eng", "bul"],
+            "subsunacs": [],
+        },
+    )
+
+    try:
+        result = get_providers.get_provider_language_exclusions(config)
+    finally:
+        config.set("general.provider_languages", original)
+
+    assert result == {
+        "opensubtitlescom": {Language("eng"), Language("bul")},
+    }
+
+
+def test_get_provider_language_hook_returns_configured_exclusions():
+    config = get_providers.settings
+    original = getattr(config.general, "provider_languages", {})
+    config.set(
+        "general.provider_languages",
+        {
+            "opensubtitlescom": ["eng"],
+        },
+    )
+
+    try:
+        hook = get_providers.get_provider_language_hook(config)
+        result = hook("opensubtitlescom")
+        unrestricted = hook("subsunacs")
+    finally:
+        config.set("general.provider_languages", original)
+
+    assert result == {Language("eng")}
+    assert unrestricted is None
+
+
+def test_native_subtitle_pool_uses_provider_language_hook(monkeypatch):
+    from subtitles import pool as subtitle_pool
+
+    captured = {}
+
+    class CapturingPool:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(subtitle_pool, "provider_pool", lambda: CapturingPool)
+    monkeypatch.setattr(subtitle_pool, "get_providers_sorted", lambda: ["opensubtitlescom"])
+    monkeypatch.setattr(subtitle_pool, "get_providers_auth", lambda: {})
+    monkeypatch.setattr(subtitle_pool, "get_blacklist", lambda: [])
+    monkeypatch.setattr(subtitle_pool, "get_blacklist_movie", lambda: [])
+    monkeypatch.setattr(
+        subtitle_pool,
+        "get_ban_list",
+        lambda profile_id: {"must_contain": [], "must_not_contain": []},
+    )
+    monkeypatch.setattr(subtitle_pool, "get_language_equals", lambda: [])
+    monkeypatch.setattr(
+        subtitle_pool,
+        "get_provider_language_hook",
+        lambda: lambda provider: {Language("eng")},
+    )
+
+    subtitle_pool._init_pool("movie")
+
+    assert callable(captured["language_hook"])
+    assert captured["language_hook"]("opensubtitlescom") == {Language("eng")}
+
+
 def _get_error():
     try:
         raise ValueError("Some error" * 100)
