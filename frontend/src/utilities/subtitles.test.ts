@@ -1,8 +1,8 @@
 import {
   buildSubtitleLanguageKey,
+  canSynchronizeSubtitle,
   getSubtitleSyncStatusPresentation,
   getSyncEngineLabel,
-  canSynchronizeSubtitle,
   isSyncOutputLanguageKey,
   isSyncOutputSubtitle,
 } from "@/utilities/subtitles";

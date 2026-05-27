@@ -21,6 +21,7 @@ import SyncOutputCompareModal from "@/components/modals/SyncOutputCompareModal";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
 import SimpleTable from "@/components/tables/SimpleTable";
 import { filterSubtitleBy, toPython } from "@/utilities";
+import { useProfileItemsToLanguages } from "@/utilities/languages";
 import {
   buildSubtitleLanguageKey,
   canSynchronizeSubtitle,
@@ -29,7 +30,6 @@ import {
   isSyncOutputSubtitle,
   sortSyncOutputSubtitles,
 } from "@/utilities/subtitles";
-import { useProfileItemsToLanguages } from "@/utilities/languages";
 
 const missingText = "Missing Subtitles";
 const syncAction = 5;
@@ -149,7 +149,6 @@ const SubtitleStatusCell: FunctionComponent<{
   mediaId: number | undefined;
   subtitle: Subtitle;
 }> = ({ actions, mediaId, subtitle }) => {
-  const hasSync = actions?.has(syncAction) === true;
   const languageKey = buildSubtitleLanguageKey(subtitle);
   const canCheckSyncStatus =
     !!subtitle.path &&
@@ -443,7 +442,7 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
         },
       },
     ],
-    [CodeCell, historyMap, statusMap],
+    [CodeCell, historyMap, movie?.radarrId, statusMap],
   );
 
   const data: Subtitle[] = useMemo(() => {

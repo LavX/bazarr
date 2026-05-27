@@ -1,6 +1,6 @@
+import type { SubtitleSyncStatus } from "@/utilities/subtitles";
 import BaseApi from "./base";
 import client from "./client";
-import type { SubtitleSyncStatus } from "@/utilities/subtitles";
 
 export interface SubtitleContentResponse {
   exists?: boolean;

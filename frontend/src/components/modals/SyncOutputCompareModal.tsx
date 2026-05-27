@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import { showNotification } from "@mantine/notifications";
 import {
   Button,
   Group,
@@ -11,12 +10,13 @@ import {
   Table,
   Text,
 } from "@mantine/core";
+import { showNotification } from "@mantine/notifications";
 import { usePromoteSyncSubtitle } from "@/apis/hooks";
 import api from "@/apis/raw";
-import { getParser } from "@/pages/SubtitleEditor/parsers";
-import { formatTimestamp } from "@/pages/SubtitleEditor/CueTable";
-import type { SubtitleFormat } from "@/pages/SubtitleEditor/types";
 import { notification } from "@/modules/task";
+import { formatTimestamp } from "@/pages/SubtitleEditor/CueTable";
+import { getParser } from "@/pages/SubtitleEditor/parsers";
+import type { SubtitleFormat } from "@/pages/SubtitleEditor/types";
 import {
   buildSubtitleLanguageKey,
   getSyncEngineLabel,
