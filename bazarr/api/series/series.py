@@ -2,6 +2,7 @@
 
 import operator
 
+from flask import request
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
 from functools import reduce
 from sqlalchemy import case
@@ -10,9 +11,11 @@ from app.database import get_exclusion_clause, TableEpisodes, TableShows, databa
 from sonarr.sync.series import update_one_series
 from subtitles.indexer.series import list_missing_subtitles, series_scan_subtitles
 from subtitles.mass_download import series_download_subtitles
+from subtitles.tools.combine.main import try_combine_for_video
 from subtitles.wanted import wanted_search_missing_subtitles_series, wanted_scan_subtitles_series
 from app.event_handler import event_stream
 from api.swaggerui import subtitles_model, subtitles_language_model, audio_language_model
+from utilities.path_mappings import path_mappings
 
 from api.utils import authenticate, None_Keys, postprocess
 
@@ -251,3 +254,73 @@ class Series(Resource):
             return '', 204
 
         return 'Unknown action', 400
+
+
+def _list_series_episodes(series_id):
+    rows = database.execute(
+        select(
+            TableEpisodes.sonarrEpisodeId,
+            TableEpisodes.sonarrSeriesId,
+            TableEpisodes.path,
+        ).where(TableEpisodes.sonarrSeriesId == series_id)
+    ).all()
+    return [
+        {
+            'sonarrEpisodeId': r.sonarrEpisodeId,
+            'sonarrSeriesId': r.sonarrSeriesId,
+            'path': r.path,
+        }
+        for r in rows
+    ]
+
+
+@api_ns_series.route('series/<int:series_id>/subtitles/combine')
+class SeriesSubtitlesCombine(Resource):
+    @authenticate
+    @api_ns_series.response(200, 'Batch combine summary')
+    @api_ns_series.response(401, 'Not Authenticated')
+    @api_ns_series.response(404, 'Series not found')
+    def post(self, series_id):
+        """Build the combined subtitle file for every episode in the series
+        that has all required source languages on disk."""
+        payload = request.get_json(silent=True) or {}
+        languages = payload.get('languages')
+        format_ = payload.get('format')
+
+        episodes = _list_series_episodes(series_id)
+        if not episodes:
+            return {'status': 'not_found'}, 404
+
+        built, skipped, failed = 0, 0, 0
+        details = []
+        for ep in episodes:
+            video_path = path_mappings.path_replace(ep['path'])
+            r = try_combine_for_video(
+                video_path=video_path,
+                media_type='series',
+                radarr_id=None,
+                sonarr_series_id=ep['sonarrSeriesId'],
+                sonarr_episode_id=ep['sonarrEpisodeId'],
+                languages=languages,
+                format=format_,
+            )
+            details.append({
+                'episodeId': ep['sonarrEpisodeId'],
+                'status': r.status,
+                'path': r.path,
+                'reason': r.reason,
+                'error': r.error,
+            })
+            if r.status == 'built':
+                built += 1
+            elif r.status == 'skipped':
+                skipped += 1
+            else:
+                failed += 1
+        return {
+            'status': 'batch_complete',
+            'built': built,
+            'skipped': skipped,
+            'failed': failed,
+            'details': details,
+        }, 200
