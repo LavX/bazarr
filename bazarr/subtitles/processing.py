@@ -19,6 +19,7 @@ from .utils import _get_download_code3
 from .post_processing import postprocessing
 from .utils import _get_scores
 from .language_profiles import profile_item_language_code
+from .tools.combine.main import try_combine_for_video
 
 
 class ProcessSubtitlesResult:
@@ -172,6 +173,22 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
             )
     except Exception:
         logging.exception('BAZARR error in _trigger_auto_translation')
+
+
+def _trigger_combine(video_path, media_type, radarr_id, series_id, episode_id):
+    """After a subtitle download/upgrade/translate completes, try to build or
+    rebuild the combined subtitle file for the video's profile rule. Best-effort:
+    never raises, never blocks the caller."""
+    try:
+        try_combine_for_video(
+            video_path=video_path,
+            media_type=media_type,
+            radarr_id=radarr_id,
+            sonarr_series_id=series_id,
+            sonarr_episode_id=episode_id,
+        )
+    except Exception:
+        logging.exception("BAZARR error in _trigger_combine")
 
 
 def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_upgrade=False, is_manual=False,
@@ -329,6 +346,16 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         radarr_id=movie_metadata.radarrId if media_type != 'series' else None,
         source_score_percent=percent_score,
         forced=subtitle.language.forced,
+    )
+
+    # Combined subtitle: if the profile defines a combine rule and all sources
+    # are now on disk, build or refresh the combined file.
+    _trigger_combine(
+        video_path=path,
+        media_type=media_type,
+        radarr_id=movie_metadata.radarrId if media_type != 'series' else None,
+        series_id=series_id if media_type == 'series' else None,
+        episode_id=episode_id if media_type == 'series' else None,
     )
 
     return ProcessSubtitlesResult(message=message,
