@@ -20,6 +20,7 @@ from subliminal_patch.extensions import provider_registry
 
 from .manifest import validate_manifest
 from .bundle import verify_bundle_tree
+from .migration import validation_built_in_provider_ids
 from .state import (
     OFFICIAL_CATALOG_SOURCE_ID,
     OFFICIAL_CATALOG_URL,
@@ -762,7 +763,14 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
             if not python_path:
                 raise ProviderHubInstallError("provider Python path is missing")
 
-            manifest = validate_manifest(manifest_data, built_in_provider_ids=_built_in_provider_ids())
+            trusted = bool(provider.get("trusted", False))
+            manifest = validate_manifest(
+                manifest_data,
+                built_in_provider_ids=_validation_built_in_provider_ids(
+                    manifest_data,
+                    trusted,
+                ),
+            )
             bundle_path = Path(active_path)
             _remove_bundle_runtime_artifacts(bundle_path)
             verify_bundle_tree(manifest, bundle_path)
@@ -818,6 +826,20 @@ def _built_in_provider_ids() -> set[str]:
         return provider_ids - _REGISTERED_PROVIDER_HUB_IDS
     except Exception:
         return provider_ids
+
+
+def _manifest_provider_id(manifest: dict[str, Any]) -> str:
+    if not isinstance(manifest, dict):
+        return ""
+    return str(manifest.get("provider_id") or "")
+
+
+def _validation_built_in_provider_ids(manifest: dict[str, Any], trusted: bool) -> set[str]:
+    return validation_built_in_provider_ids(
+        _manifest_provider_id(manifest),
+        _built_in_provider_ids(),
+        trusted,
+    )
 
 
 def _bundle_path_for(manifest) -> Path:
@@ -980,9 +1002,15 @@ def _failed_installation(validated, existing, error: Exception, source_trusted: 
 
 
 def stage_install(manifest: dict[str, Any]) -> dict[str, Any]:
-    validated = validate_manifest(manifest, built_in_provider_ids=_built_in_provider_ids())
     state = load_state()
-    source_trusted = _catalog_manifest_trusted(validated.raw, state)
+    source_trusted = _catalog_manifest_trusted(manifest, state) if isinstance(manifest, dict) else False
+    validated = validate_manifest(
+        manifest,
+        built_in_provider_ids=_validation_built_in_provider_ids(
+            manifest,
+            source_trusted,
+        ),
+    )
     existing = (state.get("installations") or {}).get(validated.provider_id)
     existing_version = (
         existing.get("active_version") if isinstance(existing, dict) else None
@@ -1085,11 +1113,23 @@ def activate_staged_installations() -> list[str]:
             to_version=target_version,
         ) as job:
             try:
-                manifest = validate_manifest(installation.get("manifest") or {}, built_in_provider_ids=_built_in_provider_ids())
+                trusted = bool(installation.get("trusted", False))
+                manifest_data = installation.get("manifest") or {}
+                manifest = validate_manifest(
+                    manifest_data,
+                    built_in_provider_ids=_validation_built_in_provider_ids(
+                        manifest_data,
+                        trusted,
+                    ),
+                )
                 if isinstance(installation.get("staged_manifest"), dict):
+                    staged_manifest = installation.get("staged_manifest")
                     manifest = validate_manifest(
-                        installation.get("staged_manifest"),
-                        built_in_provider_ids=_built_in_provider_ids(),
+                        staged_manifest,
+                        built_in_provider_ids=_validation_built_in_provider_ids(
+                            staged_manifest,
+                            trusted,
+                        ),
                     )
                 staged_path = installation.get("staged_path")
                 staged_python_path = installation.get("staged_python_path")

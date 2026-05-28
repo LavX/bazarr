@@ -12,6 +12,10 @@ from subliminal_patch.extensions import provider_registry
 from subliminal_patch.providers import Provider
 
 from .manifest import ManifestValidationError, validate_manifest
+from .migration import (
+    can_shadow_built_in_provider,
+    validation_built_in_provider_ids,
+)
 from .protocol import candidate_from_worker, language_to_payload, video_to_payload, worker_download_to_content
 from .state import active_installations
 from .worker import ProviderWorkerClient, WorkerError, worker_command
@@ -127,18 +131,26 @@ def register_active_provider_classes(installations=None) -> list[str]:
 
     for installation in installations:
         provider_id = installation.provider_id
-        if provider_id in built_in_provider_ids:
+        trusted = bool(getattr(installation, "trusted", False))
+        shadows_builtin = provider_id in built_in_provider_ids
+        if shadows_builtin and not can_shadow_built_in_provider(provider_id, trusted):
             logger.warning("Skipping Provider Hub provider %s because it shadows a built-in provider", provider_id)
             continue
         try:
             manifest = validate_manifest(
                 installation.manifest,
-                built_in_provider_ids=built_in_provider_ids,
+                built_in_provider_ids=validation_built_in_provider_ids(
+                    provider_id,
+                    built_in_provider_ids,
+                    trusted,
+                ),
             )
         except ManifestValidationError:
             logger.exception("Skipping invalid Provider Hub manifest for %s", provider_id)
             continue
 
+        if shadows_builtin and manifest.provider_id in provider_registry:
+            del provider_registry[manifest.provider_id]
         provider_registry.register(manifest.provider_id, _make_provider_class(manifest, installation=installation))
         _REGISTERED_PROVIDER_HUB_IDS.add(manifest.provider_id)
         registered.append(manifest.provider_id)
