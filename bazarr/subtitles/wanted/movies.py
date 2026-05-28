@@ -4,6 +4,7 @@
 import ast
 import logging
 import operator
+import os
 
 from functools import reduce
 
@@ -76,19 +77,36 @@ def _wanted_movie(movie, providers_list, job_id=None):
                     )
                 else:
                     # Guard: skip if we already have a translate history entry
-                    # for this target language. Why: the translate service
-                    # writes action=6 on successful completion, which blocks
-                    # re-queuing after a successful translation. Without this
-                    # check, the wanted-scan would re-queue every cycle.
+                    # for this target language AND the translated file still
+                    # exists on disk. Why: the translate service writes
+                    # action=6 on successful completion, which blocks
+                    # re-queuing after a successful translation. But if the
+                    # translated subtitle was deleted or moved after that
+                    # success, the file is missing again and we must re-queue;
+                    # checking only the history row would suppress the
+                    # replacement forever.
                     already_translated = database.execute(
-                        select(TableHistoryMovie.id)
+                        select(TableHistoryMovie.subtitles_path)
                         .where(TableHistoryMovie.radarrId == movie.radarrId)
                         .where(TableHistoryMovie.language == language)
                         .where(TableHistoryMovie.action == 6)
+                        .order_by(TableHistoryMovie.timestamp.desc())
                         .limit(1)
                     ).first()
-                    if already_translated:
-                        continue
+                    if already_translated and already_translated.subtitles_path:
+                        local_subs_path = path_mappings.path_replace_movie(
+                            already_translated.subtitles_path
+                        )
+                        if local_subs_path and os.path.exists(local_subs_path):
+                            continue
+                    # Fetch additional columns required by postprocess_subtitles
+                    # (imdbId/tmdbId for plex/jellyfin refresh). movie row
+                    # only carries the subset selected for wanted scans.
+                    metadata = database.execute(
+                        select(TableMovies.imdbId,
+                               TableMovies.tmdbId)
+                        .where(TableMovies.radarrId == movie.radarrId)
+                    ).first()
                     try:
                         from subtitles.tools.translate.main import translate_subtitles_file
                         translate_kwargs = dict(
@@ -102,7 +120,7 @@ def _wanted_movie(movie, providers_list, job_id=None):
                             sonarr_series_id=None,
                             sonarr_episode_id=None,
                             radarr_id=movie.radarrId,
-                            metadata=None,
+                            metadata=metadata,
                         )
                         # Guard: skip if an identical translate job is already
                         # pending or running. Why: history guard (action=6) only

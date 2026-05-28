@@ -1026,9 +1026,12 @@ def save_settings(settings_items):
             if value != settings.subsource.apikey:
                 reset_providers = True
 
-        if key == 'settings-general-enabled_providers':
+        if key in ('settings-general-enabled_providers',
+                   'settings-general-provider_languages'):
             # Defer the reset until AFTER all values in this batch are
             # written, same reasoning as reset_fanout_pool below.
+            # provider_languages changes affect per-provider exclusions
+            # which alter compat cache keys and provider pool behavior.
             reset_compat_pool = True
 
         if key in ('settings-compat_endpoint-fanout_max_workers',

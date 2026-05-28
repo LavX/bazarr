@@ -364,7 +364,18 @@ class SZProviderPool(ProviderPool):
             return []
 
         # check whether we want to search this provider for the languages
-        use_languages = languages - excluded_languages
+        # Compare by alpha3 (and country/script when specified on the
+        # exclusion) so that HI and forced variants like Language('eng',
+        # hi=True) are correctly excluded when the base Language('eng') is
+        # in the exclusion set. Language.__eq__ compares hi/forced flags,
+        # so plain set subtraction misses variants.
+        excluded_bases = set()
+        for el in excluded_languages:
+            excluded_bases.add((el.alpha3, el.country, el.script))
+        use_languages = {
+            lang for lang in languages
+            if (lang.alpha3, lang.country, lang.script) not in excluded_bases
+        }
         if not use_languages:
             logger.info('Skipping provider %r: no language to search for (excluded: %r, requested: %r)', provider,
                         excluded_languages, languages)

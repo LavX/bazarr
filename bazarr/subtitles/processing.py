@@ -60,6 +60,8 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
         from app.database import get_profile_id, get_profiles_list
         from subtitles.tools.translate.main import translate_subtitles_file
         from subtitles.download import check_missing_languages
+        from app.database import (TableEpisodes, TableShows, TableMovies,
+                                  database, select)
 
         if not subtitle_path or not downloaded_lang:
             return
@@ -89,6 +91,29 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
         profile = get_profiles_list(profile_id=profile_id)
         if not profile:
             return
+
+        # Fetch the episode/movie row that postprocess_subtitles dereferences
+        # for plex/jellyfin refresh (sonarrSeriesId, imdbId, season, episode,
+        # tvdbId for episodes; imdbId, tmdbId for movies). Passing None here
+        # crashed the translation job during post-processing.
+        translation_metadata = None
+        if media_type == 'series' and episode_id:
+            translation_metadata = database.execute(
+                select(TableEpisodes.sonarrSeriesId,
+                       TableEpisodes.season,
+                       TableEpisodes.episode,
+                       TableShows.imdbId,
+                       TableShows.tvdbId)
+                .select_from(TableEpisodes)
+                .join(TableShows)
+                .where(TableEpisodes.sonarrEpisodeId == episode_id)
+            ).first()
+        elif media_type == 'movies' and radarr_id:
+            translation_metadata = database.execute(
+                select(TableMovies.imdbId,
+                       TableMovies.tmdbId)
+                .where(TableMovies.radarrId == radarr_id)
+            ).first()
 
         # Hoisted out of the loop: check_missing_languages is independent of the
         # profile item being considered, so calling it once per profile item
@@ -143,7 +168,7 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
                 sonarr_series_id=series_id,
                 sonarr_episode_id=episode_id,
                 radarr_id=radarr_id,
-                metadata=None,
+                metadata=translation_metadata,
             )
     except Exception:
         logging.exception('BAZARR error in _trigger_auto_translation')
