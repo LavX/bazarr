@@ -14,6 +14,10 @@ from utilities.path_mappings import path_mappings
 from languages.custom_lang import CustomLanguage
 from subtitles.tools.subsync_engines import SYNC_ENGINES, sync_engine_from_output_path
 
+import re as _re_combine
+
+_COMBINED_MODIFIER_PATTERN = _re_combine.compile(r'^combined-[a-z]{2}(?:-[a-z]{2})?$')
+
 
 def get_external_subtitles_path(file, subtitle):
     fld = os.path.dirname(file)
@@ -56,6 +60,12 @@ def normalize_subtitle_language_variant(language, forced=False, hi=False):
         normalized_variants.append('forced')
     sync_variants = sorted(part for part in variants if part.startswith('sync-'))
     normalized_variants.extend(sync_variants)
+    combined_variant = next(
+        (part for part in variants if _COMBINED_MODIFIER_PATTERN.match(part)),
+        None,
+    )
+    if combined_variant:
+        normalized_variants.append(combined_variant)
     if not normalized_variants:
         return base
     return ':'.join([base] + normalized_variants)
@@ -128,6 +138,80 @@ def subtitle_language_with_sync_modifier(language_str, subtitle):
     base_language = parts[0]
     modifiers = [part.lower() for part in parts[1:] if not part.lower().startswith('sync-')]
     modifiers.append(f'sync-{engine}')
+    return ':'.join([base_language] + modifiers)
+
+
+def combined_modifier_from_subtitle_name(subtitle):
+    """Return the 'combined-X[-Y]' modifier if the filename matches the
+    combined-subtitle convention, else None."""
+    from subtitles.tools.combine.naming import parse_combined_filename
+    info = parse_combined_filename(subtitle)
+    if info is None:
+        return None
+    return "combined-" + "-".join(info.secondaries)
+
+
+def _language_code_from_combined_output(subtitle):
+    from subtitles.tools.combine.naming import parse_combined_filename
+    info = parse_combined_filename(subtitle)
+    if info is None:
+        return None
+    return info.primary
+
+
+def add_combined_outputs(dest_folder, subtitles):
+    """Scan dest_folder for combined-subtitle files and add them to the
+    subtitles dict so the rest of the indexer treats them as known artifacts.
+
+    Mirrors add_sync_engine_outputs from PR 158 in structure."""
+    if not os.path.isdir(dest_folder):
+        return subtitles
+
+    for subtitle in os.listdir(dest_folder):
+        if subtitle in subtitles or not combined_modifier_from_subtitle_name(subtitle):
+            continue
+
+        subtitle_path = os.path.join(dest_folder, subtitle)
+        if not os.path.isfile(subtitle_path):
+            continue
+
+        language_code = _language_code_from_combined_output(subtitle)
+        if not language_code:
+            logging.debug(
+                "BAZARR skipping combined subtitle with unknown language: %s",
+                subtitle_path,
+            )
+            continue
+
+        try:
+            subtitles[subtitle] = _get_lang_from_str(language_code)
+        except Exception:
+            logging.debug(
+                "BAZARR skipping combined subtitle with unsupported language: %s",
+                subtitle_path,
+            )
+
+    return subtitles
+
+
+def subtitle_language_with_combined_modifier(language_str, subtitle):
+    """Stamp the combined modifier onto the language string for this subtitle
+    file, preserving any pre-existing hi/forced/sync- modifiers."""
+    modifier = combined_modifier_from_subtitle_name(subtitle)
+    if not modifier:
+        return language_str
+    parts = [part for part in str(language_str).split(':') if part]
+    if not parts:
+        return language_str
+    base_language = parts[0]
+    # Drop any pre-existing combined-* modifier; we always re-stamp from the
+    # filename so it is authoritative.
+    modifiers = [
+        part.lower()
+        for part in parts[1:]
+        if not part.lower().startswith('combined-')
+    ]
+    modifiers.append(modifier)
     return ':'.join([base_language] + modifiers)
 
 
