@@ -13,8 +13,7 @@ from datetime import datetime
 from sqlalchemy import create_engine, inspect, DateTime, ForeignKey, Index, Integer, LargeBinary, Text, func, text, BigInteger
 # importing here to be indirectly imported in other modules later
 from sqlalchemy import update, delete, select, func  # noqa: F401, F811
-from sqlalchemy.orm import scoped_session, sessionmaker, mapped_column, close_all_sessions
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import scoped_session, sessionmaker, mapped_column, close_all_sessions, declarative_base
 from sqlalchemy.pool import NullPool
 
 from flask_sqlalchemy import SQLAlchemy
