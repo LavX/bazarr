@@ -61,6 +61,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
+  DOCKERHUB_IMAGE: lavx/bazarr
   UI_DIRECTORY: ./frontend
 
 jobs:
@@ -142,6 +143,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Determine if release build
+        id: release
+        run: |
+          if [[ "${{ inputs.build_type }}" == "release" ]]; then
+            echo "is_release=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_release=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Login to Docker Hub
+        if: steps.release.outputs.is_release == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Determine Version and Tags
         id: version
         run: |
@@ -151,7 +168,8 @@ jobs:
           BRANCH="${{ inputs.branch }}"
           
           # Initialize tags array
-          TAGS=""
+          GHCR_TAGS=""
+          DOCKERHUB_TAGS=""
           
           case "${{ inputs.build_type }}" in
             release)
@@ -164,14 +182,19 @@ jobs:
               VERSION="${VERSION#v}"  # Remove 'v' prefix
               FORK_VERSION="${VERSION}"
               
-              TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${FORK_VERSION}"
-              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${VERSION}"
-              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}"
+              GHCR_TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${FORK_VERSION}"
+              GHCR_TAGS="${GHCR_TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${VERSION}"
+              GHCR_TAGS="${GHCR_TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}"
+              
+              DOCKERHUB_TAGS="${{ env.DOCKERHUB_IMAGE }}:${FORK_VERSION}"
+              DOCKERHUB_TAGS="${DOCKERHUB_TAGS},${{ env.DOCKERHUB_IMAGE }}:v${VERSION}"
+              DOCKERHUB_TAGS="${DOCKERHUB_TAGS},${{ env.DOCKERHUB_IMAGE }}:sha-${SHORT_SHA}"
               
               # Major.Minor tag (e.g., 1.5)
               MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1,2)
               if [ -n "$MAJOR_MINOR" ]; then
-                TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${MAJOR_MINOR}"
+                GHCR_TAGS="${GHCR_TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${MAJOR_MINOR}"
+                DOCKERHUB_TAGS="${DOCKERHUB_TAGS},${{ env.DOCKERHUB_IMAGE }}:${MAJOR_MINOR}"
               fi
               
               echo "display_version=${FORK_VERSION}" >> $GITHUB_OUTPUT
@@ -181,9 +204,9 @@ jobs:
               # Nightly build - date-based versioning
               FORK_VERSION="nightly-${BUILD_DATE}"
               
-              TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:nightly"
-              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:nightly-${BUILD_DATE}"
-              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}"
+              GHCR_TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:nightly"
+              GHCR_TAGS="${GHCR_TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:nightly-${BUILD_DATE}"
+              GHCR_TAGS="${GHCR_TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}"
               
               echo "display_version=${FORK_VERSION}" >> $GITHUB_OUTPUT
               ;;
@@ -193,9 +216,9 @@ jobs:
               SAFE_BRANCH=$(echo "$BRANCH" | sed 's/[^a-zA-Z0-9]/-/g')
               FORK_VERSION="dev-${SAFE_BRANCH}-${SHORT_SHA}"
               
-              TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev"
-              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev-${SAFE_BRANCH}"
-              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}"
+              GHCR_TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev"
+              GHCR_TAGS="${GHCR_TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev-${SAFE_BRANCH}"
+              GHCR_TAGS="${GHCR_TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}"
               
               echo "display_version=${FORK_VERSION}" >> $GITHUB_OUTPUT
               ;;
@@ -213,8 +236,8 @@ jobs:
                 FORK_VERSION="${CUSTOM_TAG}"
               fi
 
-              TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${CUSTOM_TAG}"
-              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}"
+              GHCR_TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${CUSTOM_TAG}"
+              GHCR_TAGS="${GHCR_TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}"
 
               echo "display_version=${FORK_VERSION}" >> $GITHUB_OUTPUT
               ;;
@@ -222,16 +245,26 @@ jobs:
           
           # Add latest tag if requested
           if [ "${{ inputs.push_latest }}" == "true" ]; then
-            TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+            GHCR_TAGS="${GHCR_TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+            if [[ "${{ inputs.build_type }}" == "release" ]]; then
+              DOCKERHUB_TAGS="${DOCKERHUB_TAGS},${{ env.DOCKERHUB_IMAGE }}:latest"
+            fi
           fi
           
-          echo "tags=${TAGS}" >> $GITHUB_OUTPUT
+          # Combine tags based on build type
+          if [[ "${{ inputs.build_type }}" == "release" ]]; then
+            ALL_TAGS="${GHCR_TAGS},${DOCKERHUB_TAGS}"
+          else
+            ALL_TAGS="${GHCR_TAGS}"
+          fi
+          
+          echo "tags=${ALL_TAGS}" >> $GITHUB_OUTPUT
           echo "fork_version=${FORK_VERSION}" >> $GITHUB_OUTPUT
           echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
           echo "build_date=${BUILD_DATE}" >> $GITHUB_OUTPUT
           
           # Summary
-          echo "## 🏷️ Version & Tags" >> $GITHUB_STEP_SUMMARY
+          echo "## Version & Tags" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
@@ -243,7 +276,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Tags to be pushed:" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "${TAGS}" | tr ',' '\n' >> $GITHUB_STEP_SUMMARY
+          echo "${ALL_TAGS}" | tr ',' '\n' >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Build and Push Docker Image
@@ -279,18 +312,34 @@ jobs:
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
 
+      - name: Generate Docker Hub Attestation
+        if: steps.release.outputs.is_release == 'true'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: docker.io/${{ env.DOCKERHUB_IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
       - name: Create Build Summary
         run: |
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## 🐳 Docker Image Published" >> $GITHUB_STEP_SUMMARY
+          echo "## Docker Image Published" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Pull Commands" >> $GITHUB_STEP_SUMMARY
           echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo "# By version" >> $GITHUB_STEP_SUMMARY
+          echo "# GitHub Container Registry" >> $GITHUB_STEP_SUMMARY
           echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.fork_version }}" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ inputs.build_type }}" == "release" ]]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "# Docker Hub" >> $GITHUB_STEP_SUMMARY
+            echo "docker pull ${{ env.DOCKERHUB_IMAGE }}:${{ steps.version.outputs.fork_version }}" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "# By SHA (immutable)" >> $GITHUB_STEP_SUMMARY
           echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ steps.version.outputs.short_sha }}" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ inputs.build_type }}" == "release" ]]; then
+            echo "docker pull ${{ env.DOCKERHUB_IMAGE }}:sha-${{ steps.version.outputs.short_sha }}" >> $GITHUB_STEP_SUMMARY
+          fi
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Image Details" >> $GITHUB_STEP_SUMMARY
@@ -298,3 +347,8 @@ jobs:
           echo "- **Platforms:** ${{ inputs.platforms }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Build Type:** ${{ inputs.build_type }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Source Branch:** ${{ inputs.branch }}" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ inputs.build_type }}" == "release" ]]; then
+            echo "- **Docker Hub:** published" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Docker Hub:** skipped (not a release build)" >> $GITHUB_STEP_SUMMARY
+          fi
