@@ -63,3 +63,41 @@ def test_srt_trio_sibling():
     cue1 = text.split("\n\n")[0]
     lines = [ln for ln in cue1.split("\n") if ln and "-->" not in ln and not ln.isdigit()]
     assert lines == ["Hello there.", "Szia.", "你好。"]
+
+
+class TestAssOutput:
+    def test_ass_has_three_styles(self):
+        out = compose(
+            primary_path=fixture("trio_en.srt"),
+            secondary_paths=[fixture("trio_hu.srt"), fixture("trio_zh.srt")],
+            format="ass",
+        )
+        text = out.decode("utf-8")
+        assert "[Script Info]" in text
+        assert "Style: Bottom" in text
+        assert "Style: Top" in text
+        assert "Style: Middle" in text
+
+    def test_ass_dialogue_lines_per_language(self):
+        out = compose(
+            primary_path=fixture("en_hu_sibling_en.srt"),
+            secondary_paths=[fixture("en_hu_sibling_hu.srt")],
+            format="ass",
+        )
+        text = out.decode("utf-8")
+        # 3 primary cues, 2 languages each = 6 dialogue lines.
+        assert text.count("Dialogue:") == 6
+        assert "Dialogue: 0,0:00:01.00,0:00:03.00,Bottom" in text
+        assert "Dialogue: 0,0:00:01.00,0:00:03.00,Top" in text
+
+    def test_ass_alignment_codes(self):
+        out = compose(
+            primary_path=fixture("trio_en.srt"),
+            secondary_paths=[fixture("trio_hu.srt"), fixture("trio_zh.srt")],
+            format="ass",
+        )
+        text = out.decode("utf-8")
+        # Alignment code 2 = bottom-center, 8 = top-center, 5 = middle-center.
+        assert ",2," in text
+        assert ",8," in text
+        assert ",5," in text

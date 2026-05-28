@@ -111,4 +111,58 @@ def _ts(ms):
 
 
 def _emit_ass(primary_events, aligned_secondaries):
-    raise NotImplementedError("ASS output added in next task")
+    out = []
+    out.append("[Script Info]")
+    out.append("ScriptType: v4.00+")
+    out.append("WrapStyle: 0")
+    out.append("ScaledBorderAndShadow: yes")
+    out.append("YCbCr Matrix: TV.601")
+    out.append("PlayResX: 384")
+    out.append("PlayResY: 288")
+    out.append("")
+    out.append("[V4+ Styles]")
+    out.append(
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding"
+    )
+    out.append(_style_line("Bottom", alignment=2))
+    out.append(_style_line("Top", alignment=8))
+    out.append(_style_line("Middle", alignment=5))
+    out.append("")
+    out.append("[Events]")
+    out.append(
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, "
+        "MarginV, Effect, Text"
+    )
+    styles = ["Bottom", "Top", "Middle"]
+    for idx, p in enumerate(primary_events):
+        start = _ass_ts(p.start)
+        end = _ass_ts(p.end)
+        primary_text = (p.plaintext or "").strip().replace("\n", "\\N")
+        if primary_text:
+            out.append(f"Dialogue: 0,{start},{end},{styles[0]},,0,0,0,,{primary_text}")
+        for si, sec_texts in enumerate(aligned_secondaries):
+            text = sec_texts[idx].strip().replace("\n", "\\N")
+            if text:
+                out.append(
+                    f"Dialogue: 0,{start},{end},{styles[si + 1]},,0,0,0,,{text}"
+                )
+    return ("\n".join(out) + "\n").encode("utf-8")
+
+
+def _style_line(name, alignment):
+    return (
+        f"Style: {name},Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,"
+        f"0,0,0,0,100,100,0,0,1,2,0,{alignment},10,10,10,1"
+    )
+
+
+def _ass_ts(ms):
+    total = int(ms)
+    h, rem = divmod(total, 3600000)
+    m, rem = divmod(rem, 60000)
+    s, ms = divmod(rem, 1000)
+    cs = ms // 10
+    return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
