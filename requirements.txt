@@ -3,7 +3,7 @@ setuptools>=82.0.1
 # Bazarr runtime dependencies
 aiohttp>=3.13.5
 alembic==1.18.4
-apprise==1.9.8
+apprise==1.10.0
 apscheduler==3.11.2
 babelfish==0.6.1
 beautifulsoup4==4.14.3
