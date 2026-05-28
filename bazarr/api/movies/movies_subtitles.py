@@ -3,6 +3,7 @@
 import os
 
 from io import BytesIO
+from flask import request
 from flask_restx import Resource, Namespace, reqparse
 from subliminal_patch.core import SUBTITLE_EXTENSIONS
 from werkzeug.datastructures import FileStorage
@@ -13,6 +14,7 @@ from subtitles.upload import manual_upload_subtitle
 from subtitles.mass_download.movies import movie_download_specific_subtitles
 from subtitles.download import generate_subtitles  # noqa: F401
 from subtitles.tools.delete import delete_subtitles
+from subtitles.tools.combine.main import try_combine_for_video
 from app.event_handler import event_stream  # noqa: F401
 from app.config import settings  # noqa: F401
 from app.jobs_queue import jobs_queue  # noqa: F401
@@ -147,4 +149,44 @@ class MoviesSubtitles(Resource):
             return '', 204
         else:
             return 'Subtitles file not found or permission issue.', 500
+
+
+@api_ns_movies_subtitles.route('movies/<int:radarr_id>/subtitles/combine')
+class MoviesSubtitlesCombine(Resource):
+    @authenticate
+    @api_ns_movies_subtitles.response(200, 'Result of combine attempt')
+    @api_ns_movies_subtitles.response(401, 'Not Authenticated')
+    @api_ns_movies_subtitles.response(404, 'Movie not found')
+    @api_ns_movies_subtitles.response(500, 'Combine failed')
+    def post(self, radarr_id):
+        """Build (or rebuild) the combined subtitle file for this movie."""
+        payload = request.get_json(silent=True) or {}
+        languages = payload.get('languages')
+        format_ = payload.get('format')
+
+        row = database.execute(
+            select(TableMovies.path).where(TableMovies.radarrId == radarr_id)
+        ).first()
+        if not row:
+            return {'status': 'not_found'}, 404
+        video_path = path_mappings.path_replace_movie(row.path)
+
+        result = try_combine_for_video(
+            video_path=video_path,
+            media_type='movies',
+            radarr_id=radarr_id,
+            sonarr_series_id=None,
+            sonarr_episode_id=None,
+            languages=languages,
+            format=format_,
+        )
+        body = {
+            'status': result.status,
+            'path': result.path,
+            'alignment': result.alignment,
+            'reason': result.reason,
+            'error': result.error,
+        }
+        http_status = 500 if result.status == 'failed' else 200
+        return body, http_status
 
