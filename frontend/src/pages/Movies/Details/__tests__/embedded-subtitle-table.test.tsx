@@ -1,3 +1,5 @@
+/* eslint-disable camelcase */
+
 /**
  * Tests for the Movies Detail subtitle Table component.
  *
@@ -15,10 +17,10 @@
  */
 
 import { http, HttpResponse } from "msw";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
+import Table from "@/pages/Movies/Details/table";
 import { customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
-import Table from "../table";
 
 // ---------------------------------------------------------------------------
 // Shared fixtures
@@ -307,9 +309,6 @@ describe("Movies Detail Table — bitmap 400 error handling", () => {
     // The BazarrClient interceptor fires showNotification on 400 responses.
     // The Mantine <Notifications> in AllProviders renders those into the DOM.
     // We wait for the notification text to appear.
-    const { useSubtitleAction } = await import("@/apis/hooks");
-    const { useMutation } = await import("@tanstack/react-query");
-
     // Directly call the API to trigger the 400 and observe the notification
     const api = (await import("@/apis/raw")).default;
     await api.subtitles
