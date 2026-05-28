@@ -498,6 +498,10 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
       <SimpleTable
         columns={columns}
         data={data}
+        getRowId={(sub) =>
+          sub.path ??
+          `embedded-${sub.code2 ?? "unknown"}${sub.hi ? "-hi" : ""}${sub.forced ? "-forced" : ""}`
+        }
         tableStyles={{ emptyText: "No subtitles found for this movie" }}
       ></SimpleTable>
       {movie && compareSelection && (

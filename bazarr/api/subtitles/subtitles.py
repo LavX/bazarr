@@ -219,11 +219,8 @@ class Subtitles(Resource):
                     "from_language is required when path is empty (embedded track)",
                     400,
                 )
-            if len(from_language_arg) != 2:
-                return (
-                    "from_language must be an alpha2 language code (2 characters)",
-                    400,
-                )
+            if len(from_language_arg) != 2 or not alpha3_from_alpha2(from_language_arg):
+                return "from_language must be a valid alpha2 language code", 400
 
             # Resolve the video path from the DB using the media ID
             if media_type == "episode":
@@ -244,7 +241,7 @@ class Subtitles(Resource):
                 embedded_video_path = path_mappings.path_replace_movie(mv_meta.path)
 
             extracted = extract_embedded_subtitle(
-                embedded_video_path, from_language_arg, media_type
+                embedded_video_path, from_language_arg, media_type, hi=hi, forced=forced
             )
             if not extracted:
                 return (
@@ -338,11 +335,10 @@ class Subtitles(Resource):
             # from_language may be pre-set by the embedded track extraction branch above
             from_language = args.get("from_language") or None
 
-            if from_language and len(from_language) != 2:
-                return (
-                    "from_language must be an alpha2 language code (2 characters)",
-                    400,
-                )
+            if from_language and (
+                len(from_language) != 2 or not alpha3_from_alpha2(from_language)
+            ):
+                return "from_language must be a valid alpha2 language code", 400
 
             if not from_language and metadata.subtitles:
                 subtitles_list = get_array_from(metadata.subtitles)

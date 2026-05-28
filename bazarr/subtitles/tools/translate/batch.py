@@ -301,7 +301,11 @@ def find_subtitle_by_language(subtitles, language_code, video_path, media_type="
 
             for sub in candidates:
                 extracted_path = extract_embedded_subtitle(
-                    video_path, sub["code2"], media_type
+                    video_path,
+                    sub["code2"],
+                    media_type,
+                    hi=sub["hi"],
+                    forced=sub["forced"],
                 )
                 if extracted_path:
                     return extracted_path, sub["code2"]
@@ -322,11 +326,25 @@ def find_subtitle_by_language(subtitles, language_code, video_path, media_type="
     return None, None
 
 
-def extract_embedded_subtitle(video_path, language_code2, media_type):
+def extract_embedded_subtitle(
+    video_path, language_code2, media_type, hi=False, forced=False
+):
     """Extract an embedded subtitle track from a video file using ffmpeg.
 
+    Why: Isolates embedded-track extraction so callers (API and batch) share one
+    implementation with a deterministic cache key that encodes hi/forced flags.
+    What: Looks up video metadata, finds the matching subtitle stream, runs ffmpeg
+    to produce a .srt file, and caches it keyed by video hash + language + hi + forced.
     Returns the path to the extracted .srt file, or None on failure.
+    Test: See tests/bazarr/test_embedded_subtitle_extraction.py — covers text codec,
+    bitmap rejection, cache hit, hi/forced key separation.
     """
+    if not language_code2:
+        logger.warning(
+            "extract_embedded_subtitle called with empty language_code2 — skipping"
+        )
+        return None
+
     target_alpha3 = alpha3_from_alpha2(language_code2)
     if not target_alpha3:
         logger.error(f"Cannot convert language code {language_code2} to alpha3")  # noqa: G004
@@ -380,9 +398,13 @@ def extract_embedded_subtitle(video_path, language_code2, media_type):
         "dvd",
     ]
 
-    # Find the matching subtitle stream index
+    # Find the matching subtitle stream index using a two-pass approach:
+    # Pass 1: exact match on language + hi + forced disposition flags.
+    # Pass 2: fall back to first language-only match if no exact match found,
+    # so extraction never silently returns the wrong track.
+    exact_track = None
+    fallback_track = None
     track_id = 0
-    found_track = None
     for track in data[cache_provider]["subtitle"]:
         codec = (track.get("format") or track.get("name") or "").lower()
         if any(bc in codec for bc in bitmap_codecs):
@@ -395,9 +417,17 @@ def extract_embedded_subtitle(video_path, language_code2, media_type):
 
         track_alpha3 = _handle_alpha3(track)
         if track_alpha3 == target_alpha3:
-            found_track = track_id
-            break
+            if (
+                track.get("hearing_impaired", False) == hi
+                and track.get("forced", False) == forced
+            ):
+                exact_track = track_id
+                break
+            if fallback_track is None:
+                fallback_track = track_id
         track_id += 1
+
+    found_track = exact_track if exact_track is not None else fallback_track
 
     if found_track is None:
         logger.debug(
@@ -415,17 +445,18 @@ def extract_embedded_subtitle(video_path, language_code2, media_type):
     extract_dir = os.path.join(bazarr_args.config_dir, "extracted_subs")
     os.makedirs(extract_dir, exist_ok=True)
     video_hash = hashlib.md5(video_path.encode()).hexdigest()
-    # TODO: include hi/forced flags in cache key once extract_embedded_subtitle
-    # accepts those parameters — currently callers don't pass them so two requests
-    # for the same video/language but different hi/forced may return the wrong track.
-    output_path = os.path.join(extract_dir, f"{video_hash}.{language_code2}.srt")
+    suffix = ""
+    if hi:
+        suffix += ".hi"
+    if forced:
+        suffix += ".forced"
+    output_path = os.path.join(
+        extract_dir, f"{video_hash}.{language_code2}{suffix}.srt"
+    )
 
-    # NOTE: Cache removed until hi/forced flags are threaded through the function
-    # signature. Re-extracting every time is slightly slower but always correct.
-    # A stale cache hit would silently return the wrong track when a second request
-    # arrives for the same video/language but different hi/forced flags.
-    # TODO: Re-enable cache once extract_embedded_subtitle(video_path, lang,
-    #       media_type, hi=False, forced=False) is implemented.
+    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+        logger.debug("Using cached extracted subtitle: %s", output_path)
+        return output_path
 
     # Extract using ffmpeg
     try:
