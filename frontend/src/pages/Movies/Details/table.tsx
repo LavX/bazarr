@@ -1,20 +1,39 @@
-import React, { FunctionComponent, useMemo } from "react";
+import React, { FunctionComponent, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
-import { Badge, Group, Text, TextProps } from "@mantine/core";
-import { faEllipsis } from "@fortawesome/free-solid-svg-icons";
+import { Badge, Group, Text, TextProps, Tooltip } from "@mantine/core";
+import {
+  faEllipsis,
+  faQuestionCircle,
+  faSpinner,
+} from "@fortawesome/free-solid-svg-icons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import { isString } from "lodash";
-import { useMovieSubtitleModification } from "@/apis/hooks";
+import {
+  useMovieSubtitleModification,
+  useSubtitleSyncStatus,
+} from "@/apis/hooks";
 import { useShowOnlyDesired } from "@/apis/hooks/site";
 import { Action } from "@/components";
 import { HistoryIcon } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
+import SyncOutputCompareModal from "@/components/modals/SyncOutputCompareModal";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
 import SimpleTable from "@/components/tables/SimpleTable";
 import { filterSubtitleBy, toPython } from "@/utilities";
 import { useProfileItemsToLanguages } from "@/utilities/languages";
+import {
+  buildSubtitleLanguageKey,
+  canSynchronizeSubtitle,
+  getSubtitleSyncStatusPresentation,
+  getSyncEngineLabel,
+  isCompatibleSyncOutputSubtitle,
+  isSyncOutputSubtitle,
+  sortSyncOutputSubtitles,
+} from "@/utilities/subtitles";
 
 const missingText = "Missing Subtitles";
+const syncAction = 5;
 
 interface Props {
   movie: Item.Movie | null;
@@ -29,7 +48,7 @@ const ScoreBadge: React.FC<{ score?: string | number | null }> = ({
   if (score === undefined || score === null || score === "") {
     return (
       <Text c="dimmed" size="xs">
-        —
+        -
       </Text>
     );
   }
@@ -50,15 +69,152 @@ function isSubtitleMissing(path: string | undefined | null) {
   return path === missingText;
 }
 
-function buildLanguageKey(sub: Subtitle): string {
-  let key = sub.code2;
-  if (sub.hi) key += ":hi";
-  if (sub.forced) key += ":forced";
-  return key;
-}
+const SyncEngineBadge: FunctionComponent<{ subtitle: Subtitle }> = ({
+  subtitle,
+}) => {
+  if (!isSyncOutputSubtitle(subtitle)) {
+    return null;
+  }
+
+  return (
+    <Badge
+      color="gray"
+      size="xs"
+      variant="light"
+      style={{ whiteSpace: "nowrap" }}
+    >
+      {getSyncEngineLabel(subtitle.modifier)}
+    </Badge>
+  );
+};
+
+const SubtitleLanguageBadges: FunctionComponent<{
+  subtitle: Subtitle;
+  missing?: boolean;
+}> = ({ subtitle, missing = false }) => {
+  if (missing) {
+    return (
+      <Badge variant="missing" style={{ whiteSpace: "nowrap" }}>
+        <Language.Text value={subtitle} long></Language.Text>
+      </Badge>
+    );
+  }
+
+  return (
+    <Group gap={4} wrap="nowrap">
+      <Badge style={{ whiteSpace: "nowrap" }}>
+        <Language.Text value={subtitle} long></Language.Text>
+      </Badge>
+      <SyncEngineBadge subtitle={subtitle} />
+    </Group>
+  );
+};
+
+const UnconfirmedSyncIcon: FunctionComponent<{ label: string }> = ({
+  label,
+}) => (
+  <Tooltip
+    label={label}
+    openDelay={500}
+    position="right"
+    events={{ hover: true, focus: false, touch: true }}
+  >
+    <Text span c="yellow.5">
+      <FontAwesomeIcon
+        aria-label="Sync unconfirmed"
+        icon={faQuestionCircle}
+      ></FontAwesomeIcon>
+    </Text>
+  </Tooltip>
+);
+
+const ActiveSyncIcon: FunctionComponent<{ label: string }> = ({ label }) => (
+  <Tooltip
+    label={label}
+    openDelay={500}
+    position="right"
+    events={{ hover: true, focus: false, touch: true }}
+  >
+    <Text span c="blue.4">
+      <FontAwesomeIcon
+        aria-label={label}
+        icon={faSpinner}
+        spin
+      ></FontAwesomeIcon>
+    </Text>
+  </Tooltip>
+);
+
+const SubtitleStatusCell: FunctionComponent<{
+  actions: Set<number> | undefined;
+  mediaId: number | undefined;
+  subtitle: Subtitle;
+}> = ({ actions, mediaId, subtitle }) => {
+  const languageKey = buildSubtitleLanguageKey(subtitle);
+  const canCheckSyncStatus =
+    !!subtitle.path &&
+    !isSubtitleTrack(subtitle.path) &&
+    !isSubtitleMissing(subtitle.path);
+  const syncStatus = useSubtitleSyncStatus(
+    "movie",
+    mediaId,
+    languageKey,
+    canCheckSyncStatus,
+  );
+  const presentation = syncStatus.data
+    ? getSubtitleSyncStatusPresentation(syncStatus.data)
+    : null;
+
+  if (!actions?.size) {
+    if (presentation?.icon === "running") {
+      return <ActiveSyncIcon label={presentation.label} />;
+    }
+
+    return (
+      <Text c="dimmed" size="xs">
+        -
+      </Text>
+    );
+  }
+
+  return (
+    <Group gap={4} wrap="nowrap">
+      {Array.from(actions).map((action) => {
+        if (action !== syncAction) {
+          return <HistoryIcon key={action} action={action} />;
+        }
+
+        if (syncStatus.isError) {
+          return (
+            <UnconfirmedSyncIcon
+              key={action}
+              label="Sync status could not be verified"
+            />
+          );
+        }
+
+        if (presentation?.icon === "running") {
+          return <ActiveSyncIcon key={action} label={presentation.label} />;
+        }
+
+        if (presentation?.icon === "question") {
+          return (
+            <UnconfirmedSyncIcon key={action} label={presentation.label} />
+          );
+        }
+
+        return <HistoryIcon key={action} action={action} />;
+      })}
+    </Group>
+  );
+};
 
 const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
   const onlyDesired = useShowOnlyDesired();
+  const [compareSelection, setCompareSelection] = useState<{
+    original: Subtitle;
+    outputs: Subtitle[];
+  } | null>(null);
 
   const profileItems = useProfileItemsToLanguages(profile);
 
@@ -68,7 +224,7 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
   const availableSources = useMemo(
     () =>
       (movie?.subtitles ?? []).filter(
-        (s) => s.path && !isSubtitleTrack(s.path),
+        (s) => s.path && !isSubtitleTrack(s.path) && !isSyncOutputSubtitle(s),
       ),
     [movie?.subtitles],
   );
@@ -123,6 +279,16 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
     }
 
     const { radarrId } = movie;
+    const syncOutputs = sortSyncOutputSubtitles(
+      (movie.subtitles ?? []).filter((subtitle) =>
+        isCompatibleSyncOutputSubtitle(item, subtitle),
+      ),
+    );
+    const canCompareSyncOutputs =
+      syncOutputs.length > 0 &&
+      !isSyncOutputSubtitle(item) &&
+      !!path &&
+      !isSubtitleMissing(path);
 
     if (isSubtitleMissing(path)) {
       return (
@@ -135,7 +301,7 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
           onAction={async (action) => {
             if (action === "edit") {
               navigate(
-                `/subtitles/edit/movie/${radarrId}/${encodeURIComponent(buildLanguageKey(item))}`,
+                `/subtitles/edit/movie/${radarrId}/${encodeURIComponent(buildSubtitleLanguageKey(item))}`,
               );
             } else if (action === "search") {
               await download.mutateAsync({
@@ -157,15 +323,19 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
     return (
       <SubtitleToolsMenu
         selections={selections}
+        canSync={canSynchronizeSubtitle(item)}
+        canCompareSyncOutputs={canCompareSyncOutputs}
         onAction={async (action) => {
           if (action === "view") {
             navigate(
-              `/subtitles/preview/movie/${radarrId}/${encodeURIComponent(buildLanguageKey(item))}`,
+              `/subtitles/preview/movie/${radarrId}/${encodeURIComponent(buildSubtitleLanguageKey(item))}`,
             );
           } else if (action === "edit") {
             navigate(
-              `/subtitles/edit/movie/${radarrId}/${encodeURIComponent(buildLanguageKey(item))}`,
+              `/subtitles/edit/movie/${radarrId}/${encodeURIComponent(buildSubtitleLanguageKey(item))}`,
             );
+          } else if (action === "compare-sync") {
+            setCompareSelection({ original: item, outputs: syncOutputs });
           } else if (action === "delete" && path) {
             await remove.mutateAsync({
               radarrId,
@@ -221,19 +391,12 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
         header: "Language",
         accessorKey: "name",
         cell: ({ row }) => {
-          if (row.original.path === missingText) {
-            return (
-              <Badge variant="missing">
-                <Language.Text value={row.original} long></Language.Text>
-              </Badge>
-            );
-          } else {
-            return (
-              <Badge>
-                <Language.Text value={row.original} long></Language.Text>
-              </Badge>
-            );
-          }
+          return (
+            <SubtitleLanguageBadges
+              subtitle={row.original}
+              missing={row.original.path === missingText}
+            />
+          );
         },
       },
       {
@@ -252,7 +415,7 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
           if (!record?.provider)
             return (
               <Text c="dimmed" size="xs">
-                —
+                -
               </Text>
             );
           return <Text size="xs">{record.provider}</Text>;
@@ -263,18 +426,12 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
         header: "Status",
         cell: ({ row: { original } }) => {
           const actions = statusMap.get(original.path ?? "");
-          if (!actions?.size)
-            return (
-              <Text c="dimmed" size="xs">
-                —
-              </Text>
-            );
           return (
-            <Group gap={4}>
-              {Array.from(actions).map((action) => (
-                <HistoryIcon key={action} action={action} />
-              ))}
-            </Group>
+            <SubtitleStatusCell
+              actions={actions}
+              mediaId={movie?.radarrId}
+              subtitle={original}
+            />
           );
         },
       },
@@ -285,7 +442,7 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
         },
       },
     ],
-    [CodeCell, historyMap, statusMap],
+    [CodeCell, historyMap, movie?.radarrId, statusMap],
   );
 
   const data: Subtitle[] = useMemo(() => {
@@ -304,11 +461,23 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
   }, [movie, onlyDesired, profileItems]);
 
   return (
-    <SimpleTable
-      columns={columns}
-      data={data}
-      tableStyles={{ emptyText: "No subtitles found for this movie" }}
-    ></SimpleTable>
+    <>
+      <SimpleTable
+        columns={columns}
+        data={data}
+        tableStyles={{ emptyText: "No subtitles found for this movie" }}
+      ></SimpleTable>
+      {movie && compareSelection && (
+        <SyncOutputCompareModal
+          opened={compareSelection !== null}
+          onClose={() => setCompareSelection(null)}
+          mediaType="movie"
+          mediaId={movie.radarrId}
+          original={compareSelection.original}
+          outputs={compareSelection.outputs}
+        />
+      )}
+    </>
   );
 };
 

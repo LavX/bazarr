@@ -52,6 +52,7 @@ declare namespace FormType {
     max_offset_seconds?: string;
     no_fix_framerate?: PythonBoolean;
     gss?: PythonBoolean;
+    output_mode?: "overwrite" | "keep_all";
   }
 
   interface DownloadSeries {

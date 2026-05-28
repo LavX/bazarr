@@ -12,6 +12,7 @@ from constants import MAXIMUM_SUBTITLE_SIZE
 from app.config import settings
 from utilities.path_mappings import path_mappings
 from languages.custom_lang import CustomLanguage
+from subtitles.tools.subsync_engines import SYNC_ENGINES, sync_engine_from_output_path
 
 
 def get_external_subtitles_path(file, subtitle):
@@ -46,13 +47,88 @@ def normalize_subtitle_language_variant(language, forced=False, hi=False):
     parts = language_text.split(':')
     base = parts[0]
     variants = {part.lower() for part in parts[1:]}
+    normalized_variants = []
 
     # Keep the same priority as ProcessSubtitlesResult.language_code.
     if hi or "hi" in variants:
-        return f"{base}:hi"
+        normalized_variants.append('hi')
     if forced or "forced" in variants:
-        return f"{base}:forced"
-    return base
+        normalized_variants.append('forced')
+    sync_variants = sorted(part for part in variants if part.startswith('sync-'))
+    normalized_variants.extend(sync_variants)
+    if not normalized_variants:
+        return base
+    return ':'.join([base] + normalized_variants)
+
+
+def sync_engine_from_subtitle_name(subtitle):
+    return sync_engine_from_output_path(subtitle)
+
+
+def _language_code_from_sync_engine_output(subtitle):
+    filename = os.path.basename(subtitle).lower()
+    stem, extension = os.path.splitext(filename)
+    if extension not in core.SUBTITLE_EXTENSIONS:
+        return None
+
+    parts = stem.split('.')
+    if len(parts) < 3 or parts[-1] not in SYNC_ENGINES:
+        return None
+
+    parts = parts[:-1]
+    variants = []
+    if parts and parts[-1] in ['hi', 'sdh', 'cc']:
+        variants.append('hi')
+        parts = parts[:-1]
+    if parts and parts[-1] == 'forced':
+        variants.append('forced')
+        parts = parts[:-1]
+    if not parts:
+        return None
+
+    language = parts[-1].replace('_', '-')
+    if not language:
+        return None
+
+    return ':'.join([language] + variants)
+
+
+def add_sync_engine_outputs(dest_folder, subtitles):
+    if not os.path.isdir(dest_folder):
+        return subtitles
+
+    for subtitle in os.listdir(dest_folder):
+        if subtitle in subtitles or not sync_engine_from_subtitle_name(subtitle):
+            continue
+
+        subtitle_path = os.path.join(dest_folder, subtitle)
+        if not os.path.isfile(subtitle_path):
+            continue
+
+        language_code = _language_code_from_sync_engine_output(subtitle)
+        if not language_code:
+            logging.debug("BAZARR skipping generated sync subtitle with unknown language: %s", subtitle_path)
+            continue
+
+        try:
+            subtitles[subtitle] = _get_lang_from_str(language_code)
+        except Exception:
+            logging.debug("BAZARR skipping generated sync subtitle with unsupported language: %s", subtitle_path)
+
+    return subtitles
+
+
+def subtitle_language_with_sync_modifier(language_str, subtitle):
+    engine = sync_engine_from_subtitle_name(subtitle)
+    if not engine:
+        return language_str
+    parts = [part for part in str(language_str).split(':') if part]
+    if not parts:
+        return language_str
+    base_language = parts[0]
+    modifiers = [part.lower() for part in parts[1:] if not part.lower().startswith('sync-')]
+    modifiers.append(f'sync-{engine}')
+    return ':'.join([base_language] + modifiers)
 
 
 def guess_external_subtitles(dest_folder, subtitles, media_type, previously_indexed_subtitles_to_exclude=None):

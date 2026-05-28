@@ -10,6 +10,7 @@ from languages.get_languages import alpha3_from_alpha2
 from utilities.path_mappings import path_mappings
 from utilities.video_analyzer import subtitles_sync_references
 from subtitles.tools.subsyncer import SubSyncer  # noqa: F401
+from subtitles.tools.subsync_engines import is_sync_engine_output
 from subtitles.tools.translate.main import translate_subtitles_file
 from subtitles.tools.mods import subtitles_apply_mods
 from subtitles.indexer.series import store_subtitles
@@ -99,11 +100,16 @@ class Subtitles(Resource):
                                       help='Don\'t try to fix framerate from ["True", "False"]')
     patch_request_parser.add_argument('gss', type=str, required=False,
                                       help='Use Golden-Section Search from ["True", "False"]')
+    patch_request_parser.add_argument('output_mode', type=str, required=False,
+                                      help='Output mode from ["overwrite", "keep_all"]')
+    patch_request_parser.add_argument('enabled_engines', type=str, required=False,
+                                      help='Comma-separated sync engines to use')
 
     @authenticate
     @api_ns_subtitles.doc(parser=patch_request_parser)
     @api_ns_subtitles.response(204, 'Success')
     @api_ns_subtitles.response(401, 'Not Authenticated')
+    @api_ns_subtitles.response(400, 'Generated sync output files cannot be synchronized again')
     @api_ns_subtitles.response(404, 'Episode/movie not found')
     @api_ns_subtitles.response(409, 'Unable to edit subtitles file. Check logs.')
     @api_ns_subtitles.response(500, 'Subtitles file not found. Path mapping issue?')
@@ -121,6 +127,9 @@ class Subtitles(Resource):
 
         if not os.path.exists(subtitles_path):
             return 'Subtitles file not found. Path mapping issue?', 500
+
+        if action == 'sync' and is_sync_engine_output(subtitles_path):
+            return 'Generated sync output files cannot be synchronized again.', 400
 
         if media_type == 'episode':
             metadata = database.execute(
@@ -157,6 +166,10 @@ class Subtitles(Resource):
                                str(settings.subsync.max_offset_seconds),
                                no_fix_framerate=args.get('no_fix_framerate') == 'True',
                                gss=args.get('gss') == 'True',
+                               output_mode=args.get('output_mode') if args.get('output_mode') not in empty_values
+                               else None,
+                               enabled_engines=args.get('enabled_engines') if args.get('enabled_engines') not in
+                               empty_values else None,
                                sonarr_series_id=metadata.sonarrSeriesId if media_type == "episode" else None,
                                sonarr_episode_id=id if media_type == "episode" else None,
                                radarr_id=id if media_type == "movie" else None,

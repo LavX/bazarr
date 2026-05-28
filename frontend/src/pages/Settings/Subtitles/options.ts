@@ -209,3 +209,29 @@ export const syncMaxOffsetSecondsOptions: SelectorOption<number>[] = [
     value: 600,
   },
 ];
+
+export const syncEngineOptions: SelectorOption<string>[] = [
+  {
+    label: "FFsubsync",
+    value: "ffsubsync",
+  },
+  {
+    label: "Autosubsync",
+    value: "autosubsync",
+  },
+  {
+    label: "ALASS",
+    value: "alass",
+  },
+];
+
+export const syncOutputModeOptions: SelectorOption<string>[] = [
+  {
+    label: "Overwrite current subtitle",
+    value: "overwrite",
+  },
+  {
+    label: "Keep all engine outputs",
+    value: "keep_all",
+  },
+];

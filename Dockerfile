@@ -8,6 +8,7 @@
 ARG BAZARR_VERSION=latest
 ARG BUILD_DATE
 ARG VCS_REF
+ARG ALASS_CLI_VERSION=2.0.0
 
 # =============================================================================
 # Stage 1: Install Python Dependencies (cached heavily)
@@ -32,10 +33,28 @@ COPY requirements.txt postgres-requirements.txt ./
 
 # Use pip cache mount to avoid re-downloading packages across builds
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --prefix=/install -r requirements.txt -r postgres-requirements.txt
+    pip install --prefix=/install --ignore-installed "setuptools>=82.0.1" \
+    && pip install --prefix=/install -r requirements.txt -r postgres-requirements.txt
 
 # =============================================================================
-# Stage 2: Production Image
+# Stage 2: Build ALASS CLI
+# =============================================================================
+FROM rust:1.95-slim-trixie AS alass-builder
+
+ARG ALASS_CLI_VERSION
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo install alass-cli --version "${ALASS_CLI_VERSION}" --locked
+
+# =============================================================================
+# Stage 3: Production Image
 # =============================================================================
 FROM python:3.14-slim-trixie AS production
 
@@ -73,6 +92,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 # Copy Python packages from builder (changes rarely)
 COPY --from=python-builder /install /usr/local
+COPY --from=alass-builder /usr/local/cargo/bin/alass-cli /usr/local/bin/alass-cli
+RUN ln -s /usr/local/bin/alass-cli /usr/local/bin/alass
 
 # Copy entrypoint and supervisor scripts (changes rarely)
 COPY docker/entrypoint.sh /entrypoint.sh

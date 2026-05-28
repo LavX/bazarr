@@ -10,6 +10,7 @@ import json
 import os
 import struct  # noqa: F401
 from collections import namedtuple
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch, mock_open  # noqa: F401
 
 import pytest  # noqa: F401
@@ -89,6 +90,7 @@ _patches = {
 }
 
 import sys  # noqa: E402
+_preexisting_modules = {mod_name: sys.modules.get(mod_name) for mod_name in _patches}
 for mod_name, mock_obj in _patches.items():
     sys.modules.setdefault(mod_name, mock_obj)
 
@@ -106,6 +108,10 @@ from api.editor.editor import (  # noqa: E402
 
 # Re-import database and path_mappings as the module sees them
 from api.editor import editor as editor_module  # noqa: E402
+
+for _mod_name in ('app.config', 'app.database', 'utilities.path_mappings', 'utilities.binaries'):
+    if _preexisting_modules.get(_mod_name) is None and sys.modules.get(_mod_name) is _patches.get(_mod_name):
+        sys.modules.pop(_mod_name, None)
 
 
 # ---------------------------------------------------------------------------
@@ -533,6 +539,57 @@ class TestRunEditorSync:
         assert _editor_sync_jobs[job_key]['status'] == 'completed'
         assert _editor_sync_jobs[job_key]['content'] == synced_content
 
+    def test_successful_sync_returns_multiple_engine_results(self, tmp_path):
+        """Multiple engine outputs are returned for the editor choice prompt."""
+        tmp_in = str(tmp_path / 'input.srt')
+        tmp_out = str(tmp_path / 'input.synced.srt')
+        ffsubsync_out = str(tmp_path / 'input.ffsubsync.srt')
+        alass_out = str(tmp_path / 'input.alass.srt')
+
+        with open(tmp_in, 'w') as f:
+            f.write('original')
+        with open(ffsubsync_out, 'w') as f:
+            f.write('ffsubsync content')
+        with open(alass_out, 'w') as f:
+            f.write('alass content')
+
+        sync_result = SimpleNamespace(successful_results=[
+            SimpleNamespace(engine='ffsubsync', output_path=ffsubsync_out),
+            SimpleNamespace(engine='alass', output_path=alass_out),
+        ])
+
+        job_key = 'test_sync_multiple'
+        _editor_sync_jobs[job_key] = {'status': 'running', 'content': None, 'message': ''}
+
+        mock_subsync = MagicMock()
+        mock_subsync.sync.return_value = sync_result
+        mock_subsync_cls = MagicMock(return_value=mock_subsync)
+        mock_jobs_queue = MagicMock()
+
+        with patch('api.editor.editor.SubSyncer', mock_subsync_cls, create=True), \
+             patch.dict('sys.modules', {'subtitles.tools.subsyncer': MagicMock(SubSyncer=mock_subsync_cls)}), \
+             patch('api.editor.editor.jobs_queue', mock_jobs_queue, create=True), \
+             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue)}), \
+             patch('threading.Timer'):
+
+            run_editor_sync(
+                job_key=job_key,
+                video_path='/video/test.mkv',
+                tmp_in=tmp_in,
+                tmp_out=tmp_out,
+                encoding='utf-8',
+                max_offset='120',
+                gss=False,
+                reference='a:0',
+            )
+
+        assert _editor_sync_jobs[job_key]['status'] == 'completed'
+        assert _editor_sync_jobs[job_key]['content'] == 'ffsubsync content'
+        assert _editor_sync_jobs[job_key]['results'] == [
+            {'engine': 'ffsubsync', 'content': 'ffsubsync content'},
+            {'engine': 'alass', 'content': 'alass content'},
+        ]
+
     def test_sync_failure_stores_error(self, tmp_path):
         """When SubSyncer raises, the job should be marked as failed."""
         tmp_in = str(tmp_path / 'input.srt')
@@ -567,6 +624,92 @@ class TestRunEditorSync:
 
         assert _editor_sync_jobs[job_key]['status'] == 'failed'
         assert 'ffsubsync crashed' in _editor_sync_jobs[job_key]['message']
+
+    def test_unsuccessful_sync_result_does_not_return_original_content(self, tmp_path):
+        tmp_in = str(tmp_path / 'input.srt')
+        tmp_out = str(tmp_path / 'input.synced.srt')
+
+        original_content = '1\n00:00:01,000 --> 00:00:02,000\nOriginal\n'
+        with open(tmp_in, 'w') as f:
+            f.write(original_content)
+
+        sync_result = SimpleNamespace(
+            success=False,
+            successful_results=[],
+            failed_results=[SimpleNamespace(engine='alass', message='missing binary')],
+            skipped_results=[],
+        )
+
+        job_key = 'test_sync_unsuccessful_result'
+        _editor_sync_jobs[job_key] = {'status': 'running', 'content': None, 'message': ''}
+
+        mock_subsync = MagicMock()
+        mock_subsync.sync.return_value = sync_result
+        mock_subsync_cls = MagicMock(return_value=mock_subsync)
+        mock_jobs_queue = MagicMock()
+
+        with patch('api.editor.editor.SubSyncer', mock_subsync_cls, create=True), \
+             patch.dict('sys.modules', {'subtitles.tools.subsyncer': MagicMock(SubSyncer=mock_subsync_cls)}), \
+             patch('api.editor.editor.jobs_queue', mock_jobs_queue, create=True), \
+             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue)}), \
+             patch('threading.Timer'):
+            run_editor_sync(
+                job_key=job_key,
+                video_path='/video/test.mkv',
+                tmp_in=tmp_in,
+                tmp_out=tmp_out,
+                encoding='utf-8',
+                max_offset='120',
+                gss=False,
+                reference='a:0',
+            )
+
+        assert _editor_sync_jobs[job_key]['status'] == 'failed'
+        assert _editor_sync_jobs[job_key]['content'] is None
+        assert 'alass: missing binary' in _editor_sync_jobs[job_key]['message']
+
+    def test_sync_without_output_does_not_return_original_content(self, tmp_path):
+        tmp_in = str(tmp_path / 'input.srt')
+        tmp_out = str(tmp_path / 'input.synced.srt')
+
+        original_content = '1\n00:00:01,000 --> 00:00:02,000\nOriginal\n'
+        with open(tmp_in, 'w') as f:
+            f.write(original_content)
+
+        sync_result = SimpleNamespace(
+            success=True,
+            successful_results=[],
+            failed_results=[],
+            skipped_results=[],
+        )
+
+        job_key = 'test_sync_no_output'
+        _editor_sync_jobs[job_key] = {'status': 'running', 'content': None, 'message': ''}
+
+        mock_subsync = MagicMock()
+        mock_subsync.sync.return_value = sync_result
+        mock_subsync_cls = MagicMock(return_value=mock_subsync)
+        mock_jobs_queue = MagicMock()
+
+        with patch('api.editor.editor.SubSyncer', mock_subsync_cls, create=True), \
+             patch.dict('sys.modules', {'subtitles.tools.subsyncer': MagicMock(SubSyncer=mock_subsync_cls)}), \
+             patch('api.editor.editor.jobs_queue', mock_jobs_queue, create=True), \
+             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue)}), \
+             patch('threading.Timer'):
+            run_editor_sync(
+                job_key=job_key,
+                video_path='/video/test.mkv',
+                tmp_in=tmp_in,
+                tmp_out=tmp_out,
+                encoding='utf-8',
+                max_offset='120',
+                gss=False,
+                reference='a:0',
+            )
+
+        assert _editor_sync_jobs[job_key]['status'] == 'failed'
+        assert _editor_sync_jobs[job_key]['content'] is None
+        assert 'Synced subtitle file not found' in _editor_sync_jobs[job_key]['message']
 
     def test_sync_updates_progress(self, tmp_path):
         """Progress updates should be sent to the jobs_queue."""
@@ -682,6 +825,30 @@ class TestEditorSyncGet:
         # Job should be removed after retrieval
         assert 'key2' not in _editor_sync_jobs
 
+    def test_completed_job_returns_engine_results(self):
+        _editor_sync_jobs['key_multi'] = {
+            'status': 'completed',
+            'content': 'ffsubsync content',
+            'message': 'done',
+            'results': [
+                {'engine': 'ffsubsync', 'content': 'ffsubsync content'},
+                {'engine': 'alass', 'content': 'alass content'},
+            ],
+        }
+
+        mock_request = MagicMock()
+        mock_request.args.get = lambda key: {'jobKey': 'key_multi'}.get(key)
+
+        sync_resource = editor_module.EditorSync()
+        with patch.object(editor_module, 'request', mock_request):
+            result = sync_resource.get()
+
+        body, status = result
+        assert status == 200
+        assert body['status'] == 'completed'
+        assert body['results'][1]['engine'] == 'alass'
+        assert 'key_multi' not in _editor_sync_jobs
+
     def test_failed_job_returns_error_and_cleans_up(self):
         _editor_sync_jobs['key3'] = {'status': 'failed', 'content': None, 'message': 'ffsubsync crashed'}
 
@@ -789,6 +956,38 @@ class TestEditorSyncPost:
         with patch.object(editor_module, 'request', mock_request):
             result = sync_resource.post()
         assert result == ('Invalid vad option', 400)
+
+    def test_rejects_generated_sync_output_language(self):
+        mock_request = self._make_post_request({
+            'mediaType': 'episode',
+            'mediaId': '1',
+            'content': 'data',
+            'language': 'hu:sync-ffsubsync',
+        })
+        sync_resource = editor_module.EditorSync()
+
+        with patch.object(editor_module, 'request', mock_request), \
+             patch.object(editor_module, '_resolve_video_path', return_value=('Should not resolve', 404)) as mock_resolve:
+            result = sync_resource.post()
+
+        assert result == ('Generated sync output files cannot be synchronized again.', 400)
+        mock_resolve.assert_not_called()
+
+    def test_rejects_generated_sync_output_language_with_existing_variant(self):
+        mock_request = self._make_post_request({
+            'mediaType': 'episode',
+            'mediaId': '1',
+            'content': 'data',
+            'language': 'hu:hi:sync-ffsubsync',
+        })
+        sync_resource = editor_module.EditorSync()
+
+        with patch.object(editor_module, 'request', mock_request), \
+             patch.object(editor_module, '_resolve_video_path', return_value=('Should not resolve', 404)) as mock_resolve:
+            result = sync_resource.post()
+
+        assert result == ('Generated sync output files cannot be synchronized again.', 400)
+        mock_resolve.assert_not_called()
 
     def test_valid_vad_options_accepted(self):
         """All valid VAD options should pass validation (may fail later on missing video)."""

@@ -102,6 +102,7 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
               seriesId={seriesId}
               episodeId={episodeId}
               subtitle={val}
+              availableSubtitles={episode.subtitles}
             ></Subtitle>
           ));
 

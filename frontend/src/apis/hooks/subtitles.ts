@@ -155,6 +155,30 @@ export function useSubtitleContents(subtitlePath: string) {
   });
 }
 
+export function useSubtitleSyncStatus(
+  mediaType: "episode" | "movie",
+  mediaId: number | undefined,
+  language: string,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: [
+      QueryKeys.Subtitles,
+      "sync-status",
+      mediaType,
+      mediaId,
+      language,
+    ],
+    queryFn: () => api.subtitles.getSyncStatus(mediaType, mediaId!, language),
+    enabled: enabled && mediaId !== undefined,
+    refetchOnWindowFocus: false,
+    refetchInterval: (query) => {
+      const status = query.state.data?.jobStatus;
+      return status === "pending" || status === "running" ? 2000 : false;
+    },
+  });
+}
+
 export function useRefTracksByEpisodeId(
   subtitlesPath: string,
   sonarrEpisodeId: number,
@@ -279,6 +303,42 @@ export function useSubtitleSave() {
       // the content (it just saved it) and the PUT response provides the
       // new ETag. Invalidating would trigger a refetch that races with
       // the ETag update and causes 412 on the next save.
+    },
+  });
+}
+
+export function usePromoteSyncSubtitle() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationKey: [QueryKeys.Subtitles, "promote-sync-output"],
+    mutationFn: (params: {
+      mediaType: string;
+      mediaId: number;
+      targetLanguage: string;
+      sourceLanguage: string;
+    }) =>
+      api.subtitles.promoteSyncOutput(
+        params.mediaType,
+        params.mediaId,
+        params.targetLanguage,
+        params.sourceLanguage,
+      ),
+    onSuccess: (_, params) => {
+      if (params.mediaType === "episode") {
+        client.invalidateQueries({ queryKey: [QueryKeys.Series] });
+      } else {
+        client.invalidateQueries({ queryKey: [QueryKeys.Movies] });
+      }
+      client.invalidateQueries({ queryKey: [QueryKeys.History] });
+      client.invalidateQueries({
+        queryKey: [
+          QueryKeys.Subtitles,
+          "content",
+          params.mediaType,
+          params.mediaId,
+          params.targetLanguage,
+        ],
+      });
     },
   });
 }

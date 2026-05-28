@@ -150,7 +150,11 @@ interface Props {
   selections: FormType.ModifySubtitle[];
   children?: ReactElement;
   menu?: Omit<MenuProps, "children">;
-  onAction?: (action: "delete" | "search" | "view" | "edit") => void;
+  canSync?: boolean;
+  onAction?: (
+    action: "delete" | "search" | "view" | "edit" | "compare-sync",
+  ) => void;
+  canCompareSyncOutputs?: boolean;
   // For missing subtitle translation
   missingLanguage?: Subtitle;
   translationSources?: Subtitle[];
@@ -162,7 +166,9 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
   selections,
   children,
   menu,
+  canSync = true,
   onAction,
+  canCompareSyncOutputs = false,
   missingLanguage,
   translationSources,
   mediaId,
@@ -204,6 +210,9 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
             <Menu.Label>{group.label}</Menu.Label>
             {group.tools.map((tool) => {
               if (tool.key === "translation" && isMissing) {
+                return null;
+              }
+              if (tool.key === "sync" && !canSync) {
                 return null;
               }
               return (
@@ -262,6 +271,19 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
             leftSection={<FontAwesomeIcon icon={faLanguage} />}
           >
             No source subtitles to translate from
+          </Menu.Item>
+        )}
+        {canCompareSyncOutputs && (
+          <Menu.Item
+            disabled={onAction === undefined}
+            leftSection={
+              <FontAwesomeIcon icon={faExchangeAlt}></FontAwesomeIcon>
+            }
+            onClick={() => {
+              onAction?.("compare-sync");
+            }}
+          >
+            Compare Sync Outputs
           </Menu.Item>
         )}
         <Menu.Item

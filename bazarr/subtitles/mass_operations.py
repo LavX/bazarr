@@ -8,6 +8,7 @@ from app.config import settings
 from app.database import TableEpisodes, TableMovies, TableHistory, TableHistoryMovie, TableShows, database, select
 from app.jobs_queue import jobs_queue
 from subtitles.sync import sync_subtitles
+from subtitles.tools.subsync_engines import is_sync_engine_output
 from subtitles.tools.mods import subtitles_apply_mods
 from subtitles.indexer.series import series_scan_subtitles
 from subtitles.indexer.movies import movies_scan_subtitles
@@ -66,7 +67,7 @@ def _collect_subtitle_items(items, action, options):
     Args:
         items: List of dicts with 'type' and IDs, or None to collect entire library.
         action: The action to perform (sync, translate, mod, etc.).
-        options: Dict with force_resync, max_offset_seconds, gss, no_fix_framerate.
+        options: Dict with force_resync, max_offset_seconds, gss, no_fix_framerate, output_mode.
 
     Returns:
         Tuple of (items_list, skipped_count).
@@ -76,6 +77,8 @@ def _collect_subtitle_items(items, action, options):
     max_offset = str(options.get('max_offset_seconds', settings.subsync.max_offset_seconds))
     gss = options.get('gss', settings.subsync.gss)
     no_fix_framerate = options.get('no_fix_framerate', settings.subsync.no_fix_framerate)
+    output_mode = options.get('output_mode')
+    enabled_engines = options.get('enabled_engines')
 
     # Parse item types
     series_ids = []
@@ -117,6 +120,8 @@ def _collect_subtitle_items(items, action, options):
             max_offset=max_offset,
             gss=gss,
             no_fix_framerate=no_fix_framerate,
+            output_mode=output_mode,
+            enabled_engines=enabled_engines,
             target_lang=target_lang,
             source_lang=source_lang,
         )
@@ -133,6 +138,8 @@ def _collect_subtitle_items(items, action, options):
             max_offset=max_offset,
             gss=gss,
             no_fix_framerate=no_fix_framerate,
+            output_mode=output_mode,
+            enabled_engines=enabled_engines,
             target_lang=target_lang,
             source_lang=source_lang,
         )
@@ -144,7 +151,7 @@ def _collect_subtitle_items(items, action, options):
 
 def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
                       force_resync=False, max_offset='60', gss=True, no_fix_framerate=True,
-                      target_lang=None, source_lang=None):
+                      output_mode=None, enabled_engines=None, target_lang=None, source_lang=None):
     """Collect episode subtitles from the database."""
     columns = [
         TableEpisodes.sonarrEpisodeId,
@@ -214,6 +221,10 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
                 skipped += 1
                 continue
 
+            if action == 'sync' and is_sync_engine_output(mapped_sub_path):
+                skipped += 1
+                continue
+
             if action == 'sync' and not force_resync:
                 reversed_path = path_mappings.path_replace_reverse(mapped_sub_path)
                 if reversed_path in synced_paths:
@@ -232,6 +243,8 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
                 'max_offset_seconds': max_offset,
                 'no_fix_framerate': no_fix_framerate,
                 'gss': gss,
+                'output_mode': output_mode,
+                'enabled_engines': enabled_engines,
             }
             if action == 'translate':
                 item['metadata'] = ep
@@ -242,7 +255,7 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
 
 def _collect_movies(movie_ids=None, action='sync', force_resync=False,
                     max_offset='60', gss=True, no_fix_framerate=True,
-                    target_lang=None, source_lang=None):
+                    output_mode=None, enabled_engines=None, target_lang=None, source_lang=None):
     """Collect movie subtitles from the database."""
     columns = [
         TableMovies.radarrId,
@@ -299,6 +312,10 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
                 skipped += 1
                 continue
 
+            if action == 'sync' and is_sync_engine_output(mapped_sub_path):
+                skipped += 1
+                continue
+
             if action == 'sync' and not force_resync:
                 reversed_path = path_mappings.path_replace_reverse_movie(mapped_sub_path)
                 if reversed_path in synced_paths:
@@ -317,6 +334,8 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
                 'max_offset_seconds': max_offset,
                 'no_fix_framerate': no_fix_framerate,
                 'gss': gss,
+                'output_mode': output_mode,
+                'enabled_engines': enabled_engines,
             }
             if action == 'translate':
                 item['metadata'] = movie
@@ -331,22 +350,28 @@ def _process_subtitle_item(item, action, options, job_id):
     Returns True on success, False on failure.
     """
     if action == 'sync':
-        return sync_subtitles(
-            video_path=item['video_path'],
-            srt_path=item['srt_path'],
-            srt_lang=item['srt_lang'],
-            forced=item['forced'],
-            hi=item['hi'],
-            percent_score=0,
-            sonarr_series_id=item['sonarr_series_id'],
-            sonarr_episode_id=item['sonarr_episode_id'],
-            radarr_id=item['radarr_id'],
-            max_offset_seconds=item['max_offset_seconds'],
-            no_fix_framerate=item['no_fix_framerate'],
-            gss=item['gss'],
-            force_sync=True,
-            job_id=job_id,
-        )
+        sync_kwargs = {
+            'video_path': item['video_path'],
+            'srt_path': item['srt_path'],
+            'srt_lang': item['srt_lang'],
+            'forced': item['forced'],
+            'hi': item['hi'],
+            'percent_score': 0,
+            'sonarr_series_id': item['sonarr_series_id'],
+            'sonarr_episode_id': item['sonarr_episode_id'],
+            'radarr_id': item['radarr_id'],
+            'max_offset_seconds': item['max_offset_seconds'],
+            'no_fix_framerate': item['no_fix_framerate'],
+            'gss': item['gss'],
+            'force_sync': True,
+            'job_id': job_id,
+            'track_job_progress': False,
+        }
+        if item.get('output_mode') is not None:
+            sync_kwargs['output_mode'] = item.get('output_mode')
+        if item.get('enabled_engines') is not None:
+            sync_kwargs['enabled_engines'] = item.get('enabled_engines')
+        return sync_subtitles(**sync_kwargs)
     elif action == 'translate':
         from subtitles.tools.translate.main import translate_subtitles_file
         media_type = 'episode' if item['sonarr_series_id'] else 'movies'
@@ -519,7 +544,7 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
     for i, item in enumerate(all_items, start=1):
         jobs_queue.update_job_progress(
             job_id=job_id,
-            progress_value=i,
+            progress_value=i - 1,
             progress_message=f"{action}: {os.path.basename(item['srt_path'])} ({i}/{total_count})"
         )
 
@@ -533,6 +558,12 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
             logger.error(f'Error during {action} on {item["srt_path"]}: {e}')  # noqa: G004
             all_errors.append(str(e))
             failed += 1
+        finally:
+            jobs_queue.update_job_progress(
+                job_id=job_id,
+                progress_value=i,
+                progress_message=f"{action}: {os.path.basename(item['srt_path'])} ({i}/{total_count})"
+            )
 
     jobs_queue.update_job_name(
         job_id=job_id,

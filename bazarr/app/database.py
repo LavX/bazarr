@@ -373,6 +373,22 @@ class TableMoviesRootfolder(Base):
     path = mapped_column(Text)
 
 
+class TableSubsyncEngineFailure(Base):
+    __tablename__ = 'subsync_engine_failures'
+    __table_args__ = (
+        Index('ix_subsync_engine_failures_path_engine', 'subtitle_path', 'engine', unique=True),
+    )
+
+    id = mapped_column(Integer, primary_key=True)
+    subtitle_path = mapped_column(Text, nullable=False)
+    engine = mapped_column(Text, nullable=False)
+    consecutive_failures = mapped_column(Integer, nullable=False, default=0)
+    is_skipped = mapped_column(Integer, nullable=False, default=0)
+    last_error = mapped_column(Text)
+    created_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+    updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
 class TableSettingsLanguages(Base):
     __tablename__ = 'table_settings_languages'
 
