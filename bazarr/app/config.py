@@ -827,6 +827,34 @@ def _settings_mapping(parent, key):
     return mapping
 
 
+def _settings_value(parent, keys):
+    value = parent
+    for key in keys:
+        if value is None:
+            return None
+        if hasattr(value, "get"):
+            value = value.get(key)
+        else:
+            value = getattr(value, key, None)
+    return value
+
+
+def _active_provider_hub_provider_ids():
+    try:
+        from provider_hub.state import active_installations
+        return {
+            str(provider_id)
+            for provider_id in (
+                getattr(installation, "provider_id", None)
+                for installation in active_installations()
+            )
+            if provider_id
+        }
+    except Exception:
+        logging.exception("Unable to inspect active Provider Hub providers")
+        return set()
+
+
 def save_settings(settings_items):
     configure_debug = False
     configure_captcha = False
@@ -846,6 +874,7 @@ def save_settings(settings_items):
     reset_providers = False
     reset_fanout_pool = False
     reset_compat_pool = False
+    active_provider_hub_provider_ids = None
 
     # Subzero Mods
     update_subzero = False
@@ -1030,6 +1059,13 @@ def save_settings(settings_items):
             # Defer the reset until AFTER all values in this batch are
             # written, same reasoning as reset_fanout_pool below.
             reset_compat_pool = True
+
+        if settings_keys[0] == 'settings' and len(settings_keys) >= 3:
+            if active_provider_hub_provider_ids is None:
+                active_provider_hub_provider_ids = _active_provider_hub_provider_ids()
+            if settings_keys[1] in active_provider_hub_provider_ids:
+                if value != _settings_value(settings, settings_keys[1:]):
+                    reset_compat_pool = True
 
         if key in ('settings-compat_endpoint-fanout_max_workers',
                    'settings-compat_endpoint-max_concurrent_fanouts'):
