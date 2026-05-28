@@ -156,8 +156,13 @@ def store_subtitles(original_path, reversed_path, use_cache=True):
                 logging.debug(f"BAZARR storing those languages to DB: {actual_subtitles}")  # noqa: G004
                 list_missing_subtitles(epno=episode.sonarrEpisodeId)
                 if embedded_languages:
+                    # Pass the DB-side path (original_path), not the local
+                    # filesystem path. history_log stores result.path verbatim,
+                    # and download history rows store DB-side paths via
+                    # path_replace_reverse. Embedded rows must match so path
+                    # comparisons line up in path-mapped installs.
                     _log_embedded_history(episode.sonarrSeriesId, episode.sonarrEpisodeId,
-                                          embedded_languages, reversed_path)
+                                          embedded_languages, original_path)
             else:
                 logging.debug(f"BAZARR haven't been able to update existing subtitles to DB: {actual_subtitles}")  # noqa: G004
     else:
