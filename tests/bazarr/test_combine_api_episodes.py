@@ -1,0 +1,247 @@
+# coding=utf-8
+
+"""Unit tests for the episode combine REST endpoint.
+
+Pattern matches test_editor_api.py: patch sys.modules before import, then call
+resource methods directly on instantiated objects. No Flask test client needed.
+"""
+
+import sys
+from unittest.mock import MagicMock, patch
+
+
+# ---------------------------------------------------------------------------
+# Patch heavy dependencies before importing the module under test.
+# Same approach as test_editor_api.py.
+# ---------------------------------------------------------------------------
+
+def _passthrough_decorator(*args, **kwargs):
+    def wrap(target):
+        return target
+    return wrap
+
+
+class _FakeNamespace:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def route(self, *args, **kwargs):
+        return _passthrough_decorator()
+
+    def doc(self, *args, **kwargs):
+        return _passthrough_decorator()
+
+    def response(self, *args, **kwargs):
+        return _passthrough_decorator()
+
+    def __getattr__(self, name):
+        return MagicMock()
+
+
+class _FakeResource:
+    pass
+
+
+_fake_flask_restx = MagicMock()
+_fake_flask_restx.Namespace = _FakeNamespace
+_fake_flask_restx.Resource = _FakeResource
+_fake_flask_restx.fields = MagicMock()
+_fake_flask_restx.reqparse = MagicMock()
+
+_api_utils_mock = MagicMock()
+_api_utils_mock.authenticate = lambda fn: fn
+
+_patches = {
+    'flask_restx': _fake_flask_restx,
+    'app.get_args': MagicMock(args=MagicMock(config_dir='/tmp/bazarr_test')),
+    'app.config': MagicMock(),
+    'app.database': MagicMock(),
+    'app.event_handler': MagicMock(),
+    'app.jobs_queue': MagicMock(),
+    'utilities.path_mappings': MagicMock(),
+    'utilities.binaries': MagicMock(),
+    'api.utils': _api_utils_mock,
+    'subliminal_patch.core': MagicMock(SUBTITLE_EXTENSIONS=['.srt', '.ass']),
+    'subtitles.upload': MagicMock(),
+    'subtitles.mass_download.series': MagicMock(),
+    'subtitles.download': MagicMock(),
+    'subtitles.tools.delete': MagicMock(),
+    'subtitles.tools.combine': MagicMock(),
+    'subtitles.tools.combine.main': MagicMock(),
+    'init': MagicMock(startTime=0),
+    'flask': MagicMock(),
+    'werkzeug.datastructures': MagicMock(),
+}
+
+_preexisting = {k: sys.modules.get(k) for k in _patches}
+for _mod, _obj in _patches.items():
+    sys.modules.setdefault(_mod, _obj)
+
+import api.episodes.episodes_subtitles as episodes_subtitles_module  # noqa: E402
+
+# Clean up only the mocks we injected (not ones that were already present)
+for _mod in _patches:
+    if _preexisting.get(_mod) is None and sys.modules.get(_mod) is _patches.get(_mod):
+        sys.modules.pop(_mod, None)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_result(status, path="", alignment="", reason="", error=""):
+    return type("CombineResult", (), {
+        "status": status,
+        "path": path,
+        "alignment": alignment,
+        "reason": reason,
+        "error": error,
+    })()
+
+
+def _make_db_row(path="/series/Show/S01E01.mkv", sonarr_series_id=7):
+    return type("Row", (), {"path": path, "sonarrSeriesId": sonarr_series_id})()
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+class TestEpisodesSubtitlesCombinePost:
+
+    def _make_request(self, payload):
+        mock_request = MagicMock()
+        mock_request.get_json.return_value = payload
+        return mock_request
+
+    def test_post_combine_uses_profile_rule(self):
+        """Empty payload: languages and format should both be None (profile-driven)."""
+        resource = episodes_subtitles_module.EpisodesSubtitlesCombine()
+
+        mock_db_result = MagicMock()
+        mock_db_result.first.return_value = _make_db_row()
+
+        with patch.object(episodes_subtitles_module, 'database') as mock_db, \
+             patch.object(episodes_subtitles_module, 'path_mappings') as mock_pm, \
+             patch.object(episodes_subtitles_module, 'try_combine_for_video') as mock_combine, \
+             patch.object(episodes_subtitles_module, 'request', self._make_request({})):
+
+            mock_db.execute.return_value = mock_db_result
+            mock_pm.path_replace.return_value = '/mapped/series/Show/S01E01.mkv'
+            mock_combine.return_value = _make_result(
+                status='built',
+                path='/series/Show/S01E01.en.combined-hu.srt',
+                alignment='ok',
+            )
+
+            body, status_code = resource.post(episode_id=99)
+
+        assert status_code == 200
+        assert body['status'] == 'built'
+        assert body['path'].endswith('combined-hu.srt')
+        mock_combine.assert_called_once()
+        kwargs = mock_combine.call_args.kwargs
+        assert kwargs['languages'] is None
+        assert kwargs['format'] is None
+        assert kwargs['media_type'] == 'series'
+        assert kwargs['sonarr_series_id'] == 7
+        assert kwargs['sonarr_episode_id'] == 99
+        assert kwargs['radarr_id'] is None
+
+    def test_post_combine_with_explicit_languages(self):
+        """Explicit languages and format are forwarded to try_combine_for_video."""
+        resource = episodes_subtitles_module.EpisodesSubtitlesCombine()
+
+        mock_db_result = MagicMock()
+        mock_db_result.first.return_value = _make_db_row()
+
+        payload = {'languages': ['de', 'es', 'zh'], 'format': 'ass'}
+
+        with patch.object(episodes_subtitles_module, 'database') as mock_db, \
+             patch.object(episodes_subtitles_module, 'path_mappings') as mock_pm, \
+             patch.object(episodes_subtitles_module, 'try_combine_for_video') as mock_combine, \
+             patch.object(episodes_subtitles_module, 'request', self._make_request(payload)):
+
+            mock_db.execute.return_value = mock_db_result
+            mock_pm.path_replace.return_value = '/mapped/series/Show/S01E01.mkv'
+            mock_combine.return_value = _make_result(
+                status='built',
+                path='/x.srt',
+                alignment='ok',
+            )
+
+            body, status_code = resource.post(episode_id=99)
+
+        assert status_code == 200
+        kwargs = mock_combine.call_args.kwargs
+        assert kwargs['languages'] == ['de', 'es', 'zh']
+        assert kwargs['format'] == 'ass'
+        assert kwargs['media_type'] == 'series'
+        assert kwargs['sonarr_series_id'] == 7
+        assert kwargs['sonarr_episode_id'] == 99
+        assert kwargs['radarr_id'] is None
+
+    def test_post_combine_skipped(self):
+        """A skipped result (no rule matching) returns HTTP 200 with status=skipped."""
+        resource = episodes_subtitles_module.EpisodesSubtitlesCombine()
+
+        mock_db_result = MagicMock()
+        mock_db_result.first.return_value = _make_db_row()
+
+        with patch.object(episodes_subtitles_module, 'database') as mock_db, \
+             patch.object(episodes_subtitles_module, 'path_mappings') as mock_pm, \
+             patch.object(episodes_subtitles_module, 'try_combine_for_video') as mock_combine, \
+             patch.object(episodes_subtitles_module, 'request', self._make_request({})):
+
+            mock_db.execute.return_value = mock_db_result
+            mock_pm.path_replace.return_value = '/mapped/series/Show/S01E01.mkv'
+            mock_combine.return_value = _make_result(
+                status='skipped',
+                reason='no rule',
+            )
+
+            body, status_code = resource.post(episode_id=99)
+
+        assert status_code == 200
+        assert body['status'] == 'skipped'
+        assert 'no rule' in body['reason']
+
+    def test_post_combine_failed(self):
+        """A failed result returns HTTP 500."""
+        resource = episodes_subtitles_module.EpisodesSubtitlesCombine()
+
+        mock_db_result = MagicMock()
+        mock_db_result.first.return_value = _make_db_row()
+
+        with patch.object(episodes_subtitles_module, 'database') as mock_db, \
+             patch.object(episodes_subtitles_module, 'path_mappings') as mock_pm, \
+             patch.object(episodes_subtitles_module, 'try_combine_for_video') as mock_combine, \
+             patch.object(episodes_subtitles_module, 'request', self._make_request({})):
+
+            mock_db.execute.return_value = mock_db_result
+            mock_pm.path_replace.return_value = '/mapped/series/Show/S01E01.mkv'
+            mock_combine.return_value = _make_result(
+                status='failed',
+                error='malformed SRT',
+            )
+
+            body, status_code = resource.post(episode_id=99)
+
+        assert status_code == 500
+        assert 'malformed SRT' in body['error']
+
+    def test_post_combine_episode_not_found(self):
+        """Missing episode in DB returns HTTP 404."""
+        resource = episodes_subtitles_module.EpisodesSubtitlesCombine()
+
+        mock_db_result = MagicMock()
+        mock_db_result.first.return_value = None
+
+        with patch.object(episodes_subtitles_module, 'database') as mock_db, \
+             patch.object(episodes_subtitles_module, 'request', self._make_request({})):
+
+            mock_db.execute.return_value = mock_db_result
+
+            body, status_code = resource.post(episode_id=999)
+
+        assert status_code == 404
