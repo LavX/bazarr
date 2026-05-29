@@ -151,62 +151,42 @@ export const Subtitle: FunctionComponent<Props> = ({
     const subtitlePath = subtitle.path;
     return (
       <Group gap={4} wrap="nowrap">
-        <CombinedSubtitleBadge subtitle={subtitle} />
-        <Menu shadow="md" width={200}>
-          <Menu.Target>
-            <ActionIcon variant="subtle" aria-label="Combined subtitle actions">
-              <FontAwesomeIcon icon={faEllipsis} />
-            </ActionIcon>
-          </Menu.Target>
-          <Menu.Dropdown>
-            <Menu.Item
-              leftSection={<FontAwesomeIcon icon={faRotateRight} size="sm" />}
-              disabled={combine.isPending}
-              onClick={() =>
-                combine.mutate({
-                  scope: { kind: "episode", episodeId },
-                  body: {},
-                })
-              }
-            >
-              Rebuild
-            </Menu.Item>
-            {subtitlePath && (
-              <Menu.Item
-                leftSection={<FontAwesomeIcon icon={faEye} size="sm" />}
-                onClick={() =>
-                  navigate(
-                    `/subtitles/preview/episode/${episodeId}/${encodeURIComponent(buildSubtitleLanguageKey(subtitle))}`,
-                  )
-                }
-              >
-                View
-              </Menu.Item>
-            )}
-            <Menu.Divider />
-            <Menu.Item
-              leftSection={<FontAwesomeIcon icon={faTrash} size="sm" />}
-              c="red"
-              disabled={!subtitlePath}
-              onClick={async () => {
-                if (subtitlePath) {
-                  await remove.mutateAsync({
-                    seriesId,
-                    episodeId,
-                    form: {
-                      language: subtitle.code2,
-                      hi: subtitle.hi,
-                      forced: subtitle.forced,
-                      path: subtitlePath,
-                    },
-                  });
-                }
-              }}
-            >
-              Delete
-            </Menu.Item>
-          </Menu.Dropdown>
-        </Menu>
+        <SubtitleToolsMenu
+          selections={selections}
+          isCombinedOutput
+          menu={{
+            trigger: "click",
+            onOpen: () => setOpen(true),
+            onClose: () => setOpen(false),
+          }}
+          onAction={async (action) => {
+            if (action === "rebuild") {
+              combine.mutate({
+                scope: { kind: "episode", episodeId },
+                body: {},
+              });
+            } else if (action === "view") {
+              navigate(
+                `/subtitles/preview/episode/${episodeId}/${encodeURIComponent(buildSubtitleLanguageKey(subtitle))}`,
+              );
+            } else if (action === "delete" && subtitlePath) {
+              await remove.mutateAsync({
+                seriesId,
+                episodeId,
+                form: {
+                  language: subtitle.code2,
+                  hi: subtitle.hi,
+                  forced: subtitle.forced,
+                  path: subtitlePath,
+                },
+              });
+            }
+          }}
+        >
+          <UnstyledButton aria-label="Combined subtitle">
+            <CombinedSubtitleBadge subtitle={subtitle} />
+          </UnstyledButton>
+        </SubtitleToolsMenu>
       </Group>
     );
   }

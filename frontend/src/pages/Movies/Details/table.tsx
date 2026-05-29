@@ -311,58 +311,34 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
 
     if (isCombinedOutputSubtitle(item)) {
       return (
-        <Menu shadow="md" width={200}>
-          <Menu.Target>
-            <Action label="Combined Subtitle Actions" icon={faEllipsis} />
-          </Menu.Target>
-          <Menu.Dropdown>
-            <Menu.Item
-              leftSection={<FontAwesomeIcon icon={faRotateRight} size="sm" />}
-              disabled={combine.isPending}
-              onClick={() =>
-                combine.mutate({
-                  scope: { kind: "movie", radarrId },
-                  body: {},
-                })
-              }
-            >
-              Rebuild
-            </Menu.Item>
-            {path && !isSubtitleMissing(path) && (
-              <Menu.Item
-                leftSection={<FontAwesomeIcon icon={faEye} size="sm" />}
-                onClick={() =>
-                  navigate(
-                    `/subtitles/preview/movie/${radarrId}/${encodeURIComponent(buildSubtitleLanguageKey(item))}`,
-                  )
-                }
-              >
-                View
-              </Menu.Item>
-            )}
-            <Menu.Divider />
-            <Menu.Item
-              leftSection={<FontAwesomeIcon icon={faTrash} size="sm" />}
-              c="red"
-              disabled={!path || isSubtitleMissing(path)}
-              onClick={async () => {
-                if (path) {
-                  await remove.mutateAsync({
-                    radarrId,
-                    form: {
-                      language: code2,
-                      forced,
-                      hi,
-                      path,
-                    },
-                  });
-                }
-              }}
-            >
-              Delete
-            </Menu.Item>
-          </Menu.Dropdown>
-        </Menu>
+        <SubtitleToolsMenu
+          selections={selections}
+          isCombinedOutput
+          onAction={async (action) => {
+            if (action === "rebuild") {
+              combine.mutate({
+                scope: { kind: "movie", radarrId },
+                body: {},
+              });
+            } else if (action === "view") {
+              navigate(
+                `/subtitles/preview/movie/${radarrId}/${encodeURIComponent(buildSubtitleLanguageKey(item))}`,
+              );
+            } else if (action === "delete" && path) {
+              await remove.mutateAsync({
+                radarrId,
+                form: {
+                  language: code2,
+                  forced,
+                  hi,
+                  path,
+                },
+              });
+            }
+          }}
+        >
+          <Action label="Combined Subtitle Actions" icon={faEllipsis} />
+        </SubtitleToolsMenu>
       );
     }
 

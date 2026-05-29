@@ -138,7 +138,9 @@ function hasFinalEngineFilenameSegment(path: string, engine: string): boolean {
 }
 
 export function canSynchronizeSubtitle(subtitle: Subtitle): boolean {
-  return !isSyncOutputSubtitle(subtitle) && !isCombinedOutputSubtitle(subtitle);
+  // Combined-output files are valid SRTs and can be synced like any other.
+  // Only sync-engine outputs are non-syncable (they already are the sync result).
+  return !isSyncOutputSubtitle(subtitle);
 }
 
 export function getSyncEngineLabel(modifier: string | null | undefined) {

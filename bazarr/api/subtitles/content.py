@@ -41,12 +41,15 @@ def _is_safe_path(path):
 
 
 # ISO-ish language tags used by Bazarr. e.g. "en", "pt-BR", "en:hi", "en:forced",
-# "en:sync-ffsubsync".
+# "en:sync-ffsubsync", "en:combined-hu", "de:combined-es-zh".
 # Anchored + char-class prevents `..`, slashes, or shell metachars from reaching
 # the file-system probe paths downstream.
 _LANGUAGE_CODE_RE = re.compile(
     r'^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,4})?'
-    r'(:(forced|hi|sync-(ffsubsync|autosubsync|alass)))*$'
+    r'(:(forced|hi|'
+    r'sync-(ffsubsync|autosubsync|alass)|'
+    r'combined-[a-z]{2}(-[a-z]{2})?'
+    r'))*$'
 )
 
 
@@ -217,7 +220,17 @@ def resolve_subtitle_path(media_type, media_id, language_code):
         found = False
         lang_base = language_code.split(':')[0]  # "en:hi" -> "en"
         suffix = lang_base
-        if ':hi' in language_code:
+        # Combined-output files use a distinct suffix scheme:
+        # <basename>.<primary>.combined-<sec>[-<ter>].<ext>
+        # Pick that path before the hi/forced suffixes so we generate the
+        # right filename.
+        combined_mod = next(
+            (m for m in language_code.split(':')[1:] if m.startswith('combined-')),
+            None,
+        )
+        if combined_mod:
+            suffix = f'{lang_base}.{combined_mod}'
+        elif ':hi' in language_code:
             suffix += '.hi'
         elif ':forced' in language_code:
             suffix += '.forced'
