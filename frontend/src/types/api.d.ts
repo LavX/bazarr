@@ -34,6 +34,11 @@ declare namespace Language {
     translate_from: CodeType | null;
   }
 
+  interface CombineRule {
+    languages: CodeType[];
+    format: "srt" | "ass";
+  }
+
   interface Profile {
     name: string;
     profileId: number;
@@ -43,6 +48,7 @@ declare namespace Language {
     mustNotContain: string[];
     originalFormat: boolean | null;
     tag: string | undefined;
+    combine?: CombineRule | null;
   }
 }
 
