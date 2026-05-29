@@ -22,13 +22,14 @@ def _subtitle_language_details(language_code):
     language = language_code.split(':')
     modifiers = language[1:]
     sync_modifier = next((modifier for modifier in modifiers if modifier.startswith('sync-')), None)
+    combined_modifier = next((modifier for modifier in modifiers if modifier.startswith('combined-')), None)
 
     return {
         "base": language[0],
         "full": language_code,
         "forced": any(modifier.lower() == 'forced' for modifier in modifiers),
         "hi": any(modifier.lower() == 'hi' for modifier in modifiers),
-        "modifier": sync_modifier,
+        "modifier": sync_modifier or combined_modifier,
     }
 
 
