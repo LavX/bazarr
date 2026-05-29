@@ -160,7 +160,8 @@ const SubtitleStatusCell: FunctionComponent<{
   const canCheckSyncStatus =
     !!subtitle.path &&
     !isSubtitleTrack(subtitle.path) &&
-    !isSubtitleMissing(subtitle.path);
+    !isSubtitleMissing(subtitle.path) &&
+    !isCombinedOutputSubtitle(subtitle);
   const syncStatus = useSubtitleSyncStatus(
     "movie",
     mediaId,
