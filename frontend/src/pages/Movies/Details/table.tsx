@@ -1,6 +1,6 @@
 import React, { FunctionComponent, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
-import { Badge, Group, Text, TextProps, Tooltip } from "@mantine/core";
+import { Badge, Button, Group, Text, TextProps, Tooltip } from "@mantine/core";
 import {
   faEllipsis,
   faQuestionCircle,
@@ -13,9 +13,10 @@ import {
   useMovieSubtitleModification,
   useSubtitleSyncStatus,
 } from "@/apis/hooks";
+import { useCombineSubtitles } from "@/apis/hooks/combine";
 import { useShowOnlyDesired } from "@/apis/hooks/site";
 import { Action } from "@/components";
-import { HistoryIcon } from "@/components/bazarr";
+import { CombinedSubtitleBadge, HistoryIcon } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
 import SyncOutputCompareModal from "@/components/modals/SyncOutputCompareModal";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
@@ -27,6 +28,7 @@ import {
   canSynchronizeSubtitle,
   getSubtitleSyncStatusPresentation,
   getSyncEngineLabel,
+  isCombinedOutputSubtitle,
   isCompatibleSyncOutputSubtitle,
   isSyncOutputSubtitle,
   sortSyncOutputSubtitles,
@@ -98,6 +100,10 @@ const SubtitleLanguageBadges: FunctionComponent<{
         <Language.Text value={subtitle} long></Language.Text>
       </Badge>
     );
+  }
+
+  if (isCombinedOutputSubtitle(subtitle)) {
+    return <CombinedSubtitleBadge subtitle={subtitle} />;
   }
 
   return (
@@ -219,6 +225,7 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
   const profileItems = useProfileItemsToLanguages(profile);
 
   const { download, remove } = useMovieSubtitleModification();
+  const combine = useCombineSubtitles();
 
   // Available subtitles with actual files (for translate-from source)
   const availableSources = useMemo(
@@ -289,6 +296,24 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
       !isSyncOutputSubtitle(item) &&
       !!path &&
       !isSubtitleMissing(path);
+
+    if (isCombinedOutputSubtitle(item)) {
+      return (
+        <Button
+          size="xs"
+          variant="light"
+          loading={combine.isPending}
+          onClick={() =>
+            combine.mutate({
+              scope: { kind: "movie", radarrId },
+              body: {},
+            })
+          }
+        >
+          Rebuild
+        </Button>
+      );
+    }
 
     if (isSubtitleMissing(path)) {
       return (

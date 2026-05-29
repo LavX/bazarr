@@ -17,6 +17,7 @@ import {
   faEllipsis,
   faHardDrive,
   faHistory,
+  faLayerGroup,
   faMagnifyingGlass,
   faSearch,
   faSync,
@@ -39,6 +40,7 @@ import {
 import { useInstanceName } from "@/apis/hooks/site";
 import { Action, DropContent, Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
+import { CombineModal } from "@/components/forms/CombineForm";
 import { ItemEditModal } from "@/components/forms/ItemEditForm";
 import { MovieUploadModal } from "@/components/forms/MovieUploadForm";
 import { MovieHistoryModal, SubtitleToolsModal } from "@/components/modals";
@@ -48,6 +50,10 @@ import { notification, task, TaskGroup } from "@/modules/task";
 import ItemOverview from "@/pages/views/ItemOverview";
 import { RouterNames } from "@/Router/RouterNames";
 import { useLanguageProfileBy } from "@/utilities/languages";
+import {
+  isCombinedOutputSubtitle,
+  isSyncOutputSubtitle,
+} from "@/utilities/subtitles";
 import Table from "./table";
 
 const MovieDetailView: FunctionComponent = () => {
@@ -125,6 +131,17 @@ const MovieDetailView: FunctionComponent = () => {
   }
 
   const allowEdit = movie?.profileId !== undefined;
+
+  const availableLangs = (movie?.subtitles ?? [])
+    .filter(
+      (s) =>
+        s.path &&
+        !isSyncOutputSubtitle(s) &&
+        !isCombinedOutputSubtitle(s) &&
+        !s.hi &&
+        !s.forced,
+    )
+    .map((s) => s.code2);
 
   return (
     <Container fluid px={0}>
@@ -205,6 +222,20 @@ const MovieDetailView: FunctionComponent = () => {
               }}
             >
               Manual Search
+            </Toolbox.Button>
+            <Toolbox.Button
+              icon={faLayerGroup}
+              disabled={availableLangs.length < 2}
+              onClick={() => {
+                if (movie) {
+                  modals.openContextModal(CombineModal, {
+                    scope: { kind: "movie", radarrId: movie.radarrId },
+                    availableLanguages: availableLangs,
+                  });
+                }
+              }}
+            >
+              Combine Subtitles
             </Toolbox.Button>
           </Group>
           <Group gap="xs">
