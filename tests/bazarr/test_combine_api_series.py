@@ -84,7 +84,10 @@ _patches = {
 
 _preexisting = {k: sys.modules.get(k) for k in _patches}
 for _mod, _obj in _patches.items():
-    sys.modules.setdefault(_mod, _obj)
+    # Force-install (not setdefault) so that even when an earlier test loaded
+    # the real api.utils etc., the mock replaces them at the critical moment
+    # the module under test imports its decorators.
+    sys.modules[_mod] = _obj
 
 # Stub the `api` package itself so api/__init__.py (which imports badges, badges
 # imports signalr_client, etc.) never runs.  The sub-package api.series must also
@@ -104,12 +107,21 @@ _bazarr_root = _os.path.join(_os.path.dirname(__file__), '../../bazarr')
 _ensure_pkg_stub('api', [_os.path.join(_bazarr_root, 'api')])
 _ensure_pkg_stub('api.series', [_os.path.join(_bazarr_root, 'api', 'series')])
 
+# Drop any cached api.series.series so the re-import below resolves
+# `authenticate` against the mocked api.utils, not the real one loaded
+# eagerly via api/__init__.py during an earlier test.
+sys.modules.pop('api.series.series', None)
+
 import api.series.series as series_module  # noqa: E402
 
-# Clean up only the mocks we injected (not ones that were already present)
+# Restore sys.modules: pop entries we added, put back originals we replaced.
+# This lets later test files re-resolve real modules.
 for _mod in _patches:
-    if _preexisting.get(_mod) is None and sys.modules.get(_mod) is _patches.get(_mod):
+    _orig = _preexisting.get(_mod)
+    if _orig is None:
         sys.modules.pop(_mod, None)
+    else:
+        sys.modules[_mod] = _orig
 
 
 # ---------------------------------------------------------------------------

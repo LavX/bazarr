@@ -1,6 +1,14 @@
 # coding=utf-8
 
-from api.utils import _subtitle_language_details
+# Earlier API endpoint tests in the suite (test_editor_api, test_combine_api_*)
+# install MagicMock stand-ins for `api.utils` so their modules-under-test get
+# a pass-through `authenticate` decorator. Pop the cached entry so our import
+# below resolves to the real module.
+import sys
+sys.modules.pop("api.utils", None)
+sys.modules.pop("api", None)
+
+from api.utils import _subtitle_language_details  # noqa: E402
 
 
 def test_plain_language_has_no_modifier():
