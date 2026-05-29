@@ -2,9 +2,12 @@ import {
   buildComparableSubtitleVariantKey,
   buildSubtitleLanguageKey,
   canSynchronizeSubtitle,
+  getCombinedLabel,
+  getCombinedSecondaries,
   getSubtitleSyncStatusPresentation,
   getSyncEngineLabel,
   isCompatibleSyncOutputSubtitle,
+  isCombinedOutputSubtitle,
   isSyncOutputLanguageKey,
   isSyncOutputSubtitle,
 } from "@/utilities/subtitles";
@@ -207,5 +210,139 @@ describe("subtitle language helpers", () => {
         jobId: null,
       }),
     ).toBeNull();
+  });
+});
+
+describe("combined output helpers", () => {
+  it("detects combined output via modifier", () => {
+    expect(
+      isCombinedOutputSubtitle({
+        code2: "en",
+        name: "English",
+        forced: false,
+        hi: false,
+        modifier: "combined-hu",
+        language: "en:combined-hu",
+        path: "/movie/Movie.en.combined-hu.srt",
+      }),
+    ).toBe(true);
+  });
+
+  it("detects combined output via language key when modifier is missing", () => {
+    expect(
+      isCombinedOutputSubtitle({
+        code2: "de",
+        name: "German",
+        forced: false,
+        hi: false,
+        language: "de:combined-es-zh",
+        path: "/movie/Movie.de.combined-es-zh.ass",
+      }),
+    ).toBe(true);
+  });
+
+  it("does not flag regular subtitles or sync outputs as combined", () => {
+    expect(
+      isCombinedOutputSubtitle({
+        code2: "en",
+        name: "English",
+        forced: false,
+        hi: false,
+        language: "en",
+        path: "/movie/Movie.en.srt",
+      }),
+    ).toBe(false);
+
+    expect(
+      isCombinedOutputSubtitle({
+        code2: "en",
+        name: "English",
+        forced: false,
+        hi: false,
+        modifier: "sync-ffsubsync",
+        language: "en:sync-ffsubsync",
+        path: "/movie/Movie.en.ffsubsync.srt",
+      }),
+    ).toBe(false);
+  });
+
+  it("extracts secondary codes from a combined output", () => {
+    expect(
+      getCombinedSecondaries({
+        code2: "de",
+        name: "German",
+        forced: false,
+        hi: false,
+        modifier: "combined-es-zh",
+        language: "de:combined-es-zh",
+        path: "/movie/Movie.de.combined-es-zh.ass",
+      }),
+    ).toEqual(["es", "zh"]);
+  });
+
+  it("returns null secondaries for non-combined subtitles", () => {
+    expect(
+      getCombinedSecondaries({
+        code2: "en",
+        name: "English",
+        forced: false,
+        hi: false,
+        language: "en",
+        path: "/movie/Movie.en.srt",
+      }),
+    ).toBeNull();
+  });
+
+  it("formats combined label as PRIMARY + SEC1 [+ SEC2]", () => {
+    expect(
+      getCombinedLabel({
+        code2: "en",
+        name: "English",
+        forced: false,
+        hi: false,
+        modifier: "combined-hu",
+        language: "en:combined-hu",
+        path: "/movie/Movie.en.combined-hu.srt",
+      }),
+    ).toBe("EN + HU");
+
+    expect(
+      getCombinedLabel({
+        code2: "de",
+        name: "German",
+        forced: false,
+        hi: false,
+        modifier: "combined-es-zh",
+        language: "de:combined-es-zh",
+        path: "/movie/Movie.de.combined-es-zh.ass",
+      }),
+    ).toBe("DE + ES + ZH");
+  });
+
+  it("blocks sync action on combined output subtitles", () => {
+    expect(
+      canSynchronizeSubtitle({
+        code2: "en",
+        name: "English",
+        forced: false,
+        hi: false,
+        modifier: "combined-hu",
+        language: "en:combined-hu",
+        path: "/movie/Movie.en.combined-hu.srt",
+      }),
+    ).toBe(false);
+  });
+
+  it("still allows sync action on plain subtitles", () => {
+    expect(
+      canSynchronizeSubtitle({
+        code2: "en",
+        name: "English",
+        forced: false,
+        hi: false,
+        language: "en",
+        path: "/movie/Movie.en.srt",
+      }),
+    ).toBe(true);
   });
 });

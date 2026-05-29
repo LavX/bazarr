@@ -85,6 +85,45 @@ export function isSyncOutputLanguageKey(
   );
 }
 
+export function isCombinedOutputSubtitle(subtitle: Subtitle): boolean {
+  if (isCombinedOutputLanguageKey(subtitle.language)) {
+    return true;
+  }
+  return subtitle.modifier?.startsWith("combined-") === true;
+}
+
+export function isCombinedOutputLanguageKey(
+  language: string | null | undefined,
+): boolean {
+  const modifiers = language
+    ?.split(":")
+    .slice(1)
+    .map((item) => item.toLowerCase());
+  return modifiers?.some((m) => m.startsWith("combined-")) ?? false;
+}
+
+export function getCombinedSecondaries(subtitle: Subtitle): string[] | null {
+  const language = buildSubtitleLanguageKey(subtitle);
+  const modifier = language
+    .split(":")
+    .slice(1)
+    .find((m) => m.toLowerCase().startsWith("combined-"));
+  if (!modifier) {
+    return null;
+  }
+  return modifier.slice("combined-".length).split("-");
+}
+
+export function getCombinedLabel(subtitle: Subtitle): string {
+  const secondaries = getCombinedSecondaries(subtitle);
+  if (!secondaries) {
+    return "";
+  }
+  return [subtitle.code2, ...secondaries]
+    .map((c) => c.toUpperCase())
+    .join(" + ");
+}
+
 function hasFinalEngineFilenameSegment(path: string, engine: string): boolean {
   const filename = path.split(/[\\/]/).pop() ?? "";
   const marker = `.${engine}.`;
@@ -99,7 +138,7 @@ function hasFinalEngineFilenameSegment(path: string, engine: string): boolean {
 }
 
 export function canSynchronizeSubtitle(subtitle: Subtitle): boolean {
-  return !isSyncOutputSubtitle(subtitle);
+  return !isSyncOutputSubtitle(subtitle) && !isCombinedOutputSubtitle(subtitle);
 }
 
 export function getSyncEngineLabel(modifier: string | null | undefined) {
