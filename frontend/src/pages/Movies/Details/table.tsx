@@ -1,10 +1,21 @@
 import React, { FunctionComponent, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
-import { Badge, Button, Group, Text, TextProps, Tooltip } from "@mantine/core";
+import {
+  Badge,
+  Button,
+  Group,
+  Menu,
+  Text,
+  TextProps,
+  Tooltip,
+} from "@mantine/core";
 import {
   faEllipsis,
+  faEye,
   faQuestionCircle,
+  faRotateRight,
   faSpinner,
+  faTrash,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
@@ -300,19 +311,58 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
 
     if (isCombinedOutputSubtitle(item)) {
       return (
-        <Button
-          size="xs"
-          variant="light"
-          loading={combine.isPending}
-          onClick={() =>
-            combine.mutate({
-              scope: { kind: "movie", radarrId },
-              body: {},
-            })
-          }
-        >
-          Rebuild
-        </Button>
+        <Menu shadow="md" width={200}>
+          <Menu.Target>
+            <Action label="Combined Subtitle Actions" icon={faEllipsis} />
+          </Menu.Target>
+          <Menu.Dropdown>
+            <Menu.Item
+              leftSection={<FontAwesomeIcon icon={faRotateRight} size="sm" />}
+              disabled={combine.isPending}
+              onClick={() =>
+                combine.mutate({
+                  scope: { kind: "movie", radarrId },
+                  body: {},
+                })
+              }
+            >
+              Rebuild
+            </Menu.Item>
+            {path && !isSubtitleMissing(path) && (
+              <Menu.Item
+                leftSection={<FontAwesomeIcon icon={faEye} size="sm" />}
+                onClick={() =>
+                  navigate(
+                    `/subtitles/preview/movie/${radarrId}/${encodeURIComponent(buildSubtitleLanguageKey(item))}`,
+                  )
+                }
+              >
+                View
+              </Menu.Item>
+            )}
+            <Menu.Divider />
+            <Menu.Item
+              leftSection={<FontAwesomeIcon icon={faTrash} size="sm" />}
+              c="red"
+              disabled={!path || isSubtitleMissing(path)}
+              onClick={async () => {
+                if (path) {
+                  await remove.mutateAsync({
+                    radarrId,
+                    form: {
+                      language: code2,
+                      forced,
+                      hi,
+                      path,
+                    },
+                  });
+                }
+              }}
+            >
+              Delete
+            </Menu.Item>
+          </Menu.Dropdown>
+        </Menu>
       );
     }
 

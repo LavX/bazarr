@@ -1,13 +1,22 @@
 import { FunctionComponent, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import {
+  ActionIcon,
   Badge,
   Button,
   Group,
   MantineColor,
+  Menu,
   Tooltip,
   UnstyledButton,
 } from "@mantine/core";
+import {
+  faEllipsis,
+  faEye,
+  faRotateRight,
+  faTrash,
+} from "@fortawesome/free-solid-svg-icons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useEpisodeSubtitleModification } from "@/apis/hooks";
 import { useCombineSubtitles } from "@/apis/hooks/combine";
 import { CombinedSubtitleBadge } from "@/components/bazarr";
@@ -139,22 +148,65 @@ export const Subtitle: FunctionComponent<Props> = ({
   }
 
   if (isCombinedOutputSubtitle(subtitle)) {
+    const subtitlePath = subtitle.path;
     return (
       <Group gap={4} wrap="nowrap">
         <CombinedSubtitleBadge subtitle={subtitle} />
-        <Button
-          size="xs"
-          variant="light"
-          loading={combine.isPending}
-          onClick={() =>
-            combine.mutate({
-              scope: { kind: "episode", episodeId },
-              body: {},
-            })
-          }
-        >
-          Rebuild
-        </Button>
+        <Menu shadow="md" width={200}>
+          <Menu.Target>
+            <ActionIcon variant="subtle" aria-label="Combined subtitle actions">
+              <FontAwesomeIcon icon={faEllipsis} />
+            </ActionIcon>
+          </Menu.Target>
+          <Menu.Dropdown>
+            <Menu.Item
+              leftSection={<FontAwesomeIcon icon={faRotateRight} size="sm" />}
+              disabled={combine.isPending}
+              onClick={() =>
+                combine.mutate({
+                  scope: { kind: "episode", episodeId },
+                  body: {},
+                })
+              }
+            >
+              Rebuild
+            </Menu.Item>
+            {subtitlePath && (
+              <Menu.Item
+                leftSection={<FontAwesomeIcon icon={faEye} size="sm" />}
+                onClick={() =>
+                  navigate(
+                    `/subtitles/preview/episode/${episodeId}/${encodeURIComponent(buildSubtitleLanguageKey(subtitle))}`,
+                  )
+                }
+              >
+                View
+              </Menu.Item>
+            )}
+            <Menu.Divider />
+            <Menu.Item
+              leftSection={<FontAwesomeIcon icon={faTrash} size="sm" />}
+              c="red"
+              disabled={!subtitlePath}
+              onClick={async () => {
+                if (subtitlePath) {
+                  await remove.mutateAsync({
+                    seriesId,
+                    episodeId,
+                    form: {
+                      language: subtitle.code2,
+                      hi: subtitle.hi,
+                      forced: subtitle.forced,
+                      path: subtitlePath,
+                    },
+                  });
+                }
+              }}
+            >
+              Delete
+            </Menu.Item>
+          </Menu.Dropdown>
+        </Menu>
       </Group>
     );
   }
