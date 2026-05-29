@@ -20,6 +20,7 @@ import {
   faEllipsisVertical,
   faHardDrive,
   faLanguage,
+  faLayerGroup,
   faMagnifyingGlass,
   faPlay,
   faStop,
@@ -41,6 +42,7 @@ import LanguageProfileName from "@/components/bazarr/LanguageProfile";
 import { BatchModConfirmModal } from "@/components/forms/BatchModConfirmForm";
 import { ChangeProfileModal } from "@/components/forms/ChangeProfileForm";
 import { ItemEditModal } from "@/components/forms/ItemEditForm";
+import { MassCombineModal } from "@/components/forms/MassCombineForm";
 import { MassSyncModal } from "@/components/forms/MassSyncForm";
 import {
   MassTranslateModal,
@@ -334,6 +336,18 @@ const SeriesView: FunctionComponent = () => {
                 >
                   Translate
                 </Menu.Item>
+                <Menu.Item
+                  leftSection={
+                    <FontAwesomeIcon icon={faLayerGroup} size="sm" />
+                  }
+                  onClick={() =>
+                    modals.openContextModal(MassCombineModal, {
+                      items: [wantedItem],
+                    })
+                  }
+                >
+                  Combine Subtitles
+                </Menu.Item>
                 <Menu.Divider />
                 <Menu.Label>Subtitle Tools</Menu.Label>
                 {SUBTITLE_TOOL_ACTIONS.map(([action, label]) => (
@@ -453,6 +467,17 @@ const SeriesView: FunctionComponent = () => {
           }
         >
           Translate
+        </Toolbox.Button>
+
+        <Toolbox.Button
+          icon={faLayerGroup}
+          onClick={() =>
+            modals.openContextModal(MassCombineModal, {
+              items: toWantedItems(),
+            })
+          }
+        >
+          Combine
         </Toolbox.Button>
 
         <Menu shadow="md" width={220}>
