@@ -2,12 +2,15 @@ import { FunctionComponent, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import {
   Badge,
+  Button,
   Group,
   MantineColor,
   Tooltip,
   UnstyledButton,
 } from "@mantine/core";
 import { useEpisodeSubtitleModification } from "@/apis/hooks";
+import { useCombineSubtitles } from "@/apis/hooks/combine";
+import { CombinedSubtitleBadge } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
 import SyncOutputCompareModal from "@/components/modals/SyncOutputCompareModal";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
@@ -17,6 +20,7 @@ import {
   canSynchronizeSubtitle,
   getSyncEngineLabel,
   isCompatibleSyncOutputSubtitle,
+  isCombinedOutputSubtitle,
   isSyncOutputSubtitle,
   sortSyncOutputSubtitles,
 } from "@/utilities/subtitles";
@@ -38,6 +42,7 @@ export const Subtitle: FunctionComponent<Props> = ({
 }) => {
   const navigate = useNavigate();
   const { remove, download } = useEpisodeSubtitleModification();
+  const combine = useCombineSubtitles();
 
   const [opened, setOpen] = useState(false);
   const [compareOpened, setCompareOpened] = useState(false);
@@ -130,6 +135,27 @@ export const Subtitle: FunctionComponent<Props> = ({
           {badgeEl}
         </UnstyledButton>
       </Tooltip.Floating>
+    );
+  }
+
+  if (isCombinedOutputSubtitle(subtitle)) {
+    return (
+      <Group gap={4} wrap="nowrap">
+        <CombinedSubtitleBadge subtitle={subtitle} />
+        <Button
+          size="xs"
+          variant="light"
+          loading={combine.isPending}
+          onClick={() =>
+            combine.mutate({
+              scope: { kind: "episode", episodeId },
+              body: {},
+            })
+          }
+        >
+          Rebuild
+        </Button>
+      </Group>
     );
   }
 

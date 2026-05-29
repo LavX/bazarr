@@ -15,7 +15,8 @@ import { notification } from "@/modules/task";
 
 type Scope =
   | { kind: "movie"; radarrId: number }
-  | { kind: "episode"; episodeId: number };
+  | { kind: "episode"; episodeId: number }
+  | { kind: "series"; seriesId: number };
 
 interface Props {
   scope: Scope;
@@ -62,6 +63,16 @@ const CombineForm: FunctionComponent<Props> = ({
         );
       } else if (result.status === "skipped") {
         showNotification(notification.warn("Skipped", result.reason ?? ""));
+      } else if (result.status === "batch_complete") {
+        const built = result.built ?? 0;
+        const skipped = result.skipped ?? 0;
+        const failed = result.failed ?? 0;
+        showNotification(
+          notification.info(
+            "Series combine complete",
+            `Built ${built}, skipped ${skipped}, failed ${failed}`,
+          ),
+        );
       } else {
         showNotification(
           notification.error("Combine failed", result.error ?? ""),
