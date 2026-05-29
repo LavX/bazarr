@@ -70,3 +70,61 @@ def test_three_languages(tmp_path):
         str(base / "Movie.es.srt"),
         str(base / "Movie.zh.srt"),
     ]
+
+
+def test_picks_hi_when_only_hi_exists(tmp_path):
+    base = make_video_dir(tmp_path, [
+        "Movie.mkv",
+        "Movie.en.hi.srt",
+        "Movie.hu.hi.srt",
+    ])
+    result = resolve_source_paths(
+        video_path=str(base / "Movie.mkv"),
+        languages=["en", "hu"],
+    )
+    assert result.primary == str(base / "Movie.en.hi.srt")
+    assert result.secondaries == [str(base / "Movie.hu.hi.srt")]
+
+
+def test_prefers_plain_over_hi_when_both_exist(tmp_path):
+    base = make_video_dir(tmp_path, [
+        "Movie.mkv",
+        "Movie.en.srt",
+        "Movie.en.hi.srt",
+        "Movie.hu.hi.srt",
+    ])
+    result = resolve_source_paths(
+        video_path=str(base / "Movie.mkv"),
+        languages=["en", "hu"],
+    )
+    assert result.primary == str(base / "Movie.en.srt")
+    assert result.secondaries == [str(base / "Movie.hu.hi.srt")]
+
+
+def test_prefers_hi_over_forced(tmp_path):
+    base = make_video_dir(tmp_path, [
+        "Movie.mkv",
+        "Movie.en.forced.srt",
+        "Movie.en.hi.srt",
+        "Movie.hu.forced.srt",
+    ])
+    result = resolve_source_paths(
+        video_path=str(base / "Movie.mkv"),
+        languages=["en", "hu"],
+    )
+    assert result.primary == str(base / "Movie.en.hi.srt")
+    assert result.secondaries == [str(base / "Movie.hu.forced.srt")]
+
+
+def test_skips_chained_modifier_sync_outputs(tmp_path):
+    base = make_video_dir(tmp_path, [
+        "Movie.mkv",
+        "Movie.en.hi.ffsubsync.srt",
+        "Movie.hu.hi.srt",
+    ])
+    # en.hi.ffsubsync is a sync output of an HI subtitle; not a valid source.
+    result = resolve_source_paths(
+        video_path=str(base / "Movie.mkv"),
+        languages=["en", "hu"],
+    )
+    assert result is None

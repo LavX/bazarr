@@ -12,8 +12,21 @@ class SourcePaths:
     secondaries: list
 
 
+# Priority order when multiple variants of the same language are on disk.
+# Lower number wins. Plain SRT is preferred over HI, HI over forced.
+_PLAIN = 0
+_HI = 1
+_FORCED = 2
+
+_SYNC_ENGINES = ("ffsubsync", "autosubsync", "alass")
+
+
 def resolve_source_paths(video_path, languages):
     """Find single-language SRT files on disk matching the requested codes.
+
+    Accepts plain, HI, and forced variants. When multiple variants of the same
+    language are present, prefers plain > hi > forced. Sync-engine outputs
+    (.ffsubsync, .autosubsync, .alass) and combined outputs are never picked.
 
     Returns SourcePaths if every requested language has a matching file,
     None if any is missing.
@@ -28,12 +41,19 @@ def resolve_source_paths(video_path, languages):
     if not video_dir or not base:
         return None
 
-    candidates = glob.glob(os.path.join(glob.escape(video_dir), f"{glob.escape(base)}.*.srt"))
+    candidates = glob.glob(
+        os.path.join(glob.escape(video_dir), f"{glob.escape(base)}.*.srt")
+    )
+    # Map of code -> (priority, path). Lower priority wins.
     by_code = {}
     for path in candidates:
-        code = _extract_simple_code(base, path)
-        if code is not None:
-            by_code.setdefault(code, path)
+        match = _extract_code_and_priority(base, path)
+        if match is None:
+            continue
+        code, priority = match
+        existing = by_code.get(code)
+        if existing is None or priority < existing[0]:
+            by_code[code] = (priority, path)
 
     paths = []
     for code in languages:
@@ -42,17 +62,20 @@ def resolve_source_paths(video_path, languages):
                 "BAZARR combine: missing source %s for %s", code, video_path
             )
             return None
-        paths.append(by_code[code])
+        paths.append(by_code[code][1])
 
     return SourcePaths(primary=paths[0], secondaries=paths[1:])
 
 
-def _extract_simple_code(base, path):
-    """Return the language code if path is a plain single-language SRT
-    (<base>.<code>.srt) where code is a 2-letter lowercase code, else None.
+def _extract_code_and_priority(base, path):
+    """Return (code, priority) for a usable single-language SRT.
 
-    Excludes files with extra modifiers like .hi, .forced, .combined-xx,
-    and PR 158 sync-engine outputs (.ffsubsync, .autosubsync, .alass).
+    Recognizes <base>.<code>.srt (priority _PLAIN),
+    <base>.<code>.hi.srt and <base>.<code>.sdh.srt and <base>.<code>.cc.srt
+    (priority _HI), and <base>.<code>.forced.srt (priority _FORCED).
+
+    Returns None for combined outputs, sync-engine outputs, and anything that
+    does not match a recognized single-language pattern.
     """
     filename = os.path.basename(path)
     if not filename.startswith(base + "."):
@@ -62,10 +85,30 @@ def _extract_simple_code(base, path):
     if len(parts) != 2 or parts[1] != "srt":
         return None
     middle = parts[0]
-    if "." in middle:
-        return None
     if "-" in middle:
+        # combined-X[-Y] markers always contain a hyphen.
         return None
-    if len(middle) != 2 or not middle.isalpha() or not middle.islower():
+
+    segments = middle.split(".")
+    if not segments:
         return None
-    return middle
+    code = segments[0]
+    if len(code) != 2 or not code.isalpha() or not code.islower():
+        return None
+
+    if len(segments) == 1:
+        return code, _PLAIN
+
+    if len(segments) == 2:
+        modifier = segments[1].lower()
+        if modifier in ("hi", "sdh", "cc"):
+            return code, _HI
+        if modifier == "forced":
+            return code, _FORCED
+        if modifier in _SYNC_ENGINES:
+            # PR 158 sync engine output, never a combine source.
+            return None
+        return None
+
+    # More than two segments: e.g. en.hi.ffsubsync.srt. Reject.
+    return None

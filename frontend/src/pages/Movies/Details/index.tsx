@@ -132,16 +132,16 @@ const MovieDetailView: FunctionComponent = () => {
 
   const allowEdit = movie?.profileId !== undefined;
 
-  const availableLangs = (movie?.subtitles ?? [])
-    .filter(
-      (s) =>
-        s.path &&
-        !isSyncOutputSubtitle(s) &&
-        !isCombinedOutputSubtitle(s) &&
-        !s.hi &&
-        !s.forced,
-    )
-    .map((s) => s.code2);
+  const availableLangs = Array.from(
+    new Set(
+      (movie?.subtitles ?? [])
+        .filter(
+          (s) =>
+            s.path && !isSyncOutputSubtitle(s) && !isCombinedOutputSubtitle(s),
+        )
+        .map((s) => s.code2),
+    ),
+  );
 
   return (
     <Container fluid px={0}>

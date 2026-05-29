@@ -117,9 +117,7 @@ const SeriesEpisodesView: FunctionComponent = () => {
         if (
           s.path &&
           !isSyncOutputSubtitle(s) &&
-          !isCombinedOutputSubtitle(s) &&
-          !s.hi &&
-          !s.forced
+          !isCombinedOutputSubtitle(s)
         ) {
           seen.add(s.code2);
         }
