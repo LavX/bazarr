@@ -22,9 +22,11 @@ def test_build_key_query_and_moviehash_vary():
     k_empty = C.build_key(**base)
     k_q = C.build_key(**base, query="Movie.2020.1080p-GROUP.mkv")
     k_h = C.build_key(**base, moviehash="deadbeefcafebabe")
+    k_s = C.build_key(**base, moviehash="deadbeefcafebabe",
+                      moviebytesize=123456789)
     k_qh = C.build_key(**base, query="Movie.2020.1080p-GROUP.mkv",
                        moviehash="deadbeefcafebabe")
-    assert k_empty != k_q != k_h != k_qh
+    assert k_empty != k_q != k_h != k_s != k_qh
     # Same query should produce the same key (deterministic)
     assert k_q == C.build_key(**base, query="Movie.2020.1080p-GROUP.mkv")
 

@@ -168,6 +168,9 @@ def subtitles():
     if not imdb and tmdb:
         imdb = _resolve_tmdb_to_imdb(tmdb)
     moviehash = args.get("moviehash") or None
+    moviebytesize = args.get("moviebytesize", type=int)
+    if moviebytesize is not None and moviebytesize <= 0:
+        return compat_error("moviebytesize must be a positive integer", 400, "bad-request")
     moviehash_match = args.get("moviehash_match") or None
     if moviehash_match and moviehash_match not in ("include", "only"):
         return compat_error("moviehash_match must be include|only", 400, "bad-request")
@@ -193,6 +196,7 @@ def subtitles():
     try:
         result = service.search(imdb or "", season, episode, langs, media_type,
                                 query=query_filename, moviehash=moviehash,
+                                moviebytesize=moviebytesize,
                                 moviehash_match=moviehash_match,
                                 requested_languages=requested_codes)
     except Exception:

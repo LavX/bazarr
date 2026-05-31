@@ -55,3 +55,24 @@ def test_subtitles_requires_languages(monkeypatch):
     app.register_blueprint(compat_bp, url_prefix="/api/v1")
     r = app.test_client().get("/api/v1/subtitles", headers={"Api-Key": "a" * 32})
     assert r.status_code == 400
+
+
+def test_subtitles_passes_moviebytesize_to_search(monkeypatch):
+    from flask import Flask
+    from compat.routes import compat_bp
+    monkeypatch.setattr("compat.auth.settings.compat_endpoint.token", "a" * 32)
+    search_mock = MagicMock(return_value={"data": []})
+    monkeypatch.setattr("compat.routes.service.search", search_mock)
+    app = Flask(__name__)
+    app.register_blueprint(compat_bp, url_prefix="/api/v1")
+
+    response = app.test_client().get(
+        "/api/v1/subtitles?imdb_id=tt1&languages=en&type=movie"
+        "&moviehash=8e245d9679d31e12&moviebytesize=123456789",
+        headers={"Api-Key": "a" * 32},
+    )
+
+    assert response.status_code == 200
+    _, kwargs = search_mock.call_args
+    assert kwargs["moviehash"] == "8e245d9679d31e12"
+    assert kwargs["moviebytesize"] == 123456789
