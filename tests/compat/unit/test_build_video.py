@@ -87,6 +87,20 @@ def test_moviebytesize_is_wired_for_hash_size_providers():
     assert v.hashes.get("bsplayer") == "8e245d9679d31e12"
 
 
+def test_anidb_ids_are_wired_for_anime_providers():
+    """AnimeTosho needs AniDB ids on the worker video payload."""
+    from compat.service import _build_video
+    v = _build_video(
+        "tt21209876", 1, 12, "episode",
+        query="Solo.Leveling.S01E12.2160p.WEB-ToonsHub.mkv",
+        series_anidb_id=17495,
+        series_anidb_episode_id=277518,
+    )
+    assert v.series_anidb_id == 17495
+    assert v.series_anidb_series_id == 17495
+    assert v.series_anidb_episode_id == 277518
+
+
 def test_imdb_id_normalized_to_tt_prefix():
     """OS-compat clients (Jellyfin plugin) strip 'tt' before sending.
     OMDB / TVDB v1 / v4 all reject the bare numeric form, so we normalize

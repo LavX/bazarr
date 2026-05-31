@@ -201,10 +201,22 @@ def _parse_video_from_library(path: str, meta: dict, media_type: str,
     return v
 
 
+def _apply_anidb_ids(video, series_anidb_id: int | None = None,
+                     series_anidb_episode_id: int | None = None):
+    if series_anidb_id is not None:
+        video.series_anidb_id = int(series_anidb_id)
+        video.series_anidb_series_id = int(series_anidb_id)
+    if series_anidb_episode_id is not None:
+        video.series_anidb_episode_id = int(series_anidb_episode_id)
+    return video
+
+
 def _build_video(imdb_id: str, season: int | None, episode: int | None,
                  media_type: str, query: str | None = None,
                  moviehash: str | None = None,
-                 moviebytesize: int | None = None) -> Video:
+                 moviebytesize: int | None = None,
+                 series_anidb_id: int | None = None,
+                 series_anidb_episode_id: int | None = None) -> Video:
     """Construct a Video for compat fanout.
 
     Preferred path: when the imdb_id resolves to a library entry with a
@@ -232,7 +244,7 @@ def _build_video(imdb_id: str, season: int | None, episode: int | None,
                                           imdb_id, season, episode, moviehash,
                                           moviebytesize)
         if real is not None:
-            return real
+            return _apply_anidb_ids(real, series_anidb_id, series_anidb_episode_id)
         logger.debug("compat: library has path %r but parse_video failed; "
                      "falling back to virtual Video build", path)
     title = meta.get("title") or ""
@@ -310,6 +322,8 @@ def _build_video(imdb_id: str, season: int | None, episode: int | None,
         }
     else:
         v.hashes = {}
+
+    _apply_anidb_ids(v, series_anidb_id, series_anidb_episode_id)
 
     # Library miss -> try OMDB/TVDB refiners (network, best-effort).
     if not getattr(v, "title", None) and not getattr(v, "series", None):
@@ -598,7 +612,9 @@ _SKIP_FOR_VIRTUAL_VIDEO = frozenset({"embeddedsubtitles"})
 
 
 def _do_fanout(imdb_id, season, episode, languages, media_type,
-               query=None, moviehash=None, moviebytesize=None, moviehash_match=None,
+               query=None, moviehash=None, moviebytesize=None,
+               series_anidb_id=None, series_anidb_episode_id=None,
+               moviehash_match=None,
                requested_languages=None):
     from subliminal_patch.provider_health import get_tracker as _get_health_tracker
     from subliminal_patch.score import ComputeScore, MAX_SCORES
@@ -606,7 +622,9 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
     pool = _get_compat_pool()
     video = _build_video(imdb_id, season, episode, media_type,
                          query=query, moviehash=moviehash,
-                         moviebytesize=moviebytesize)
+                         moviebytesize=moviebytesize,
+                         series_anidb_id=series_anidb_id,
+                         series_anidb_episode_id=series_anidb_episode_id)
     health_discarded = health.currently_discarded()
     video_has_file = bool(getattr(video, "name", None)
                           and os.path.exists(getattr(video, "name", "")))
@@ -761,12 +779,16 @@ def search(imdb_id: str, season, episode, languages: Iterable[Language],
            media_type: str, query: str | None = None,
            moviehash: str | None = None,
            moviebytesize: int | None = None,
+           series_anidb_id: int | None = None,
+           series_anidb_episode_id: int | None = None,
            moviehash_match: str | None = None,
            requested_languages: list[str] | None = None) -> dict:
     enabled = get_providers_sorted()
     key = C.build_key(media_type, imdb_id, season, episode, languages, enabled,
                       query=query, moviehash=moviehash,
                       moviebytesize=moviebytesize,
+                      series_anidb_id=series_anidb_id,
+                      series_anidb_episode_id=series_anidb_episode_id,
                       moviehash_match=moviehash_match,
                       requested_languages=requested_languages)
     cache_ttl = int(settings.compat_endpoint.cache_ttl_seconds)
@@ -777,6 +799,8 @@ def search(imdb_id: str, season, episode, languages: Iterable[Language],
         creator=lambda: _do_fanout(imdb_id, season, episode, languages,
                                     media_type, query=query, moviehash=moviehash,
                                     moviebytesize=moviebytesize,
+                                    series_anidb_id=series_anidb_id,
+                                    series_anidb_episode_id=series_anidb_episode_id,
                                     moviehash_match=moviehash_match,
                                     requested_languages=requested_languages),
         expiration_time=ttl,
@@ -825,15 +849,15 @@ def _fetch_subtitle_bytes(sub) -> bytes:
     # Scheme detection is case-insensitive: HTTP clients treat schemes as
     # case-insensitive per RFC 3986, so a hostile provider returning
     # `HTTP://169.254.169.254/...` (uppercase) must NOT slip past the
-    # guard just because `startswith` is byte-exact. Codex flagged this
-    # as a bypass: the request would still hit the cloud-metadata
-    # endpoint via pool.download_subtitle() with no SSRF check applied.
+    # guard just because `startswith` is byte-exact. The request would
+    # still hit the cloud-metadata endpoint via pool.download_subtitle()
+    # with no SSRF check applied.
     #
     # Also walk the redirect chain via HEAD before invoking the pool. The
     # provider HTTP client follows redirects automatically, so a public
     # URL that 30x-redirects to 127.0.0.1 or 169.254.169.254 would
     # otherwise fetch the private target with no per-hop SSRF check.
-    # Codex P1: pre-resolve every Location and refuse any unsafe hop.
+    # Pre-resolve every Location and refuse any unsafe hop.
     url = getattr(sub, "download_link", None) or getattr(sub, "url", None)
     if isinstance(url, str) and url[:8].lower().startswith(("http://", "https://")):
         resolve_safe_url(url)  # raises UnsafeURLError on any unsafe hop

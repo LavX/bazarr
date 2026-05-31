@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from subzero.language import Language
 from subliminal.video import Movie
+from subliminal_patch.core import Episode
 
 
 def _sha256(value):
@@ -248,6 +249,14 @@ def test_worker_protocol_round_trips_language_video_and_download_payload():
     )
     movie.hashes["opensubtitles"] = "abc123"
     movie.radarrId = 12
+    episode = Episode(
+        "/media/anime.mkv",
+        "Solo Leveling",
+        1,
+        12,
+        series_anidb_id=17495,
+        series_anidb_episode_id=277518,
+    )
 
     candidate = candidate_from_worker(
         provider_name="examplehub",
@@ -271,6 +280,9 @@ def test_worker_protocol_round_trips_language_video_and_download_payload():
     assert language_to_payload(language)["hi"] is True
     assert video_to_payload(movie)["hashes"]["opensubtitles"] == "abc123"
     assert video_to_payload(movie)["media_ids"]["radarrId"] == 12
+    assert video_to_payload(episode)["series_anidb_id"] == 17495
+    assert video_to_payload(episode)["series_anidb_series_id"] == 17495
+    assert video_to_payload(episode)["series_anidb_episode_id"] == 277518
     assert candidate.provider_name == "examplehub"
     assert candidate.source_provider == "upstream"
     assert candidate.id == "upstream:sub-1"
