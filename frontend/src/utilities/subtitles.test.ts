@@ -319,7 +319,7 @@ describe("combined output helpers", () => {
     ).toBe("DE + ES + ZH");
   });
 
-  it("blocks sync action on combined output subtitles", () => {
+  it("allows sync action on combined output subtitles (they are valid SRTs)", () => {
     expect(
       canSynchronizeSubtitle({
         code2: "en",
@@ -329,6 +329,20 @@ describe("combined output helpers", () => {
         modifier: "combined-hu",
         language: "en:combined-hu",
         path: "/movie/Movie.en.combined-hu.srt",
+      }),
+    ).toBe(true);
+  });
+
+  it("blocks sync action on sync-engine output subtitles", () => {
+    expect(
+      canSynchronizeSubtitle({
+        code2: "en",
+        name: "English",
+        forced: false,
+        hi: false,
+        modifier: "sync-ffsubsync",
+        language: "en:sync-ffsubsync",
+        path: "/movie/Movie.en.ffsubsync.srt",
       }),
     ).toBe(false);
   });
