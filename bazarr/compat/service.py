@@ -138,7 +138,8 @@ def _guessit_filename(filename: str) -> dict:
 def _parse_video_from_library(path: str, meta: dict, media_type: str,
                               imdb_id: str, season: int | None,
                               episode: int | None,
-                              moviehash: str | None) -> Video | None:
+                              moviehash: str | None,
+                              moviebytesize: int | None = None) -> Video | None:
     """Build a Video via Bazarr's parse_video (same as native manual search).
 
     Returns None when the path is missing on disk or parse_video raises;
@@ -191,15 +192,19 @@ def _parse_video_from_library(path: str, meta: dict, media_type: str,
     # client already has the file open and its computation is canonical.
     if moviehash:
         existing = dict(getattr(v, "hashes", {}) or {})
+        existing["bsplayer"] = str(moviehash)
         existing["opensubtitles"] = str(moviehash)
         existing["opensubtitlescom"] = str(moviehash)
         v.hashes = existing
+    if moviebytesize:
+        v.size = int(moviebytesize)
     return v
 
 
 def _build_video(imdb_id: str, season: int | None, episode: int | None,
                  media_type: str, query: str | None = None,
-                 moviehash: str | None = None) -> Video:
+                 moviehash: str | None = None,
+                 moviebytesize: int | None = None) -> Video:
     """Construct a Video for compat fanout.
 
     Preferred path: when the imdb_id resolves to a library entry with a
@@ -224,7 +229,8 @@ def _build_video(imdb_id: str, season: int | None, episode: int | None,
     path = meta.get("path") or ""
     if path:
         real = _parse_video_from_library(path, meta, media_type,
-                                          imdb_id, season, episode, moviehash)
+                                          imdb_id, season, episode, moviehash,
+                                          moviebytesize)
         if real is not None:
             return real
         logger.debug("compat: library has path %r but parse_video failed; "
@@ -293,11 +299,15 @@ def _build_video(imdb_id: str, season: int | None, episode: int | None,
             video_codec=g_video_codec,
             audio_codec=g_audio_codec,
         )
-    v.size = None
+    v.size = int(moviebytesize) if moviebytesize else None
     # OpenSubtitles uses a specific file-hash algorithm; if the client
     # computed and provided it, OS providers get an exact-hash match path.
     if moviehash:
-        v.hashes = {"opensubtitles": str(moviehash), "opensubtitlescom": str(moviehash)}
+        v.hashes = {
+            "bsplayer": str(moviehash),
+            "opensubtitles": str(moviehash),
+            "opensubtitlescom": str(moviehash),
+        }
     else:
         v.hashes = {}
 
@@ -588,14 +598,15 @@ _SKIP_FOR_VIRTUAL_VIDEO = frozenset({"embeddedsubtitles"})
 
 
 def _do_fanout(imdb_id, season, episode, languages, media_type,
-               query=None, moviehash=None, moviehash_match=None,
+               query=None, moviehash=None, moviebytesize=None, moviehash_match=None,
                requested_languages=None):
     from subliminal_patch.provider_health import get_tracker as _get_health_tracker
     from subliminal_patch.score import ComputeScore, MAX_SCORES
     health = _get_health_tracker()
     pool = _get_compat_pool()
     video = _build_video(imdb_id, season, episode, media_type,
-                         query=query, moviehash=moviehash)
+                         query=query, moviehash=moviehash,
+                         moviebytesize=moviebytesize)
     health_discarded = health.currently_discarded()
     video_has_file = bool(getattr(video, "name", None)
                           and os.path.exists(getattr(video, "name", "")))
@@ -749,11 +760,13 @@ def _build_requested_language_map(requested_languages: list[str]) -> dict:
 def search(imdb_id: str, season, episode, languages: Iterable[Language],
            media_type: str, query: str | None = None,
            moviehash: str | None = None,
+           moviebytesize: int | None = None,
            moviehash_match: str | None = None,
            requested_languages: list[str] | None = None) -> dict:
     enabled = get_providers_sorted()
     key = C.build_key(media_type, imdb_id, season, episode, languages, enabled,
                       query=query, moviehash=moviehash,
+                      moviebytesize=moviebytesize,
                       moviehash_match=moviehash_match,
                       requested_languages=requested_languages)
     cache_ttl = int(settings.compat_endpoint.cache_ttl_seconds)
@@ -763,6 +776,7 @@ def search(imdb_id: str, season, episode, languages: Iterable[Language],
         key,
         creator=lambda: _do_fanout(imdb_id, season, episode, languages,
                                     media_type, query=query, moviehash=moviehash,
+                                    moviebytesize=moviebytesize,
                                     moviehash_match=moviehash_match,
                                     requested_languages=requested_languages),
         expiration_time=ttl,
