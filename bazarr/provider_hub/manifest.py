@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
@@ -77,10 +78,14 @@ def _validate_sha256(value: str, field: str) -> str:
     return value.lower()
 
 
-def _validate_provider_id(value: str, built_in_provider_ids: set[str]) -> str:
+def _validate_provider_id(
+    value: str,
+    built_in_provider_ids: AbstractSet[str],
+    replacement_provider_ids: AbstractSet[str],
+) -> str:
     if not _PROVIDER_ID_RE.match(value):
         raise ManifestValidationError("provider_id must use lowercase provider id syntax")
-    if value in built_in_provider_ids:
+    if value in built_in_provider_ids and value not in replacement_provider_ids:
         raise ManifestValidationError(f"provider_id {value!r} shadows a built-in provider")
     return value
 
@@ -198,8 +203,13 @@ def _validate_dependencies(dependencies: dict[str, Any]) -> tuple[DependencyRequ
     return tuple(validated)
 
 
-def validate_manifest(manifest: dict[str, Any], built_in_provider_ids: set[str] | None = None) -> ValidatedManifest:
+def validate_manifest(
+    manifest: dict[str, Any],
+    built_in_provider_ids: set[str] | None = None,
+    replacement_provider_ids: AbstractSet[str] | None = None,
+) -> ValidatedManifest:
     built_in_provider_ids = built_in_provider_ids or set()
+    replacement_provider_ids = replacement_provider_ids or frozenset()
     manifest = _require_mapping(manifest, "manifest")
 
     schema_version = manifest.get("schema_version")
@@ -209,6 +219,7 @@ def validate_manifest(manifest: dict[str, Any], built_in_provider_ids: set[str] 
     provider_id = _validate_provider_id(
         _require_text(manifest.get("provider_id"), "provider_id"),
         built_in_provider_ids,
+        replacement_provider_ids,
     )
     name = _require_text(manifest.get("name"), "name")
     version = _require_text(manifest.get("version"), "version")

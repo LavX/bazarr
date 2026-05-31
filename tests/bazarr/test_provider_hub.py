@@ -188,6 +188,26 @@ def test_manifest_rejects_built_in_provider_shadowing():
         validate_manifest(manifest, built_in_provider_ids={"opensubtitles"})
 
 
+def test_manifest_accepts_explicit_built_in_replacement_policy():
+    from provider_hub.manifest import validate_manifest
+
+    validated = validate_manifest(
+        _manifest(provider_id="addic7ed"),
+        built_in_provider_ids={"addic7ed"},
+        replacement_provider_ids={"addic7ed"},
+    )
+
+    assert validated.provider_id == "addic7ed"
+
+
+def test_dead_origin_providers_are_not_builtin_replacements():
+    from provider_hub.policy import MIGRATED_BUILT_IN_PROVIDER_IDS
+
+    assert {"hosszupuska", "podnapisi", "subscenter", "xsubs"}.isdisjoint(
+        MIGRATED_BUILT_IN_PROVIDER_IDS
+    )
+
+
 @pytest.mark.parametrize(
     "requirement",
     [
@@ -339,6 +359,53 @@ def test_active_provider_hub_installation_registers_proxy(tmp_path, monkeypatch)
     provider_cls = provider_registry[provider_id]
     assert provider_cls.provider_name == provider_id
     assert provider_cls.languages
+
+
+def test_trusted_provider_hub_builtin_replacement_registers_proxy(tmp_path, monkeypatch):
+    from provider_hub.registry import register_active_provider_classes
+    import provider_hub.registry as hub_registry
+
+    class FakeProviderRegistry:
+        def __init__(self):
+            self.providers = {"addic7ed": object}
+            self.registered = []
+
+        def names(self):
+            return list(self.providers)
+
+        def register(self, provider_id, provider_cls):
+            self.providers[provider_id] = provider_cls
+            self.registered.append((provider_id, provider_cls))
+
+    fake_registry = FakeProviderRegistry()
+    monkeypatch.setattr(hub_registry, "provider_registry", fake_registry)
+    monkeypatch.setattr(hub_registry, "_REGISTERED_PROVIDER_HUB_IDS", set())
+
+    provider_id = "addic7ed"
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "installations": {
+                    provider_id: {
+                        "provider_id": provider_id,
+                        "name": "Addic7ed",
+                        "active_version": "1.0.0",
+                        "state": "active",
+                        "pending_restart": False,
+                        "trusted": True,
+                        "manifest": _manifest(provider_id=provider_id, name="Addic7ed"),
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    assert register_active_provider_classes() == [provider_id]
+    assert fake_registry.registered[0][0] == provider_id
+    assert fake_registry.providers[provider_id].provider_name == provider_id
 
 
 def test_get_providers_registers_active_provider_hub_installation(tmp_path, monkeypatch):
@@ -1527,6 +1594,100 @@ def test_stage_install_trust_comes_from_catalog_entry_only(tmp_path, monkeypatch
     installation = stage_install(tampered_manifest)
 
     assert installation["trusted"] is False
+
+
+def test_stage_install_allows_trusted_official_catalog_to_replace_migrated_builtin(tmp_path, monkeypatch):
+    from provider_hub.service import stage_install
+    from provider_hub.state import official_catalog_source
+
+    provider_id = "addic7ed"
+    provider_content = b"class ExampleProvider: pass\n"
+    commit = "e" * 40
+    catalog_manifest = _manifest(
+        provider_id=provider_id,
+        name="Addic7ed",
+        file_payloads={"provider.py": provider_content},
+        dependencies={"requirements": []},
+        source={
+            "type": "github",
+            "repo": "owner/repo",
+            "ref": "main",
+            "commit": commit,
+            "catalog_url": "https://github.com/owner/repo/blob/main/catalog.json",
+            "trusted": True,
+        },
+    )
+    install_manifest = json.loads(json.dumps(catalog_manifest))
+    install_manifest["source"].pop("trusted")
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(
+        json.dumps(
+            {
+                "catalog_sources": {"official": official_catalog_source()},
+                "catalog_entries": {
+                    f"official:{provider_id}:1.0.0": {
+                        "source": "official",
+                        "provider_id": provider_id,
+                        "version": "1.0.0",
+                        "trusted": True,
+                        "manifest": catalog_manifest,
+                    }
+                },
+                "installations": {},
+                "jobs": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    monkeypatch.setattr("provider_hub.service._built_in_provider_ids", lambda: {provider_id})
+
+    def fake_get(url, timeout):
+        return _FakeResponse(content=provider_content)
+
+    class FakeEnvironment:
+        def __init__(self, root):
+            self.root = Path(root)
+
+        def install(self, validated):
+            env_path = self.root / "envs" / validated.provider_id / validated.version / "test"
+            python_path = env_path / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            python_path.parent.mkdir(parents=True, exist_ok=True)
+            python_path.write_text("", encoding="utf-8")
+            return env_path
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
+    monkeypatch.setattr("provider_hub.service._smoke_validate_worker", lambda manifest, bundle_path, python_path: None)
+
+    installation = stage_install(install_manifest)
+
+    assert installation["provider_id"] == provider_id
+    assert installation["trusted"] is True
+
+
+def test_stage_install_rejects_untrusted_catalog_builtin_replacement(tmp_path, monkeypatch):
+    from provider_hub.manifest import ManifestValidationError
+    from provider_hub.service import stage_install
+
+    provider_id = "addic7ed"
+    manifest = _manifest(provider_id=provider_id)
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    monkeypatch.setattr("provider_hub.service._built_in_provider_ids", lambda: {provider_id})
+
+    with pytest.raises(ManifestValidationError, match="built-in"):
+        stage_install(manifest)
+
+
+def test_stage_install_rejects_non_mapping_manifest_with_validation_error(tmp_path, monkeypatch):
+    from provider_hub.manifest import ManifestValidationError
+    from provider_hub.service import stage_install
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+
+    with pytest.raises(ManifestValidationError, match="manifest must be an object"):
+        stage_install([])
 
 
 def test_stage_install_smoke_failure_records_failed_install(tmp_path, monkeypatch):
