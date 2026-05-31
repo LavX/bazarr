@@ -18,6 +18,12 @@ logger = logging.getLogger("bazarr.compat.service")
 
 _pool_lock = Lock()
 _compat_pool = None  # lazy singleton, dedicated (B2)
+_CLIENT_MOVIEHASH_PROVIDERS = (
+    "bsplayer",
+    "napiprojekt",
+    "opensubtitles",
+    "opensubtitlescom",
+)
 
 
 def _get_compat_pool():
@@ -190,15 +196,20 @@ def _parse_video_from_library(path: str, meta: dict, media_type: str,
 
     # Client-supplied hash wins over whatever parse_video computed; the
     # client already has the file open and its computation is canonical.
-    if moviehash:
-        existing = dict(getattr(v, "hashes", {}) or {})
-        existing["bsplayer"] = str(moviehash)
-        existing["opensubtitles"] = str(moviehash)
-        existing["opensubtitlescom"] = str(moviehash)
-        v.hashes = existing
+    _apply_client_moviehash(v, moviehash)
     if moviebytesize:
         v.size = int(moviebytesize)
     return v
+
+
+def _apply_client_moviehash(video, moviehash: str | None = None):
+    if not moviehash:
+        return video
+    hashes = dict(getattr(video, "hashes", {}) or {})
+    for provider_id in _CLIENT_MOVIEHASH_PROVIDERS:
+        hashes[provider_id] = str(moviehash)
+    video.hashes = hashes
+    return video
 
 
 def _apply_anidb_ids(video, series_anidb_id: int | None = None,
@@ -312,16 +323,10 @@ def _build_video(imdb_id: str, season: int | None, episode: int | None,
             audio_codec=g_audio_codec,
         )
     v.size = int(moviebytesize) if moviebytesize else None
-    # OpenSubtitles uses a specific file-hash algorithm; if the client
-    # computed and provided it, OS providers get an exact-hash match path.
-    if moviehash:
-        v.hashes = {
-            "bsplayer": str(moviehash),
-            "opensubtitles": str(moviehash),
-            "opensubtitlescom": str(moviehash),
-        }
-    else:
-        v.hashes = {}
+    # Client-supplied hashes give hash-based providers an exact-match path
+    # when the client knows the provider-specific value.
+    v.hashes = {}
+    _apply_client_moviehash(v, moviehash)
 
     _apply_anidb_ids(v, series_anidb_id, series_anidb_episode_id)
 

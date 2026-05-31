@@ -66,11 +66,12 @@ def test_episode_sets_series_imdb_and_season_episode():
 
 
 def test_moviehash_is_wired_for_opensubtitles_providers():
-    """OS-style moviehash enables exact-hash matching on hash providers."""
+    """Client-supplied hashes enable exact-hash matching on hash providers."""
     from compat.service import _build_video
     v = _build_video("tt0111161", None, None, "movie",
                      moviehash="8e245d9679d31e12")
     assert v.hashes.get("bsplayer") == "8e245d9679d31e12"
+    assert v.hashes.get("napiprojekt") == "8e245d9679d31e12"
     assert v.hashes.get("opensubtitles") == "8e245d9679d31e12"
     assert v.hashes.get("opensubtitlescom") == "8e245d9679d31e12"
 
