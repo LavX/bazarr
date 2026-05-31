@@ -26,7 +26,7 @@ def test_search_calls_parallel_fanout_and_caches():
                                 languages=[Language("eng")],
                                 media_type="episode")
         assert result["data"]
-        # Second call hits cache — fanout not re-invoked
+        # Second call hits cache, fanout not re-invoked.
         lf.reset_mock()
         result2 = service.search(imdb_id="tt12345", season=1, episode=2,
                                   languages=[Language("eng")],
@@ -76,3 +76,25 @@ def test_subtitles_passes_moviebytesize_to_search(monkeypatch):
     _, kwargs = search_mock.call_args
     assert kwargs["moviehash"] == "8e245d9679d31e12"
     assert kwargs["moviebytesize"] == 123456789
+
+
+def test_subtitles_passes_anidb_ids_to_search(monkeypatch):
+    from flask import Flask
+    from compat.routes import compat_bp
+    monkeypatch.setattr("compat.auth.settings.compat_endpoint.token", "a" * 32)
+    search_mock = MagicMock(return_value={"data": []})
+    monkeypatch.setattr("compat.routes.service.search", search_mock)
+    app = Flask(__name__)
+    app.register_blueprint(compat_bp, url_prefix="/api/v1")
+
+    response = app.test_client().get(
+        "/api/v1/subtitles?query=Solo.Leveling.S01E12.mkv&type=episode"
+        "&season_number=1&episode_number=12&languages=en"
+        "&series_anidb_id=17495&series_anidb_episode_id=277518",
+        headers={"Api-Key": "a" * 32},
+    )
+
+    assert response.status_code == 200
+    _, kwargs = search_mock.call_args
+    assert kwargs["series_anidb_id"] == 17495
+    assert kwargs["series_anidb_episode_id"] == 277518

@@ -27,13 +27,15 @@ def build_key(media_type: str, imdb_id: str, season: int | None,
               episode: int | None, languages, enabled_providers,
               query: str | None = None, moviehash: str | None = None,
               moviebytesize: int | None = None,
+              series_anidb_id: int | None = None,
+              series_anidb_episode_id: int | None = None,
               moviehash_match: str | None = None,
               requested_languages: list[str] | None = None) -> str:
     """Deterministic across restarts. Language variants preserved.
 
-    query/moviehash/moviebytesize/moviehash_match are part of the key because they
-    change the virtual Video construction AND post-fanout filtering, so
-    different values produce different result shapes and must not
+    query/moviehash/moviebytesize/AniDB ids/moviehash_match are part of the key
+    because they change the virtual Video construction AND post-fanout filtering,
+    so different values produce different result shapes and must not
     cross-contaminate via cache hits.
     """
     lang_tuples = sorted(
@@ -53,6 +55,7 @@ def build_key(media_type: str, imdb_id: str, season: int | None,
     local_flag = int(bool(_cfg.compat_endpoint.serve_local_subs))
     extras = hashlib.sha256(
         f"{query or ''}|{moviehash or ''}|{moviebytesize or ''}|{moviehash_match or ''}"
+        f"|anidb={series_anidb_id or ''}|anidb_ep={series_anidb_episode_id or ''}"
         f"|{req_langs}|local={local_flag}".encode()
     ).hexdigest()[:16]
     return (

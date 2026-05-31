@@ -3,8 +3,8 @@ from flask import Blueprint, request, jsonify, Response
 # Intra-package and intra-app imports MUST drop the `bazarr.` prefix - the
 # rest of bazarr resolves modules from `bazarr/` as sys.path root, and a
 # `bazarr.foo` import resolves to a SECOND module instance with its own
-# state. Codex flagged duplicate settings/database instances on writes
-# from /system/compat/regenerate.
+# state. The compat regenerate path previously showed duplicate
+# settings/database instances when these imports used the package prefix.
 from .auth import compat_error
 from utilities.url_guard import UnsafeURLError
 
@@ -86,8 +86,8 @@ def _enforce_runtime_disable():
     """Refuse traffic when the operator toggles compat_endpoint.enabled
     off at runtime. The blueprint is mounted at startup based on the
     boot-time value, so without this guard a previously-enabled endpoint
-    keeps serving with the old token until restart. Codex P2: re-check
-    the live setting on every request and 503 if it has been disabled.
+    keeps serving with the old token until restart. Re-check the live
+    setting on every request and 503 if it has been disabled.
     """
     from app.config import settings
     if not bool(settings.compat_endpoint.enabled):
@@ -171,6 +171,16 @@ def subtitles():
     moviebytesize = args.get("moviebytesize", type=int)
     if moviebytesize is not None and moviebytesize <= 0:
         return compat_error("moviebytesize must be a positive integer", 400, "bad-request")
+    series_anidb_id = args.get("series_anidb_id", type=int)
+    if series_anidb_id is None:
+        series_anidb_id = args.get("anidb_id", type=int)
+    series_anidb_episode_id = args.get("series_anidb_episode_id", type=int)
+    if series_anidb_episode_id is None:
+        series_anidb_episode_id = args.get("anidb_episode_id", type=int)
+    if series_anidb_id is not None and series_anidb_id <= 0:
+        return compat_error("series_anidb_id must be a positive integer", 400, "bad-request")
+    if series_anidb_episode_id is not None and series_anidb_episode_id <= 0:
+        return compat_error("series_anidb_episode_id must be a positive integer", 400, "bad-request")
     moviehash_match = args.get("moviehash_match") or None
     if moviehash_match and moviehash_match not in ("include", "only"):
         return compat_error("moviehash_match must be include|only", 400, "bad-request")
@@ -197,6 +207,8 @@ def subtitles():
         result = service.search(imdb or "", season, episode, langs, media_type,
                                 query=query_filename, moviehash=moviehash,
                                 moviebytesize=moviebytesize,
+                                series_anidb_id=series_anidb_id,
+                                series_anidb_episode_id=series_anidb_episode_id,
                                 moviehash_match=moviehash_match,
                                 requested_languages=requested_codes)
     except Exception:
