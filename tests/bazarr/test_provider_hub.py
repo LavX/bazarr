@@ -325,7 +325,8 @@ def test_venv_installer_uses_isolated_hash_checked_pip(monkeypatch, tmp_path):
     assert pip_calls, calls
     install_cmd = " ".join(pip_calls[-1])
     assert "--require-hashes" in install_cmd
-    assert "--only-binary=:all:" in install_cmd
+    assert "--prefer-binary" in install_cmd
+    assert "--only-binary=:all:" not in install_cmd
     assert "--no-warn-script-location" in install_cmd
     assert "-r" in install_cmd
     assert "/usr/local" not in install_cmd

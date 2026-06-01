@@ -64,7 +64,7 @@ class PluginEnvironment:
                 "--disable-pip-version-check",
                 "--no-warn-script-location",
                 "--require-hashes",
-                "--only-binary=:all:",
+                "--prefer-binary",
                 "-r",
                 str(requirements_path),
             ]
