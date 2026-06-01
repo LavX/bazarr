@@ -175,9 +175,7 @@ WINDOWS_RUNTIME_REQUIREMENTS = {
 }
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-FORBIDDEN_RUNTIME_ORIGINS = (
-    REPO_ROOT / "custom_libs",
-)
+FORBIDDEN_RUNTIME_ORIGINS = (REPO_ROOT / "custom_libs",)
 
 UNVENDORED_RUNTIME_IMPORTS = {
     "signalrcore",
@@ -275,14 +273,21 @@ def missing_runtime_requirements():
 
 def install_requirements(missing_modules=None):
     if importlib.util.find_spec("pip") is None:
-        logging.info("BAZARR unable to install requirements because pip is not installed.")
+        logging.info(
+            "BAZARR unable to install requirements because pip is not installed."
+        )
         return False
 
     if os.path.expanduser("~") == "/":
-        logging.info("BAZARR unable to install requirements because the user has no home directory.")
+        logging.info(
+            "BAZARR unable to install requirements because the user has no home directory."
+        )
         return False
 
-    logging.info("BAZARR installing requirements. Missing imports: %s", ", ".join(missing_modules or []))
+    logging.info(
+        "BAZARR installing requirements. Missing imports: %s",
+        ", ".join(missing_modules or []),
+    )
 
     pip_command = [
         sys.executable,
@@ -293,7 +298,10 @@ def install_requirements(missing_modules=None):
         "-qq",
         "--disable-pip-version-check",
         "-r",
-        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "requirements.txt"),
+        os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            "requirements.txt",
+        ),
     ]
     if not is_virtualenv():
         pip_command.insert(4, "--user")
@@ -314,7 +322,9 @@ def restart_after_requirements_install():
         try:
             Path(restart_file).touch()
         except Exception:
-            logging.exception("BAZARR cannot create restart file after installing requirements.")
+            logging.exception(
+                "BAZARR cannot create restart file after installing requirements."
+            )
         else:
             os._exit(EXIT_NORMAL)
 

@@ -33,15 +33,15 @@ _pools = {}
 
 def _get_pool(media_type, profile_id=None):
     try:
-        return _pools[f'{media_type}_{profile_id or ""}']
+        return _pools[f"{media_type}_{profile_id or ''}"]
     except KeyError:
         _update_pool(media_type, profile_id)
 
-        return _pools[f'{media_type}_{profile_id or ""}']
+        return _pools[f"{media_type}_{profile_id or ''}"]
 
 
 def _update_pool(media_type, profile_id=None):
-    pool_key = f'{media_type}_{profile_id or ""}'
+    pool_key = f"{media_type}_{profile_id or ''}"
     logging.debug("BAZARR updating pool: %s", pool_key)
 
     # Init a new pool if not present

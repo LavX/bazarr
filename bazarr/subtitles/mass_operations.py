@@ -5,7 +5,15 @@ import logging
 import os
 
 from app.config import settings
-from app.database import TableEpisodes, TableMovies, TableHistory, TableHistoryMovie, TableShows, database, select
+from app.database import (
+    TableEpisodes,
+    TableMovies,
+    TableHistory,
+    TableHistoryMovie,
+    TableShows,
+    database,
+    select,
+)
 from app.jobs_queue import jobs_queue
 from subtitles.sync import sync_subtitles
 from subtitles.tools.subsync_engines import is_sync_engine_output
@@ -22,14 +30,31 @@ from sqlalchemy import or_
 logger = logging.getLogger(__name__)
 
 VALID_ACTIONS = {
-    'sync', 'translate', 'OCR_fixes', 'common', 'remove_HI',
-    'remove_tags', 'fix_uppercase', 'reverse_rtl', 'emoji',
-    'scan-disk', 'search-missing', 'upgrade',
+    "sync",
+    "translate",
+    "OCR_fixes",
+    "common",
+    "remove_HI",
+    "remove_tags",
+    "fix_uppercase",
+    "reverse_rtl",
+    "emoji",
+    "scan-disk",
+    "search-missing",
+    "upgrade",
 }
 
-MEDIA_ACTIONS = {'scan-disk', 'search-missing', 'upgrade'}
+MEDIA_ACTIONS = {"scan-disk", "search-missing", "upgrade"}
 
-MOD_ACTIONS = {'OCR_fixes', 'common', 'remove_HI', 'remove_tags', 'fix_uppercase', 'reverse_rtl', 'emoji'}
+MOD_ACTIONS = {
+    "OCR_fixes",
+    "common",
+    "remove_HI",
+    "remove_tags",
+    "fix_uppercase",
+    "reverse_rtl",
+    "emoji",
+}
 
 
 def _parse_subtitles_column(subtitles_raw):
@@ -38,7 +63,9 @@ def _parse_subtitles_column(subtitles_raw):
         return []
     try:
         parsed = ast.literal_eval(subtitles_raw)
-        return [(entry[0], entry[1]) for entry in parsed if len(entry) >= 2 and entry[1]]
+        return [
+            (entry[0], entry[1]) for entry in parsed if len(entry) >= 2 and entry[1]
+        ]
     except (ValueError, SyntaxError):
         return []
 
@@ -46,8 +73,7 @@ def _parse_subtitles_column(subtitles_raw):
 def _get_synced_episode_paths():
     """Get set of subtitle paths that have been synced (action=5) from episode history."""
     results = database.execute(
-        select(TableHistory.subtitles_path)
-        .where(TableHistory.action == 5)
+        select(TableHistory.subtitles_path).where(TableHistory.action == 5)
     ).all()
     return {r.subtitles_path for r in results if r.subtitles_path}
 
@@ -55,8 +81,7 @@ def _get_synced_episode_paths():
 def _get_synced_movie_paths():
     """Get set of subtitle paths that have been synced (action=5) from movie history."""
     results = database.execute(
-        select(TableHistoryMovie.subtitles_path)
-        .where(TableHistoryMovie.action == 5)
+        select(TableHistoryMovie.subtitles_path).where(TableHistoryMovie.action == 5)
     ).all()
     return {r.subtitles_path for r in results if r.subtitles_path}
 
@@ -73,12 +98,16 @@ def _collect_subtitle_items(items, action, options):
         Tuple of (items_list, skipped_count).
     """
     options = options or {}
-    force_resync = options.get('force_resync', False)
-    max_offset = str(options.get('max_offset_seconds', settings.subsync.max_offset_seconds))
-    gss = options.get('gss', settings.subsync.gss)
-    no_fix_framerate = options.get('no_fix_framerate', settings.subsync.no_fix_framerate)
-    output_mode = options.get('output_mode')
-    enabled_engines = options.get('enabled_engines')
+    force_resync = options.get("force_resync", False)
+    max_offset = str(
+        options.get("max_offset_seconds", settings.subsync.max_offset_seconds)
+    )
+    gss = options.get("gss", settings.subsync.gss)
+    no_fix_framerate = options.get(
+        "no_fix_framerate", settings.subsync.no_fix_framerate
+    )
+    output_mode = options.get("output_mode")
+    enabled_engines = options.get("enabled_engines")
 
     # Parse item types
     series_ids = []
@@ -90,27 +119,29 @@ def _collect_subtitle_items(items, action, options):
         pass
     else:
         for item in items:
-            item_type = item.get('type')
-            if item_type == 'series':
-                sid = item.get('sonarrSeriesId')
+            item_type = item.get("type")
+            if item_type == "series":
+                sid = item.get("sonarrSeriesId")
                 if sid is not None:
                     series_ids.append(sid)
-            elif item_type == 'episode':
-                eid = item.get('sonarrEpisodeId')
+            elif item_type == "episode":
+                eid = item.get("sonarrEpisodeId")
                 if eid is not None:
                     episode_ids.append(eid)
-            elif item_type == 'movie':
-                rid = item.get('radarrId')
+            elif item_type == "movie":
+                rid = item.get("radarrId")
                 if rid is not None:
                     movie_ids.append(rid)
 
     all_items = []
     total_skipped = 0
-    target_lang = options.get('to_lang') if action == 'translate' else None
-    source_lang = options.get('from_lang') if action == 'translate' else None
+    target_lang = options.get("to_lang") if action == "translate" else None
+    source_lang = options.get("from_lang") if action == "translate" else None
 
     # Collect episode subtitles
-    should_collect_episodes = (items is None and settings.general.use_sonarr) or series_ids or episode_ids
+    should_collect_episodes = (
+        (items is None and settings.general.use_sonarr) or series_ids or episode_ids
+    )
     if should_collect_episodes:
         ep_items, ep_skipped = _collect_episodes(
             series_ids=series_ids or None,
@@ -149,9 +180,19 @@ def _collect_subtitle_items(items, action, options):
     return all_items, total_skipped
 
 
-def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
-                      force_resync=False, max_offset='60', gss=True, no_fix_framerate=True,
-                      output_mode=None, enabled_engines=None, target_lang=None, source_lang=None):
+def _collect_episodes(
+    series_ids=None,
+    episode_ids=None,
+    action="sync",
+    force_resync=False,
+    max_offset="60",
+    gss=True,
+    no_fix_framerate=True,
+    output_mode=None,
+    enabled_engines=None,
+    target_lang=None,
+    source_lang=None,
+):
     """Collect episode subtitles from the database."""
     columns = [
         TableEpisodes.sonarrEpisodeId,
@@ -159,17 +200,19 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
         TableEpisodes.path,
         TableEpisodes.subtitles,
     ]
-    if action == 'translate':
+    if action == "translate":
         # translate_subtitles_file consumes show-level metadata (imdbId, tvdbId,
         # season, episode) via postprocess_subtitles. Other actions do not, so
         # the join to TableShows is scoped to translate to avoid dropping
         # orphaned episodes from sync/mods batches.
-        columns.extend([
-            TableEpisodes.season,
-            TableEpisodes.episode,
-            TableShows.imdbId,
-            TableShows.tvdbId,
-        ])
+        columns.extend(
+            [
+                TableEpisodes.season,
+                TableEpisodes.episode,
+                TableShows.imdbId,
+                TableShows.tvdbId,
+            ]
+        )
         query = select(*columns).join(TableShows)
     else:
         query = select(*columns)
@@ -185,7 +228,7 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
     episodes = database.execute(query).all()
 
     synced_paths = set()
-    if action == 'sync' and not force_resync:
+    if action == "sync" and not force_resync:
         synced_paths = _get_synced_episode_paths()
 
     items = []
@@ -196,8 +239,8 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
         video_path = path_mappings.path_replace(ep.path)
 
         # For translate: check if target language already exists
-        if action == 'translate' and target_lang:
-            existing_langs = {lang_str.split(':')[0] for lang_str, _ in subtitles}
+        if action == "translate" and target_lang:
+            existing_langs = {lang_str.split(":")[0] for lang_str, _ in subtitles}
             if target_lang in existing_langs:
                 skipped += 1
                 continue
@@ -206,13 +249,13 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
             lang_info = languages_from_colon_seperated_string(lang_string)
 
             # Forced subs can't be synced or translated, but mods are fine
-            if lang_info['forced'] and action in ('sync', 'translate'):
+            if lang_info["forced"] and action in ("sync", "translate"):
                 skipped += 1
                 continue
 
             # For translate: only queue subtitles matching the requested source language
-            sub_lang = lang_string.split(':')[0]
-            if action == 'translate' and source_lang and sub_lang != source_lang:
+            sub_lang = lang_string.split(":")[0]
+            if action == "translate" and source_lang and sub_lang != source_lang:
                 skipped += 1
                 continue
 
@@ -221,53 +264,64 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
                 skipped += 1
                 continue
 
-            if action == 'sync' and is_sync_engine_output(mapped_sub_path):
+            if action == "sync" and is_sync_engine_output(mapped_sub_path):
                 skipped += 1
                 continue
 
-            if action == 'sync' and not force_resync:
+            if action == "sync" and not force_resync:
                 reversed_path = path_mappings.path_replace_reverse(mapped_sub_path)
                 if reversed_path in synced_paths:
                     skipped += 1
                     continue
 
             item = {
-                'video_path': video_path,
-                'srt_path': mapped_sub_path,
-                'srt_lang': sub_lang,
-                'forced': lang_info['forced'],
-                'hi': lang_info['hi'],
-                'sonarr_series_id': ep.sonarrSeriesId,
-                'sonarr_episode_id': ep.sonarrEpisodeId,
-                'radarr_id': None,
-                'max_offset_seconds': max_offset,
-                'no_fix_framerate': no_fix_framerate,
-                'gss': gss,
-                'output_mode': output_mode,
-                'enabled_engines': enabled_engines,
+                "video_path": video_path,
+                "srt_path": mapped_sub_path,
+                "srt_lang": sub_lang,
+                "forced": lang_info["forced"],
+                "hi": lang_info["hi"],
+                "sonarr_series_id": ep.sonarrSeriesId,
+                "sonarr_episode_id": ep.sonarrEpisodeId,
+                "radarr_id": None,
+                "max_offset_seconds": max_offset,
+                "no_fix_framerate": no_fix_framerate,
+                "gss": gss,
+                "output_mode": output_mode,
+                "enabled_engines": enabled_engines,
             }
-            if action == 'translate':
-                item['metadata'] = ep
+            if action == "translate":
+                item["metadata"] = ep
             items.append(item)
 
     return items, skipped
 
 
-def _collect_movies(movie_ids=None, action='sync', force_resync=False,
-                    max_offset='60', gss=True, no_fix_framerate=True,
-                    output_mode=None, enabled_engines=None, target_lang=None, source_lang=None):
+def _collect_movies(
+    movie_ids=None,
+    action="sync",
+    force_resync=False,
+    max_offset="60",
+    gss=True,
+    no_fix_framerate=True,
+    output_mode=None,
+    enabled_engines=None,
+    target_lang=None,
+    source_lang=None,
+):
     """Collect movie subtitles from the database."""
     columns = [
         TableMovies.radarrId,
         TableMovies.path,
         TableMovies.subtitles,
     ]
-    if action == 'translate':
+    if action == "translate":
         # See _collect_episodes for why metadata columns are translate-only.
-        columns.extend([
-            TableMovies.imdbId,
-            TableMovies.tmdbId,
-        ])
+        columns.extend(
+            [
+                TableMovies.imdbId,
+                TableMovies.tmdbId,
+            ]
+        )
     query = select(*columns)
 
     if movie_ids:
@@ -276,7 +330,7 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
     movies = database.execute(query).all()
 
     synced_paths = set()
-    if action == 'sync' and not force_resync:
+    if action == "sync" and not force_resync:
         synced_paths = _get_synced_movie_paths()
 
     items = []
@@ -287,8 +341,8 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
         video_path = path_mappings.path_replace_movie(movie.path)
 
         # For translate: check if target language already exists
-        if action == 'translate' and target_lang:
-            existing_langs = {lang_str.split(':')[0] for lang_str, _ in subtitles}
+        if action == "translate" and target_lang:
+            existing_langs = {lang_str.split(":")[0] for lang_str, _ in subtitles}
             if target_lang in existing_langs:
                 skipped += 1
                 continue
@@ -297,13 +351,13 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
             lang_info = languages_from_colon_seperated_string(lang_string)
 
             # Forced subs can't be synced or translated, but mods are fine
-            if lang_info['forced'] and action in ('sync', 'translate'):
+            if lang_info["forced"] and action in ("sync", "translate"):
                 skipped += 1
                 continue
 
             # For translate: only queue subtitles matching the requested source language
-            sub_lang = lang_string.split(':')[0]
-            if action == 'translate' and source_lang and sub_lang != source_lang:
+            sub_lang = lang_string.split(":")[0]
+            if action == "translate" and source_lang and sub_lang != source_lang:
                 skipped += 1
                 continue
 
@@ -312,33 +366,35 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
                 skipped += 1
                 continue
 
-            if action == 'sync' and is_sync_engine_output(mapped_sub_path):
+            if action == "sync" and is_sync_engine_output(mapped_sub_path):
                 skipped += 1
                 continue
 
-            if action == 'sync' and not force_resync:
-                reversed_path = path_mappings.path_replace_reverse_movie(mapped_sub_path)
+            if action == "sync" and not force_resync:
+                reversed_path = path_mappings.path_replace_reverse_movie(
+                    mapped_sub_path
+                )
                 if reversed_path in synced_paths:
                     skipped += 1
                     continue
 
             item = {
-                'video_path': video_path,
-                'srt_path': mapped_sub_path,
-                'srt_lang': sub_lang,
-                'forced': lang_info['forced'],
-                'hi': lang_info['hi'],
-                'sonarr_series_id': None,
-                'sonarr_episode_id': None,
-                'radarr_id': movie.radarrId,
-                'max_offset_seconds': max_offset,
-                'no_fix_framerate': no_fix_framerate,
-                'gss': gss,
-                'output_mode': output_mode,
-                'enabled_engines': enabled_engines,
+                "video_path": video_path,
+                "srt_path": mapped_sub_path,
+                "srt_lang": sub_lang,
+                "forced": lang_info["forced"],
+                "hi": lang_info["hi"],
+                "sonarr_series_id": None,
+                "sonarr_episode_id": None,
+                "radarr_id": movie.radarrId,
+                "max_offset_seconds": max_offset,
+                "no_fix_framerate": no_fix_framerate,
+                "gss": gss,
+                "output_mode": output_mode,
+                "enabled_engines": enabled_engines,
             }
-            if action == 'translate':
-                item['metadata'] = movie
+            if action == "translate":
+                item["metadata"] = movie
             items.append(item)
 
     return items, skipped
@@ -349,55 +405,56 @@ def _process_subtitle_item(item, action, options, job_id):
 
     Returns True on success, False on failure.
     """
-    if action == 'sync':
+    if action == "sync":
         sync_kwargs = {
-            'video_path': item['video_path'],
-            'srt_path': item['srt_path'],
-            'srt_lang': item['srt_lang'],
-            'forced': item['forced'],
-            'hi': item['hi'],
-            'percent_score': 0,
-            'sonarr_series_id': item['sonarr_series_id'],
-            'sonarr_episode_id': item['sonarr_episode_id'],
-            'radarr_id': item['radarr_id'],
-            'max_offset_seconds': item['max_offset_seconds'],
-            'no_fix_framerate': item['no_fix_framerate'],
-            'gss': item['gss'],
-            'force_sync': True,
-            'job_id': job_id,
-            'track_job_progress': False,
+            "video_path": item["video_path"],
+            "srt_path": item["srt_path"],
+            "srt_lang": item["srt_lang"],
+            "forced": item["forced"],
+            "hi": item["hi"],
+            "percent_score": 0,
+            "sonarr_series_id": item["sonarr_series_id"],
+            "sonarr_episode_id": item["sonarr_episode_id"],
+            "radarr_id": item["radarr_id"],
+            "max_offset_seconds": item["max_offset_seconds"],
+            "no_fix_framerate": item["no_fix_framerate"],
+            "gss": item["gss"],
+            "force_sync": True,
+            "job_id": job_id,
+            "track_job_progress": False,
         }
-        if item.get('output_mode') is not None:
-            sync_kwargs['output_mode'] = item.get('output_mode')
-        if item.get('enabled_engines') is not None:
-            sync_kwargs['enabled_engines'] = item.get('enabled_engines')
+        if item.get("output_mode") is not None:
+            sync_kwargs["output_mode"] = item.get("output_mode")
+        if item.get("enabled_engines") is not None:
+            sync_kwargs["enabled_engines"] = item.get("enabled_engines")
         return sync_subtitles(**sync_kwargs)
-    elif action == 'translate':
+    elif action == "translate":
         from subtitles.tools.translate.main import translate_subtitles_file
-        media_type = 'episode' if item['sonarr_series_id'] else 'movies'
+
+        media_type = "episode" if item["sonarr_series_id"] else "movies"
         # Don't pass the batch job_id to translate. translate_subtitles_file
         # has its own job/progress lifecycle that would hijack the batch job.
         # Calling without job_id makes it queue as its own separate job.
         translate_subtitles_file(
-            video_path=item['video_path'],
-            source_srt_file=item['srt_path'],
-            from_lang=options.get('from_lang', item['srt_lang']),
-            to_lang=options.get('to_lang', 'en'),
-            forced=item['forced'],
-            hi=item['hi'],
+            video_path=item["video_path"],
+            source_srt_file=item["srt_path"],
+            from_lang=options.get("from_lang", item["srt_lang"]),
+            to_lang=options.get("to_lang", "en"),
+            forced=item["forced"],
+            hi=item["hi"],
             media_type=media_type,
-            sonarr_series_id=item['sonarr_series_id'],
-            sonarr_episode_id=item['sonarr_episode_id'],
-            radarr_id=item['radarr_id'],
-            metadata=item['metadata'],
+            sonarr_series_id=item["sonarr_series_id"],
+            sonarr_episode_id=item["sonarr_episode_id"],
+            radarr_id=item["radarr_id"],
+            metadata=item["metadata"],
         )
         return True
     elif action in MOD_ACTIONS:
         subtitles_apply_mods(
-            item['srt_lang'],
-            item['srt_path'],
+            item["srt_lang"],
+            item["srt_path"],
             [action],
-            item['video_path'],
+            item["video_path"],
         )
         return True
     return False
@@ -418,42 +475,50 @@ def _process_media_action(items, action, job_id):
     skipped = 0
     errors = []
 
-    if action == 'upgrade':
-        sonarr_series_ids = [i.get('sonarrSeriesId') for i in items
-                             if i.get('type') in ('series', 'episode') and i.get('sonarrSeriesId')]
-        radarr_ids = [i.get('radarrId') for i in items
-                      if i.get('type') == 'movie' and i.get('radarrId')]
+    if action == "upgrade":
+        sonarr_series_ids = [
+            i.get("sonarrSeriesId")
+            for i in items
+            if i.get("type") in ("series", "episode") and i.get("sonarrSeriesId")
+        ]
+        radarr_ids = [
+            i.get("radarrId")
+            for i in items
+            if i.get("type") == "movie" and i.get("radarrId")
+        ]
         try:
             if sonarr_series_ids:
-                upgrade_episodes_subtitles(job_id=job_id, sonarr_series_ids=sonarr_series_ids)
+                upgrade_episodes_subtitles(
+                    job_id=job_id, sonarr_series_ids=sonarr_series_ids
+                )
             if radarr_ids:
                 upgrade_movies_subtitles(job_id=job_id, radarr_ids=radarr_ids)
             queued = len(sonarr_series_ids) + len(radarr_ids)
         except Exception as e:
-            logger.error(f'Error during upgrade: {e}')  # noqa: G004
+            logger.error(f"Error during upgrade: {e}")  # noqa: G004
             errors.append(str(e))
-        return {'queued': queued, 'skipped': 0, 'errors': errors}
+        return {"queued": queued, "skipped": 0, "errors": errors}
 
     jobs_queue.update_job_progress(job_id=job_id, progress_max=len(items))
 
     for i, item in enumerate(items, start=1):
-        item_type = item.get('type')
+        item_type = item.get("type")
         jobs_queue.update_job_progress(
             job_id=job_id,
             progress_value=i,
-            progress_message=f"Processing {item_type} ({i}/{len(items)})"
+            progress_message=f"Processing {item_type} ({i}/{len(items)})",
         )
 
         try:
-            if action == 'scan-disk':
-                if item_type in ('series', 'episode'):
-                    series_id = item.get('sonarrSeriesId')
+            if action == "scan-disk":
+                if item_type in ("series", "episode"):
+                    series_id = item.get("sonarrSeriesId")
                     if not series_id:
                         skipped += 1
                         continue
                     series_scan_subtitles(series_id)
-                elif item_type == 'movie':
-                    radarr_id = item.get('radarrId')
+                elif item_type == "movie":
+                    radarr_id = item.get("radarrId")
                     if not radarr_id:
                         skipped += 1
                         continue
@@ -461,15 +526,15 @@ def _process_media_action(items, action, job_id):
                 else:
                     skipped += 1
                     continue
-            elif action == 'search-missing':
-                if item_type in ('series', 'episode'):
-                    series_id = item.get('sonarrSeriesId')
+            elif action == "search-missing":
+                if item_type in ("series", "episode"):
+                    series_id = item.get("sonarrSeriesId")
                     if not series_id:
                         skipped += 1
                         continue
                     series_download_subtitles(series_id)
-                elif item_type == 'movie':
-                    radarr_id = item.get('radarrId')
+                elif item_type == "movie":
+                    radarr_id = item.get("radarrId")
                     if not radarr_id:
                         skipped += 1
                         continue
@@ -479,13 +544,13 @@ def _process_media_action(items, action, job_id):
                     continue
             queued += 1
         except Exception as e:
-            logger.error(f'Error processing {action} for {item}: {e}')  # noqa: G004
+            logger.error(f"Error processing {action} for {item}: {e}")  # noqa: G004
             errors.append(str(e))
 
-    return {'queued': queued, 'skipped': skipped, 'errors': errors}
+    return {"queued": queued, "skipped": skipped, "errors": errors}
 
 
-def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
+def mass_batch_operation(items=None, action="sync", options=None, job_id=None):
     """Main entry point for all batch operations on subtitles.
 
     Handles sync, translate, subtitle mods, scan-disk, and search-missing
@@ -502,7 +567,7 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
         Dict with queued, skipped, errors. Or None if scheduling a job.
     """
     if action not in VALID_ACTIONS:
-        return {'queued': 0, 'skipped': 0, 'errors': [f'Invalid action: {action}']}
+        return {"queued": 0, "skipped": 0, "errors": [f"Invalid action: {action}"]}
 
     options = options or {}
 
@@ -520,13 +585,13 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
     # Media actions (scan-disk, search-missing) work on media items directly
     if action in MEDIA_ACTIONS:
         if not items:
-            return {'queued': 0, 'skipped': 0, 'errors': []}
+            return {"queued": 0, "skipped": 0, "errors": []}
         return _process_media_action(items, action, job_id)
 
     # Subtitle actions: collect subtitle files, then process them
     if items is not None and len(items) == 0:
         jobs_queue.update_job_progress(job_id=job_id, progress_max=0)
-        return {'queued': 0, 'skipped': 0, 'errors': []}
+        return {"queued": 0, "skipped": 0, "errors": []}
 
     all_items, total_skipped = _collect_subtitle_items(items, action, options)
 
@@ -535,7 +600,7 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
     jobs_queue.update_job_progress(job_id=job_id, progress_max=total_count)
 
     if total_count == 0:
-        jobs_queue.update_job_progress(job_id=job_id, progress_value='max')
+        jobs_queue.update_job_progress(job_id=job_id, progress_value="max")
 
     processed = 0
     failed = 0
@@ -545,7 +610,7 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
         jobs_queue.update_job_progress(
             job_id=job_id,
             progress_value=i - 1,
-            progress_message=f"{action}: {os.path.basename(item['srt_path'])} ({i}/{total_count})"
+            progress_message=f"{action}: {os.path.basename(item['srt_path'])} ({i}/{total_count})",
         )
 
         try:
@@ -555,22 +620,26 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
             else:
                 failed += 1
         except Exception as e:
-            logger.error(f'Error during {action} on {item["srt_path"]}: {e}')  # noqa: G004
+            logger.error(f"Error during {action} on {item['srt_path']}: {e}")  # noqa: G004
             all_errors.append(str(e))
             failed += 1
         finally:
             jobs_queue.update_job_progress(
                 job_id=job_id,
                 progress_value=i,
-                progress_message=f"{action}: {os.path.basename(item['srt_path'])} ({i}/{total_count})"
+                progress_message=f"{action}: {os.path.basename(item['srt_path'])} ({i}/{total_count})",
             )
 
     jobs_queue.update_job_name(
         job_id=job_id,
-        new_job_name=f"Mass {action} complete: {processed} done, {total_skipped} skipped"
+        new_job_name=f"Mass {action} complete: {processed} done, {total_skipped} skipped",
     )
     logger.info(
-        f'BAZARR mass {action} complete: {processed} processed, {failed} failed, '  # noqa: G004
-        f'{total_skipped} skipped, {len(all_errors)} errors'
+        f"BAZARR mass {action} complete: {processed} processed, {failed} failed, "  # noqa: G004
+        f"{total_skipped} skipped, {len(all_errors)} errors"
     )
-    return {'queued': processed, 'skipped': total_skipped + failed, 'errors': all_errors}
+    return {
+        "queued": processed,
+        "skipped": total_skipped + failed,
+        "errors": all_errors,
+    }

@@ -9,7 +9,11 @@ from subliminal.video import Episode, Movie, Video
 from subliminal_patch.core_persistent import list_all_subtitles_parallel
 
 from app.config import settings
-from app.get_providers import get_provider_language_hook, get_providers_sorted, get_providers_auth
+from app.get_providers import (
+    get_provider_language_hook,
+    get_providers_sorted,
+    get_providers_auth,
+)
 from . import auth, cache as C, response_mapper as M
 from .local_subs import search_local
 from utilities.url_guard import assert_safe_outbound, resolve_safe_url, UnsafeURLError  # noqa: F401
@@ -26,6 +30,7 @@ def _get_compat_pool():
     with _pool_lock:
         if _compat_pool is None:
             from subliminal_patch.core import SZAsyncProviderPool
+
             _compat_pool = SZAsyncProviderPool(
                 providers=get_providers_sorted(),
                 provider_configs=get_providers_auth(),
@@ -60,9 +65,9 @@ def _tt(imdb_id) -> str:
     return f"tt{s}" if s.isdigit() or s.lstrip("0").isdigit() else ""
 
 
-def _lookup_library_metadata(imdb_id: str, media_type: str,
-                             season: int | None = None,
-                             episode: int | None = None) -> dict:
+def _lookup_library_metadata(
+    imdb_id: str, media_type: str, season: int | None = None, episode: int | None = None
+) -> dict:
     """Best-effort title/year/tvdb_id/path resolution from the local Bazarr DB.
 
     Providers like supersubtitles and yifysubtitles score heavily on title
@@ -78,25 +83,34 @@ def _lookup_library_metadata(imdb_id: str, media_type: str,
     native manual search). Returns {} if the imdb_id is not in the library.
     """
     try:
-        from app.database import (database, select, TableMovies,
-                                  TableShows, TableEpisodes)
+        from app.database import (
+            database,
+            select,
+            TableMovies,
+            TableShows,
+            TableEpisodes,
+        )
     except Exception:
         return {}
     imdb = imdb_id if str(imdb_id).startswith("tt") else f"tt{imdb_id}"
     try:
         if media_type == "episode":
             show = database.execute(
-                select(TableShows.sonarrSeriesId, TableShows.title,
-                       TableShows.year, TableShows.tvdbId)
-                .where(TableShows.imdbId == imdb)
+                select(
+                    TableShows.sonarrSeriesId,
+                    TableShows.title,
+                    TableShows.year,
+                    TableShows.tvdbId,
+                ).where(TableShows.imdbId == imdb)
             ).first()
             if not show:
                 return {}
             out = {"title": show[1] or "", "year": show[2], "tvdb_id": show[3]}
             if season is not None and episode is not None:
                 ep = database.execute(
-                    select(TableEpisodes.path, TableEpisodes.sceneName,
-                           TableEpisodes.title)
+                    select(
+                        TableEpisodes.path, TableEpisodes.sceneName, TableEpisodes.title
+                    )
                     .where(TableEpisodes.sonarrSeriesId == show[0])
                     .where(TableEpisodes.season == int(season))
                     .where(TableEpisodes.episode == int(episode))
@@ -108,13 +122,20 @@ def _lookup_library_metadata(imdb_id: str, media_type: str,
             return out
         else:
             row = database.execute(
-                select(TableMovies.title, TableMovies.year,
-                       TableMovies.path, TableMovies.sceneName)
-                .where(TableMovies.imdbId == imdb)
+                select(
+                    TableMovies.title,
+                    TableMovies.year,
+                    TableMovies.path,
+                    TableMovies.sceneName,
+                ).where(TableMovies.imdbId == imdb)
             ).first()
             if row:
-                return {"title": row[0] or "", "year": row[1],
-                        "path": row[2] or "", "sceneName": row[3] or ""}
+                return {
+                    "title": row[0] or "",
+                    "year": row[1],
+                    "path": row[2] or "",
+                    "sceneName": row[3] or "",
+                }
     except Exception as e:
         logger.debug("compat library metadata lookup failed for %s: %s", imdb, e)
     return {}
@@ -128,6 +149,7 @@ def _guessit_filename(filename: str) -> dict:
         return {}
     try:
         from subliminal_patch.core import guessit as _guessit
+
         g = _guessit(filename)
         return dict(g) if g else {}
     except Exception as e:
@@ -135,10 +157,15 @@ def _guessit_filename(filename: str) -> dict:
         return {}
 
 
-def _parse_video_from_library(path: str, meta: dict, media_type: str,
-                              imdb_id: str, season: int | None,
-                              episode: int | None,
-                              moviehash: str | None) -> Video | None:
+def _parse_video_from_library(
+    path: str,
+    meta: dict,
+    media_type: str,
+    imdb_id: str,
+    season: int | None,
+    episode: int | None,
+    moviehash: str | None,
+) -> Video | None:
     """Build a Video via Bazarr's parse_video (same as native manual search).
 
     Returns None when the path is missing on disk or parse_video raises;
@@ -148,6 +175,7 @@ def _parse_video_from_library(path: str, meta: dict, media_type: str,
     enabled) that ComputeScore needs to differentiate subtitle matches.
     """
     import os
+
     if not os.path.exists(path):
         return None
     try:
@@ -159,8 +187,9 @@ def _parse_video_from_library(path: str, meta: dict, media_type: str,
     scene_name = meta.get("sceneName") or "None"
     native_media_type = "series" if media_type == "episode" else "movie"
     try:
-        v = get_video(path, title, scene_name,
-                      providers=None, media_type=native_media_type)
+        v = get_video(
+            path, title, scene_name, providers=None, media_type=native_media_type
+        )
     except Exception as e:
         logger.debug("compat: get_video failed for %r: %s", path, e)
         return None
@@ -197,9 +226,14 @@ def _parse_video_from_library(path: str, meta: dict, media_type: str,
     return v
 
 
-def _build_video(imdb_id: str, season: int | None, episode: int | None,
-                 media_type: str, query: str | None = None,
-                 moviehash: str | None = None) -> Video:
+def _build_video(
+    imdb_id: str,
+    season: int | None,
+    episode: int | None,
+    media_type: str,
+    query: str | None = None,
+    moviehash: str | None = None,
+) -> Video:
     """Construct a Video for compat fanout.
 
     Preferred path: when the imdb_id resolves to a library entry with a
@@ -223,12 +257,16 @@ def _build_video(imdb_id: str, season: int | None, episode: int | None,
 
     path = meta.get("path") or ""
     if path:
-        real = _parse_video_from_library(path, meta, media_type,
-                                          imdb_id, season, episode, moviehash)
+        real = _parse_video_from_library(
+            path, meta, media_type, imdb_id, season, episode, moviehash
+        )
         if real is not None:
             return real
-        logger.debug("compat: library has path %r but parse_video failed; "
-                     "falling back to virtual Video build", path)
+        logger.debug(
+            "compat: library has path %r but parse_video failed; "
+            "falling back to virtual Video build",
+            path,
+        )
     title = meta.get("title") or ""
     year_raw = meta.get("year")
     try:
@@ -279,8 +317,7 @@ def _build_video(imdb_id: str, season: int | None, episode: int | None,
                 pass
     else:
         name = name_fallback or (
-            f"{title or imdb_id}.{year}.mkv" if year
-            else f"{title or imdb_id}.mkv"
+            f"{title or imdb_id}.{year}.mkv" if year else f"{title or imdb_id}.mkv"
         )
         v = Movie(
             name=name,
@@ -352,6 +389,7 @@ def _tvdb_v4_episode_lookup(video) -> bool:
     """
     try:
         from subliminal_patch.refiners import tvdb_v4
+
         imdb = getattr(video, "series_imdb_id", None) or getattr(video, "imdb_id", None)
         if not imdb:
             return False
@@ -382,8 +420,10 @@ def _tvdb_v4_episode_lookup(video) -> bool:
             # numbers land on the video, which the response mapper reads
             # for feature_details - otherwise clients that filter results
             # by (season, episode) see all zeros and drop every hit.
-            if episode_id and (not getattr(video, "season", None)
-                               or not getattr(video, "episode", None)):
+            if episode_id and (
+                not getattr(video, "season", None)
+                or not getattr(video, "episode", None)
+            ):
                 try:
                     full_ep = tvdb_v4.get_client().get_episode(int(episode_id))
                 except (TypeError, ValueError):
@@ -431,6 +471,7 @@ def _tvdb_v4_episode_lookup(video) -> bool:
         if not getattr(video, "series", None) or not getattr(video, "year", None):
             try:
                 from subliminal.refiners.tvdb import tvdb_client
+
                 s_data = tvdb_client.get_series(int(series_id))
                 if s_data:
                     if not getattr(video, "series", None):
@@ -456,17 +497,20 @@ def _omdb_episode_to_series_imdb(video) -> str | None:
     None on any failure / no-key. Safe to call without OMDB configured."""
     try:
         from subliminal_patch.refiners.omdb import _resolve_omdb_apikey
+
         apikey = _resolve_omdb_apikey()
         if not apikey:
             return None
-        imdb = _tt(getattr(video, "series_imdb_id", None)
-                   or getattr(video, "imdb_id", None))
+        imdb = _tt(
+            getattr(video, "series_imdb_id", None) or getattr(video, "imdb_id", None)
+        )
         if not imdb:
             return None
         import requests
-        r = requests.get("https://www.omdbapi.com/",
-                         params={"i": imdb, "apikey": apikey},
-                         timeout=5)
+
+        r = requests.get(
+            "https://www.omdbapi.com/", params={"i": imdb, "apikey": apikey}, timeout=5
+        )
         if r.status_code != 200:
             return None
         data = r.json()
@@ -516,6 +560,7 @@ def _omdb_lookup_by_imdb(video) -> None:
     Requires settings.omdb.apikey or OMDB_API_KEY env. No-op without a key."""
     try:
         from subliminal_patch.refiners.omdb import _resolve_omdb_apikey
+
         apikey = _resolve_omdb_apikey()
         if not apikey:
             return
@@ -523,9 +568,10 @@ def _omdb_lookup_by_imdb(video) -> None:
         if not imdb:
             return
         import requests
-        r = requests.get("https://www.omdbapi.com/",
-                         params={"i": imdb, "apikey": apikey},
-                         timeout=5)
+
+        r = requests.get(
+            "https://www.omdbapi.com/", params={"i": imdb, "apikey": apikey}, timeout=5
+        )
         if r.status_code != 200:
             return
         data = r.json()
@@ -549,8 +595,10 @@ def _tvdb_lookup_by_imdb(video) -> None:
     which we don't have on library miss."""
     try:
         from subliminal.refiners.tvdb import tvdb_client
-        imdb = _tt(getattr(video, "series_imdb_id", None)
-                   or getattr(video, "imdb_id", None))
+
+        imdb = _tt(
+            getattr(video, "series_imdb_id", None) or getattr(video, "imdb_id", None)
+        )
         if not imdb:
             return
         # TVDB v1 search rejects bare numeric ids; always send tt-prefixed.
@@ -571,7 +619,9 @@ def _tvdb_lookup_by_imdb(video) -> None:
             except (TypeError, ValueError):
                 pass
         if getattr(video, "season", None) and getattr(video, "episode", None):
-            ep = tvdb_client.get_series_episode(tvdb_id, int(video.season), int(video.episode))
+            ep = tvdb_client.get_series_episode(
+                tvdb_id, int(video.season), int(video.episode)
+            )
             if ep:
                 if not getattr(video, "tvdb_id", None):
                     video.tvdb_id = ep.get("id")
@@ -587,22 +637,39 @@ def _tvdb_lookup_by_imdb(video) -> None:
 _SKIP_FOR_VIRTUAL_VIDEO = frozenset({"embeddedsubtitles"})
 
 
-def _do_fanout(imdb_id, season, episode, languages, media_type,
-               query=None, moviehash=None, moviehash_match=None,
-               requested_languages=None):
+def _do_fanout(
+    imdb_id,
+    season,
+    episode,
+    languages,
+    media_type,
+    query=None,
+    moviehash=None,
+    moviehash_match=None,
+    requested_languages=None,
+):
     from subliminal_patch.provider_health import get_tracker as _get_health_tracker
     from subliminal_patch.score import ComputeScore, MAX_SCORES
+
     health = _get_health_tracker()
     pool = _get_compat_pool()
-    video = _build_video(imdb_id, season, episode, media_type,
-                         query=query, moviehash=moviehash)
+    video = _build_video(
+        imdb_id, season, episode, media_type, query=query, moviehash=moviehash
+    )
     health_discarded = health.currently_discarded()
-    video_has_file = bool(getattr(video, "name", None)
-                          and os.path.exists(getattr(video, "name", "")))
-    exclude = health_discarded | (set() if video_has_file else set(_SKIP_FOR_VIRTUAL_VIDEO))
-    logger.info("compat fanout: video=%r lang=%s providers=%d health_skipped=%s",
-                video, [str(l) for l in languages], len(pool.providers),  # noqa: E741
-                sorted(health_discarded) or "[]")
+    video_has_file = bool(
+        getattr(video, "name", None) and os.path.exists(getattr(video, "name", ""))
+    )
+    exclude = health_discarded | (
+        set() if video_has_file else set(_SKIP_FOR_VIRTUAL_VIDEO)
+    )
+    logger.info(
+        "compat fanout: video=%r lang=%s providers=%d health_skipped=%s",
+        video,
+        [str(l) for l in languages],
+        len(pool.providers),  # noqa: E741
+        sorted(health_discarded) or "[]",
+    )
 
     stats: dict[str, tuple[str, int]] = {}
 
@@ -613,7 +680,9 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
     wall = int(settings.compat_endpoint.search_timeout_seconds)
     per_provider = max(3, int(wall * 0.6))
     results = list_all_subtitles_parallel(
-        [video], set(languages), pool,
+        [video],
+        set(languages),
+        pool,
         per_provider_timeout=per_provider,
         wall_timeout=wall,
         exclude_providers=exclude,
@@ -621,8 +690,7 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
     )
 
     if stats:
-        compact = ", ".join(f"{n}={o}:{l}ms"
-                            for n, (o, l) in sorted(stats.items()))  # noqa: E741
+        compact = ", ".join(f"{n}={o}:{l}ms" for n, (o, l) in sorted(stats.items()))  # noqa: E741
         logger.info("compat fanout complete: %s", compact)
 
     subs = []
@@ -664,8 +732,11 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
             subtitle=sub,
         )
         try:
-            matches = sub.get_matches(video) if hasattr(sub, "get_matches") \
-                      else (getattr(sub, "matches", None) or set())
+            matches = (
+                sub.get_matches(video)
+                if hasattr(sub, "get_matches")
+                else (getattr(sub, "matches", None) or set())
+            )
         except Exception:
             matches = getattr(sub, "matches", None) or set()
         try:
@@ -683,6 +754,7 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
             dc = int(getattr(sub, "download_count", 0) or 0)
             if dc > 0:
                 import math
+
                 score = int(score) + min(20, int(math.log10(dc + 1) * 4))
         except (TypeError, ValueError):
             pass
@@ -690,17 +762,26 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
         sub_alpha2 = getattr(sub_lang, "alpha2", None) or ""
         req_lang = req_lang_map.get(sub_alpha2)
         if req_lang and "-" in req_lang:
-            sub_country = getattr(getattr(sub_lang, "country", None), "alpha2", None) or ""
+            sub_country = (
+                getattr(getattr(sub_lang, "country", None), "alpha2", None) or ""
+            )
             req_region = req_lang.split("-", 1)[1].upper()
             if sub_country and sub_country.upper() != req_region:
                 req_lang = None
-        entries.append(M.subtitle_to_os_entry(
-            sub, file_id, media_type, imdb_id, season, episode,
-            video=video,
-            hash_matched=_has_hash(sub),
-            score=(int(score), int(max_score)),
-            requested_language=req_lang,
-        ))
+        entries.append(
+            M.subtitle_to_os_entry(
+                sub,
+                file_id,
+                media_type,
+                imdb_id,
+                season,
+                episode,
+                video=video,
+                hash_matched=_has_hash(sub),
+                score=(int(score), int(max_score)),
+                requested_language=req_lang,
+            )
+        )
     # Surface locally-stored subtitles alongside provider results when the
     # operator hasn't disabled the feature. Locals carry a synthetic high
     # download_count, so the existing single-key sort below pins them to
@@ -708,14 +789,19 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
     if bool(settings.compat_endpoint.serve_local_subs):
         try:
             local_entries = search_local(
-                imdb_id=imdb_id, season=season, episode=episode,
+                imdb_id=imdb_id,
+                season=season,
+                episode=episode,
                 media_type=media_type,
                 languages=requested_languages or [],
-                query=query, moviehash=moviehash,
+                query=query,
+                moviehash=moviehash,
                 moviehash_match=moviehash_match,
             )
         except Exception as e:
-            logger.warning("compat: search_local failed (continuing without locals): %s", e)
+            logger.warning(
+                "compat: search_local failed (continuing without locals): %s", e
+            )
             local_entries = []
         if local_entries:
             entries = local_entries + entries
@@ -746,31 +832,53 @@ def _build_requested_language_map(requested_languages: list[str]) -> dict:
     return out
 
 
-def search(imdb_id: str, season, episode, languages: Iterable[Language],
-           media_type: str, query: str | None = None,
-           moviehash: str | None = None,
-           moviehash_match: str | None = None,
-           requested_languages: list[str] | None = None) -> dict:
+def search(
+    imdb_id: str,
+    season,
+    episode,
+    languages: Iterable[Language],
+    media_type: str,
+    query: str | None = None,
+    moviehash: str | None = None,
+    moviehash_match: str | None = None,
+    requested_languages: list[str] | None = None,
+) -> dict:
     enabled = get_providers_sorted()
-    key = C.build_key(media_type, imdb_id, season, episode, languages, enabled,
-                      query=query, moviehash=moviehash,
-                      moviehash_match=moviehash_match,
-                      requested_languages=requested_languages)
+    key = C.build_key(
+        media_type,
+        imdb_id,
+        season,
+        episode,
+        languages,
+        enabled,
+        query=query,
+        moviehash=moviehash,
+        moviehash_match=moviehash_match,
+        requested_languages=requested_languages,
+    )
     cache_ttl = int(settings.compat_endpoint.cache_ttl_seconds)
     fid_ttl = int(settings.compat_endpoint.file_id_ttl_seconds)
     ttl = min(cache_ttl, fid_ttl)
     return C.compat_region.get_or_create(
         key,
-        creator=lambda: _do_fanout(imdb_id, season, episode, languages,
-                                    media_type, query=query, moviehash=moviehash,
-                                    moviehash_match=moviehash_match,
-                                    requested_languages=requested_languages),
+        creator=lambda: _do_fanout(
+            imdb_id,
+            season,
+            episode,
+            languages,
+            media_type,
+            query=query,
+            moviehash=moviehash,
+            moviehash_match=moviehash_match,
+            requested_languages=requested_languages,
+        ),
         expiration_time=ttl,
     )
 
 
-def download(file_id, base_host: str = "",
-             remaining: int = 0, reset_iso: str = "") -> dict:
+def download(
+    file_id, base_host: str = "", remaining: int = 0, reset_iso: str = ""
+) -> dict:
     """Resolve the int file_id, mint a short-lived stream token, return a
     download link. No provider fetch happens here - the subtitle is fetched
     only when the client follows the link.
@@ -832,17 +940,20 @@ def _fetch_subtitle_bytes(sub) -> bytes:
     try:
         pool.download_subtitle(sub)
     except Exception as e:
-        logger.exception("compat: download_subtitle failed for %s: %s",
-                         provider_name, e)
+        logger.exception(
+            "compat: download_subtitle failed for %s: %s", provider_name, e
+        )
         raise
 
     # Re-validate after download: some providers follow redirects that
     # could land on a private/loopback address, bypassing the pre-download
     # SSRF guard. Check the post-download URL if the provider updated it.
     post_url = getattr(sub, "download_link", None) or getattr(sub, "url", None)
-    if (isinstance(post_url, str)
-            and post_url[:8].lower().startswith(("http://", "https://"))
-            and post_url != url):
+    if (
+        isinstance(post_url, str)
+        and post_url[:8].lower().startswith(("http://", "https://"))
+        and post_url != url
+    ):
         assert_safe_outbound(post_url)
     content = getattr(sub, "content", None)
     if not content:
@@ -876,6 +987,7 @@ def serve_subtitle_content(stream_token: str) -> tuple[bytes, str]:
     # provider fanout pool.
     if fpayload.get("kind") == "local":
         from .local_subs import serve_local
+
         return serve_local(fpayload)
 
     sub = fpayload.get("sub")
@@ -895,8 +1007,10 @@ def guessit_filename(filename: str) -> dict:
     if len(filename) > 512:
         raise ValueError("filename too long")
     from subliminal_patch.core import guessit as _guessit
+
     result = _guessit(filename)
     # guessit returns a MatchesDict; coerce to plain dict with JSON-friendly values.
     import json
     from guessit.jsonutils import GuessitEncoder
+
     return json.loads(json.dumps(dict(result), cls=GuessitEncoder))

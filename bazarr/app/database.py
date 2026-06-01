@@ -10,10 +10,28 @@ import flask_migrate
 from dogpile.cache import make_region
 from datetime import datetime
 
-from sqlalchemy import create_engine, inspect, DateTime, ForeignKey, Index, Integer, LargeBinary, Text, func, text, BigInteger
+from sqlalchemy import (
+    create_engine,
+    inspect,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    LargeBinary,
+    Text,
+    func,
+    text,
+    BigInteger,
+)
+
 # importing here to be indirectly imported in other modules later
 from sqlalchemy import update, delete, select, func  # noqa: F401, F811
-from sqlalchemy.orm import scoped_session, sessionmaker, mapped_column, close_all_sessions
+from sqlalchemy.orm import (
+    scoped_session,
+    sessionmaker,
+    mapped_column,
+    close_all_sessions,
+)
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.pool import NullPool
 
@@ -26,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 POSTGRES_ENABLED_ENV = os.getenv("POSTGRES_ENABLED")
 if POSTGRES_ENABLED_ENV:
-    postgresql = POSTGRES_ENABLED_ENV.lower() == 'true'
+    postgresql = POSTGRES_ENABLED_ENV.lower() == "true"
 else:
     postgresql = settings.postgresql.enabled
 
@@ -34,11 +52,13 @@ else:
 # (one key only). The 60s TTL is a safety net so a missed manual
 # invalidation does not pin stale profile data forever.
 region = make_region().configure(
-    'dogpile.cache.memory',
+    "dogpile.cache.memory",
     expiration_time=60,
 )
 
-migrations_directory = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'migrations')
+migrations_directory = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "migrations"
+)
 
 
 def configure_sqlite_connection(dbapi_connection, connection_record):
@@ -53,7 +73,7 @@ def configure_sqlite_connection(dbapi_connection, connection_record):
 
 
 def optimize_sqlite_database(engine_to_optimize):
-    if engine_to_optimize.dialect.name != 'sqlite':
+    if engine_to_optimize.dialect.name != "sqlite":
         return False
     if sqlite3.sqlite_version_info < (3, 46, 0):
         logger.debug("Skipping PRAGMA optimize on SQLite %s", sqlite3.sqlite_version)
@@ -69,7 +89,7 @@ def optimize_sqlite_database(engine_to_optimize):
 
 
 def log_sqlite_runtime_version(engine_to_log):
-    if engine_to_log.dialect.name != 'sqlite':
+    if engine_to_log.dialect.name != "sqlite":
         return False
     logging.info("SQLite runtime version: %s", sqlite3.sqlite_version)
     return True
@@ -90,16 +110,18 @@ if postgresql:
     if postgres_url:
         url = make_url(postgres_url)
         backend_name = url.get_backend_name()
-        if backend_name != 'postgresql':
-            raise ValueError(f"Invalid Postgres URL, scheme must be 'postgresql', got {backend_name}")
-        
+        if backend_name != "postgresql":
+            raise ValueError(
+                f"Invalid Postgres URL, scheme must be 'postgresql', got {backend_name}"
+            )
+
         # Allow overriding individual components of the URL
         url_overrides = {
-            'username': postgres_username if postgres_username else None,
-            'password': postgres_password if postgres_password else None,
-            'host': postgres_host if postgres_host else None,
-            'port': postgres_port if postgres_port else None,
-            'database': postgres_database if postgres_database else None,
+            "username": postgres_username if postgres_username else None,
+            "password": postgres_password if postgres_password else None,
+            "host": postgres_host if postgres_host else None,
+            "port": postgres_port if postgres_port else None,
+            "database": postgres_database if postgres_database else None,
         }
         url = url.set(**{k: v for k, v in url_overrides.items()})
     else:
@@ -109,7 +131,7 @@ if postgresql:
             password=postgres_password,
             host=postgres_host,
             port=postgres_port,
-            database=postgres_database
+            database=postgres_database,
         )
     # Build the log message from individual non-secret components instead of
     # going through `url`. SQLAlchemy's render_as_string(hide_password=True)
@@ -124,7 +146,10 @@ if postgresql:
         log_db = f"{log_db} (via POSTGRES_URL)"
     logger.debug(
         "Connecting to PostgreSQL database: postgresql://%s@%s:%s/%s",
-        log_user, log_host, log_port, log_db,
+        log_user,
+        log_host,
+        log_port,
+        log_db,
     )
 
     # Postgres: use SQLAlchemy's default QueuePool. NullPool would force a
@@ -146,7 +171,8 @@ if postgresql:
 else:
     # insert is different between database types
     from sqlalchemy.dialects.sqlite import insert
-    url = f'sqlite:///{os.path.join(args.config_dir, "db", "bazarr.db")}'
+
+    url = f"sqlite:///{os.path.join(args.config_dir, 'db', 'bazarr.db')}"
     logger.debug(f"Connecting to SQLite database: {url}")  # noqa: G004
     # SQLite: keep NullPool. SQLite's single-writer file-lock model produces
     # "database is locked" errors when connections are pooled and shared
@@ -164,6 +190,7 @@ else:
 # is a cheap function call and a hard early-return when disabled, so
 # we wire it once for both engines without branching.
 from utilities.sql_profiler import install_slow_query_log  # noqa: E402
+
 install_slow_query_log(engine)
 
 # sessionmaker defaults are wrong for this codebase's access pattern.
@@ -190,12 +217,13 @@ def close_database():
 def _stop_worker_threads():
     database.remove()
 
+
 Base = declarative_base()
 metadata = Base.metadata
 
 
 class System(Base):
-    __tablename__ = 'system'
+    __tablename__ = "system"
 
     id = mapped_column(Integer, primary_key=True)
     configured = mapped_column(Text)
@@ -203,7 +231,7 @@ class System(Base):
 
 
 class TableAnnouncements(Base):
-    __tablename__ = 'table_announcements'
+    __tablename__ = "table_announcements"
 
     id = mapped_column(Integer, primary_key=True)
     timestamp = mapped_column(DateTime, nullable=False, default=datetime.now)
@@ -212,30 +240,36 @@ class TableAnnouncements(Base):
 
 
 class TableBlacklist(Base):
-    __tablename__ = 'table_blacklist'
+    __tablename__ = "table_blacklist"
 
     id = mapped_column(Integer, primary_key=True)
     language = mapped_column(Text)
     provider = mapped_column(Text)
-    sonarr_episode_id = mapped_column(Integer, ForeignKey('table_episodes.sonarrEpisodeId', ondelete='CASCADE'))
-    sonarr_series_id = mapped_column(Integer, ForeignKey('table_shows.sonarrSeriesId', ondelete='CASCADE'))
+    sonarr_episode_id = mapped_column(
+        Integer, ForeignKey("table_episodes.sonarrEpisodeId", ondelete="CASCADE")
+    )
+    sonarr_series_id = mapped_column(
+        Integer, ForeignKey("table_shows.sonarrSeriesId", ondelete="CASCADE")
+    )
     subs_id = mapped_column(Text, index=True)
     timestamp = mapped_column(DateTime, default=datetime.now)
 
 
 class TableBlacklistMovie(Base):
-    __tablename__ = 'table_blacklist_movie'
+    __tablename__ = "table_blacklist_movie"
 
     id = mapped_column(Integer, primary_key=True)
     language = mapped_column(Text)
     provider = mapped_column(Text)
-    radarr_id = mapped_column(Integer, ForeignKey('table_movies.radarrId', ondelete='CASCADE'))
+    radarr_id = mapped_column(
+        Integer, ForeignKey("table_movies.radarrId", ondelete="CASCADE")
+    )
     subs_id = mapped_column(Text, index=True)
     timestamp = mapped_column(DateTime, default=datetime.now)
 
 
 class TableEpisodes(Base):
-    __tablename__ = 'table_episodes'
+    __tablename__ = "table_episodes"
 
     absoluteEpisode = mapped_column(Integer)
     audio_codec = mapped_column(Text)
@@ -254,7 +288,11 @@ class TableEpisodes(Base):
     sceneName = mapped_column(Text)
     season = mapped_column(Integer, nullable=False)
     sonarrEpisodeId = mapped_column(Integer, primary_key=True)
-    sonarrSeriesId = mapped_column(Integer, ForeignKey('table_shows.sonarrSeriesId', ondelete='CASCADE'), index=True)
+    sonarrSeriesId = mapped_column(
+        Integer,
+        ForeignKey("table_shows.sonarrSeriesId", ondelete="CASCADE"),
+        index=True,
+    )
     subtitles = mapped_column(Text)
     title = mapped_column(Text, nullable=False)
     tvdbId = mapped_column(Integer)
@@ -262,14 +300,20 @@ class TableEpisodes(Base):
     video_codec = mapped_column(Text)
 
     def to_dict(self):
-        return {column.name: getattr(self, column.name) for column in self.__table__.columns}
+        return {
+            column.name: getattr(self, column.name) for column in self.__table__.columns
+        }
 
 
 class TableHistory(Base):
-    __tablename__ = 'table_history'
+    __tablename__ = "table_history"
     __table_args__ = (
-        Index('ix_table_history_video_path_language_timestamp',
-              'video_path', 'language', 'timestamp'),
+        Index(
+            "ix_table_history_video_path_language_timestamp",
+            "video_path",
+            "language",
+            "timestamp",
+        ),
     )
 
     id = mapped_column(Integer, primary_key=True)
@@ -279,22 +323,34 @@ class TableHistory(Base):
     provider = mapped_column(Text)
     score = mapped_column(Integer)
     score_out_of = mapped_column(Integer, nullable=True)
-    sonarrEpisodeId = mapped_column(Integer, ForeignKey('table_episodes.sonarrEpisodeId', ondelete='CASCADE'), index=True)
-    sonarrSeriesId = mapped_column(Integer, ForeignKey('table_shows.sonarrSeriesId', ondelete='CASCADE'), index=True)
+    sonarrEpisodeId = mapped_column(
+        Integer,
+        ForeignKey("table_episodes.sonarrEpisodeId", ondelete="CASCADE"),
+        index=True,
+    )
+    sonarrSeriesId = mapped_column(
+        Integer,
+        ForeignKey("table_shows.sonarrSeriesId", ondelete="CASCADE"),
+        index=True,
+    )
     subs_id = mapped_column(Text)
     subtitles_path = mapped_column(Text)
     timestamp = mapped_column(DateTime, nullable=False, default=datetime.now)
     video_path = mapped_column(Text)
     matched = mapped_column(Text)
     not_matched = mapped_column(Text)
-    upgradedFromId = mapped_column(Integer, ForeignKey('table_history.id'))
+    upgradedFromId = mapped_column(Integer, ForeignKey("table_history.id"))
 
 
 class TableHistoryMovie(Base):
-    __tablename__ = 'table_history_movie'
+    __tablename__ = "table_history_movie"
     __table_args__ = (
-        Index('ix_table_history_movie_video_path_language_timestamp',
-              'video_path', 'language', 'timestamp'),
+        Index(
+            "ix_table_history_movie_video_path_language_timestamp",
+            "video_path",
+            "language",
+            "timestamp",
+        ),
     )
 
     id = mapped_column(Integer, primary_key=True)
@@ -302,7 +358,9 @@ class TableHistoryMovie(Base):
     description = mapped_column(Text, nullable=False)
     language = mapped_column(Text)
     provider = mapped_column(Text)
-    radarrId = mapped_column(Integer, ForeignKey('table_movies.radarrId', ondelete='CASCADE'), index=True)
+    radarrId = mapped_column(
+        Integer, ForeignKey("table_movies.radarrId", ondelete="CASCADE"), index=True
+    )
     score = mapped_column(Integer)
     score_out_of = mapped_column(Integer, nullable=True)
     subs_id = mapped_column(Text)
@@ -311,11 +369,11 @@ class TableHistoryMovie(Base):
     video_path = mapped_column(Text)
     matched = mapped_column(Text)
     not_matched = mapped_column(Text)
-    upgradedFromId = mapped_column(Integer, ForeignKey('table_history_movie.id'))
+    upgradedFromId = mapped_column(Integer, ForeignKey("table_history_movie.id"))
 
 
 class TableLanguagesProfiles(Base):
-    __tablename__ = 'table_languages_profiles'
+    __tablename__ = "table_languages_profiles"
 
     profileId = mapped_column(Integer, primary_key=True)
     cutoff = mapped_column(Integer)
@@ -328,7 +386,7 @@ class TableLanguagesProfiles(Base):
 
 
 class TableMovies(Base):
-    __tablename__ = 'table_movies'
+    __tablename__ = "table_movies"
 
     alternativeTitles = mapped_column(Text)
     audio_codec = mapped_column(Text)
@@ -347,7 +405,11 @@ class TableMovies(Base):
     overview = mapped_column(Text)
     path = mapped_column(Text, nullable=False, unique=True)
     poster = mapped_column(Text)
-    profileId = mapped_column(Integer, ForeignKey('table_languages_profiles.profileId', ondelete='SET NULL'), index=True)
+    profileId = mapped_column(
+        Integer,
+        ForeignKey("table_languages_profiles.profileId", ondelete="SET NULL"),
+        index=True,
+    )
     radarrId = mapped_column(Integer, primary_key=True)
     resolution = mapped_column(Text)
     sceneName = mapped_column(Text)
@@ -361,11 +423,13 @@ class TableMovies(Base):
     year = mapped_column(Text)
 
     def to_dict(self):
-        return {column.name: getattr(self, column.name) for column in self.__table__.columns}
+        return {
+            column.name: getattr(self, column.name) for column in self.__table__.columns
+        }
 
 
 class TableMoviesRootfolder(Base):
-    __tablename__ = 'table_movies_rootfolder'
+    __tablename__ = "table_movies_rootfolder"
 
     accessible = mapped_column(Integer)
     error = mapped_column(Text)
@@ -374,9 +438,14 @@ class TableMoviesRootfolder(Base):
 
 
 class TableSubsyncEngineFailure(Base):
-    __tablename__ = 'subsync_engine_failures'
+    __tablename__ = "subsync_engine_failures"
     __table_args__ = (
-        Index('ix_subsync_engine_failures_path_engine', 'subtitle_path', 'engine', unique=True),
+        Index(
+            "ix_subsync_engine_failures_path_engine",
+            "subtitle_path",
+            "engine",
+            unique=True,
+        ),
     )
 
     id = mapped_column(Integer, primary_key=True)
@@ -390,7 +459,7 @@ class TableSubsyncEngineFailure(Base):
 
 
 class TableSettingsLanguages(Base):
-    __tablename__ = 'table_settings_languages'
+    __tablename__ = "table_settings_languages"
 
     code3 = mapped_column(Text, primary_key=True)
     code2 = mapped_column(Text)
@@ -400,7 +469,7 @@ class TableSettingsLanguages(Base):
 
 
 class TableSettingsNotifier(Base):
-    __tablename__ = 'table_settings_notifier'
+    __tablename__ = "table_settings_notifier"
 
     name = mapped_column(Text, primary_key=True)
     enabled = mapped_column(Integer)
@@ -408,7 +477,7 @@ class TableSettingsNotifier(Base):
 
 
 class TableShows(Base):
-    __tablename__ = 'table_shows'
+    __tablename__ = "table_shows"
 
     tvdbId = mapped_column(Integer)
     alternativeTitles = mapped_column(Text)
@@ -423,7 +492,11 @@ class TableShows(Base):
     overview = mapped_column(Text)
     path = mapped_column(Text, nullable=False, unique=True)
     poster = mapped_column(Text)
-    profileId = mapped_column(Integer, ForeignKey('table_languages_profiles.profileId', ondelete='SET NULL'), index=True)
+    profileId = mapped_column(
+        Integer,
+        ForeignKey("table_languages_profiles.profileId", ondelete="SET NULL"),
+        index=True,
+    )
     seriesType = mapped_column(Text)
     sonarrSeriesId = mapped_column(Integer, primary_key=True)
     sortTitle = mapped_column(Text)
@@ -433,11 +506,13 @@ class TableShows(Base):
     year = mapped_column(Text)
 
     def to_dict(self):
-        return {column.name: getattr(self, column.name) for column in self.__table__.columns}
+        return {
+            column.name: getattr(self, column.name) for column in self.__table__.columns
+        }
 
 
 class TableShowsRootfolder(Base):
-    __tablename__ = 'table_shows_rootfolder'
+    __tablename__ = "table_shows_rootfolder"
 
     accessible = mapped_column(Integer)
     error = mapped_column(Text)
@@ -446,7 +521,7 @@ class TableShowsRootfolder(Base):
 
 
 class TableProviderHubCatalogSource(Base):
-    __tablename__ = 'provider_hub_catalog_sources'
+    __tablename__ = "provider_hub_catalog_sources"
 
     id = mapped_column(Integer, primary_key=True)
     name = mapped_column(Text, nullable=False, unique=True)
@@ -460,10 +535,14 @@ class TableProviderHubCatalogSource(Base):
 
 
 class TableProviderHubCatalogEntry(Base):
-    __tablename__ = 'provider_hub_catalog_entries'
+    __tablename__ = "provider_hub_catalog_entries"
 
     id = mapped_column(Integer, primary_key=True)
-    source_id = mapped_column(Integer, ForeignKey('provider_hub_catalog_sources.id', ondelete='CASCADE'), index=True)
+    source_id = mapped_column(
+        Integer,
+        ForeignKey("provider_hub_catalog_sources.id", ondelete="CASCADE"),
+        index=True,
+    )
     provider_id = mapped_column(Text, nullable=False, index=True)
     version = mapped_column(Text, nullable=False)
     manifest_json = mapped_column(Text, nullable=False)
@@ -476,14 +555,14 @@ class TableProviderHubCatalogEntry(Base):
 
 
 class TableProviderHubInstallation(Base):
-    __tablename__ = 'provider_hub_installations'
+    __tablename__ = "provider_hub_installations"
 
     provider_id = mapped_column(Text, primary_key=True)
     active_version = mapped_column(Text)
     staged_version = mapped_column(Text)
     active_path = mapped_column(Text)
     staged_path = mapped_column(Text)
-    state = mapped_column(Text, nullable=False, default='inactive')
+    state = mapped_column(Text, nullable=False, default="inactive")
     pending_restart = mapped_column(Integer, nullable=False, default=0)
     installed_at = mapped_column(DateTime)
     activated_at = mapped_column(DateTime)
@@ -492,18 +571,18 @@ class TableProviderHubInstallation(Base):
 
 
 class TableProviderHubConfig(Base):
-    __tablename__ = 'provider_hub_config'
+    __tablename__ = "provider_hub_config"
 
     provider_id = mapped_column(Text, primary_key=True)
     enabled = mapped_column(Integer, nullable=False, default=0)
     priority = mapped_column(Integer)
-    config_json = mapped_column(Text, nullable=False, default='{}')
+    config_json = mapped_column(Text, nullable=False, default="{}")
     schema_version = mapped_column(Integer, nullable=False, default=1)
     updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
 
 
 class TableProviderHubSecret(Base):
-    __tablename__ = 'provider_hub_secrets'
+    __tablename__ = "provider_hub_secrets"
 
     id = mapped_column(Integer, primary_key=True)
     provider_id = mapped_column(Text, nullable=False, index=True)
@@ -513,7 +592,7 @@ class TableProviderHubSecret(Base):
 
 
 class TableProviderHubJob(Base):
-    __tablename__ = 'provider_hub_jobs'
+    __tablename__ = "provider_hub_jobs"
 
     id = mapped_column(Text, primary_key=True)
     provider_id = mapped_column(Text, index=True)
@@ -525,7 +604,7 @@ class TableProviderHubJob(Base):
 
 
 class TableProviderHubInstallEvent(Base):
-    __tablename__ = 'provider_hub_install_events'
+    __tablename__ = "provider_hub_install_events"
 
     id = mapped_column(Integer, primary_key=True)
     provider_id = mapped_column(Text, nullable=False, index=True)
@@ -547,6 +626,7 @@ def init_db():
     # this Session". scoped_session proxies don't expose in_transaction
     # so we catch sqlalchemy's own signal directly.
     from sqlalchemy.exc import InvalidRequestError
+
     try:
         database.begin()
     except InvalidRequestError:
@@ -576,7 +656,9 @@ def migrate_db(app):
     db = SQLAlchemy(app, metadata=metadata)
 
     insp = inspect(engine)
-    alembic_temp_tables_list = [x for x in insp.get_table_names() if x.startswith('_alembic_tmp_')]
+    alembic_temp_tables_list = [
+        x for x in insp.get_table_names() if x.startswith("_alembic_tmp_")
+    ]
     for table in alembic_temp_tables_list:
         database.execute(text(f"DROP TABLE IF EXISTS {table}"))
 
@@ -586,37 +668,33 @@ def migrate_db(app):
         db.engine.dispose()
 
     # add the system table single row if it's not existing
-    if not database.execute(
-            select(System)) \
-            .first():
-        database.execute(
-            insert(System)
-            .values(configured='0', updated='0'))
+    if not database.execute(select(System)).first():
+        database.execute(insert(System).values(configured="0", updated="0"))
     optimize_sqlite_database(engine)
 
 
 def get_exclusion_clause(exclusion_type):
     where_clause = []
-    if exclusion_type == 'series':
+    if exclusion_type == "series":
         tagsList = settings.sonarr.excluded_tags
         for tag in tagsList:
-            where_clause.append(~(TableShows.tags.contains(f"\'{tag}\'")))  # noqa: PERF401
+            where_clause.append(~(TableShows.tags.contains(f"'{tag}'")))  # noqa: PERF401
     else:
         tagsList = settings.radarr.excluded_tags
         for tag in tagsList:
-            where_clause.append(~(TableMovies.tags.contains(f"\'{tag}\'")))  # noqa: PERF401
+            where_clause.append(~(TableMovies.tags.contains(f"'{tag}'")))  # noqa: PERF401
 
-    if exclusion_type == 'series':
+    if exclusion_type == "series":
         monitoredOnly = settings.sonarr.only_monitored
         if monitoredOnly:
-            where_clause.append((TableEpisodes.monitored == 'True'))
-            where_clause.append((TableShows.monitored == 'True'))
+            where_clause.append((TableEpisodes.monitored == "True"))
+            where_clause.append((TableShows.monitored == "True"))
     else:
         monitoredOnly = settings.radarr.only_monitored
         if monitoredOnly:
-            where_clause.append((TableMovies.monitored == 'True'))
+            where_clause.append((TableMovies.monitored == "True"))
 
-    if exclusion_type == 'series':
+    if exclusion_type == "series":
         typesList = settings.sonarr.excluded_series_types
         for item in typesList:
             where_clause.append((TableShows.seriesType != item))  # noqa: PERF401
@@ -630,34 +708,40 @@ def get_exclusion_clause(exclusion_type):
 
 @region.cache_on_arguments()
 def update_profile_id_list():
-    return [{
-        'profileId': x.profileId,
-        'name': x.name,
-        'cutoff': x.cutoff,
-        'items': json.loads(x.items),
-        'mustContain': ast.literal_eval(x.mustContain) if x.mustContain else [],
-        'mustNotContain': ast.literal_eval(x.mustNotContain) if x.mustNotContain else [],
-        'originalFormat': x.originalFormat,
-        'tag': x.tag,
-    } for x in database.execute(
-        select(TableLanguagesProfiles.profileId,
-               TableLanguagesProfiles.name,
-               TableLanguagesProfiles.cutoff,
-               TableLanguagesProfiles.items,
-               TableLanguagesProfiles.mustContain,
-               TableLanguagesProfiles.mustNotContain,
-               TableLanguagesProfiles.originalFormat,
-               TableLanguagesProfiles.tag))
-        .all()
+    return [
+        {
+            "profileId": x.profileId,
+            "name": x.name,
+            "cutoff": x.cutoff,
+            "items": json.loads(x.items),
+            "mustContain": ast.literal_eval(x.mustContain) if x.mustContain else [],
+            "mustNotContain": ast.literal_eval(x.mustNotContain)
+            if x.mustNotContain
+            else [],
+            "originalFormat": x.originalFormat,
+            "tag": x.tag,
+        }
+        for x in database.execute(
+            select(
+                TableLanguagesProfiles.profileId,
+                TableLanguagesProfiles.name,
+                TableLanguagesProfiles.cutoff,
+                TableLanguagesProfiles.items,
+                TableLanguagesProfiles.mustContain,
+                TableLanguagesProfiles.mustNotContain,
+                TableLanguagesProfiles.originalFormat,
+                TableLanguagesProfiles.tag,
+            )
+        ).all()
     ]
 
 
 def get_profiles_list(profile_id=None):
     profile_id_list = update_profile_id_list()
 
-    if profile_id and profile_id != 'null':
+    if profile_id and profile_id != "null":
         for profile in profile_id_list:
-            if profile['profileId'] == profile_id:
+            if profile["profileId"] == profile_id:
                 return profile
     else:
         return profile_id_list
@@ -665,28 +749,37 @@ def get_profiles_list(profile_id=None):
 
 def get_desired_languages(profile_id):
     for profile in update_profile_id_list():
-        if profile['profileId'] == profile_id:
-            return [x['language'] for x in profile['items']]
+        if profile["profileId"] == profile_id:
+            return [x["language"] for x in profile["items"]]
 
 
 def get_profile_id_name(profile_id):
     for profile in update_profile_id_list():
-        if profile['profileId'] == profile_id:
-            return profile['name']
+        if profile["profileId"] == profile_id:
+            return profile["name"]
 
 
 def get_profile_cutoff(profile_id):
     cutoff_language = None
     profile_id_list = update_profile_id_list()
 
-    if profile_id and profile_id != 'null':
+    if profile_id and profile_id != "null":
         cutoff_language = []
         for profile in profile_id_list:
-            profileId, name, cutoff, items, mustContain, mustNotContain, originalFormat, tag = profile.values()
+            (
+                profileId,
+                name,
+                cutoff,
+                items,
+                mustContain,
+                mustNotContain,
+                originalFormat,
+                tag,
+            ) = profile.values()
             if cutoff:
                 if profileId == int(profile_id):
                     for item in items:
-                        if item['id'] == cutoff:
+                        if item["id"] == cutoff:
                             return [item]
                         elif cutoff == 65535:
                             cutoff_language.append(item)
@@ -698,30 +791,41 @@ def get_profile_cutoff(profile_id):
 
 
 def get_audio_profile_languages(audio_languages_list_str):
-    from languages.get_languages import alpha2_from_language, alpha3_from_language, language_from_alpha2
+    from languages.get_languages import (
+        alpha2_from_language,
+        alpha3_from_language,
+        language_from_alpha2,
+    )
+
     audio_languages = []
 
     und_default_language = language_from_alpha2(settings.general.default_und_audio_lang)
 
     try:
-        audio_languages_list = ast.literal_eval(audio_languages_list_str or '[]')
+        audio_languages_list = ast.literal_eval(audio_languages_list_str or "[]")
     except ValueError:
         pass
     else:
         for language in audio_languages_list:
             if language:
                 audio_languages.append(
-                    {"name": language,
-                     "code2": alpha2_from_language(language) or None,
-                     "code3": alpha3_from_language(language) or None}
+                    {
+                        "name": language,
+                        "code2": alpha2_from_language(language) or None,
+                        "code3": alpha3_from_language(language) or None,
+                    }
                 )
             else:
                 if und_default_language:
-                    logging.debug(f"Undefined language audio track treated as {und_default_language}")  # noqa: G004
+                    logging.debug(
+                        f"Undefined language audio track treated as {und_default_language}"
+                    )  # noqa: G004
                     audio_languages.append(
-                        {"name": und_default_language,
-                         "code2": alpha2_from_language(und_default_language) or None,
-                         "code3": alpha3_from_language(und_default_language) or None}
+                        {
+                            "name": und_default_language,
+                            "code2": alpha2_from_language(und_default_language) or None,
+                            "code3": alpha3_from_language(und_default_language) or None,
+                        }
                     )
 
     return audio_languages
@@ -730,9 +834,8 @@ def get_audio_profile_languages(audio_languages_list_str):
 def get_profile_id(series_id=None, episode_id=None, movie_id=None):
     if series_id:
         data = database.execute(
-            select(TableShows.profileId)
-            .where(TableShows.sonarrSeriesId == series_id))\
-            .first()
+            select(TableShows.profileId).where(TableShows.sonarrSeriesId == series_id)
+        ).first()
         if data:
             return data.profileId
     elif episode_id:
@@ -740,16 +843,15 @@ def get_profile_id(series_id=None, episode_id=None, movie_id=None):
             select(TableShows.profileId)
             .select_from(TableShows)
             .join(TableEpisodes)
-            .where(TableEpisodes.sonarrEpisodeId == episode_id)) \
-            .first()
+            .where(TableEpisodes.sonarrEpisodeId == episode_id)
+        ).first()
         if data:
             return data.profileId
 
     elif movie_id:
         data = database.execute(
-            select(TableMovies.profileId)
-            .where(TableMovies.radarrId == movie_id))\
-            .first()
+            select(TableMovies.profileId).where(TableMovies.radarrId == movie_id)
+        ).first()
         if data:
             return data.profileId
 
@@ -764,7 +866,8 @@ def convert_list_to_clause(arr: list):
 
 
 def upgrade_languages_profile_values():
-    for languages_profile in (database.execute(
+    for languages_profile in (
+        database.execute(
             select(
                 TableLanguagesProfiles.profileId,
                 TableLanguagesProfiles.name,
@@ -773,21 +876,22 @@ def upgrade_languages_profile_values():
                 TableLanguagesProfiles.mustContain,
                 TableLanguagesProfiles.mustNotContain,
                 TableLanguagesProfiles.originalFormat,
-                TableLanguagesProfiles.tag)
-            ))\
-            .all():
+                TableLanguagesProfiles.tag,
+            )
+        )
+    ).all():
         items = json.loads(languages_profile.items)
         for language in items:
-            if language['hi'] == "only":
-                language['hi'] = "True"
-            elif language['hi'] in ["also", "never"]:
-                language['hi'] = "False"
+            if language["hi"] == "only":
+                language["hi"] = "True"
+            elif language["hi"] in ["also", "never"]:
+                language["hi"] = "False"
 
-            if 'audio_exclude' not in language:
-                language['audio_exclude'] = "False"
+            if "audio_exclude" not in language:
+                language["audio_exclude"] = "False"
 
-            if 'audio_only_include' not in language:
-                language['audio_only_include'] = "False"
+            if "audio_only_include" not in language:
+                language["audio_only_include"] = "False"
 
             if "translate_from" not in language:
                 language["translate_from"] = None
@@ -800,7 +904,12 @@ def upgrade_languages_profile_values():
 
 def fix_languages_profiles_with_duplicate_ids():
     languages_profiles = database.execute(
-        select(TableLanguagesProfiles.profileId, TableLanguagesProfiles.items, TableLanguagesProfiles.cutoff)).all()
+        select(
+            TableLanguagesProfiles.profileId,
+            TableLanguagesProfiles.items,
+            TableLanguagesProfiles.cutoff,
+        )
+    ).all()
     for languages_profile in languages_profiles:
         if languages_profile.cutoff:
             # ignore profiles that have a cutoff set
@@ -809,17 +918,17 @@ def fix_languages_profiles_with_duplicate_ids():
         languages_profile_has_duplicate = False
         languages_profile_items = json.loads(languages_profile.items)
         for items in languages_profile_items:
-            if items['id'] in languages_profile_ids:
+            if items["id"] in languages_profile_ids:
                 languages_profile_has_duplicate = True
                 break
             else:
-                languages_profile_ids.append(items['id'])
+                languages_profile_ids.append(items["id"])
 
         if languages_profile_has_duplicate:
             item_id = 0
             for items in languages_profile_items:
                 item_id += 1
-                items['id'] = item_id
+                items["id"] = item_id
             database.execute(
                 update(TableLanguagesProfiles)
                 .values({"items": json.dumps(languages_profile_items)})

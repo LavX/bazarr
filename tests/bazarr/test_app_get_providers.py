@@ -167,7 +167,9 @@ def test_native_subtitle_pool_uses_provider_language_hook(monkeypatch):
             captured.update(kwargs)
 
     monkeypatch.setattr(subtitle_pool, "provider_pool", lambda: CapturingPool)
-    monkeypatch.setattr(subtitle_pool, "get_providers_sorted", lambda: ["opensubtitlescom"])
+    monkeypatch.setattr(
+        subtitle_pool, "get_providers_sorted", lambda: ["opensubtitlescom"]
+    )
     monkeypatch.setattr(subtitle_pool, "get_providers_auth", lambda: {})
     monkeypatch.setattr(subtitle_pool, "get_blacklist", lambda: [])
     monkeypatch.setattr(subtitle_pool, "get_blacklist_movie", lambda: [])
