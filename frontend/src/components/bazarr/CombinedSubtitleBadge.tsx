@@ -1,6 +1,5 @@
 import { FunctionComponent } from "react";
 import { Badge, Group, Text } from "@mantine/core";
-
 import { getCombinedLabel } from "@/utilities/subtitles";
 
 interface Props {

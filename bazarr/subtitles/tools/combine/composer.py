@@ -6,7 +6,7 @@ from io import StringIO
 
 import pysubs2
 
-from .aligner import AlignmentMode, detect_mode
+from .aligner import detect_mode
 
 
 def compose(primary_path, secondary_paths, format):

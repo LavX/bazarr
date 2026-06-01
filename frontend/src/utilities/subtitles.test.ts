@@ -6,8 +6,8 @@ import {
   getCombinedSecondaries,
   getSubtitleSyncStatusPresentation,
   getSyncEngineLabel,
-  isCompatibleSyncOutputSubtitle,
   isCombinedOutputSubtitle,
+  isCompatibleSyncOutputSubtitle,
   isSyncOutputLanguageKey,
   isSyncOutputSubtitle,
 } from "@/utilities/subtitles";

@@ -28,8 +28,8 @@ import {
   buildSubtitleLanguageKey,
   canSynchronizeSubtitle,
   getSyncEngineLabel,
-  isCompatibleSyncOutputSubtitle,
   isCombinedOutputSubtitle,
+  isCompatibleSyncOutputSubtitle,
   isSyncOutputSubtitle,
   sortSyncOutputSubtitles,
 } from "@/utilities/subtitles";

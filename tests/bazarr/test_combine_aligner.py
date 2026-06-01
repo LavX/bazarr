@@ -4,7 +4,6 @@ import os
 import pysubs2
 
 from subtitles.tools.combine.aligner import (
-    AlignmentMode,
     detect_mode,
 )
 

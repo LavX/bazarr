@@ -1,6 +1,5 @@
 # coding=utf-8
 
-import os
 
 from subtitles.tools.combine.rules import (
     SourcePaths,

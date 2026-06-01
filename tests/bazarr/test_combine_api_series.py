@@ -11,6 +11,10 @@ import sys
 import types
 from unittest.mock import MagicMock, patch
 
+# Snapshot sys.modules so we can fully restore it after importing the module
+# under test, preventing mock/transitive-import leakage into later test files.
+_SYS_BEFORE = dict(sys.modules)
+
 
 # ---------------------------------------------------------------------------
 # Patch heavy dependencies before importing the module under test.
@@ -102,7 +106,7 @@ def _ensure_pkg_stub(name, pkg_path=None):
 
 # Stub the `api` package itself so api/__init__.py never runs.
 # Provide the real paths so submodule file lookup still works.
-import os as _os
+import os as _os  # noqa: E402
 _bazarr_root = _os.path.join(_os.path.dirname(__file__), '../../bazarr')
 _ensure_pkg_stub('api', [_os.path.join(_bazarr_root, 'api')])
 _ensure_pkg_stub('api.series', [_os.path.join(_bazarr_root, 'api', 'series')])
@@ -114,14 +118,13 @@ sys.modules.pop('api.series.series', None)
 
 import api.series.series as series_module  # noqa: E402
 
-# Restore sys.modules: pop entries we added, put back originals we replaced.
-# This lets later test files re-resolve real modules.
-for _mod in _patches:
-    _orig = _preexisting.get(_mod)
-    if _orig is None:
-        sys.modules.pop(_mod, None)
-    else:
-        sys.modules[_mod] = _orig
+# Fully restore sys.modules to its pre-import state: drop everything this module
+# added (mocks + transitive imports) and put back any originals we replaced.
+for _k in list(sys.modules):
+    if _k not in _SYS_BEFORE:
+        del sys.modules[_k]
+for _k, _v in _SYS_BEFORE.items():
+    sys.modules[_k] = _v
 
 
 # ---------------------------------------------------------------------------

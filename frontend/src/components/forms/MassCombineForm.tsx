@@ -14,7 +14,6 @@ import { notifications } from "@mantine/notifications";
 import { useCombineSubtitles } from "@/apis/hooks/combine";
 import { useModals, withModal } from "@/modules/modals";
 import { useEnabledLanguages } from "@/utilities/languages";
-
 import type { WantedItem } from "./MassTranslateForm";
 
 interface Props {

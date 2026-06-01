@@ -1,6 +1,5 @@
 # coding=utf-8
 
-import os
 
 from subtitles.indexer.utils import (
     add_combined_outputs,
