@@ -37,6 +37,7 @@ import { useProfileItemsToLanguages } from "@/utilities/languages";
 import {
   buildSubtitleLanguageKey,
   canSynchronizeSubtitle,
+  combineRequestForSubtitle,
   getSubtitleSyncStatusPresentation,
   getSyncEngineLabel,
   isCombinedOutputSubtitle,
@@ -318,7 +319,7 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
             if (action === "rebuild") {
               combine.mutate({
                 scope: { kind: "movie", radarrId },
-                body: {},
+                body: combineRequestForSubtitle(item) ?? {},
               });
             } else if (action === "view") {
               navigate(

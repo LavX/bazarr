@@ -27,6 +27,7 @@ import { toPython } from "@/utilities";
 import {
   buildSubtitleLanguageKey,
   canSynchronizeSubtitle,
+  combineRequestForSubtitle,
   getSyncEngineLabel,
   isCombinedOutputSubtitle,
   isCompatibleSyncOutputSubtitle,
@@ -163,7 +164,7 @@ export const Subtitle: FunctionComponent<Props> = ({
             if (action === "rebuild") {
               combine.mutate({
                 scope: { kind: "episode", episodeId },
-                body: {},
+                body: combineRequestForSubtitle(subtitle) ?? {},
               });
             } else if (action === "view") {
               navigate(

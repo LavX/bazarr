@@ -14,6 +14,26 @@ def make_video_dir(tmp_path, files):
     return tmp_path
 
 
+def test_finds_sources_in_relative_subfolder(tmp_path, monkeypatch):
+    # Video alongside the .mkv, but the SRTs live in a configured subfolder.
+    (tmp_path / "Movie.mkv").write_text("")
+    subs = tmp_path / "Subs"
+    subs.mkdir()
+    (subs / "Movie.en.srt").write_text("")
+    (subs / "Movie.hu.srt").write_text("")
+    monkeypatch.setattr(
+        "subtitles.tools.combine.naming.external_subtitles_search_dirs",
+        lambda video_path: [str(tmp_path), str(subs)],
+    )
+    result = resolve_source_paths(
+        video_path=str(tmp_path / "Movie.mkv"),
+        languages=["en", "hu"],
+    )
+    assert result is not None
+    assert result.primary == str(subs / "Movie.en.srt")
+    assert result.secondaries == [str(subs / "Movie.hu.srt")]
+
+
 def test_all_sources_present(tmp_path):
     base = make_video_dir(tmp_path, ["Movie.en.srt", "Movie.hu.srt", "Movie.mkv"])
     result = resolve_source_paths(

@@ -159,16 +159,26 @@ def _language_code_from_combined_output(subtitle):
     return info.primary
 
 
-def add_combined_outputs(dest_folder, subtitles):
+def add_combined_outputs(dest_folder, subtitles, video_filename=None):
     """Scan dest_folder for combined-subtitle files and add them to the
     subtitles dict so the rest of the indexer treats them as known artifacts.
+
+    video_filename: the basename of the video being indexed. When provided,
+    only combined files belonging to that video are added. This matters in
+    folders holding multiple episodes/movies, where an unfiltered scan would
+    attach another item's combined file to the wrong video.
 
     Mirrors add_sync_engine_outputs from PR 158 in structure."""
     if not os.path.isdir(dest_folder):
         return subtitles
 
+    video_stem = os.path.splitext(video_filename)[0] if video_filename else None
+
     for subtitle in os.listdir(dest_folder):
         if subtitle in subtitles or not combined_modifier_from_subtitle_name(subtitle):
+            continue
+
+        if video_stem is not None and not subtitle.startswith(video_stem + "."):
             continue
 
         subtitle_path = os.path.join(dest_folder, subtitle)

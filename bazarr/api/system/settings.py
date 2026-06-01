@@ -61,6 +61,7 @@ class SystemSettings(Resource):
                 .all()
             existing = [x.profileId for x in existing_ids]
             for item in json.loads(languages_profiles):
+                combine_value = json.dumps(item['combine']) if item.get('combine') else None
                 if item['profileId'] in existing:
                     # Update existing profiles
                     database.execute(
@@ -74,6 +75,7 @@ class SystemSettings(Resource):
                             originalFormat=int(item['originalFormat']) if item['originalFormat'] not in None_Keys else
                             None,
                             tag=item['tag'] if 'tag' in item else None,
+                            combine=combine_value,
                         )
                         .where(TableLanguagesProfiles.profileId == item['profileId']))
                     existing.remove(item['profileId'])
@@ -91,6 +93,7 @@ class SystemSettings(Resource):
                             originalFormat=int(item['originalFormat']) if item['originalFormat'] not in None_Keys else
                             None,
                             tag=item['tag'] if 'tag' in item else None,
+                            combine=combine_value,
                         ))
             for profileId in existing:
                 # Remove deleted profiles

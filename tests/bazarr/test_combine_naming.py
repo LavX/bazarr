@@ -36,8 +36,8 @@ class TestParseCombinedFilename:
 class TestComposeCombinedFilename:
     def test_two_language_srt(self, monkeypatch):
         monkeypatch.setattr(
-            "subtitles.tools.combine.naming.get_external_subtitles_path",
-            lambda file, subtitle: f"/movies/Movie/{subtitle}",
+            "subtitles.tools.combine.naming.external_subtitles_dir",
+            lambda video_path: "/movies/Movie",
         )
         path = compose_combined_filename(
             video_path="/movies/Movie/Movie.mkv",
@@ -49,8 +49,8 @@ class TestComposeCombinedFilename:
 
     def test_three_language_ass(self, monkeypatch):
         monkeypatch.setattr(
-            "subtitles.tools.combine.naming.get_external_subtitles_path",
-            lambda file, subtitle: f"/movies/Movie/{subtitle}",
+            "subtitles.tools.combine.naming.external_subtitles_dir",
+            lambda video_path: "/movies/Movie",
         )
         path = compose_combined_filename(
             video_path="/movies/Movie/Movie.mkv",
@@ -64,8 +64,8 @@ class TestComposeCombinedFilename:
 class TestRoundTrip:
     def test_roundtrip_two_lang(self, monkeypatch):
         monkeypatch.setattr(
-            "subtitles.tools.combine.naming.get_external_subtitles_path",
-            lambda file, subtitle: f"/movies/Movie/{subtitle}",
+            "subtitles.tools.combine.naming.external_subtitles_dir",
+            lambda video_path: "/movies/Movie",
         )
         path = compose_combined_filename("/movies/Movie/Movie.mkv", "en", ["hu"], "srt")
         info = parse_combined_filename(path)

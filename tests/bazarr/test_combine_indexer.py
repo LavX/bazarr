@@ -47,6 +47,17 @@ class TestAddCombinedOutputs:
         # Must not overwrite the existing entry.
         assert result["Movie.en.combined-hu.srt"] == "something"
 
+    def test_filters_to_current_video(self, tmp_path):
+        # A multi-episode folder: only the current episode's combined file
+        # should be picked up.
+        (tmp_path / "Show.S01E01.en.combined-hu.srt").write_text("")
+        (tmp_path / "Show.S01E02.en.combined-hu.srt").write_text("")
+        result = add_combined_outputs(
+            str(tmp_path), {}, video_filename="Show.S01E01.mkv"
+        )
+        assert "Show.S01E01.en.combined-hu.srt" in result
+        assert "Show.S01E02.en.combined-hu.srt" not in result
+
 
 class TestSubtitleLanguageWithCombinedModifier:
     def test_stamps_modifier(self):

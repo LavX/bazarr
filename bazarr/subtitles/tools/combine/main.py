@@ -59,13 +59,6 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
             )
         except Exception as e:
             logging.exception("BAZARR combine compose failed for %s", video_path)
-            _write_history_row(
-                video_path=video_path, media_type=media_type,
-                sources=sources, format=rule["format"], output=out_path,
-                alignment="error", success=False, error=str(e),
-                sonarr_series_id=sonarr_series_id,
-                sonarr_episode_id=sonarr_episode_id, radarr_id=radarr_id,
-            )
             return CombineResult(status="failed", error=str(e))
 
         try:
@@ -73,25 +66,11 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                 fh.write(content)
         except OSError as e:
             logging.exception("BAZARR combine write failed for %s", out_path)
-            _write_history_row(
-                video_path=video_path, media_type=media_type,
-                sources=sources, format=rule["format"], output=out_path,
-                alignment="error", success=False, error=str(e),
-                sonarr_series_id=sonarr_series_id,
-                sonarr_episode_id=sonarr_episode_id, radarr_id=radarr_id,
-            )
             return CombineResult(status="failed", error=str(e))
 
         _post_write(out_path, video_path, media_type,
                      sonarr_episode_id, radarr_id)
 
-        _write_history_row(
-            video_path=video_path, media_type=media_type,
-            sources=sources, format=rule["format"], output=out_path,
-            alignment="ok", success=True, error="",
-            sonarr_series_id=sonarr_series_id,
-            sonarr_episode_id=sonarr_episode_id, radarr_id=radarr_id,
-        )
         logging.info(
             "BAZARR combine built %s for %s", out_path, video_path,
         )
@@ -126,66 +105,20 @@ def _profile_for(media_type, sonarr_series_id, sonarr_episode_id, radarr_id):
 
 
 def _post_write(out_path, video_path, media_type, sonarr_episode_id, radarr_id):
-    """Hook into the same postprocess chain a downloaded subtitle uses."""
+    """Hook into the same postprocess chain a downloaded subtitle uses.
+
+    postprocess_subtitles uses the 'episode'/'movie' media-type convention and
+    its episode branch keys off the value being exactly 'episode'. The combine
+    pipeline uses the 'series'/'movies' convention, so map it here and pass the
+    matching id (episode id for series, radarr id for movies)."""
     try:
         from api.subtitles.subtitles import postprocess_subtitles
-        postprocess_subtitles(
-            out_path, video_path, media_type, None,
-            sonarr_episode_id if media_type != "movies" else radarr_id,
-        )
+        is_movie = media_type == "movies"
+        pp_media_type = "movie" if is_movie else "episode"
+        pp_id = radarr_id if is_movie else sonarr_episode_id
+        postprocess_subtitles(out_path, video_path, pp_media_type, None, pp_id)
     except Exception:
         logging.exception("BAZARR combine post-write hook failed")
-
-
-def _write_history_row(video_path, media_type, sources, format, output,
-                         alignment, success, error, sonarr_series_id,
-                         sonarr_episode_id, radarr_id):
-    """Insert a row into the appropriate history table with action='combined'."""
-    import json
-    payload = {
-        "sources": [sources.primary] + list(sources.secondaries),
-        "format": format,
-        "alignment": alignment,
-        "output": output,
-    }
-    if not success:
-        payload["error"] = error
-    description = json.dumps(payload)
-
-    try:
-        if media_type == "movies":
-            _insert_movie_history(radarr_id, description)
-        else:
-            _insert_episode_history(sonarr_series_id, sonarr_episode_id, description)
-    except Exception:
-        logging.exception("BAZARR combine history write failed")
-
-
-def _insert_movie_history(radarr_id, description):
-    from app.database import TableHistoryMovie, database
-    import time
-    database.execute(
-        TableHistoryMovie.__table__.insert().values(
-            action="combined",
-            radarrId=radarr_id,
-            timestamp=int(time.time()),
-            description=description,
-        )
-    )
-
-
-def _insert_episode_history(series_id, episode_id, description):
-    from app.database import TableHistory, database
-    import time
-    database.execute(
-        TableHistory.__table__.insert().values(
-            action="combined",
-            sonarrSeriesId=series_id,
-            sonarrEpisodeId=episode_id,
-            timestamp=int(time.time()),
-            description=description,
-        )
-    )
 
 
 # Late import to avoid circular at module load.

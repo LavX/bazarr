@@ -2,6 +2,7 @@ import {
   buildComparableSubtitleVariantKey,
   buildSubtitleLanguageKey,
   canSynchronizeSubtitle,
+  combineRequestForSubtitle,
   getCombinedLabel,
   getCombinedSecondaries,
   getSubtitleSyncStatusPresentation,
@@ -358,5 +359,48 @@ describe("combined output helpers", () => {
         path: "/movie/Movie.en.srt",
       }),
     ).toBe(true);
+  });
+});
+
+describe("combineRequestForSubtitle", () => {
+  it("reproduces the artifact's languages and SRT format", () => {
+    expect(
+      combineRequestForSubtitle({
+        code2: "en",
+        name: "English",
+        forced: false,
+        hi: false,
+        modifier: "combined-hu",
+        language: "en:combined-hu",
+        path: "/movie/Movie.en.combined-hu.srt",
+      }),
+    ).toEqual({ languages: ["en", "hu"], format: "srt" });
+  });
+
+  it("reproduces three languages and ASS format", () => {
+    expect(
+      combineRequestForSubtitle({
+        code2: "de",
+        name: "German",
+        forced: false,
+        hi: false,
+        modifier: "combined-es-zh",
+        language: "de:combined-es-zh",
+        path: "/movie/Movie.de.combined-es-zh.ass",
+      }),
+    ).toEqual({ languages: ["de", "es", "zh"], format: "ass" });
+  });
+
+  it("returns null for non-combined subtitles", () => {
+    expect(
+      combineRequestForSubtitle({
+        code2: "en",
+        name: "English",
+        forced: false,
+        hi: false,
+        language: "en",
+        path: "/movie/Movie.en.srt",
+      }),
+    ).toBeNull();
   });
 });

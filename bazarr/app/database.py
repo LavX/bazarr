@@ -325,6 +325,7 @@ class TableLanguagesProfiles(Base):
     mustContain = mapped_column(Text)
     mustNotContain = mapped_column(Text)
     tag = mapped_column(Text)
+    combine = mapped_column(Text)
 
 
 class TableMovies(Base):
@@ -639,6 +640,7 @@ def update_profile_id_list():
         'mustNotContain': ast.literal_eval(x.mustNotContain) if x.mustNotContain else [],
         'originalFormat': x.originalFormat,
         'tag': x.tag,
+        'combine': json.loads(x.combine) if x.combine else None,
     } for x in database.execute(
         select(TableLanguagesProfiles.profileId,
                TableLanguagesProfiles.name,
@@ -647,7 +649,8 @@ def update_profile_id_list():
                TableLanguagesProfiles.mustContain,
                TableLanguagesProfiles.mustNotContain,
                TableLanguagesProfiles.originalFormat,
-               TableLanguagesProfiles.tag))
+               TableLanguagesProfiles.tag,
+               TableLanguagesProfiles.combine))
         .all()
     ]
 

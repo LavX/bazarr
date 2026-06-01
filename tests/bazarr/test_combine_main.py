@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from subtitles.tools.combine.main import (
     CombineResult,
+    _post_write,
     try_combine_for_video,
 )
 from subtitles.tools.combine.rules import SourcePaths
@@ -34,10 +35,9 @@ class TestTryCombine:
     @patch("subtitles.tools.combine.main.get_combine_rule")
     @patch("subtitles.tools.combine.main.resolve_source_paths")
     @patch("subtitles.tools.combine.main.compose_combined_filename")
-    @patch("subtitles.tools.combine.main._write_history_row")
     @patch("subtitles.tools.combine.main._post_write")
     def test_builds_when_sources_present(
-        self, mock_post_write, mock_history, mock_filename, mock_resolve, mock_rule,
+        self, mock_post_write, mock_filename, mock_resolve, mock_rule,
         tmp_video, tmp_path,
     ):
         mock_rule.return_value = {"languages": ["en", "hu"], "format": "srt"}
@@ -55,7 +55,7 @@ class TestTryCombine:
         assert result.status == "built"
         assert result.path == out_path
         assert os.path.exists(out_path)
-        mock_history.assert_called_once()
+        mock_post_write.assert_called_once()
 
     @patch("subtitles.tools.combine.main.get_combine_rule")
     @patch("subtitles.tools.combine.main._profile_for")
@@ -87,10 +87,9 @@ class TestTryCombine:
     @patch("subtitles.tools.combine.main._profile_for")
     @patch("subtitles.tools.combine.main.resolve_source_paths")
     @patch("subtitles.tools.combine.main.compose_combined_filename")
-    @patch("subtitles.tools.combine.main._write_history_row")
     @patch("subtitles.tools.combine.main.compose")
     def test_failed_compose_returns_failed(
-        self, mock_compose, mock_history, mock_filename, mock_resolve,
+        self, mock_compose, mock_filename, mock_resolve,
         mock_profile, mock_rule, tmp_video, tmp_path,
     ):
         mock_profile.return_value = {"items": []}
@@ -106,4 +105,17 @@ class TestTryCombine:
         )
         assert result.status == "failed"
         assert "bad SRT" in result.error
-        mock_history.assert_called_once()
+
+
+class TestPostWrite:
+    @patch("api.subtitles.subtitles.postprocess_subtitles")
+    def test_maps_series_to_episode(self, mock_pp):
+        _post_write("/out.srt", "/video.mkv", "series",
+                    sonarr_episode_id=99, radarr_id=None)
+        mock_pp.assert_called_once_with("/out.srt", "/video.mkv", "episode", None, 99)
+
+    @patch("api.subtitles.subtitles.postprocess_subtitles")
+    def test_maps_movies_to_movie(self, mock_pp):
+        _post_write("/out.srt", "/video.mkv", "movies",
+                    sonarr_episode_id=None, radarr_id=42)
+        mock_pp.assert_called_once_with("/out.srt", "/video.mkv", "movie", None, 42)

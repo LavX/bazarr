@@ -102,7 +102,8 @@ def store_subtitles(original_path, reversed_path, use_cache=True):
                 elif settings.general.subfolder == "relative":
                     full_dest_folder_path = os.path.join(os.path.dirname(reversed_path), dest_folder)
             subtitles = add_sync_engine_outputs(full_dest_folder_path, subtitles)
-            subtitles = add_combined_outputs(full_dest_folder_path, subtitles)
+            subtitles = add_combined_outputs(full_dest_folder_path, subtitles,
+                                             video_filename=os.path.basename(reversed_path))
             subtitles = guess_external_subtitles(full_dest_folder_path, subtitles, "series",
                                                  previously_indexed_subtitles_to_exclude)
         except Exception as e:

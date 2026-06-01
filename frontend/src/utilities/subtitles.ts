@@ -124,6 +124,27 @@ export function getCombinedLabel(subtitle: Subtitle): string {
     .join(" + ");
 }
 
+export function getCombinedFormat(subtitle: Subtitle): "srt" | "ass" {
+  return subtitle.path?.toLowerCase().endsWith(".ass") ? "ass" : "srt";
+}
+
+// Build the combine request that reproduces THIS combined artifact (its own
+// primary + secondaries + format), so a Rebuild targets the selected file
+// rather than falling back to whatever the profile rule currently is.
+export function combineRequestForSubtitle(subtitle: Subtitle): {
+  languages: string[];
+  format: "srt" | "ass";
+} | null {
+  const secondaries = getCombinedSecondaries(subtitle);
+  if (!secondaries) {
+    return null;
+  }
+  return {
+    languages: [subtitle.code2, ...secondaries],
+    format: getCombinedFormat(subtitle),
+  };
+}
+
 function hasFinalEngineFilenameSegment(path: string, engine: string): boolean {
   const filename = path.split(/[\\/]/).pop() ?? "";
   const marker = `.${engine}.`;

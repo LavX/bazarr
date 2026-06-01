@@ -36,14 +36,20 @@ def resolve_source_paths(video_path, languages):
     if not languages or len(languages) < 2:
         return None
 
-    video_dir = os.path.dirname(video_path)
     base = os.path.splitext(os.path.basename(video_path))[0]
-    if not video_dir or not base:
+    if not base:
         return None
 
-    candidates = glob.glob(
-        os.path.join(glob.escape(video_dir), f"{glob.escape(base)}.*.srt")
-    )
+    from .naming import external_subtitles_search_dirs
+    search_dirs = external_subtitles_search_dirs(video_path)
+
+    candidates = []
+    for d in search_dirs:
+        if d and os.path.isdir(d):
+            candidates.extend(glob.glob(
+                os.path.join(glob.escape(d), f"{glob.escape(base)}.*.srt")
+            ))
+
     # Map of code -> (priority, path). Lower priority wins.
     by_code = {}
     for path in candidates:
