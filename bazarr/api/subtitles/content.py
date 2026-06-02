@@ -327,12 +327,24 @@ def resolve_subtitle_path(media_type, media_id, language_code):
     # (os.stat in generate_etag, tempfile.mkstemp(dir=), os.replace, os.chmod)
     # no longer inherit taint from the language_code URL param.
     resolved_subtitle_path = os.path.realpath(safe_path)
+    # Accept the resolved path if it lives under the media directory OR the
+    # configured (absolute/relative) subtitle folder. Both are trusted dirs
+    # derived from the int media id, and combined/synced outputs are written to
+    # the subtitle folder when subfolder mode is enabled. Each os.path.commonpath
+    # comparison is the CodeQL-recognized py/path-injection sanitizer; gating the
+    # sink on one of them passing keeps the downstream value cleared.
     try:
-        common = os.path.commonpath([resolved_subtitle_path, trusted_media_dir])
+        common_media = os.path.commonpath([resolved_subtitle_path, trusted_media_dir])
     except ValueError:
         # Mixed drives on Windows or empty paths.
         return 'Invalid subtitle path', 400
-    if common != trusted_media_dir:
+    common_target = None
+    if trusted_target_dir:
+        try:
+            common_target = os.path.commonpath([resolved_subtitle_path, trusted_target_dir])
+        except ValueError:
+            common_target = None
+    if common_media != trusted_media_dir and common_target != trusted_target_dir:
         return 'Resolved subtitle path outside media directory', 400
 
     ext = os.path.splitext(resolved_subtitle_path)[1].lower()

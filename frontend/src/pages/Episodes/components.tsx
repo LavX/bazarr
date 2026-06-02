@@ -96,7 +96,8 @@ export const Subtitle: FunctionComponent<Props> = ({
   const translationSources = useMemo(
     () =>
       (availableSubtitles ?? []).filter(
-        (s) => s.path && !isSyncOutputSubtitle(s),
+        (s) =>
+          s.path && !isSyncOutputSubtitle(s) && !isCombinedOutputSubtitle(s),
       ),
     [availableSubtitles],
   );

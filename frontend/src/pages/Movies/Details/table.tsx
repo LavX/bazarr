@@ -244,7 +244,11 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
   const availableSources = useMemo(
     () =>
       (movie?.subtitles ?? []).filter(
-        (s) => s.path && !isSubtitleTrack(s.path) && !isSyncOutputSubtitle(s),
+        (s) =>
+          s.path &&
+          !isSubtitleTrack(s.path) &&
+          !isSyncOutputSubtitle(s) &&
+          !isCombinedOutputSubtitle(s),
       ),
     [movie?.subtitles],
   );

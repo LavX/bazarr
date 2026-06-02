@@ -68,6 +68,23 @@ class TestTryCombine:
         assert result.status == "skipped"
         assert result.reason == "no rule"
 
+    def test_rejects_duplicate_adhoc_languages(self, tmp_video):
+        # Ad-hoc override with a duplicate language must be rejected before
+        # resolving sources or writing Movie.en.combined-en.srt.
+        result = try_combine_for_video(
+            video_path=tmp_video, media_type="movies", radarr_id=42,
+            languages=["en", "en"], format="srt",
+        )
+        assert result.status == "failed"
+        assert "distinct" in result.error
+
+    def test_rejects_too_many_adhoc_languages(self, tmp_video):
+        result = try_combine_for_video(
+            video_path=tmp_video, media_type="movies", radarr_id=42,
+            languages=["en", "hu", "de", "es"], format="srt",
+        )
+        assert result.status == "failed"
+
     @patch("subtitles.tools.combine.main.get_combine_rule")
     @patch("subtitles.tools.combine.main._profile_for")
     @patch("subtitles.tools.combine.main.resolve_source_paths")
@@ -108,14 +125,20 @@ class TestTryCombine:
 
 
 class TestPostWrite:
+    @patch("app.database.database")
     @patch("api.subtitles.subtitles.postprocess_subtitles")
-    def test_maps_series_to_episode(self, mock_pp):
+    def test_maps_series_to_episode(self, mock_pp, mock_db):
+        meta = object()
+        mock_db.execute.return_value.first.return_value = meta
         _post_write("/out.srt", "/video.mkv", "series",
                     sonarr_episode_id=99, radarr_id=None)
-        mock_pp.assert_called_once_with("/out.srt", "/video.mkv", "episode", None, 99)
+        mock_pp.assert_called_once_with("/out.srt", "/video.mkv", "episode", meta, 99)
 
+    @patch("app.database.database")
     @patch("api.subtitles.subtitles.postprocess_subtitles")
-    def test_maps_movies_to_movie(self, mock_pp):
+    def test_maps_movies_to_movie(self, mock_pp, mock_db):
+        meta = object()
+        mock_db.execute.return_value.first.return_value = meta
         _post_write("/out.srt", "/video.mkv", "movies",
                     sonarr_episode_id=None, radarr_id=42)
-        mock_pp.assert_called_once_with("/out.srt", "/video.mkv", "movie", None, 42)
+        mock_pp.assert_called_once_with("/out.srt", "/video.mkv", "movie", meta, 42)

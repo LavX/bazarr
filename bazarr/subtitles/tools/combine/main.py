@@ -34,6 +34,23 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
         if rule is None:
             return CombineResult(status="skipped", reason="no rule")
 
+        # Validate the resolved languages for both the profile and the ad-hoc
+        # override paths. The profile path is already validated on save, but
+        # ad-hoc requests reach here unchecked: reject duplicates (which would
+        # otherwise resolve the same file as primary and secondary and emit a
+        # nonsense Movie.en.combined-en.srt) and out-of-range counts.
+        langs = rule["languages"]
+        if not (2 <= len(langs) <= 3) or len(set(langs)) != len(langs):
+            return CombineResult(
+                status="failed",
+                error=f"combine requires 2 to 3 distinct languages, got {langs}",
+            )
+        if rule["format"] not in ("srt", "ass"):
+            return CombineResult(
+                status="failed",
+                error=f"invalid combine format: {rule['format']!r}",
+            )
+
         sources = resolve_source_paths(
             video_path=video_path,
             languages=rule["languages"],
@@ -109,14 +126,32 @@ def _post_write(out_path, video_path, media_type, sonarr_episode_id, radarr_id):
 
     postprocess_subtitles uses the 'episode'/'movie' media-type convention and
     its episode branch keys off the value being exactly 'episode'. The combine
-    pipeline uses the 'series'/'movies' convention, so map it here and pass the
-    matching id (episode id for series, radarr id for movies)."""
+    pipeline uses the 'series'/'movies' convention, so map it here. It also
+    dereferences the metadata row (sonarrSeriesId/imdbId/...) to emit events and
+    refresh the media-server library, so build the same metadata the editor
+    endpoint does instead of passing None."""
     try:
         from api.subtitles.subtitles import postprocess_subtitles
+        from app.database import (TableEpisodes, TableShows, TableMovies,
+                                  database, select)
         is_movie = media_type == "movies"
-        pp_media_type = "movie" if is_movie else "episode"
-        pp_id = radarr_id if is_movie else sonarr_episode_id
-        postprocess_subtitles(out_path, video_path, pp_media_type, None, pp_id)
+        if is_movie:
+            metadata = database.execute(
+                select(TableMovies.path, TableMovies.subtitles,
+                       TableMovies.imdbId, TableMovies.tmdbId)
+                .where(TableMovies.radarrId == radarr_id)
+            ).first()
+            postprocess_subtitles(out_path, video_path, "movie", metadata, radarr_id)
+        else:
+            metadata = database.execute(
+                select(TableEpisodes.path, TableEpisodes.sonarrSeriesId,
+                       TableEpisodes.subtitles, TableEpisodes.season,
+                       TableEpisodes.episode, TableShows.imdbId, TableShows.tvdbId)
+                .join(TableShows)
+                .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id)
+            ).first()
+            postprocess_subtitles(out_path, video_path, "episode", metadata,
+                                  sonarr_episode_id)
     except Exception:
         logging.exception("BAZARR combine post-write hook failed")
 
