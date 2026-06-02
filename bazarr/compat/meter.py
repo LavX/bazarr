@@ -32,7 +32,10 @@ _UNIQUE_COLS = ("key_id", "kind", "hour_start")
 
 _lock = Lock()
 _sum_cache: dict[tuple[int, str, str], tuple[float, int]] = {}
-_SUM_TTL = 5.0
+# Short TTL: a caller's own sequential requests stay exact (record() busts the
+# cache for its key), so this window only affects truly concurrent bursts. Keep
+# it small so a burst can overshoot a limit by at most ~1s of traffic, not 5s.
+_SUM_TTL = 1.0
 
 
 def _truncate_hour(dt: datetime) -> datetime:

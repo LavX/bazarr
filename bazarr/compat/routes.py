@@ -256,13 +256,23 @@ def subtitles():
             _meter_blocked(key_rec, "search")
             return _throttle_response("search", decision)
 
+    # The request is admitted: meter it now, before the fanout. Metering on
+    # admission (not on success) means a provider outage or empty result still
+    # counts against the key's quota, so failing searches can't be spammed to
+    # evade the rate limit.
+    _meter_ok(key_rec, "search")
+
     # Per-request provider exclusion + timeout, falling back to the key's
-    # configured defaults (req #1, #2).
+    # configured defaults (req #1, #2). Clamp the timeout to the same [5, 120]
+    # bounds the fanout enforces, here at the edge, so the effective value is
+    # what feeds the cache key (an out-of-range value can't fragment the cache
+    # into a key that behaves identically to the clamped one).
     exclude_param = args.get("exclude_providers") or ""
     req_exclude = [p.strip() for p in exclude_param.split(",") if p.strip()]
     eff_exclude = req_exclude or (key_rec.get("excluded_providers") or [])
     req_timeout = args.get("timeout_seconds", type=int)
-    eff_timeout = req_timeout or key_rec.get("timeout_seconds")
+    raw_timeout = req_timeout or key_rec.get("timeout_seconds")
+    eff_timeout = max(5, min(120, int(raw_timeout))) if raw_timeout else None
 
     try:
         result = service.search(imdb or "", season, episode, langs, media_type,
@@ -276,7 +286,6 @@ def subtitles():
                                 timeout_seconds=eff_timeout)
     except Exception:
         return compat_error("upstream providers unavailable", 503, "upstream")
-    _meter_ok(key_rec, "search")
     page = max(1, args.get("page", default=1, type=int) or 1)
     per_page = args.get("per_page", default=50, type=int) or 50
     per_page = min(max(per_page, 1), 100)

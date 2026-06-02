@@ -25,11 +25,16 @@ class CompatBootError(RuntimeError):
 
 
 def validate_compat_token(supplied: str | None) -> bool:
-    """Constant-time compare against settings.compat_endpoint.token. Never `==`."""
+    """Constant-time compare against settings.compat_endpoint.token. Never `==`.
+
+    Rejects secrets shorter than 32 chars defensively. boot_hmac_selftest
+    already fails closed on a short token, so a running compat endpoint never
+    has one - but this guards any caller that reaches here without that gate.
+    """
     if not supplied:
         return False
     expected = settings.compat_endpoint.token or ""
-    if not expected:
+    if len(expected) < 32:
         return False
     return hmac.compare_digest(str(supplied), str(expected))
 
@@ -277,14 +282,25 @@ def resolve_compat_key(api_key: str | None) -> dict | None:
     endpoint keeps working even before/without the keyring seed."""
     if not api_key:
         return None
+    keyring_errored = False
     try:
         from . import keyring
         rec = keyring.resolve(api_key)
     except Exception:
+        # Availability over strictness: a keyring/DB hiccup must not lock out
+        # the legacy shared token (existing integrations). Fall through to the
+        # token check, but log loudly so the degraded state isn't silent - in
+        # this window the legacy token is served as an unmetered Unlimited key.
         rec = None
+        keyring_errored = True
     if rec is not None:
         return rec
     if validate_compat_token(api_key):
+        if keyring_errored:
+            import logging
+            logging.getLogger("bazarr.compat.auth").warning(
+                "compat keyring unavailable; serving legacy shared token as "
+                "unmetered Unlimited (id=0) until the keyring recovers")
         return _legacy_key_record()
     return None
 
@@ -316,9 +332,16 @@ def compat_auth(require_jwt: bool = False):
                 bearer = (request.headers.get("Authorization") or "")
                 if not bearer.startswith("Bearer "):
                     return compat_error("Authorization header required", 401, "auth")
-                ok, _ = validate_jwt(bearer[7:])
+                ok, claims = validate_jwt(bearer[7:])
                 if not ok:
                     return compat_error("Token invalid or expired", 401, "auth")
+                # Bind the JWT to the key it was minted for: a token issued for
+                # key A must not be replayed alongside key B's Api-Key to spend
+                # B's quota. Only enforced when the token carries a kid claim,
+                # so pre-existing kid-less tokens keep working until they expire.
+                kid = claims.get("kid")
+                if kid is not None and int(kid) != int(rec.get("id") or 0):
+                    return compat_error("Token does not match API key", 401, "auth")
             return fn(*args, **kwargs)
         return wrapper
     return decorator

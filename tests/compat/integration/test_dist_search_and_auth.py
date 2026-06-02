@@ -113,6 +113,29 @@ def test_request_exclusion_and_timeout_reach_service(compat_db, monkeypatch):
     assert captured["timeout_seconds"] == 10
 
 
+def test_jwt_kid_binds_to_key(compat_db, monkeypatch):
+    """A JWT minted for key A must not be replayed with key B's Api-Key."""
+    monkeypatch.setattr("compat.routes.service.download",
+                        lambda *a, **k: {"link": "x", "remaining_downloads": 1,
+                                         "remaining": 1, "reset_time_utc": "z"})
+    from compat import keyring, auth
+    from unittest.mock import MagicMock
+    id_a, token_a = keyring.create("key-a", tier="unlimited")
+    _, token_b = keyring.create("key-b", tier="unlimited")
+    keyring.invalidate_cache()
+    fid = auth.mint_file_id("os", "1", "eng", "", subtitle=MagicMock(provider_name="os", id="1"))
+    jwt_a = auth.mint_jwt({"kid": id_a})
+    c = _app().test_client()
+    # Correct pairing (A's key + A's JWT) works.
+    ok = c.post("/api/v1/download", headers={"Api-Key": token_a,
+                "Authorization": f"Bearer {jwt_a}"}, json={"file_id": fid})
+    assert ok.status_code == 200
+    # A's JWT presented with B's Api-Key is rejected (kid mismatch -> 401).
+    bad = c.post("/api/v1/download", headers={"Api-Key": token_b,
+                 "Authorization": f"Bearer {jwt_a}"}, json={"file_id": fid})
+    assert bad.status_code == 401
+
+
 def test_per_key_exclusion_default_applies(compat_db, monkeypatch):
     captured = {}
 

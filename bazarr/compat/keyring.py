@@ -40,11 +40,21 @@ _SCALAR_COLS = ("id", "name", "key_prefix", "key_hash", "tier", "enabled",
                 "note")
 
 
+def _safe_json(raw):
+    """Tolerate a corrupt/hand-edited JSON column: fall back to None rather
+    than letting one poisoned row break auth for that key."""
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+
+
 def _row_to_dict(row) -> dict:
     d = {c: getattr(row, c) for c in _SCALAR_COLS}
-    d["custom_limits"] = json.loads(row.custom_limits) if row.custom_limits else None
-    d["excluded_providers"] = (json.loads(row.excluded_providers)
-                               if row.excluded_providers else None)
+    d["custom_limits"] = _safe_json(row.custom_limits)
+    d["excluded_providers"] = _safe_json(row.excluded_providers)
     return d
 
 
@@ -142,6 +152,11 @@ def list_keys() -> list[dict]:
 
 
 def touch_last_used(key_id: int) -> None:
+    # Deliberately does NOT invalidate_cache(): this runs on every metered
+    # request, and busting the resolve cache here would defeat the hot-path
+    # cache entirely (a DB read per request). last_used_at is display-only
+    # (read from the DB by the management API, never from the resolve cache),
+    # so a slightly stale cached value is harmless.
     database.execute(sa_update(TableCompatApiKeys)
                      .where(TableCompatApiKeys.id == int(key_id))
                      .values(last_used_at=datetime.now()))
@@ -168,8 +183,16 @@ def seed_legacy_key() -> None:
                              .values(key_hash=h, key_prefix=token[:8]))
             invalidate_cache()
         return
-    database.execute(insert(TableCompatApiKeys).values(
-        name="Default (legacy token)", key_prefix=token[:8], key_hash=h,
-        tier="unlimited", enabled=1, is_legacy=1, created_at=datetime.now(),
-        note="Auto-migrated shared Api-Key. Existing integrations use this key."))
+    # The check-then-insert above is not atomic under AUTOCOMMIT. If two callers
+    # race (e.g. boot seed + a concurrent /regenerate), the loser's insert hits
+    # the unique key_hash index. Swallow it and treat as already-seeded so the
+    # race can't fail boot or leave duplicate legacy rows.
+    from sqlalchemy.exc import IntegrityError
+    try:
+        database.execute(insert(TableCompatApiKeys).values(
+            name="Default (legacy token)", key_prefix=token[:8], key_hash=h,
+            tier="unlimited", enabled=1, is_legacy=1, created_at=datetime.now(),
+            note="Auto-migrated shared Api-Key. Existing integrations use this key."))
+    except IntegrityError:
+        pass
     invalidate_cache()

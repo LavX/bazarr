@@ -111,8 +111,16 @@ class DistributionHubKey(Resource):
 
     @authenticate
     def delete(self, key_id):
-        if keyring.get(key_id) is None:
+        rec = keyring.get(key_id)
+        if rec is None:
             return {"message": "key not found"}, 404
+        # The legacy Default key maps the shared compat_endpoint.token that
+        # existing integrations use. Deleting it would break them (and it gets
+        # re-seeded on next boot anyway). Disable it instead, or rotate the
+        # shared secret via /distribution-hub/regenerate.
+        if int(rec.get("is_legacy") or 0) == 1:
+            return {"message": "The legacy Default key cannot be deleted. "
+                    "Disable it, or rotate it via regenerate."}, 400
         keyring.delete(key_id)
         return '', 204
 

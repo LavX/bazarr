@@ -65,6 +65,19 @@ def test_patch_and_delete_key(client):
     assert client.get(f"/distribution-hub/keys/{key_id}", headers=_h()).status_code == 404
 
 
+def test_legacy_default_key_cannot_be_deleted(client):
+    from compat import keyring
+    from app.config import settings
+    settings["compat_endpoint"]["token"] = "z" * 40
+    keyring.seed_legacy_key()
+    keyring.invalidate_cache()
+    legacy = next(k for k in keyring.list_keys() if k["is_legacy"])
+    r = client.delete(f"/distribution-hub/keys/{legacy['id']}", headers=_h())
+    assert r.status_code == 400
+    # still present
+    assert any(k["is_legacy"] for k in keyring.list_keys())
+
+
 def test_rotate_changes_prefix(client):
     created = client.post("/distribution-hub/keys", json={"name": "r"},
                           headers=_h()).get_json()

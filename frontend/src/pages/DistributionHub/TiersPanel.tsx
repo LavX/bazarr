@@ -36,13 +36,19 @@ const TiersPanel: FunctionComponent = () => {
     window: keyof DistTier["search"],
     value: number,
   ) => {
-    setDraft((d) => ({
-      ...d,
-      [tierId]: {
-        ...d[tierId],
-        [kind]: { ...d[tierId][kind], [window]: value },
-      },
-    }));
+    setDraft((d) => {
+      const tier = d[tierId];
+      if (!tier) {
+        return d;
+      }
+      return {
+        ...d,
+        [tierId]: {
+          ...tier,
+          [kind]: { ...tier[kind], [window]: value },
+        },
+      };
+    });
   };
 
   const tierIds = Object.keys(draft);
