@@ -228,6 +228,32 @@ const SubtitleStatusCell: FunctionComponent<{
   );
 };
 
+function buildLanguageKey(sub: {
+  code2: string;
+  hi?: boolean;
+  forced?: boolean;
+}): string {
+  let key = sub.code2;
+  if (sub.hi) key += ":hi";
+  if (sub.forced) key += ":forced";
+  return key;
+}
+
+// Key for the embedded action=7 score lookup. The backend stores embedded history
+// with a single hi-priority modifier (ProcessSubtitlesResult drops forced when hi is
+// set), so a hi+forced track is recorded as "<code>:hi". Mirror that here so the row
+// lookup matches the stored history; do NOT use buildLanguageKey (which keeps both
+// modifiers and is needed for unique row ids).
+function buildEmbeddedScoreKey(sub: {
+  code2: string;
+  hi?: boolean;
+  forced?: boolean;
+}): string {
+  if (sub.hi) return `${sub.code2}:hi`;
+  if (sub.forced) return `${sub.code2}:forced`;
+  return sub.code2;
+}
+
 const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
   const onlyDesired = useShowOnlyDesired();
   const [compareSelection, setCompareSelection] = useState<{
@@ -240,15 +266,14 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
   const { download, remove } = useMovieSubtitleModification();
   const combine = useCombineSubtitles();
 
-  // Available subtitles with actual files (for translate-from source)
+  // Available subtitles for translate-from source, include embedded tracks
+  // (backend handles bitmap exclusion at extraction time)
   const availableSources = useMemo(
     () =>
+      // Embedded tracks (empty path) are valid translate sources, so do not
+      // filter on s.path / isSubtitleTrack; only exclude sync- and combined-output.
       (movie?.subtitles ?? []).filter(
-        (s) =>
-          s.path &&
-          !isSubtitleTrack(s.path) &&
-          !isSyncOutputSubtitle(s) &&
-          !isCombinedOutputSubtitle(s),
+        (s) => !isSyncOutputSubtitle(s) && !isCombinedOutputSubtitle(s),
       ),
     [movie?.subtitles],
   );
@@ -259,6 +284,17 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
       if (!h.subtitles_path) return;
       if ([1, 2, 3].includes(h.action)) {
         if (!map.has(h.subtitles_path)) map.set(h.subtitles_path, h);
+      }
+    });
+    return map;
+  }, [history]);
+
+  const embeddedScoreMap = useMemo(() => {
+    const map = new Map<string, History.Movie>();
+    history?.forEach((h) => {
+      if (h.action === 7 && h.language?.code2) {
+        const key = buildEmbeddedScoreKey(h.language);
+        if (!map.has(key)) map.set(key, h);
       }
     });
     return map;
@@ -284,14 +320,18 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
     const selections = useMemo(() => {
       const list: FormType.ModifySubtitle[] = [];
 
-      if (path && !isSubtitleMissing(path) && movie !== null) {
+      if (!isSubtitleMissing(path) && movie !== null) {
         list.push({
           type: "movie",
-          path,
+          // Embedded track: path is null/empty, pass empty string so backend
+          // treats it as an embedded extraction request (translate only).
+          path: isSubtitleTrack(path) ? "" : path!,
           id: movie.radarrId,
           language: code2,
           forced: toPython(forced),
           hi: toPython(hi),
+          // Carry the source language so backend can extract the right track
+          from_language: isSubtitleTrack(path) ? code2 : undefined,
         });
       }
 
@@ -380,6 +420,7 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
     return (
       <SubtitleToolsMenu
         selections={selections}
+        embeddedTrack={isSubtitleTrack(path)}
         canSync={canSynchronizeSubtitle(item)}
         canCompareSyncOutputs={canCompareSyncOutputs}
         onAction={async (action) => {
@@ -406,11 +447,7 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
           }
         }}
       >
-        <Action
-          label="Subtitle Actions"
-          disabled={isSubtitleTrack(path)}
-          icon={faEllipsis}
-        ></Action>
+        <Action label="Subtitle Actions" icon={faEllipsis}></Action>
       </SubtitleToolsMenu>
     );
   });
@@ -460,7 +497,9 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
         id: "score",
         header: "Score",
         cell: ({ row: { original } }) => {
-          const record = historyMap.get(original.path ?? "");
+          const record = !isSubtitleTrack(original.path)
+            ? historyMap.get(original.path!)
+            : embeddedScoreMap.get(buildEmbeddedScoreKey(original));
           return <ScoreBadge score={record?.score} />;
         },
       },
@@ -468,7 +507,9 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
         id: "provider",
         header: "Provider",
         cell: ({ row: { original } }) => {
-          const record = historyMap.get(original.path ?? "");
+          const record = !isSubtitleTrack(original.path)
+            ? historyMap.get(original.path!)
+            : embeddedScoreMap.get(buildEmbeddedScoreKey(original));
           if (!record?.provider)
             return (
               <Text c="dimmed" size="xs">
@@ -482,7 +523,15 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
         id: "status",
         header: "Status",
         cell: ({ row: { original } }) => {
-          const actions = statusMap.get(original.path ?? "");
+          const actions = !isSubtitleTrack(original.path)
+            ? statusMap.get(original.path!)
+            : undefined;
+          if (!actions?.size)
+            return (
+              <Text c="dimmed" size="xs">
+                -
+              </Text>
+            );
           return (
             <SubtitleStatusCell
               actions={actions}
@@ -499,7 +548,7 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
         },
       },
     ],
-    [CodeCell, historyMap, movie?.radarrId, statusMap],
+    [CodeCell, historyMap, embeddedScoreMap, movie?.radarrId, statusMap],
   );
 
   const data: Subtitle[] = useMemo(() => {
@@ -522,6 +571,19 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
       <SimpleTable
         columns={columns}
         data={data}
+        getRowId={(sub) => {
+          // Missing rows all share the sentinel path "Missing Subtitles" and
+          // embedded tracks have an empty path, so both must be keyed by their
+          // language (code2[:hi][:forced]) to stay unique. Only real on-disk
+          // subtitles can safely use the file path as the row id.
+          if (isSubtitleMissing(sub.path)) {
+            return `missing-${buildLanguageKey(sub)}`;
+          }
+          if (isSubtitleTrack(sub.path)) {
+            return `embedded-${buildLanguageKey(sub)}`;
+          }
+          return sub.path!;
+        }}
         tableStyles={{ emptyText: "No subtitles found for this movie" }}
       ></SimpleTable>
       {movie && compareSelection && (
