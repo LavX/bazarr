@@ -636,6 +636,63 @@ def test_untrusted_install_cannot_replace_registered_migrated_provider():
             provider_registry.register(provider_id, original_cls)
 
 
+def test_dead_origin_providers_are_not_builtin_replacements():
+    # Providers whose upstream origin is dead must never be on the trusted-replacement
+    # allowlist, so a catalog cannot resurrect them by shadowing a (removed) built-in.
+    from provider_hub.migration import MIGRATED_BUILT_IN_PROVIDER_IDS
+
+    assert {"hosszupuska", "podnapisi", "subscenter", "xsubs"}.isdisjoint(
+        MIGRATED_BUILT_IN_PROVIDER_IDS
+    )
+
+
+def test_active_trusted_provider_replaces_non_gestdown_built_in():
+    # The allowlist covers the full built-in set, not just gestdown: a trusted catalog
+    # entry for any allowlisted built-in (here addic7ed) replaces it with a hub proxy.
+    import provider_hub.registry as hub_registry
+    from provider_hub.migration import MIGRATED_BUILT_IN_PROVIDER_IDS
+    from provider_hub.registry import HubProxyProvider, register_active_provider_classes
+    from subliminal_patch.extensions import provider_registry
+    from subliminal_patch.providers import Provider
+
+    provider_id = "addic7ed"
+    assert provider_id in MIGRATED_BUILT_IN_PROVIDER_IDS
+    had_existing = provider_id in provider_registry
+    original_cls = provider_registry[provider_id] if had_existing else None
+
+    class BuiltInAddic7edProvider(Provider):
+        provider_name = provider_id
+        languages = {Language("eng")}
+        video_types = (Movie,)
+
+    if not had_existing:
+        provider_registry.register(provider_id, BuiltInAddic7edProvider)
+        original_cls = BuiltInAddic7edProvider
+
+    installation = _install(
+        provider_id,
+        trusted=True,
+        manifest=_manifest(
+            provider_id=provider_id,
+            name="Addic7ed",
+            dependencies={"requirements": []},
+        ),
+    )
+
+    try:
+        registered = register_active_provider_classes(installations=[installation])
+
+        assert registered == [provider_id]
+        assert provider_registry[provider_id] is not original_cls
+        assert issubclass(provider_registry[provider_id], HubProxyProvider)
+    finally:
+        hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if provider_id in provider_registry:
+            del provider_registry[provider_id]
+        if had_existing and original_cls is not None:
+            provider_registry.register(provider_id, original_cls)
+
+
 def test_get_providers_registers_active_provider_hub_installation(tmp_path, monkeypatch):
     from app import get_providers
     from subliminal_patch.extensions import provider_registry
