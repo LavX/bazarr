@@ -85,6 +85,66 @@ export function isSyncOutputLanguageKey(
   );
 }
 
+export function isCombinedOutputSubtitle(subtitle: Subtitle): boolean {
+  if (isCombinedOutputLanguageKey(subtitle.language)) {
+    return true;
+  }
+  return subtitle.modifier?.startsWith("combined-") === true;
+}
+
+export function isCombinedOutputLanguageKey(
+  language: string | null | undefined,
+): boolean {
+  const modifiers = language
+    ?.split(":")
+    .slice(1)
+    .map((item) => item.toLowerCase());
+  return modifiers?.some((m) => m.startsWith("combined-")) ?? false;
+}
+
+export function getCombinedSecondaries(subtitle: Subtitle): string[] | null {
+  const language = buildSubtitleLanguageKey(subtitle);
+  const modifier = language
+    .split(":")
+    .slice(1)
+    .find((m) => m.toLowerCase().startsWith("combined-"));
+  if (!modifier) {
+    return null;
+  }
+  return modifier.slice("combined-".length).split("-");
+}
+
+export function getCombinedLabel(subtitle: Subtitle): string {
+  const secondaries = getCombinedSecondaries(subtitle);
+  if (!secondaries) {
+    return "";
+  }
+  return [subtitle.code2, ...secondaries]
+    .map((c) => c.toUpperCase())
+    .join(" + ");
+}
+
+export function getCombinedFormat(subtitle: Subtitle): "srt" | "ass" {
+  return subtitle.path?.toLowerCase().endsWith(".ass") ? "ass" : "srt";
+}
+
+// Build the combine request that reproduces THIS combined artifact (its own
+// primary + secondaries + format), so a Rebuild targets the selected file
+// rather than falling back to whatever the profile rule currently is.
+export function combineRequestForSubtitle(subtitle: Subtitle): {
+  languages: string[];
+  format: "srt" | "ass";
+} | null {
+  const secondaries = getCombinedSecondaries(subtitle);
+  if (!secondaries) {
+    return null;
+  }
+  return {
+    languages: [subtitle.code2, ...secondaries],
+    format: getCombinedFormat(subtitle),
+  };
+}
+
 function hasFinalEngineFilenameSegment(path: string, engine: string): boolean {
   const filename = path.split(/[\\/]/).pop() ?? "";
   const marker = `.${engine}.`;
@@ -99,6 +159,8 @@ function hasFinalEngineFilenameSegment(path: string, engine: string): boolean {
 }
 
 export function canSynchronizeSubtitle(subtitle: Subtitle): boolean {
+  // Combined-output files are valid SRTs and can be synced like any other.
+  // Only sync-engine outputs are non-syncable (they already are the sync result).
   return !isSyncOutputSubtitle(subtitle);
 }
 

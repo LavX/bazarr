@@ -28,6 +28,7 @@ import {
   faEllipsisVertical,
   faHardDrive,
   faHdd,
+  faLayerGroup,
   faPlay,
   faSearch,
   faStop,
@@ -47,6 +48,7 @@ import {
 import { useInstanceName } from "@/apis/hooks/site";
 import { DropContent, Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
+import { CombineModal } from "@/components/forms/CombineForm";
 import { ItemEditModal } from "@/components/forms/ItemEditForm";
 import { SeriesUploadModal } from "@/components/forms/SeriesUploadForm";
 import { SubtitleToolsModal } from "@/components/modals";
@@ -55,6 +57,10 @@ import { notification, task, TaskGroup } from "@/modules/task";
 import ItemOverview from "@/pages/views/ItemOverview";
 import { RouterNames } from "@/Router/RouterNames";
 import { useLanguageProfileBy } from "@/utilities/languages";
+import {
+  isCombinedOutputSubtitle,
+  isSyncOutputSubtitle,
+} from "@/utilities/subtitles";
 import Table from "./table";
 
 const SeriesEpisodesView: FunctionComponent = () => {
@@ -103,6 +109,22 @@ const SeriesEpisodesView: FunctionComponent = () => {
   const profile = useLanguageProfileBy(series?.profileId);
 
   const hasTask = useIsAnyActionRunning();
+
+  const seriesAvailableLangs = useMemo(() => {
+    const seen = new Set<string>();
+    for (const episode of episodes ?? []) {
+      for (const s of episode.subtitles) {
+        if (
+          s.path &&
+          !isSyncOutputSubtitle(s) &&
+          !isCombinedOutputSubtitle(s)
+        ) {
+          seen.add(s.code2);
+        }
+      }
+    }
+    return Array.from(seen);
+  }, [episodes]);
 
   const onDrop = useCallback(
     (files: File[]) => {
@@ -194,6 +216,23 @@ const SeriesEpisodesView: FunctionComponent = () => {
               loading={hasTask}
             >
               Search
+            </Toolbox.Button>
+            <Toolbox.Button
+              icon={faLayerGroup}
+              disabled={seriesAvailableLangs.length < 2}
+              onClick={() => {
+                if (series) {
+                  modals.openContextModal(CombineModal, {
+                    scope: {
+                      kind: "series",
+                      seriesId: series.sonarrSeriesId,
+                    },
+                    availableLanguages: seriesAvailableLangs,
+                  });
+                }
+              }}
+            >
+              Combine across series
             </Toolbox.Button>
             <Toolbox.Button
               disabled={

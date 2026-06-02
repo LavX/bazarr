@@ -41,12 +41,15 @@ def _is_safe_path(path):
 
 
 # ISO-ish language tags used by Bazarr. e.g. "en", "pt-BR", "en:hi", "en:forced",
-# "en:sync-ffsubsync".
+# "en:sync-ffsubsync", "en:combined-hu", "de:combined-es-zh".
 # Anchored + char-class prevents `..`, slashes, or shell metachars from reaching
 # the file-system probe paths downstream.
 _LANGUAGE_CODE_RE = re.compile(
     r'^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,4})?'
-    r'(:(forced|hi|sync-(ffsubsync|autosubsync|alass)))*$'
+    r'(:(forced|hi|'
+    r'sync-(ffsubsync|autosubsync|alass)|'
+    r'combined-[a-z]{2}(-[a-z]{2})?'
+    r'))*$'
 )
 
 
@@ -217,7 +220,17 @@ def resolve_subtitle_path(media_type, media_id, language_code):
         found = False
         lang_base = language_code.split(':')[0]  # "en:hi" -> "en"
         suffix = lang_base
-        if ':hi' in language_code:
+        # Combined-output files use a distinct suffix scheme:
+        # <basename>.<primary>.combined-<sec>[-<ter>].<ext>
+        # Pick that path before the hi/forced suffixes so we generate the
+        # right filename.
+        combined_mod = next(
+            (m for m in language_code.split(':')[1:] if m.startswith('combined-')),
+            None,
+        )
+        if combined_mod:
+            suffix = f'{lang_base}.{combined_mod}'
+        elif ':hi' in language_code:
             suffix += '.hi'
         elif ':forced' in language_code:
             suffix += '.forced'
@@ -314,12 +327,29 @@ def resolve_subtitle_path(media_type, media_id, language_code):
     # (os.stat in generate_etag, tempfile.mkstemp(dir=), os.replace, os.chmod)
     # no longer inherit taint from the language_code URL param.
     resolved_subtitle_path = os.path.realpath(safe_path)
+    # Accept the resolved path if it lives under the media directory OR the
+    # configured (absolute/relative) subtitle folder. Both are trusted dirs
+    # derived from the int media id, and combined/synced outputs are written to
+    # the subtitle folder when subfolder mode is enabled. Each os.path.commonpath
+    # comparison is the CodeQL-recognized py/path-injection sanitizer; gating the
+    # sink on one of them passing keeps the downstream value cleared.
     try:
-        common = os.path.commonpath([resolved_subtitle_path, trusted_media_dir])
+        common_media = os.path.commonpath([resolved_subtitle_path, trusted_media_dir])
     except ValueError:
         # Mixed drives on Windows or empty paths.
         return 'Invalid subtitle path', 400
-    if common != trusted_media_dir:
+    media_ok = common_media == trusted_media_dir
+    target_ok = False
+    if trusted_target_dir:
+        try:
+            common_target = os.path.commonpath([resolved_subtitle_path, trusted_target_dir])
+        except ValueError:
+            common_target = None
+        target_ok = common_target == trusted_target_dir
+    # When no subtitle folder is configured (the default), trusted_target_dir is
+    # None and target_ok stays False, so the media check is NOT neutralized by a
+    # None==None comparison. A path under neither trusted dir is still rejected.
+    if not (media_ok or target_ok):
         return 'Resolved subtitle path outside media directory', 400
 
     ext = os.path.splitext(resolved_subtitle_path)[1].lower()

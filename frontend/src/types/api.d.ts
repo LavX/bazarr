@@ -34,6 +34,11 @@ declare namespace Language {
     translate_from: CodeType | null;
   }
 
+  interface CombineRule {
+    languages: CodeType[];
+    format: "srt" | "ass";
+  }
+
   interface Profile {
     name: string;
     profileId: number;
@@ -43,6 +48,7 @@ declare namespace Language {
     mustNotContain: string[];
     originalFormat: boolean | null;
     tag: string | undefined;
+    combine?: CombineRule | null;
   }
 }
 
@@ -434,3 +440,28 @@ type BackendError = {
   code: number;
   message: string;
 };
+
+declare namespace Api {
+  interface CombineRequest {
+    languages?: string[];
+    format?: "srt" | "ass";
+  }
+
+  interface CombineResult {
+    status: "built" | "skipped" | "failed" | "batch_complete" | "not_found";
+    path?: string;
+    alignment?: string;
+    reason?: string;
+    error?: string;
+    built?: number;
+    skipped?: number;
+    failed?: number;
+    details?: Array<{
+      episodeId: number;
+      status: string;
+      path?: string;
+      reason?: string;
+      error?: string;
+    }>;
+  }
+}

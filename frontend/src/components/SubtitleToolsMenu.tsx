@@ -15,6 +15,7 @@ import {
   faPaintBrush,
   faPencil,
   faPlay,
+  faRotateRight,
   faSearch,
   faTextHeight,
   faTrash,
@@ -152,9 +153,12 @@ interface Props {
   menu?: Omit<MenuProps, "children">;
   canSync?: boolean;
   onAction?: (
-    action: "delete" | "search" | "view" | "edit" | "compare-sync",
+    action: "delete" | "search" | "view" | "edit" | "compare-sync" | "rebuild",
   ) => void;
   canCompareSyncOutputs?: boolean;
+  // When true: hide the editing tool groups (sync, cleanup, style) and show
+  // a Rebuild action at the top. Used for combined-subtitle artifact rows.
+  isCombinedOutput?: boolean;
   // For missing subtitle translation
   missingLanguage?: Subtitle;
   translationSources?: Subtitle[];
@@ -169,6 +173,7 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
   canSync = true,
   onAction,
   canCompareSyncOutputs = false,
+  isCombinedOutput = false,
   missingLanguage,
   translationSources,
   mediaId,
@@ -204,6 +209,19 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
     <Menu withArrow withinPortal position="left-end" {...menu}>
       <Menu.Target>{children}</Menu.Target>
       <Menu.Dropdown>
+        {isCombinedOutput && (
+          <>
+            <Menu.Label>Combined Output</Menu.Label>
+            <Menu.Item
+              disabled={onAction === undefined}
+              leftSection={<FontAwesomeIcon icon={faRotateRight} />}
+              onClick={() => onAction?.("rebuild")}
+            >
+              Rebuild
+            </Menu.Item>
+            <Divider />
+          </>
+        )}
         {toolGroups.map((group, groupIdx) => (
           <div key={group.label}>
             {groupIdx > 0 && <Divider />}
@@ -213,6 +231,11 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
                 return null;
               }
               if (tool.key === "sync" && !canSync) {
+                return null;
+              }
+              // Translate doesn't make sense for combined-output files
+              // (the file is already a composition, not a single language).
+              if (tool.key === "translation" && isCombinedOutput) {
                 return null;
               }
               return (
@@ -295,24 +318,28 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
         >
           View
         </Menu.Item>
-        <Menu.Item
-          disabled={onAction === undefined}
-          leftSection={<FontAwesomeIcon icon={faPencil}></FontAwesomeIcon>}
-          onClick={() => {
-            onAction?.("edit");
-          }}
-        >
-          {selections.length === 0 ? "Create / Upload" : "Edit"}
-        </Menu.Item>
-        <Menu.Item
-          disabled={selections.length !== 0 || onAction === undefined}
-          leftSection={<FontAwesomeIcon icon={faSearch}></FontAwesomeIcon>}
-          onClick={() => {
-            onAction?.("search");
-          }}
-        >
-          Search
-        </Menu.Item>
+        {!isCombinedOutput && (
+          <Menu.Item
+            disabled={onAction === undefined}
+            leftSection={<FontAwesomeIcon icon={faPencil}></FontAwesomeIcon>}
+            onClick={() => {
+              onAction?.("edit");
+            }}
+          >
+            {selections.length === 0 ? "Create / Upload" : "Edit"}
+          </Menu.Item>
+        )}
+        {!isCombinedOutput && (
+          <Menu.Item
+            disabled={selections.length !== 0 || onAction === undefined}
+            leftSection={<FontAwesomeIcon icon={faSearch}></FontAwesomeIcon>}
+            onClick={() => {
+              onAction?.("search");
+            }}
+          >
+            Search
+          </Menu.Item>
+        )}
         <Menu.Item
           disabled={selections.length === 0 || onAction === undefined}
           color="red"

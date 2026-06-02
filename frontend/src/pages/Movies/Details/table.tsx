@@ -1,10 +1,21 @@
 import React, { FunctionComponent, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
-import { Badge, Group, Text, TextProps, Tooltip } from "@mantine/core";
+import {
+  Badge,
+  Button,
+  Group,
+  Menu,
+  Text,
+  TextProps,
+  Tooltip,
+} from "@mantine/core";
 import {
   faEllipsis,
+  faEye,
   faQuestionCircle,
+  faRotateRight,
   faSpinner,
+  faTrash,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
@@ -13,9 +24,10 @@ import {
   useMovieSubtitleModification,
   useSubtitleSyncStatus,
 } from "@/apis/hooks";
+import { useCombineSubtitles } from "@/apis/hooks/combine";
 import { useShowOnlyDesired } from "@/apis/hooks/site";
 import { Action } from "@/components";
-import { HistoryIcon } from "@/components/bazarr";
+import { CombinedSubtitleBadge, HistoryIcon } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
 import SyncOutputCompareModal from "@/components/modals/SyncOutputCompareModal";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
@@ -25,8 +37,10 @@ import { useProfileItemsToLanguages } from "@/utilities/languages";
 import {
   buildSubtitleLanguageKey,
   canSynchronizeSubtitle,
+  combineRequestForSubtitle,
   getSubtitleSyncStatusPresentation,
   getSyncEngineLabel,
+  isCombinedOutputSubtitle,
   isCompatibleSyncOutputSubtitle,
   isSyncOutputSubtitle,
   sortSyncOutputSubtitles,
@@ -100,6 +114,10 @@ const SubtitleLanguageBadges: FunctionComponent<{
     );
   }
 
+  if (isCombinedOutputSubtitle(subtitle)) {
+    return <CombinedSubtitleBadge subtitle={subtitle} />;
+  }
+
   return (
     <Group gap={4} wrap="nowrap">
       <Badge style={{ whiteSpace: "nowrap" }}>
@@ -154,7 +172,8 @@ const SubtitleStatusCell: FunctionComponent<{
   const canCheckSyncStatus =
     !!subtitle.path &&
     !isSubtitleTrack(subtitle.path) &&
-    !isSubtitleMissing(subtitle.path);
+    !isSubtitleMissing(subtitle.path) &&
+    !isCombinedOutputSubtitle(subtitle);
   const syncStatus = useSubtitleSyncStatus(
     "movie",
     mediaId,
@@ -219,12 +238,17 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
   const profileItems = useProfileItemsToLanguages(profile);
 
   const { download, remove } = useMovieSubtitleModification();
+  const combine = useCombineSubtitles();
 
   // Available subtitles with actual files (for translate-from source)
   const availableSources = useMemo(
     () =>
       (movie?.subtitles ?? []).filter(
-        (s) => s.path && !isSubtitleTrack(s.path) && !isSyncOutputSubtitle(s),
+        (s) =>
+          s.path &&
+          !isSubtitleTrack(s.path) &&
+          !isSyncOutputSubtitle(s) &&
+          !isCombinedOutputSubtitle(s),
       ),
     [movie?.subtitles],
   );
@@ -289,6 +313,39 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
       !isSyncOutputSubtitle(item) &&
       !!path &&
       !isSubtitleMissing(path);
+
+    if (isCombinedOutputSubtitle(item)) {
+      return (
+        <SubtitleToolsMenu
+          selections={selections}
+          isCombinedOutput
+          onAction={async (action) => {
+            if (action === "rebuild") {
+              combine.mutate({
+                scope: { kind: "movie", radarrId },
+                body: combineRequestForSubtitle(item) ?? {},
+              });
+            } else if (action === "view") {
+              navigate(
+                `/subtitles/preview/movie/${radarrId}/${encodeURIComponent(buildSubtitleLanguageKey(item))}`,
+              );
+            } else if (action === "delete" && path) {
+              await remove.mutateAsync({
+                radarrId,
+                form: {
+                  language: code2,
+                  forced,
+                  hi,
+                  path,
+                },
+              });
+            }
+          }}
+        >
+          <Action label="Combined Subtitle Actions" icon={faEllipsis} />
+        </SubtitleToolsMenu>
+      );
+    }
 
     if (isSubtitleMissing(path)) {
       return (

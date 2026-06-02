@@ -324,6 +324,7 @@ class TableLanguagesProfiles(Base):
     mustContain = mapped_column(Text)
     mustNotContain = mapped_column(Text)
     tag = mapped_column(Text)
+    combine = mapped_column(Text)
 
 
 class TableMovies(Base):
@@ -638,6 +639,7 @@ def update_profile_id_list():
         'mustNotContain': ast.literal_eval(x.mustNotContain) if x.mustNotContain else [],
         'originalFormat': x.originalFormat,
         'tag': x.tag,
+        'combine': json.loads(x.combine) if x.combine else None,
     } for x in database.execute(
         select(TableLanguagesProfiles.profileId,
                TableLanguagesProfiles.name,
@@ -646,7 +648,8 @@ def update_profile_id_list():
                TableLanguagesProfiles.mustContain,
                TableLanguagesProfiles.mustNotContain,
                TableLanguagesProfiles.originalFormat,
-               TableLanguagesProfiles.tag))
+               TableLanguagesProfiles.tag,
+               TableLanguagesProfiles.combine))
         .all()
     ]
 
@@ -681,7 +684,12 @@ def get_profile_cutoff(profile_id):
     if profile_id and profile_id != 'null':
         cutoff_language = []
         for profile in profile_id_list:
-            profileId, name, cutoff, items, mustContain, mustNotContain, originalFormat, tag = profile.values()
+            # Access by key, not positional .values() unpacking: the profile
+            # dict can grow new keys (e.g. 'combine') and a fixed-arity unpack
+            # would raise ValueError for every profile during indexing.
+            profileId = profile['profileId']
+            cutoff = profile['cutoff']
+            items = profile['items']
             if cutoff:
                 if profileId == int(profile_id):
                     for item in items:

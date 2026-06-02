@@ -2,12 +2,17 @@ import React, { FunctionComponent, useCallback, useMemo } from "react";
 import {
   Accordion,
   Button,
+  Checkbox,
+  Divider,
   Flex,
+  Group,
+  Radio,
   Select,
   Stack,
   Switch,
   Text,
   TextInput,
+  Tooltip,
 } from "@mantine/core";
 import { useForm } from "@mantine/form";
 import { faTrash } from "@fortawesome/free-solid-svg-icons";
@@ -70,6 +75,114 @@ const inclusionOptions: SelectorOption<string>[] = [
     value: "audio_exclude",
   },
 ];
+
+interface CombineRuleEditorProps {
+  items: Language.ProfileItem[];
+  value: Language.CombineRule | null | undefined;
+  onChange: (next: Language.CombineRule | null) => void;
+}
+
+const CombineRuleEditor: FunctionComponent<CombineRuleEditorProps> = ({
+  items,
+  value,
+  onChange,
+}) => {
+  const enabled = value != null;
+  const itemCodes = useMemo(
+    () => items.map((it) => it.language).filter(Boolean),
+    [items],
+  );
+
+  const setLanguageAt = (idx: number, code: string | null) => {
+    if (!value) return;
+    const next = [...value.languages];
+    if (code) {
+      next[idx] = code;
+    } else {
+      next.splice(idx, 1);
+    }
+    onChange({ ...value, languages: next });
+  };
+
+  return (
+    <Stack>
+      <Divider
+        label="Combined subtitle output (optional)"
+        labelPosition="left"
+      />
+      <Checkbox
+        label="Generate a combined subtitle file when all selected languages are present"
+        checked={enabled}
+        onChange={(e) => {
+          if (e.currentTarget.checked) {
+            const seed = itemCodes.slice(0, 2);
+            if (seed.length === 2) {
+              onChange({ languages: seed, format: "srt" });
+            }
+          } else {
+            onChange(null);
+          }
+        }}
+      />
+      {enabled && value && (
+        <>
+          <Text size="sm">Languages (in display order, max 3)</Text>
+          <Group>
+            {value.languages.map((code, idx) => (
+              <Select
+                key={`${code}-${idx}`}
+                value={code}
+                data={itemCodes.map((c) => ({
+                  value: c,
+                  label: c.toUpperCase(),
+                }))}
+                onChange={(next) => setLanguageAt(idx, next)}
+                style={{ width: 120 }}
+              />
+            ))}
+            {value.languages.length < 3 &&
+              itemCodes.length > value.languages.length && (
+                <Select
+                  placeholder="Add language"
+                  data={itemCodes
+                    .filter((c) => !value.languages.includes(c))
+                    .map((c) => ({ value: c, label: c.toUpperCase() }))}
+                  onChange={(next) => {
+                    if (next) {
+                      onChange({
+                        ...value,
+                        languages: [...value.languages, next],
+                      });
+                    }
+                  }}
+                  style={{ width: 140 }}
+                />
+              )}
+          </Group>
+          <Radio.Group
+            label="Output format"
+            value={value.format}
+            onChange={(f) => onChange({ ...value, format: f as "srt" | "ass" })}
+          >
+            <Group mt="xs">
+              <Radio value="srt" label="SRT stacked" />
+              <Radio value="ass" label="ASS positioned" />
+            </Group>
+          </Radio.Group>
+          <Tooltip
+            multiline
+            w={320}
+            label="Bazarr writes one extra file when all selected languages have a subtitle on disk for this video. This feature only composes existing files; it never triggers translation."
+          >
+            <Text size="xs" c="dimmed">
+              How does this work?
+            </Text>
+          </Tooltip>
+        </>
+      )}
+    </Stack>
+  );
+};
 
 interface Props {
   onComplete?: (profile: Language.Profile) => void;
@@ -447,6 +560,11 @@ const ProfileEditForm: FunctionComponent<Props> = ({
             </Stack>
           </Accordion.Item>
         </Accordion>
+        <CombineRuleEditor
+          items={form.values.items}
+          value={form.values.combine ?? null}
+          onChange={(next) => form.setFieldValue("combine", next)}
+        />
         <Button type="submit">Save</Button>
       </Stack>
     </form>
