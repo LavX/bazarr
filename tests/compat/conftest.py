@@ -51,3 +51,29 @@ def _guarantee_compat_secrets():
         except Exception:
             pass
     yield
+
+
+@pytest.fixture
+def compat_db():
+    """Ensure the Distribution Hub tables exist and start each test clean.
+
+    Uses the project's configured sqlite DB (data/db/bazarr.db) and the ORM
+    metadata's idempotent create_all, mirroring how the app bootstraps. Wipes
+    the two compat tables and the in-memory caches before and after the test."""
+    import os
+    from app.config import args
+    from app.database import engine, metadata, database, delete, TableCompatApiKeys, TableCompatUsage
+    from compat import keyring, meter
+
+    os.makedirs(os.path.join(args.config_dir, "db"), exist_ok=True)
+    metadata.create_all(engine)
+
+    def _wipe():
+        database.execute(delete(TableCompatUsage))
+        database.execute(delete(TableCompatApiKeys))
+        keyring.invalidate_cache()
+        meter.reset_cache()
+
+    _wipe()
+    yield database
+    _wipe()
