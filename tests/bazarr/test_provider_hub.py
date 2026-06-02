@@ -400,6 +400,160 @@ def test_active_trusted_migrated_provider_replaces_built_in(tmp_path, monkeypatc
             provider_registry.register(provider_id, original_cls)
 
 
+def _install(provider_id, *, trusted, manifest):
+    from provider_hub.state import ProviderHubInstallation
+
+    return ProviderHubInstallation(
+        provider_id=provider_id,
+        name=provider_id.title(),
+        active_version="1.0.0",
+        state="active",
+        pending_restart=False,
+        manifest=manifest,
+        trusted=trusted,
+    )
+
+
+def test_active_trusted_non_allowlisted_provider_cannot_shadow_built_in():
+    # The shadow gate is "trusted AND on the migration allowlist". Trust alone must
+    # not be enough: a trusted provider whose id is NOT in MIGRATED_BUILT_IN_PROVIDER_IDS
+    # must still be refused and the built-in left untouched. A regression that dropped
+    # the allowlist check (e.g. `return bool(trusted)`) would silently fail this test.
+    import provider_hub.registry as hub_registry
+    from provider_hub.migration import MIGRATED_BUILT_IN_PROVIDER_IDS
+    from provider_hub.registry import register_active_provider_classes
+    from subliminal_patch.extensions import provider_registry
+    from subliminal_patch.providers import Provider
+
+    provider_id = "examplebuiltin"
+    assert provider_id not in MIGRATED_BUILT_IN_PROVIDER_IDS
+    had_existing = provider_id in provider_registry
+    original_cls = provider_registry[provider_id] if had_existing else None
+
+    class BuiltInExampleProvider(Provider):
+        provider_name = provider_id
+        languages = {Language("eng")}
+        video_types = (Movie,)
+
+    if not had_existing:
+        provider_registry.register(provider_id, BuiltInExampleProvider)
+        original_cls = BuiltInExampleProvider
+
+    installation = _install(
+        provider_id,
+        trusted=True,
+        manifest=_manifest(
+            provider_id=provider_id,
+            name="Example Built-in",
+            dependencies={"requirements": []},
+        ),
+    )
+
+    try:
+        registered = register_active_provider_classes(installations=[installation])
+
+        assert provider_id not in registered
+        assert provider_registry[provider_id] is original_cls
+    finally:
+        hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if not had_existing and provider_id in provider_registry:
+            del provider_registry[provider_id]
+
+
+def test_active_untrusted_migrated_provider_cannot_shadow_built_in():
+    # The provider id IS on the migration allowlist, but the install is untrusted, so
+    # register must skip it and leave the built-in class in place (last line of defense
+    # against an untrusted state row that shadows a built-in).
+    import provider_hub.registry as hub_registry
+    from provider_hub.migration import MIGRATED_BUILT_IN_PROVIDER_IDS
+    from provider_hub.registry import register_active_provider_classes
+    from subliminal_patch.extensions import provider_registry
+    from subliminal_patch.providers import Provider
+
+    provider_id = "gestdown"
+    assert provider_id in MIGRATED_BUILT_IN_PROVIDER_IDS
+    had_existing = provider_id in provider_registry
+    original_cls = provider_registry[provider_id] if had_existing else None
+
+    class BuiltInGestdownProvider(Provider):
+        provider_name = provider_id
+        languages = {Language("eng")}
+        video_types = (Movie,)
+
+    if not had_existing:
+        provider_registry.register(provider_id, BuiltInGestdownProvider)
+        original_cls = BuiltInGestdownProvider
+
+    installation = _install(
+        provider_id,
+        trusted=False,
+        manifest=_manifest(
+            provider_id=provider_id,
+            name="Gestdown",
+            dependencies={"requirements": []},
+        ),
+    )
+
+    try:
+        registered = register_active_provider_classes(installations=[installation])
+
+        assert provider_id not in registered
+        assert provider_registry[provider_id] is original_cls
+    finally:
+        hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if not had_existing and provider_id in provider_registry:
+            del provider_registry[provider_id]
+
+
+def test_failed_proxy_build_preserves_shadowed_built_in(monkeypatch):
+    # A trusted, allowlisted manifest that passes validation but blows up while the
+    # proxy class is being built must not destroy the built-in it shadows: the build
+    # happens before the registry is mutated, so on failure the built-in stays intact
+    # and the exception does not propagate out of the loop.
+    import provider_hub.registry as hub_registry
+    from provider_hub.registry import register_active_provider_classes
+    from subliminal_patch.extensions import provider_registry
+    from subliminal_patch.providers import Provider
+
+    provider_id = "gestdown"
+    had_existing = provider_id in provider_registry
+    original_cls = provider_registry[provider_id] if had_existing else None
+
+    class BuiltInGestdownProvider(Provider):
+        provider_name = provider_id
+        languages = {Language("eng")}
+        video_types = (Movie,)
+
+    if not had_existing:
+        provider_registry.register(provider_id, BuiltInGestdownProvider)
+        original_cls = BuiltInGestdownProvider
+
+    def _boom(manifest, installation=None):
+        raise RuntimeError("proxy class construction failed")
+
+    monkeypatch.setattr(hub_registry, "_make_provider_class", _boom)
+
+    installation = _install(
+        provider_id,
+        trusted=True,
+        manifest=_manifest(
+            provider_id=provider_id,
+            name="Gestdown",
+            dependencies={"requirements": []},
+        ),
+    )
+
+    try:
+        registered = register_active_provider_classes(installations=[installation])
+
+        assert provider_id not in registered
+        assert provider_registry[provider_id] is original_cls
+    finally:
+        hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if not had_existing and provider_id in provider_registry:
+            del provider_registry[provider_id]
+
+
 def test_get_providers_registers_active_provider_hub_installation(tmp_path, monkeypatch):
     from app import get_providers
     from subliminal_patch.extensions import provider_registry

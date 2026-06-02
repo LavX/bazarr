@@ -149,9 +149,16 @@ def register_active_provider_classes(installations=None) -> list[str]:
             logger.exception("Skipping invalid Provider Hub manifest for %s", provider_id)
             continue
 
-        if shadows_builtin and manifest.provider_id in provider_registry:
-            del provider_registry[manifest.provider_id]
-        provider_registry.register(manifest.provider_id, _make_provider_class(manifest, installation=installation))
+        try:
+            provider_cls = _make_provider_class(manifest, installation=installation)
+        except Exception:
+            # Build the proxy class before touching the registry. If this fails for a
+            # provider that shadows a built-in, the built-in must stay in place rather
+            # than be left deleted (provider_registry.register overwrites in place, so
+            # no explicit delete is needed on the success path).
+            logger.exception("Skipping Provider Hub provider %s because its proxy class could not be built", provider_id)
+            continue
+        provider_registry.register(manifest.provider_id, provider_cls)
         _REGISTERED_PROVIDER_HUB_IDS.add(manifest.provider_id)
         registered.append(manifest.provider_id)
 
