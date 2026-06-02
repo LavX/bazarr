@@ -15,6 +15,7 @@ import {
   faLaptop,
   faPlay,
   faStore,
+  faTowerBroadcast,
 } from "@fortawesome/free-solid-svg-icons";
 import { useBadges } from "@/apis/hooks";
 import { useEnabledStatus } from "@/apis/hooks/site";
@@ -23,6 +24,7 @@ import { Lazy } from "@/components/async";
 import Authentication from "@/pages/Authentication";
 import BlacklistMoviesView from "@/pages/Blacklist/Movies";
 import BlacklistSeriesView from "@/pages/Blacklist/Series";
+import DistributionHubView from "@/pages/DistributionHub";
 import Episodes from "@/pages/Episodes";
 import NotFound from "@/pages/errors/NotFound";
 import MoviesHistoryView from "@/pages/History/Movies";
@@ -189,6 +191,12 @@ function useRoutes(): CustomRouteObject[] {
             name: "Subtitle Hub",
             path: "subtitle-hub",
             element: <SettingsProvidersView></SettingsProvidersView>,
+          },
+          {
+            icon: faTowerBroadcast,
+            name: "Distribution Hub",
+            path: "distribution-hub",
+            element: <DistributionHubView></DistributionHubView>,
           },
           {
             icon: faCogs,

@@ -1,4 +1,5 @@
 import badges from "./badges";
+import distributionHub from "./distributionHub";
 import episodes from "./episodes";
 import files from "./files";
 import history from "./history";
@@ -26,6 +27,7 @@ const api = {
   utils,
   plex,
   providerHub,
+  distributionHub,
 };
 
 export default api;

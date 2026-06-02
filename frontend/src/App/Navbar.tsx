@@ -84,7 +84,10 @@ function useIsActive(parent: string, route: RouteObject) {
 const sectionGroups = [
   { label: "Media", paths: ["series", "movies"] },
   { label: "Management", paths: ["history", "wanted", "blacklist"] },
-  { label: "System", paths: ["subtitle-hub", "settings", "system"] },
+  {
+    label: "System",
+    paths: ["subtitle-hub", "distribution-hub", "settings", "system"],
+  },
 ];
 
 function groupRoutes(routes: CustomRouteObject[]) {
