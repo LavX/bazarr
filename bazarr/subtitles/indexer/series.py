@@ -196,6 +196,17 @@ def _log_embedded_history(series_id, episode_id, embedded_languages, reversed_pa
 
         for lang in embedded_languages:
             lang = normalize_subtitle_language_variant(lang)
+            # Reduce the (possibly multi-variant, e.g. "en:hi:forced") normalized
+            # value to the canonical hi-priority code that ProcessSubtitlesResult
+            # actually stores, and use it for BOTH the dedup lookup and the written
+            # row so a forced+hi track matches an existing "en:hi" entry instead of
+            # creating a duplicate with a divergent "en:forced" code.
+            parts = lang.split(':')
+            base = parts[0]
+            variants = set(parts[1:])
+            is_hi = 'hi' in variants
+            is_forced = 'forced' in variants
+            canonical = base + (':hi' if is_hi else ':forced' if is_forced else '')
             # Dedup: skip if we already logged action=7 for this episode+language.
             # Not atomic under AUTOCOMMIT. Concurrent indexing of the same episode
             # could produce duplicates, but this is rare in practice and consistent
@@ -203,21 +214,21 @@ def _log_embedded_history(series_id, episode_id, embedded_languages, reversed_pa
             existing = database.execute(
                 select(TableHistory.id)
                 .where(TableHistory.sonarrEpisodeId == episode_id)
-                .where(TableHistory.language == lang)
+                .where(TableHistory.language == canonical)
                 .where(TableHistory.action == 7)).first()
             if existing:
                 continue
 
             result = ProcessSubtitlesResult(
-                message=f"{lang} embedded subtitles detected.",
+                message=f"{canonical} embedded subtitles detected.",
                 reversed_path=reversed_path,
-                downloaded_language_code2=lang.split(':')[0],
+                downloaded_language_code2=base,
                 downloaded_provider="embedded",
                 score=score_out_of,
-                forced=lang.endswith(':forced'),
+                forced=is_forced,
                 subtitle_id=None,
                 reversed_subtitles_path=None,
-                hearing_impaired=lang.endswith(':hi'))
+                hearing_impaired=is_hi)
             history_log(action=7, sonarr_series_id=series_id, sonarr_episode_id=episode_id,
                         result=result, fake_provider="embedded", fake_score=score_out_of)
     except Exception:
