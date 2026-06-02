@@ -9,7 +9,7 @@ from functools import wraps
 from typing import Tuple
 
 import jwt as pyjwt
-from flask import jsonify, make_response, request
+from flask import g, jsonify, make_response, request
 
 from app.config import settings
 
@@ -255,6 +255,40 @@ def compat_error(message: str, status: int, x_reason: str):
     return resp
 
 
+def _legacy_key_record() -> dict:
+    """Synthesized Unlimited key record for the shared compat_endpoint.token.
+
+    Used when the presented Api-Key matches the legacy shared token but the
+    keyring can't resolve it to a row (e.g. the compat tables aren't present
+    in a partial/bootstrapping environment). Mirrors the seeded Default key:
+    Unlimited tier, no per-key exclusion/timeout. id=0 means "unkeyed" -
+    metering against it is best-effort and limit checks short-circuit
+    (Unlimited never reads the meter)."""
+    return {"id": 0, "name": "Default (legacy token)", "tier": "unlimited",
+            "custom_limits": None, "excluded_providers": None,
+            "timeout_seconds": None, "enabled": 1, "is_legacy": 1}
+
+
+def resolve_compat_key(api_key: str | None) -> dict | None:
+    """Resolve a presented Api-Key to a key record (named key or legacy token).
+
+    Named keys (incl. the seeded Default) resolve via the keyring. The shared
+    compat_endpoint.token also validates as a synthesized legacy record so the
+    endpoint keeps working even before/without the keyring seed."""
+    if not api_key:
+        return None
+    try:
+        from . import keyring
+        rec = keyring.resolve(api_key)
+    except Exception:
+        rec = None
+    if rec is not None:
+        return rec
+    if validate_compat_token(api_key):
+        return _legacy_key_record()
+    return None
+
+
 def compat_auth(require_jwt: bool = False):
     """Standalone decorator. MUST NOT call bazarr/api/utils.py::authenticate.
 
@@ -264,6 +298,9 @@ def compat_auth(require_jwt: bool = False):
         JWT and retry in a loop that can't recover.
       - JWT missing / invalid / expired: 401 Unauthorized. This IS the
         signal the plugin uses to re-login (clear token + POST /login).
+
+    On success the resolved key record is stashed on `g.compat_key` for the
+    route to meter and rate-limit against (Distribution Hub).
     """
     def decorator(fn):
         @wraps(fn)
@@ -271,8 +308,10 @@ def compat_auth(require_jwt: bool = False):
             api_key = request.headers.get("Api-Key") or request.headers.get("X-Api-Key")
             if not api_key:
                 return compat_error("Missing API key", 403, "auth")
-            if not validate_compat_token(api_key):
+            rec = resolve_compat_key(api_key)
+            if rec is None:
                 return compat_error("Invalid API key", 403, "auth")
+            g.compat_key = rec
             if require_jwt:
                 bearer = (request.headers.get("Authorization") or "")
                 if not bearer.startswith("Bearer "):

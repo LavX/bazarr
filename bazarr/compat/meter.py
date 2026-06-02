@@ -11,12 +11,15 @@ app.database is the sqlite/postgres dialect insert, both of which support
 on_conflict_do_update) so concurrent fanouts can't violate the unique index.
 """
 from __future__ import annotations
+import logging
 import time
 from datetime import datetime, timedelta
 from threading import Lock
 
 from app.database import (database, select, insert, delete as sa_delete,
                           func, TableCompatUsage)
+
+logger = logging.getLogger("bazarr.compat.meter")
 
 WINDOWS = ("hour", "day", "week", "month")
 _WINDOW_DELTA = {
@@ -61,7 +64,13 @@ def record(key_id: int, kind: str, *, blocked: bool = False) -> None:
             "blocked": TableCompatUsage.blocked + inc_blocked,
         },
     )
-    database.execute(stmt)
+    # Metering is best-effort telemetry: a DB hiccup (or a not-yet-migrated
+    # table in a partial environment) must never 500 a subtitle request.
+    try:
+        database.execute(stmt)
+    except Exception:
+        logger.debug("compat meter: record failed", exc_info=True)
+        return
     _invalidate(key_id)
 
 
@@ -77,12 +86,18 @@ def window_sum(key_id: int, kind: str, window: str) -> int:
     # Inclusive of the current hour bucket: subtract the window then add one
     # hour back so e.g. the "day" window covers the trailing 24 hour buckets.
     since = _truncate_hour(datetime.now()) - _WINDOW_DELTA[window] + timedelta(hours=1)
-    total = database.execute(
-        select(func.coalesce(func.sum(TableCompatUsage.count), 0))
-        .where(TableCompatUsage.key_id == key_id,
-               TableCompatUsage.kind == kind,
-               TableCompatUsage.hour_start >= since)).scalar() or 0
-    total = int(total)
+    # Fail-open on read errors: a limit check that can't read usage must allow
+    # the request (return 0 used), never block or 500.
+    try:
+        total = database.execute(
+            select(func.coalesce(func.sum(TableCompatUsage.count), 0))
+            .where(TableCompatUsage.key_id == key_id,
+                   TableCompatUsage.kind == kind,
+                   TableCompatUsage.hour_start >= since)).scalar() or 0
+        total = int(total)
+    except Exception:
+        logger.debug("compat meter: window_sum failed", exc_info=True)
+        return 0
     with _lock:
         _sum_cache[ck] = (now + _SUM_TTL, total)
     return total
