@@ -685,7 +685,12 @@ def get_profile_cutoff(profile_id):
     if profile_id and profile_id != 'null':
         cutoff_language = []
         for profile in profile_id_list:
-            profileId, name, cutoff, items, mustContain, mustNotContain, originalFormat, tag = profile.values()
+            # Access by key, not positional .values() unpacking: the profile
+            # dict can grow new keys (e.g. 'combine') and a fixed-arity unpack
+            # would raise ValueError for every profile during indexing.
+            profileId = profile['profileId']
+            cutoff = profile['cutoff']
+            items = profile['items']
             if cutoff:
                 if profileId == int(profile_id):
                     for item in items:

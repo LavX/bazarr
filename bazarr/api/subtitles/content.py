@@ -338,13 +338,18 @@ def resolve_subtitle_path(media_type, media_id, language_code):
     except ValueError:
         # Mixed drives on Windows or empty paths.
         return 'Invalid subtitle path', 400
-    common_target = None
+    media_ok = common_media == trusted_media_dir
+    target_ok = False
     if trusted_target_dir:
         try:
             common_target = os.path.commonpath([resolved_subtitle_path, trusted_target_dir])
         except ValueError:
             common_target = None
-    if common_media != trusted_media_dir and common_target != trusted_target_dir:
+        target_ok = common_target == trusted_target_dir
+    # When no subtitle folder is configured (the default), trusted_target_dir is
+    # None and target_ok stays False, so the media check is NOT neutralized by a
+    # None==None comparison. A path under neither trusted dir is still rejected.
+    if not (media_ok or target_ok):
         return 'Resolved subtitle path outside media directory', 400
 
     ext = os.path.splitext(resolved_subtitle_path)[1].lower()

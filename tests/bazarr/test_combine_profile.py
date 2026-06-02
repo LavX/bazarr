@@ -64,3 +64,23 @@ class TestGetCombineRule:
             "combine": {"languages": ["en", "hu"], "format": "srt"},
         })
         assert rule is None
+
+
+class TestGetProfileCutoffWithCombineColumn:
+    def test_cutoff_does_not_crash_with_combine_key(self):
+        # Regression: update_profile_id_list now yields a 'combine' key, so the
+        # old positional .values() unpack in get_profile_cutoff raised
+        # ValueError for every profile during indexing. Key access must tolerate
+        # the extra key.
+        from unittest.mock import patch
+        from app.database import get_profile_cutoff
+
+        profile = {
+            "profileId": 1, "name": "p", "cutoff": 65535,
+            "items": [{"id": 1, "language": "en"}],
+            "mustContain": [], "mustNotContain": [], "originalFormat": None,
+            "tag": None, "combine": {"languages": ["en", "hu"], "format": "srt"},
+        }
+        with patch("app.database.update_profile_id_list", return_value=[profile]):
+            result = get_profile_cutoff(1)
+        assert result == [{"id": 1, "language": "en"}]

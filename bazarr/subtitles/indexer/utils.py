@@ -86,6 +86,15 @@ def _language_code_from_sync_engine_output(subtitle):
         return None
 
     parts = parts[:-1]
+    # A keep-all sync of a combined file produces e.g.
+    # Movie.en.combined-hu.ffsubsync.srt. That is not a plain-language sync
+    # output: skip it cleanly here (returning None) so the indexer does not
+    # mis-parse "combined-hu" as a language and raise downstream. Such a synced
+    # combined output is a known limitation: it is left on disk but not indexed
+    # as a tracked variant. Overwrite-mode sync of a combined file works in
+    # place (it keeps the Movie.en.combined-hu.srt name) and is unaffected.
+    if parts and _COMBINED_MODIFIER_PATTERN.match(parts[-1]):
+        return None
     variants = []
     if parts and parts[-1] in ['hi', 'sdh', 'cc']:
         variants.append('hi')
@@ -169,29 +178,35 @@ def add_combined_outputs(dest_folder, subtitles, video_filename=None):
     attach another item's combined file to the wrong video.
 
     Mirrors add_sync_engine_outputs from PR 158 in structure."""
+    from subtitles.tools.combine.naming import parse_combined_filename
     if not os.path.isdir(dest_folder):
         return subtitles
 
     video_stem = os.path.splitext(video_filename)[0] if video_filename else None
 
     for subtitle in os.listdir(dest_folder):
-        if subtitle in subtitles or not combined_modifier_from_subtitle_name(subtitle):
+        if subtitle in subtitles:
             continue
 
-        if video_stem is not None and not subtitle.startswith(video_stem + "."):
+        info = parse_combined_filename(subtitle)
+        if info is None:
             continue
+
+        # Exact-base match, not a prefix test: the combined file must be exactly
+        # <video_stem>.<primary>.combined-<secondaries>.<ext>. A prefix check
+        # would wrongly attach a sibling's file (e.g. "Movie.Extended.en.combined
+        # -es.srt") to "Movie" when their stems share a dotted prefix.
+        if video_stem is not None:
+            expected = (f"{video_stem}.{info.primary}.combined-"
+                        f"{'-'.join(info.secondaries)}.{info.format}")
+            if subtitle != expected:
+                continue
 
         subtitle_path = os.path.join(dest_folder, subtitle)
         if not os.path.isfile(subtitle_path):
             continue
 
-        language_code = _language_code_from_combined_output(subtitle)
-        if not language_code:
-            logging.debug(
-                "BAZARR skipping combined subtitle with unknown language: %s",
-                subtitle_path,
-            )
-            continue
+        language_code = info.primary
 
         try:
             subtitles[subtitle] = _get_lang_from_str(language_code)

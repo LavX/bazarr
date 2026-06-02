@@ -2,11 +2,38 @@
 
 
 from subtitles.indexer.utils import (
+    _language_code_from_sync_engine_output,
     add_combined_outputs,
+    add_sync_engine_outputs,
     combined_modifier_from_subtitle_name,
     normalize_subtitle_language_variant,
     subtitle_language_with_combined_modifier,
 )
+
+
+class TestSyncedCombinedOrphan:
+    def test_sync_parser_cleanly_skips_combined_chain(self):
+        # Movie.en.combined-hu.ffsubsync.srt must NOT be mis-parsed as language
+        # "combined-hu"; it is cleanly skipped (returns None).
+        assert _language_code_from_sync_engine_output(
+            "Movie.en.combined-hu.ffsubsync.srt"
+        ) is None
+        # A plain synced output still parses normally.
+        assert _language_code_from_sync_engine_output(
+            "Movie.en.ffsubsync.srt"
+        ) == "en"
+
+    def test_add_sync_engine_outputs_skips_combined_chain_without_error(self, tmp_path):
+        (tmp_path / "Movie.en.combined-hu.ffsubsync.srt").write_text("")
+        result = add_sync_engine_outputs(str(tmp_path), {})
+        assert "Movie.en.combined-hu.ffsubsync.srt" not in result
+
+    def test_add_combined_outputs_skips_synced_combined_chain(self, tmp_path):
+        (tmp_path / "Movie.en.combined-hu.ffsubsync.srt").write_text("")
+        result = add_combined_outputs(
+            str(tmp_path), {}, video_filename="Movie.mkv"
+        )
+        assert "Movie.en.combined-hu.ffsubsync.srt" not in result
 
 
 class TestCombinedModifierFromSubtitleName:
@@ -57,6 +84,17 @@ class TestAddCombinedOutputs:
         )
         assert "Show.S01E01.en.combined-hu.srt" in result
         assert "Show.S01E02.en.combined-hu.srt" not in result
+
+    def test_does_not_cross_attach_prefix_sibling(self, tmp_path):
+        # "Movie (2020)" must NOT pick up the Extended edition's combined file
+        # even though its stem is a dotted prefix.
+        (tmp_path / "Movie (2020).en.combined-hu.srt").write_text("")
+        (tmp_path / "Movie (2020).Extended.en.combined-hu.srt").write_text("")
+        result = add_combined_outputs(
+            str(tmp_path), {}, video_filename="Movie (2020).mkv"
+        )
+        assert "Movie (2020).en.combined-hu.srt" in result
+        assert "Movie (2020).Extended.en.combined-hu.srt" not in result
 
 
 class TestSubtitleLanguageWithCombinedModifier:

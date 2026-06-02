@@ -8,6 +8,7 @@ from unittest.mock import patch
 from subtitles.tools.combine.main import (
     CombineResult,
     _post_write,
+    _profile_for,
     try_combine_for_video,
 )
 from subtitles.tools.combine.rules import SourcePaths
@@ -85,6 +86,16 @@ class TestTryCombine:
         )
         assert result.status == "failed"
 
+    def test_rejects_non_two_letter_adhoc_languages(self, tmp_video):
+        # Defends compose_combined_filename against a crafted code reaching the
+        # on-disk filename.
+        result = try_combine_for_video(
+            video_path=tmp_video, media_type="movies", radarr_id=42,
+            languages=["en", "../../etc/passwd"], format="srt",
+        )
+        assert result.status == "failed"
+        assert "2-letter" in result.error
+
     @patch("subtitles.tools.combine.main.get_combine_rule")
     @patch("subtitles.tools.combine.main._profile_for")
     @patch("subtitles.tools.combine.main.resolve_source_paths")
@@ -142,3 +153,37 @@ class TestPostWrite:
         _post_write("/out.srt", "/video.mkv", "movies",
                     sonarr_episode_id=None, radarr_id=42)
         mock_pp.assert_called_once_with("/out.srt", "/video.mkv", "movie", meta, 42)
+
+    @patch("app.database.database")
+    @patch("api.subtitles.subtitles.postprocess_subtitles")
+    def test_maps_singular_movie_to_movie(self, mock_pp, mock_db):
+        # The auto-combine path forwards process_subtitle's singular 'movie'.
+        meta = object()
+        mock_db.execute.return_value.first.return_value = meta
+        _post_write("/out.srt", "/video.mkv", "movie",
+                    sonarr_episode_id=None, radarr_id=42)
+        mock_pp.assert_called_once_with("/out.srt", "/video.mkv", "movie", meta, 42)
+
+
+class TestProfileFor:
+    @patch("app.database.get_profiles_list")
+    @patch("app.database.get_profile_id")
+    def test_singular_movie_resolves_via_radarr_id(self, mock_pid, mock_list):
+        # Regression: the auto-combine path passes 'movie' (singular); it must
+        # resolve the movie profile by radarr id, not fall through to the
+        # episode/series branch (which has no ids and returns no rule).
+        mock_pid.return_value = 7
+        mock_list.return_value = {"profileId": 7}
+        result = _profile_for("movie", sonarr_series_id=None,
+                              sonarr_episode_id=None, radarr_id=42)
+        mock_pid.assert_called_once_with(movie_id=42)
+        assert result == {"profileId": 7}
+
+    @patch("app.database.get_profiles_list")
+    @patch("app.database.get_profile_id")
+    def test_plural_movies_resolves_via_radarr_id(self, mock_pid, mock_list):
+        mock_pid.return_value = 7
+        mock_list.return_value = {"profileId": 7}
+        _profile_for("movies", sonarr_series_id=None,
+                     sonarr_episode_id=None, radarr_id=42)
+        mock_pid.assert_called_once_with(movie_id=42)

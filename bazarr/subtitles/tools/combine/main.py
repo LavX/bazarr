@@ -1,11 +1,15 @@
 # coding=utf-8
 
 import logging
+import os
+import re
 from dataclasses import dataclass
 
 from .composer import compose
 from .naming import compose_combined_filename
 from .rules import resolve_source_paths
+
+_TWO_LETTER_RE = re.compile(r"^[a-z]{2}$")
 
 
 @dataclass(frozen=True)
@@ -38,12 +42,19 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
         # override paths. The profile path is already validated on save, but
         # ad-hoc requests reach here unchecked: reject duplicates (which would
         # otherwise resolve the same file as primary and secondary and emit a
-        # nonsense Movie.en.combined-en.srt) and out-of-range counts.
+        # nonsense Movie.en.combined-en.srt), out-of-range counts, and codes that
+        # are not plain 2-letter lowercase (defends compose_combined_filename
+        # against a crafted code reaching the on-disk filename).
         langs = rule["languages"]
         if not (2 <= len(langs) <= 3) or len(set(langs)) != len(langs):
             return CombineResult(
                 status="failed",
                 error=f"combine requires 2 to 3 distinct languages, got {langs}",
+            )
+        if not all(isinstance(c, str) and _TWO_LETTER_RE.match(c) for c in langs):
+            return CombineResult(
+                status="failed",
+                error=f"combine languages must be 2-letter lowercase codes, got {langs}",
             )
         if rule["format"] not in ("srt", "ass"):
             return CombineResult(
@@ -79,6 +90,13 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
             return CombineResult(status="failed", error=str(e))
 
         try:
+            # Create the destination directory (mirrors how Bazarr's
+            # get_target_folder makedirs the configured subtitle subfolder) so a
+            # first-time combine into a not-yet-created absolute/relative folder
+            # succeeds instead of failing on open().
+            out_dir = os.path.dirname(out_path)
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
             with open(out_path, "wb") as fh:
                 fh.write(content)
         except OSError as e:
@@ -109,7 +127,11 @@ def _resolve_rule(media_type, sonarr_series_id, sonarr_episode_id, radarr_id,
 
 def _profile_for(media_type, sonarr_series_id, sonarr_episode_id, radarr_id):
     from app.database import get_profile_id, get_profiles_list
-    if media_type == "movies":
+    # Accept both media-type conventions: the REST endpoints pass 'movies'
+    # (plural), but the auto-combine path forwards process_subtitle's 'movie'
+    # (singular). Treating only the plural as a movie silently skipped every
+    # automatic movie combine.
+    if media_type in ("movies", "movie"):
         profile_id = get_profile_id(movie_id=radarr_id)
     else:
         profile_id = (
@@ -134,7 +156,7 @@ def _post_write(out_path, video_path, media_type, sonarr_episode_id, radarr_id):
         from api.subtitles.subtitles import postprocess_subtitles
         from app.database import (TableEpisodes, TableShows, TableMovies,
                                   database, select)
-        is_movie = media_type == "movies"
+        is_movie = media_type in ("movies", "movie")
         if is_movie:
             metadata = database.execute(
                 select(TableMovies.path, TableMovies.subtitles,
