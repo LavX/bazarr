@@ -20,7 +20,7 @@ from subliminal_patch.extensions import provider_registry
 
 from .manifest import validate_manifest
 from .bundle import verify_bundle_tree
-from .migration import validation_built_in_provider_ids
+from .migration import MIGRATED_BUILT_IN_PROVIDER_IDS, validation_built_in_provider_ids
 from .state import (
     OFFICIAL_CATALOG_SOURCE_ID,
     OFFICIAL_CATALOG_URL,
@@ -823,9 +823,12 @@ def _built_in_provider_ids() -> set[str]:
     provider_ids = set(provider_registry.names())
     try:
         from .registry import _REGISTERED_PROVIDER_HUB_IDS
-        return provider_ids - _REGISTERED_PROVIDER_HUB_IDS
+        provider_ids = provider_ids - _REGISTERED_PROVIDER_HUB_IDS
     except Exception:
-        return provider_ids
+        pass
+    # Keep migrated built-in ids in the denylist even after a hub provider has
+    # registered one, so an untrusted install of the same id can never shadow it.
+    return provider_ids | MIGRATED_BUILT_IN_PROVIDER_IDS
 
 
 def _manifest_provider_id(manifest: dict[str, Any]) -> str:

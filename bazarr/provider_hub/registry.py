@@ -13,6 +13,7 @@ from subliminal_patch.providers import Provider
 
 from .manifest import ManifestValidationError, validate_manifest
 from .migration import (
+    MIGRATED_BUILT_IN_PROVIDER_IDS,
     can_shadow_built_in_provider,
     validation_built_in_provider_ids,
 )
@@ -126,7 +127,15 @@ def _make_provider_class(manifest, worker_client=None, installation=None):
 
 def register_active_provider_classes(installations=None) -> list[str]:
     registered = []
-    built_in_provider_ids = set(provider_registry.names()) - _REGISTERED_PROVIDER_HUB_IDS
+    # Always treat migrated built-in ids as built-in for the shadow gate, even once a
+    # hub provider has registered one: otherwise, after the trusted migration registers
+    # (adding the id to _REGISTERED_PROVIDER_HUB_IDS and dropping it from the dynamic
+    # set), a later UNTRUSTED install of the same id would no longer count as shadowing
+    # a built-in and could silently replace the migrated provider.
+    built_in_provider_ids = (
+        (set(provider_registry.names()) - _REGISTERED_PROVIDER_HUB_IDS)
+        | MIGRATED_BUILT_IN_PROVIDER_IDS
+    )
     installations = installations if installations is not None else active_installations()
 
     for installation in installations:

@@ -554,6 +554,75 @@ def test_failed_proxy_build_preserves_shadowed_built_in(monkeypatch):
             del provider_registry[provider_id]
 
 
+def test_built_in_denylist_keeps_migrated_id_after_registration():
+    # Once the trusted migration registers gestdown as a hub provider, gestdown is in
+    # _REGISTERED_PROVIDER_HUB_IDS and is no longer a plain built-in class. It must still
+    # be reported as a built-in id so a later untrusted install cannot shadow it.
+    import provider_hub.registry as hub_registry
+    from provider_hub.service import _built_in_provider_ids
+    from subliminal_patch.extensions import provider_registry
+
+    provider_id = "gestdown"
+    had_existing = provider_id in provider_registry
+    original_cls = provider_registry[provider_id] if had_existing else None
+
+    # Simulate post-migration state: registered as a hub id, absent as a built-in class.
+    if had_existing:
+        del provider_registry[provider_id]
+    hub_registry._REGISTERED_PROVIDER_HUB_IDS.add(provider_id)
+
+    try:
+        assert provider_id in _built_in_provider_ids()
+    finally:
+        hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if had_existing and original_cls is not None:
+            provider_registry.register(provider_id, original_cls)
+
+
+def test_untrusted_install_cannot_replace_registered_migrated_provider():
+    # gestdown is already registered as a (trusted) hub provider. An untrusted gestdown
+    # installation must still be skipped, leaving the registered provider untouched, even
+    # though gestdown is no longer in the dynamic built-in set.
+    import provider_hub.registry as hub_registry
+    from provider_hub.registry import register_active_provider_classes
+    from subliminal_patch.extensions import provider_registry
+    from subliminal_patch.providers import Provider
+
+    provider_id = "gestdown"
+    had_existing = provider_id in provider_registry
+    original_cls = provider_registry[provider_id] if had_existing else None
+
+    class RegisteredHubGestdown(Provider):
+        provider_name = provider_id
+        languages = {Language("eng")}
+        video_types = (Movie,)
+
+    provider_registry.register(provider_id, RegisteredHubGestdown)
+    hub_registry._REGISTERED_PROVIDER_HUB_IDS.add(provider_id)
+
+    installation = _install(
+        provider_id,
+        trusted=False,
+        manifest=_manifest(
+            provider_id=provider_id,
+            name="Gestdown",
+            dependencies={"requirements": []},
+        ),
+    )
+
+    try:
+        registered = register_active_provider_classes(installations=[installation])
+
+        assert provider_id not in registered
+        assert provider_registry[provider_id] is RegisteredHubGestdown
+    finally:
+        hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if provider_id in provider_registry:
+            del provider_registry[provider_id]
+        if had_existing and original_cls is not None:
+            provider_registry.register(provider_id, original_cls)
+
+
 def test_get_providers_registers_active_provider_hub_installation(tmp_path, monkeypatch):
     from app import get_providers
     from subliminal_patch.extensions import provider_registry
