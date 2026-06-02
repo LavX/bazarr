@@ -61,22 +61,40 @@ const UsageCell: FunctionComponent<{ keyData: DistKey }> = ({ keyData }) => {
       </Text>
     );
   }
+  // The cell stays compact (daily figure); hover reveals every window so the
+  // hour/week/month limits are discoverable without widening the table.
+  const breakdown = (
+    <Stack gap={4}>
+      {(["search", "download"] as const).map((kind) => (
+        <div key={kind}>
+          <Text size="xs" fw={600}>
+            {kind === "search" ? "Search" : "Download"}
+          </Text>
+          {WINDOWS.map((w) => (
+            <Text key={w} size="xs">
+              {WINDOW_LABELS[w]}: {usage[kind][w].toLocaleString()} /{" "}
+              {formatLimit(limits[kind][w])}
+            </Text>
+          ))}
+        </div>
+      ))}
+    </Stack>
+  );
   return (
-    <Stack gap={2}>
-      {(["search", "download"] as const).map((kind) => {
-        const used = usage[kind].day;
-        const limit = limits[kind].day;
-        return (
+    <Tooltip label={breakdown} multiline withArrow position="left">
+      <Stack gap={2} style={{ cursor: "help", width: "fit-content" }}>
+        {(["search", "download"] as const).map((kind) => (
           <Text key={kind} size="xs">
-            {kind === "search" ? "Search" : "Download"}: {used.toLocaleString()}
+            {kind === "search" ? "Search" : "Download"}:{" "}
+            {usage[kind].day.toLocaleString()}
             {" / "}
             <Text span c="dimmed">
-              {formatLimit(limit)} day
+              {formatLimit(limits[kind].day)} today
             </Text>
           </Text>
-        );
-      })}
-    </Stack>
+        ))}
+      </Stack>
+    </Tooltip>
   );
 };
 
@@ -276,8 +294,8 @@ const KeysPanel: FunctionComponent = () => {
         </Table.ScrollContainer>
 
         <Text size="xs" c="dimmed">
-          Window legend: {WINDOWS.map((w) => WINDOW_LABELS[w]).join(" · ")}.
-          Usage shown is the daily window.
+          The usage column shows today&apos;s count; hover it for the full
+          hourly / daily / weekly / monthly breakdown.
         </Text>
       </Stack>
 
