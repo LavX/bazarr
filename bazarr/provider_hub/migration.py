@@ -28,6 +28,7 @@ MIGRATED_BUILT_IN_PROVIDER_IDS = frozenset({
     "napiprojekt",
     "napisy24",
     "nekur",
+    "opensubtitles",
     "opensubtitlescom",
     "pipocas",
     "prijevodionline",

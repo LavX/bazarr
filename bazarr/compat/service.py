@@ -18,9 +18,12 @@ logger = logging.getLogger("bazarr.compat.service")
 
 _pool_lock = Lock()
 _compat_pool = None  # lazy singleton, dedicated (B2)
+# Providers that consume the client-supplied OpenSubtitles-style moviehash.
+# NapiProjekt is intentionally excluded: it keys on a different hash (md5 of the
+# first 10 MB, a 32-char digest), and feeding it the 16-char OS hash makes its
+# get_subhash() raise instead of matching.
 _CLIENT_MOVIEHASH_PROVIDERS = (
     "bsplayer",
-    "napiprojekt",
     "opensubtitles",
     "opensubtitlescom",
 )
