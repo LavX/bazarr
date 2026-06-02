@@ -276,12 +276,16 @@ def find_subtitle_by_language(subtitles, language_code, video_path, media_type="
                 sub_code = lang_parts[0]
                 sub_path = sub[1]
                 if sub_path is None:  # Embedded subtitle (no file on disk)
+                    # Inspect every modifier, not just the first: a track can be
+                    # both hi and forced (e.g. "en:hi:forced"), so checking only
+                    # lang_parts[1] would drop the second flag and mis-select the
+                    # stream when several same-language tracks exist.
+                    modifiers = {part.lower() for part in lang_parts[1:]}
                     embedded_subs.append(
                         {
                             "code2": sub_code,
-                            "hi": len(lang_parts) > 1 and lang_parts[1].lower() == "hi",
-                            "forced": len(lang_parts) > 1
-                            and lang_parts[1].lower() == "forced",
+                            "hi": "hi" in modifiers,
+                            "forced": "forced" in modifiers,
                         }
                     )
 

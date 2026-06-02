@@ -239,6 +239,21 @@ function buildLanguageKey(sub: {
   return key;
 }
 
+// Key for the embedded action=7 score lookup. The backend stores embedded history
+// with a single hi-priority modifier (ProcessSubtitlesResult drops forced when hi is
+// set), so a hi+forced track is recorded as "<code>:hi". Mirror that here so the row
+// lookup matches the stored history; do NOT use buildLanguageKey (which keeps both
+// modifiers and is needed for unique row ids).
+function buildEmbeddedScoreKey(sub: {
+  code2: string;
+  hi?: boolean;
+  forced?: boolean;
+}): string {
+  if (sub.hi) return `${sub.code2}:hi`;
+  if (sub.forced) return `${sub.code2}:forced`;
+  return sub.code2;
+}
+
 const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
   const onlyDesired = useShowOnlyDesired();
   const [compareSelection, setCompareSelection] = useState<{
@@ -278,7 +293,7 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
     const map = new Map<string, History.Movie>();
     history?.forEach((h) => {
       if (h.action === 7 && h.language?.code2) {
-        const key = buildLanguageKey(h.language);
+        const key = buildEmbeddedScoreKey(h.language);
         if (!map.has(key)) map.set(key, h);
       }
     });
@@ -484,7 +499,7 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
         cell: ({ row: { original } }) => {
           const record = !isSubtitleTrack(original.path)
             ? historyMap.get(original.path!)
-            : embeddedScoreMap.get(buildLanguageKey(original));
+            : embeddedScoreMap.get(buildEmbeddedScoreKey(original));
           return <ScoreBadge score={record?.score} />;
         },
       },
@@ -494,7 +509,7 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
         cell: ({ row: { original } }) => {
           const record = !isSubtitleTrack(original.path)
             ? historyMap.get(original.path!)
-            : embeddedScoreMap.get(buildLanguageKey(original));
+            : embeddedScoreMap.get(buildEmbeddedScoreKey(original));
           if (!record?.provider)
             return (
               <Text c="dimmed" size="xs">

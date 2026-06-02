@@ -126,6 +126,18 @@ class Subtitles(Resource):
         help="Source language code2 (required when path is empty, i.e. embedded track)",
     )
     patch_request_parser.add_argument(
+        "from_hi",
+        type=str,
+        required=False,
+        help='HI flag of the embedded source track from ["True", "False"]',
+    )
+    patch_request_parser.add_argument(
+        "from_forced",
+        type=str,
+        required=False,
+        help='Forced flag of the embedded source track from ["True", "False"]',
+    )
+    patch_request_parser.add_argument(
         "type", type=str, required=True, help='Media type from ["episode", "movie"]'
     )
     patch_request_parser.add_argument(
@@ -220,6 +232,18 @@ class Subtitles(Resource):
             if len(from_language_arg) != 2 or not alpha3_from_alpha2(from_language_arg):
                 return "from_language must be a valid alpha2 language code", 400
 
+            # The hi/forced args describe the OUTPUT subtitle. The source embedded
+            # track to extract can be a different variant (e.g. translating a normal
+            # subtitle from the HI English track), so honour from_hi/from_forced when
+            # the caller sends them and fall back to the output flags otherwise (the
+            # direct-embedded-translate path where source == output).
+            from_hi_arg = args.get("from_hi")
+            from_forced_arg = args.get("from_forced")
+            source_hi = (from_hi_arg == "True") if from_hi_arg is not None else hi
+            source_forced = (
+                (from_forced_arg == "True") if from_forced_arg is not None else forced
+            )
+
             # Resolve the video path from the DB using the media ID
             if media_type == "episode":
                 ep_meta = database.execute(
@@ -239,7 +263,11 @@ class Subtitles(Resource):
                 embedded_video_path = path_mappings.path_replace_movie(mv_meta.path)
 
             extracted = extract_embedded_subtitle(
-                embedded_video_path, from_language_arg, media_type, hi=hi, forced=forced
+                embedded_video_path,
+                from_language_arg,
+                media_type,
+                hi=source_hi,
+                forced=source_forced,
             )
             if not extracted:
                 return (

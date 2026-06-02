@@ -304,6 +304,15 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
                         from_language: sourceIsEmbedded
                           ? source.code2
                           : undefined,
+                        // Identify which embedded source track to extract by its
+                        // own hi/forced variant (the source may differ from the
+                        // output subtitle's variant).
+                        from_hi: sourceIsEmbedded
+                          ? toPython(source.hi)
+                          : undefined,
+                        from_forced: sourceIsEmbedded
+                          ? toPython(source.forced)
+                          : undefined,
                       },
                     });
                   }}
