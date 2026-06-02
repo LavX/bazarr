@@ -18,6 +18,7 @@ from .jellyfin import api_ns_list_jellyfin
 from .translator import api_ns_list_translator
 from .editor import api_ns_list_editor
 from .provider_hub import api_ns_list_provider_hub
+from .distribution_hub import api_ns_list_distribution_hub
 from .swaggerui import swaggerui_api_params
 
 api_ns_list = [
@@ -36,6 +37,7 @@ api_ns_list = [
     api_ns_list_translator,
     api_ns_list_editor,
     api_ns_list_provider_hub,
+    api_ns_list_distribution_hub,
 ]
 
 authorizations = {
