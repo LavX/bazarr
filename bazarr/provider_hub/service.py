@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import re
 import shutil
 import tempfile
 import time
 import uuid
+import zipfile
 
 import requests
 
@@ -694,7 +696,10 @@ def runtime_provider_configs() -> dict[str, dict[str, Any]]:
 
 def list_providers(redact: bool = True) -> list[dict[str, Any]]:
     state = load_state()
-    providers = list((state.get("installations") or {}).values())
+    providers = [
+        _with_origin(provider, state) if isinstance(provider, dict) else provider
+        for provider in (state.get("installations") or {}).values()
+    ]
     if not redact:
         return providers
     return [
@@ -708,6 +713,7 @@ def get_provider(provider_id: str, redact: bool = True) -> dict[str, Any] | None
     provider = (state.get("installations") or {}).get(provider_id)
     if not isinstance(provider, dict):
         return None
+    provider = _with_origin(provider, state)
     return _redact_installation(provider) if redact else provider
 
 
@@ -899,6 +905,71 @@ def _fetch_bundle(manifest) -> Path:
     return target
 
 
+def _safe_extract_zip(archive_bytes: bytes, dest: Path) -> None:
+    """Extract a zip into ``dest`` with zip-slip protection."""
+    dest_root = dest.resolve()
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(archive_bytes))
+    except zipfile.BadZipFile as error:
+        raise ProviderHubInstallError("uploaded package is not a valid .zip archive") from error
+    with archive:
+        for member in archive.infolist():
+            name = member.filename
+            if not name or name.endswith("/"):
+                continue
+            target = (dest / name).resolve()
+            if target != dest_root and dest_root not in target.parents:
+                raise ProviderHubInstallError(f"unsafe path in package: {name}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(member) as source, open(target, "wb") as out:
+                shutil.copyfileobj(source, out)
+
+
+def _find_local_manifest(extracted: Path) -> tuple[dict[str, Any], Path]:
+    """Locate the manifest inside an extracted local package and its bundle root."""
+    candidates = sorted(
+        list(extracted.rglob("provider.json")) + list(extracted.rglob("manifest.json")),
+        key=lambda path: len(path.parts),
+    )
+    if not candidates:
+        raise ProviderHubInstallError("package must contain a provider.json manifest")
+    manifest_file = candidates[0]
+    try:
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ProviderHubInstallError(f"invalid manifest in package: {error}") from error
+    if not isinstance(manifest, dict):
+        raise ProviderHubInstallError("package manifest must be a JSON object")
+    return manifest, manifest_file.parent
+
+
+def _stage_local_bundle(validated, source_dir: Path) -> Path:
+    """Stage a bundle from already-extracted local files (no network fetch)."""
+    target = _bundle_path_for(validated)
+    if target.exists():
+        _remove_bundle_runtime_artifacts(target)
+        verify_bundle_tree(validated, target)
+        return target
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".stage-", dir=str(target.parent)) as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        for relative_path in validated.files:
+            source_file = source_dir / relative_path
+            if not source_file.is_file():
+                raise ProviderHubInstallError(f"package is missing declared file: {relative_path}")
+            destination = tmp_path / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(source_file.read_bytes())
+
+        _write_manifest_file(validated, tmp_path)
+        verify_bundle_tree(validated, tmp_path)
+        shutil.move(str(tmp_path), str(target))
+
+    verify_bundle_tree(validated, target)
+    return target
+
+
 def _trust_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(manifest)
     if isinstance(normalized.get("source"), dict):
@@ -927,6 +998,43 @@ def _catalog_manifest_trusted(manifest: dict[str, Any], state: dict[str, Any]) -
     return False
 
 
+def _install_origin(manifest: dict[str, Any], state: dict[str, Any]) -> tuple[str, str | None]:
+    """Resolve where an install came from, for display/grouping only.
+
+    Returns ("catalog", source_id) when the manifest's catalog_url matches a
+    configured catalog source, otherwise ("local", None). This is independent of
+    the trust decision (_catalog_manifest_trusted), which stays the security gate;
+    a local upload is always recorded as origin="local" regardless of this result.
+    """
+    if not isinstance(manifest, dict):
+        return ("local", None)
+    source = manifest.get("source")
+    catalog_url = source.get("catalog_url") if isinstance(source, dict) else None
+    if catalog_url:
+        for source_id, configured in (state.get("catalog_sources") or {}).items():
+            if isinstance(configured, dict) and configured.get("url") == catalog_url:
+                return ("catalog", source_id)
+    return ("local", None)
+
+
+def _with_origin(provider: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    """Ensure a serialized installation carries origin/source_id.
+
+    A stored origin of "local" is authoritative (a local upload can never be
+    relabelled as a catalog provider). Otherwise the origin is resolved from the
+    manifest's catalog_url against the current sources, so pre-existing installs
+    and later source-config changes are reflected on read.
+    """
+    result = dict(provider)
+    if result.get("origin") == "local":
+        result.setdefault("source_id", result.get("source_id"))
+        return result
+    origin, source_id = _install_origin(result.get("manifest") or {}, state)
+    result["origin"] = origin
+    result["source_id"] = source_id
+    return result
+
+
 def _smoke_validate_worker(manifest, bundle_path: Path, python_path: Path) -> None:
     _remove_bundle_runtime_artifacts(bundle_path)
     runner = Path(__file__).with_name("worker_runner.py")
@@ -945,7 +1053,15 @@ def _smoke_validate_worker(manifest, bundle_path: Path, python_path: Path) -> No
         _remove_bundle_runtime_artifacts(bundle_path)
 
 
-def _staged_installation(validated, existing, bundle_path: Path, staged_python_path: Path, source_trusted: bool):
+def _staged_installation(
+    validated,
+    existing,
+    bundle_path: Path,
+    staged_python_path: Path,
+    source_trusted: bool,
+    origin: str = "catalog",
+    source_id: str | None = None,
+):
     existing = existing if isinstance(existing, dict) else {}
     return {
         "provider_id": validated.provider_id,
@@ -963,13 +1079,22 @@ def _staged_installation(validated, existing, bundle_path: Path, staged_python_p
         "activated_at": existing.get("activated_at"),
         "last_error": None,
         "trusted": bool(source_trusted),
+        "origin": origin,
+        "source_id": source_id,
         "manifest": existing.get("manifest") if existing.get("active_version") else validated.raw,
         "enabled": existing.get("enabled", True),
         "config": existing.get("config", {}),
     }
 
 
-def _failed_installation(validated, existing, error: Exception, source_trusted: bool):
+def _failed_installation(
+    validated,
+    existing,
+    error: Exception,
+    source_trusted: bool,
+    origin: str = "catalog",
+    source_id: str | None = None,
+):
     existing = existing if isinstance(existing, dict) else {}
     message = str(error)
     if existing.get("active_version"):
@@ -998,28 +1123,32 @@ def _failed_installation(validated, existing, error: Exception, source_trusted: 
         "activated_at": None,
         "last_error": message,
         "trusted": bool(source_trusted),
+        "origin": origin,
+        "source_id": source_id,
         "manifest": validated.raw,
         "enabled": existing.get("enabled", True),
         "config": existing.get("config", {}),
     }
 
 
-def stage_install(manifest: dict[str, Any]) -> dict[str, Any]:
+def _stage_validated(
+    validated,
+    source_trusted: bool,
+    origin: str,
+    source_id: str | None,
+    bundle_stager,
+    catalog_url: str | None = None,
+) -> dict[str, Any]:
+    """Shared install core: stage the bundle, build the venv, smoke-test, record.
+
+    ``bundle_stager(validated) -> Path`` decides where the bundle comes from
+    (catalog fetch vs already-extracted local files).
+    """
     state = load_state()
-    source_trusted = _catalog_manifest_trusted(manifest, state) if isinstance(manifest, dict) else False
-    validated = validate_manifest(
-        manifest,
-        built_in_provider_ids=_validation_built_in_provider_ids(
-            manifest,
-            source_trusted,
-        ),
-    )
     existing = (state.get("installations") or {}).get(validated.provider_id)
     existing_version = (
         existing.get("active_version") if isinstance(existing, dict) else None
     )
-    manifest_source = validated.raw.get("source") if isinstance(validated.raw, dict) else None
-    catalog_url = manifest_source.get("catalog_url") if isinstance(manifest_source, dict) else None
     is_update = bool(existing_version)
     action = "stage_update" if is_update else "install"
 
@@ -1030,10 +1159,10 @@ def stage_install(manifest: dict[str, Any]) -> dict[str, Any]:
         target_name=validated.raw.get("name") or validated.provider_id,
         from_version=existing_version,
         to_version=validated.version,
-        details={"catalog_url": catalog_url, "trusted": source_trusted},
+        details={"catalog_url": catalog_url, "trusted": source_trusted, "origin": origin},
     ) as job:
         try:
-            bundle_path = _fetch_bundle(validated)
+            bundle_path = bundle_stager(validated)
             env_path = PluginEnvironment(provider_hub_dir()).install(validated)
             staged_python_path = python_executable(env_path)
             _smoke_validate_worker(validated, bundle_path, staged_python_path)
@@ -1043,7 +1172,9 @@ def stage_install(manifest: dict[str, Any]) -> dict[str, Any]:
             def record_failed_install(state: dict[str, Any]) -> dict[str, Any]:
                 installations = state.setdefault("installations", {})
                 current = installations.get(validated.provider_id, existing)
-                installation = _failed_installation(validated, current, install_error, source_trusted)
+                installation = _failed_installation(
+                    validated, current, install_error, source_trusted, origin, source_id
+                )
                 installations[validated.provider_id] = installation
                 return dict(installation)
 
@@ -1059,6 +1190,8 @@ def stage_install(manifest: dict[str, Any]) -> dict[str, Any]:
                 bundle_path,
                 staged_python_path,
                 source_trusted,
+                origin,
+                source_id,
             )
             installations[validated.provider_id] = installation
             return dict(installation)
@@ -1077,6 +1210,61 @@ def stage_install(manifest: dict[str, Any]) -> dict[str, Any]:
             message = f"Staged install of v{validated.version} (restart Bazarr+ to activate)"
         job.update(message=message)
         return _redact_installation(installation)
+
+
+def stage_install(manifest: dict[str, Any]) -> dict[str, Any]:
+    state = load_state()
+    source_trusted = _catalog_manifest_trusted(manifest, state) if isinstance(manifest, dict) else False
+    origin, source_id = _install_origin(manifest, state) if isinstance(manifest, dict) else ("local", None)
+    validated = validate_manifest(
+        manifest,
+        built_in_provider_ids=_validation_built_in_provider_ids(
+            manifest,
+            source_trusted,
+        ),
+    )
+    manifest_source = validated.raw.get("source") if isinstance(validated.raw, dict) else None
+    catalog_url = manifest_source.get("catalog_url") if isinstance(manifest_source, dict) else None
+    return _stage_validated(
+        validated,
+        source_trusted,
+        origin,
+        source_id,
+        _fetch_bundle,
+        catalog_url=catalog_url,
+    )
+
+
+def stage_install_local(archive_bytes: bytes) -> dict[str, Any]:
+    """Install a Provider Hub provider from an uploaded .zip package.
+
+    A local package has no catalog vouching for it, so it is always recorded as
+    origin="local" and forced untrusted: it can never shadow a built-in provider.
+    Its files are still hash-verified against the manifest and smoke-tested before
+    activation, exactly like a catalog install.
+    """
+    if not isinstance(archive_bytes, (bytes, bytearray)) or not archive_bytes:
+        raise ProviderHubInstallError("uploaded package is empty")
+
+    work_dir = Path(tempfile.mkdtemp(prefix="phub-local-", dir=str(provider_hub_dir())))
+    try:
+        _safe_extract_zip(bytes(archive_bytes), work_dir)
+        manifest, bundle_root = _find_local_manifest(work_dir)
+        # Untrusted (full built-in set, no replacements): a local package can
+        # never shadow a built-in provider.
+        validated = validate_manifest(
+            manifest,
+            built_in_provider_ids=_built_in_provider_ids(),
+        )
+        return _stage_validated(
+            validated,
+            source_trusted=False,
+            origin="local",
+            source_id=None,
+            bundle_stager=lambda candidate: _stage_local_bundle(candidate, bundle_root),
+        )
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def activate_staged_installations() -> list[str]:

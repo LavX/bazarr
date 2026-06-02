@@ -1,9 +1,21 @@
 import { FunctionComponent, useCallback, useMemo, useState } from "react";
-import { Button, Chip, Group, SegmentedControl, Stack } from "@mantine/core";
-import { faSliders, faStore } from "@fortawesome/free-solid-svg-icons";
+import {
+  Button,
+  Chip,
+  FileButton,
+  Group,
+  SegmentedControl,
+  Stack,
+} from "@mantine/core";
+import {
+  faSliders,
+  faStore,
+  faUpload,
+} from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   useProviderHubInstall,
+  useProviderHubInstallLocal,
   useProviderHubTest,
   useProviderHubUninstall,
 } from "@/apis/hooks";
@@ -63,6 +75,7 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   const install = useProviderHubInstall();
+  const installLocal = useProviderHubInstallLocal();
   const testProvider = useProviderHubTest();
   const uninstall = useProviderHubUninstall();
 
@@ -146,8 +159,46 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
     [install],
   );
 
+  const isLocalInstall = useCallback(
+    (entry: ProviderHubCatalogEntry) =>
+      installedById.get(entry.provider_id)?.origin === "local",
+    [installedById],
+  );
+
+  const marketplaceCards = useMemo(
+    () => filtered.filter((entry) => !isLocalInstall(entry)),
+    [filtered, isLocalInstall],
+  );
+  const localCards = useMemo(
+    () => filtered.filter((entry) => isLocalInstall(entry)),
+    [filtered, isLocalInstall],
+  );
+
+  const renderCard = useCallback(
+    (entry: ProviderHubCatalogEntry, isLocal: boolean) => (
+      <CatalogCard
+        key={`${entry.provider_id}-${entry.version}`}
+        entry={entry}
+        installed={installedById.get(entry.provider_id) ?? null}
+        onInstall={handleInstall}
+        isInstalling={
+          install.isPending &&
+          install.variables?.manifest?.provider_id === entry.provider_id
+        }
+        onTest={(providerId) => testProvider.mutate(providerId)}
+        onUninstall={(providerId) => uninstall.mutate(providerId)}
+        isTesting={
+          testProvider.isPending && testProvider.variables === entry.provider_id
+        }
+        isLocal={isLocal}
+      />
+    ),
+    [installedById, handleInstall, install, testProvider, uninstall],
+  );
+
   const noSources = sources.length === 0 && marketplaceEntries.length === 0;
-  const noResults = !noSources && filtered.length === 0;
+  const noResults =
+    !noSources && marketplaceCards.length === 0 && localCards.length === 0;
 
   return (
     <Stack gap="md">
@@ -160,13 +211,32 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
             sources. Installed plugins can be tested or removed here.
           </p>
         </div>
-        <Button
-          variant="default"
-          leftSection={<FontAwesomeIcon icon={faSliders} />}
-          onClick={() => setDrawerOpen(true)}
-        >
-          Manage sources ({sources.length})
-        </Button>
+        <Group gap="xs">
+          <FileButton
+            accept=".zip,application/zip"
+            onChange={(file) => {
+              if (file) installLocal.mutate(file);
+            }}
+          >
+            {(props) => (
+              <Button
+                {...props}
+                variant="default"
+                leftSection={<FontAwesomeIcon icon={faUpload} />}
+                loading={installLocal.isPending}
+              >
+                Install local package
+              </Button>
+            )}
+          </FileButton>
+          <Button
+            variant="default"
+            leftSection={<FontAwesomeIcon icon={faSliders} />}
+            onClick={() => setDrawerOpen(true)}
+          >
+            Manage sources ({sources.length})
+          </Button>
+        </Group>
       </div>
 
       <Group className={styles.toolbar}>
@@ -221,26 +291,31 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
           body="Try a different search term or clear the active filters."
         />
       ) : (
-        <div className={styles.cardGrid}>
-          {filtered.map((entry) => (
-            <CatalogCard
-              key={`${entry.provider_id}-${entry.version}`}
-              entry={entry}
-              installed={installedById.get(entry.provider_id) ?? null}
-              onInstall={handleInstall}
-              isInstalling={
-                install.isPending &&
-                install.variables?.manifest?.provider_id === entry.provider_id
-              }
-              onTest={(providerId) => testProvider.mutate(providerId)}
-              onUninstall={(providerId) => uninstall.mutate(providerId)}
-              isTesting={
-                testProvider.isPending &&
-                testProvider.variables === entry.provider_id
-              }
-            />
-          ))}
-        </div>
+        <>
+          {marketplaceCards.length > 0 && (
+            <div className={styles.cardGrid}>
+              {marketplaceCards.map((entry) => renderCard(entry, false))}
+            </div>
+          )}
+          {localCards.length > 0 && (
+            <Stack gap="md">
+              <div>
+                <div className={styles.eyebrow}>Local</div>
+                <h3 className={styles.panelTitle} style={{ fontSize: 18 }}>
+                  Local / manually installed
+                </h3>
+                <p className={styles.panelDescription}>
+                  Providers installed from an uploaded package rather than a
+                  catalog source. They are never trusted and can never replace a
+                  built-in provider.
+                </p>
+              </div>
+              <div className={styles.cardGrid}>
+                {localCards.map((entry) => renderCard(entry, true))}
+              </div>
+            </Stack>
+          )}
+        </>
       )}
 
       <SourcesDrawer
