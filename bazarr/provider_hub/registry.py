@@ -12,6 +12,11 @@ from subliminal_patch.extensions import provider_registry
 from subliminal_patch.providers import Provider
 
 from .manifest import ManifestValidationError, validate_manifest
+from .migration import (
+    MIGRATED_BUILT_IN_PROVIDER_IDS,
+    can_shadow_built_in_provider,
+    validation_built_in_provider_ids,
+)
 from .protocol import candidate_from_worker, language_to_payload, video_to_payload, worker_download_to_content
 from .state import active_installations
 from .worker import ProviderWorkerClient, WorkerError, worker_command
@@ -122,24 +127,47 @@ def _make_provider_class(manifest, worker_client=None, installation=None):
 
 def register_active_provider_classes(installations=None) -> list[str]:
     registered = []
-    built_in_provider_ids = set(provider_registry.names()) - _REGISTERED_PROVIDER_HUB_IDS
+    # Always treat migrated built-in ids as built-in for the shadow gate, even once a
+    # hub provider has registered one: otherwise, after the trusted migration registers
+    # (adding the id to _REGISTERED_PROVIDER_HUB_IDS and dropping it from the dynamic
+    # set), a later UNTRUSTED install of the same id would no longer count as shadowing
+    # a built-in and could silently replace the migrated provider.
+    built_in_provider_ids = (
+        (set(provider_registry.names()) - _REGISTERED_PROVIDER_HUB_IDS)
+        | MIGRATED_BUILT_IN_PROVIDER_IDS
+    )
     installations = installations if installations is not None else active_installations()
 
     for installation in installations:
         provider_id = installation.provider_id
-        if provider_id in built_in_provider_ids:
+        trusted = bool(getattr(installation, "trusted", False))
+        shadows_builtin = provider_id in built_in_provider_ids
+        if shadows_builtin and not can_shadow_built_in_provider(provider_id, trusted):
             logger.warning("Skipping Provider Hub provider %s because it shadows a built-in provider", provider_id)
             continue
         try:
             manifest = validate_manifest(
                 installation.manifest,
-                built_in_provider_ids=built_in_provider_ids,
+                built_in_provider_ids=validation_built_in_provider_ids(
+                    provider_id,
+                    built_in_provider_ids,
+                    trusted,
+                ),
             )
         except ManifestValidationError:
             logger.exception("Skipping invalid Provider Hub manifest for %s", provider_id)
             continue
 
-        provider_registry.register(manifest.provider_id, _make_provider_class(manifest, installation=installation))
+        try:
+            provider_cls = _make_provider_class(manifest, installation=installation)
+        except Exception:
+            # Build the proxy class before touching the registry. If this fails for a
+            # provider that shadows a built-in, the built-in must stay in place rather
+            # than be left deleted (provider_registry.register overwrites in place, so
+            # no explicit delete is needed on the success path).
+            logger.exception("Skipping Provider Hub provider %s because its proxy class could not be built", provider_id)
+            continue
+        provider_registry.register(manifest.provider_id, provider_cls)
         _REGISTERED_PROVIDER_HUB_IDS.add(manifest.provider_id)
         registered.append(manifest.provider_id)
 
