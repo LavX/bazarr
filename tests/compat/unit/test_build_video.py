@@ -66,12 +66,42 @@ def test_episode_sets_series_imdb_and_season_episode():
 
 
 def test_moviehash_is_wired_for_opensubtitles_providers():
-    """OS-style moviehash enables exact-hash matching on the OS providers."""
+    """Client-supplied hashes enable exact-hash matching on OS-hash providers."""
     from compat.service import _build_video
     v = _build_video("tt0111161", None, None, "movie",
                      moviehash="8e245d9679d31e12")
+    assert v.hashes.get("bsplayer") == "8e245d9679d31e12"
     assert v.hashes.get("opensubtitles") == "8e245d9679d31e12"
     assert v.hashes.get("opensubtitlescom") == "8e245d9679d31e12"
+    # NapiProjekt uses a different hash algorithm, so it must NOT receive the
+    # OpenSubtitles moviehash (its get_subhash would raise on the 16-char value).
+    assert "napiprojekt" not in v.hashes
+
+
+def test_moviebytesize_is_wired_for_hash_size_providers():
+    """BSPlayer needs both the OS hash and byte size on virtual searches."""
+    from compat.service import _build_video
+    v = _build_video(
+        "tt0111161", None, None, "movie",
+        moviehash="8e245d9679d31e12",
+        moviebytesize=123456789,
+    )
+    assert v.size == 123456789
+    assert v.hashes.get("bsplayer") == "8e245d9679d31e12"
+
+
+def test_anidb_ids_are_wired_for_anime_providers():
+    """AnimeTosho needs AniDB ids on the worker video payload."""
+    from compat.service import _build_video
+    v = _build_video(
+        "tt21209876", 1, 12, "episode",
+        query="Solo.Leveling.S01E12.2160p.WEB-ToonsHub.mkv",
+        series_anidb_id=17495,
+        series_anidb_episode_id=277518,
+    )
+    assert v.series_anidb_id == 17495
+    assert v.series_anidb_series_id == 17495
+    assert v.series_anidb_episode_id == 277518
 
 
 def test_imdb_id_normalized_to_tt_prefix():

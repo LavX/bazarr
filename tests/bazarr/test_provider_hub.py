@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from subzero.language import Language
 from subliminal.video import Movie
+from subliminal_patch.core import Episode
 
 
 def _sha256(value):
@@ -228,6 +229,14 @@ def test_worker_protocol_round_trips_language_video_and_download_payload():
     )
     movie.hashes["opensubtitles"] = "abc123"
     movie.radarrId = 12
+    episode = Episode(
+        "/media/anime.mkv",
+        "Solo Leveling",
+        1,
+        12,
+        series_anidb_id=17495,
+        series_anidb_episode_id=277518,
+    )
 
     candidate = candidate_from_worker(
         provider_name="examplehub",
@@ -251,6 +260,9 @@ def test_worker_protocol_round_trips_language_video_and_download_payload():
     assert language_to_payload(language)["hi"] is True
     assert video_to_payload(movie)["hashes"]["opensubtitles"] == "abc123"
     assert video_to_payload(movie)["media_ids"]["radarrId"] == 12
+    assert video_to_payload(episode)["series_anidb_id"] == 17495
+    assert video_to_payload(episode)["series_anidb_series_id"] == 17495
+    assert video_to_payload(episode)["series_anidb_episode_id"] == 277518
     assert candidate.provider_name == "examplehub"
     assert candidate.source_provider == "upstream"
     assert candidate.id == "upstream:sub-1"
@@ -293,7 +305,8 @@ def test_venv_installer_uses_isolated_hash_checked_pip(monkeypatch, tmp_path):
     assert pip_calls, calls
     install_cmd = " ".join(pip_calls[-1])
     assert "--require-hashes" in install_cmd
-    assert "--only-binary=:all:" in install_cmd
+    assert "--prefer-binary" in install_cmd
+    assert "--only-binary=:all:" not in install_cmd
     assert "--no-warn-script-location" in install_cmd
     assert "-r" in install_cmd
     assert "/usr/local" not in install_cmd
@@ -615,6 +628,63 @@ def test_untrusted_install_cannot_replace_registered_migrated_provider():
 
         assert provider_id not in registered
         assert provider_registry[provider_id] is RegisteredHubGestdown
+    finally:
+        hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if provider_id in provider_registry:
+            del provider_registry[provider_id]
+        if had_existing and original_cls is not None:
+            provider_registry.register(provider_id, original_cls)
+
+
+def test_dead_origin_providers_are_not_builtin_replacements():
+    # Providers whose upstream origin is dead must never be on the trusted-replacement
+    # allowlist, so a catalog cannot resurrect them by shadowing a (removed) built-in.
+    from provider_hub.migration import MIGRATED_BUILT_IN_PROVIDER_IDS
+
+    assert {"hosszupuska", "podnapisi", "subscenter", "xsubs"}.isdisjoint(
+        MIGRATED_BUILT_IN_PROVIDER_IDS
+    )
+
+
+def test_active_trusted_provider_replaces_non_gestdown_built_in():
+    # The allowlist covers the full built-in set, not just gestdown: a trusted catalog
+    # entry for any allowlisted built-in (here addic7ed) replaces it with a hub proxy.
+    import provider_hub.registry as hub_registry
+    from provider_hub.migration import MIGRATED_BUILT_IN_PROVIDER_IDS
+    from provider_hub.registry import HubProxyProvider, register_active_provider_classes
+    from subliminal_patch.extensions import provider_registry
+    from subliminal_patch.providers import Provider
+
+    provider_id = "addic7ed"
+    assert provider_id in MIGRATED_BUILT_IN_PROVIDER_IDS
+    had_existing = provider_id in provider_registry
+    original_cls = provider_registry[provider_id] if had_existing else None
+
+    class BuiltInAddic7edProvider(Provider):
+        provider_name = provider_id
+        languages = {Language("eng")}
+        video_types = (Movie,)
+
+    if not had_existing:
+        provider_registry.register(provider_id, BuiltInAddic7edProvider)
+        original_cls = BuiltInAddic7edProvider
+
+    installation = _install(
+        provider_id,
+        trusted=True,
+        manifest=_manifest(
+            provider_id=provider_id,
+            name="Addic7ed",
+            dependencies={"requirements": []},
+        ),
+    )
+
+    try:
+        registered = register_active_provider_classes(installations=[installation])
+
+        assert registered == [provider_id]
+        assert provider_registry[provider_id] is not original_cls
+        assert issubclass(provider_registry[provider_id], HubProxyProvider)
     finally:
         hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
         if provider_id in provider_registry:
