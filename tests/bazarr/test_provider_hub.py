@@ -3052,3 +3052,31 @@ def test_stage_install_local_rejects_zip_slip(tmp_path, monkeypatch):
 
     with pytest.raises(ProviderHubInstallError, match="unsafe path"):
         stage_install_local(buffer.getvalue())
+
+
+def test_stage_install_local_creates_hub_dir_when_missing(tmp_path, monkeypatch):
+    # A local upload can be the first Provider Hub write, before the hub dir exists;
+    # it must create the directory instead of failing with FileNotFoundError.
+    from provider_hub.service import stage_install_local
+
+    provider_content = b"class LocalProvider: pass\n"
+    file_payloads = {"provider.py": provider_content}
+    manifest = _manifest(
+        provider_id="firstlocal",
+        name="First Local",
+        provider_content=provider_content,
+        dependencies={"requirements": []},
+    )
+    package = _provider_zip(manifest, file_payloads)
+
+    # Point the state at a provider_hub dir that does not exist yet.
+    state_file = tmp_path / "provider_hub" / "state.json"
+    assert not state_file.parent.exists()
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    _patch_local_install_env(monkeypatch, tmp_path)
+
+    installation = stage_install_local(package)
+
+    assert installation["provider_id"] == "firstlocal"
+    assert installation["origin"] == "local"
+    assert state_file.parent.exists()

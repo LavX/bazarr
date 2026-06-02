@@ -1246,7 +1246,11 @@ def stage_install_local(archive_bytes: bytes) -> dict[str, Any]:
     if not isinstance(archive_bytes, (bytes, bytearray)) or not archive_bytes:
         raise ProviderHubInstallError("uploaded package is empty")
 
-    work_dir = Path(tempfile.mkdtemp(prefix="phub-local-", dir=str(provider_hub_dir())))
+    # A local upload can be the very first Provider Hub write, before any catalog
+    # refresh/job has created the directory, so make sure it exists.
+    hub_dir = provider_hub_dir()
+    hub_dir.mkdir(parents=True, exist_ok=True)
+    work_dir = Path(tempfile.mkdtemp(prefix="phub-local-", dir=str(hub_dir)))
     try:
         _safe_extract_zip(bytes(archive_bytes), work_dir)
         manifest, bundle_root = _find_local_manifest(work_dir)

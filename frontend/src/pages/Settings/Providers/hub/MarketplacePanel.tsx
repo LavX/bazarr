@@ -116,26 +116,54 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
     return Array.from(seen.values());
   }, [catalog?.entries]);
 
+  // Providers installed from an uploaded package. They own their card (built from
+  // the installation, not a catalog entry) and are excluded from the marketplace
+  // list so a local override is never shown as a catalog card.
+  const localProviderIds = useMemo(
+    () =>
+      new Set(
+        (providers ?? [])
+          .filter((provider) => provider.origin === "local")
+          .map((provider) => provider.provider_id),
+      ),
+    [providers],
+  );
+
+  const localEntries = useMemo(
+    () =>
+      (providers ?? [])
+        .filter((provider) => provider.origin === "local")
+        .map(catalogEntryFromInstallation),
+    [providers],
+  );
+
   const marketplaceEntries = useMemo(() => {
     const catalogProviderIds = new Set(
       latestPerProvider.map((entry) => entry.provider_id),
     );
     const installedOnlyEntries = (providers ?? [])
-      .filter((provider) => !catalogProviderIds.has(provider.provider_id))
+      .filter(
+        (provider) =>
+          !catalogProviderIds.has(provider.provider_id) &&
+          provider.origin !== "local",
+      )
       .map(catalogEntryFromInstallation);
 
-    return [...latestPerProvider, ...installedOnlyEntries];
-  }, [latestPerProvider, providers]);
+    const catalogEntries = latestPerProvider.filter(
+      (entry) => !localProviderIds.has(entry.provider_id),
+    );
+    return [...catalogEntries, ...installedOnlyEntries];
+  }, [latestPerProvider, providers, localProviderIds]);
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return marketplaceEntries.filter((entry) => {
+  const matchesFilters = useCallback(
+    (entry: ProviderHubCatalogEntry) => {
       if (trustFilter === "trusted" && !entry.trusted) return false;
       if (trustFilter === "community" && entry.trusted) return false;
       if (activeSources.length > 0) {
         const sn = entry.source ?? entry.source_name ?? "";
         if (!activeSources.includes(sn)) return false;
       }
+      const q = query.trim().toLowerCase();
       if (!q) return true;
       const haystack = [
         entry.name,
@@ -148,8 +176,9 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
         .join(" ")
         .toLowerCase();
       return haystack.includes(q);
-    });
-  }, [marketplaceEntries, query, trustFilter, activeSources]);
+    },
+    [query, trustFilter, activeSources],
+  );
 
   const handleInstall = useCallback(
     (entry: ProviderHubCatalogEntry) => {
@@ -159,19 +188,13 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
     [install],
   );
 
-  const isLocalInstall = useCallback(
-    (entry: ProviderHubCatalogEntry) =>
-      installedById.get(entry.provider_id)?.origin === "local",
-    [installedById],
-  );
-
   const marketplaceCards = useMemo(
-    () => filtered.filter((entry) => !isLocalInstall(entry)),
-    [filtered, isLocalInstall],
+    () => marketplaceEntries.filter(matchesFilters),
+    [marketplaceEntries, matchesFilters],
   );
   const localCards = useMemo(
-    () => filtered.filter((entry) => isLocalInstall(entry)),
-    [filtered, isLocalInstall],
+    () => localEntries.filter(matchesFilters),
+    [localEntries, matchesFilters],
   );
 
   const renderCard = useCallback(

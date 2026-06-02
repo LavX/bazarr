@@ -137,9 +137,13 @@ class ProviderHubApi extends BaseApi {
   async installLocal(file: File) {
     const form = new FormData();
     form.append("file", file);
+    // Override the client's default application/json Content-Type so Axios sends
+    // real multipart/form-data (with boundary) and Flask populates request.files.
     const response = await this.postRaw<ProviderHubInstallation>(
       "/installations/local",
       form,
+      undefined,
+      { "Content-Type": "multipart/form-data" },
     );
     return response.data;
   }
