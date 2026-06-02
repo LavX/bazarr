@@ -51,8 +51,9 @@ class BaseApi {
     path: string,
     data?: unknown,
     params?: LooseObject,
+    headers?: LooseObject,
   ): Promise<AxiosResponse<T>> {
-    return client.axios.post(this.prefix + path, data, { params });
+    return client.axios.post(this.prefix + path, data, { params, headers });
   }
 
   protected patch<T = void>(

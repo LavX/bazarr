@@ -1,9 +1,11 @@
 # coding=utf-8
 import base64
+import io
 import json
 import os
 import subprocess
 import threading
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -75,6 +77,29 @@ def _manifest(**overrides):
     }
     manifest.update(overrides)
     return manifest
+
+
+def _provider_zip(manifest, file_payloads, *, manifest_name="provider.json", prefix=""):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(f"{prefix}{manifest_name}", json.dumps(manifest))
+        for path, content in file_payloads.items():
+            archive.writestr(f"{prefix}{path}", content)
+    return buffer.getvalue()
+
+
+def _patch_local_install_env(monkeypatch, tmp_path):
+    class FakeEnvironment:
+        def __init__(self, root):
+            self.root = Path(root)
+
+        def install(self, validated):
+            return self.root / "envs" / validated.provider_id / validated.version / "test"
+
+    monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
+    monkeypatch.setattr("provider_hub.service.python_executable", lambda env_path: tmp_path / "python")
+    monkeypatch.setattr("provider_hub.service._smoke_validate_worker", lambda manifest, bundle_path, python_path: None)
+    monkeypatch.setattr("provider_hub.service._set_bazarr_provider_enabled", lambda provider_id, enabled: True)
 
 
 class _FakeResponse:
@@ -2981,3 +3006,147 @@ def test_remove_catalog_source_purges_catalog_entries(tmp_path, monkeypatch):
     remaining = load_state()["catalog_entries"]
     assert "community:foo:1.0.0" not in remaining
     assert "official:bar:1.0.0" in remaining
+
+
+def test_install_origin_resolves_catalog_and_local():
+    from provider_hub.service import _install_origin
+
+    state = {
+        "catalog_sources": {
+            "official": {
+                "id": "official",
+                "url": "https://github.com/owner/repo/blob/main/catalog.json",
+            }
+        }
+    }
+    catalog_manifest = _manifest()  # source.catalog_url matches the official source
+    assert _install_origin(catalog_manifest, state) == ("catalog", "official")
+
+    local_manifest = _manifest(
+        source={
+            "type": "github",
+            "repo": "someone/elsewhere",
+            "ref": "main",
+            "commit": "a" * 40,
+            "catalog_url": "https://github.com/someone/elsewhere/blob/main/catalog.json",
+            "trusted": False,
+        }
+    )
+    assert _install_origin(local_manifest, state) == ("local", None)
+
+
+def test_stage_install_local_records_origin_local_and_untrusted(tmp_path, monkeypatch):
+    from provider_hub.service import stage_install_local
+    from provider_hub.state import load_state
+
+    provider_content = b"class LocalProvider: pass\n"
+    file_payloads = {"provider.py": provider_content}
+    manifest = _manifest(
+        provider_id="locallyinstalled",
+        name="Locally Installed",
+        provider_content=provider_content,
+        dependencies={"requirements": []},
+        # Even with a catalog_url, an uploaded package is always local + untrusted.
+        source={
+            "type": "github",
+            "repo": "owner/repo",
+            "ref": "main",
+            "commit": "b" * 40,
+            "catalog_url": "https://github.com/owner/repo/blob/main/catalog.json",
+            "trusted": True,
+        },
+    )
+    package = _provider_zip(manifest, file_payloads, prefix="locallyinstalled/")
+
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(json.dumps({"installations": {}, "jobs": []}), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    _patch_local_install_env(monkeypatch, tmp_path)
+
+    installation = stage_install_local(package)
+
+    assert installation["provider_id"] == "locallyinstalled"
+    assert installation["origin"] == "local"
+    assert installation["source_id"] is None
+    assert installation["trusted"] is False
+    assert installation["state"] == "staged"
+
+    stored = load_state()["installations"]["locallyinstalled"]
+    assert stored["origin"] == "local"
+    assert stored["trusted"] is False
+    # A local install is authoritative: even a catalog_url that matches a source
+    # must not relabel it as a catalog provider on read.
+    from provider_hub.service import list_providers
+    listed = {p["provider_id"]: p for p in list_providers()}
+    assert listed["locallyinstalled"]["origin"] == "local"
+
+
+def test_stage_install_local_rejects_built_in_shadow(tmp_path, monkeypatch):
+    from provider_hub.manifest import ManifestValidationError
+    from provider_hub.service import stage_install_local
+
+    provider_content = b"class GestdownProvider: pass\n"
+    file_payloads = {"provider.py": provider_content}
+    manifest = _manifest(
+        provider_id="gestdown",
+        name="Gestdown",
+        provider_content=provider_content,
+        dependencies={"requirements": []},
+    )
+    package = _provider_zip(manifest, file_payloads)
+
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(json.dumps({"installations": {}, "jobs": []}), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    monkeypatch.setattr("provider_hub.service._built_in_provider_ids", lambda: {"gestdown"})
+    _patch_local_install_env(monkeypatch, tmp_path)
+
+    # Untrusted local packages can never shadow a built-in, even an allowlisted one.
+    with pytest.raises(ManifestValidationError, match="built-in"):
+        stage_install_local(package)
+
+
+def test_stage_install_local_rejects_zip_slip(tmp_path, monkeypatch):
+    from provider_hub.service import ProviderHubInstallError, stage_install_local
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("../escaped.py", b"print('pwned')\n")
+
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(json.dumps({"installations": {}, "jobs": []}), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    with pytest.raises(ProviderHubInstallError, match="unsafe path"):
+        stage_install_local(buffer.getvalue())
+
+
+def test_stage_install_local_creates_hub_dir_when_missing(tmp_path, monkeypatch):
+    # A local upload can be the first Provider Hub write, before the hub dir exists;
+    # it must create the directory instead of failing with FileNotFoundError.
+    from provider_hub.service import stage_install_local
+
+    provider_content = b"class LocalProvider: pass\n"
+    file_payloads = {"provider.py": provider_content}
+    manifest = _manifest(
+        provider_id="firstlocal",
+        name="First Local",
+        provider_content=provider_content,
+        dependencies={"requirements": []},
+    )
+    package = _provider_zip(manifest, file_payloads)
+
+    # Point the state at a provider_hub dir that does not exist yet.
+    state_file = tmp_path / "provider_hub" / "state.json"
+    assert not state_file.parent.exists()
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    _patch_local_install_env(monkeypatch, tmp_path)
+
+    installation = stage_install_local(package)
+
+    assert installation["provider_id"] == "firstlocal"
+    assert installation["origin"] == "local"
+    assert state_file.parent.exists()

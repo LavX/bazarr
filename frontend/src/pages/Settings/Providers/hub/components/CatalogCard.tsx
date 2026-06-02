@@ -37,6 +37,8 @@ interface CatalogCardProps {
   onTest?: (id: string) => void;
   onUninstall?: (id: string) => void;
   isTesting?: boolean;
+  /** True for providers installed from an uploaded local package, not a catalog. */
+  isLocal?: boolean;
 }
 
 type CtaState = "install" | "installed" | "update" | "restart" | "broken";
@@ -83,6 +85,7 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
   onTest,
   onUninstall,
   isTesting,
+  isLocal = false,
 }) => {
   const manifest = useMemo(() => parseManifest(entry), [entry]);
   const cta = deriveCta(entry, installed, manifest !== null);
@@ -163,7 +166,9 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
     }
   })();
 
-  const sourceLabel = entry.source ?? entry.source_name ?? "Unknown source";
+  const sourceLabel = isLocal
+    ? "local package"
+    : (entry.source ?? entry.source_name ?? "Unknown source");
   const description =
     (manifest?.description as string | undefined) ??
     (manifest?.summary as string | undefined) ??
@@ -272,7 +277,15 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
               activeVersion={installed.active_version}
             />
           )}
-          <TrustBadge trusted={entry.trusted} />
+          {isLocal ? (
+            <Tooltip label="Installed from an uploaded local package, not a catalog source. Never trusted; cannot replace a built-in provider.">
+              <Badge size="xs" variant="light" color="grape">
+                Local
+              </Badge>
+            </Tooltip>
+          ) : (
+            <TrustBadge trusted={entry.trusted} />
+          )}
         </Group>
         <div className={styles.hubCardAction}>{ctaButton}</div>
       </div>

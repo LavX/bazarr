@@ -148,6 +148,23 @@ class ProviderHubInstallations(Resource):
             return str(error), 400
 
 
+@api_ns_provider_hub.route('provider-hub/installations/local')
+class ProviderHubLocalInstallations(Resource):
+    @authenticate
+    @api_ns_provider_hub.response(200, 'Success')
+    @api_ns_provider_hub.response(400, 'Invalid package')
+    @api_ns_provider_hub.response(401, 'Not Authenticated')
+    def post(self):
+        upload = request.files.get("file") or request.files.get("package")
+        if upload is None:
+            return 'a .zip package file is required', 400
+        archive_bytes = upload.read()
+        try:
+            return service.stage_install_local(archive_bytes)
+        except (ManifestValidationError, ProviderHubInstallError) as error:
+            return str(error), 400
+
+
 @api_ns_provider_hub.route('provider-hub/installations/<string:provider_id>')
 class ProviderHubInstallation(Resource):
     @authenticate

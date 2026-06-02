@@ -33,6 +33,8 @@ class ProviderHubInstallation:
     staged_python_path: str | None = None
     last_error: str | None = None
     trusted: bool = False
+    origin: str = "catalog"
+    source_id: str | None = None
 
 
 def official_catalog_source() -> dict[str, Any]:
@@ -209,6 +211,8 @@ def active_installations(path: str | os.PathLike[str] | None = None) -> list[Pro
                 staged_python_path=item.get("staged_python_path"),
                 last_error=item.get("last_error"),
                 trusted=bool(item.get("trusted", False)),
+                origin=str(item.get("origin") or "catalog"),
+                source_id=item.get("source_id"),
             )
         )
     return installations
