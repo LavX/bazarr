@@ -61,27 +61,28 @@ const UsageCell: FunctionComponent<{ keyData: DistKey }> = ({ keyData }) => {
       </Text>
     );
   }
-  // The cell stays compact (daily figure); hover reveals every window so the
-  // hour/week/month limits are discoverable without widening the table.
+  // The cell stays compact (daily figure); hover reveals every window. Lay the
+  // two kinds out as side-by-side columns (used / limit) so the popup is wide
+  // and short rather than a tall skinny stack.
   const breakdown = (
-    <Stack gap={4}>
+    <Group align="flex-start" gap="xl" wrap="nowrap">
       {(["search", "download"] as const).map((kind) => (
-        <div key={kind}>
-          <Text size="xs" fw={600}>
+        <Stack key={kind} gap={2}>
+          <Text size="xs" fw={700}>
             {kind === "search" ? "Search" : "Download"}
           </Text>
           {WINDOWS.map((w) => (
-            <Text key={w} size="xs">
+            <Text key={w} size="xs" style={{ whiteSpace: "nowrap" }}>
               {WINDOW_LABELS[w]}: {usage[kind][w].toLocaleString()} /{" "}
               {formatLimit(limits[kind][w])}
             </Text>
           ))}
-        </div>
+        </Stack>
       ))}
-    </Stack>
+    </Group>
   );
   return (
-    <Tooltip label={breakdown} multiline withArrow position="left">
+    <Tooltip label={breakdown} withArrow position="left" w={320} multiline>
       <Stack gap={2} style={{ cursor: "help", width: "fit-content" }}>
         {(["search", "download"] as const).map((kind) => (
           <Text key={kind} size="xs">
