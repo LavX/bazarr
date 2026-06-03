@@ -73,6 +73,14 @@ class BaseApi {
     return client.axios.patch(this.prefix + path, data, { params });
   }
 
+  protected putRaw<T = void>(
+    path: string,
+    data?: unknown,
+    params?: LooseObject,
+  ): Promise<AxiosResponse<T>> {
+    return client.axios.put(this.prefix + path, data, { params });
+  }
+
   protected delete<T = void>(
     path: string,
     formdata?: LooseObject,

@@ -1,5 +1,5 @@
 from __future__ import annotations
-from flask import Blueprint, request, jsonify, Response
+from flask import Blueprint, request, jsonify, Response, g
 # Intra-package and intra-app imports MUST drop the `bazarr.` prefix - the
 # rest of bazarr resolves modules from `bazarr/` as sys.path root, and a
 # `bazarr.foo` import resolves to a SECOND module instance with its own
@@ -18,11 +18,68 @@ def _all_disabled(path):
 
 
 import datetime as _dt  # noqa: E402
-from . import auth, service, response_mapper as M, rate_limiter  # noqa: E402
+import time as _time  # noqa: E402
+from . import auth, service, response_mapper as M  # noqa: E402
+from . import meter, limits, keyring  # noqa: E402
 from .auth import compat_auth  # noqa: E402
 
 
 _SUPPORTED_SUB_FORMATS = frozenset({"srt"})
+
+
+def _current_key() -> dict:
+    """The key record stashed by compat_auth (always set on authed routes)."""
+    return getattr(g, "compat_key", None) or auth._legacy_key_record()
+
+
+def _meter_ok(key_rec: dict, kind: str) -> None:
+    """Record a successful metered hit + touch last-used (best-effort)."""
+    kid = int(key_rec.get("id") or 0)
+    if kid <= 0:
+        return  # unkeyed legacy fallback: nothing persistent to meter
+    meter.record(kid, kind)
+    try:
+        keyring.touch_last_used(kid)
+    except Exception:
+        pass
+
+
+def _meter_blocked(key_rec: dict, kind: str) -> None:
+    kid = int(key_rec.get("id") or 0)
+    if kid > 0:
+        meter.record(kid, kind, blocked=True)
+
+
+def _display_download_quota(key_rec: dict) -> tuple[int, int, int]:
+    """(allowed, remaining, reset_epoch) for the download quota shown to
+    OS-compat clients. Unlimited keys report the legacy downloads_per_window
+    as a cosmetic ceiling so the plugin UI still shows a sensible number."""
+    from app.config import settings
+    d = limits.check(key_rec, "download")
+    if d.window == "none":
+        ceiling = int(settings.compat_endpoint.downloads_per_window)
+        reset = int(_time.time()) + int(settings.compat_endpoint.downloads_window_seconds)
+        return ceiling, ceiling, reset
+    return d.limit, max(0, d.remaining), d.reset_epoch
+
+
+def _throttle_response(kind: str, decision):
+    """429 for the search surface (the OS contract has no search-throttle
+    code, so use the standard Too Many Requests). Carries Retry-After and
+    X-RateLimit-* headers plus the OS-style x-reason + reset_time_utc."""
+    reset = int(decision.reset_epoch)
+    retry_after = max(1, reset - int(_time.time()))
+    resp = jsonify({
+        "message": f"{kind} rate limit exceeded ({decision.window})",
+        "reset_time_utc": _iso_utc(reset),
+    })
+    resp.status_code = 429
+    resp.headers["x-reason"] = "throttled"
+    resp.headers["Retry-After"] = str(retry_after)
+    resp.headers["X-RateLimit-Limit"] = str(int(decision.limit))
+    resp.headers["X-RateLimit-Remaining"] = "0"
+    resp.headers["X-RateLimit-Reset"] = str(reset)
+    return resp
 
 
 def _normalize_lang(lang):
@@ -58,25 +115,10 @@ def _resolve_tmdb_to_imdb(tmdb_id: str) -> str:
     return ""
 
 
-def _quota_config() -> tuple[int, int]:
-    from app.config import settings
-    return (int(settings.compat_endpoint.downloads_per_window),
-            int(settings.compat_endpoint.downloads_window_seconds))
-
-
 def _iso_utc(epoch: int) -> str:
     return _dt.datetime.fromtimestamp(epoch, _dt.timezone.utc)\
                        .strftime("%Y-%m-%dT%H:%M:%SZ")
 
-
-def _jti_from_request() -> str | None:
-    """Pull jti from the (pre-validated) bearer. Returns None when there
-    is no bearer or the bearer doesn't decode."""
-    bearer = (request.headers.get("Authorization") or "")
-    if not bearer.startswith("Bearer "):
-        return None
-    ok, claims = auth.validate_jwt(bearer[7:])
-    return claims.get("jti") if ok else None
 
 compat_bp = Blueprint("compat", __name__)
 
@@ -129,12 +171,13 @@ def _infer_client_base(req) -> tuple[str, str]:
 def login():
     scheme, host = _infer_client_base(request)
     base_url = host or request.host
-    limit, window = _quota_config()
-    remaining, reset = rate_limiter.inspect("", limit, window)
-    user_data = M.user_info_response(remaining=remaining, allowed=limit,
+    key_rec = _current_key()
+    allowed, remaining, reset = _display_download_quota(key_rec)
+    user_data = M.user_info_response(remaining=remaining, allowed=allowed,
                                       reset_iso=_iso_utc(reset))["data"]
+    # Bind the JWT to the resolving key so /infos/user can attribute usage.
     return jsonify({
-        "token": auth.mint_jwt(),
+        "token": auth.mint_jwt({"kid": int(key_rec.get("id") or 0)}),
         "status": 200,
         "base_url": base_url,
         "user": user_data,
@@ -203,6 +246,34 @@ def subtitles():
         media_type = "episode"
     else:
         media_type = "movie"
+
+    # Distribution Hub: meter + rate-limit search per API key (req #3, #5, #6).
+    from app.config import settings
+    key_rec = _current_key()
+    if bool(settings.compat_endpoint.search_rate_limit_enabled):
+        decision = limits.check(key_rec, "search")
+        if not decision.allowed:
+            _meter_blocked(key_rec, "search")
+            return _throttle_response("search", decision)
+
+    # The request is admitted: meter it now, before the fanout. Metering on
+    # admission (not on success) means a provider outage or empty result still
+    # counts against the key's quota, so failing searches can't be spammed to
+    # evade the rate limit.
+    _meter_ok(key_rec, "search")
+
+    # Per-request provider exclusion + timeout, falling back to the key's
+    # configured defaults (req #1, #2). Clamp the timeout to the same [5, 120]
+    # bounds the fanout enforces, here at the edge, so the effective value is
+    # what feeds the cache key (an out-of-range value can't fragment the cache
+    # into a key that behaves identically to the clamped one).
+    exclude_param = args.get("exclude_providers") or ""
+    req_exclude = [p.strip() for p in exclude_param.split(",") if p.strip()]
+    eff_exclude = req_exclude or (key_rec.get("excluded_providers") or [])
+    req_timeout = args.get("timeout_seconds", type=int)
+    raw_timeout = req_timeout or key_rec.get("timeout_seconds")
+    eff_timeout = max(5, min(120, int(raw_timeout))) if raw_timeout else None
+
     try:
         result = service.search(imdb or "", season, episode, langs, media_type,
                                 query=query_filename, moviehash=moviehash,
@@ -210,7 +281,9 @@ def subtitles():
                                 series_anidb_id=series_anidb_id,
                                 series_anidb_episode_id=series_anidb_episode_id,
                                 moviehash_match=moviehash_match,
-                                requested_languages=requested_codes)
+                                requested_languages=requested_codes,
+                                exclude_providers=eff_exclude or None,
+                                timeout_seconds=eff_timeout)
     except Exception:
         return compat_error("upstream providers unavailable", 503, "upstream")
     page = max(1, args.get("page", default=1, type=int) or 1)
@@ -247,12 +320,16 @@ def download():
         return compat_error(f"unsupported sub_format: {sub_format}",
                             400, "bad-request")
 
-    limit, window = _quota_config()
-    jti = _jti_from_request() or ""
-    allowed, remaining, reset = rate_limiter.try_consume(jti, limit, window)
-    if not allowed:
+    # Distribution Hub: per-key download metering + limit (req #5, #6). The
+    # download throttle keeps the OS-contract 406 (the Jellyfin plugin treats
+    # this code as a quota signal). The Api-Key resolves the key on every
+    # request, so g.compat_key is authoritative for whose quota is spent.
+    key_rec = _current_key()
+    decision = limits.check(key_rec, "download")
+    if not decision.allowed:
+        _meter_blocked(key_rec, "download")
         resp = jsonify({"message": "download quota exhausted",
-                        "reset_time_utc": _iso_utc(reset)})
+                        "reset_time_utc": _iso_utc(int(decision.reset_epoch))})
         resp.status_code = 406
         resp.headers["x-reason"] = "throttled"
         return resp
@@ -263,6 +340,9 @@ def download():
             base_host = f"{scheme}://{host}"
         else:
             base_host = request.host_url.rstrip("/")
+        # Compute the post-consume remaining for the displayed quota.
+        _meter_ok(key_rec, "download")
+        _allowed, remaining, reset = _display_download_quota(key_rec)
         resp = service.download(fid_int, base_host=base_host,
                                 remaining=remaining,
                                 reset_iso=_iso_utc(reset))
@@ -313,11 +393,12 @@ def download_stream(stream_token):
 @compat_auth(require_jwt=False)
 def infos_user():
     """Api-Key alone is sufficient. OS-compat clients (Jellyfin) poll /infos/user
-    for remaining-downloads updates without re-minting the JWT each time."""
-    limit, window = _quota_config()
-    jti = _jti_from_request() or ""
-    remaining, reset = rate_limiter.inspect(jti, limit, window)
-    return jsonify(M.user_info_response(remaining=remaining, allowed=limit,
+    for remaining-downloads updates without re-minting the JWT each time.
+
+    Reports the resolved key's download quota (inspect-only, no consume)."""
+    key_rec = _current_key()
+    allowed, remaining, reset = _display_download_quota(key_rec)
+    return jsonify(M.user_info_response(remaining=remaining, allowed=allowed,
                                           reset_iso=_iso_utc(reset)))
 
 

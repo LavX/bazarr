@@ -30,13 +30,21 @@ def build_key(media_type: str, imdb_id: str, season: int | None,
               series_anidb_id: int | None = None,
               series_anidb_episode_id: int | None = None,
               moviehash_match: str | None = None,
-              requested_languages: list[str] | None = None) -> str:
+              requested_languages: list[str] | None = None,
+              exclude_providers: list[str] | None = None,
+              timeout_seconds: int | None = None) -> str:
     """Deterministic across restarts. Language variants preserved.
 
     query/moviehash/moviebytesize/AniDB ids/moviehash_match are part of the key
     because they change the virtual Video construction AND post-fanout filtering,
     so different values produce different result shapes and must not
     cross-contaminate via cache hits.
+
+    exclude_providers/timeout_seconds are per-request (Distribution Hub)
+    knobs. Excluding a provider changes which results appear, so it MUST
+    influence the key - otherwise an excluded-provider search would hit the
+    full-provider cached envelope. timeout_seconds is folded in too so a
+    short-timeout (partial) search can't poison a later full search's cache.
     """
     lang_tuples = sorted(
         (str(l.alpha3), str(l.country) if l.country else "",
@@ -53,10 +61,12 @@ def build_key(media_type: str, imdb_id: str, season: int | None,
     # envelope until natural TTL expiry.
     from app.config import settings as _cfg
     local_flag = int(bool(_cfg.compat_endpoint.serve_local_subs))
+    excl = ",".join(sorted(exclude_providers or []))
+    to = int(timeout_seconds) if timeout_seconds else 0
     extras = hashlib.sha256(
         f"{query or ''}|{moviehash or ''}|{moviebytesize or ''}|{moviehash_match or ''}"
         f"|anidb={series_anidb_id or ''}|anidb_ep={series_anidb_episode_id or ''}"
-        f"|{req_langs}|local={local_flag}".encode()
+        f"|{req_langs}|local={local_flag}|excl={excl}|to={to}".encode()
     ).hexdigest()[:16]
     return (
         f"compat:v2:{media_type}:{imdb_id}:{season or 0}:{episode or 0}"

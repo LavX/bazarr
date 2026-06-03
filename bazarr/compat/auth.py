@@ -9,7 +9,7 @@ from functools import wraps
 from typing import Tuple
 
 import jwt as pyjwt
-from flask import jsonify, make_response, request
+from flask import g, jsonify, make_response, request
 
 from app.config import settings
 
@@ -25,11 +25,16 @@ class CompatBootError(RuntimeError):
 
 
 def validate_compat_token(supplied: str | None) -> bool:
-    """Constant-time compare against settings.compat_endpoint.token. Never `==`."""
+    """Constant-time compare against settings.compat_endpoint.token. Never `==`.
+
+    Rejects secrets shorter than 32 chars defensively. boot_hmac_selftest
+    already fails closed on a short token, so a running compat endpoint never
+    has one - but this guards any caller that reaches here without that gate.
+    """
     if not supplied:
         return False
     expected = settings.compat_endpoint.token or ""
-    if not expected:
+    if len(expected) < 32:
         return False
     return hmac.compare_digest(str(supplied), str(expected))
 
@@ -255,6 +260,71 @@ def compat_error(message: str, status: int, x_reason: str):
     return resp
 
 
+def _legacy_key_record() -> dict:
+    """Synthesized Unlimited key record for the shared compat_endpoint.token.
+
+    Used when the presented Api-Key matches the legacy shared token but the
+    keyring can't resolve it to a row (e.g. the compat tables aren't present
+    in a partial/bootstrapping environment). Mirrors the seeded Default key:
+    Unlimited tier, no per-key exclusion/timeout. id=0 means "unkeyed" -
+    metering against it is best-effort and limit checks short-circuit
+    (Unlimited never reads the meter)."""
+    return {"id": 0, "name": "Default (legacy token)", "tier": "unlimited",
+            "custom_limits": None, "excluded_providers": None,
+            "timeout_seconds": None, "enabled": 1, "is_legacy": 1}
+
+
+def resolve_compat_key(api_key: str | None) -> dict | None:
+    """Resolve a presented Api-Key to a key record (named key or legacy token).
+
+    Named keys (incl. the seeded Default) resolve via the keyring. The shared
+    compat_endpoint.token also validates as a synthesized legacy record so the
+    endpoint keeps working even before/without the keyring seed."""
+    if not api_key:
+        return None
+    keyring_errored = False
+    try:
+        from . import keyring
+        rec = keyring.resolve(api_key)
+    except Exception:
+        # Availability over strictness: a keyring/DB hiccup must not lock out
+        # the legacy shared token (existing integrations). Fall through to the
+        # token check, but log loudly so the degraded state isn't silent - in
+        # this window the legacy token is served as an unmetered Unlimited key.
+        rec = None
+        keyring_errored = True
+    if rec is not None:
+        return rec
+    # rec is None: the Api-Key is not an active named or legacy key row. Only
+    # the shared compat_endpoint.token may still authorize, via a synthesized
+    # legacy record - but used narrowly so disabling the Default key actually
+    # revokes the token.
+    if not validate_compat_token(api_key):
+        return None
+    import logging
+    _log = logging.getLogger("bazarr.compat.auth")
+    if keyring_errored:
+        # Availability over strictness: a keyring/DB hiccup must not lock out
+        # existing integrations. Degrade to unmetered Unlimited, but loudly.
+        _log.warning("compat keyring unavailable; serving legacy shared token "
+                     "as unmetered Unlimited (id=0) until the keyring recovers")
+        return _legacy_key_record()
+    # Keyring is healthy and did not resolve the token. If a legacy row has been
+    # seeded, resolve() already considered it, so None means the operator
+    # disabled it (or it was re-pointed) - respect that and reject. Fall back to
+    # the synthesized record only during the bootstrap window before the legacy
+    # row exists (e.g. table created but not yet seeded this boot).
+    try:
+        from . import keyring
+        if keyring.has_legacy_key():
+            return None
+    except Exception:
+        pass
+    _log.info("legacy shared token accepted before keyring seed; serving as "
+              "unmetered Unlimited (id=0) until the Default key is seeded")
+    return _legacy_key_record()
+
+
 def compat_auth(require_jwt: bool = False):
     """Standalone decorator. MUST NOT call bazarr/api/utils.py::authenticate.
 
@@ -264,6 +334,9 @@ def compat_auth(require_jwt: bool = False):
         JWT and retry in a loop that can't recover.
       - JWT missing / invalid / expired: 401 Unauthorized. This IS the
         signal the plugin uses to re-login (clear token + POST /login).
+
+    On success the resolved key record is stashed on `g.compat_key` for the
+    route to meter and rate-limit against (Distribution Hub).
     """
     def decorator(fn):
         @wraps(fn)
@@ -271,15 +344,24 @@ def compat_auth(require_jwt: bool = False):
             api_key = request.headers.get("Api-Key") or request.headers.get("X-Api-Key")
             if not api_key:
                 return compat_error("Missing API key", 403, "auth")
-            if not validate_compat_token(api_key):
+            rec = resolve_compat_key(api_key)
+            if rec is None:
                 return compat_error("Invalid API key", 403, "auth")
+            g.compat_key = rec
             if require_jwt:
                 bearer = (request.headers.get("Authorization") or "")
                 if not bearer.startswith("Bearer "):
                     return compat_error("Authorization header required", 401, "auth")
-                ok, _ = validate_jwt(bearer[7:])
+                ok, claims = validate_jwt(bearer[7:])
                 if not ok:
                     return compat_error("Token invalid or expired", 401, "auth")
+                # Bind the JWT to the key it was minted for: a token issued for
+                # key A must not be replayed alongside key B's Api-Key to spend
+                # B's quota. Only enforced when the token carries a kid claim,
+                # so pre-existing kid-less tokens keep working until they expire.
+                kid = claims.get("kid")
+                if kid is not None and int(kid) != int(rec.get("id") or 0):
+                    return compat_error("Token does not match API key", 401, "auth")
             return fn(*args, **kwargs)
         return wrapper
     return decorator

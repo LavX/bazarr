@@ -564,6 +564,15 @@ validators = [
               default=86400, cast=int, gte=60, lte=2592000),
     Validator('compat_endpoint.serve_local_subs',
               default=True, is_type_of=bool),
+    # Distribution Hub: tiered rate limiting. `tiers` is an operator-editable
+    # dict merged over the built-in presets (see compat/tiers.py). A limit of
+    # 0 means unlimited for that window. `default_tier` is applied to new keys.
+    Validator('compat_endpoint.default_tier', default='free', cast=str),
+    Validator('compat_endpoint.tiers', default={}, is_type_of=dict),
+    Validator('compat_endpoint.search_rate_limit_enabled',
+              default=True, is_type_of=bool),
+    Validator('compat_endpoint.usage_retention_days',
+              default=400, cast=int, gte=35, lte=1000),
     # OMDB: optional title/year resolution for movies that aren't in the
     # local library. Free tier at omdbapi.com (1000 req/day). Empty = skip.
     Validator('omdb.apikey', default='', cast=str),
@@ -921,7 +930,7 @@ def save_settings(settings_items):
             value = False
 
         # Handle JSON strings for dict settings
-        if settings_keys[-1] in ['provider_priorities', 'provider_languages'] and isinstance(value, str):
+        if settings_keys[-1] in ['provider_priorities', 'provider_languages', 'tiers'] and isinstance(value, str):
             try:
                 value = json.loads(value)
             except ValueError:

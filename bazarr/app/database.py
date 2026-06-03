@@ -210,6 +210,46 @@ class TableAnnouncements(Base):
     text = mapped_column(Text)
 
 
+class TableCompatApiKeys(Base):
+    # Distribution Hub: named API keys for the OpenSubtitles-compat endpoint.
+    # The full token is never stored - only its sha256 (key_hash) and an
+    # 8-char prefix for UI identification. The legacy shared
+    # compat_endpoint.token is migrated in as an is_legacy Unlimited row.
+    __tablename__ = 'compat_api_keys'
+
+    id = mapped_column(Integer, primary_key=True)
+    name = mapped_column(Text, nullable=False)
+    key_prefix = mapped_column(Text)
+    key_hash = mapped_column(Text, nullable=False, unique=True, index=True)
+    tier = mapped_column(Text, nullable=False, default='free')
+    custom_limits = mapped_column(Text)            # JSON dict or NULL = inherit tier
+    excluded_providers = mapped_column(Text)       # JSON list or NULL
+    timeout_seconds = mapped_column(Integer)       # NULL = inherit global
+    enabled = mapped_column(Integer, nullable=False, default=1)
+    is_legacy = mapped_column(Integer, nullable=False, default=0)
+    created_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+    last_used_at = mapped_column(DateTime)
+    note = mapped_column(Text)
+
+
+class TableCompatUsage(Base):
+    # Distribution Hub: hourly-bucketed per-key usage counters. Source of
+    # truth for both rate-limit window sums and usage statistics. One row
+    # per (key_id, kind, hour_start); upserted on each metered request.
+    __tablename__ = 'compat_usage'
+    __table_args__ = (
+        Index('ix_compat_usage_key_kind_hour', 'key_id', 'kind', 'hour_start',
+              unique=True),
+    )
+
+    id = mapped_column(Integer, primary_key=True)
+    key_id = mapped_column(Integer, nullable=False, index=True)
+    kind = mapped_column(Text, nullable=False)        # 'search' | 'download'
+    hour_start = mapped_column(DateTime, nullable=False, index=True)
+    count = mapped_column(Integer, nullable=False, default=0)
+    blocked = mapped_column(Integer, nullable=False, default=0)
+
+
 class TableBlacklist(Base):
     __tablename__ = 'table_blacklist'
 
