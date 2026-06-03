@@ -1,6 +1,7 @@
 from __future__ import annotations
 import logging
 import os
+import re
 from threading import Lock
 from typing import Iterable
 from urllib.parse import quote
@@ -24,9 +25,11 @@ _compat_pool = None  # lazy singleton, dedicated (B2)
 # get_subhash() raise instead of matching.
 _CLIENT_MOVIEHASH_PROVIDERS = (
     "bsplayer",
+    "napisy24",
     "opensubtitles",
     "opensubtitlescom",
 )
+_SHOOTER_HASH_RE = re.compile(r"^[0-9a-fA-F]{32}(?:;[0-9a-fA-F]{32}){3}$")
 
 
 def _get_compat_pool():
@@ -208,9 +211,14 @@ def _parse_video_from_library(path: str, meta: dict, media_type: str,
 def _apply_client_moviehash(video, moviehash: str | None = None):
     if not moviehash:
         return video
+    client_hash = str(moviehash).strip()
     hashes = dict(getattr(video, "hashes", {}) or {})
+    if _SHOOTER_HASH_RE.match(client_hash):
+        hashes["shooter"] = client_hash.lower()
+        video.hashes = hashes
+        return video
     for provider_id in _CLIENT_MOVIEHASH_PROVIDERS:
-        hashes[provider_id] = str(moviehash)
+        hashes[provider_id] = client_hash
     video.hashes = hashes
     return video
 
