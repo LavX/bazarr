@@ -29,6 +29,7 @@ import {
   useDistDeleteKey,
   useDistKeys,
   useDistProviders,
+  useDistRegenerate,
   useDistRotateKey,
   useDistTiers,
   useDistUpdateKey,
@@ -144,11 +145,13 @@ const KeysPanel: FunctionComponent = () => {
   const updateKey = useDistUpdateKey();
   const deleteKey = useDistDeleteKey();
   const rotateKey = useDistRotateKey();
+  const regenerate = useDistRegenerate();
 
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<DistKey | null>(null);
   const [revealToken, setRevealToken] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<DistKey | null>(null);
+  const [confirmLegacyRotate, setConfirmLegacyRotate] = useState(false);
 
   const openCreate = () => {
     setEditing(null);
@@ -253,7 +256,11 @@ const KeysPanel: FunctionComponent = () => {
                   <Table.Td>
                     <Menu position="bottom-end" withinPortal>
                       <Menu.Target>
-                        <ActionIcon variant="subtle" color="gray">
+                        <ActionIcon
+                          variant="subtle"
+                          color="gray"
+                          aria-label="Key actions"
+                        >
                           <FontAwesomeIcon icon={faEllipsisVertical} />
                         </ActionIcon>
                       </Menu.Target>
@@ -262,11 +269,15 @@ const KeysPanel: FunctionComponent = () => {
                           Edit
                         </Menu.Item>
                         {key.is_legacy === 1 ? (
-                          // The legacy Default key maps the shared config token:
-                          // rotate/delete are handled via Settings -> Regenerate
+                          // The legacy Default key maps the shared config token.
+                          // Rotating it calls the regenerate endpoint, which
+                          // rotates signing secrets + shared token atomically
                           // so the config secret and DB row stay in sync.
-                          <Menu.Item disabled>
-                            Rotate/delete via Settings → Regenerate
+                          <Menu.Item
+                            leftSection={<FontAwesomeIcon icon={faRotate} />}
+                            onClick={() => setConfirmLegacyRotate(true)}
+                          >
+                            Rotate token
                           </Menu.Item>
                         ) : (
                           <>
@@ -328,6 +339,41 @@ const KeysPanel: FunctionComponent = () => {
         token={revealToken}
         onClose={() => setRevealToken(null)}
       />
+
+      <Modal
+        opened={confirmLegacyRotate}
+        onClose={() => setConfirmLegacyRotate(false)}
+        title="Rotate the legacy Default key?"
+      >
+        <Stack>
+          <Text size="sm">
+            This regenerates the signing secrets and the shared legacy token.
+            The current token stops working immediately, every client using it
+            must re-paste the new token, and the Default key is automatically
+            re-pointed at it. Named keys are unaffected. This cannot be undone.
+          </Text>
+          <Group justify="flex-end">
+            <Button
+              variant="default"
+              onClick={() => setConfirmLegacyRotate(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              color="red"
+              loading={regenerate.isPending}
+              onClick={() =>
+                regenerate.mutate(undefined, {
+                  onSuccess: (res) => setRevealToken(res.token),
+                  onSettled: () => setConfirmLegacyRotate(false),
+                })
+              }
+            >
+              Rotate
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
 
       <Modal
         opened={confirmDelete != null}

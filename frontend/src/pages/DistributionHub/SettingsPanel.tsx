@@ -41,6 +41,13 @@ const SettingsPanel: FunctionComponent = () => {
               </Title>
               <Stack gap="sm">
                 <Switch
+                  label="I understand this endpoint must not be exposed to the public internet and I am responsible for provider ToS compliance."
+                  checked={draft.consent}
+                  onChange={(e) =>
+                    setDraft({ ...draft, consent: e.currentTarget.checked })
+                  }
+                />
+                <Switch
                   label="Enable the Distribution Hub endpoint"
                   checked={draft.enabled}
                   onChange={(e) =>
@@ -101,6 +108,7 @@ const SettingsPanel: FunctionComponent = () => {
                     onClick={() =>
                       saveSettings.mutate({
                         enabled: draft.enabled,
+                        consent: draft.consent,
                         search_rate_limit_enabled:
                           draft.search_rate_limit_enabled,
                         serve_local_subs: draft.serve_local_subs,
@@ -134,6 +142,12 @@ const SettingsPanel: FunctionComponent = () => {
                   Regenerate secrets
                 </Button>
               </Group>
+              <Text size="xs" c="dimmed" mt="sm">
+                This endpoint implements a REST API shape used by
+                OpenSubtitles.com for interoperability with existing
+                OpenSubtitles-compatible media-center plugins. Bazarr+ is not
+                affiliated with or endorsed by OpenSubtitles.com.
+              </Text>
             </Card>
           </>
         )}
