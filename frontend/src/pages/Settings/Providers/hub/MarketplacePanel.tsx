@@ -219,7 +219,10 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
     [installedById, handleInstall, install, testProvider, uninstall],
   );
 
-  const noSources = sources.length === 0 && marketplaceEntries.length === 0;
+  const noSources =
+    sources.length === 0 &&
+    marketplaceEntries.length === 0 &&
+    localEntries.length === 0;
   const noResults =
     !noSources && marketplaceCards.length === 0 && localCards.length === 0;
 

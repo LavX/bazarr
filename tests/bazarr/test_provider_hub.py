@@ -3008,7 +3008,10 @@ def test_remove_catalog_source_purges_catalog_entries(tmp_path, monkeypatch):
     assert "official:bar:1.0.0" in remaining
 
 
-def test_install_origin_resolves_catalog_and_local():
+def test_install_origin_resolves_catalog_source_id():
+    # A catalog install is always origin="catalog"; the source_id is resolved from
+    # the manifest's catalog_url, or None when no configured source matches.
+    # ("local" is reserved for uploads, recorded explicitly by stage_install_local.)
     from provider_hub.service import _install_origin
 
     state = {
@@ -3022,7 +3025,7 @@ def test_install_origin_resolves_catalog_and_local():
     catalog_manifest = _manifest()  # source.catalog_url matches the official source
     assert _install_origin(catalog_manifest, state) == ("catalog", "official")
 
-    local_manifest = _manifest(
+    unmatched_manifest = _manifest(
         source={
             "type": "github",
             "repo": "someone/elsewhere",
@@ -3032,7 +3035,7 @@ def test_install_origin_resolves_catalog_and_local():
             "trusted": False,
         }
     )
-    assert _install_origin(local_manifest, state) == ("local", None)
+    assert _install_origin(unmatched_manifest, state) == ("catalog", None)
 
 
 def test_stage_install_local_records_origin_local_and_untrusted(tmp_path, monkeypatch):
@@ -3150,3 +3153,97 @@ def test_stage_install_local_creates_hub_dir_when_missing(tmp_path, monkeypatch)
     assert installation["provider_id"] == "firstlocal"
     assert installation["origin"] == "local"
     assert state_file.parent.exists()
+
+
+def _local_install_state_file(tmp_path):
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(
+        json.dumps(
+            {
+                "catalog_entries": {
+                    "official:locallyowned:2.0.0": {
+                        "source": "official",
+                        "provider_id": "locallyowned",
+                        "version": "2.0.0",
+                        "trusted": True,
+                        "manifest": _manifest(
+                            provider_id="locallyowned",
+                            version="2.0.0",
+                            dependencies={"requirements": []},
+                        ),
+                    }
+                },
+                "installations": {
+                    "locallyowned": {
+                        "provider_id": "locallyowned",
+                        "name": "Locally Owned",
+                        "active_version": "1.0.0",
+                        "state": "active",
+                        "pending_restart": False,
+                        "origin": "local",
+                        "trusted": False,
+                        "manifest": _manifest(
+                            provider_id="locallyowned",
+                            version="1.0.0",
+                            dependencies={"requirements": []},
+                        ),
+                    }
+                },
+                "jobs": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return state_file
+
+
+def test_check_updates_skips_local_installs(tmp_path, monkeypatch):
+    # A local install with a higher catalog version must NOT be reported as an
+    # available update; the catalog does not own local packages.
+    from provider_hub.service import check_updates
+
+    monkeypatch.setenv(
+        "BAZARR_PROVIDER_HUB_STATE", str(_local_install_state_file(tmp_path))
+    )
+
+    result = check_updates()
+
+    assert (result.get("details") or {}).get("updates_available") == 0
+
+
+def test_apply_update_ignores_local_install(tmp_path, monkeypatch):
+    # apply_update must refuse to replace a local package with a catalog version.
+    from provider_hub.service import apply_update
+    from provider_hub.state import load_state
+
+    monkeypatch.setenv(
+        "BAZARR_PROVIDER_HUB_STATE", str(_local_install_state_file(tmp_path))
+    )
+
+    provider = apply_update("locallyowned")
+
+    assert provider["origin"] == "local"
+    assert provider.get("staged_version") is None
+    stored = load_state()["installations"]["locallyowned"]
+    assert stored["active_version"] == "1.0.0"
+    assert stored.get("staged_version") is None
+
+
+def test_stage_install_local_rejects_oversized_package(tmp_path, monkeypatch):
+    # An upload whose declared uncompressed size exceeds the bound is rejected as a
+    # 400-class error before extraction, not allowed to fill the disk.
+    import provider_hub.service as svc
+    from provider_hub.service import ProviderHubInstallError, stage_install_local
+
+    monkeypatch.setattr(svc, "_LOCAL_PACKAGE_MAX_TOTAL_BYTES", 10)
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(json.dumps({"installations": {}, "jobs": []}), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    manifest = _manifest(provider_id="toobig", dependencies={"requirements": []})
+    package = _provider_zip(manifest, {"provider.py": b"class P: pass\n"})
+
+    with pytest.raises(ProviderHubInstallError, match="too large"):
+        stage_install_local(package)

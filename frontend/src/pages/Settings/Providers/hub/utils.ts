@@ -205,7 +205,11 @@ export function summarizeUpdates(
 ): UpdateSummary {
   const list = providers ?? [];
   return {
-    available: list.filter((p) => isUpdateAvailable(p, catalog)),
+    // Local packages are owned by their uploaded file, so a catalog update is
+    // never offered for them (the backend also refuses apply_update for local).
+    available: list.filter(
+      (p) => p.origin !== "local" && isUpdateAvailable(p, catalog),
+    ),
     pendingRestart: list.filter((p) => p.pending_restart === true),
   };
 }
