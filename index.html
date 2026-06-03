@@ -4,15 +4,18 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Bazarr+ - Self-Hosted Subtitle Management for Sonarr, Radarr, Plex &amp; Jellyfin</title>
-  <meta name="description" content="Bazarr+ is a drop-in replacement for Bazarr with Provider Hub plugin marketplace, External Integration for Jellyfin and VLSub, API key encryption at rest, AI translation, provider priority, bulk operations, a subtitle editor, and zero telemetry.">
-  <link rel="canonical" href="https://lavx.github.io/bazarr">
+  <meta name="description" content="Self-hosted subtitle management for Sonarr, Radarr, Plex &amp; Jellyfin. Bazarr+ is a drop-in Bazarr replacement with Provider Hub, AI translation, and zero telemetry.">
+  <link rel="canonical" href="https://lavx.github.io/bazarr/">
 
   <!-- Open Graph -->
   <meta property="og:type" content="website">
-  <meta property="og:url" content="https://lavx.github.io/bazarr">
+  <meta property="og:site_name" content="Bazarr+">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:url" content="https://lavx.github.io/bazarr/">
   <meta property="og:title" content="Bazarr+ - Self-Hosted Subtitle Management">
   <meta property="og:description" content="Provider Hub plugin marketplace, External Integration for Jellyfin and VLSub, API key encryption at rest, AI translation, provider priority, bulk operations, subtitle editor, zero telemetry.">
   <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
+  <meta property="og:image:alt" content="Bazarr+ subtitle management dashboard">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
 
@@ -31,12 +34,14 @@
     "applicationCategory": "MultimediaApplication",
     "operatingSystem": "Linux, Docker",
     "description": "Self-hosted subtitle management for Sonarr, Radarr, Plex, and Jellyfin with Provider Hub plugin marketplace, External Integration (OpenSubtitles-compatible REST endpoint for Jellyfin and VLSub clients), API key encryption at rest, AI translation, provider priority, bulk operations, and zero telemetry.",
-    "url": "https://lavx.github.io/bazarr",
+    "url": "https://lavx.github.io/bazarr/",
+    "image": "https://lavx.github.io/bazarr/screenshots/og-image.png",
     "downloadUrl": "https://github.com/LavX/bazarr",
-    "softwareVersion": "2.3.0",
+    "softwareVersion": "2.3.1",
     "author": {
       "@type": "Person",
-      "name": "LavX"
+      "name": "LavX",
+      "sameAs": "https://github.com/LavX"
     },
     "license": "https://github.com/LavX/bazarr/blob/master/LICENSE",
     "offers": {
@@ -46,13 +51,69 @@
     }
   }
   </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": [
+      {
+        "@type": "Question",
+        "name": "Is migration safe? Will I lose my data?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Yes. Bazarr+ uses the same database with a few added columns created on first run. Your SQLite database, settings, download history, and subtitle files are all preserved. Back up your config directory first, swap the container image, and start."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Can I go back to upstream Bazarr?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Yes. Restore your config backup, change the image back, and start. The only manual step is clearing the password field in config.yaml since upstream cannot read the PBKDF2 hash. See the migration guide for details."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Is it really free? What is the catch?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Completely free and open source under the same GPL license as upstream Bazarr. AI translation uses OpenRouter, which offers free model tiers with generous limits. Paid models are available if you want higher quality, but they are entirely optional."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Do I need to reconfigure anything after switching?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "No. Your Sonarr/Radarr connections, language profiles, provider accounts, and notification settings carry over as-is. New features like Provider Hub, provider priority, bulk operations, and the subtitle editor are available immediately. Installed Provider Hub plugins activate after the staged restart."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "How does the OpenSubtitles.org scraper work?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "The scraper fetches publicly available subtitle pages from OpenSubtitles.org, similar to how a browser works. It uses FlareSolverr to handle Cloudflare challenges. No OpenSubtitles account or API key is needed."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Where do I get help or report issues?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Join our Discord server for help and discussion, or open an issue on GitHub. The guides section covers installation, AI translation setup, and migration in detail."
+        }
+      }
+    ]
+  }
+  </script>
 
-  <!-- Geist font: async preload -->
-  <link rel="preload" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" as="style" crossorigin>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" media="print" onload="this.media='all'">
-  <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css"></noscript>
+  <!-- Geist font: self-hosted (see @font-face in css/style.css) -->
+  <link rel="preload" href="fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
 
+  <meta name="theme-color" content="#1a1a2e">
   <link rel="icon" href="screenshots/logo128.png" type="image/png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -457,6 +518,11 @@
       <p class="footer-credit">Built by <a href="https://github.com/LavX" target="_blank" rel="noopener">LavX</a>. Based on <a href="https://github.com/morpheus65535/bazarr" target="_blank" rel="noopener">Bazarr</a> by morpheus65535.</p>
       <ul class="footer-links">
         <li><a href="guides/">Guides</a></li>
+        <li><a href="guides/getting-started.html">Getting Started</a></li>
+        <li><a href="guides/provider-hub.html">Provider Hub</a></li>
+        <li><a href="guides/external-integration.html">External Integration</a></li>
+        <li><a href="guides/ai-translation.html">AI Translation</a></li>
+        <li><a href="guides/migration.html">Migration</a></li>
         <li><a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a></li>
         <li><a href="https://github.com/LavX/bazarr/issues" target="_blank" rel="noopener">Issues</a></li>
         <li><a href="https://github.com/LavX/bazarr/wiki" target="_blank" rel="noopener">Wiki</a></li>

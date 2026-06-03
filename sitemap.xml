@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url><loc>https://lavx.github.io/bazarr/</loc></url>
-  <url><loc>https://lavx.github.io/bazarr/guides/</loc></url>
-  <url><loc>https://lavx.github.io/bazarr/guides/getting-started.html</loc></url>
-  <url><loc>https://lavx.github.io/bazarr/guides/provider-hub.html</loc></url>
-  <url><loc>https://lavx.github.io/bazarr/guides/external-integration.html</loc></url>
-  <url><loc>https://lavx.github.io/bazarr/guides/ai-translation.html</loc></url>
-  <url><loc>https://lavx.github.io/bazarr/guides/migration.html</loc></url>
+  <url><loc>https://lavx.github.io/bazarr/</loc><lastmod>2026-06-03</lastmod></url>
+  <url><loc>https://lavx.github.io/bazarr/guides/</loc><lastmod>2026-06-03</lastmod></url>
+  <url><loc>https://lavx.github.io/bazarr/guides/getting-started.html</loc><lastmod>2026-06-03</lastmod></url>
+  <url><loc>https://lavx.github.io/bazarr/guides/provider-hub.html</loc><lastmod>2026-06-03</lastmod></url>
+  <url><loc>https://lavx.github.io/bazarr/guides/external-integration.html</loc><lastmod>2026-06-03</lastmod></url>
+  <url><loc>https://lavx.github.io/bazarr/guides/ai-translation.html</loc><lastmod>2026-06-03</lastmod></url>
+  <url><loc>https://lavx.github.io/bazarr/guides/migration.html</loc><lastmod>2026-06-03</lastmod></url>
 </urlset>
