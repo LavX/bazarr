@@ -46,6 +46,9 @@ function draftToBody(draft: KeyDraft) {
     excluded_providers: draft.excluded_providers.length
       ? draft.excluded_providers
       : null,
+    allowed_providers: draft.allowed_providers.length
+      ? draft.allowed_providers
+      : null,
     timeout_seconds: draft.timeout_seconds,
     note: draft.note?.trim() ? draft.note.trim() : null,
   };

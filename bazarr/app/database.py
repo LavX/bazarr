@@ -223,7 +223,8 @@ class TableCompatApiKeys(Base):
     key_hash = mapped_column(Text, nullable=False, unique=True, index=True)
     tier = mapped_column(Text, nullable=False, default='free')
     custom_limits = mapped_column(Text)            # JSON dict or NULL = inherit tier
-    excluded_providers = mapped_column(Text)       # JSON list or NULL
+    excluded_providers = mapped_column(Text)       # JSON list or NULL = drop these
+    allowed_providers = mapped_column(Text)        # JSON list or NULL = allow all (only these)
     timeout_seconds = mapped_column(Integer)       # NULL = inherit global
     enabled = mapped_column(Integer, nullable=False, default=1)
     is_legacy = mapped_column(Integer, nullable=False, default=0)

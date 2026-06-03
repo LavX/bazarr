@@ -55,6 +55,7 @@ def _row_to_dict(row) -> dict:
     d = {c: getattr(row, c) for c in _SCALAR_COLS}
     d["custom_limits"] = _safe_json(row.custom_limits)
     d["excluded_providers"] = _safe_json(row.excluded_providers)
+    d["allowed_providers"] = _safe_json(row.allowed_providers)
     return d
 
 
@@ -93,7 +94,8 @@ def get(key_id: int) -> dict | None:
 
 
 def create(name: str, tier: str = "free", *, custom_limits=None,
-           excluded_providers=None, timeout_seconds=None, note=None,
+           excluded_providers=None, allowed_providers=None,
+           timeout_seconds=None, note=None,
            is_legacy: int = 0) -> tuple[int, str]:
     """Create a key. Returns (id, full_token). The token is returned once."""
     token, prefix, h = generate_token()
@@ -102,6 +104,8 @@ def create(name: str, tier: str = "free", *, custom_limits=None,
         custom_limits=json.dumps(custom_limits) if custom_limits else None,
         excluded_providers=(json.dumps(excluded_providers)
                             if excluded_providers else None),
+        allowed_providers=(json.dumps(allowed_providers)
+                           if allowed_providers else None),
         timeout_seconds=timeout_seconds, enabled=1, is_legacy=is_legacy,
         created_at=datetime.now(), note=note))
     new_id = database.execute(
@@ -132,6 +136,9 @@ def update(key_id: int, **fields) -> None:
     if "excluded_providers" in fields:
         ep = fields["excluded_providers"]
         vals["excluded_providers"] = json.dumps(ep) if ep else None
+    if "allowed_providers" in fields:
+        ap = fields["allowed_providers"]
+        vals["allowed_providers"] = json.dumps(ap) if ap else None
     if vals:
         database.execute(sa_update(TableCompatApiKeys)
                          .where(TableCompatApiKeys.id == int(key_id))

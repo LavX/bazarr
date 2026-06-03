@@ -40,6 +40,21 @@ def test_exclusion_and_timeout_change_cache_key():
     assert excl != to
 
 
+def test_only_providers_changes_cache_key():
+    """An allow-listed search must not collide with the full-provider envelope,
+    nor with the same-named exclusion (incl and excl are distinct dimensions)."""
+    from compat.cache import build_key
+    from subzero.language import Language
+    langs = [Language.fromietf("en")]
+    base = build_key("movie", "tt1", None, None, langs, ["p1", "p2"])
+    incl = build_key("movie", "tt1", None, None, langs, ["p1", "p2"],
+                     only_providers=["p1"])
+    excl = build_key("movie", "tt1", None, None, langs, ["p1", "p2"],
+                     exclude_providers=["p1"])
+    assert base != incl
+    assert incl != excl
+
+
 # ---- keyed auth ----
 
 def test_unknown_key_is_forbidden():
@@ -179,3 +194,114 @@ def test_per_key_exclusion_default_applies(compat_db, monkeypatch):
               headers={"Api-Key": token})
     assert r.status_code == 200
     assert captured["exclude_providers"] == ["embeddedsubtitles"]
+
+
+def test_request_only_providers_reach_service(compat_db, monkeypatch):
+    captured = {}
+
+    def _fake_search(*a, **k):
+        captured.update(k)
+        return {"data": []}
+
+    monkeypatch.setattr("compat.routes.service.search", _fake_search)
+    from compat import keyring
+    _, token = keyring.create("site", tier="free")
+    keyring.invalidate_cache()
+    c = _app().test_client()
+    r = c.get("/api/v1/subtitles?imdb_id=tt1&languages=en"
+              "&only_providers=opensubtitles,subscene",
+              headers={"Api-Key": token})
+    assert r.status_code == 200
+    assert captured["only_providers"] == ["opensubtitles", "subscene"]
+
+
+def test_per_key_allow_default_applies(compat_db, monkeypatch):
+    captured = {}
+
+    def _fake_search(*a, **k):
+        captured.update(k)
+        return {"data": []}
+
+    monkeypatch.setattr("compat.routes.service.search", _fake_search)
+    from compat import keyring
+    _, token = keyring.create("site", tier="free",
+                              allowed_providers=["opensubtitles"])
+    keyring.invalidate_cache()
+    c = _app().test_client()
+    r = c.get("/api/v1/subtitles?imdb_id=tt1&languages=en",
+              headers={"Api-Key": token})
+    assert r.status_code == 200
+    assert captured["only_providers"] == ["opensubtitles"]
+
+
+def test_request_only_overrides_key_allow_default(compat_db, monkeypatch):
+    """A per-request only_providers value wins over the key's allow default."""
+    captured = {}
+
+    def _fake_search(*a, **k):
+        captured.update(k)
+        return {"data": []}
+
+    monkeypatch.setattr("compat.routes.service.search", _fake_search)
+    from compat import keyring
+    _, token = keyring.create("site", tier="free",
+                              allowed_providers=["opensubtitles"])
+    keyring.invalidate_cache()
+    c = _app().test_client()
+    r = c.get("/api/v1/subtitles?imdb_id=tt1&languages=en"
+              "&only_providers=subscene",
+              headers={"Api-Key": token})
+    assert r.status_code == 200
+    assert captured["only_providers"] == ["subscene"]
+
+
+# ---- provider discovery endpoint ----
+
+def test_providers_endpoint_lists_allowed_names(compat_db, monkeypatch):
+    monkeypatch.setattr("compat.routes.service.available_providers",
+                        lambda: ["opensubtitles", "subscene", "embeddedsubtitles"])
+    from compat import keyring
+    _, token = keyring.create("site", tier="free")
+    keyring.invalidate_cache()
+    c = _app().test_client()
+    r = c.get("/api/v1/providers", headers={"Api-Key": token})
+    assert r.status_code == 200
+    names = [p["name"] for p in r.get_json()["data"]]
+    assert names == ["opensubtitles", "subscene", "embeddedsubtitles"]
+
+
+def test_providers_endpoint_hides_key_excluded(compat_db, monkeypatch):
+    """A provider walled off for the key must not appear in its discovery list."""
+    monkeypatch.setattr("compat.routes.service.available_providers",
+                        lambda: ["opensubtitles", "subscene", "embeddedsubtitles"])
+    from compat import keyring
+    _, token = keyring.create("site", tier="free",
+                              excluded_providers=["embeddedsubtitles"])
+    keyring.invalidate_cache()
+    c = _app().test_client()
+    r = c.get("/api/v1/providers", headers={"Api-Key": token})
+    names = [p["name"] for p in r.get_json()["data"]]
+    assert "embeddedsubtitles" not in names
+    assert set(names) == {"opensubtitles", "subscene"}
+
+
+def test_providers_endpoint_intersects_key_allow_default(compat_db, monkeypatch):
+    monkeypatch.setattr("compat.routes.service.available_providers",
+                        lambda: ["opensubtitles", "subscene", "embeddedsubtitles"])
+    from compat import keyring
+    _, token = keyring.create("site", tier="free",
+                              allowed_providers=["subscene"])
+    keyring.invalidate_cache()
+    c = _app().test_client()
+    r = c.get("/api/v1/providers", headers={"Api-Key": token})
+    names = [p["name"] for p in r.get_json()["data"]]
+    assert names == ["subscene"]
+
+
+def test_providers_endpoint_rejects_unknown_key(monkeypatch):
+    monkeypatch.setattr("compat.routes.service.available_providers",
+                        lambda: ["opensubtitles"])
+    c = _app().test_client()
+    r = c.get("/api/v1/providers", headers={"Api-Key": "bzr_nope"})
+    assert r.status_code == 403
+    assert r.headers["x-reason"] == "auth"

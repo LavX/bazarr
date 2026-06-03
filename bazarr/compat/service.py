@@ -624,7 +624,7 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
                series_anidb_id=None, series_anidb_episode_id=None,
                moviehash_match=None,
                requested_languages=None, exclude_providers=None,
-               timeout_seconds=None):
+               timeout_seconds=None, only_providers=None):
     from subliminal_patch.provider_health import get_tracker as _get_health_tracker
     from subliminal_patch.score import ComputeScore, MAX_SCORES
     health = _get_health_tracker()
@@ -642,9 +642,21 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
     requested_exclude = {str(p).strip() for p in (exclude_providers or []) if str(p).strip()}
     exclude = (health_discarded | requested_exclude
                | (set() if video_has_file else set(_SKIP_FOR_VIRTUAL_VIDEO)))
-    logger.info("compat fanout: video=%r lang=%s providers=%d health_skipped=%s req_excluded=%s",
+    # Per-request / per-key allow-list (only_providers): restrict the fanout to
+    # exactly these by excluding everything else the pool knows about. Applied
+    # as an exclusion (unioned in) so it can only NARROW - it never overrides
+    # the operator's per-key exclusions or the health/virtual skips above, which
+    # remain subtracted. Unknown names simply don't match any pool provider; an
+    # allow-list that intersects nothing leaves the full pool excluded, yielding
+    # an empty result set (contract-safe: data == []).
+    requested_only = {str(p).strip() for p in (only_providers or []) if str(p).strip()}
+    if requested_only:
+        exclude |= (set(pool.providers) - requested_only)
+    logger.info("compat fanout: video=%r lang=%s providers=%d health_skipped=%s "
+                "req_excluded=%s req_only=%s",
                 video, [str(l) for l in languages], len(pool.providers),  # noqa: E741
-                sorted(health_discarded) or "[]", sorted(requested_exclude) or "[]")
+                sorted(health_discarded) or "[]", sorted(requested_exclude) or "[]",
+                sorted(requested_only) or "[]")
 
     stats: dict[str, tuple[str, int]] = {}
 
@@ -793,6 +805,17 @@ def _build_requested_language_map(requested_languages: list[str]) -> dict:
     return out
 
 
+def available_providers() -> list[str]:
+    """The provider names currently enabled on this install, sorted. Backs the
+    /api/v1/providers discovery endpoint so a client can learn the valid names
+    for the exclude_providers/only_providers knobs. Fail-soft to [] so a
+    provider-config hiccup degrades discovery to 'empty' rather than 500."""
+    try:
+        return sorted(get_providers_sorted() or [])
+    except Exception:
+        return []
+
+
 def search(imdb_id: str, season, episode, languages: Iterable[Language],
            media_type: str, query: str | None = None,
            moviehash: str | None = None,
@@ -802,7 +825,8 @@ def search(imdb_id: str, season, episode, languages: Iterable[Language],
            moviehash_match: str | None = None,
            requested_languages: list[str] | None = None,
            exclude_providers: list[str] | None = None,
-           timeout_seconds: int | None = None) -> dict:
+           timeout_seconds: int | None = None,
+           only_providers: list[str] | None = None) -> dict:
     enabled = get_providers_sorted()
     key = C.build_key(media_type, imdb_id, season, episode, languages, enabled,
                       query=query, moviehash=moviehash,
@@ -812,7 +836,8 @@ def search(imdb_id: str, season, episode, languages: Iterable[Language],
                       moviehash_match=moviehash_match,
                       requested_languages=requested_languages,
                       exclude_providers=exclude_providers,
-                      timeout_seconds=timeout_seconds)
+                      timeout_seconds=timeout_seconds,
+                      only_providers=only_providers)
     cache_ttl = int(settings.compat_endpoint.cache_ttl_seconds)
     fid_ttl = int(settings.compat_endpoint.file_id_ttl_seconds)
     ttl = min(cache_ttl, fid_ttl)
@@ -826,7 +851,8 @@ def search(imdb_id: str, season, episode, languages: Iterable[Language],
                                     moviehash_match=moviehash_match,
                                     requested_languages=requested_languages,
                                     exclude_providers=exclude_providers,
-                                    timeout_seconds=timeout_seconds),
+                                    timeout_seconds=timeout_seconds,
+                                    only_providers=only_providers),
         expiration_time=ttl,
     )
 
