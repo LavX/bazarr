@@ -905,15 +905,26 @@ def _fetch_bundle(manifest) -> Path:
     return target
 
 
+_LOCAL_PACKAGE_MAX_MEMBERS = 5000
+_LOCAL_PACKAGE_MAX_TOTAL_BYTES = 100 * 1024 * 1024  # 100 MB uncompressed
+
+
 def _safe_extract_zip(archive_bytes: bytes, dest: Path) -> None:
-    """Extract a zip into ``dest`` with zip-slip protection."""
+    """Extract a zip into ``dest`` with zip-slip, size and read-error guards."""
     dest_root = dest.resolve()
     try:
         archive = zipfile.ZipFile(io.BytesIO(archive_bytes))
     except zipfile.BadZipFile as error:
         raise ProviderHubInstallError("uploaded package is not a valid .zip archive") from error
     with archive:
-        for member in archive.infolist():
+        infos = archive.infolist()
+        # Bound the work before extracting so an oversized or zip-bomb upload
+        # cannot fill the disk or stall the install.
+        if len(infos) > _LOCAL_PACKAGE_MAX_MEMBERS:
+            raise ProviderHubInstallError("package contains too many files")
+        if sum(max(0, info.file_size) for info in infos) > _LOCAL_PACKAGE_MAX_TOTAL_BYTES:
+            raise ProviderHubInstallError("package is too large")
+        for member in infos:
             name = member.filename
             if not name or name.endswith("/"):
                 continue
@@ -921,8 +932,15 @@ def _safe_extract_zip(archive_bytes: bytes, dest: Path) -> None:
             if target != dest_root and dest_root not in target.parents:
                 raise ProviderHubInstallError(f"unsafe path in package: {name}")
             target.parent.mkdir(parents=True, exist_ok=True)
-            with archive.open(member) as source, open(target, "wb") as out:
-                shutil.copyfileobj(source, out)
+            try:
+                with archive.open(member) as source, open(target, "wb") as out:
+                    shutil.copyfileobj(source, out)
+            except (RuntimeError, zipfile.BadZipFile, OSError) as error:
+                # Encrypted/corrupt members raise here, outside the open() guard
+                # above; surface them as a 400 invalid-package, not a 500.
+                raise ProviderHubInstallError(
+                    f"could not read package entry {name}: {error}"
+                ) from error
 
 
 def _find_local_manifest(extracted: Path) -> tuple[dict[str, Any], Path]:
@@ -998,40 +1016,49 @@ def _catalog_manifest_trusted(manifest: dict[str, Any], state: dict[str, Any]) -
     return False
 
 
-def _install_origin(manifest: dict[str, Any], state: dict[str, Any]) -> tuple[str, str | None]:
-    """Resolve where an install came from, for display/grouping only.
-
-    Returns ("catalog", source_id) when the manifest's catalog_url matches a
-    configured catalog source, otherwise ("local", None). This is independent of
-    the trust decision (_catalog_manifest_trusted), which stays the security gate;
-    a local upload is always recorded as origin="local" regardless of this result.
-    """
+def _catalog_source_id_for_manifest(manifest: dict[str, Any], state: dict[str, Any]) -> str | None:
+    """Return the configured catalog source id whose url matches the manifest's
+    catalog_url, or None when no configured source matches."""
     if not isinstance(manifest, dict):
-        return ("local", None)
+        return None
     source = manifest.get("source")
     catalog_url = source.get("catalog_url") if isinstance(source, dict) else None
-    if catalog_url:
-        for source_id, configured in (state.get("catalog_sources") or {}).items():
-            if isinstance(configured, dict) and configured.get("url") == catalog_url:
-                return ("catalog", source_id)
-    return ("local", None)
+    if not catalog_url:
+        return None
+    for source_id, configured in (state.get("catalog_sources") or {}).items():
+        if isinstance(configured, dict) and configured.get("url") == catalog_url:
+            return source_id
+    return None
+
+
+def _install_origin(manifest: dict[str, Any], state: dict[str, Any]) -> tuple[str, str | None]:
+    """Resolve (origin, source_id) for a catalog install.
+
+    A catalog install is always origin="catalog"; the source_id is the configured
+    source matching the manifest's catalog_url, or None if none is configured (the
+    source may have been removed, or this is an older install). "local" is reserved
+    for uploads, which stage_install_local records explicitly. This is for
+    display/grouping only and is independent of the trust gate.
+    """
+    return ("catalog", _catalog_source_id_for_manifest(manifest, state))
 
 
 def _with_origin(provider: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     """Ensure a serialized installation carries origin/source_id.
 
-    A stored origin of "local" is authoritative (a local upload can never be
-    relabelled as a catalog provider). Otherwise the origin is resolved from the
-    manifest's catalog_url against the current sources, so pre-existing installs
-    and later source-config changes are reflected on read.
+    A stored origin of "local" is authoritative (a local upload is never
+    relabelled as a catalog provider). Otherwise it is a catalog install and the
+    source_id is resolved from the manifest's catalog_url against the current
+    sources, so source-config changes are reflected on read.
     """
     result = dict(provider)
     if result.get("origin") == "local":
         result.setdefault("source_id", result.get("source_id"))
         return result
-    origin, source_id = _install_origin(result.get("manifest") or {}, state)
-    result["origin"] = origin
-    result["source_id"] = source_id
+    result["origin"] = "catalog"
+    result["source_id"] = _catalog_source_id_for_manifest(
+        result.get("manifest") or {}, state
+    )
     return result
 
 
@@ -1440,6 +1467,9 @@ def check_updates() -> dict[str, Any]:
         for provider_id, installation in (state.get("installations") or {}).items():
             if not isinstance(installation, dict):
                 continue
+            if installation.get("origin") == "local":
+                # Local packages are owned by their uploaded file, not the catalog.
+                continue
             active_version = installation.get("active_version")
             if not active_version:
                 continue
@@ -1524,6 +1554,9 @@ def apply_update(provider_id: str) -> dict[str, Any] | None:
     provider = get_provider(provider_id, redact=False)
     if not provider:
         return None
+    if provider.get("origin") == "local":
+        # A local package is never replaced by a catalog update; ignore the request.
+        return _redact_installation(provider)
     state = load_state()
     manifest = provider.get("available_manifest") or _latest_catalog_manifest(
         state,
