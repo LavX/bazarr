@@ -26,6 +26,7 @@ const DistributionHubView: FunctionComponent = () => {
   useDocumentTitle(`Distribution Hub - ${useInstanceName()}`);
 
   const enabled = settings.data?.enabled ?? true;
+  const restartRequired = settings.data?.restart_required ?? false;
 
   return (
     <Container fluid px="md">
@@ -51,6 +52,19 @@ const DistributionHubView: FunctionComponent = () => {
               Enable now
             </Button>
           </Group>
+        </Alert>
+      )}
+
+      {restartRequired && (
+        <Alert
+          mb="md"
+          color="orange"
+          icon={<FontAwesomeIcon icon={faTriangleExclamation} />}
+          title="Restart required"
+        >
+          The endpoint is enabled in settings but not serving yet. The
+          OpenSubtitles-compatible routes are mounted at startup, so restart
+          Bazarr for the Distribution Hub to begin handling requests.
         </Alert>
       )}
 

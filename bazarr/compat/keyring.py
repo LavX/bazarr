@@ -162,20 +162,40 @@ def touch_last_used(key_id: int) -> None:
                      .values(last_used_at=datetime.now()))
 
 
+def has_legacy_key() -> bool:
+    """Whether an is_legacy row exists (any enabled state). Raises if the
+    table is absent - the caller distinguishes 'absent' from 'not seeded'."""
+    return database.execute(
+        select(TableCompatApiKeys.id)
+        .where(TableCompatApiKeys.is_legacy == 1)).first() is not None
+
+
 def seed_legacy_key() -> None:
     """Migrate settings.compat_endpoint.token into an Unlimited Default key.
 
     Idempotent: there is at most one is_legacy row. If the shared token has
     been rotated since the last seed, re-point the legacy row at the new hash
-    so existing integrations keep authorizing without manual intervention."""
+    so existing integrations keep authorizing without manual intervention.
+
+    Tolerates a missing table: on an upgrade where the compat blueprint is
+    registered before the schema is created (create_all/migrate), this no-ops
+    instead of crashing boot. The next request reseeds via the keyring once the
+    table exists, and the legacy token keeps working via the auth fallback in
+    the meantime."""
     from app.config import settings
     token = settings.compat_endpoint.token or ""
     if len(token) < 32:
         return
     h = hash_token(token)
-    existing = database.execute(
-        select(TableCompatApiKeys).where(TableCompatApiKeys.is_legacy == 1)
-    ).scalar_one_or_none()
+    try:
+        existing = database.execute(
+            select(TableCompatApiKeys).where(TableCompatApiKeys.is_legacy == 1)
+        ).scalar_one_or_none()
+    except Exception:
+        import logging
+        logging.getLogger("bazarr.compat.keyring").info(
+            "seed_legacy_key skipped: compat_api_keys table not ready yet")
+        return
     if existing is not None:
         if existing.key_hash != h:
             database.execute(sa_update(TableCompatApiKeys)

@@ -113,6 +113,32 @@ def test_request_exclusion_and_timeout_reach_service(compat_db, monkeypatch):
     assert captured["timeout_seconds"] == 10
 
 
+def test_disabled_legacy_key_revokes_shared_token(compat_db):
+    """Disabling the seeded Default key must actually revoke the shared token,
+    not silently fall back to the unmetered Unlimited legacy record."""
+    from app.config import settings
+    from compat import keyring, auth
+    settings["compat_endpoint"]["token"] = "L" * 40
+    keyring.seed_legacy_key()
+    keyring.invalidate_cache()
+    assert auth.resolve_compat_key("L" * 40) is not None  # enabled -> works
+    legacy = next(k for k in keyring.list_keys() if k["is_legacy"])
+    keyring.update(legacy["id"], enabled=0)
+    keyring.invalidate_cache()
+    assert auth.resolve_compat_key("L" * 40) is None       # disabled -> revoked
+
+
+def test_legacy_token_works_before_seed(compat_db):
+    """Bootstrap window: token matches config but no legacy row yet -> serve the
+    synthesized id=0 record so the endpoint works before the seed runs."""
+    from app.config import settings
+    from compat import keyring, auth
+    settings["compat_endpoint"]["token"] = "M" * 40
+    keyring.invalidate_cache()  # no seed called -> no is_legacy row
+    rec = auth.resolve_compat_key("M" * 40)
+    assert rec is not None and rec["id"] == 0 and rec["is_legacy"] == 1
+
+
 def test_jwt_kid_binds_to_key(compat_db, monkeypatch):
     """A JWT minted for key A must not be replayed with key B's Api-Key."""
     monkeypatch.setattr("compat.routes.service.download",

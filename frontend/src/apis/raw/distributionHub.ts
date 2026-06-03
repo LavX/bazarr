@@ -111,6 +111,7 @@ export interface DistSettings {
   downloads_window_seconds: number;
   serve_local_subs: boolean;
   has_token: boolean;
+  restart_required?: boolean;
 }
 
 class DistributionHubApi extends BaseApi {

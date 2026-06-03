@@ -258,24 +258,35 @@ const KeysPanel: FunctionComponent = () => {
                         <Menu.Item onClick={() => openEdit(key)}>
                           Edit
                         </Menu.Item>
-                        <Menu.Item
-                          leftSection={<FontAwesomeIcon icon={faRotate} />}
-                          onClick={() =>
-                            rotateKey.mutate(key.id, {
-                              onSuccess: (res) => setRevealToken(res.token),
-                            })
-                          }
-                        >
-                          Rotate token
-                        </Menu.Item>
-                        <Menu.Divider />
-                        <Menu.Item
-                          color="red"
-                          leftSection={<FontAwesomeIcon icon={faTrash} />}
-                          onClick={() => setConfirmDelete(key)}
-                        >
-                          Delete
-                        </Menu.Item>
+                        {key.is_legacy === 1 ? (
+                          // The legacy Default key maps the shared config token:
+                          // rotate/delete are handled via Settings -> Regenerate
+                          // so the config secret and DB row stay in sync.
+                          <Menu.Item disabled>
+                            Rotate/delete via Settings → Regenerate
+                          </Menu.Item>
+                        ) : (
+                          <>
+                            <Menu.Item
+                              leftSection={<FontAwesomeIcon icon={faRotate} />}
+                              onClick={() =>
+                                rotateKey.mutate(key.id, {
+                                  onSuccess: (res) => setRevealToken(res.token),
+                                })
+                              }
+                            >
+                              Rotate token
+                            </Menu.Item>
+                            <Menu.Divider />
+                            <Menu.Item
+                              color="red"
+                              leftSection={<FontAwesomeIcon icon={faTrash} />}
+                              onClick={() => setConfirmDelete(key)}
+                            >
+                              Delete
+                            </Menu.Item>
+                          </>
+                        )}
                       </Menu.Dropdown>
                     </Menu>
                   </Table.Td>

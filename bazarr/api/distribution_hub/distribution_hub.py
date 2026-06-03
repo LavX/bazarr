@@ -132,6 +132,14 @@ class DistributionHubKeyRotate(Resource):
         rec = keyring.get(key_id)
         if rec is None:
             return {"message": "key not found"}, 404
+        # Rotating the legacy Default key here would only change the DB row's
+        # hash, leaving settings.compat_endpoint.token (the real shared secret)
+        # untouched: the revealed token would be overwritten by seed on the next
+        # restart, and the old shared token would still authorize. Rotate the
+        # shared secret through /distribution-hub/regenerate instead.
+        if int(rec.get("is_legacy") or 0) == 1:
+            return {"message": "The legacy Default key cannot be rotated here. "
+                    "Use regenerate to rotate the shared secret."}, 400
         token = keyring.rotate(key_id)
         return {"token": token, "key_prefix": keyring.get(key_id)["key_prefix"]}
 
@@ -212,8 +220,15 @@ class DistributionHubSettings(Resource):
     @authenticate
     def get(self):
         ce = settings.compat_endpoint
+        # The /api/v1 blueprint (real vs disabled stub) is chosen once at boot
+        # from the enabled flag. If the operator flips enabled on at runtime,
+        # the routes are not remounted until restart - surface that so the UI
+        # can tell the user instead of silently serving the stub.
+        import compat
+        enabled = bool(ce.enabled)
+        restart_required = enabled and not getattr(compat, "compat_active", False)
         return {
-            "enabled": bool(ce.enabled),
+            "enabled": enabled,
             "consent": bool(ce.consent),
             "search_timeout_seconds": int(ce.search_timeout_seconds),
             "search_rate_limit_enabled": bool(ce.search_rate_limit_enabled),
@@ -223,6 +238,7 @@ class DistributionHubSettings(Resource):
             "downloads_window_seconds": int(ce.downloads_window_seconds),
             "serve_local_subs": bool(ce.serve_local_subs),
             "has_token": bool(ce.token),
+            "restart_required": restart_required,
         }
 
     @authenticate

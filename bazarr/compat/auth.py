@@ -295,14 +295,34 @@ def resolve_compat_key(api_key: str | None) -> dict | None:
         keyring_errored = True
     if rec is not None:
         return rec
-    if validate_compat_token(api_key):
-        if keyring_errored:
-            import logging
-            logging.getLogger("bazarr.compat.auth").warning(
-                "compat keyring unavailable; serving legacy shared token as "
-                "unmetered Unlimited (id=0) until the keyring recovers")
+    # rec is None: the Api-Key is not an active named or legacy key row. Only
+    # the shared compat_endpoint.token may still authorize, via a synthesized
+    # legacy record - but used narrowly so disabling the Default key actually
+    # revokes the token.
+    if not validate_compat_token(api_key):
+        return None
+    import logging
+    _log = logging.getLogger("bazarr.compat.auth")
+    if keyring_errored:
+        # Availability over strictness: a keyring/DB hiccup must not lock out
+        # existing integrations. Degrade to unmetered Unlimited, but loudly.
+        _log.warning("compat keyring unavailable; serving legacy shared token "
+                     "as unmetered Unlimited (id=0) until the keyring recovers")
         return _legacy_key_record()
-    return None
+    # Keyring is healthy and did not resolve the token. If a legacy row has been
+    # seeded, resolve() already considered it, so None means the operator
+    # disabled it (or it was re-pointed) - respect that and reject. Fall back to
+    # the synthesized record only during the bootstrap window before the legacy
+    # row exists (e.g. table created but not yet seeded this boot).
+    try:
+        from . import keyring
+        if keyring.has_legacy_key():
+            return None
+    except Exception:
+        pass
+    _log.info("legacy shared token accepted before keyring seed; serving as "
+              "unmetered Unlimited (id=0) until the Default key is seeded")
+    return _legacy_key_record()
 
 
 def compat_auth(require_jwt: bool = False):

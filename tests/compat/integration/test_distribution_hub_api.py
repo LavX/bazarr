@@ -78,6 +78,17 @@ def test_legacy_default_key_cannot_be_deleted(client):
     assert any(k["is_legacy"] for k in keyring.list_keys())
 
 
+def test_legacy_default_key_cannot_be_rotated(client):
+    from compat import keyring
+    from app.config import settings
+    settings["compat_endpoint"]["token"] = "y" * 40
+    keyring.seed_legacy_key()
+    keyring.invalidate_cache()
+    legacy = next(k for k in keyring.list_keys() if k["is_legacy"])
+    r = client.post(f"/distribution-hub/keys/{legacy['id']}/rotate", headers=_h())
+    assert r.status_code == 400
+
+
 def test_rotate_changes_prefix(client):
     created = client.post("/distribution-hub/keys", json={"name": "r"},
                           headers=_h()).get_json()
