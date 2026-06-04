@@ -44,7 +44,7 @@ lxml>=6.1.1  # XXE fix in iterparse / ETCompatXMLParser
 msgpack==1.1.2
 numpy>=2.0.0,<2.4.0  # cap excludes entire 2.4.x line: it raised the x86-64 baseline to v2, crashing pre-2009 CPUs (SIGILL on import). 2.4.0 itself is also yanked for an unrelated BC bug.
 Pillow>=12.2.0 --only-binary=Pillow
-plexapi>=4.16.1
+plexapi>=4.18.1
 py7zr==1.1.0
 pycountry==26.2.16
 PyJWT>=2.12.1  # CVE-2026-32597 fix for unknown crit headers
