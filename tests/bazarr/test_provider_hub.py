@@ -93,7 +93,7 @@ def _patch_local_install_env(monkeypatch, tmp_path):
         def __init__(self, root):
             self.root = Path(root)
 
-        def install(self, validated):
+        def install(self, validated, timeout=None):
             return self.root / "envs" / validated.provider_id / validated.version / "test"
 
     monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
@@ -932,7 +932,7 @@ def test_apply_update_uses_latest_catalog_manifest(tmp_path, monkeypatch):
         def __init__(self, root):
             self.root = root
 
-        def install(self, validated):
+        def install(self, validated, timeout=None):
             return tmp_path / "env"
 
     monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
@@ -1745,7 +1745,7 @@ def test_stage_install_fetches_bundle_builds_env_and_records_staged_paths(tmp_pa
         def __init__(self, root):
             self.root = Path(root)
 
-        def install(self, validated):
+        def install(self, validated, timeout=None):
             env_calls.append((self.root, validated.provider_id, validated.version))
             env_path = self.root / "envs" / validated.provider_id / validated.version / "test"
             python_path = env_path / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
@@ -1812,7 +1812,7 @@ def test_stage_install_fetches_bundle_from_manifest_source_path(tmp_path, monkey
         def __init__(self, root):
             self.root = Path(root)
 
-        def install(self, validated):
+        def install(self, validated, timeout=None):
             env_path = self.root / "envs" / validated.provider_id / validated.version / "test"
             python_path = env_path / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
             python_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1883,7 +1883,7 @@ def test_stage_install_trust_comes_from_catalog_entry_only(tmp_path, monkeypatch
         def __init__(self, root):
             self.root = Path(root)
 
-        def install(self, validated):
+        def install(self, validated, timeout=None):
             env_path = self.root / "envs" / validated.provider_id / validated.version / "test"
             python_path = env_path / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
             python_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1974,7 +1974,7 @@ def test_stage_install_accepts_trusted_migrated_built_in_shadow(tmp_path, monkey
         def __init__(self, root):
             self.root = Path(root)
 
-        def install(self, validated):
+        def install(self, validated, timeout=None):
             return self.root / "envs" / validated.provider_id / validated.version / "test"
 
     monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
@@ -2012,7 +2012,7 @@ def test_stage_install_smoke_failure_records_failed_install(tmp_path, monkeypatc
         def __init__(self, root):
             self.root = Path(root)
 
-        def install(self, validated):
+        def install(self, validated, timeout=None):
             env_path = self.root / "envs" / validated.provider_id / validated.version / "test"
             python_path = env_path / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
             python_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2772,7 +2772,7 @@ def test_stage_install_records_install_job_on_success(tmp_path, monkeypatch):
         def __init__(self, root):
             self.root = Path(root)
 
-        def install(self, validated):
+        def install(self, validated, timeout=None):
             env_path = self.root / "envs" / validated.provider_id / validated.version / "test"
             python_path = env_path / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
             python_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2814,7 +2814,7 @@ def test_stage_install_records_failed_job_on_smoke_error(tmp_path, monkeypatch):
         def __init__(self, root):
             self.root = Path(root)
 
-        def install(self, validated):
+        def install(self, validated, timeout=None):
             env_path = self.root / "envs" / validated.provider_id / validated.version / "test"
             python_path = env_path / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
             python_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3291,7 +3291,7 @@ def test_autoinstall_stages_enabled_official_providers_not_yet_installed(tmp_pat
     monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
     monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl", "opensubtitlescom"])
     staged = []
-    monkeypatch.setattr(service, "stage_install", lambda manifest: staged.append(manifest["provider_id"]))
+    monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: staged.append(manifest["provider_id"]))
 
     result = service.autoinstall_enabled_builtins()
 
@@ -3315,7 +3315,7 @@ def test_autoinstall_is_idempotent_skips_existing_installs(tmp_path, monkeypatch
     monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
     monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
     staged = []
-    monkeypatch.setattr(service, "stage_install", lambda manifest: staged.append(manifest["provider_id"]))
+    monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: staged.append(manifest["provider_id"]))
 
     assert service.autoinstall_enabled_builtins() == []
     assert staged == []
@@ -3332,7 +3332,7 @@ def test_autoinstall_ignores_non_official_catalog_entries(tmp_path, monkeypatch)
     monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
     monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
     staged = []
-    monkeypatch.setattr(service, "stage_install", lambda manifest: staged.append(manifest["provider_id"]))
+    monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: staged.append(manifest["provider_id"]))
 
     assert service.autoinstall_enabled_builtins() == []
     assert staged == []
@@ -3351,7 +3351,7 @@ def test_autoinstall_swallows_stage_failures(tmp_path, monkeypatch):
 
     calls = []
 
-    def flaky(manifest):
+    def flaky(manifest, install_timeout=None):
         calls.append(manifest["provider_id"])
         if manifest["provider_id"] == "subdl":
             raise RuntimeError("boom")
@@ -3392,7 +3392,7 @@ def test_autoinstall_proceeds_when_catalog_refresh_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "refresh_catalog", boom)
     monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
     staged = []
-    monkeypatch.setattr(service, "stage_install", lambda manifest: staged.append(manifest["provider_id"]))
+    monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: staged.append(manifest["provider_id"]))
 
     # Refresh failure is swallowed; auto-install still stages from the cached catalog.
     assert service.autoinstall_enabled_builtins() == ["subdl"]
@@ -3413,7 +3413,7 @@ def test_autoinstall_retries_failed_install_rows(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
     monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
     staged = []
-    monkeypatch.setattr(service, "stage_install", lambda manifest: staged.append(manifest["provider_id"]))
+    monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: staged.append(manifest["provider_id"]))
 
     assert service.autoinstall_enabled_builtins() == ["subdl"]
     assert staged == ["subdl"]
@@ -3434,7 +3434,7 @@ def test_autoinstall_skips_refresh_when_nothing_to_install(tmp_path, monkeypatch
     refresh_calls = []
     monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: refresh_calls.append(source_ids))
     monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
-    monkeypatch.setattr(service, "stage_install", lambda manifest: (_ for _ in ()).throw(AssertionError("should not install")))
+    monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: (_ for _ in ()).throw(AssertionError("should not install")))
 
     assert service.autoinstall_enabled_builtins() == []
     assert refresh_calls == []  # no candidates -> no catalog fetch
@@ -3449,7 +3449,48 @@ def test_autoinstall_refreshes_only_the_official_source(tmp_path, monkeypatch):
     refresh_calls = []
     monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: refresh_calls.append(source_ids))
     monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
-    monkeypatch.setattr(service, "stage_install", lambda manifest: None)
+    monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: None)
 
     service.autoinstall_enabled_builtins()
     assert refresh_calls == [{OFFICIAL_CATALOG_SOURCE_ID}]
+
+
+def test_autoinstall_bounds_each_install_with_remaining_budget(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    state_file = _catalog_state(tmp_path, entries={"official:subdl:1.0.0": _official_entry("subdl")})
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
+    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    captured = {}
+
+    def capture(manifest, install_timeout=None):
+        captured["install_timeout"] = install_timeout
+
+    monkeypatch.setattr(service, "stage_install", capture)
+
+    service.autoinstall_enabled_builtins()
+    # The install is bounded by the remaining startup budget, not left unbounded.
+    assert captured["install_timeout"] is not None
+    assert 0 < captured["install_timeout"] <= 180.0
+
+
+def test_plugin_environment_install_times_out(tmp_path, monkeypatch):
+    import subprocess
+
+    from provider_hub.manifest import validate_manifest
+    from provider_hub.venv import PluginEnvironment, PluginEnvironmentError
+
+    validated = validate_manifest(
+        _manifest(dependencies={"requirements": []}), built_in_provider_ids=set()
+    )
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    # A stuck venv/pip step is surfaced as a clean PluginEnvironmentError rather than
+    # hanging the install (and therefore boot) indefinitely.
+    with pytest.raises(PluginEnvironmentError):
+        PluginEnvironment(tmp_path).install(validated, timeout=30)

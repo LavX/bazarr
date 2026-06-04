@@ -553,14 +553,18 @@ def autoinstall_enabled_builtins() -> list[str]:
         manifest = _latest_official_catalog_manifest(state, provider_id)
         if manifest is None:
             continue
-        if time.monotonic() - started > budget_seconds:
+        remaining = budget_seconds - (time.monotonic() - started)
+        if remaining <= 0:
             logger.warning(
                 "Provider Hub startup auto-install: time budget exceeded at %s; deferring remaining to next start",
                 provider_id,
             )
             break
         try:
-            stage_install(manifest)
+            # Bound the install itself by the remaining budget so one stuck pip/venv
+            # step can't block boot indefinitely; failures are swallowed and the
+            # built-in keeps serving until the next start.
+            stage_install(manifest, install_timeout=remaining)
             staged.append(provider_id)
             logger.info("Provider Hub startup auto-install: staged %s from the official catalog", provider_id)
         except Exception:
@@ -1263,6 +1267,7 @@ def _stage_validated(
     source_id: str | None,
     bundle_stager,
     catalog_url: str | None = None,
+    install_timeout: float | None = None,
 ) -> dict[str, Any]:
     """Shared install core: stage the bundle, build the venv, smoke-test, record.
 
@@ -1288,7 +1293,7 @@ def _stage_validated(
     ) as job:
         try:
             bundle_path = bundle_stager(validated)
-            env_path = PluginEnvironment(provider_hub_dir()).install(validated)
+            env_path = PluginEnvironment(provider_hub_dir()).install(validated, timeout=install_timeout)
             staged_python_path = python_executable(env_path)
             _smoke_validate_worker(validated, bundle_path, staged_python_path)
         except Exception as error:
@@ -1337,7 +1342,7 @@ def _stage_validated(
         return _redact_installation(installation)
 
 
-def stage_install(manifest: dict[str, Any]) -> dict[str, Any]:
+def stage_install(manifest: dict[str, Any], install_timeout: float | None = None) -> dict[str, Any]:
     state = load_state()
     source_trusted = _catalog_manifest_trusted(manifest, state) if isinstance(manifest, dict) else False
     origin, source_id = _install_origin(manifest, state) if isinstance(manifest, dict) else ("local", None)
@@ -1357,6 +1362,7 @@ def stage_install(manifest: dict[str, Any]) -> dict[str, Any]:
         source_id,
         _fetch_bundle,
         catalog_url=catalog_url,
+        install_timeout=install_timeout,
     )
 
 
