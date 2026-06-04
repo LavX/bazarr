@@ -558,6 +558,12 @@ describe("Settings > Providers (Provider Hub)", () => {
       await within(panel).findByText(/no providers enabled/i),
     ).toBeInTheDocument();
 
+    // The add-provider control stays available in the empty state so a shipped
+    // provider can still be added directly (not only via the Marketplace).
+    expect(
+      within(panel).getByRole("button", { name: /Add search provider/i }),
+    ).toBeInTheDocument();
+
     await userEvent.click(
       within(panel).getByRole("button", { name: /browse the marketplace/i }),
     );

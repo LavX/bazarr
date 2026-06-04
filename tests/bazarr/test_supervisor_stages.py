@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 from pathlib import Path
 
@@ -30,3 +31,18 @@ def test_installing_providers_stage_present_and_ordered():
     # The auto-install marker maps to the new stage.
     assert any(marker == "Provider Hub startup auto-install" and idx == install_idx
                for marker, idx in markers)
+
+
+def test_wait_for_ready_returns_when_process_not_alive():
+    # The readiness poll waits as long as the backend process is alive (so a long
+    # first-boot migration can't leave the startup screen stuck), but must end
+    # promptly when there is no live process rather than looping forever.
+    sup = _load_supervisor()
+    mgr = sup.BackendManager([])
+    mgr.state = mgr.STATE_STARTING
+    mgr.process = None  # no live backend process
+
+    asyncio.run(asyncio.wait_for(mgr._wait_for_ready(), timeout=5))
+
+    # It never falsely marks RUNNING without a responding backend.
+    assert mgr.state == mgr.STATE_STARTING

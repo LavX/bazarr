@@ -189,23 +189,23 @@ const EnabledProvidersSection: FunctionComponent<{
         minimum score is found. When disabled, all providers are queried
         simultaneously and the best result is selected.
       </Message>
-      {isEmpty ? (
-        <Stack gap="xs" align="flex-start" py="md">
+      {isEmpty && (
+        <Stack gap="xs" align="flex-start" py="xs">
           <MantineText fw={600}>No providers enabled</MantineText>
           <Message>
-            Install subtitle providers from the Marketplace, then add them here.
+            New here? Install subtitle providers from the Marketplace, then add
+            them below. You can also add a shipped provider with the + button.
           </Message>
           <Button variant="light" onClick={onBrowseMarketplace}>
             Browse the Marketplace
           </Button>
         </Stack>
-      ) : (
-        <ProviderView
-          addLabel="Add search provider"
-          availableOptions={providerOptions}
-          settingsKey="settings-general-enabled_providers"
-        />
       )}
+      <ProviderView
+        addLabel="Add search provider"
+        availableOptions={providerOptions}
+        settingsKey="settings-general-enabled_providers"
+      />
     </Stack>
   );
 };

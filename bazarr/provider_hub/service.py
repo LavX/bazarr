@@ -515,24 +515,41 @@ def autoinstall_enabled_builtins() -> list[str]:
     logger.info("Provider Hub startup auto-install: reconciling enabled providers against the official catalog")
 
     try:
-        refresh_catalog()
-    except Exception:
-        logger.exception("Provider Hub startup auto-install: catalog refresh failed; using cached catalog")
-
-    try:
         state = load_state()
-        existing = set((state.get("installations") or {}).keys())
+        # Skip rows that are live or mid-lifecycle, but NOT "failed": a transient
+        # bundle/venv error should be retried on a later boot rather than blocking
+        # the migration forever.
+        existing = {
+            provider_id
+            for provider_id, row in (state.get("installations") or {}).items()
+            if isinstance(row, dict) and row.get("state") != "failed"
+        }
         enabled = _bazarr_enabled_providers()
     except Exception:
         logger.exception("Provider Hub startup auto-install: could not load state; skipping")
         return []
 
+    candidates = [provider_id for provider_id in enabled if provider_id not in existing]
+    if not candidates:
+        # Everything enabled is already installed: no migration work, so don't touch
+        # the network at all. Keeps the common boot fast and independent of catalog
+        # source health.
+        return []
+
+    # There is potential work, so force a fresh OFFICIAL catalog (only) to pick up a
+    # newly-merged provider id. Best-effort: refresh_catalog isolates per-source
+    # failures and the call is guarded, so a slow/broken catalog can never block or
+    # crash boot, and unrelated third-party sources are not fetched on the boot path.
+    try:
+        refresh_catalog(source_ids={OFFICIAL_CATALOG_SOURCE_ID})
+        state = load_state()
+    except Exception:
+        logger.exception("Provider Hub startup auto-install: catalog refresh failed; using cached catalog")
+
     budget_seconds = 180.0
     started = time.monotonic()
     staged: list[str] = []
-    for provider_id in enabled:
-        if provider_id in existing:
-            continue
+    for provider_id in candidates:
         manifest = _latest_official_catalog_manifest(state, provider_id)
         if manifest is None:
             continue
@@ -562,7 +579,10 @@ def _normalize_catalog_manifest(manifest: dict[str, Any], source: dict[str, Any]
     return normalized
 
 
-def refresh_catalog() -> dict[str, Any]:
+def refresh_catalog(source_ids: set[str] | None = None) -> dict[str, Any]:
+    """Refresh catalog sources. When ``source_ids`` is given, only those source ids
+    are fetched (e.g. the startup migration refreshes only the official source so an
+    unrelated slow/broken third-party source can't delay boot); otherwise all are."""
     with record_job("refresh_catalog", target_kind="system") as job:
         def refresh(state: dict[str, Any]) -> dict[str, Any]:
             now = utcnow_iso()
@@ -574,6 +594,8 @@ def refresh_catalog() -> dict[str, Any]:
             failed_sources: list[str] = []
             for source in (state.get("catalog_sources") or {}).values():
                 if not isinstance(source, dict):
+                    continue
+                if source_ids is not None and source.get("id") not in source_ids:
                     continue
                 sources_count += 1
                 source["last_checked_at"] = now

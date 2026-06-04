@@ -147,11 +147,20 @@ class BackendManager:
             pass
 
     async def _wait_for_ready(self):
-        """Poll the backend until it responds, then set state to RUNNING."""
+        """Poll the backend until it responds, then set state to RUNNING.
+
+        Poll for as long as the backend process is alive and still starting,
+        rather than giving up after a fixed number of attempts. A long first-boot
+        migration (e.g. auto-installing providers that build dependency venvs) can
+        delay the backend binding past a fixed window; abandoning the poll would
+        leave the startup screen stuck even though the process is healthy and
+        about to bind. Process exit is handled by run() (which flips state to
+        CRASHED); the dead-process guard below also ends this loop.
+        """
         url = f"http://{BACKEND_HOST}:{BACKEND_PORT}/api/system/status"
         timeout = ClientTimeout(total=2, connect=1)
-        for _ in range(120):  # up to ~2 minutes
-            if self.state != self.STATE_STARTING:
+        while self.state == self.STATE_STARTING:
+            if self.process is None or self.process.returncode is not None:
                 return
             try:
                 async with ClientSession(timeout=timeout) as session:
