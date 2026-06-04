@@ -618,6 +618,12 @@ def _tvdb_lookup_by_imdb(video) -> None:
 # time frees a thread-pool slot and cuts wall time.
 _SKIP_FOR_VIRTUAL_VIDEO = frozenset({"embeddedsubtitles"})
 
+# Reserved provider name addressing locally-stored subtitles in the allow-list /
+# exclude knobs. Locals are not a pool provider, so they are governed by this
+# name: with an allow-list active they are served only when it lists `local`;
+# with no allow-list they follow serve_local_subs unless `local` is excluded.
+LOCAL_PROVIDER = "local"
+
 
 def _do_fanout(imdb_id, season, episode, languages, media_type,
                query=None, moviehash=None, moviebytesize=None,
@@ -642,21 +648,31 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
     requested_exclude = {str(p).strip() for p in (exclude_providers or []) if str(p).strip()}
     exclude = (health_discarded | requested_exclude
                | (set() if video_has_file else set(_SKIP_FOR_VIRTUAL_VIDEO)))
-    # Per-request / per-key allow-list (only_providers): restrict the fanout to
-    # exactly these by excluding everything else the pool knows about. Applied
-    # as an exclusion (unioned in) so it can only NARROW - it never overrides
-    # the operator's per-key exclusions or the health/virtual skips above, which
-    # remain subtracted. Unknown names simply don't match any pool provider; an
-    # allow-list that intersects nothing leaves the full pool excluded, yielding
-    # an empty result set (contract-safe: data == []).
-    requested_only = {str(p).strip() for p in (only_providers or []) if str(p).strip()}
-    if requested_only:
+    # Per-request / per-key allow-list (only_providers). None means no allow-list
+    # (every enabled provider is in play); a list (even empty) scopes the search
+    # to exactly those names, so everything else the pool knows about is excluded.
+    # An allow-list that matches nothing leaves the full pool excluded, yielding
+    # an empty result set (contract-safe: data == []). It only NARROWS - the
+    # operator's per-key exclusions and the health/virtual skips above remain
+    # subtracted on top.
+    #
+    # `local` (LOCAL_PROVIDER) addresses on-disk subtitles, which are not a pool
+    # provider: with an allow-list active, locals are served only when it lists
+    # `local`; with no allow-list, locals follow serve_local_subs unless `local`
+    # is explicitly excluded.
+    if only_providers is not None:
+        requested_only = {str(p).strip() for p in only_providers if str(p).strip()}
         exclude |= (set(pool.providers) - requested_only)
+        local_allowed = LOCAL_PROVIDER in requested_only
+    else:
+        requested_only = None
+        local_allowed = LOCAL_PROVIDER not in requested_exclude
     logger.info("compat fanout: video=%r lang=%s providers=%d health_skipped=%s "
-                "req_excluded=%s req_only=%s",
+                "req_excluded=%s req_only=%s local_allowed=%s",
                 video, [str(l) for l in languages], len(pool.providers),  # noqa: E741
                 sorted(health_discarded) or "[]", sorted(requested_exclude) or "[]",
-                sorted(requested_only) or "[]")
+                "none" if requested_only is None else (sorted(requested_only) or "[]"),
+                local_allowed)
 
     stats: dict[str, tuple[str, int]] = {}
 
@@ -764,7 +780,7 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
     # operator hasn't disabled the feature. Locals carry a synthetic high
     # download_count, so the existing single-key sort below pins them to
     # the top of the list naturally.
-    if bool(settings.compat_endpoint.serve_local_subs):
+    if local_allowed and bool(settings.compat_endpoint.serve_local_subs):
         try:
             local_entries = search_local(
                 imdb_id=imdb_id, season=season, episode=episode,

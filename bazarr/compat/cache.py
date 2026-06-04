@@ -67,7 +67,11 @@ def build_key(media_type: str, imdb_id: str, season: int | None,
     from app.config import settings as _cfg
     local_flag = int(bool(_cfg.compat_endpoint.serve_local_subs))
     excl = ",".join(sorted(exclude_providers or []))
-    incl = ",".join(sorted(only_providers or []))
+    # only_providers is tri-state and its three cases MUST stay distinct in the
+    # key: None = no allow-list (every provider in play), [] = allow-list active
+    # but matches nothing (data == []), [names] = scoped. Collapsing None and []
+    # to "" would let an active-empty search hit the full-provider envelope.
+    incl = "*" if only_providers is None else ",".join(sorted(only_providers))
     to = int(timeout_seconds) if timeout_seconds else 0
     extras = hashlib.sha256(
         f"{query or ''}|{moviehash or ''}|{moviebytesize or ''}|{moviehash_match or ''}"
