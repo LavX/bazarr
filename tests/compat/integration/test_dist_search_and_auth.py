@@ -394,3 +394,25 @@ def test_request_only_providers_intersects_key_grant(compat_db, monkeypatch):
     # no grant, with request: the request stands alone
     c.get(f"{base}&only_providers=p2", headers={"Api-Key": open_key})
     assert captured["only_providers"] == ["p2"]
+
+
+def test_present_but_empty_only_providers_is_active_empty(compat_db, monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings.compat_endpoint, "search_rate_limit_enabled", False)
+    captured = {}
+
+    def _fake_search(*a, **k):
+        captured.clear()
+        captured.update(k)
+        return {"data": []}
+
+    monkeypatch.setattr("compat.routes.service.search", _fake_search)
+    from compat import keyring
+    _, token = keyring.create("open", tier="free")
+    keyring.invalidate_cache()
+    c = _app().test_client()
+    c.get("/api/v1/subtitles?imdb_id=tt1&languages=en&only_providers=",
+          headers={"Api-Key": token})
+    assert captured["only_providers"] == []        # present-but-empty -> active []
+    c.get("/api/v1/subtitles?imdb_id=tt1&languages=en", headers={"Api-Key": token})
+    assert captured["only_providers"] is None        # absent -> None

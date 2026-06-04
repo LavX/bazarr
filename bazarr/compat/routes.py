@@ -270,27 +270,25 @@ def subtitles():
     exclude_param = args.get("exclude_providers") or ""
     req_exclude = [p.strip() for p in exclude_param.split(",") if p.strip()]
     eff_exclude = req_exclude or (key_rec.get("excluded_providers") or [])
-    # only_providers (req #1, advanced): the inverse allow-list. A per-request
-    # value NARROWS within the key's allowed_providers grant by intersection; it
-    # never expands it, so a key the operator scoped to provider X cannot reach Y
-    # via only_providers=Y. With no per-key grant the request stands alone; with
-    # no request the key's grant applies. allow_list_active tracks whether any
-    # allow-list is in force, so an intersection that resolves to nothing is sent
-    # as an (active) empty list -> data == [], kept distinct from None ("no
-    # allow-list, every provider in play"). eff_exclude is still subtracted
-    # downstream, so an allow-list can never reach a provider the operator
-    # excluded for this key.
-    only_param = args.get("only_providers") or ""
-    req_only = [p.strip() for p in only_param.split(",") if p.strip()]
+    # `only_providers` is tri-state by PRESENCE, not just content: a present-
+    # but-empty param (?only_providers= or only commas/whitespace) is a
+    # deliberate "select nothing" and stays active (-> data: []), distinct from
+    # an absent param (no allow-list, every provider in play). It still NARROWS
+    # within the key's allowed_providers grant by intersection.
+    only_raw = args.get("only_providers")
+    only_present = only_raw is not None
+    req_only = [p.strip() for p in (only_raw or "").split(",") if p.strip()]
     key_allowed = key_rec.get("allowed_providers") or []
-    if req_only and key_allowed:
+    if only_present and key_allowed:
         allowed_set = set(key_allowed)
         eff_only = [p for p in req_only if p in allowed_set]
-    elif req_only:
+    elif only_present:
         eff_only = req_only
-    else:
+    elif key_allowed:
         eff_only = list(key_allowed)
-    allow_list_active = bool(req_only or key_allowed)
+    else:
+        eff_only = []
+    allow_list_active = only_present or bool(key_allowed)
     only_arg = eff_only if allow_list_active else None
     req_timeout = args.get("timeout_seconds", type=int)
     raw_timeout = req_timeout or key_rec.get("timeout_seconds")
