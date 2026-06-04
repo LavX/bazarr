@@ -16,6 +16,7 @@ import {
 } from "@/apis/hooks";
 import type { DistSettings } from "@/apis/raw/distributionHub";
 import { QueryOverlay } from "@/components/async";
+import TokenRevealModal from "./TokenRevealModal";
 
 const SettingsPanel: FunctionComponent = () => {
   const settings = useDistSettings();
@@ -23,6 +24,7 @@ const SettingsPanel: FunctionComponent = () => {
   const regenerate = useDistRegenerate();
 
   const [draft, setDraft] = useState<DistSettings | null>(null);
+  const [revealToken, setRevealToken] = useState<string | null>(null);
 
   useEffect(() => {
     if (settings.data) {
@@ -137,7 +139,11 @@ const SettingsPanel: FunctionComponent = () => {
                   color="orange"
                   variant="light"
                   loading={regenerate.isPending}
-                  onClick={() => regenerate.mutate()}
+                  onClick={() =>
+                    regenerate.mutate(undefined, {
+                      onSuccess: (res) => setRevealToken(res.token),
+                    })
+                  }
                 >
                   Regenerate secrets
                 </Button>
@@ -151,6 +157,11 @@ const SettingsPanel: FunctionComponent = () => {
             </Card>
           </>
         )}
+
+        <TokenRevealModal
+          token={revealToken}
+          onClose={() => setRevealToken(null)}
+        />
       </Stack>
     </QueryOverlay>
   );

@@ -181,3 +181,18 @@ def test_providers_list(client):
     r = client.get("/distribution-hub/providers", headers=_h())
     assert r.status_code == 200
     assert isinstance(r.get_json()["providers"], list)
+
+
+def test_legacy_token_reveal(client):
+    """GET /distribution-hub/legacy-token returns the current shared secret for
+    operators who need to copy it without rotating; an unknown key is rejected."""
+    from app.config import settings
+    settings["compat_endpoint"]["token"] = "reveal-test-token-xyz"
+    r = client.get("/distribution-hub/legacy-token", headers=_h())
+    assert r.status_code == 200
+    assert r.get_json() == {"token": "reveal-test-token-xyz"}
+
+
+def test_legacy_token_reveal_requires_auth(client):
+    r = client.get("/distribution-hub/legacy-token")
+    assert r.status_code == 401

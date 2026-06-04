@@ -40,6 +40,9 @@ describe("DistributionHub > KeysPanel legacy rotation", () => {
       http.post("/api/distribution-hub/regenerate", () =>
         HttpResponse.json({ ok: true, token: "newtok123" }),
       ),
+      http.get("/api/distribution-hub/legacy-token", () =>
+        HttpResponse.json({ token: "legacytok456" }),
+      ),
     );
   });
 
@@ -57,5 +60,18 @@ describe("DistributionHub > KeysPanel legacy rotation", () => {
     await user.click(await screen.findByRole("button", { name: /^rotate$/i }));
 
     expect(await screen.findByText("newtok123")).toBeInTheDocument();
+  });
+
+  it("reveals the legacy token inline without rotating", async () => {
+    const user = userEvent.setup();
+    customRender(<KeysPanel />);
+
+    expect(await screen.findByText("Default")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /key actions/i }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: /reveal token/i }),
+    );
+    // The stored shared token is shown as-is (re-viewable, not a one-time secret).
+    expect(await screen.findByText("legacytok456")).toBeInTheDocument();
   });
 });

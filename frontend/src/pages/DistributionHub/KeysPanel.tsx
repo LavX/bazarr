@@ -1,11 +1,9 @@
 import { FunctionComponent, useState } from "react";
 import {
   ActionIcon,
-  Alert,
   Badge,
   Button,
   Code,
-  CopyButton,
   Group,
   Menu,
   Modal,
@@ -16,8 +14,8 @@ import {
   Tooltip,
 } from "@mantine/core";
 import {
-  faCopy,
   faEllipsisVertical,
+  faEye,
   faKey,
   faPlus,
   faRotate,
@@ -28,6 +26,7 @@ import {
   useDistCreateKey,
   useDistDeleteKey,
   useDistKeys,
+  useDistLegacyToken,
   useDistProviders,
   useDistRegenerate,
   useDistRotateKey,
@@ -38,6 +37,7 @@ import type { DistKey } from "@/apis/raw/distributionHub";
 import { QueryOverlay } from "@/components/async";
 import KeyEditorModal, { KeyDraft } from "./KeyEditorModal";
 import { formatLimit, WINDOW_LABELS, WINDOWS } from "./limits";
+import TokenRevealModal from "./TokenRevealModal";
 
 function draftToBody(draft: KeyDraft) {
   return {
@@ -103,40 +103,6 @@ const UsageCell: FunctionComponent<{ keyData: DistKey }> = ({ keyData }) => {
   );
 };
 
-const TokenRevealModal: FunctionComponent<{
-  token: string | null;
-  onClose: () => void;
-}> = ({ token, onClose }) => (
-  <Modal opened={token != null} onClose={onClose} title="Copy your API key">
-    <Stack gap="sm">
-      <Alert color="yellow">
-        This key is shown only once. Copy it now and store it securely. You can
-        rotate it later, but it cannot be retrieved again.
-      </Alert>
-      <Group gap="xs" wrap="nowrap">
-        <Code style={{ flex: 1, overflowWrap: "anywhere" }}>{token}</Code>
-        <CopyButton value={token ?? ""}>
-          {({ copied, copy }) => (
-            <Button
-              size="xs"
-              color={copied ? "teal" : "blue"}
-              leftSection={<FontAwesomeIcon icon={faCopy} />}
-              onClick={copy}
-            >
-              {copied ? "Copied" : "Copy"}
-            </Button>
-          )}
-        </CopyButton>
-      </Group>
-      <Group justify="flex-end">
-        <Button variant="default" onClick={onClose}>
-          Done
-        </Button>
-      </Group>
-    </Stack>
-  </Modal>
-);
-
 const KeysPanel: FunctionComponent = () => {
   const keys = useDistKeys();
   const tiers = useDistTiers();
@@ -146,12 +112,14 @@ const KeysPanel: FunctionComponent = () => {
   const deleteKey = useDistDeleteKey();
   const rotateKey = useDistRotateKey();
   const regenerate = useDistRegenerate();
+  const revealLegacy = useDistLegacyToken();
 
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<DistKey | null>(null);
   const [revealToken, setRevealToken] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<DistKey | null>(null);
   const [confirmLegacyRotate, setConfirmLegacyRotate] = useState(false);
+  const [legacyReveal, setLegacyReveal] = useState<string | null>(null);
 
   const openCreate = () => {
     setEditing(null);
@@ -270,15 +238,29 @@ const KeysPanel: FunctionComponent = () => {
                         </Menu.Item>
                         {key.is_legacy === 1 ? (
                           // The legacy Default key maps the shared config token.
-                          // Rotating it calls the regenerate endpoint, which
-                          // rotates signing secrets + shared token atomically
-                          // so the config secret and DB row stay in sync.
-                          <Menu.Item
-                            leftSection={<FontAwesomeIcon icon={faRotate} />}
-                            onClick={() => setConfirmLegacyRotate(true)}
-                          >
-                            Rotate token
-                          </Menu.Item>
+                          // It is re-viewable (unlike named keys) so an operator
+                          // can copy it to a new client without rotating. Rotating
+                          // calls the regenerate endpoint, which rotates signing
+                          // secrets + shared token atomically so the config secret
+                          // and DB row stay in sync.
+                          <>
+                            <Menu.Item
+                              leftSection={<FontAwesomeIcon icon={faEye} />}
+                              onClick={() =>
+                                revealLegacy.mutate(undefined, {
+                                  onSuccess: (d) => setLegacyReveal(d.token),
+                                })
+                              }
+                            >
+                              Reveal token
+                            </Menu.Item>
+                            <Menu.Item
+                              leftSection={<FontAwesomeIcon icon={faRotate} />}
+                              onClick={() => setConfirmLegacyRotate(true)}
+                            >
+                              Rotate token
+                            </Menu.Item>
+                          </>
                         ) : (
                           <>
                             <Menu.Item
@@ -338,6 +320,12 @@ const KeysPanel: FunctionComponent = () => {
       <TokenRevealModal
         token={revealToken}
         onClose={() => setRevealToken(null)}
+      />
+
+      <TokenRevealModal
+        token={legacyReveal}
+        oneTime={false}
+        onClose={() => setLegacyReveal(null)}
       />
 
       <Modal

@@ -145,7 +145,7 @@ const KeyEditorModal: FunctionComponent<Props> = ({
         />
         <MultiSelect
           label="Allowed providers (default for this key)"
-          description="Restrict this key to ONLY these providers. Leave empty to allow all. Exclusions above still apply on top. A per-request only_providers value overrides this."
+          description="Restrict this key to ONLY these providers. Leave empty to allow all. Exclusions above still apply on top. A per-request only_providers value narrows within this; it can never reach a provider outside this list. Include 'local' to allow on-disk subtitles."
           data={providers}
           searchable
           clearable

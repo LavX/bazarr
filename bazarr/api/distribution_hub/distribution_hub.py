@@ -206,7 +206,10 @@ class DistributionHubProviders(Resource):
             providers = get_providers_sorted() or []
         except Exception:
             providers = []
-        return {"providers": sorted(providers)}
+        names = sorted(providers)
+        if bool(settings.compat_endpoint.serve_local_subs):
+            names = [*names, "local"]
+        return {"providers": names}
 
 
 # ---------------------------------------------------------------- settings
@@ -265,3 +268,14 @@ class DistributionHubRegenerate(Resource):
         token = regenerate_all_secrets()
         keyring.seed_legacy_key()   # re-point the Default key at the new token
         return {"ok": True, "token": token}
+
+
+@api_ns_distribution_hub.route('distribution-hub/legacy-token')
+class DistributionHubLegacyToken(Resource):
+    @authenticate
+    def get(self):
+        # Reveal the current shared legacy token so an operator can copy it to a
+        # new client without rotating (which would break every client still on
+        # the old value). The Default key maps this token; the keys table only
+        # shows its prefix.
+        return {"token": settings.compat_endpoint.token or ""}

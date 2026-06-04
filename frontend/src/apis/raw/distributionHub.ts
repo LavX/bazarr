@@ -186,6 +186,10 @@ class DistributionHubApi extends BaseApi {
     );
     return response.data;
   }
+
+  legacyToken() {
+    return this.get<{ token: string }>("/legacy-token");
+  }
 }
 
 export default new DistributionHubApi();
