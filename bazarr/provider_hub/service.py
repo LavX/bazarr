@@ -515,7 +515,7 @@ def autoinstall_enabled_builtins() -> list[str]:
     logger.info("Provider Hub startup auto-install: reconciling enabled providers against the official catalog")
 
     try:
-        list_catalog(auto_refresh=True)
+        refresh_catalog()
     except Exception:
         logger.exception("Provider Hub startup auto-install: catalog refresh failed; using cached catalog")
 
