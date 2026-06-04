@@ -270,6 +270,28 @@ def subtitles():
     exclude_param = args.get("exclude_providers") or ""
     req_exclude = [p.strip() for p in exclude_param.split(",") if p.strip()]
     eff_exclude = req_exclude or (key_rec.get("excluded_providers") or [])
+    # only_providers (req #1, advanced): the inverse allow-list. A per-request
+    # value NARROWS within the key's allowed_providers grant by intersection; it
+    # never expands it, so a key the operator scoped to provider X cannot reach Y
+    # via only_providers=Y. With no per-key grant the request stands alone; with
+    # no request the key's grant applies. allow_list_active tracks whether any
+    # allow-list is in force, so an intersection that resolves to nothing is sent
+    # as an (active) empty list -> data == [], kept distinct from None ("no
+    # allow-list, every provider in play"). eff_exclude is still subtracted
+    # downstream, so an allow-list can never reach a provider the operator
+    # excluded for this key.
+    only_param = args.get("only_providers") or ""
+    req_only = [p.strip() for p in only_param.split(",") if p.strip()]
+    key_allowed = key_rec.get("allowed_providers") or []
+    if req_only and key_allowed:
+        allowed_set = set(key_allowed)
+        eff_only = [p for p in req_only if p in allowed_set]
+    elif req_only:
+        eff_only = req_only
+    else:
+        eff_only = list(key_allowed)
+    allow_list_active = bool(req_only or key_allowed)
+    only_arg = eff_only if allow_list_active else None
     req_timeout = args.get("timeout_seconds", type=int)
     raw_timeout = req_timeout or key_rec.get("timeout_seconds")
     eff_timeout = max(5, min(120, int(raw_timeout))) if raw_timeout else None
@@ -283,7 +305,8 @@ def subtitles():
                                 moviehash_match=moviehash_match,
                                 requested_languages=requested_codes,
                                 exclude_providers=eff_exclude or None,
-                                timeout_seconds=eff_timeout)
+                                timeout_seconds=eff_timeout,
+                                only_providers=only_arg)
     except Exception:
         return compat_error("upstream providers unavailable", 503, "upstream")
     page = max(1, args.get("page", default=1, type=int) or 1)
@@ -405,6 +428,32 @@ def infos_user():
 @compat_bp.route("/infos/languages", methods=["GET"])
 def infos_languages():
     return jsonify(M.languages_response())
+
+
+@compat_bp.route("/providers", methods=["GET"])
+@compat_auth(require_jwt=False)
+def providers():
+    """Discovery for the exclude_providers / only_providers knobs.
+
+    Additive to the OpenSubtitles contract (OS has no provider concept), so it
+    can't break existing clients. Returns the provider names THIS key may
+    actually reach: the install's enabled providers (plus the reserved `local`
+    name when serve_local_subs is on), minus the key's excluded_providers,
+    intersected with the key's allowed_providers default when one is set. That
+    way the list a client sees is exactly the set it can select from - a provider
+    the operator walled off for this key never appears.
+    """
+    from app.config import settings
+    key_rec = _current_key()
+    universe = service.available_providers()
+    if bool(settings.compat_endpoint.serve_local_subs):
+        universe = [*universe, "local"]
+    excluded = {str(p).strip() for p in (key_rec.get("excluded_providers") or [])}
+    allowed = {str(p).strip() for p in (key_rec.get("allowed_providers") or [])}
+    names = [p for p in universe if p not in excluded]
+    if allowed:
+        names = [p for p in names if p in allowed]
+    return jsonify({"data": [{"name": n} for n in names]})
 
 
 @compat_bp.route("/utilities/guessit", methods=["POST"])

@@ -35,6 +35,7 @@ def _public_key(rec: dict, with_usage: bool = True) -> dict:
         "timeout_seconds": rec.get("timeout_seconds"),
         "custom_limits": rec.get("custom_limits"),
         "excluded_providers": rec.get("excluded_providers"),
+        "allowed_providers": rec.get("allowed_providers"),
         "created_at": _iso(rec.get("created_at")),
         "last_used_at": _iso(rec.get("last_used_at")),
         "note": rec.get("note"),
@@ -74,6 +75,7 @@ class DistributionHubKeys(Resource):
             name, tier=tier,
             custom_limits=body.get("custom_limits"),
             excluded_providers=body.get("excluded_providers"),
+            allowed_providers=body.get("allowed_providers"),
             timeout_seconds=body.get("timeout_seconds"),
             note=body.get("note"))
         rec = keyring.get(key_id)
@@ -99,7 +101,7 @@ class DistributionHubKey(Resource):
         body = request.get_json(silent=True) or {}
         fields = {}
         for k in ("name", "tier", "enabled", "timeout_seconds", "note",
-                  "custom_limits", "excluded_providers"):
+                  "custom_limits", "excluded_providers", "allowed_providers"):
             if k in body:
                 fields[k] = body[k]
         if "tier" in fields and fields["tier"] not in tiers.all_tiers():

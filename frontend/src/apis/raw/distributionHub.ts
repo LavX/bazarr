@@ -23,6 +23,7 @@ export interface DistKey {
   timeout_seconds: number | null;
   custom_limits: Partial<DistKindLimits> | null;
   excluded_providers: string[] | null;
+  allowed_providers: string[] | null;
   created_at: string | null;
   last_used_at: string | null;
   note: string | null;
@@ -41,6 +42,7 @@ export interface DistKeyCreateRequest {
   tier?: string;
   custom_limits?: Partial<DistKindLimits> | null;
   excluded_providers?: string[] | null;
+  allowed_providers?: string[] | null;
   timeout_seconds?: number | null;
   note?: string | null;
 }
@@ -53,6 +55,7 @@ export type DistKeyUpdateRequest = Partial<{
   note: string | null;
   custom_limits: Partial<DistKindLimits> | null;
   excluded_providers: string[] | null;
+  allowed_providers: string[] | null;
 }>;
 
 export interface DistTier {

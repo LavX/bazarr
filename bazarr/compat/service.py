@@ -626,13 +626,19 @@ def _tvdb_lookup_by_imdb(video) -> None:
 # time frees a thread-pool slot and cuts wall time.
 _SKIP_FOR_VIRTUAL_VIDEO = frozenset({"embeddedsubtitles"})
 
+# Reserved provider name addressing locally-stored subtitles in the allow-list /
+# exclude knobs. Locals are not a pool provider, so they are governed by this
+# name: with an allow-list active they are served only when it lists `local`;
+# with no allow-list they follow serve_local_subs unless `local` is excluded.
+LOCAL_PROVIDER = "local"
+
 
 def _do_fanout(imdb_id, season, episode, languages, media_type,
                query=None, moviehash=None, moviebytesize=None,
                series_anidb_id=None, series_anidb_episode_id=None,
                moviehash_match=None,
                requested_languages=None, exclude_providers=None,
-               timeout_seconds=None):
+               timeout_seconds=None, only_providers=None):
     from subliminal_patch.provider_health import get_tracker as _get_health_tracker
     from subliminal_patch.score import ComputeScore, MAX_SCORES
     health = _get_health_tracker()
@@ -650,9 +656,31 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
     requested_exclude = {str(p).strip() for p in (exclude_providers or []) if str(p).strip()}
     exclude = (health_discarded | requested_exclude
                | (set() if video_has_file else set(_SKIP_FOR_VIRTUAL_VIDEO)))
-    logger.info("compat fanout: video=%r lang=%s providers=%d health_skipped=%s req_excluded=%s",
+    # Per-request / per-key allow-list (only_providers). None means no allow-list
+    # (every enabled provider is in play); a list (even empty) scopes the search
+    # to exactly those names, so everything else the pool knows about is excluded.
+    # An allow-list that matches nothing leaves the full pool excluded, yielding
+    # an empty result set (contract-safe: data == []). It only NARROWS - the
+    # operator's per-key exclusions and the health/virtual skips above remain
+    # subtracted on top.
+    #
+    # `local` (LOCAL_PROVIDER) addresses on-disk subtitles, which are not a pool
+    # provider: with an allow-list active, locals are served only when it lists
+    # `local`; with no allow-list, locals follow serve_local_subs unless `local`
+    # is explicitly excluded.
+    if only_providers is not None:
+        requested_only = {str(p).strip() for p in only_providers if str(p).strip()}
+        exclude |= (set(pool.providers) - requested_only)
+        local_allowed = LOCAL_PROVIDER in requested_only
+    else:
+        requested_only = None
+        local_allowed = LOCAL_PROVIDER not in requested_exclude
+    logger.info("compat fanout: video=%r lang=%s providers=%d health_skipped=%s "
+                "req_excluded=%s req_only=%s local_allowed=%s",
                 video, [str(l) for l in languages], len(pool.providers),  # noqa: E741
-                sorted(health_discarded) or "[]", sorted(requested_exclude) or "[]")
+                sorted(health_discarded) or "[]", sorted(requested_exclude) or "[]",
+                "none" if requested_only is None else (sorted(requested_only) or "[]"),
+                local_allowed)
 
     stats: dict[str, tuple[str, int]] = {}
 
@@ -760,7 +788,7 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
     # operator hasn't disabled the feature. Locals carry a synthetic high
     # download_count, so the existing single-key sort below pins them to
     # the top of the list naturally.
-    if bool(settings.compat_endpoint.serve_local_subs):
+    if local_allowed and bool(settings.compat_endpoint.serve_local_subs):
         try:
             local_entries = search_local(
                 imdb_id=imdb_id, season=season, episode=episode,
@@ -801,6 +829,17 @@ def _build_requested_language_map(requested_languages: list[str]) -> dict:
     return out
 
 
+def available_providers() -> list[str]:
+    """The provider names currently enabled on this install, sorted. Backs the
+    /api/v1/providers discovery endpoint so a client can learn the valid names
+    for the exclude_providers/only_providers knobs. Fail-soft to [] so a
+    provider-config hiccup degrades discovery to 'empty' rather than 500."""
+    try:
+        return sorted(get_providers_sorted() or [])
+    except Exception:
+        return []
+
+
 def search(imdb_id: str, season, episode, languages: Iterable[Language],
            media_type: str, query: str | None = None,
            moviehash: str | None = None,
@@ -810,7 +849,8 @@ def search(imdb_id: str, season, episode, languages: Iterable[Language],
            moviehash_match: str | None = None,
            requested_languages: list[str] | None = None,
            exclude_providers: list[str] | None = None,
-           timeout_seconds: int | None = None) -> dict:
+           timeout_seconds: int | None = None,
+           only_providers: list[str] | None = None) -> dict:
     enabled = get_providers_sorted()
     key = C.build_key(media_type, imdb_id, season, episode, languages, enabled,
                       query=query, moviehash=moviehash,
@@ -820,7 +860,8 @@ def search(imdb_id: str, season, episode, languages: Iterable[Language],
                       moviehash_match=moviehash_match,
                       requested_languages=requested_languages,
                       exclude_providers=exclude_providers,
-                      timeout_seconds=timeout_seconds)
+                      timeout_seconds=timeout_seconds,
+                      only_providers=only_providers)
     cache_ttl = int(settings.compat_endpoint.cache_ttl_seconds)
     fid_ttl = int(settings.compat_endpoint.file_id_ttl_seconds)
     ttl = min(cache_ttl, fid_ttl)
@@ -834,7 +875,8 @@ def search(imdb_id: str, season, episode, languages: Iterable[Language],
                                     moviehash_match=moviehash_match,
                                     requested_languages=requested_languages,
                                     exclude_providers=exclude_providers,
-                                    timeout_seconds=timeout_seconds),
+                                    timeout_seconds=timeout_seconds,
+                                    only_providers=only_providers),
         expiration_time=ttl,
     )
 

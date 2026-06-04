@@ -27,6 +27,7 @@ export interface KeyDraft {
   timeout_seconds: number | null;
   note: string | null;
   excluded_providers: string[];
+  allowed_providers: string[];
   custom_enabled: boolean;
   custom_limits: DistKindLimits;
 }
@@ -50,6 +51,7 @@ function draftFromKey(key: DistKey | null, defaultTier: string): KeyDraft {
       timeout_seconds: null,
       note: "",
       excluded_providers: [],
+      allowed_providers: [],
       custom_enabled: false,
       custom_limits: emptyKindLimits(),
     };
@@ -64,6 +66,7 @@ function draftFromKey(key: DistKey | null, defaultTier: string): KeyDraft {
     timeout_seconds: key.timeout_seconds,
     note: key.note ?? "",
     excluded_providers: key.excluded_providers ?? [],
+    allowed_providers: key.allowed_providers ?? [],
     custom_enabled: cl != null,
     custom_limits: base,
   };
@@ -139,6 +142,15 @@ const KeyEditorModal: FunctionComponent<Props> = ({
           clearable
           value={draft.excluded_providers}
           onChange={(v) => setDraft({ ...draft, excluded_providers: v })}
+        />
+        <MultiSelect
+          label="Allowed providers (default for this key)"
+          description="Restrict this key to ONLY these providers. Leave empty to allow all. Exclusions above still apply on top. A per-request only_providers value overrides this."
+          data={providers}
+          searchable
+          clearable
+          value={draft.allowed_providers}
+          onChange={(v) => setDraft({ ...draft, allowed_providers: v })}
         />
         <NumberInput
           label="Search timeout override (seconds)"

@@ -49,6 +49,29 @@ def test_create_rejects_unknown_tier(client):
     assert r.status_code == 400
 
 
+def test_allowed_providers_round_trip(client):
+    """allowed_providers persists through create, list, patch, and clear."""
+    r = client.post("/distribution-hub/keys",
+                    json={"name": "allow-site",
+                          "allowed_providers": ["opensubtitles", "subscene"]},
+                    headers=_h())
+    assert r.status_code == 201
+    key_id = r.get_json()["id"]
+    assert r.get_json()["allowed_providers"] == ["opensubtitles", "subscene"]
+
+    entry = next(k for k in client.get("/distribution-hub/keys", headers=_h())
+                 .get_json()["keys"] if k["id"] == key_id)
+    assert entry["allowed_providers"] == ["opensubtitles", "subscene"]
+
+    # Narrow it, then clear it (empty list -> stored as NULL -> None).
+    r = client.patch(f"/distribution-hub/keys/{key_id}",
+                     json={"allowed_providers": ["subscene"]}, headers=_h())
+    assert r.get_json()["allowed_providers"] == ["subscene"]
+    r = client.patch(f"/distribution-hub/keys/{key_id}",
+                     json={"allowed_providers": []}, headers=_h())
+    assert r.get_json()["allowed_providers"] is None
+
+
 def test_patch_and_delete_key(client):
     key_id = client.post("/distribution-hub/keys", json={"name": "p"},
                          headers=_h()).get_json()["id"]
