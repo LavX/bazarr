@@ -3247,3 +3247,124 @@ def test_stage_install_local_rejects_oversized_package(tmp_path, monkeypatch):
 
     with pytest.raises(ProviderHubInstallError, match="too large"):
         stage_install_local(package)
+
+
+def _catalog_state(tmp_path, *, installations=None, entries=None):
+    state = {
+        "catalog_sources": {
+            "official": {"id": "official", "name": "Official Bazarr Provider Catalog",
+                         "type": "github", "url": "https://github.com/LavX/bazarr-provider-catalog/blob/main/catalog.json",
+                         "enabled": True, "official": True, "trusted": True},
+        },
+        "catalog_entries": entries or {},
+        "installations": installations or {},
+        "jobs": [],
+    }
+    f = tmp_path / "state.json"
+    f.write_text(json.dumps(state), encoding="utf-8")
+    return f
+
+
+def _official_entry(provider_id, version="1.0.0"):
+    return {
+        "source": "official",
+        "provider_id": provider_id,
+        "version": version,
+        "trusted": True,
+        "manifest": _manifest(provider_id=provider_id, version=version,
+                              dependencies={"requirements": []}),
+    }
+
+
+def test_autoinstall_stages_enabled_official_providers_not_yet_installed(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    state_file = _catalog_state(
+        tmp_path,
+        installations={},  # nothing installed yet
+        entries={
+            "official:subdl:1.0.0": _official_entry("subdl"),
+            "official:gestdown:1.0.0": _official_entry("gestdown"),
+        },
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    monkeypatch.setattr(service, "list_catalog", lambda auto_refresh=False: None)
+    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl", "opensubtitlescom"])
+    staged = []
+    monkeypatch.setattr(service, "stage_install", lambda manifest: staged.append(manifest["provider_id"]))
+
+    result = service.autoinstall_enabled_builtins()
+
+    # only "subdl" is enabled AND in the official catalog AND not installed.
+    # "opensubtitlescom" is enabled but not in the catalog -> skipped.
+    # "gestdown" is in the catalog but not enabled -> skipped.
+    assert result == ["subdl"]
+    assert staged == ["subdl"]
+
+
+def test_autoinstall_is_idempotent_skips_existing_installs(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    state_file = _catalog_state(
+        tmp_path,
+        installations={"subdl": {"provider_id": "subdl", "state": "active",
+                                 "active_version": "1.0.0", "manifest": _manifest(provider_id="subdl")}},
+        entries={"official:subdl:1.0.0": _official_entry("subdl")},
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    monkeypatch.setattr(service, "list_catalog", lambda auto_refresh=False: None)
+    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    staged = []
+    monkeypatch.setattr(service, "stage_install", lambda manifest: staged.append(manifest["provider_id"]))
+
+    assert service.autoinstall_enabled_builtins() == []
+    assert staged == []
+
+
+def test_autoinstall_ignores_non_official_catalog_entries(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    third_party = _official_entry("subdl")
+    third_party["source"] = "thirdparty"
+    third_party["trusted"] = False
+    state_file = _catalog_state(tmp_path, entries={"thirdparty:subdl:1.0.0": third_party})
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    monkeypatch.setattr(service, "list_catalog", lambda auto_refresh=False: None)
+    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    staged = []
+    monkeypatch.setattr(service, "stage_install", lambda manifest: staged.append(manifest["provider_id"]))
+
+    assert service.autoinstall_enabled_builtins() == []
+    assert staged == []
+
+
+def test_autoinstall_swallows_stage_failures(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    state_file = _catalog_state(tmp_path, entries={
+        "official:subdl:1.0.0": _official_entry("subdl"),
+        "official:gestdown:1.0.0": _official_entry("gestdown"),
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    monkeypatch.setattr(service, "list_catalog", lambda auto_refresh=False: None)
+    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl", "gestdown"])
+
+    calls = []
+
+    def flaky(manifest):
+        calls.append(manifest["provider_id"])
+        if manifest["provider_id"] == "subdl":
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(service, "stage_install", flaky)
+
+    # subdl fails (swallowed), gestdown still staged; never raises.
+    assert service.autoinstall_enabled_builtins() == ["gestdown"]
+    assert calls == ["subdl", "gestdown"]
+
+
+def test_autoinstall_kill_switch_returns_empty(monkeypatch):
+    from provider_hub import service
+    monkeypatch.setenv("BAZARR_DISABLE_PROVIDER_AUTOINSTALL", "1")
+    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    assert service.autoinstall_enabled_builtins() == []

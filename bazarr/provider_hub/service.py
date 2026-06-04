@@ -475,6 +475,78 @@ def list_catalog(auto_refresh: bool = False) -> dict[str, Any]:
     }
 
 
+def _latest_official_catalog_manifest(state: dict[str, Any], provider_id: str) -> dict[str, Any] | None:
+    """Latest manifest for ``provider_id`` from the OFFICIAL (trusted) catalog source."""
+    candidates: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    for entry in (state.get("catalog_entries") or {}).values():
+        if not isinstance(entry, dict) or entry.get("provider_id") != provider_id:
+            continue
+        if entry.get("source") != OFFICIAL_CATALOG_SOURCE_ID or not entry.get("trusted", False):
+            continue
+        manifest = entry.get("manifest")
+        if not isinstance(manifest, dict):
+            continue
+        version_key = _version_key(manifest.get("version") or entry.get("version"))
+        if version_key is None:
+            continue
+        candidates.append((version_key, manifest))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def autoinstall_enabled_builtins() -> list[str]:
+    """Stage-install official-catalog versions of enabled providers not yet installed.
+
+    For each provider in Bazarr's ``enabled_providers`` that (a) has no Provider Hub
+    installation row yet and (b) has a matching entry in the OFFICIAL catalog, stage
+    the latest official manifest. The caller's ``activate_staged_installations()`` +
+    ``register_active_provider_classes()`` then activate and shadow the built-in in the
+    same boot (catalog plugins reuse the built-in id). Idempotent and best-effort:
+    never raises, never enables/disables/uninstalls anything.
+    """
+    import logging
+    import os
+
+    logger = logging.getLogger(__name__)
+    if os.environ.get("BAZARR_DISABLE_PROVIDER_AUTOINSTALL"):
+        return []
+
+    logger.info("Provider Hub startup auto-install: reconciling enabled providers against the official catalog")
+
+    try:
+        list_catalog(auto_refresh=True)
+    except Exception:
+        logger.exception("Provider Hub startup auto-install: catalog refresh failed; using cached catalog")
+
+    state = load_state()
+    existing = set((state.get("installations") or {}).keys())
+    enabled = _bazarr_enabled_providers()
+
+    budget_seconds = 180.0
+    started = time.monotonic()
+    staged: list[str] = []
+    for provider_id in enabled:
+        if provider_id in existing:
+            continue
+        manifest = _latest_official_catalog_manifest(state, provider_id)
+        if manifest is None:
+            continue
+        if time.monotonic() - started > budget_seconds:
+            logger.warning(
+                "Provider Hub startup auto-install: time budget exceeded at %s; deferring remaining to next start",
+                provider_id,
+            )
+            break
+        try:
+            stage_install(manifest)
+            staged.append(provider_id)
+            logger.info("Provider Hub startup auto-install: staged %s from the official catalog", provider_id)
+        except Exception:
+            logger.exception("Provider Hub startup auto-install: failed to stage %s; keeping built-in", provider_id)
+    return staged
+
+
 def _normalize_catalog_manifest(manifest: dict[str, Any], source: dict[str, Any], commit: str) -> dict[str, Any]:
     normalized = dict(manifest)
     manifest_source = dict(normalized.get("source") or {})
