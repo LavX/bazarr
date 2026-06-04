@@ -11,7 +11,7 @@ cachetools>=7.1.4
 certifi==2026.2.25
 chardet==7.4.3
 charset-normalizer==3.4.6
-click-option-group>=0.5.6
+click-option-group>=0.5.9
 cloudscraper<=1.2.58  # newer version dropped captcha v1 support
 cryptography>=48.0.0
 deathbycaptcha-official==4.7.1
