@@ -7,3 +7,6 @@
 [submodule "bazarr-binaries"]
 	path = bazarr-binaries
 	url = https://github.com/LavX/bazarr-binaries.git
+[submodule "bazarr-provider-catalog"]
+	path = bazarr-provider-catalog
+	url = https://github.com/LavX/bazarr-provider-catalog.git
