@@ -5,6 +5,7 @@ import hashlib
 import os
 import subprocess
 import sys
+import time
 
 from pathlib import Path
 
@@ -39,46 +40,70 @@ class PluginEnvironment:
     def path_for(self, manifest: ValidatedManifest) -> Path:
         return self.root / "envs" / manifest.provider_id / manifest.version / self._fingerprint(manifest)
 
-    def install(self, manifest: ValidatedManifest) -> Path:
+    def install(self, manifest: ValidatedManifest, timeout: float | None = None) -> Path:
+        """Build the provider venv. When ``timeout`` is set it is a hard wall-clock
+        budget for the whole install (shared across the venv/pip subprocesses): the
+        startup auto-install passes its remaining budget so one stuck pip/venv step
+        can't block boot indefinitely. ``None`` (manual installs) leaves it unbounded.
+        """
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+
+        def _remaining() -> float | None:
+            if deadline is None:
+                return None
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise PluginEnvironmentError(
+                    f"Provider Hub install for {manifest.provider_id} exceeded its time budget"
+                )
+            return left
+
         env_path = self.path_for(manifest)
         env_path.mkdir(parents=True, exist_ok=True)
 
         python_exe = python_executable(env_path)
-        if not python_exe.exists():
+        try:
+            if not python_exe.exists():
+                subprocess.run(
+                    [sys.executable, "-m", "venv", str(env_path)],
+                    check=True,
+                    timeout=_remaining(),
+                )
+
+            if manifest.dependency_requirements:
+                requirements_path = env_path / "requirements.txt"
+                requirements_path.write_text(
+                    "\n".join(requirement.pip_line for requirement in manifest.dependency_requirements) + "\n",
+                    encoding="utf-8",
+                )
+                cmd = [
+                    str(python_exe),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--disable-pip-version-check",
+                    "--no-warn-script-location",
+                    "--require-hashes",
+                    "--prefer-binary",
+                    "-r",
+                    str(requirements_path),
+                ]
+
+                env = {
+                    "PATH": os.environ.get("PATH", ""),
+                    "PYTHONNOUSERSITE": "1",
+                }
+                subprocess.run(cmd, check=True, env=env, cwd=str(env_path), timeout=_remaining())
+
             subprocess.run(
-                [sys.executable, "-m", "venv", str(env_path)],
+                [str(python_exe), "-m", "pip", "check"],
                 check=True,
+                env={"PATH": os.environ.get("PATH", ""), "PYTHONNOUSERSITE": "1"},
+                cwd=str(env_path),
+                timeout=_remaining(),
             )
-
-        if manifest.dependency_requirements:
-            requirements_path = env_path / "requirements.txt"
-            requirements_path.write_text(
-                "\n".join(requirement.pip_line for requirement in manifest.dependency_requirements) + "\n",
-                encoding="utf-8",
-            )
-            cmd = [
-                str(python_exe),
-                "-m",
-                "pip",
-                "install",
-                "--disable-pip-version-check",
-                "--no-warn-script-location",
-                "--require-hashes",
-                "--prefer-binary",
-                "-r",
-                str(requirements_path),
-            ]
-
-            env = {
-                "PATH": os.environ.get("PATH", ""),
-                "PYTHONNOUSERSITE": "1",
-            }
-            subprocess.run(cmd, check=True, env=env, cwd=str(env_path))
-
-        subprocess.run(
-            [str(python_exe), "-m", "pip", "check"],
-            check=True,
-            env={"PATH": os.environ.get("PATH", ""), "PYTHONNOUSERSITE": "1"},
-            cwd=str(env_path),
-        )
+        except subprocess.TimeoutExpired as error:
+            raise PluginEnvironmentError(
+                f"Provider Hub install for {manifest.provider_id} timed out"
+            ) from error
         return env_path

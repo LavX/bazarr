@@ -475,6 +475,103 @@ def list_catalog(auto_refresh: bool = False) -> dict[str, Any]:
     }
 
 
+def _latest_official_catalog_manifest(state: dict[str, Any], provider_id: str) -> dict[str, Any] | None:
+    """Latest manifest for ``provider_id`` from the OFFICIAL (trusted) catalog source."""
+    candidates: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    for entry in (state.get("catalog_entries") or {}).values():
+        if not isinstance(entry, dict) or entry.get("provider_id") != provider_id:
+            continue
+        if entry.get("source") != OFFICIAL_CATALOG_SOURCE_ID or not entry.get("trusted", False):
+            continue
+        manifest = entry.get("manifest")
+        if not isinstance(manifest, dict):
+            continue
+        version_key = _version_key(manifest.get("version") or entry.get("version"))
+        if version_key is None:
+            continue
+        candidates.append((version_key, manifest))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def autoinstall_enabled_builtins() -> list[str]:
+    """Stage-install official-catalog versions of enabled providers not yet installed.
+
+    For each provider in Bazarr's ``enabled_providers`` that (a) has no Provider Hub
+    installation row yet and (b) has a matching entry in the OFFICIAL catalog, stage
+    the latest official manifest. The caller's ``activate_staged_installations()`` +
+    ``register_active_provider_classes()`` then activate and shadow the built-in in the
+    same boot (catalog plugins reuse the built-in id). Idempotent and best-effort:
+    never raises, never enables/disables/uninstalls anything.
+    """
+    import logging
+    import os
+
+    logger = logging.getLogger(__name__)
+    if os.environ.get("BAZARR_DISABLE_PROVIDER_AUTOINSTALL"):
+        return []
+
+    logger.info("Provider Hub startup auto-install: reconciling enabled providers against the official catalog")
+
+    try:
+        state = load_state()
+        # Skip rows that are live or mid-lifecycle, but NOT "failed": a transient
+        # bundle/venv error should be retried on a later boot rather than blocking
+        # the migration forever.
+        existing = {
+            provider_id
+            for provider_id, row in (state.get("installations") or {}).items()
+            if isinstance(row, dict) and row.get("state") != "failed"
+        }
+        enabled = _bazarr_enabled_providers()
+    except Exception:
+        logger.exception("Provider Hub startup auto-install: could not load state; skipping")
+        return []
+
+    candidates = [provider_id for provider_id in enabled if provider_id not in existing]
+    if not candidates:
+        # Everything enabled is already installed: no migration work, so don't touch
+        # the network at all. Keeps the common boot fast and independent of catalog
+        # source health.
+        return []
+
+    # There is potential work, so force a fresh OFFICIAL catalog (only) to pick up a
+    # newly-merged provider id. Best-effort: refresh_catalog isolates per-source
+    # failures and the call is guarded, so a slow/broken catalog can never block or
+    # crash boot, and unrelated third-party sources are not fetched on the boot path.
+    try:
+        refresh_catalog(source_ids={OFFICIAL_CATALOG_SOURCE_ID})
+        state = load_state()
+    except Exception:
+        logger.exception("Provider Hub startup auto-install: catalog refresh failed; using cached catalog")
+
+    budget_seconds = 180.0
+    started = time.monotonic()
+    staged: list[str] = []
+    for provider_id in candidates:
+        manifest = _latest_official_catalog_manifest(state, provider_id)
+        if manifest is None:
+            continue
+        remaining = budget_seconds - (time.monotonic() - started)
+        if remaining <= 0:
+            logger.warning(
+                "Provider Hub startup auto-install: time budget exceeded at %s; deferring remaining to next start",
+                provider_id,
+            )
+            break
+        try:
+            # Bound the install itself by the remaining budget so one stuck pip/venv
+            # step can't block boot indefinitely; failures are swallowed and the
+            # built-in keeps serving until the next start.
+            stage_install(manifest, install_timeout=remaining)
+            staged.append(provider_id)
+            logger.info("Provider Hub startup auto-install: staged %s from the official catalog", provider_id)
+        except Exception:
+            logger.exception("Provider Hub startup auto-install: failed to stage %s; keeping built-in", provider_id)
+    return staged
+
+
 def _normalize_catalog_manifest(manifest: dict[str, Any], source: dict[str, Any], commit: str) -> dict[str, Any]:
     normalized = dict(manifest)
     manifest_source = dict(normalized.get("source") or {})
@@ -486,7 +583,10 @@ def _normalize_catalog_manifest(manifest: dict[str, Any], source: dict[str, Any]
     return normalized
 
 
-def refresh_catalog() -> dict[str, Any]:
+def refresh_catalog(source_ids: set[str] | None = None) -> dict[str, Any]:
+    """Refresh catalog sources. When ``source_ids`` is given, only those source ids
+    are fetched (e.g. the startup migration refreshes only the official source so an
+    unrelated slow/broken third-party source can't delay boot); otherwise all are."""
     with record_job("refresh_catalog", target_kind="system") as job:
         def refresh(state: dict[str, Any]) -> dict[str, Any]:
             now = utcnow_iso()
@@ -498,6 +598,8 @@ def refresh_catalog() -> dict[str, Any]:
             failed_sources: list[str] = []
             for source in (state.get("catalog_sources") or {}).values():
                 if not isinstance(source, dict):
+                    continue
+                if source_ids is not None and source.get("id") not in source_ids:
                     continue
                 sources_count += 1
                 source["last_checked_at"] = now
@@ -866,8 +968,25 @@ def _github_raw_url(manifest, relative_path: str) -> str:
     return f"https://raw.githubusercontent.com/{manifest.source_repo}/{manifest.source_commit}/{raw_path}"
 
 
-def _fetch_github_bundle_file(manifest, relative_path: str) -> bytes:
-    response = requests.get(_github_raw_url(manifest, relative_path), timeout=30)
+def _deadline_request_timeout(deadline: float | None, default: float = 30.0) -> float:
+    """Per-request timeout bounded by an optional wall-clock deadline (monotonic).
+
+    Raises ``ProviderHubInstallError`` when the deadline has already passed so a
+    slow bundle fetch can't run the startup auto-install past its time budget.
+    """
+    if deadline is None:
+        return default
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ProviderHubInstallError("bundle fetch exceeded the install time budget")
+    return max(1.0, min(default, remaining))
+
+
+def _fetch_github_bundle_file(manifest, relative_path: str, deadline: float | None = None) -> bytes:
+    response = requests.get(
+        _github_raw_url(manifest, relative_path),
+        timeout=_deadline_request_timeout(deadline),
+    )
     response.raise_for_status()
     content = response.content
     if not isinstance(content, bytes):
@@ -882,7 +1001,7 @@ def _write_manifest_file(manifest, root: Path) -> None:
     )
 
 
-def _fetch_bundle(manifest) -> Path:
+def _fetch_bundle(manifest, deadline: float | None = None) -> Path:
     target = _bundle_path_for(manifest)
     if target.exists():
         _remove_bundle_runtime_artifacts(target)
@@ -895,7 +1014,7 @@ def _fetch_bundle(manifest) -> Path:
         for relative_path in manifest.files:
             destination = tmp_path / relative_path
             destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(_fetch_github_bundle_file(manifest, relative_path))
+            destination.write_bytes(_fetch_github_bundle_file(manifest, relative_path, deadline=deadline))
 
         _write_manifest_file(manifest, tmp_path)
         verify_bundle_tree(manifest, tmp_path)
@@ -1165,11 +1284,15 @@ def _stage_validated(
     source_id: str | None,
     bundle_stager,
     catalog_url: str | None = None,
+    install_timeout: float | None = None,
 ) -> dict[str, Any]:
     """Shared install core: stage the bundle, build the venv, smoke-test, record.
 
-    ``bundle_stager(validated) -> Path`` decides where the bundle comes from
-    (catalog fetch vs already-extracted local files).
+    ``bundle_stager(validated, deadline) -> Path`` decides where the bundle comes
+    from (catalog fetch vs already-extracted local files). ``install_timeout``, when
+    set, is a single wall-clock budget for the whole stage (bundle fetch + venv
+    build) shared via ``deadline``, so the startup auto-install can't run past it;
+    ``None`` (manual installs) leaves it unbounded.
     """
     state = load_state()
     existing = (state.get("installations") or {}).get(validated.provider_id)
@@ -1189,8 +1312,10 @@ def _stage_validated(
         details={"catalog_url": catalog_url, "trusted": source_trusted, "origin": origin},
     ) as job:
         try:
-            bundle_path = bundle_stager(validated)
-            env_path = PluginEnvironment(provider_hub_dir()).install(validated)
+            deadline = None if install_timeout is None else time.monotonic() + max(0.0, install_timeout)
+            bundle_path = bundle_stager(validated, deadline)
+            install_remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            env_path = PluginEnvironment(provider_hub_dir()).install(validated, timeout=install_remaining)
             staged_python_path = python_executable(env_path)
             _smoke_validate_worker(validated, bundle_path, staged_python_path)
         except Exception as error:
@@ -1239,7 +1364,7 @@ def _stage_validated(
         return _redact_installation(installation)
 
 
-def stage_install(manifest: dict[str, Any]) -> dict[str, Any]:
+def stage_install(manifest: dict[str, Any], install_timeout: float | None = None) -> dict[str, Any]:
     state = load_state()
     source_trusted = _catalog_manifest_trusted(manifest, state) if isinstance(manifest, dict) else False
     origin, source_id = _install_origin(manifest, state) if isinstance(manifest, dict) else ("local", None)
@@ -1259,6 +1384,7 @@ def stage_install(manifest: dict[str, Any]) -> dict[str, Any]:
         source_id,
         _fetch_bundle,
         catalog_url=catalog_url,
+        install_timeout=install_timeout,
     )
 
 
@@ -1292,7 +1418,7 @@ def stage_install_local(archive_bytes: bytes) -> dict[str, Any]:
             source_trusted=False,
             origin="local",
             source_id=None,
-            bundle_stager=lambda candidate: _stage_local_bundle(candidate, bundle_root),
+            bundle_stager=lambda candidate, deadline=None: _stage_local_bundle(candidate, bundle_root),
         )
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
