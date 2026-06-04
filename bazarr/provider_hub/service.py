@@ -968,8 +968,25 @@ def _github_raw_url(manifest, relative_path: str) -> str:
     return f"https://raw.githubusercontent.com/{manifest.source_repo}/{manifest.source_commit}/{raw_path}"
 
 
-def _fetch_github_bundle_file(manifest, relative_path: str) -> bytes:
-    response = requests.get(_github_raw_url(manifest, relative_path), timeout=30)
+def _deadline_request_timeout(deadline: float | None, default: float = 30.0) -> float:
+    """Per-request timeout bounded by an optional wall-clock deadline (monotonic).
+
+    Raises ``ProviderHubInstallError`` when the deadline has already passed so a
+    slow bundle fetch can't run the startup auto-install past its time budget.
+    """
+    if deadline is None:
+        return default
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ProviderHubInstallError("bundle fetch exceeded the install time budget")
+    return max(1.0, min(default, remaining))
+
+
+def _fetch_github_bundle_file(manifest, relative_path: str, deadline: float | None = None) -> bytes:
+    response = requests.get(
+        _github_raw_url(manifest, relative_path),
+        timeout=_deadline_request_timeout(deadline),
+    )
     response.raise_for_status()
     content = response.content
     if not isinstance(content, bytes):
@@ -984,7 +1001,7 @@ def _write_manifest_file(manifest, root: Path) -> None:
     )
 
 
-def _fetch_bundle(manifest) -> Path:
+def _fetch_bundle(manifest, deadline: float | None = None) -> Path:
     target = _bundle_path_for(manifest)
     if target.exists():
         _remove_bundle_runtime_artifacts(target)
@@ -997,7 +1014,7 @@ def _fetch_bundle(manifest) -> Path:
         for relative_path in manifest.files:
             destination = tmp_path / relative_path
             destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(_fetch_github_bundle_file(manifest, relative_path))
+            destination.write_bytes(_fetch_github_bundle_file(manifest, relative_path, deadline=deadline))
 
         _write_manifest_file(manifest, tmp_path)
         verify_bundle_tree(manifest, tmp_path)
@@ -1271,8 +1288,11 @@ def _stage_validated(
 ) -> dict[str, Any]:
     """Shared install core: stage the bundle, build the venv, smoke-test, record.
 
-    ``bundle_stager(validated) -> Path`` decides where the bundle comes from
-    (catalog fetch vs already-extracted local files).
+    ``bundle_stager(validated, deadline) -> Path`` decides where the bundle comes
+    from (catalog fetch vs already-extracted local files). ``install_timeout``, when
+    set, is a single wall-clock budget for the whole stage (bundle fetch + venv
+    build) shared via ``deadline``, so the startup auto-install can't run past it;
+    ``None`` (manual installs) leaves it unbounded.
     """
     state = load_state()
     existing = (state.get("installations") or {}).get(validated.provider_id)
@@ -1292,8 +1312,10 @@ def _stage_validated(
         details={"catalog_url": catalog_url, "trusted": source_trusted, "origin": origin},
     ) as job:
         try:
-            bundle_path = bundle_stager(validated)
-            env_path = PluginEnvironment(provider_hub_dir()).install(validated, timeout=install_timeout)
+            deadline = None if install_timeout is None else time.monotonic() + max(0.0, install_timeout)
+            bundle_path = bundle_stager(validated, deadline)
+            install_remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            env_path = PluginEnvironment(provider_hub_dir()).install(validated, timeout=install_remaining)
             staged_python_path = python_executable(env_path)
             _smoke_validate_worker(validated, bundle_path, staged_python_path)
         except Exception as error:
@@ -1396,7 +1418,7 @@ def stage_install_local(archive_bytes: bytes) -> dict[str, Any]:
             source_trusted=False,
             origin="local",
             source_id=None,
-            bundle_stager=lambda candidate: _stage_local_bundle(candidate, bundle_root),
+            bundle_stager=lambda candidate, deadline=None: _stage_local_bundle(candidate, bundle_root),
         )
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)

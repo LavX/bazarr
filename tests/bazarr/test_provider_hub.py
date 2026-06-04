@@ -927,7 +927,7 @@ def test_apply_update_uses_latest_catalog_manifest(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
-    monkeypatch.setattr("provider_hub.service._fetch_bundle", lambda manifest: tmp_path / "bundle")
+    monkeypatch.setattr("provider_hub.service._fetch_bundle", lambda manifest, deadline=None: tmp_path / "bundle")
     class FakeEnvironment:
         def __init__(self, root):
             self.root = root
@@ -1968,7 +1968,7 @@ def test_stage_install_accepts_trusted_migrated_built_in_shadow(tmp_path, monkey
     )
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     monkeypatch.setattr("provider_hub.service._built_in_provider_ids", lambda: {"gestdown"})
-    monkeypatch.setattr("provider_hub.service._fetch_bundle", lambda manifest: tmp_path / "bundle")
+    monkeypatch.setattr("provider_hub.service._fetch_bundle", lambda manifest, deadline=None: tmp_path / "bundle")
 
     class FakeEnvironment:
         def __init__(self, root):
@@ -3494,3 +3494,20 @@ def test_plugin_environment_install_times_out(tmp_path, monkeypatch):
     # hanging the install (and therefore boot) indefinitely.
     with pytest.raises(PluginEnvironmentError):
         PluginEnvironment(tmp_path).install(validated, timeout=30)
+
+
+def test_deadline_request_timeout_bounds_and_rejects():
+    import time
+
+    from provider_hub.service import ProviderHubInstallError, _deadline_request_timeout
+
+    # No deadline -> the full per-request default.
+    assert _deadline_request_timeout(None) == 30.0
+    # Plenty of budget left -> still capped at the default.
+    assert _deadline_request_timeout(time.monotonic() + 1000) == 30.0
+    # Little budget left -> shrunk to the remaining time.
+    shrunk = _deadline_request_timeout(time.monotonic() + 5)
+    assert 1.0 <= shrunk <= 5.0
+    # Budget exhausted -> the bundle fetch is rejected instead of running long.
+    with pytest.raises(ProviderHubInstallError):
+        _deadline_request_timeout(time.monotonic() - 1)
