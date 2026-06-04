@@ -13,6 +13,7 @@ extend-exclude = [
     "ai-subtitle-translator",
     "bazarr/ai-subtitle-translator",
     "opensubtitles-scraper",
+    "bazarr-provider-catalog",
     "frontend",
     "bazarr-binaries",
     ".worktrees",
