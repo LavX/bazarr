@@ -410,6 +410,67 @@ describe("Settings > Providers (Provider Hub)", () => {
     ).toBeInTheDocument();
   });
 
+  it("keeps the plugin card while a same-id update is staged for restart", async () => {
+    const subdlPluginManifest = {
+      ...manifest,
+      provider_id: "subdl",
+      name: "SubDL",
+      description: "SubDL plugin.",
+      version: "0.1.0",
+      config_schema: {
+        type: "object",
+        properties: {
+          api_key: { type: "string", title: "API key", secret: true },
+        },
+      },
+      secret_fields: ["api_key"],
+    };
+    server.use(
+      http.get("/api/provider-hub/providers", () => {
+        return HttpResponse.json({
+          data: [
+            {
+              // An update is staged: the backend keeps active_version serving and
+              // marks pending_restart, so the plugin must still own the card.
+              provider_id: "subdl",
+              name: "SubDL",
+              active_version: "0.1.0",
+              staged_version: "0.2.0",
+              state: "staged",
+              pending_restart: true,
+              trusted: true,
+              last_error: null,
+              manifest: subdlPluginManifest,
+            },
+          ],
+        });
+      }),
+    );
+
+    customRender(<SettingsProvidersView />);
+
+    const panel = await screen.findByRole("tabpanel", {
+      name: /My Providers/i,
+    });
+    await userEvent.click(
+      await within(panel).findByRole("button", {
+        name: /Add search provider/i,
+      }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: /Provider settings/i,
+    });
+
+    // Exactly one SubDL option (the plugin), not the shipped built-in card.
+    const subdlOptions = await within(dialog).findAllByText("SubDL");
+    expect(subdlOptions).toHaveLength(1);
+    await userEvent.click(subdlOptions[0]);
+    expect(screen.getByLabelText("API key")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Provider Hub plugin is installed but not enabled/i),
+    ).toBeInTheDocument();
+  });
+
   it("stages per-provider excluded language configuration from the provider drawer", async () => {
     const updateRequest = vi.fn();
     server.use(
