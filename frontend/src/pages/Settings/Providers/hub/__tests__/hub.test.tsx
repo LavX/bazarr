@@ -341,6 +341,75 @@ describe("Settings > Providers (Provider Hub)", () => {
     ).toBeInTheDocument();
   });
 
+  it("replaces the shipped built-in card with its same-id replacement plugin", async () => {
+    const embeddedPluginManifest = {
+      ...manifest,
+      provider_id: "embeddedsubtitles",
+      name: "Embedded Subtitles",
+      description: "Embedded subtitles plugin.",
+      version: "0.1.2",
+      config_schema: {
+        type: "object",
+        properties: {
+          ffmpeg_path: {
+            type: "string",
+            title: "ffmpeg path",
+          },
+        },
+      },
+    };
+    server.use(
+      http.get("/api/provider-hub/providers", () => {
+        return HttpResponse.json({
+          data: [
+            {
+              // Catalog plugin reuses the built-in id it replaces.
+              provider_id: "embeddedsubtitles",
+              name: "Embedded Subtitles",
+              active_version: "0.1.2",
+              staged_version: null,
+              state: "active",
+              pending_restart: false,
+              trusted: true,
+              last_error: null,
+              manifest: embeddedPluginManifest,
+            },
+          ],
+        });
+      }),
+    );
+
+    customRender(<SettingsProvidersView />);
+
+    const panel = await screen.findByRole("tabpanel", {
+      name: /My Providers/i,
+    });
+
+    await userEvent.click(
+      await within(panel).findByRole("button", {
+        name: /Add search provider/i,
+      }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: /Provider settings/i,
+    });
+
+    // Exactly one "Embedded Subtitles" option: the plugin replaces the shipped
+    // built-in card instead of appearing as a second, duplicate provider.
+    const embeddedOptions =
+      await within(dialog).findAllByText("Embedded Subtitles");
+    expect(embeddedOptions).toHaveLength(1);
+
+    await userEvent.click(embeddedOptions[0]);
+
+    // The single card is plugin-backed: it renders the plugin's config schema
+    // and the Provider Hub notice (not the shipped built-in inputs).
+    expect(screen.getByLabelText("ffmpeg path")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Provider Hub plugin is installed but not enabled/i),
+    ).toBeInTheDocument();
+  });
+
   it("stages per-provider excluded language configuration from the provider drawer", async () => {
     const updateRequest = vi.fn();
     server.use(

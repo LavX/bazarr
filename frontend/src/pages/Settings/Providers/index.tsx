@@ -134,17 +134,24 @@ function useProviderOptions(
   providers: ProviderHubInstallation[] | undefined,
 ): Readonly<ProviderInfo[]> {
   return useMemo(() => {
-    const seen = new Set(ProviderList.map((provider) => provider.key));
-    const hubOptions = (providers ?? [])
-      .filter(
-        (provider) => provider.state === "active" && !provider.pending_restart,
-      )
+    const active = (providers ?? []).filter(
+      (provider) => provider.state === "active" && !provider.pending_restart,
+    );
+    // A catalog plugin reuses the built-in's id when it replaces it (e.g. subdl,
+    // embeddedsubtitles). Drop the shipped card for any id an active plugin owns
+    // so the plugin replaces it instead of appearing as a second duplicate, and
+    // so a same-id plugin can actually be added (the shipped key no longer masks
+    // it). Plugins with a brand-new id are simply appended.
+    const replaced = new Set(active.map((provider) => provider.provider_id));
+    const base = ProviderList.filter((provider) => !replaced.has(provider.key));
+    const seen = new Set(base.map((provider) => provider.key));
+    const hubOptions = active
       .filter((provider) => !seen.has(provider.provider_id))
       .map((provider) => {
         seen.add(provider.provider_id);
         return providerHubOption(provider);
       });
-    return [...ProviderList, ...hubOptions];
+    return [...base, ...hubOptions];
   }, [providers]);
 }
 
