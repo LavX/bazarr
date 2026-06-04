@@ -49,4 +49,20 @@ describe("DistributionHub > SettingsPanel consent", () => {
     await waitFor(() => expect(patched).toHaveBeenCalled());
     expect(patched.mock.calls[0][0]).toMatchObject({ consent: true });
   });
+
+  it("reveals the regenerated token so the operator can copy it", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.post("/api/distribution-hub/regenerate", () =>
+        HttpResponse.json({ ok: true, token: "regentok789" }),
+      ),
+    );
+
+    customRender(<SettingsPanel />);
+
+    await user.click(
+      await screen.findByRole("button", { name: /regenerate secrets/i }),
+    );
+    expect(await screen.findByText("regentok789")).toBeInTheDocument();
+  });
 });

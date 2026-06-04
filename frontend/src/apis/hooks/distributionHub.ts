@@ -155,3 +155,15 @@ export function useDistRegenerate() {
       }),
   });
 }
+
+export function useDistLegacyToken() {
+  return useMutation({
+    mutationKey: [...distKey, QueryKeys.Actions, "legacy-token"],
+    mutationFn: () => api.distributionHub.legacyToken(),
+    onError: () =>
+      showNotification({
+        color: "red",
+        message: "Failed to load the legacy token",
+      }),
+  });
+}
