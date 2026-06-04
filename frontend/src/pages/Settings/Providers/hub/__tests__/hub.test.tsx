@@ -471,6 +471,40 @@ describe("Settings > Providers (Provider Hub)", () => {
     );
   });
 
+  it("nudges to the Marketplace when no providers are enabled", async () => {
+    server.use(
+      http.get("/api/system/settings", () => {
+        return HttpResponse.json({
+          general: {
+            enabled_providers: [],
+            provider_priorities: {},
+            provider_languages: {},
+            use_provider_priority: true,
+          },
+        });
+      }),
+      http.get("/api/provider-hub/providers", () => {
+        return HttpResponse.json({ data: [] });
+      }),
+    );
+
+    customRender(<SettingsProvidersView />);
+
+    const panel = await screen.findByRole("tabpanel", {
+      name: /My Providers/i,
+    });
+    expect(
+      await within(panel).findByText(/no providers enabled/i),
+    ).toBeInTheDocument();
+
+    await userEvent.click(
+      within(panel).getByRole("button", { name: /browse the marketplace/i }),
+    );
+    expect(
+      await screen.findByRole("tabpanel", { name: /Marketplace/i }),
+    ).toBeInTheDocument();
+  });
+
   it("preserves the trusted-source attribution when installing from catalog", async () => {
     const installRequest = vi.fn();
     server.use(
