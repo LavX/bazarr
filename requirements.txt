@@ -24,7 +24,7 @@ enzyme==0.5.2
 fcache==0.6.0
 fese==0.3.0
 ffmpeg-python==0.2.0
-ffsubsync==0.4.31
+ffsubsync==0.4.32
 autosubsync==1.0.1
 filetype==1.2.0
 Flask==3.1.3
