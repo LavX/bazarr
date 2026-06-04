@@ -63,6 +63,7 @@ class BackendManager:
     # Ordered startup stages (must match actual stdout from bazarr subprocess)
     STAGES = [
         "Launching process",
+        "Installing providers",
         "Checking for updates",
         "Starting scheduler",
         "Starting jobs queue",
@@ -74,11 +75,12 @@ class BackendManager:
     # Map log fragments to stage index (only markers that ACTUALLY appear in stdout)
     _STAGE_MARKERS = [
         ("starting child process", 0),                  # Launching process
-        ("check_update", 1),                            # Checking for updates
-        ("Scheduler will use this timezone", 2),        # Starting scheduler
-        ("jobs queue started", 3),                      # Starting jobs queue
-        ("waiting for requests on", 4),                 # Starting HTTP server
-        ("SignalR client for", 5),                      # Connecting to Sonarr/Radarr
+        ("Provider Hub startup auto-install", 1),       # Installing providers
+        ("check_update", 2),                            # Checking for updates
+        ("Scheduler will use this timezone", 3),        # Starting scheduler
+        ("jobs queue started", 4),                      # Starting jobs queue
+        ("waiting for requests on", 5),                 # Starting HTTP server
+        ("SignalR client for", 6),                      # Connecting to Sonarr/Radarr
     ]
 
     def __init__(self, bazarr_args: list[str]):
