@@ -3368,3 +3368,13 @@ def test_autoinstall_kill_switch_returns_empty(monkeypatch):
     monkeypatch.setenv("BAZARR_DISABLE_PROVIDER_AUTOINSTALL", "1")
     monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
     assert service.autoinstall_enabled_builtins() == []
+
+
+def test_autoinstall_returns_empty_when_state_load_fails(monkeypatch):
+    from provider_hub import service
+    monkeypatch.setattr(service, "list_catalog", lambda auto_refresh=False: None)
+    def boom(*a, **k):
+        raise RuntimeError("corrupt state")
+    monkeypatch.setattr(service, "load_state", boom)
+    # Must not raise; returns [].
+    assert service.autoinstall_enabled_builtins() == []

@@ -519,9 +519,13 @@ def autoinstall_enabled_builtins() -> list[str]:
     except Exception:
         logger.exception("Provider Hub startup auto-install: catalog refresh failed; using cached catalog")
 
-    state = load_state()
-    existing = set((state.get("installations") or {}).keys())
-    enabled = _bazarr_enabled_providers()
+    try:
+        state = load_state()
+        existing = set((state.get("installations") or {}).keys())
+        enabled = _bazarr_enabled_providers()
+    except Exception:
+        logger.exception("Provider Hub startup auto-install: could not load state; skipping")
+        return []
 
     budget_seconds = 180.0
     started = time.monotonic()
