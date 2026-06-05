@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 
 from typing import Any
 
 from subzero.language import Language
 from subliminal.video import Episode, Movie
 from subliminal_patch.subtitle import Subtitle
+
+logger = logging.getLogger(__name__)
 
 
 class WorkerProtocolError(ValueError):
@@ -47,7 +50,18 @@ class HubWorkerSubtitle(Subtitle):
         return self.worker_id
 
     def get_matches(self, video):
-        return set(self.matches or set())
+        matches = set(self.matches or set())
+        release_info = getattr(self, "release_info", None)
+        if release_info:
+            try:
+                from subliminal_patch.providers.utils import update_matches
+
+                update_matches(matches, video, release_info)
+            except Exception:
+                logger.debug(
+                    "provider_hub: release-based match update failed", exc_info=True
+                )
+        return matches
 
 
 def language_to_payload(language) -> dict[str, Any]:
