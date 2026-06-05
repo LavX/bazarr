@@ -109,12 +109,14 @@
       <p>The same source rules apply: only on-disk subtitles are used, source priority is plain &gt; HI &gt; forced, and items that do not have all source languages are skipped.</p>
 
       <h3 id="combined-managing">Managing combined output</h3>
-      <p>Combined subtitles are indexed alongside other generated outputs and marked with a CombinedSubtitleBadge in the subtitle table. Each combined row has an overflow menu with three actions:</p>
+      <p>Combined subtitles are indexed alongside other generated outputs and marked with a CombinedSubtitleBadge in the subtitle table. Each combined row has an overflow menu:</p>
       <ul>
         <li><strong>Rebuild</strong>: recompose the combined file from the current on-disk sources.</li>
         <li><strong>View</strong>: open the combined subtitle.</li>
+        <li><strong>Edit</strong>: open the combined subtitle in the subtitle editor. An SRT combined opens as one stacked cue per timestamp; an ASS combined opens as its separate positioned cues (one per language) without false overlap warnings.</li>
         <li><strong>Delete</strong>: remove the combined file.</li>
       </ul>
+      <p>A combined output is kept as a single file: rebuilding in a different format removes the stale sibling left in the previous format.</p>
 
       <h3 id="combined-api">API endpoints</h3>
       <p>The on-demand and mass-combine actions call these endpoints. The series endpoint is the batch form that combines across the show's episodes.</p>
