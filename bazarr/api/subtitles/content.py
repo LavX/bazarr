@@ -181,6 +181,18 @@ def resolve_subtitle_path(media_type, media_id, language_code):
     # which CodeQL's py/path-injection query recognises as a sanitizer: the
     # retrieved path value comes from the DB-populated dict, not from any
     # comparison involving the tainted key.
+    def _entry_mtime(raw_path):
+        # Best-effort modified time of a DB-listed subtitle, via the trusted
+        # path mapping. Returns -1 when the file can't be stat'd.
+        try:
+            if media_type == 'episode':
+                real_path = path_mappings.path_replace(raw_path)
+            else:
+                real_path = path_mappings.path_replace_movie(raw_path)
+            return os.path.getmtime(real_path)
+        except OSError:
+            return -1.0
+
     subtitles_by_lang = {}
     for item in subtitles_list:
         if not (isinstance(item, list)
@@ -190,15 +202,17 @@ def resolve_subtitle_path(media_type, media_id, language_code):
             continue
         lang, sub_path = item[0], item[1]
         existing = subtitles_by_lang.get(lang)
-        # A combined output can be indexed more than once for the same language
-        # when a stale file in another format lingers (e.g. a positioned `.ass`
-        # next to the stacked `.srt`). Prefer the `.srt` so the editor loads one
-        # stacked cue per timestamp instead of overlapping positioned events.
-        if existing is None or (
-            not existing.lower().endswith('.srt')
-            and sub_path.lower().endswith('.srt')
-        ):
+        if existing is None:
             subtitles_by_lang[lang] = sub_path
+        elif existing != sub_path:
+            # A combined output can be indexed more than once for the same
+            # language when a stale file in another format lingers (e.g. a
+            # positioned `.ass` left next to the current `.srt` after a format
+            # change, before the combine cleanup runs). Keep the most recently
+            # written file, which is the current output, rather than guessing by
+            # extension.
+            if _entry_mtime(sub_path) > _entry_mtime(existing):
+                subtitles_by_lang[lang] = sub_path
     entry = None
     if language_code in subtitles_by_lang:
         entry = (language_code, subtitles_by_lang[language_code])

@@ -16,6 +16,9 @@ interface QCPanelProps {
   open: boolean;
   cues: Cue[];
   preset: QCPreset;
+  // Combined outputs stack languages at shared timestamps; their overlaps and
+  // zero gaps are intentional, so the overlap/gap checks are suppressed.
+  combined?: boolean;
   onPresetChange: (preset: QCPreset) => void;
   onApplyFixes: (ops: CueOperation[]) => void;
   onNavigate: (cueIndex: number) => void;
@@ -339,6 +342,7 @@ export default function QCPanel({
   open,
   cues,
   preset,
+  combined = false,
   onPresetChange,
   onApplyFixes,
   onNavigate,
@@ -366,6 +370,7 @@ export default function QCPanel({
         cues[i - 1] ?? null,
         cues[i + 1] ?? null,
         preset,
+        combined,
       );
       if (w) {
         warningMap.set(i, w);
@@ -375,7 +380,7 @@ export default function QCPanel({
       }
     });
     return { red, orange, yellow, warningMap };
-  }, [cues, preset]);
+  }, [cues, preset, combined]);
 
   // Navigate to first warning of a given level
   const navigateToLevel = useCallback(
@@ -395,13 +400,15 @@ export default function QCPanel({
     () => ({
       hi: countHI(cues),
       whitespace: countWhitespace(cues),
-      overlaps: countOverlaps(cues),
-      shortGaps: countShortGaps(cues, preset.minGapMs),
+      // Combined outputs stack languages at the same timestamp; their overlaps
+      // and zero gaps are intentional, so do not offer to "fix" them.
+      overlaps: combined ? 0 : countOverlaps(cues),
+      shortGaps: combined ? 0 : countShortGaps(cues, preset.minGapMs),
       empty: countEmpty(cues),
       ellipsis: countEllipsis(cues),
       longLines: countLongLines(cues, preset.maxCharsPerLine),
     }),
-    [cues, preset],
+    [cues, preset, combined],
   );
 
   const applyFix = useCallback(
