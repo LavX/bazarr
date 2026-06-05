@@ -110,13 +110,18 @@ def _analize_sub_name(sub_name: str, title_: str):
 
 
 def get_subtitle_from_archive(
-    archive, forced=False, episode=None, get_first_subtitle=False, **kwargs
+    archive,
+    forced=False,
+    episode=None,
+    get_first_subtitle=False,
+    extensions=(".srt", ".sub", ".ssa", ".ass"),
+    **kwargs,
 ):
     "Get subtitle from Rarfile/Zipfile object. Return None if nothing is found."
     subs_in_archive = [
         name
         for name in archive.namelist()
-        if name.endswith((".srt", ".sub", ".ssa", ".ass"))
+        if name.endswith(tuple(extensions))
     ]
 
     if not subs_in_archive:

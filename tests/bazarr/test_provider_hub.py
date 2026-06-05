@@ -3707,3 +3707,104 @@ def test_deadline_request_timeout_bounds_and_rejects():
     # Budget exhausted -> the bundle fetch is rejected instead of running long.
     with pytest.raises(ProviderHubInstallError):
         _deadline_request_timeout(time.monotonic() - 1)
+
+
+def test_worker_download_rejects_excessive_archive_member_count(monkeypatch):
+    # The byte caps never trip on an archive full of tiny members, so an entry-count
+    # bomb (hundreds of thousands of zero-byte members) would still be scanned/extracted.
+    # The guard must also cap the member count, like service.py's _LOCAL_PACKAGE_MAX_MEMBERS.
+    from provider_hub import protocol
+    from provider_hub.protocol import WorkerProtocolError, worker_download_to_content
+
+    candidate = _hub_candidate("sub-manymembers")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        # Without a count cap this archive extracts fine (one usable .srt); the only
+        # thing that should reject it is the member-count guard.
+        archive.writestr("only.srt", b"1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+        for i in range(20):
+            archive.writestr(f"junk{i}.txt", b"x")
+    archive_bytes = buffer.getvalue()
+
+    monkeypatch.setattr(protocol, "_MAX_ARCHIVE_MEMBERS", 5, raising=False)
+    with pytest.raises(WorkerProtocolError):
+        worker_download_to_content(
+            candidate, {"archive_b64": base64.b64encode(archive_bytes).decode("ascii")}
+        )
+
+
+def test_worker_download_archive_clears_stale_encoding():
+    # An encoding can be carried onto the subtitle at search time (e.g. via the display
+    # attribute splat in candidate_from_worker). The archive path must clear it so
+    # Subtitle.normalize()/chardet detects encoding from the extracted bytes instead of
+    # pinning a stale legacy guess (which silently decodes UTF-8 as mojibake).
+    from provider_hub.protocol import worker_download_to_content
+
+    candidate = _hub_candidate("sub-staleenc")
+    candidate.encoding = "latin-1"
+    candidate._guessed_encoding = "latin-1"
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("only.srt", b"1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+    archive_bytes = buffer.getvalue()
+
+    worker_download_to_content(
+        candidate, {"archive_b64": base64.b64encode(archive_bytes).decode("ascii")}
+    )
+
+    assert candidate.encoding is None
+    assert candidate._guessed_encoding is None
+
+
+def test_worker_download_auto_selects_single_vtt_member():
+    # The explicit-member path already supports VTT; the auto-select path must too, so a
+    # worker archive containing a lone WebVTT file is not rejected as "no usable member".
+    from provider_hub.protocol import worker_download_to_content
+
+    candidate = _hub_candidate("sub-vtt")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("only.vtt", b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHi\n")
+    archive_bytes = buffer.getvalue()
+
+    worker_download_to_content(
+        candidate, {"archive_b64": base64.b64encode(archive_bytes).decode("ascii")}
+    )
+
+    assert b"WEBVTT" in candidate.content
+
+
+def test_worker_download_forwards_episode_title_to_archive_selection(monkeypatch):
+    # Episode packs are disambiguated by episode_title when filenames carry the title
+    # rather than the number (as subdl/subf2m do). The host must forward episode_title
+    # into the shared selector, not just the episode number.
+    import subliminal_patch.providers.utils as utils
+
+    from provider_hub.protocol import worker_download_to_content
+
+    captured = {}
+
+    def fake_select(archive, **kwargs):
+        captured.update(kwargs)
+        return b"1\n00:00:01,000 --> 00:00:02,000\nHi\n"
+
+    monkeypatch.setattr(utils, "get_subtitle_from_archive", fake_select)
+
+    candidate = _hub_candidate("sub-eptitle")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("a.srt", b"x")
+        archive.writestr("b.srt", b"y")
+    archive_bytes = buffer.getvalue()
+
+    worker_download_to_content(
+        candidate,
+        {
+            "archive_b64": base64.b64encode(archive_bytes).decode("ascii"),
+            "episode": 1,
+            "episode_title": "The One With The Test",
+        },
+    )
+
+    assert captured.get("episode_title") == "The One With The Test"

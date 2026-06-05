@@ -215,6 +215,10 @@ def worker_download_to_content(subtitle: HubWorkerSubtitle, payload: dict[str, A
 _MAX_ARCHIVE_BYTES = 32 * 1024 * 1024
 _MAX_MEMBER_BYTES = 16 * 1024 * 1024
 _MAX_ARCHIVE_TOTAL_BYTES = 64 * 1024 * 1024
+# Real subtitle archives hold a handful of files; cap the member count so a 32 MB zip
+# packed with hundreds of thousands of zero-byte entries cannot DoS the host (the byte
+# caps above never trip on empty members). Mirrors service.py's _LOCAL_PACKAGE_MAX_MEMBERS.
+_MAX_ARCHIVE_MEMBERS = 5000
 
 
 def _guard_archive_members(archive) -> None:
@@ -223,6 +227,10 @@ def _guard_archive_members(archive) -> None:
         infos = archive.infolist()
     except Exception:  # pragma: no cover - exotic archive objects
         return
+    # Cap the entry count before the O(N) scan below (and the later namelist()/extract):
+    # an archive can stay under the byte caps while carrying a pathological member count.
+    if len(infos) > _MAX_ARCHIVE_MEMBERS:
+        raise WorkerProtocolError("download.archive_b64 contains too many members")
     total = 0
     for info in infos:
         # zip/rar expose file_size; py7zr exposes uncompressed.
@@ -344,7 +352,9 @@ def _worker_archive_to_content(
             archive,
             forced=forced,
             episode=episode,
+            episode_title=payload.get("episode_title"),
             get_first_subtitle=bool(payload.get("first_subtitle")),
+            extensions=(".srt", ".sub", ".ssa", ".ass", ".vtt"),
         )
         if content is None:
             raise WorkerProtocolError("download.archive_b64 has no usable subtitle member")
@@ -352,6 +362,9 @@ def _worker_archive_to_content(
 
     subtitle.content = content
     subtitle.format = payload.get("format") or _format_from_member(chosen) or getattr(subtitle, "format", "srt")
-    # Leave subtitle.encoding unset so Subtitle.normalize()/chardet detects it, the
-    # same as native subliminal providers; do not let the worker pin a guess.
+    # Clear any encoding carried over from search (e.g. via the display attribute splat)
+    # so Subtitle.normalize()/chardet detects it from the extracted bytes, the same as
+    # native subliminal providers; do not let a stale or worker-supplied guess pin it.
+    subtitle.encoding = None
+    subtitle._guessed_encoding = None
     return True
