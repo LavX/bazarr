@@ -422,6 +422,27 @@ def test_worker_download_rejects_oversized_archive(monkeypatch):
         worker_download_to_content(candidate, {"archive_b64": payload_b64})
 
 
+def test_worker_download_extracts_seven_zip_member_host_side():
+    py7zr = pytest.importorskip("py7zr")
+    from provider_hub.protocol import worker_download_to_content
+
+    candidate = _hub_candidate("sub-7z")
+    buffer = io.BytesIO()
+    with py7zr.SevenZipFile(buffer, "w") as archive:
+        archive.writestr(b"1\r\n00:00:01,000 --> 00:00:02,000\r\nAhoj\r\n", "Show.S01E01.ces.srt")
+    archive_bytes = buffer.getvalue()
+    assert archive_bytes[:6] == b"7z\xbc\xaf\x27\x1c"
+
+    worker_download_to_content(
+        candidate,
+        {"archive_b64": base64.b64encode(archive_bytes).decode("ascii"), "member": "Show.S01E01.ces.srt"},
+    )
+
+    assert b"Ahoj" in candidate.content
+    assert b"\r\n" not in candidate.content  # host applied fix_line_ending
+    assert candidate.format == "srt"
+
+
 def test_worker_reader_caps_oversized_response_line(monkeypatch):
     # The reader thread must reject an oversized response at the transport layer
     # (a giant readline() line buffers in full before json.loads otherwise).

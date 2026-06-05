@@ -225,12 +225,63 @@ def _guard_archive_members(archive) -> None:
         return
     total = 0
     for info in infos:
-        size = int(getattr(info, "file_size", 0) or 0)
+        # zip/rar expose file_size; py7zr exposes uncompressed.
+        size = int(getattr(info, "file_size", 0) or getattr(info, "uncompressed", 0) or 0)
         if size > _MAX_MEMBER_BYTES:
             raise WorkerProtocolError("download.archive_b64 member exceeds the size limit")
         total += size
         if total > _MAX_ARCHIVE_TOTAL_BYTES:
             raise WorkerProtocolError("download.archive_b64 decompresses past the size limit")
+
+
+_SEVEN_ZIP_MAGIC = b"7z\xbc\xaf\x27\x1c"
+
+
+class _SevenZipArchive:
+    """A minimal zip/rar-like view over py7zr so get_subtitle_from_archive and the bomb
+    guard work on 7z archives unchanged. py7zr (a bazarr host dependency) extracts to
+    disk, so read() extracts one member into a temp dir and returns its bytes."""
+
+    def __init__(self, data: bytes):
+        self._data = data
+
+    def _open(self):
+        import io as _io
+
+        import py7zr
+
+        return py7zr.SevenZipFile(_io.BytesIO(self._data))
+
+    def namelist(self):
+        with self._open() as archive:
+            return archive.getnames()
+
+    def infolist(self):
+        with self._open() as archive:
+            return archive.list()
+
+    def read(self, name: str) -> bytes:
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self._open() as archive:
+                archive.extract(path=tmp, targets=[name])
+            for root, _dirs, files in os.walk(tmp):
+                for filename in files:
+                    with open(os.path.join(root, filename), "rb") as handle:
+                        return handle.read()
+        raise WorkerProtocolError(f"download.archive_b64 7z member could not be read: {name}")
+
+
+def _seven_zip_archive(raw: bytes):
+    if not raw.startswith(_SEVEN_ZIP_MAGIC):
+        return None
+    try:
+        import py7zr  # noqa: F401
+    except Exception:  # pragma: no cover - py7zr is a declared host dependency
+        return None
+    return _SevenZipArchive(raw)
 
 
 def _worker_archive_to_content(
@@ -261,7 +312,9 @@ def _worker_archive_to_content(
 
     archive = get_archive_from_bytes(raw)
     if archive is None:
-        raise WorkerProtocolError("download.archive_b64 is not a zip or rar archive")
+        archive = _seven_zip_archive(raw)
+    if archive is None:
+        raise WorkerProtocolError("download.archive_b64 is not a zip, rar, or 7z archive")
     _guard_archive_members(archive)
 
     member = payload.get("member")
