@@ -267,9 +267,21 @@ class _SevenZipArchive:
         with tempfile.TemporaryDirectory() as tmp:
             with self._open() as archive:
                 archive.extract(path=tmp, targets=[name])
-            for root, _dirs, files in os.walk(tmp):
+            # py7zr preserves the archived file's mode, which can drop the owner read
+            # bit; make directories traversable and files readable before reading.
+            for root, dirs, files in os.walk(tmp):
+                for directory in dirs:
+                    try:
+                        os.chmod(os.path.join(root, directory), 0o700)
+                    except OSError:  # pragma: no cover
+                        pass
                 for filename in files:
-                    with open(os.path.join(root, filename), "rb") as handle:
+                    path = os.path.join(root, filename)
+                    try:
+                        os.chmod(path, 0o600)
+                    except OSError:  # pragma: no cover
+                        pass
+                    with open(path, "rb") as handle:
                         return handle.read()
         raise WorkerProtocolError(f"download.archive_b64 7z member could not be read: {name}")
 
