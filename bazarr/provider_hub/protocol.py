@@ -209,6 +209,30 @@ def worker_download_to_content(subtitle: HubWorkerSubtitle, payload: dict[str, A
     return True
 
 
+# Hard caps so a worker, or the untrusted site it fetched the archive from, cannot OOM
+# the host with a decompression bomb or an oversized response. Real subtitle archives
+# are a few KB; these limits are deliberately generous.
+_MAX_ARCHIVE_BYTES = 32 * 1024 * 1024
+_MAX_MEMBER_BYTES = 16 * 1024 * 1024
+_MAX_ARCHIVE_TOTAL_BYTES = 64 * 1024 * 1024
+
+
+def _guard_archive_members(archive) -> None:
+    """Reject decompression bombs by checking declared uncompressed sizes up front."""
+    try:
+        infos = archive.infolist()
+    except Exception:  # pragma: no cover - exotic archive objects
+        return
+    total = 0
+    for info in infos:
+        size = int(getattr(info, "file_size", 0) or 0)
+        if size > _MAX_MEMBER_BYTES:
+            raise WorkerProtocolError("download.archive_b64 member exceeds the size limit")
+        total += size
+        if total > _MAX_ARCHIVE_TOTAL_BYTES:
+            raise WorkerProtocolError("download.archive_b64 decompresses past the size limit")
+
+
 def _worker_archive_to_content(
     subtitle: HubWorkerSubtitle, payload: dict[str, Any], archive_b64: str
 ) -> bool:
@@ -225,7 +249,11 @@ def _worker_archive_to_content(
         get_subtitle_from_archive,
     )
 
+    if len(archive_b64) > _MAX_ARCHIVE_BYTES * 4 // 3 + 16:
+        raise WorkerProtocolError("download.archive_b64 exceeds the maximum archive size")
     raw = base64.b64decode(archive_b64.encode("ascii"), validate=True)
+    if len(raw) > _MAX_ARCHIVE_BYTES:
+        raise WorkerProtocolError("download.archive_b64 exceeds the maximum archive size")
     expected_hash = payload.get("archive_sha256")
     if expected_hash:
         if hashlib.sha256(raw).hexdigest() != str(expected_hash).lower():
@@ -234,6 +262,7 @@ def _worker_archive_to_content(
     archive = get_archive_from_bytes(raw)
     if archive is None:
         raise WorkerProtocolError("download.archive_b64 is not a zip or rar archive")
+    _guard_archive_members(archive)
 
     member = payload.get("member")
     if member:
@@ -243,10 +272,13 @@ def _worker_archive_to_content(
         chosen = member
     else:
         forced = bool(getattr(getattr(subtitle, "language", None), "forced", False))
+        episode = payload.get("episode")
+        if isinstance(episode, (list, tuple)):
+            episode = episode[0] if episode else None
         content = get_subtitle_from_archive(
             archive,
             forced=forced,
-            episode=payload.get("episode"),
+            episode=episode,
             get_first_subtitle=bool(payload.get("first_subtitle")),
         )
         if content is None:

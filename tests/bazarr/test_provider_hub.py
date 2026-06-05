@@ -392,6 +392,36 @@ def test_worker_download_rejects_missing_member_and_bad_archive():
         )
 
 
+def test_worker_download_rejects_decompression_bomb(monkeypatch):
+    from provider_hub import protocol
+    from provider_hub.protocol import WorkerProtocolError, worker_download_to_content
+
+    candidate = _hub_candidate("sub-bomb")
+    # 2 MiB member that compresses to almost nothing: a classic zip bomb shape.
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("Show.S01E01.srt", b"\0" * (2 * 1024 * 1024))
+    archive_bytes = buffer.getvalue()
+    assert len(archive_bytes) < 50 * 1024  # tiny on disk, huge decompressed
+
+    monkeypatch.setattr(protocol, "_MAX_MEMBER_BYTES", 64 * 1024)
+    with pytest.raises(WorkerProtocolError):
+        worker_download_to_content(
+            candidate, {"archive_b64": base64.b64encode(archive_bytes).decode("ascii")}
+        )
+
+
+def test_worker_download_rejects_oversized_archive(monkeypatch):
+    from provider_hub import protocol
+    from provider_hub.protocol import WorkerProtocolError, worker_download_to_content
+
+    candidate = _hub_candidate("sub-big")
+    monkeypatch.setattr(protocol, "_MAX_ARCHIVE_BYTES", 1024)
+    payload_b64 = base64.b64encode(b"x" * 4096).decode("ascii")
+    with pytest.raises(WorkerProtocolError):
+        worker_download_to_content(candidate, {"archive_b64": payload_b64})
+
+
 def test_venv_installer_uses_isolated_hash_checked_pip(monkeypatch, tmp_path):
     from provider_hub.venv import PluginEnvironment
     from provider_hub.manifest import validate_manifest
