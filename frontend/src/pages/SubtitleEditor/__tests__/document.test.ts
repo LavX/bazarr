@@ -677,6 +677,31 @@ describe("computeCueWarnings", () => {
     expect(result!.message).toContain("Empty text");
   });
 
+  // Combined outputs stack languages at shared timestamps.
+  it("suppresses the overlap warning for combined subtitles", () => {
+    const prev = makeCue({ startMs: 1000, endMs: 2000, text: "Hello" });
+    const cue = makeCue({ startMs: 1000, endMs: 2000, text: "Szia" });
+    expect(computeCueWarnings(cue, prev, null)!.message).toContain("Overlaps");
+    expect(computeCueWarnings(cue, prev, null, undefined, true)).toBeNull();
+  });
+
+  it("suppresses CPS/line heuristics for combined subtitles", () => {
+    const cue = makeCue({ startMs: 0, endMs: 1000, text: "a".repeat(100) });
+    expect(computeCueWarnings(cue, null, null)!.level).toBe("orange");
+    expect(computeCueWarnings(cue, null, null, undefined, true)).toBeNull();
+  });
+
+  it("still flags genuine errors for combined subtitles", () => {
+    const reversed = makeCue({ startMs: 2000, endMs: 1000, text: "Bad" });
+    expect(
+      computeCueWarnings(reversed, null, null, undefined, true)!.level,
+    ).toBe("red");
+    const empty = makeCue({ startMs: 0, endMs: 1000, text: "  " });
+    expect(
+      computeCueWarnings(empty, null, null, undefined, true)!.message,
+    ).toContain("Empty text");
+  });
+
   // Orange checks
   it("returns orange for CPS exceeding maxCPS", () => {
     // 100 chars in 1 second = 100 CPS

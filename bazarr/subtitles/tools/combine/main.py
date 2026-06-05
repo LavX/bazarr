@@ -103,6 +103,13 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
             logging.exception("BAZARR combine write failed for %s", out_path)
             return CombineResult(status="failed", error=str(e))
 
+        # A combined output is one logical subtitle. Drop any sibling combined
+        # file in a different subtitle format (left over when the profile format
+        # changes or a rebuild switches format) before re-indexing, so the same
+        # combined language is not indexed twice and the editor does not load a
+        # stale positioned ASS as overlapping cues.
+        _remove_stale_combined_siblings(out_path)
+
         _post_write(out_path, video_path, media_type,
                      sonarr_episode_id, radarr_id)
 
@@ -113,6 +120,27 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
     except Exception as e:
         logging.exception("BAZARR combine top-level failure")
         return CombineResult(status="failed", error=str(e))
+
+
+_COMBINED_OUTPUT_EXTS = (".srt", ".ass", ".ssa")
+
+
+def _remove_stale_combined_siblings(out_path):
+    """Remove combined-output siblings that share this output's stem but use a
+    different subtitle extension (e.g. a stale `.ass` left next to a freshly
+    written `.srt`). Best-effort: never raises."""
+    root, _ext = os.path.splitext(out_path)
+    for ext in _COMBINED_OUTPUT_EXTS:
+        sibling = root + ext
+        if sibling == out_path:
+            continue
+        try:
+            if os.path.isfile(sibling):
+                os.remove(sibling)
+                logging.info("BAZARR combine removed stale sibling %s", sibling)
+        except OSError:
+            logging.exception(
+                "BAZARR combine could not remove stale sibling %s", sibling)
 
 
 def _resolve_rule(media_type, sonarr_series_id, sonarr_episode_id, radarr_id,

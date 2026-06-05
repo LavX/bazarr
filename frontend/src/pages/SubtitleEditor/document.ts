@@ -513,6 +513,7 @@ export function computeCueWarnings(
   prevCue: Cue | null,
   nextCue: Cue | null,
   preset: QCPreset = DEFAULT_QC_PRESET,
+  combined = false,
 ): CueWarning | null {
   const durationMs = cue.endMs - cue.startMs;
   const durationSec = durationMs / 1000;
@@ -524,11 +525,20 @@ export function computeCueWarnings(
   if (cue.endMs < cue.startMs) {
     return { level: "red", message: "End time is before start time" };
   }
-  if (prevCue && cue.startMs < prevCue.endMs) {
+  // Combined outputs stack each language as its own cue at the same timestamp,
+  // so a same-timestamp "overlap" is intentional, not an error.
+  if (!combined && prevCue && cue.startMs < prevCue.endMs) {
     return { level: "red", message: "Overlaps with previous cue" };
   }
   if (cue.text.trim() === "") {
     return { level: "red", message: "Empty text" };
+  }
+
+  // A combined subtitle is a composed artifact: per-line CPS, length, and
+  // line-count heuristics do not apply (each cue holds one language line, and
+  // the languages stack at shared timestamps).
+  if (combined) {
+    return null;
   }
 
   // Orange checks

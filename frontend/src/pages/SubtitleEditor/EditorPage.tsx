@@ -34,6 +34,7 @@ import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import client from "@/apis/raw/client";
 import { Environment } from "@/utilities/env";
+import { isCombinedOutputLanguageKey } from "@/utilities/subtitles";
 import DetailPane, { type DetailPaneHandle } from "./DetailPane";
 import {
   computeCueWarnings,
@@ -106,6 +107,11 @@ export default function EditorPage() {
       return null;
     }
   }, [data]);
+
+  // Combined outputs (en:combined-hu) stack languages at shared timestamps. For
+  // ASS that means one positioned cue per language, so we suppress the QC
+  // overlap warning for them instead of treating the stack as an error.
+  const isCombined = isCombinedOutputLanguageKey(language);
 
   // Format derived from data
   const format = (data?.format as SubtitleFormat) ?? "srt";
@@ -336,11 +342,12 @@ export default function EditorPage() {
         docState.cues[i - 1] ?? null,
         docState.cues[i + 1] ?? null,
         qcPreset,
+        isCombined,
       );
       if (w) map.set(i, w);
     });
     return map;
-  }, [docState.cues, qcPreset]);
+  }, [docState.cues, qcPreset, isCombined]);
 
   // Ghost cues (gap detection)
   const ghostCues = useMemo(
@@ -1964,6 +1971,7 @@ export default function EditorPage() {
             open={qcOpen}
             cues={docState.cues}
             preset={qcPreset}
+            combined={isCombined}
             onPresetChange={setQcPreset}
             onApplyFixes={handleQCApplyFixes}
             onNavigate={handleQCNavigate}

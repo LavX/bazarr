@@ -149,6 +149,10 @@ export const Subtitle: FunctionComponent<Props> = ({
               navigate(
                 `/subtitles/preview/episode/${episodeId}/${encodeURIComponent(buildSubtitleLanguageKey(subtitle))}`,
               );
+            } else if (action === "edit") {
+              navigate(
+                `/subtitles/edit/episode/${episodeId}/${encodeURIComponent(buildSubtitleLanguageKey(subtitle))}`,
+              );
             } else if (action === "delete" && subtitlePath) {
               await remove.mutateAsync({
                 seriesId,

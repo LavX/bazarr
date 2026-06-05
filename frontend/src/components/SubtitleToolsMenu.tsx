@@ -357,17 +357,17 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
         >
           View
         </Menu.Item>
-        {!isCombinedOutput && (
-          <Menu.Item
-            disabled={onAction === undefined || isTranslateOnlyMode}
-            leftSection={<FontAwesomeIcon icon={faPencil}></FontAwesomeIcon>}
-            onClick={() => {
-              onAction?.("edit");
-            }}
-          >
-            {selections.length === 0 ? "Create / Upload" : "Edit"}
-          </Menu.Item>
-        )}
+        <Menu.Item
+          disabled={onAction === undefined || isTranslateOnlyMode}
+          leftSection={<FontAwesomeIcon icon={faPencil}></FontAwesomeIcon>}
+          onClick={() => {
+            onAction?.("edit");
+          }}
+        >
+          {isCombinedOutput || selections.length > 0
+            ? "Edit"
+            : "Create / Upload"}
+        </Menu.Item>
         {!isCombinedOutput && (
           <Menu.Item
             disabled={
