@@ -422,6 +422,66 @@ def test_worker_download_rejects_oversized_archive(monkeypatch):
         worker_download_to_content(candidate, {"archive_b64": payload_b64})
 
 
+def test_worker_reader_caps_oversized_response_line(monkeypatch):
+    # The reader thread must reject an oversized response at the transport layer
+    # (a giant readline() line buffers in full before json.loads otherwise).
+    import queue
+    from types import SimpleNamespace
+    from provider_hub import worker as worker_mod
+
+    monkeypatch.setattr(worker_mod, "_MAX_RESPONSE_LINE_BYTES", 8)
+    monkeypatch.setattr(worker_mod, "_READ_CHUNK_CHARS", 4)
+
+    class FakeStdout:
+        def __init__(self, data):
+            self.data = data
+            self.pos = 0
+
+        def readline(self, size=-1):
+            if self.pos >= len(self.data):
+                return ""
+            window = len(self.data) if size is None or size < 0 else size
+            end = min(self.pos + window, len(self.data))
+            newline = self.data.find("\n", self.pos, end)
+            if newline != -1:
+                end = newline + 1
+            chunk = self.data[self.pos:end]
+            self.pos = end
+            return chunk
+
+    stdout_queue: queue.Queue = queue.Queue()
+    # A long line with no newline until the very end exceeds the 8-byte cap.
+    worker_mod.ProviderWorkerClient._enqueue_stdout(
+        SimpleNamespace(stdout=FakeStdout("X" * 100 + "\n")), stdout_queue
+    )
+    items = []
+    while True:
+        item = stdout_queue.get_nowait()
+        items.append(item)
+        if item is None:
+            break
+    assert worker_mod._OVERSIZE_RESPONSE in items
+    # The reader stopped early instead of buffering the whole 100-char line.
+    buffered = sum(len(i) for i in items if isinstance(i, str))
+    assert buffered <= worker_mod._MAX_RESPONSE_LINE_BYTES + worker_mod._READ_CHUNK_CHARS
+
+
+def test_worker_consumer_kills_on_oversized_sentinel():
+    import queue
+    from types import SimpleNamespace
+    from provider_hub import worker as worker_mod
+    from provider_hub.worker import ProviderWorkerClient, WorkerError
+
+    client = ProviderWorkerClient.__new__(ProviderWorkerClient)
+    client.process = SimpleNamespace(
+        stdout=object(), kill=lambda: None, wait=lambda timeout=None: None
+    )
+    client._stdout_queue = queue.Queue()
+    client._stdout_queue.put(worker_mod._OVERSIZE_RESPONSE)
+    with pytest.raises(WorkerError, match="exceeded"):
+        client._read_line_with_deadline(5.0)
+
+
 def test_venv_installer_uses_isolated_hash_checked_pip(monkeypatch, tmp_path):
     from provider_hub.venv import PluginEnvironment
     from provider_hub.manifest import validate_manifest

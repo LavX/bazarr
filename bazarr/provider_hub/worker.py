@@ -19,6 +19,19 @@ from . import WORKER_ABI_VERSION
 
 logger = logging.getLogger(__name__)
 
+# Cap a single worker->host NDJSON response line. ``readline()`` buffers a whole
+# line before ``json.loads`` runs, and the protocol-level archive cap only fires
+# after the line is already in memory, so a runaway or malicious worker could OOM
+# the host with one giant line. Sized comfortably above the 32 MB archive cap
+# (base64 is ~43 MB, plus the JSON envelope) so legitimate responses still pass.
+_MAX_RESPONSE_LINE_BYTES = 48 * 1024 * 1024
+# Read granularity for the bounded readline loop, so the cap is enforced before a
+# whole oversized line accumulates.
+_READ_CHUNK_CHARS = 1024 * 1024
+# Queued by the reader thread when a response line exceeds the cap, so the
+# consumer kills the worker at the transport layer instead of assembling it.
+_OVERSIZE_RESPONSE = object()
+
 
 def _json_default(obj):
     """Coerce values not natively JSON-serializable into safe representations.
@@ -60,7 +73,7 @@ class ProviderWorkerClient:
         self.env = env
         self.process: subprocess.Popen | None = None
         self._lock = threading.Lock()
-        self._stdout_queue: queue.Queue[str | None] | None = None
+        self._stdout_queue: queue.Queue[Any] | None = None
         self._stdout_thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -94,17 +107,28 @@ class ProviderWorkerClient:
         self._stdout_thread.start()
 
     @staticmethod
-    def _enqueue_stdout(process: subprocess.Popen, stdout_queue: queue.Queue[str | None]) -> None:
+    def _enqueue_stdout(process: subprocess.Popen, stdout_queue: queue.Queue[Any]) -> None:
         stdout = process.stdout
         if stdout is None:
             stdout_queue.put(None)
             return
         try:
+            # Read in bounded chunks (readline(size) stops at a newline or after
+            # ``size`` chars) and track the current line's length, so an oversized
+            # response is rejected here instead of buffering in full before
+            # json.loads. A normal multi-chunk line is reassembled downstream.
+            line_len = 0
             while True:
-                line = stdout.readline()
-                if not line:
+                chunk = stdout.readline(_READ_CHUNK_CHARS)
+                if not chunk:
                     break
-                stdout_queue.put(line)
+                line_len += len(chunk)
+                if line_len > _MAX_RESPONSE_LINE_BYTES:
+                    stdout_queue.put(_OVERSIZE_RESPONSE)
+                    break
+                stdout_queue.put(chunk)
+                if chunk.endswith("\n"):
+                    line_len = 0
         finally:
             stdout_queue.put(None)
 
@@ -149,6 +173,11 @@ class ProviderWorkerClient:
                 continue
             if chunk is None:
                 return "".join(chunks)
+            if chunk is _OVERSIZE_RESPONSE:
+                self._kill_worker()
+                raise WorkerError(
+                    f"worker response exceeded {_MAX_RESPONSE_LINE_BYTES} bytes"
+                )
             chunks.append(chunk)
             if chunk.endswith("\n"):
                 return "".join(chunks)
