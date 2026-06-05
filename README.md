@@ -572,6 +572,17 @@ This fork is maintained by **LavX**. Explore more projects and services:
 
 ---
 
+## Roadmap
+
+Where Bazarr+ is heading. Plans shift, but the direction is steady.
+
+- **v2.4.0 "Prism"** (prepared): the Distribution Hub multi-tenant subtitle API, Provider Hub built-in replacement with startup auto-install, combined bilingual and trilingual subtitles, embedded-track scoring, and host-side archive extraction.
+- **v2.5.0**: [multiple Radarr and Sonarr instances](https://github.com/LavX/bazarr/issues/156).
+- **v2.6.0**: universal providers and federation. Point Bazarr+ at any OpenSubtitles.com-compatible endpoint, including another Bazarr+ instance, and daisy-chain instances together over a loop-safe federation protocol.
+- **v3.0.0 "Subnet"**: peer-to-peer subtitle federation, a self-organizing mesh of Bazarr+ instances.
+
+---
+
 ## Documentation
 
 - [Bazarr+ Guides](https://lavx.github.io/bazarr/guides/): getting started, Provider Hub, Distribution Hub, subtitle processing, AI translation, and migration
