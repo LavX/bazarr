@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Bazarr+ - Self-Hosted Subtitle Management for Sonarr, Radarr, Plex &amp; Jellyfin</title>
-  <meta name="description" content="Bazarr+ is a drop-in replacement for Bazarr with Provider Hub plugin marketplace, External Integration for Jellyfin and VLSub, API key encryption at rest, AI translation, provider priority, bulk operations, a subtitle editor, and zero telemetry.">
+  <meta name="description" content="Bazarr+ is a drop-in replacement for Bazarr with a Provider Hub plugin marketplace, a Distribution Hub multi-tenant subtitle API for Jellyfin and VLSub, combined bilingual subtitles, API key encryption at rest, AI translation, provider priority, bulk operations, a subtitle editor, and zero telemetry.">
   <link rel="canonical" href="https://lavx.github.io/bazarr">
 
   <!-- Open Graph -->
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://lavx.github.io/bazarr">
   <meta property="og:title" content="Bazarr+ - Self-Hosted Subtitle Management">
-  <meta property="og:description" content="Provider Hub plugin marketplace, External Integration for Jellyfin and VLSub, API key encryption at rest, AI translation, provider priority, bulk operations, subtitle editor, zero telemetry.">
+  <meta property="og:description" content="Provider Hub plugin marketplace, Distribution Hub multi-tenant subtitle API for Jellyfin and VLSub, combined bilingual subtitles, API key encryption at rest, AI translation, provider priority, bulk operations, subtitle editor, zero telemetry.">
   <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -19,7 +19,7 @@
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Bazarr+ - Self-Hosted Subtitle Management">
-  <meta name="twitter:description" content="Provider Hub plugin marketplace, External Integration for Jellyfin and VLSub, API key encryption at rest, AI translation, provider priority, bulk operations, subtitle editor, zero telemetry.">
+  <meta name="twitter:description" content="Provider Hub plugin marketplace, Distribution Hub multi-tenant subtitle API for Jellyfin and VLSub, combined bilingual subtitles, API key encryption at rest, AI translation, provider priority, bulk operations, subtitle editor, zero telemetry.">
   <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
 
   <!-- JSON-LD -->
@@ -30,10 +30,10 @@
     "name": "Bazarr+",
     "applicationCategory": "MultimediaApplication",
     "operatingSystem": "Linux, Docker",
-    "description": "Self-hosted subtitle management for Sonarr, Radarr, Plex, and Jellyfin with Provider Hub plugin marketplace, External Integration (OpenSubtitles-compatible REST endpoint for Jellyfin and VLSub clients), API key encryption at rest, AI translation, provider priority, bulk operations, and zero telemetry.",
+    "description": "Self-hosted subtitle management for Sonarr, Radarr, Plex, and Jellyfin with a Provider Hub plugin marketplace, a Distribution Hub multi-tenant OpenSubtitles-compatible API for Jellyfin and VLSub clients, combined bilingual subtitles, API key encryption at rest, AI translation, provider priority, bulk operations, and zero telemetry.",
     "url": "https://lavx.github.io/bazarr",
     "downloadUrl": "https://github.com/LavX/bazarr",
-    "softwareVersion": "2.3.0",
+    "softwareVersion": "2.4.0",
     "author": {
       "@type": "Person",
       "name": "LavX"
@@ -76,7 +76,7 @@
   <div class="container">
     <img src="screenshots/logo128.png" alt="Bazarr+ logo" class="hero-logo" width="80" height="80">
     <h1>Your Bazarr, <span class="hero-accent">upgraded.</span></h1>
-    <p class="hero-sub">Stop waiting for features upstream will never ship. Bazarr+ is a drop-in replacement with Provider Hub, external clients, AI translation, and zero telemetry. Same config, same database. Just swap the container image.</p>
+    <p class="hero-sub">Stop waiting for features upstream will never ship. Bazarr+ is a drop-in replacement with the Provider Hub, a Distribution Hub for external clients, combined subtitles, AI translation, and zero telemetry. Same config, same database. Just swap the container image.</p>
 
     <div class="stats" role="list">
       <div class="stat" role="listitem"><span class="stat-value">Zero</span> data to Google</div>
@@ -130,14 +130,24 @@
           </thead>
           <tbody>
             <tr>
-              <td>Provider Hub <span class="badge-new" aria-label="New in v2.3">v2.3</span></td>
+              <td>Provider Hub <span class="badge-new" aria-label="New in v2.4">v2.4</span></td>
               <td class="cell-na"><span class="icon-dash" aria-hidden="true">&ndash;</span></td>
-              <td class="cell-plus"><span class="icon-check" aria-hidden="true">&#x2713;</span> Marketplace for installable subtitle provider plugins with catalog sources, trust labels, staged restart activation, isolated workers, and activity log</td>
+              <td class="cell-plus"><span class="icon-check" aria-hidden="true">&#x2713;</span> Marketplace of subtitle provider plugins that replace the shipped providers, with startup auto-install of your enabled built-ins, local package installs, trust labels, and an activity log</td>
             </tr>
             <tr>
-              <td>External Integration <span class="badge-new" aria-label="New in v2.2">v2.2</span></td>
+              <td>Distribution Hub <span class="badge-new" aria-label="New in v2.4">v2.4</span></td>
               <td class="cell-na"><span class="icon-dash" aria-hidden="true">&ndash;</span></td>
-              <td class="cell-plus"><span class="icon-check" aria-hidden="true">&#x2713;</span> OpenSubtitles-compatible REST endpoint with first-party <a href="https://github.com/LavX/jellyfin-plugin-bazarr-plus" target="_blank" rel="noopener">Jellyfin plugin</a> and <a href="https://github.com/LavX/vlsub-bazarr-plus" target="_blank" rel="noopener">VLSub Bazarr+</a></td>
+              <td class="cell-plus"><span class="icon-check" aria-hidden="true">&#x2713;</span> Multi-tenant OpenSubtitles-compatible API: named keys, tiers, per-window metering, and per-key provider scoping, with a first-party <a href="https://github.com/LavX/jellyfin-plugin-bazarr-plus" target="_blank" rel="noopener">Jellyfin plugin</a> and <a href="https://github.com/LavX/vlsub-bazarr-plus" target="_blank" rel="noopener">VLSub Bazarr+</a></td>
+            </tr>
+            <tr>
+              <td>Combined Subtitles <span class="badge-new" aria-label="New in v2.4">v2.4</span></td>
+              <td class="cell-na"><span class="icon-dash" aria-hidden="true">&ndash;</span></td>
+              <td class="cell-plus"><span class="icon-check" aria-hidden="true">&#x2713;</span> Bilingual and trilingual SRT or ASS composed from subtitles already on disk, per profile or on demand</td>
+            </tr>
+            <tr>
+              <td>Embedded &amp; Multi-Engine <span class="badge-new" aria-label="New in v2.4">v2.4</span></td>
+              <td class="cell-na"><span class="icon-dash" aria-hidden="true">&ndash;</span></td>
+              <td class="cell-plus"><span class="icon-check" aria-hidden="true">&#x2713;</span> Score and translate directly from embedded tracks, plus multi-engine sync with side-by-side compare</td>
             </tr>
             <tr>
               <td>Jellyfin Library Refresh <span class="badge-new" aria-label="New in v2.2">v2.2</span></td>
@@ -157,7 +167,7 @@
             <tr>
               <td>OpenSubtitles.org</td>
               <td class="cell-na"><span class="icon-dash" aria-hidden="true">&ndash;</span></td>
-              <td class="cell-plus"><span class="icon-check" aria-hidden="true">&#x2713;</span> Self-hosted scraper</td>
+              <td class="cell-plus"><span class="icon-check" aria-hidden="true">&#x2713;</span> Native plugin, scrapes in-process with a FlareSolverr fallback (no API key or VIP)</td>
             </tr>
             <tr>
               <td>AI Translation</td>
@@ -206,6 +216,30 @@
       <h2 id="screenshots-heading">See it in action</h2>
 
       <div class="screenshots-grid">
+        <div class="screenshot-frame">
+          <div class="screenshot-chrome" aria-hidden="true">
+            <span class="chrome-dot"></span>
+            <span class="chrome-dot"></span>
+            <span class="chrome-dot"></span>
+            <span class="chrome-title">Distribution Hub overview</span>
+          </div>
+          <picture>
+            <source type="image/webp" srcset="screenshots/v2.4.0/distribution-hub-overview.webp" sizes="(max-width: 640px) 100vw, 50vw">
+            <img src="screenshots/v2.4.0/distribution-hub-overview.png" alt="Distribution Hub overview tab with usage stat cards and a 30-day subtitle request chart" loading="lazy" decoding="async" width="2864" height="1800">
+          </picture>
+        </div>
+        <div class="screenshot-frame">
+          <div class="screenshot-chrome" aria-hidden="true">
+            <span class="chrome-dot"></span>
+            <span class="chrome-dot"></span>
+            <span class="chrome-dot"></span>
+            <span class="chrome-title">Provider Hub Marketplace</span>
+          </div>
+          <picture>
+            <source type="image/webp" srcset="screenshots/v2.4.0/provider-hub-marketplace-wide.webp" sizes="(max-width: 640px) 100vw, 50vw">
+            <img src="screenshots/v2.4.0/provider-hub-marketplace-wide.png" alt="Provider Hub Marketplace grid of installable subtitle provider plugins with Trusted, Active, and Installed badges" loading="lazy" decoding="async" width="2864" height="1790">
+          </picture>
+        </div>
         <div class="screenshot-frame">
           <div class="screenshot-chrome" aria-hidden="true">
             <span class="chrome-dot"></span>
@@ -286,15 +320,13 @@
     container_name: bazarr
     restart: unless-stopped
     depends_on:
-      opensubtitles-scraper:
-        condition: service_healthy
+      - flaresolverr
     ports:
       - 6767:6767
     environment:
       - PUID=1000
       - PGID=1000
       - TZ=UTC
-      - OPENSUBTITLES_SCRAPER_URL=http://opensubtitles-scraper:8000
     volumes:
       - ./config:/config
       - /path/to/movies:/movies
@@ -306,37 +338,18 @@
       retries: 3
       start_period: 30s
 
-  opensubtitles-scraper:
-    image: ghcr.io/lavx/opensubtitles-scraper:latest
-    container_name: opensubtitles-scraper
-    restart: unless-stopped
-    depends_on:
-      flaresolverr:
-        condition: service_healthy
-    ports:
-      - 8000:8000
-    environment:
-      - FLARESOLVERR_URL=http://flaresolverr:8191/v1
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-
-  # Handles Cloudflare challenges for the scraper
+  # FlareSolverr (recommended): solves Cloudflare challenges for the native
+  # OpenSubtitles.org plugin. After installing the plugin from the Marketplace,
+  # set its FlareSolverr URL to http://flaresolverr:8191/v1 in the provider settings.
   flaresolverr:
     image: ghcr.io/flaresolverr/flaresolverr:latest
     container_name: flaresolverr
     restart: unless-stopped
+    ports:
+      - 8191:8191
     environment:
       - LOG_LEVEL=info
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8191/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
+      - TZ=UTC
 
   # AI translation via OpenRouter (free tiers available)
   # Configure the API key in Settings > AI Translator
@@ -405,17 +418,17 @@
             <svg class="faq-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
           <div class="faq-answer" id="faq-a4" role="region" aria-labelledby="faq-q4">
-            <div class="faq-answer-inner">No. Your Sonarr/Radarr connections, language profiles, provider accounts, and notification settings carry over as-is. New features like Provider Hub, provider priority, bulk operations, and the subtitle editor are available immediately. Installed Provider Hub plugins activate after the staged restart.</div>
+            <div class="faq-answer-inner">No. Your Sonarr/Radarr connections, language profiles, provider accounts, and notification settings carry over as-is. New features like the Provider Hub, the Distribution Hub, combined subtitles, provider priority, bulk operations, and the subtitle editor are available immediately. Your existing OpenSubtitles-compatible token is seeded into the Distribution Hub as an unlimited default key, and installed Provider Hub plugins activate after the staged restart.</div>
           </div>
         </div>
 
         <div class="faq-item">
           <button class="faq-trigger" id="faq-q5" aria-expanded="false" aria-controls="faq-a5">
-            How does the OpenSubtitles.org scraper work?
+            How does OpenSubtitles.org work without an API key?
             <svg class="faq-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
           <div class="faq-answer" id="faq-a5" role="region" aria-labelledby="faq-q5">
-            <div class="faq-answer-inner">The scraper fetches publicly available subtitle pages from OpenSubtitles.org, similar to how a browser works. It uses FlareSolverr to handle Cloudflare challenges. No OpenSubtitles account or API key is needed.</div>
+            <div class="faq-answer-inner">OpenSubtitles.org is a native Provider Hub plugin. It fetches publicly available subtitle pages in-process, the way a browser would, so no OpenSubtitles account or API key is needed. FlareSolverr is strongly recommended as a fallback for Cloudflare browser challenges: run the FlareSolverr container and set its URL in the plugin settings.</div>
           </div>
         </div>
 

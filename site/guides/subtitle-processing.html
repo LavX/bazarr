@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Subtitle Processing - Bazarr+ Guides</title>
+  <meta name="description" content="Combine on-disk subtitles, score and translate embedded tracks, and sync with multiple engines in Bazarr+ v2.4.">
+  <link rel="canonical" href="https://lavx.github.io/bazarr/guides/subtitle-processing.html">
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Subtitle Processing - Bazarr+ Guides">
+  <meta property="og:description" content="Combine on-disk subtitles, score and translate embedded tracks, and sync with multiple engines in Bazarr+ v2.4.">
+  <meta property="og:url" content="https://lavx.github.io/bazarr/guides/subtitle-processing.html">
+  <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Subtitle Processing - Bazarr+ Guides">
+  <meta name="twitter:description" content="Combine on-disk subtitles, score and translate embedded tracks, and sync with multiple engines in Bazarr+ v2.4.">
+  <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
+
+  <!-- Geist font: async preload -->
+  <link rel="preload" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" as="style" crossorigin>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" media="print" onload="this.media='all'">
+  <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css"></noscript>
+
+  <link rel="icon" href="../screenshots/logo128.png" type="image/png">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+
+<a href="#main-content" class="skip-link">Skip to content</a>
+
+<!-- Grain overlay -->
+<svg class="grain" aria-hidden="true">
+  <filter id="grain-filter">
+    <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/>
+  </filter>
+  <rect width="100%" height="100%" filter="url(#grain-filter)"/>
+</svg>
+
+<!-- Ambient gradients -->
+<div class="ambient" aria-hidden="true"></div>
+
+<nav class="sticky-nav" aria-label="Site navigation">
+  <div class="container">
+    <img src="../screenshots/logo128.png" alt="Bazarr+" class="nav-logo" width="22" height="22">
+    <a href="../">Home</a>
+    <a href="../#comparison-heading">Compare</a>
+    <a href="../#quick-start">Install</a>
+    <a href="../#screenshots-heading">Screenshots</a>
+    <a href="../#faq-heading">FAQ</a>
+    <a href="./" class="nav-active">Guides</a>
+    <a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a>
+  </div>
+</nav>
+
+<main id="main-content" class="guide-page">
+  <div class="container">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <a href="../">Home</a><span class="sep">/</span><a href="./">Guides</a><span class="sep">/</span><span>Subtitle Processing</span>
+    </nav>
+    <h1>Subtitle Processing <span class="badge-new" aria-label="New in v2.4">v2.4</span></h1>
+
+    <article class="content">
+
+      <p class="lede">Bazarr+ v2.4.0 (Prism) adds three subtitle processing features: combined bilingual or trilingual subtitles built from files already on disk, source scoring and direct translation for embedded tracks, and multi-engine synchronization with side-by-side output comparison. This guide covers all three.</p>
+
+      <h2 id="combined-subtitles">Combined subtitles</h2>
+      <p>Combined output takes subtitles you already have on disk and composes them into a single bilingual or trilingual subtitle, written as SRT or ASS. You pick two or three languages, and Bazarr+ aligns their cues into one file.</p>
+
+      <figure class="screenshot-frame">
+        <div class="screenshot-chrome" aria-hidden="true">
+          <span class="chrome-dot"></span><span class="chrome-dot"></span><span class="chrome-dot"></span>
+          <span class="chrome-title">Jellyfin: combined Hungarian and English subtitle</span>
+        </div>
+        <picture>
+          <source type="image/webp" srcset="../screenshots/v2.4.0/combined-subtitle-jellyfin.webp">
+          <img src="../screenshots/v2.4.0/combined-subtitle-jellyfin.png" alt="A film playing in Jellyfin with a combined bilingual subtitle: Hungarian on the top line and English on the bottom line, composed by Bazarr+ as a single ASS file" loading="lazy" decoding="async" width="1920" height="1080">
+        </picture>
+      </figure>
+
+      <div class="note">
+        <strong>This is pure composition, not translation.</strong> Combined output only stacks subtitles that already exist on disk. It never triggers a translation, never calls a provider, and never extracts an embedded track. If not all of the chosen source languages are present, Bazarr+ skips the combine silently and leaves your existing subtitles untouched.
+      </div>
+
+      <p>When more than one variant of a language is on disk, Bazarr+ resolves the source by priority: plain first, then HI, then forced. ASS output supports cue positioning so you can place each language at the bottom, top, or middle of the frame. SRT output stacks the lines in a single block.</p>
+
+      <h3 id="combined-per-profile">Per language profile</h3>
+      <p>Set up combined output once per language profile so it runs automatically as part of normal processing.</p>
+      <ol class="steps">
+        <li>Open <strong>Settings &gt; Languages</strong> and edit a language profile.</li>
+        <li>In the <strong>CombineRuleEditor</strong>, toggle combined output on.</li>
+        <li>Pick 2 or 3 languages to combine.</li>
+        <li>Choose the output format: <strong>SRT</strong> or <strong>ASS</strong>.</li>
+        <li>Save the profile.</li>
+      </ol>
+      <p>After this, whenever Bazarr+ finishes processing subtitles for an item on that profile and all chosen source languages are present on disk, it builds the combined file automatically. If a source language is missing, the combine is skipped and no error is raised.</p>
+
+      <h3 id="combined-on-demand">On demand</h3>
+      <p>You can also build a combined output now, without waiting for the next processing pass.</p>
+      <ul>
+        <li>On a movie, episode, or series detail page, use the <strong>Combine Subtitles</strong> toolbox button.</li>
+        <li>On the <strong>Movies</strong> or <strong>Series</strong> list pages, use the mass-combine action to build combined output across the selected items.</li>
+      </ul>
+      <p>The same source rules apply: only on-disk subtitles are used, source priority is plain &gt; HI &gt; forced, and items that do not have all source languages are skipped.</p>
+
+      <h3 id="combined-managing">Managing combined output</h3>
+      <p>Combined subtitles are indexed alongside other generated outputs and marked with a CombinedSubtitleBadge in the subtitle table. Each combined row has an overflow menu with three actions:</p>
+      <ul>
+        <li><strong>Rebuild</strong>: recompose the combined file from the current on-disk sources.</li>
+        <li><strong>View</strong>: open the combined subtitle.</li>
+        <li><strong>Delete</strong>: remove the combined file.</li>
+      </ul>
+
+      <h3 id="combined-api">API endpoints</h3>
+      <p>The on-demand and mass-combine actions call these endpoints. The series endpoint is the batch form that combines across the show's episodes.</p>
+      <div class="code-wrap">
+        <div class="code-header">
+          <span class="code-lang">HTTP</span>
+          <button class="copy-btn" data-copy="POST /api/movies/&lt;id&gt;/subtitles/combine&#10;POST /api/episodes/&lt;id&gt;/subtitles/combine&#10;POST /api/series/&lt;id&gt;/subtitles/combine" aria-label="Copy combine endpoints">Copy</button>
+        </div>
+        <pre><code>POST /api/movies/&lt;id&gt;/subtitles/combine
+POST /api/episodes/&lt;id&gt;/subtitles/combine
+POST /api/series/&lt;id&gt;/subtitles/combine</code></pre>
+      </div>
+
+      <h2 id="embedded-scoring">Embedded subtitle scoring and translate-from-embedded</h2>
+      <p>Embedded subtitles are tracks stored inside the media container rather than as separate files. Bazarr+ now treats those in-container tracks as a real subtitle source.</p>
+
+      <h3 id="embedded-scoring-history">Source scoring in history</h3>
+      <p>An embedded track is recorded in history as a source-quality result at a 100% score. In the subtitle table, the embedded track shows that 100% score so you can see at a glance that the item already carries an in-container subtitle for that language.</p>
+
+      <h3 id="embedded-translate">Translate from an embedded track</h3>
+      <p>You can translate directly from an embedded text track without first downloading a separate subtitle. The embedded row exposes a translate-only action in its menu.</p>
+      <ol class="steps">
+        <li>In the subtitle table, find the embedded track you want to translate from.</li>
+        <li>Open its action menu and choose the translate-only action.</li>
+        <li>Bazarr+ extracts the text stream with ffmpeg to <code>{config_dir}/extracted_subs/</code>.</li>
+        <li>It then runs your configured translator on the extracted text and writes the translated subtitle.</li>
+      </ol>
+
+      <div class="note">
+        <strong>Text-based tracks only.</strong> Translate-from-embedded works on text subtitle codecs. Bitmap codecs such as PGS and VobSub cannot be translated this way and are rejected with a clear error, because there is no text to feed the translator. ffmpeg must be available for the extraction step.
+      </div>
+
+      <p>Translation uses whatever engine you have set up in Bazarr+. See <a href="ai-translation.html">AI Subtitle Translation</a> for configuring a translator. Sync outputs and combined outputs are intentionally excluded from the list of sources you can translate from, so you translate from real source tracks rather than from generated files.</p>
+
+      <h2 id="multi-engine-sync">Multi-engine synchronization</h2>
+      <p>Synchronization shifts subtitle timing to match the audio. Bazarr+ now lets you choose which sync engine to run and compare the result before you keep it.</p>
+      <p>You can start a sync in two places:</p>
+      <ul>
+        <li>From the <strong>subtitle editor</strong>, on a single subtitle.</li>
+        <li>From the <strong>mass-sync form</strong>, across multiple items at once.</li>
+      </ul>
+      <p>In either place you pick the engine to run. When the editor sync finishes, the <strong>SyncOutputCompareModal</strong> shows the produced output next to the original side by side, so you can confirm the timing improved before committing to it.</p>
+
+      <div class="note">
+        <strong>Editor sync now fails explicitly.</strong> If a sync run produces no output, the editor reports the failure instead of silently leaving the subtitle unchanged. You see that the engine did not produce a result rather than assuming it succeeded.
+      </div>
+
+      <h2 id="next-steps">Next steps</h2>
+      <ul>
+        <li><a href="ai-translation.html">AI Subtitle Translation</a> to set up the translator used by translate-from-embedded</li>
+        <li><a href="provider-hub.html">Provider Hub</a> to install and manage subtitle provider plugins</li>
+        <li><a href="getting-started.html">Getting Started</a> if you have not installed Bazarr+ yet</li>
+      </ul>
+
+    </article>
+  </div>
+</main>
+
+<!-- Footer -->
+<footer>
+  <div class="container">
+    <div class="footer-inner">
+      <p class="footer-credit">Built by <a href="https://github.com/LavX" target="_blank" rel="noopener">LavX</a>. Based on <a href="https://github.com/morpheus65535/bazarr" target="_blank" rel="noopener">Bazarr</a> by morpheus65535.</p>
+      <ul class="footer-links">
+        <li><a href="./">Guides</a></li>
+        <li><a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a></li>
+        <li><a href="https://github.com/LavX/bazarr/issues" target="_blank" rel="noopener">Issues</a></li>
+        <li><a href="https://github.com/LavX/bazarr/wiki" target="_blank" rel="noopener">Wiki</a></li>
+      </ul>
+    </div>
+  </div>
+</footer>
+
+<script src="../js/site.js"></script>
+
+</body>
+</html>
