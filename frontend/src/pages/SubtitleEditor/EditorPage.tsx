@@ -34,6 +34,11 @@ import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import client from "@/apis/raw/client";
 import { Environment } from "@/utilities/env";
+import {
+  isCombinedAssSubtitle,
+  mergeCombinedAssCues,
+  splitCombinedAssCues,
+} from "./combinedStack";
 import DetailPane, { type DetailPaneHandle } from "./DetailPane";
 import {
   computeCueWarnings,
@@ -101,11 +106,19 @@ export default function EditorPage() {
   const parseResult = useMemo<ParseResult | null>(() => {
     if (!data) return null;
     try {
-      return getParser(data.format as SubtitleFormat).parse(data.content);
+      const fmt = data.format as SubtitleFormat;
+      const result = getParser(fmt).parse(data.content);
+      // A combined ASS output stores each language as its own positioned
+      // dialogue at the same timestamp. Merge them into one stacked cue so the
+      // editor shows one cue per timestamp instead of false overlaps.
+      if (isCombinedAssSubtitle(language, fmt)) {
+        return { ...result, cues: mergeCombinedAssCues(result.cues) };
+      }
+      return result;
     } catch {
       return null;
     }
-  }, [data]);
+  }, [data, language]);
 
   // Format derived from data
   const format = (data?.format as SubtitleFormat) ?? "srt";
@@ -432,9 +445,15 @@ export default function EditorPage() {
           )
         : docState.cues;
 
+    // For combined ASS, split each stacked cue back into its positioned
+    // dialogues (Bottom/Top/Middle) so saving preserves placement.
+    const cuesToSerialize = isCombinedAssSubtitle(language, format)
+      ? splitCombinedAssCues(cuesForSave)
+      : cuesForSave;
+
     const serialized = getSerializer(format).serialize({
       metadata: parseResult?.metadata ?? { format },
-      cues: cuesForSave,
+      cues: cuesToSerialize,
     });
 
     if (isNewSubtitle) {
