@@ -69,6 +69,8 @@
 
       <p>Bazarr+ is a drop-in replacement for upstream Bazarr. It uses a compatible database with additional columns added on first run, the same config files, and the same volume paths. Switching takes about five minutes.</p>
 
+      <p>The v2.4 additions are additive and non-destructive. Your existing settings, language profiles, providers, and the shared OpenSubtitles-compatible token all carry over. Schema migrations run automatically on first boot, and the old shared compat token is auto-seeded as an "Unlimited Default" key in the new Distribution Hub, so existing integrations keep authorizing without changes.</p>
+
       <h2 id="back-up-your-config">Back up your config</h2>
       <p>Before making any changes, copy your entire config directory. This is the directory you mounted as <code>/config</code> in your existing Bazarr container.</p>
 
@@ -116,35 +118,15 @@ image: ghcr.io/lavx/bazarr:latest</code></pre>
           </div>
         </li>
         <li>
-          <strong>Add the companion services.</strong> Add the OpenSubtitles scraper, FlareSolverr, and AI translator to your compose file. Set the scraper URL on the bazarr service:
+          <strong>Add the companion services.</strong> The only companion service recommended now is FlareSolverr, plus the optional AI translator. OpenSubtitles.org is a native <a href="provider-hub.html">Provider Hub</a> plugin in v2.4: install it from the Marketplace, then point its <strong>FlareSolverr URL</strong> setting at the flaresolverr service below. There is no separate scraper container anymore.
           <div class="code-wrap" style="margin-top: 12px;">
             <div class="code-header">
               <span class="code-lang">docker-compose.yml additions</span>
-              <button class="copy-btn" data-copy-from="migration-scraper-code" aria-label="Copy scraper config">Copy</button>
+              <button class="copy-btn" data-copy-from="migration-scraper-code" aria-label="Copy companion services config">Copy</button>
             </div>
-            <pre id="migration-scraper-code"><code># Add to bazarr service environment:
-    environment:
-      - OPENSUBTITLES_SCRAPER_URL=http://opensubtitles-scraper:8000
-
-# Add these services:
-  opensubtitles-scraper:
-    image: ghcr.io/lavx/opensubtitles-scraper:latest
-    container_name: opensubtitles-scraper
-    restart: unless-stopped
-    depends_on:
-      flaresolverr:
-        condition: service_healthy
-    ports:
-      - 8000:8000
-    environment:
-      - FLARESOLVERR_URL=http://flaresolverr:8191/v1
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-
+            <pre id="migration-scraper-code"><code># Add these services:
+  # Recommended for the OpenSubtitles.org plugin. Set this container's
+  # /v1 URL (http://flaresolverr:8191/v1) in the plugin's FlareSolverr URL.
   flaresolverr:
     image: ghcr.io/flaresolverr/flaresolverr:latest
     container_name: flaresolverr
@@ -207,7 +189,11 @@ image: ghcr.io/lavx/bazarr:latest</code></pre>
         <li><strong>History.</strong> Your entire download and upgrade history remains intact.</li>
         <li><strong>Subtitles.</strong> All previously downloaded subtitle files stay on disk, untouched.</li>
         <li><strong>Scheduled tasks.</strong> Your scan intervals and other scheduled tasks continue as configured.</li>
+        <li><strong>OpenSubtitles-compatible token.</strong> The shared compat token from earlier versions is auto-seeded as an "Unlimited Default" key in the <a href="distribution-hub.html">Distribution Hub</a>, so any Jellyfin, VLSub, or custom client using it keeps working unthrottled.</li>
       </ul>
+
+      <h2 id="external-integration-moved">External Integration has moved</h2>
+      <p>One item changed location in v2.4. The old <strong>Settings &gt; External Integration</strong> page is gone. Endpoint and token management for the OpenSubtitles-compatible API now lives in the <a href="distribution-hub.html">Distribution Hub</a>, and <code>/settings/external</code> redirects there. If you bookmarked or scripted against the old page, point it at the Distribution Hub instead. To recover the current shared token, use the "Reveal token" action on the Unlimited Default key.</p>
 
       <h2 id="password-upgrade-notice">Password upgrade notice</h2>
       <p>Upstream Bazarr stores passwords using MD5, which is insecure. On first login after the migration, Bazarr+ will transparently upgrade your password hash to PBKDF2 with 600,000 iterations. This happens automatically when you enter your existing password. No action needed on your part.</p>
@@ -231,6 +217,8 @@ image: ghcr.io/lavx/bazarr:latest</code></pre>
       <h2 id="next-steps">Next steps</h2>
       <ul>
         <li><a href="provider-hub.html">Install Provider Hub plugins</a> after your migrated instance is running</li>
+        <li><a href="distribution-hub.html">Set up the Distribution Hub</a> to issue named, tiered API keys for the OpenSubtitles-compatible endpoint</li>
+        <li><a href="subtitle-processing.html">Process subtitles</a> with combined output, embedded-track scoring, and multi-engine sync</li>
         <li><a href="ai-translation.html">Set up AI translation</a> to use one of the new features that prompted the switch</li>
         <li><a href="getting-started.html">Getting Started</a> for a full walkthrough of all configuration options</li>
       </ul>

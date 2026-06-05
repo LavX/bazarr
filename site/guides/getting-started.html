@@ -97,16 +97,12 @@
     image: ghcr.io/lavx/bazarr:latest
     container_name: bazarr
     restart: unless-stopped
-    depends_on:
-      opensubtitles-scraper:
-        condition: service_healthy
     ports:
       - 6767:6767
     environment:
       - PUID=1000
       - PGID=1000
       - TZ=UTC
-      - OPENSUBTITLES_SCRAPER_URL=http://opensubtitles-scraper:8000
     volumes:
       - ./config:/config
       - /path/to/movies:/movies
@@ -118,25 +114,9 @@
       retries: 3
       start_period: 30s
 
-  opensubtitles-scraper:
-    image: ghcr.io/lavx/opensubtitles-scraper:latest
-    container_name: opensubtitles-scraper
-    restart: unless-stopped
-    depends_on:
-      flaresolverr:
-        condition: service_healthy
-    ports:
-      - 8000:8000
-    environment:
-      - FLARESOLVERR_URL=http://flaresolverr:8191/v1
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-
-  # Handles Cloudflare challenges for the scraper
+  # Recommended for the OpenSubtitles.org Provider Hub plugin: solves
+  # Cloudflare browser challenges when the in-process scraper is itself
+  # challenged. Set this container's /v1 URL in the plugin's FlareSolverr URL.
   flaresolverr:
     image: ghcr.io/flaresolverr/flaresolverr:latest
     container_name: flaresolverr
@@ -176,15 +156,23 @@
         <pre><code>docker compose up -d</code></pre>
       </div>
 
+      <div class="note">
+        <strong>OpenSubtitles.org:</strong> in v2.4 OpenSubtitles.org is a native <a href="provider-hub.html">Provider Hub</a> plugin you install from the Marketplace. It scrapes the site in-process, so there is no separate scraper container. The FlareSolverr service above is recommended: set its <code>/v1</code> URL (e.g. <code>http://flaresolverr:8191/v1</code>) in the plugin's <strong>FlareSolverr URL</strong> setting so it can solve Cloudflare challenges when needed.
+      </div>
+
       <h2 id="first-login">First login</h2>
       <p>Open <code>http://localhost:6767</code> in your browser. Go to <strong>Settings</strong> to configure your language profile, subtitle providers, and Sonarr/Radarr connections.</p>
 
       <ol class="steps">
         <li><strong>Set a password.</strong> Bazarr+ uses PBKDF2 with 600k iterations, a significant upgrade from upstream's MD5 hashing. Pick something strong.</li>
         <li><strong>Choose your languages.</strong> Select the subtitle languages you want Bazarr+ to search for. You can set defaults per profile or override per series/movie later.</li>
-        <li><strong>Add subtitle providers.</strong> Enable shipped providers under Settings &gt; Providers, or open Marketplace to install Provider Hub plugins from catalog sources.</li>
+        <li><strong>Add subtitle providers.</strong> Enable built-in providers under Settings &gt; Providers. In v2.4 you also install providers from the Provider Hub Marketplace, which serves a versioned catalog of provider plugins. A catalog plugin can reuse a built-in id and replace the shipped provider, so the two collapse into a single card.</li>
         <li><strong>Set provider priority.</strong> Use Settings &gt; Providers to order providers. Bazarr+ can try them in priority order and stop early once it finds a match, saving time and API calls.</li>
       </ol>
+
+      <div class="note">
+        <strong>Startup auto-install:</strong> When an official catalog source is enabled, Bazarr+ installs the official-catalog version of your enabled built-in providers on startup. The supervisor reports this as an <strong>Installing providers</strong> stage, so the first boot after enabling a catalog can take a little longer. If you have no providers enabled yet, the Marketplace shows a nudge to add some.
+      </div>
 
       <h2 id="connecting-to-sonarr-and-radarr">Connecting to Sonarr and Radarr</h2>
       <p>Go to <strong>Settings &gt; Sonarr</strong> (or <strong>Radarr</strong>) and fill in:</p>
@@ -204,6 +192,8 @@
       <h2 id="next-steps">Next steps</h2>
       <ul>
         <li><a href="provider-hub.html">Install Provider Hub plugins</a> from the official catalog source</li>
+        <li><a href="subtitle-processing.html">Process subtitles</a> with combined bilingual output, embedded-track scoring, and multi-engine sync</li>
+        <li><a href="distribution-hub.html">Serve subtitles to other apps</a> with the Distribution Hub multi-tenant API and named keys</li>
         <li><a href="ai-translation.html">Set up AI translation</a> to translate subtitles into any language using OpenRouter models</li>
         <li><a href="migration.html">Migrating from upstream?</a> Your existing config and database carry over</li>
       </ul>

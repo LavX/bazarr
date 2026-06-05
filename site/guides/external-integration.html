@@ -69,9 +69,13 @@
 
       <p class="lede">Bazarr+ v2.2 (Synapse) ships an OpenSubtitles-compatible REST endpoint that lets external clients query your Bazarr+ instance as a federated subtitle service. Two first-party clients ship alongside it: a Jellyfin plugin and a VLC extension.</p>
 
+      <div class="note">
+        <strong>Moved in v2.4.</strong> The endpoint and its tokens now live in the <a href="distribution-hub.html">Distribution Hub</a>. The old <strong>Settings &gt; External Integration</strong> page has been removed, and <code class="inline">/settings/external</code> redirects to <code class="inline">/distribution-hub</code>. Existing clients keep working without changes: your old shared token was auto-seeded as an "Unlimited Default" Distribution Hub key. To enable the endpoint, use the Distribution Hub <strong>Settings</strong> tab; to create or reveal tokens, use the <strong>API Keys</strong> tab. You can now hand each client its own named key with its own tier and provider scope.
+      </div>
+
       <h2 id="what-is-external-integration">What is External Integration</h2>
-      <p>Bazarr+ already searches and downloads subtitles from your configured providers (OpenSubtitles.com, OpenSubtitles.org via the scraper, Subscene, Addic7ed, and many more) according to your priority order, your hashes, your language profiles, and your filters.</p>
-      <p>External Integration exposes that pipeline over a stable REST API at <code>/compat/*</code>. Any client that speaks the OpenSubtitles wire format can talk to Bazarr+ and use <em>your</em> provider configuration. No provider keys leave your server, no rate limit gets shared with the public OpenSubtitles API.</p>
+      <p>Bazarr+ already searches and downloads subtitles from your configured providers (OpenSubtitles.com, OpenSubtitles.org (native Provider Hub plugin), Subscene, Addic7ed, and many more) according to your priority order, your hashes, your language profiles, and your filters.</p>
+      <p>External Integration exposes that pipeline over a stable REST API at <code>/api/v1/*</code>. Any client that speaks the OpenSubtitles wire format can talk to Bazarr+ and use <em>your</em> provider configuration. No provider keys leave your server, no rate limit gets shared with the public OpenSubtitles API.</p>
       <p>Two first-party clients are published and ready to use:</p>
       <ul>
         <li><strong><a href="https://github.com/LavX/jellyfin-plugin-bazarr-plus" target="_blank" rel="noopener">Jellyfin plugin: Bazarr+ Subtitles</a></strong> &mdash; subtitle search and download from inside Jellyfin 10.11+, served by your Bazarr+ providers.</li>
@@ -84,24 +88,28 @@
 
       <h2 id="enabling-the-endpoint">Enabling the endpoint in Bazarr+</h2>
       <ol class="steps">
-        <li>In Bazarr+, go to <strong>Settings &gt; External Integration</strong>.</li>
-        <li>Toggle <strong>Enable External Integration</strong> on. Bazarr+ generates the JWT and HMAC secrets on first enable.</li>
-        <li>A prominent restart-required banner will appear. Click <strong>Restart Bazarr+</strong>.</li>
-        <li>After the restart finishes, return to the same page. Copy the <strong>API Token</strong> shown in the panel. You will paste this into the Jellyfin plugin and the VLSub configuration.</li>
+        <li>In Bazarr+, open the <strong><a href="distribution-hub.html">Distribution Hub</a></strong> from the main menu and go to the <strong>Settings</strong> tab.</li>
+        <li>Toggle <strong>Enable</strong> on (and accept the consent prompt). Bazarr+ generates the JWT and HMAC secrets on first enable.</li>
+        <li>If a restart-required banner appears, click <strong>Restart Bazarr+</strong> so the <code class="inline">/api/v1</code> endpoint mounts.</li>
+        <li>Switch to the <strong>API Keys</strong> tab. Create a named key per client (the token is shown once, copy it immediately), or use <strong>Reveal token</strong> on the legacy "Unlimited Default" key to recover the shared token. You will paste this into the Jellyfin plugin and the VLSub configuration.</li>
       </ol>
+
+      <div class="note">
+        <strong>One key per client.</strong> Instead of sharing a single token, give each client its own named key in the <strong>API Keys</strong> tab. Each key carries its own tier (rate limits and per-window metering) and its own allowed/excluded provider list, so you can scope a client to a subset of your providers. See the <a href="distribution-hub.html">Distribution Hub guide</a> for tiers, metering, and provider scoping.
+      </div>
 
       <div class="note note-warning">
         <strong>Treat the token like a password.</strong> Anyone who has the token can search and download via your Bazarr+ instance. Don't paste it into chat threads, public configs, or screenshots. Rotate it (next section) if you ever suspect it leaked.
       </div>
 
       <h2 id="rotating-the-token">Rotating or revoking the token</h2>
-      <p>On the same Settings page, the <strong>Regenerate</strong> button mints a fresh token and revokes the previous one immediately. Old clients will start getting 401s and need the new token pasted in. Use this when:</p>
+      <p>In the Distribution Hub <strong>API Keys</strong> tab, each key has a <strong>rotate</strong> action that mints a fresh token and revokes the previous one immediately. (For the legacy "Unlimited Default" key, the inline regenerate flow does the same and reveals the new shared token.) Old clients will start getting 401s and need the new token pasted in. Use this when:</p>
       <ul>
         <li>The token has been exposed (committed to a repo, posted in a screenshot, sent over an unencrypted channel).</li>
         <li>You are decommissioning a client and want to make sure it can't talk to Bazarr+ any more.</li>
         <li>You just want to rotate periodically as good hygiene.</li>
       </ul>
-      <p>The signed download tokens (which are minted per <code>/compat/download</code> and used to fetch subtitle bytes) are tied to the JWT they were issued under. Regenerating invalidates outstanding download URLs as well.</p>
+      <p>The signed download tokens (which are minted per <code>/api/v1/download</code> and used to fetch subtitle bytes) are tied to the JWT they were issued under. Regenerating invalidates outstanding download URLs as well.</p>
 
       <h2 id="installing-the-jellyfin-plugin">Installing the Jellyfin plugin</h2>
       <p>The recommended path is the plugin repository. Jellyfin can install and update from a manifest URL.</p>
@@ -120,7 +128,7 @@
         <li>Fill in:
           <ul>
             <li><strong>Bazarr+ URL</strong>: e.g. <code class="inline">https://bazarr.example.com</code> or <code class="inline">http://bazarr.local:6767</code>.</li>
-            <li><strong>Bazarr+ API Token</strong>: paste the token from Bazarr+'s External Integration page.</li>
+            <li><strong>Bazarr+ API Token</strong>: paste a token from the Distribution Hub <strong>API Keys</strong> tab (a named key for this client, or the legacy Default key via <strong>Reveal token</strong>).</li>
           </ul>
         </li>
         <li><strong>Save.</strong></li>
@@ -159,7 +167,7 @@
         <li>Fill in:
           <ul>
             <li><strong>Bazarr+ URL</strong>: e.g. <code class="inline">http://bazarr.local:6767</code>.</li>
-            <li><strong>API Token</strong>: paste the token from Bazarr+'s External Integration page.</li>
+            <li><strong>API Token</strong>: paste a token from the Distribution Hub <strong>API Keys</strong> tab.</li>
             <li><strong>Languages</strong>: pick up to three.</li>
           </ul>
         </li>
@@ -171,34 +179,35 @@
       <h2 id="how-the-pipeline-works">How the pipeline works</h2>
       <p>When a Jellyfin or VLSub client searches:</p>
       <ol>
-        <li>The client calls <code>/compat/search</code> on Bazarr+ with an IMDB id (or a title + season/episode + language).</li>
+        <li>The client calls <code>/api/v1/subtitles</code> on Bazarr+ with an IMDB id (or a title + season/episode + language).</li>
         <li>Bazarr+ runs <em>your</em> configured providers in parallel, with a bounded thread pool and dogpile coalescing so identical concurrent searches share a single backend call.</li>
         <li>The compat layer normalizes provider responses into the OpenSubtitles wire format the client expects, with download counts, ratings, FPS, HD flag, hash-match indicator, and language metadata.</li>
-        <li>When the user picks a result, the client calls <code>/compat/download</code>. Bazarr+ returns a one-shot HMAC-signed stream URL with a TTL.</li>
+        <li>When the user picks a result, the client calls <code>/api/v1/download</code>. Bazarr+ returns a one-shot HMAC-signed stream URL with a TTL.</li>
         <li>The client follows the stream URL. Bazarr+ validates the token and rate-limits per JWT before serving the bytes.</li>
       </ol>
-      <p>For TVDB-keyed providers like Gestdown, Bazarr+ hydrates season/episode and TVDB series id from an IMDB id so they "just work". The OMDB refiner (broken since the Python 3 migration upstream) is also revived in v2.2 and can be enabled with a free OMDB API key on the same Settings page.</p>
+      <p>For TVDB-keyed providers like Gestdown, Bazarr+ hydrates season/episode and TVDB series id from an IMDB id so they "just work". The OMDB refiner (broken since the Python 3 migration upstream) is also revived and can be enabled with a free OMDB API key. As of v2.4, OMDB is offered as a selectable Provider Hub integration (alongside entries like AniDB).</p>
 
       <h2 id="security-notes">Security notes</h2>
       <ul>
         <li><strong>Bearer-token auth</strong> with <code>jti</code> revocation. Logout immediately revokes the active JWT.</li>
-        <li><strong>Rate limited per token</strong> with a sliding window on <code>/compat/download</code>, so a misbehaving client cannot eat the whole pool.</li>
+        <li><strong>Rate limited per token</strong> with a sliding window on <code>/api/v1/download</code>, so a misbehaving client cannot eat the whole pool.</li>
         <li><strong>Signed download tokens</strong> with a TTL. The client never sees raw provider URLs.</li>
         <li><strong>SSRF guard with DNS rebinding protection</strong> on every outbound URL the compat layer touches. Loopback, RFC1918, and link-local addresses are blocked, and any IP that fails revalidation post-DNS resolution is refused.</li>
-        <li><strong>Encryption at rest</strong> for the External Integration admin token and every other sensitive credential (provider keys, Sonarr/Radarr keys, Plex token, OpenRouter key). See the v2.2 release notes for the full list.</li>
+        <li><strong>Encryption at rest</strong> for the compat endpoint secrets and every other sensitive credential (provider keys, Sonarr/Radarr keys, Plex token, OpenRouter key). See the v2.2 release notes for the full list.</li>
       </ul>
 
       <h2 id="troubleshooting">Troubleshooting</h2>
       <p><strong>Jellyfin shows "Bazarr+ Subtitles" in the catalog as 404.</strong> The plugin manifest is published from the plugin repo. If you see a 404, no plugin release has been published yet for your Jellyfin version. Use the <a href="https://github.com/LavX/jellyfin-plugin-bazarr-plus#option-b-manual-install-from-a-github-release" target="_blank" rel="noopener">manual install path</a> in the plugin README.</p>
 
-      <p><strong>Plugin returns 401 from Bazarr+.</strong> The API token is wrong or has been rotated. Copy the current token from <strong>Bazarr+ &gt; Settings &gt; External Integration</strong> and paste it again into the plugin settings.</p>
+      <p><strong>Plugin returns 401 from Bazarr+.</strong> The API token is wrong or has been rotated. Copy the current token from the <strong>Distribution Hub &gt; API Keys</strong> tab (a named key, or the Default key via <strong>Reveal token</strong>) and paste it again into the plugin settings.</p>
 
       <p><strong>VLSub finds nothing for hash searches.</strong> Hash-based search only works if at least one of your enabled providers supports the file's hash. Try a title-based search as a fallback (VLSub auto-falls back when hash search returns empty).</p>
 
-      <p><strong>"External Integration" toggle is missing in Settings.</strong> You're on Bazarr+ &lt; v2.2.0. Pull <code class="inline">ghcr.io/lavx/bazarr:v2.2.0</code> or <code class="inline">:latest</code> and restart.</p>
+      <p><strong>The "Distribution Hub" menu item is missing.</strong> You're on a build older than v2.4. On v2.2 and v2.3 the toggle lives under <strong>Settings &gt; External Integration</strong> instead; on anything older than v2.2.0 the endpoint does not exist. Pull <code class="inline">ghcr.io/lavx/bazarr:latest</code> and restart to get the Distribution Hub.</p>
 
       <h2 id="next-steps">Next steps</h2>
       <ul>
+        <li><a href="distribution-hub.html">Distribution Hub</a> for named API keys, tiers, metering, and per-key provider scoping</li>
         <li><a href="provider-hub.html">Provider Hub</a> for installable catalog providers</li>
         <li><a href="getting-started.html">Getting Started</a> if you have not installed Bazarr+ yet</li>
         <li><a href="ai-translation.html">AI Translation Setup</a> for OpenRouter-powered subtitle translation</li>
