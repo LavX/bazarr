@@ -307,6 +307,91 @@ def test_worker_protocol_round_trips_language_video_and_download_payload():
     assert candidate.content == content
 
 
+def _hub_candidate(worker_id="sub-arch"):
+    from provider_hub.protocol import candidate_from_worker, language_to_payload
+
+    return candidate_from_worker(
+        provider_name="examplehub",
+        payload={
+            "provider": "upstream",
+            "id": worker_id,
+            "language": language_to_payload(Language("ces")),
+            "provider_payload": {"provider": "upstream", "schema": 1},
+        },
+    )
+
+
+def test_worker_download_extracts_named_archive_member_host_side():
+    from provider_hub.protocol import worker_download_to_content
+
+    candidate = _hub_candidate()
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("Show.S01E01.ces.srt", b"1\r\n00:00:01,000 --> 00:00:02,000\r\nAhoj\r\n")
+        archive.writestr("readme.txt", b"ignore me")
+    archive_bytes = buffer.getvalue()
+
+    worker_download_to_content(
+        candidate,
+        {
+            "archive_b64": base64.b64encode(archive_bytes).decode("ascii"),
+            "archive_sha256": _sha256(archive_bytes),
+            "member": "Show.S01E01.ces.srt",
+            "encoding": "latin-1",  # a wrong worker guess that must be ignored
+        },
+    )
+
+    assert b"Ahoj" in candidate.content
+    assert b"\r\n" not in candidate.content  # host applied fix_line_ending
+    assert candidate.format == "srt"
+    # Archive mode ignores any worker-supplied encoding and keeps the detect-friendly
+    # default (utf-8 first, then chardet via Subtitle.normalize()), so a wrong latin-1
+    # guess cannot lock in mojibake the way it did in per-provider download payloads.
+    assert candidate.encoding != "latin-1"
+
+
+def test_worker_download_auto_selects_single_archive_member():
+    from provider_hub.protocol import worker_download_to_content
+
+    candidate = _hub_candidate("sub-single")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("only.srt", b"1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+    archive_bytes = buffer.getvalue()
+
+    worker_download_to_content(
+        candidate,
+        {"archive_b64": base64.b64encode(archive_bytes).decode("ascii")},
+    )
+
+    assert b"Hi" in candidate.content
+
+
+def test_worker_download_rejects_missing_member_and_bad_archive():
+    from provider_hub.protocol import WorkerProtocolError, worker_download_to_content
+
+    candidate = _hub_candidate("sub-bad")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("Show.S01E01.srt", b"1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+    archive_bytes = buffer.getvalue()
+
+    with pytest.raises(WorkerProtocolError):
+        worker_download_to_content(
+            candidate,
+            {
+                "archive_b64": base64.b64encode(archive_bytes).decode("ascii"),
+                "member": "does-not-exist.srt",
+            },
+        )
+
+    with pytest.raises(WorkerProtocolError):
+        worker_download_to_content(
+            candidate,
+            {"archive_b64": base64.b64encode(b"not an archive").decode("ascii")},
+        )
+
+
 def test_venv_installer_uses_isolated_hash_checked_pip(monkeypatch, tmp_path):
     from provider_hub.venv import PluginEnvironment
     from provider_hub.manifest import validate_manifest

@@ -174,14 +174,27 @@ def candidate_from_worker(provider_name: str, payload: dict[str, Any]) -> HubWor
     return subtitle
 
 
+_SUBTITLE_FORMATS = {"srt": "srt", "ass": "ass", "ssa": "ass", "vtt": "vtt", "sub": "sub"}
+
+
+def _format_from_member(name: str | None) -> str | None:
+    if not name or "." not in name:
+        return None
+    return _SUBTITLE_FORMATS.get(name.rsplit(".", 1)[-1].lower())
+
+
 def worker_download_to_content(subtitle: HubWorkerSubtitle, payload: dict[str, Any]) -> bool:
     if payload.get("empty"):
         subtitle.content = b""
         return True
 
+    archive_b64 = payload.get("archive_b64")
+    if isinstance(archive_b64, str):
+        return _worker_archive_to_content(subtitle, payload, archive_b64)
+
     content_b64 = payload.get("content_b64")
     if not isinstance(content_b64, str):
-        raise WorkerProtocolError("download.content_b64 is required")
+        raise WorkerProtocolError("download.content_b64 or download.archive_b64 is required")
 
     content = base64.b64decode(content_b64.encode("ascii"), validate=True)
     expected_hash = payload.get("content_sha256")
@@ -193,4 +206,55 @@ def worker_download_to_content(subtitle: HubWorkerSubtitle, payload: dict[str, A
     subtitle.content = content
     subtitle.format = payload.get("format") or getattr(subtitle, "format", "srt")
     subtitle.encoding = payload.get("encoding") or getattr(subtitle, "encoding", None)
+    return True
+
+
+def _worker_archive_to_content(
+    subtitle: HubWorkerSubtitle, payload: dict[str, Any], archive_b64: str
+) -> bool:
+    """Extract a subtitle from an archive the worker handed back.
+
+    The worker returns the raw zip/rar bytes and, when it chose one during search,
+    the member name. Bazarr extracts with its own rarfile/zipfile stack, so provider
+    bundles never carry an archive binary (no py7zz), and the encoding is left to
+    Subtitle.normalize() rather than being guessed inside the worker.
+    """
+    from subliminal.subtitle import fix_line_ending
+    from subliminal_patch.providers.utils import (
+        get_archive_from_bytes,
+        get_subtitle_from_archive,
+    )
+
+    raw = base64.b64decode(archive_b64.encode("ascii"), validate=True)
+    expected_hash = payload.get("archive_sha256")
+    if expected_hash:
+        if hashlib.sha256(raw).hexdigest() != str(expected_hash).lower():
+            raise WorkerProtocolError("download.archive_sha256 mismatch")
+
+    archive = get_archive_from_bytes(raw)
+    if archive is None:
+        raise WorkerProtocolError("download.archive_b64 is not a zip or rar archive")
+
+    member = payload.get("member")
+    if member:
+        if member not in set(archive.namelist()):
+            raise WorkerProtocolError(f"download.member is not in the archive: {member}")
+        content = fix_line_ending(archive.read(member))
+        chosen = member
+    else:
+        forced = bool(getattr(getattr(subtitle, "language", None), "forced", False))
+        content = get_subtitle_from_archive(
+            archive,
+            forced=forced,
+            episode=payload.get("episode"),
+            get_first_subtitle=bool(payload.get("first_subtitle")),
+        )
+        if content is None:
+            raise WorkerProtocolError("download.archive_b64 has no usable subtitle member")
+        chosen = payload.get("filename") or ""
+
+    subtitle.content = content
+    subtitle.format = payload.get("format") or _format_from_member(chosen) or getattr(subtitle, "format", "srt")
+    # Leave subtitle.encoding unset so Subtitle.normalize()/chardet detects it, the
+    # same as native subliminal providers; do not let the worker pin a guess.
     return True
