@@ -369,6 +369,10 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
               navigate(
                 `/subtitles/preview/movie/${radarrId}/${encodeURIComponent(buildSubtitleLanguageKey(item))}`,
               );
+            } else if (action === "edit") {
+              navigate(
+                `/subtitles/edit/movie/${radarrId}/${encodeURIComponent(buildSubtitleLanguageKey(item))}`,
+              );
             } else if (action === "delete" && path) {
               await remove.mutateAsync({
                 radarrId,

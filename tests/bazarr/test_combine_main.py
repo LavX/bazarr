@@ -59,6 +59,34 @@ class TestTryCombine:
         mock_post_write.assert_called_once()
 
     @patch("subtitles.tools.combine.main.get_combine_rule")
+    @patch("subtitles.tools.combine.main.resolve_source_paths")
+    @patch("subtitles.tools.combine.main.compose_combined_filename")
+    @patch("subtitles.tools.combine.main._post_write")
+    def test_removes_stale_other_format_sibling(
+        self, mock_post_write, mock_filename, mock_resolve, mock_rule,
+        tmp_video, tmp_path,
+    ):
+        # A combined output is one logical subtitle. Building the .srt must drop
+        # a leftover .ass for the same combined language so it is not indexed
+        # twice and the editor never loads the positioned ASS as overlaps.
+        mock_rule.return_value = {"languages": ["en", "hu"], "format": "srt"}
+        mock_resolve.return_value = make_sources(
+            tmp_path, "en_hu_sibling_en.srt", "en_hu_sibling_hu.srt"
+        )
+        out_path = str(tmp_path / "Movie.en.combined-hu.srt")
+        stale_ass = tmp_path / "Movie.en.combined-hu.ass"
+        stale_ass.write_text("stale positioned ass")
+        mock_filename.return_value = out_path
+
+        result = try_combine_for_video(
+            video_path=tmp_video, media_type="movies", radarr_id=42,
+            languages=["en", "hu"], format="srt",
+        )
+        assert result.status == "built"
+        assert os.path.exists(out_path)
+        assert not stale_ass.exists()
+
+    @patch("subtitles.tools.combine.main.get_combine_rule")
     @patch("subtitles.tools.combine.main._profile_for")
     def test_skips_when_no_rule(self, mock_profile, mock_rule, tmp_video):
         mock_profile.return_value = {"items": []}

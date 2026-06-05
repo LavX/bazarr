@@ -9,6 +9,8 @@ import {
 } from "react";
 import {
   faBackward,
+  faCompress,
+  faExpand,
   faForward,
   faPause,
   faPlay,
@@ -191,6 +193,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
     ref,
   ) {
     const videoRef = useRef<HTMLVideoElement>(null);
+    const containerRef = useRef<HTMLDivElement>(null);
     const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const isPlayingRef = useRef(false);
     const lastReportedMsRef = useRef(-1);
@@ -206,6 +209,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
     const [currentMs, setCurrentMs] = useState(0);
     const [duration, setDuration] = useState(0);
     const [videoError, setVideoError] = useState(false);
+    const [isFullscreen, setIsFullscreen] = useState(false);
 
     // HLS session: which audio track ffmpeg is encoding and what source-time
     // offset it began at. Updated atomically (one setState) so the URL never
@@ -487,6 +491,47 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
       }
     }, []);
 
+    // Fullscreen the whole player container (video + subtitle overlay +
+    // controls) so the rendered subtitle preview and the transport stay
+    // visible, not just the bare <video> element. Falls back to the webkit-
+    // prefixed API for Safari.
+    const toggleFullscreen = useCallback(() => {
+      const el = containerRef.current;
+      if (!el) return;
+      const doc = document as Document & {
+        webkitFullscreenElement?: Element | null;
+        webkitExitFullscreen?: () => void;
+      };
+      const fsEl = document.fullscreenElement ?? doc.webkitFullscreenElement;
+      if (!fsEl) {
+        const node = el as HTMLDivElement & {
+          webkitRequestFullscreen?: () => void;
+        };
+        (node.requestFullscreen ?? node.webkitRequestFullscreen)?.call(node);
+      } else {
+        (document.exitFullscreen ?? doc.webkitExitFullscreen)?.call(document);
+      }
+    }, []);
+
+    // Keep the flag in sync with the browser so Esc (or the OS chrome) updates
+    // the button and the fullscreen-only styles.
+    useEffect(() => {
+      const onChange = () => {
+        const doc = document as Document & {
+          webkitFullscreenElement?: Element | null;
+        };
+        setIsFullscreen(
+          Boolean(document.fullscreenElement ?? doc.webkitFullscreenElement),
+        );
+      };
+      document.addEventListener("fullscreenchange", onChange);
+      document.addEventListener("webkitfullscreenchange", onChange);
+      return () => {
+        document.removeEventListener("fullscreenchange", onChange);
+        document.removeEventListener("webkitfullscreenchange", onChange);
+      };
+    }, []);
+
     // Internal seek helper. Shared by seekRelative, seekTo, and seek bar onChange.
     // Three cases:
     //   1. Target before current session's startSec: spawn new session at target.
@@ -638,8 +683,12 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
           e.preventDefault();
           seekRelative(5000);
         }
+        if (e.key === "f" || e.key === "F") {
+          e.preventDefault();
+          toggleFullscreen();
+        }
       },
-      [togglePlayPause, seekRelative],
+      [togglePlayPause, seekRelative, toggleFullscreen],
     );
 
     // No media placeholder
@@ -669,17 +718,26 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
     }
 
     return (
-      <div style={containerStyle}>
+      <div
+        ref={containerRef}
+        style={
+          isFullscreen
+            ? { ...containerStyle, height: "100%", background: "#000" }
+            : containerStyle
+        }
+      >
         {/* Video area. aspectRatio is pinned (when known) so the wrapper
             doesn't collapse to zero height while hls.js is attaching, which
-            avoids layout shift on first load and on every track switch. */}
+            avoids layout shift on first load and on every track switch. In
+            fullscreen the wrapper grows to fill the remaining height and the
+            video letterboxes inside it. */}
         <div
           style={{
             position: "relative",
             width: "100%",
             background: "#000",
             lineHeight: 0,
-            aspectRatio,
+            ...(isFullscreen ? { flex: 1, minHeight: 0 } : { aspectRatio }),
           }}
           tabIndex={0}
           onKeyDown={handleKeyDown}
@@ -688,7 +746,12 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
         >
           <video
             ref={videoRef}
-            style={{ width: "100%", height: "100%", display: "block" }}
+            style={{
+              width: "100%",
+              height: "100%",
+              display: "block",
+              ...(isFullscreen ? { objectFit: "contain" as const } : null),
+            }}
             preload="metadata"
             onPlay={handlePlay}
             onPause={handlePause}
@@ -704,10 +767,21 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
             </div>
           )}
 
-          {/* Subtitle overlay */}
+          {/* Subtitle overlay. Scaled up in fullscreen so it stays readable on
+              a large screen. */}
           {currentSubtitleText && (
             <div
-              style={subtitleOverlayStyle}
+              style={
+                isFullscreen
+                  ? {
+                      ...subtitleOverlayStyle,
+                      fontSize: 28,
+                      bottom: 40,
+                      left: 24,
+                      right: 24,
+                    }
+                  : subtitleOverlayStyle
+              }
               dangerouslySetInnerHTML={{
                 __html: renderSubtitleHtml(currentSubtitleText),
               }}
@@ -838,6 +912,16 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
             aria-label="Volume"
             title={`Volume: ${Math.round(volume * 100)}%`}
           />
+
+          <button
+            type="button"
+            style={playBtnStyle}
+            onClick={toggleFullscreen}
+            aria-label={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+            title={isFullscreen ? "Exit fullscreen (f)" : "Fullscreen (f)"}
+          >
+            <FontAwesomeIcon icon={isFullscreen ? faCompress : faExpand} />
+          </button>
         </div>
       </div>
     );
