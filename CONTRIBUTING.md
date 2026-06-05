@@ -94,13 +94,14 @@ refactor(scraper): simplify response parsing
 
 ## Submodules
 
-Bazarr+ includes two submodules:
-- `opensubtitles-scraper` - OpenSubtitles.org web scraper service
-- `ai-subtitle-translator` - AI-powered subtitle translator
+Bazarr+ includes the `ai-subtitle-translator` submodule (AI-powered subtitle translator).
 
-Changes to these should be submitted to their respective repositories:
-- [LavX/opensubtitles-scraper](https://github.com/LavX/opensubtitles-scraper)
+Changes to it should be submitted to its repository:
 - [LavX/ai-subtitle-translator](https://github.com/LavX/ai-subtitle-translator)
+
+OpenSubtitles.org support is now a native Provider Hub plugin installed from the in-app
+catalog, so the `opensubtitles-scraper` sidecar is no longer bundled here. That project
+lives on standalone at [LavX/opensubtitles-scraper](https://github.com/LavX/opensubtitles-scraper).
 
 ## Running locally
 
