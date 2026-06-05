@@ -122,13 +122,14 @@ jobs:
           pip install pytest pyjwt
           pytest tests/compat/ -v --tb=short
 
-      - name: pytest dependency and Subliminal rebase guards
+      - name: pytest dependency, Provider Hub, and Subliminal rebase guards
         run: |
           pytest \
             tests/bazarr/test_pretty_date.py \
             tests/bazarr/test_dependency_loading.py \
             tests/bazarr/test_signalrcore_compat.py \
             tests/bazarr/test_app_get_providers.py \
+            tests/bazarr/test_provider_hub.py \
             tests/subliminal_patch/test_subliminal_rebase.py \
             tests/subliminal_patch/test_embeddedsubtitles.py \
             tests/subliminal_patch/test_subsunacs.py \
