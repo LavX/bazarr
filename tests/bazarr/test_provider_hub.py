@@ -307,6 +307,202 @@ def test_worker_protocol_round_trips_language_video_and_download_payload():
     assert candidate.content == content
 
 
+def _hub_candidate(worker_id="sub-arch"):
+    from provider_hub.protocol import candidate_from_worker, language_to_payload
+
+    return candidate_from_worker(
+        provider_name="examplehub",
+        payload={
+            "provider": "upstream",
+            "id": worker_id,
+            "language": language_to_payload(Language("ces")),
+            "provider_payload": {"provider": "upstream", "schema": 1},
+        },
+    )
+
+
+def test_worker_download_extracts_named_archive_member_host_side():
+    from provider_hub.protocol import worker_download_to_content
+
+    candidate = _hub_candidate()
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("Show.S01E01.ces.srt", b"1\r\n00:00:01,000 --> 00:00:02,000\r\nAhoj\r\n")
+        archive.writestr("readme.txt", b"ignore me")
+    archive_bytes = buffer.getvalue()
+
+    worker_download_to_content(
+        candidate,
+        {
+            "archive_b64": base64.b64encode(archive_bytes).decode("ascii"),
+            "archive_sha256": _sha256(archive_bytes),
+            "member": "Show.S01E01.ces.srt",
+            "encoding": "latin-1",  # a wrong worker guess that must be ignored
+        },
+    )
+
+    assert b"Ahoj" in candidate.content
+    assert b"\r\n" not in candidate.content  # host applied fix_line_ending
+    assert candidate.format == "srt"
+    # Archive mode ignores any worker-supplied encoding and keeps the detect-friendly
+    # default (utf-8 first, then chardet via Subtitle.normalize()), so a wrong latin-1
+    # guess cannot lock in mojibake the way it did in per-provider download payloads.
+    assert candidate.encoding != "latin-1"
+
+
+def test_worker_download_auto_selects_single_archive_member():
+    from provider_hub.protocol import worker_download_to_content
+
+    candidate = _hub_candidate("sub-single")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("only.srt", b"1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+    archive_bytes = buffer.getvalue()
+
+    worker_download_to_content(
+        candidate,
+        {"archive_b64": base64.b64encode(archive_bytes).decode("ascii")},
+    )
+
+    assert b"Hi" in candidate.content
+
+
+def test_worker_download_rejects_missing_member_and_bad_archive():
+    from provider_hub.protocol import WorkerProtocolError, worker_download_to_content
+
+    candidate = _hub_candidate("sub-bad")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("Show.S01E01.srt", b"1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+    archive_bytes = buffer.getvalue()
+
+    with pytest.raises(WorkerProtocolError):
+        worker_download_to_content(
+            candidate,
+            {
+                "archive_b64": base64.b64encode(archive_bytes).decode("ascii"),
+                "member": "does-not-exist.srt",
+            },
+        )
+
+    with pytest.raises(WorkerProtocolError):
+        worker_download_to_content(
+            candidate,
+            {"archive_b64": base64.b64encode(b"not an archive").decode("ascii")},
+        )
+
+
+def test_worker_download_rejects_decompression_bomb(monkeypatch):
+    from provider_hub import protocol
+    from provider_hub.protocol import WorkerProtocolError, worker_download_to_content
+
+    candidate = _hub_candidate("sub-bomb")
+    # 2 MiB member that compresses to almost nothing: a classic zip bomb shape.
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("Show.S01E01.srt", b"\0" * (2 * 1024 * 1024))
+    archive_bytes = buffer.getvalue()
+    assert len(archive_bytes) < 50 * 1024  # tiny on disk, huge decompressed
+
+    monkeypatch.setattr(protocol, "_MAX_MEMBER_BYTES", 64 * 1024)
+    with pytest.raises(WorkerProtocolError):
+        worker_download_to_content(
+            candidate, {"archive_b64": base64.b64encode(archive_bytes).decode("ascii")}
+        )
+
+
+def test_worker_download_rejects_oversized_archive(monkeypatch):
+    from provider_hub import protocol
+    from provider_hub.protocol import WorkerProtocolError, worker_download_to_content
+
+    candidate = _hub_candidate("sub-big")
+    monkeypatch.setattr(protocol, "_MAX_ARCHIVE_BYTES", 1024)
+    payload_b64 = base64.b64encode(b"x" * 4096).decode("ascii")
+    with pytest.raises(WorkerProtocolError):
+        worker_download_to_content(candidate, {"archive_b64": payload_b64})
+
+
+def test_worker_download_extracts_seven_zip_member_host_side():
+    py7zr = pytest.importorskip("py7zr")
+    from provider_hub.protocol import worker_download_to_content
+
+    candidate = _hub_candidate("sub-7z")
+    buffer = io.BytesIO()
+    with py7zr.SevenZipFile(buffer, "w") as archive:
+        archive.writestr(b"1\r\n00:00:01,000 --> 00:00:02,000\r\nAhoj\r\n", "Show.S01E01.ces.srt")
+    archive_bytes = buffer.getvalue()
+    assert archive_bytes[:6] == b"7z\xbc\xaf\x27\x1c"
+
+    worker_download_to_content(
+        candidate,
+        {"archive_b64": base64.b64encode(archive_bytes).decode("ascii"), "member": "Show.S01E01.ces.srt"},
+    )
+
+    assert b"Ahoj" in candidate.content
+    assert b"\r\n" not in candidate.content  # host applied fix_line_ending
+    assert candidate.format == "srt"
+
+
+def test_worker_reader_caps_oversized_response_line(monkeypatch):
+    # The reader thread must reject an oversized response at the transport layer
+    # (a giant readline() line buffers in full before json.loads otherwise).
+    import queue
+    from types import SimpleNamespace
+    from provider_hub import worker as worker_mod
+
+    monkeypatch.setattr(worker_mod, "_MAX_RESPONSE_LINE_BYTES", 8)
+    monkeypatch.setattr(worker_mod, "_READ_CHUNK_CHARS", 4)
+
+    class FakeStdout:
+        def __init__(self, data):
+            self.data = data
+            self.pos = 0
+
+        def readline(self, size=-1):
+            if self.pos >= len(self.data):
+                return ""
+            window = len(self.data) if size is None or size < 0 else size
+            end = min(self.pos + window, len(self.data))
+            newline = self.data.find("\n", self.pos, end)
+            if newline != -1:
+                end = newline + 1
+            chunk = self.data[self.pos:end]
+            self.pos = end
+            return chunk
+
+    stdout_queue: queue.Queue = queue.Queue()
+    # A long line with no newline until the very end exceeds the 8-byte cap.
+    worker_mod.ProviderWorkerClient._enqueue_stdout(
+        SimpleNamespace(stdout=FakeStdout("X" * 100 + "\n")), stdout_queue
+    )
+    items = []
+    while True:
+        item = stdout_queue.get_nowait()
+        items.append(item)
+        if item is None:
+            break
+    assert worker_mod._OVERSIZE_RESPONSE in items
+    # The reader stopped early instead of buffering the whole 100-char line.
+    buffered = sum(len(i) for i in items if isinstance(i, str))
+    assert buffered <= worker_mod._MAX_RESPONSE_LINE_BYTES + worker_mod._READ_CHUNK_CHARS
+
+
+def test_worker_consumer_kills_on_oversized_sentinel():
+    import queue
+    from types import SimpleNamespace
+    from provider_hub import worker as worker_mod
+    from provider_hub.worker import ProviderWorkerClient, WorkerError
+
+    client = ProviderWorkerClient.__new__(ProviderWorkerClient)
+    client.process = SimpleNamespace(
+        stdout=object(), kill=lambda: None, wait=lambda timeout=None: None
+    )
+    client._stdout_queue = queue.Queue()
+    client._stdout_queue.put(worker_mod._OVERSIZE_RESPONSE)
+    with pytest.raises(WorkerError, match="exceeded"):
+        client._read_line_with_deadline(5.0)
+
+
 def test_venv_installer_uses_isolated_hash_checked_pip(monkeypatch, tmp_path):
     from provider_hub.venv import PluginEnvironment
     from provider_hub.manifest import validate_manifest
@@ -3511,3 +3707,104 @@ def test_deadline_request_timeout_bounds_and_rejects():
     # Budget exhausted -> the bundle fetch is rejected instead of running long.
     with pytest.raises(ProviderHubInstallError):
         _deadline_request_timeout(time.monotonic() - 1)
+
+
+def test_worker_download_rejects_excessive_archive_member_count(monkeypatch):
+    # The byte caps never trip on an archive full of tiny members, so an entry-count
+    # bomb (hundreds of thousands of zero-byte members) would still be scanned/extracted.
+    # The guard must also cap the member count, like service.py's _LOCAL_PACKAGE_MAX_MEMBERS.
+    from provider_hub import protocol
+    from provider_hub.protocol import WorkerProtocolError, worker_download_to_content
+
+    candidate = _hub_candidate("sub-manymembers")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        # Without a count cap this archive extracts fine (one usable .srt); the only
+        # thing that should reject it is the member-count guard.
+        archive.writestr("only.srt", b"1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+        for i in range(20):
+            archive.writestr(f"junk{i}.txt", b"x")
+    archive_bytes = buffer.getvalue()
+
+    monkeypatch.setattr(protocol, "_MAX_ARCHIVE_MEMBERS", 5, raising=False)
+    with pytest.raises(WorkerProtocolError):
+        worker_download_to_content(
+            candidate, {"archive_b64": base64.b64encode(archive_bytes).decode("ascii")}
+        )
+
+
+def test_worker_download_archive_clears_stale_encoding():
+    # An encoding can be carried onto the subtitle at search time (e.g. via the display
+    # attribute splat in candidate_from_worker). The archive path must clear it so
+    # Subtitle.normalize()/chardet detects encoding from the extracted bytes instead of
+    # pinning a stale legacy guess (which silently decodes UTF-8 as mojibake).
+    from provider_hub.protocol import worker_download_to_content
+
+    candidate = _hub_candidate("sub-staleenc")
+    candidate.encoding = "latin-1"
+    candidate._guessed_encoding = "latin-1"
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("only.srt", b"1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+    archive_bytes = buffer.getvalue()
+
+    worker_download_to_content(
+        candidate, {"archive_b64": base64.b64encode(archive_bytes).decode("ascii")}
+    )
+
+    assert candidate.encoding is None
+    assert candidate._guessed_encoding is None
+
+
+def test_worker_download_auto_selects_single_vtt_member():
+    # The explicit-member path already supports VTT; the auto-select path must too, so a
+    # worker archive containing a lone WebVTT file is not rejected as "no usable member".
+    from provider_hub.protocol import worker_download_to_content
+
+    candidate = _hub_candidate("sub-vtt")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("only.vtt", b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHi\n")
+    archive_bytes = buffer.getvalue()
+
+    worker_download_to_content(
+        candidate, {"archive_b64": base64.b64encode(archive_bytes).decode("ascii")}
+    )
+
+    assert b"WEBVTT" in candidate.content
+
+
+def test_worker_download_forwards_episode_title_to_archive_selection(monkeypatch):
+    # Episode packs are disambiguated by episode_title when filenames carry the title
+    # rather than the number (as subdl/subf2m do). The host must forward episode_title
+    # into the shared selector, not just the episode number.
+    import subliminal_patch.providers.utils as utils
+
+    from provider_hub.protocol import worker_download_to_content
+
+    captured = {}
+
+    def fake_select(archive, **kwargs):
+        captured.update(kwargs)
+        return b"1\n00:00:01,000 --> 00:00:02,000\nHi\n"
+
+    monkeypatch.setattr(utils, "get_subtitle_from_archive", fake_select)
+
+    candidate = _hub_candidate("sub-eptitle")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("a.srt", b"x")
+        archive.writestr("b.srt", b"y")
+    archive_bytes = buffer.getvalue()
+
+    worker_download_to_content(
+        candidate,
+        {
+            "archive_b64": base64.b64encode(archive_bytes).decode("ascii"),
+            "episode": 1,
+            "episode_title": "The One With The Test",
+        },
+    )
+
+    assert captured.get("episode_title") == "The One With The Test"
