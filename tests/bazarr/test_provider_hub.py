@@ -540,6 +540,7 @@ def test_venv_installer_uses_isolated_hash_checked_pip(monkeypatch, tmp_path):
 
 
 def test_active_provider_hub_installation_registers_proxy(tmp_path, monkeypatch):
+    import provider_hub.registry as hub_registry
     from provider_hub.registry import register_active_provider_classes
     from subliminal_patch.extensions import provider_registry
 
@@ -569,10 +570,17 @@ def test_active_provider_hub_installation_registers_proxy(tmp_path, monkeypatch)
 
     register_active_provider_classes()
 
-    assert provider_id in provider_registry.names()
-    provider_cls = provider_registry[provider_id]
-    assert provider_cls.provider_name == provider_id
-    assert provider_cls.languages
+    try:
+        assert provider_id in provider_registry.names()
+        provider_cls = provider_registry[provider_id]
+        assert provider_cls.provider_name == provider_id
+        assert provider_cls.languages
+    finally:
+        # Do not leak this registration into the shared provider_registry, or the
+        # subliminal rebase guard (run in the same pytest process in CI) fails.
+        hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if provider_id in provider_registry:
+            del provider_registry[provider_id]
 
 
 def test_active_trusted_migrated_provider_replaces_built_in(tmp_path, monkeypatch):
@@ -915,6 +923,7 @@ def test_active_trusted_provider_replaces_non_gestdown_built_in():
 
 
 def test_get_providers_registers_active_provider_hub_installation(tmp_path, monkeypatch):
+    import provider_hub.registry as hub_registry
     from app import get_providers
     from subliminal_patch.extensions import provider_registry
 
@@ -943,7 +952,14 @@ def test_get_providers_registers_active_provider_hub_installation(tmp_path, monk
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     monkeypatch.setattr(get_providers.settings.general, "enabled_providers", [provider_id], raising=False)
 
-    assert get_providers.get_providers() == [provider_id]
+    try:
+        assert get_providers.get_providers() == [provider_id]
+    finally:
+        # Avoid leaking this registration into the shared provider_registry (see the
+        # subliminal rebase guard, which runs in the same pytest process in CI).
+        hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if provider_id in provider_registry:
+            del provider_registry[provider_id]
 
 
 def test_get_providers_retries_provider_hub_registration_after_failure(monkeypatch):
