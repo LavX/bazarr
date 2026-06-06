@@ -512,6 +512,14 @@ def autoinstall_enabled_builtins() -> list[str]:
     if os.environ.get("BAZARR_DISABLE_PROVIDER_AUTOINSTALL"):
         return []
 
+    # Opt-in (default off): replacing built-in providers with their catalog versions at
+    # startup is automatic only when the user enables it. Manual Marketplace install/replace
+    # is unaffected, and turning this off never uninstalls already-active plugins.
+    from app.config import settings
+    if not getattr(settings.general, "provider_hub_auto_install", False):
+        logger.debug("Provider Hub startup auto-install disabled (opt-in off); skipping")
+        return []
+
     logger.info("Provider Hub startup auto-install: reconciling enabled providers against the official catalog")
 
     try:
