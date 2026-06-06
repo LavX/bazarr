@@ -12,7 +12,6 @@ extend-exclude = [
     "custom_libs",
     "ai-subtitle-translator",
     "bazarr/ai-subtitle-translator",
-    "opensubtitles-scraper",
     "bazarr-provider-catalog",
     "frontend",
     "bazarr-binaries",
