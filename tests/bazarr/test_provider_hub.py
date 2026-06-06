@@ -3824,3 +3824,124 @@ def test_worker_download_forwards_episode_title_to_archive_selection(monkeypatch
     )
 
     assert captured.get("episode_title") == "The One With The Test"
+
+
+def test_get_matches_unions_release_derived_matches_for_episode():
+    # Provider Hub workers run isolated and cannot run guessit, so they return only the
+    # structural matches they verified. The host must derive resolution/source/video_codec/
+    # release_group from the candidate's release_info, exactly like native subliminal
+    # providers do (e.g. SubdlSubtitle.get_matches calls utils.update_matches).
+    from provider_hub.protocol import candidate_from_worker
+
+    episode = Episode(
+        "/media/Show.S01E01.1080p.WEB-DL.x264-GROUP.mkv",
+        "Show",
+        1,
+        1,
+        source="Web",
+        release_group="GROUP",
+        resolution="1080p",
+        video_codec="H.264",
+    )
+    candidate = candidate_from_worker(
+        provider_name="examplehub",
+        payload={
+            "id": "sub-1",
+            "language": {"alpha3": "eng"},
+            "release_info": "Show.S01E01.1080p.WEB-DL.x264-GROUP",
+            "matches": ["series", "season", "episode"],
+            "provider_payload": {"provider": "examplehub"},
+        },
+    )
+
+    matches = candidate.get_matches(episode)
+
+    # Worker-provided structural matches are preserved ...
+    assert {"series", "season", "episode"}.issubset(matches)
+    # ... and the host adds the release-derived matches on top.
+    assert {"resolution", "source", "video_codec", "release_group"}.issubset(matches)
+
+
+def test_get_matches_handles_release_info_as_list():
+    # Some workers return release_info as a list of release names (the protocol allows it,
+    # and update_matches accepts an iterable). Each entry is guessed and unioned, so a
+    # candidate whose best release matches the file scores like a native provider would.
+    from provider_hub.protocol import candidate_from_worker
+
+    movie = Movie(
+        "/media/Example.Movie.2024.1080p.WEB-DL.x264-GROUP.mkv",
+        "Example Movie",
+        year=2024,
+        source="Web",
+        release_group="GROUP",
+        resolution="1080p",
+        video_codec="H.264",
+    )
+    candidate = candidate_from_worker(
+        provider_name="examplehub",
+        payload={
+            "id": "sub-1",
+            "language": {"alpha3": "eng"},
+            "release_info": [
+                "Example.Movie.2024.720p.HDTV.x265-OTHER",
+                "Example.Movie.2024.1080p.WEB-DL.x264-GROUP",
+            ],
+            "matches": ["title", "year"],
+            "provider_payload": {"provider": "examplehub"},
+        },
+    )
+
+    matches = candidate.get_matches(movie)
+
+    assert {"title", "year"}.issubset(matches)
+    assert {"resolution", "source", "video_codec", "release_group"}.issubset(matches)
+
+
+def test_get_matches_without_release_info_returns_only_worker_matches():
+    # Backward compatibility: a candidate with no release_info is unaffected by the
+    # host-side derivation and yields exactly the matches the worker reported.
+    from provider_hub.protocol import candidate_from_worker
+
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    candidate = candidate_from_worker(
+        provider_name="examplehub",
+        payload={
+            "id": "sub-1",
+            "language": {"alpha3": "eng"},
+            "matches": ["title"],
+            "provider_payload": {"provider": "examplehub"},
+        },
+    )
+
+    assert candidate.get_matches(movie) == {"title"}
+
+
+def test_get_matches_swallows_release_update_errors(monkeypatch):
+    # A malformed release string must never break scoring for a candidate: if the
+    # release-based match update raises, get_matches falls back to the worker matches.
+    # This also guards the module-level logger the except branch needs -- without it the
+    # handler would raise NameError and propagate, breaking scoring for the candidate.
+    import subliminal_patch.providers.utils as utils
+
+    from provider_hub.protocol import candidate_from_worker
+
+    def boom(matches, video, release_info, *args, **kwargs):
+        raise ValueError("bad release")
+
+    monkeypatch.setattr(utils, "update_matches", boom)
+
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    candidate = candidate_from_worker(
+        provider_name="examplehub",
+        payload={
+            "id": "sub-1",
+            "language": {"alpha3": "eng"},
+            "release_info": "Example.Movie.2024.1080p.WEB-DL.x264-GROUP",
+            "matches": ["title", "year"],
+            "provider_payload": {"provider": "examplehub"},
+        },
+    )
+
+    matches = candidate.get_matches(movie)
+
+    assert matches == {"title", "year"}
