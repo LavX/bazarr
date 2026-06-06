@@ -20,9 +20,11 @@ from app.config import settings
 # To use upstream releases, set BAZARR_RELEASES_REPO to the upstream repo
 RELEASES_REPO = os.environ.get('BAZARR_RELEASES_REPO', 'LavX/bazarr')
 
-# Microservice repositories to include in releases page
+# Microservice repositories to include in releases page.
+# opensubtitles-scraper is intentionally absent: it is no longer bundled with Bazarr+
+# (OpenSubtitles.org ships as a native Provider Hub plugin), so its releases should not
+# appear in the Bazarr+ release notes. It lives on standalone at LavX/opensubtitles-scraper.
 MICROSERVICE_REPOS = [
-    ('LavX/opensubtitles-scraper', 'OpenSubtitles Scraper'),
     ('LavX/ai-subtitle-translator', 'AI Subtitle Translator'),
 ]
 
