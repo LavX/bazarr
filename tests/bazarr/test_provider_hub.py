@@ -14,6 +14,15 @@ from subliminal.video import Movie
 from subliminal_patch.core import Episode
 
 
+@pytest.fixture(autouse=True)
+def _enable_provider_hub_auto_install(monkeypatch):
+    # Startup auto-install is opt-in (default off). These tests predate that gate and
+    # exercise the install path, so enable the flag for the whole module. The OFF behavior
+    # is covered separately in test_provider_hub_auto_install_optin.py.
+    from app.config import settings
+    monkeypatch.setattr(settings.general, "provider_hub_auto_install", True, raising=False)
+
+
 def _sha256(value):
     import hashlib
     return hashlib.sha256(value).hexdigest()

@@ -130,6 +130,7 @@ jobs:
             tests/bazarr/test_signalrcore_compat.py \
             tests/bazarr/test_app_get_providers.py \
             tests/bazarr/test_provider_hub.py \
+            tests/bazarr/test_provider_hub_auto_install_optin.py \
             tests/subliminal_patch/test_subliminal_rebase.py \
             tests/subliminal_patch/test_embeddedsubtitles.py \
             tests/subliminal_patch/test_subsunacs.py \
