@@ -33,6 +33,7 @@ import api from "@/apis/raw";
 import AppNavbar from "@/App/Navbar";
 import logoSrc from "@/assets/images/logo_no_orb128.png";
 import ErrorBoundary from "@/components/ErrorBoundary";
+import { useWhatsNewAutoOpen } from "@/components/modals/useWhatsNewAutoOpen";
 import NavbarProvider from "@/contexts/Navbar";
 import OnlineProvider from "@/contexts/Online";
 import { notification } from "@/modules/task";
@@ -40,6 +41,7 @@ import CriticalError from "@/pages/errors/CriticalError";
 import { RouterNames } from "@/Router/RouterNames";
 import { Environment } from "@/utilities";
 import { consumeRestartReloadPending } from "@/utilities/restart";
+import { registerAppNavigate } from "@/utilities/whatsNew";
 import AppHeader from "./Header";
 import styleVars from "@/assets/_variables.module.scss";
 
@@ -54,6 +56,12 @@ interface SupervisorStatus {
 const App: FunctionComponent = () => {
   const navigate = useNavigate();
 
+  // Expose a live navigate to the What's New modal (it renders outside the Router, and the
+  // router is rebuilt on data changes, so a captured navigate would go stale).
+  useEffect(() => {
+    registerAppNavigate(navigate);
+  }, [navigate]);
+
   const [criticalError, setCriticalError] = useState<string | null>(null);
   const [navbar, setNavbar] = useState(false);
   const [online, setOnline] = useState(false);
@@ -64,6 +72,10 @@ const App: FunctionComponent = () => {
   const queryClient = useQueryClient();
   const settings = useSystemSettings();
   const settingsLoaded = settings.data !== undefined;
+
+  // Show the "What's New" wizard once after upgrading, but only once authenticated and
+  // loaded (settingsLoaded) so it never appears over the login screen.
+  useWhatsNewAutoOpen(settingsLoaded);
 
   // Stream supervisor status via SSE during startup.
   // When backend reports "running", invalidate the settings cache to trigger

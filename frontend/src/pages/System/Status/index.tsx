@@ -36,6 +36,10 @@ import { useSystemHealth, useSystemStatus } from "@/apis/hooks";
 import { useInstanceName } from "@/apis/hooks/site";
 import api from "@/apis/raw";
 import { QueryOverlay } from "@/components/async";
+import {
+  hasWhatsNew,
+  useOpenWhatsNew,
+} from "@/components/modals/useWhatsNewAutoOpen";
 import { GithubRepoRoot } from "@/constants";
 import { Environment, useInterval } from "@/utilities";
 import {
@@ -112,6 +116,8 @@ const InfoContainer: FunctionComponent<
 const SystemStatusView: FunctionComponent = () => {
   const health = useSystemHealth();
   const { data: status } = useSystemStatus();
+  const openWhatsNew = useOpenWhatsNew();
+  const showWhatsNew = hasWhatsNew();
 
   const [uptime, setUptime] = useState<string>();
 
@@ -171,7 +177,16 @@ const SystemStatusView: FunctionComponent = () => {
           <Space />
         </Stack>
         <InfoContainer title="About">
-          <Row title="Bazarr Version">{status?.bazarr_version}</Row>
+          <Row title="Bazarr Version">
+            <Group gap="sm">
+              {status?.bazarr_version}
+              {showWhatsNew && (
+                <Anchor component="button" type="button" onClick={openWhatsNew}>
+                  What&apos;s new
+                </Anchor>
+              )}
+            </Group>
+          </Row>
           {status?.package_version !== "" && (
             <Row title="Package Version">{status?.package_version}</Row>
           )}
