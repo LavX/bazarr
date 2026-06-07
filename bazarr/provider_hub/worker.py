@@ -196,6 +196,14 @@ class ProviderWorkerClient:
             except Exception:
                 pass
 
+    def select_archive_member(
+        self, payload: dict[str, Any] | None = None, timeout: float | None = None
+    ) -> WorkerResult:
+        """Ask the worker to language-pin a member from a host-listed archive."""
+        return self.request(
+            "select_archive_member", payload, timeout=30.0 if timeout is None else timeout
+        )
+
     def request(self, op: str, payload: dict[str, Any] | None = None, timeout: float = 30.0) -> WorkerResult:
         self.start()
         if self.process is None or self.process.stdin is None or self.process.stdout is None:
