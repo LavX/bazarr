@@ -82,6 +82,41 @@ def test_select_member_defer_uses_episode_pick():
     assert sub.content is not None and b"00:00:01" in sub.content
 
 
+def test_worker_runner_dispatches_select_archive_member():
+    from provider_hub import worker_runner
+
+    class P:
+        def select_archive_member(self, provider_payload, language, members, config):
+            return {"member": members[1], "decision": "pin"}
+
+    out = worker_runner._handle(P(), "select_archive_member", {
+        "members": ["a.srt", "b.srt"], "language": {"alpha3": "fra"},
+        "provider_payload": {}, "config": {},
+    })
+    assert out == {"member": "b.srt", "decision": "pin"}
+
+
+def test_worker_runner_select_archive_member_rejects_when_unimplemented():
+    from provider_hub import worker_runner
+
+    class P:
+        pass
+
+    out = worker_runner._handle(P(), "select_archive_member", {"members": ["a.srt"]})
+    assert out == {"member": None, "decision": "reject"}
+
+
+def test_worker_runner_select_archive_member_coerces_bad_decision():
+    from provider_hub import worker_runner
+
+    class P:
+        def select_archive_member(self, provider_payload, language, members, config):
+            return {"member": None, "decision": "weird"}
+
+    out = worker_runner._handle(P(), "select_archive_member", {"members": ["a.srt"]})
+    assert out["decision"] == "reject"
+
+
 def test_select_member_callback_receives_listed_members():
     body = _zip(["show.eng.srt", "show.fre.srt", "notes.txt"])
     seen = {}

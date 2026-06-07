@@ -75,6 +75,22 @@ def _handle(provider, op, payload):
             config=payload.get("config") or {},
         )
         return _content_payload(result)
+    if op == "select_archive_member":
+        selector = getattr(provider, "select_archive_member", None)
+        if selector is None:
+            # Provider asked the host to list members (select_member) but exposes no
+            # selector: reject so the host fails loud rather than risk a wrong member.
+            return {"member": None, "decision": "reject"}
+        result = selector(
+            provider_payload=payload.get("provider_payload") or {},
+            language=payload.get("language") or {},
+            members=payload.get("members") or [],
+            config=payload.get("config") or {},
+        ) or {}
+        decision = result.get("decision")
+        if decision not in ("pin", "defer", "reject"):
+            decision = "reject"
+        return {"member": result.get("member"), "decision": decision}
     raise ValueError(f"unsupported worker op: {op}")
 
 
