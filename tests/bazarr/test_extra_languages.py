@@ -2,7 +2,7 @@
 bundled data snapshot, so Language("cnr") raises. register_extra_languages() registers it
 at startup so it resolves like any other language.
 """
-from languages.extra import register_extra_languages
+from languages.extra import extra_settings_language_rows, register_extra_languages
 from subzero.language import Language
 
 
@@ -20,3 +20,14 @@ def test_register_extra_languages_is_idempotent():
     register_extra_languages()
     register_extra_languages()
     assert Language("cnr").alpha3 == "cnr"
+
+
+def test_extra_settings_language_rows_makes_montenegrin_selectable():
+    # cnr has no ISO 639-1 code, so it needs an explicit settings-languages row with a
+    # synthetic code2 to be selectable in profiles (load_language_in_db only ingests
+    # ISO 639-1 languages otherwise).
+    rows = extra_settings_language_rows()
+    cnr = next((r for r in rows if r["code3"] == "cnr"), None)
+    assert cnr is not None
+    assert cnr["code2"] == "me"
+    assert cnr["name"] == "Montenegrin"

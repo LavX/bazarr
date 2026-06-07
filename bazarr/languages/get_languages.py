@@ -32,6 +32,16 @@ def load_language_in_db():
     # Insert custom languages in database table
     CustomLanguage.register(TableSettingsLanguages)
 
+    # Insert extra ISO 639-3 languages missing from pycountry's alpha2-gated list
+    # (e.g. Montenegrin "cnr") so they are selectable in profiles.
+    from .extra import extra_settings_language_rows
+    extra_rows = [{**row, 'enabled': 0} for row in extra_settings_language_rows()]
+    if extra_rows:
+        database.execute(
+            insert(TableSettingsLanguages)
+            .values(extra_rows)
+            .on_conflict_do_nothing())
+
     # Create languages dictionary for faster conversion than calling database
     create_languages_dict()
 

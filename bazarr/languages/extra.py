@@ -18,10 +18,24 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# (alpha3, alpha2, name)
+# (alpha3, babelfish alpha2, settings code2, name)
+#
+# babelfish alpha2 is the real ISO 639-1 code (empty when none exists).
+# settings code2 is the 2-letter key Bazarr's settings/profile UI uses to list and enable
+# a language; since cnr has no ISO 639-1 code we assign a synthetic one ("me", matching
+# Montenegro) so Montenegrin is selectable in profiles - otherwise the languages table
+# (which only ingests ISO 639-1 languages) would never get a row for it.
 _EXTRA_LANGUAGES = [
-    ("cnr", "", "Montenegrin"),
+    ("cnr", "", "me", "Montenegrin"),
 ]
+
+
+def extra_settings_language_rows() -> list[dict]:
+    """Rows to add to TableSettingsLanguages so these languages are selectable in profiles."""
+    return [
+        {"code3": alpha3, "code2": settings_code2, "name": name}
+        for alpha3, _alpha2, settings_code2, name in _EXTRA_LANGUAGES
+    ]
 
 
 def register_extra_languages() -> None:
@@ -40,7 +54,7 @@ def register_extra_languages() -> None:
     iso_language = getattr(babelfish_language, "IsoLanguage", None) or type(matrix[0])
 
     added = False
-    for alpha3, alpha2, name in _EXTRA_LANGUAGES:
+    for alpha3, alpha2, _settings_code2, name in _EXTRA_LANGUAGES:
         if alpha3 in known:
             continue
         try:
