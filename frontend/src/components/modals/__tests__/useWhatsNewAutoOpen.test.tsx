@@ -1,7 +1,7 @@
 import { FunctionComponent } from "react";
 import { beforeEach, describe, expect, it } from "vitest";
 import { useWhatsNewAutoOpen } from "@/components/modals/useWhatsNewAutoOpen";
-import { customRender, screen, waitFor } from "@/tests";
+import { customRender, screen } from "@/tests";
 
 const Harness: FunctionComponent<{ enabled: boolean }> = ({ enabled }) => {
   useWhatsNewAutoOpen(enabled);
@@ -19,8 +19,6 @@ describe("useWhatsNewAutoOpen", () => {
 
   it("auto-opens once enabled and the version is unseen", async () => {
     customRender(<Harness enabled />);
-    await waitFor(() =>
-      expect(screen.getByText("Distribution Hub")).toBeInTheDocument(),
-    );
+    expect(await screen.findByText("Distribution Hub")).toBeInTheDocument();
   });
 });
