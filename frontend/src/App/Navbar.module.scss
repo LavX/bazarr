@@ -2,6 +2,8 @@
   padding: 8px;
   background: transparent;
   border-right: none;
+  display: flex;
+  flex-direction: column;
 }
 
 .navInner {
@@ -9,9 +11,22 @@
   border: 1px solid var(--bz-border-card);
   border-radius: var(--bz-radius-xl);
   padding: 12px;
-  height: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   scrollbar-width: none;
+}
+
+.navFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: var(--bz-surface-base);
+  border: 1px solid var(--bz-border-card);
+  border-radius: var(--bz-radius-lg);
 }
 
 .groupLabel {
