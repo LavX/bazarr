@@ -252,6 +252,18 @@ const SettingsGeneralView: FunctionComponent = () => {
       <Section header="External Integrations">
         <ExternalWebhookSelector />
       </Section>
+      <Section header="Provider Hub">
+        <Check
+          label="Auto-install catalog versions on startup"
+          settingKey="settings-general-provider_hub_auto_install"
+        ></Check>
+        <Message>
+          When enabled, Bazarr replaces enabled built-in providers with their
+          official Provider Hub catalog versions at startup. Off by default.
+          Installing or replacing providers manually from the Provider Hub
+          Marketplace always works regardless of this setting.
+        </Message>
+      </Section>
       <Section header="Proxy">
         <Selector
           clearable
