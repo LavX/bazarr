@@ -5,11 +5,21 @@ import hashlib
 import os
 import subprocess
 import sys
+import threading
 import time
 
 from pathlib import Path
 
 from .manifest import ValidatedManifest
+
+
+# Serialize venv creation process-wide. A large catalog update can fan many provider
+# installs across the jobs queue / Flask threads at once; each builds a venv (python -m
+# venv + pip install), and a concurrent burst can exceed a container memory limit and trip
+# the OOM killer. Holding this lock around the heavy subprocess work caps peak memory to a
+# single venv build at a time. Builds are idempotent and cached, so serializing only slows
+# the rare bulk-install burst, not normal operation.
+_INSTALL_LOCK = threading.Lock()
 
 
 class PluginEnvironmentError(RuntimeError):
@@ -62,6 +72,8 @@ class PluginEnvironment:
         env_path.mkdir(parents=True, exist_ok=True)
 
         python_exe = python_executable(env_path)
+        # Serialize the heavy venv/pip subprocess work process-wide (see _INSTALL_LOCK).
+        _INSTALL_LOCK.acquire()
         try:
             if not python_exe.exists():
                 subprocess.run(
@@ -106,4 +118,6 @@ class PluginEnvironment:
             raise PluginEnvironmentError(
                 f"Provider Hub install for {manifest.provider_id} timed out"
             ) from error
+        finally:
+            _INSTALL_LOCK.release()
         return env_path
