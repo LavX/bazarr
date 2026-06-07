@@ -35,8 +35,8 @@ export const whatsNew: Record<string, WhatsNewSlide[]> = {
       cta: { label: "Open Distribution Hub", to: "/distribution-hub" },
     },
     {
-      title: "Provider Hub auto-install is now opt-in",
-      body: "Built-in providers are no longer replaced by catalog versions at startup unless you enable it. Manual install from the Marketplace always works.",
+      title: "Provider Hub auto-install",
+      body: "Opt in to automatically replace built-in providers with their Provider Hub catalog versions at startup. Off by default; manual install from the Marketplace always works.",
       icon: faStore,
       cta: { label: "Open General settings", to: "/settings/general" },
     },
