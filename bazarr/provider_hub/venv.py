@@ -73,7 +73,15 @@ class PluginEnvironment:
 
         python_exe = python_executable(env_path)
         # Serialize the heavy venv/pip subprocess work process-wide (see _INSTALL_LOCK).
-        _INSTALL_LOCK.acquire()
+        # Bound the wait by the remaining budget so a timed (startup) install can't block
+        # forever behind a long-running unbounded (manual) install holding the lock.
+        lock_wait = _remaining()
+        if lock_wait is None:
+            _INSTALL_LOCK.acquire()
+        elif not _INSTALL_LOCK.acquire(timeout=lock_wait):
+            raise PluginEnvironmentError(
+                f"Provider Hub install for {manifest.provider_id} timed out waiting for the install lock"
+            )
         try:
             if not python_exe.exists():
                 subprocess.run(

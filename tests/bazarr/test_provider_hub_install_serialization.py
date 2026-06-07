@@ -11,6 +11,8 @@ import threading
 import time
 from types import SimpleNamespace
 
+import pytest
+
 import provider_hub.venv as venvmod
 
 
@@ -51,3 +53,22 @@ def test_install_serializes_concurrent_venv_creation(tmp_path, monkeypatch):
 
     assert not errors, f"install raised: {errors}"
     assert active["max"] == 1, f"venv creation must be serialized (saw {active['max']} concurrent)"
+
+
+def test_timed_install_does_not_block_forever_on_held_lock(tmp_path):
+    # A budgeted (startup) install must not wait on the serialization lock past its budget:
+    # if another (e.g. unbounded manual) install holds it, the timed one should raise within
+    # ~the budget rather than hang. Regression guard for the lock-wait being outside the
+    # deadline accounting.
+    manifest = SimpleNamespace(provider_id="p", version="1.0.0", dependency_requirements=())
+    env = venvmod.PluginEnvironment(tmp_path)
+
+    venvmod._INSTALL_LOCK.acquire()  # simulate a long-running install holding the lock
+    try:
+        start = time.monotonic()
+        with pytest.raises(venvmod.PluginEnvironmentError, match="install lock"):
+            env.install(manifest, timeout=0.2)
+        elapsed = time.monotonic() - start
+        assert elapsed < 2.0, f"timed install hung on the lock ({elapsed:.1f}s)"
+    finally:
+        venvmod._INSTALL_LOCK.release()
