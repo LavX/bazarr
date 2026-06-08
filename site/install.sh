@@ -154,7 +154,7 @@ parse_env_file() {
     line="${line%%#*}"; line="${line// /}"
     [[ -z "$line" ]] && continue
     local key="${line%%=*}" val="${line#*=}"
-    case "$key" in PUID|PGID|TZ|OPENROUTER_API_KEY)
+    case "$key" in PUID|PGID|TZ|OPENROUTER_API_KEY|OPENSUBTITLES_SCRAPER_URL)
       ENV_VALS["$key"]="$val" ;; esac
   done < "$file"
 }
@@ -309,15 +309,13 @@ do_upgrade() {
 
 # --- Generate compose ---
 generate_compose() {
-  local bazarr_port="$1" movies="$2" tv="$3" translator="$4" translator_port="$5" flaresolverr="$6"
-  local movies_vol="" tv_vol="" translator_block="" flare_block="" bazarr_depends="" volumes_block=""
+  local bazarr_port="$1" scraper_port="$2" movies="$3" tv="$4" translator="$5" translator_port="$6" flaresolverr="$7"
+  local movies_vol="" tv_vol="" translator_block="" flare_block="" scraper_depends="" scraper_env="" volumes_block=""
 
   [[ -n "$movies" ]] && movies_vol="      - ${movies}:/movies"
   [[ -n "$tv" ]]     && tv_vol="      - ${tv}:/tv"
 
-  # FlareSolverr service. The native OpenSubtitles.org plugin reads its FlareSolverr URL
-  # from the provider settings in the UI (http://flaresolverr:8191/v1), so no env var is
-  # wired here; we only make Bazarr wait for FlareSolverr to be healthy when it is enabled.
+  # FlareSolverr service and scraper dependency
   if [[ "$flaresolverr" == "y" ]]; then
     flare_block="
   flaresolverr:
@@ -336,9 +334,11 @@ generate_compose() {
       resources:
         limits:
           memory: 1G"
-    bazarr_depends="    depends_on:
+    scraper_depends="    depends_on:
       flaresolverr:
         condition: service_healthy"
+    scraper_env="    environment:
+      - FLARESOLVERR_URL=http://flaresolverr:8191/v1"
   fi
 
   # Translator service
@@ -371,7 +371,9 @@ volumes:
     image: ghcr.io/lavx/bazarr:latest
     container_name: bazarr
     restart: unless-stopped
-__BAZARR_DEPENDS__
+    depends_on:
+      opensubtitles-scraper:
+        condition: service_healthy
     ports:
       - "__BAZARR_PORT__:6767"
     env_file:
@@ -386,12 +388,29 @@ __TV_VOLUME__
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  opensubtitles-scraper:
+    image: ghcr.io/lavx/opensubtitles-scraper:latest
+    container_name: opensubtitles-scraper
+    restart: unless-stopped
+__SCRAPER_DEPENDS__
+    ports:
+      - "__SCRAPER_PORT__:8000"
+__SCRAPER_ENV__
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 __FLARE_SERVICE__
 __TRANSLATOR_SERVICE__
 __VOLUMES_BLOCK__'
 
   template="${template//__BAZARR_PORT__/$bazarr_port}"
-  template="${template//__BAZARR_DEPENDS__/$bazarr_depends}"
+  template="${template//__SCRAPER_PORT__/$scraper_port}"
+  template="${template//__SCRAPER_DEPENDS__/$scraper_depends}"
+  template="${template//__SCRAPER_ENV__/$scraper_env}"
   template="${template//__FLARE_SERVICE__/$flare_block}"
   template="${template//__VOLUMES_BLOCK__/$volumes_block}"
   template="${template//__MOVIES_VOLUME__/$movies_vol}"
@@ -475,6 +494,11 @@ general:
   utf8_encode: true
   wanted_search_frequency: 6
   wanted_search_frequency_movie: 6
+opensubtitles:
+  scraper_service_url: opensubtitles-scraper:8000
+  use_web_scraper: true
+  ssl: false
+  timeout: 15
 sonarr:
   apikey: '${SONARR_KEY}'
   base_url: '/'
@@ -537,6 +561,7 @@ write_env() {
 PUID=${puid}
 PGID=${pgid}
 TZ=${tz}
+OPENSUBTITLES_SCRAPER_URL=http://opensubtitles-scraper:8000
 EOF
     [[ -n "$api_key" ]] && printf 'OPENROUTER_API_KEY=%s\n' "$api_key" >> "$tmp"
     [[ -n "$enc_key" ]] && printf 'ENCRYPTION_KEY=%s\n' "$enc_key" >> "$tmp"
@@ -602,6 +627,7 @@ if check_port "$BAZARR_PORT"; then
   BAZARR_PORT=$(read_input "Port 6767 is in use. Bazarr port" "$(find_free_port 6767)")
   validate_port "$BAZARR_PORT"
 fi
+SCRAPER_PORT=$(find_free_port 8000)
 TRANSLATOR_PORT=$(find_free_port 8765)
 
 # --- Confirmation ---
@@ -609,6 +635,7 @@ printf "\n"
 printf "${BLD}${CYN}Configuration Summary${RST}\n"
 printf "${DIM}%-24s${RST} %s\n" "Install directory:" "$INSTALL_DIR"
 printf "${DIM}%-24s${RST} %s\n" "Bazarr port:" "$BAZARR_PORT"
+printf "${DIM}%-24s${RST} %s\n" "Scraper port:" "$SCRAPER_PORT"
 [[ -n "$MOVIES_PATH" ]] && printf "${DIM}%-24s${RST} %s\n" "Movies:" "$MOVIES_PATH"
 [[ -n "$TV_PATH" ]]     && printf "${DIM}%-24s${RST} %s\n" "TV shows:" "$TV_PATH"
 printf "${DIM}%-24s${RST} %s\n" "Timezone:" "$TZ"
@@ -638,7 +665,7 @@ success "Created .env (mode 600)"
 
 generate_config "$INSTALL_DIR"
 
-generate_compose "$BAZARR_PORT" "$MOVIES_PATH" "$TV_PATH" "$TRANSLATOR" "$TRANSLATOR_PORT" "$FLARESOLVERR" \
+generate_compose "$BAZARR_PORT" "$SCRAPER_PORT" "$MOVIES_PATH" "$TV_PATH" "$TRANSLATOR" "$TRANSLATOR_PORT" "$FLARESOLVERR" \
   > docker-compose.yml
 success "Created docker-compose.yml"
 

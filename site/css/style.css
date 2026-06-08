@@ -1,3 +1,12 @@
+/* ---- Self-hosted Geist (variable) ---- */
+@font-face {
+  font-family: 'Geist Variable';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('../fonts/Geist-Variable.woff2') format('woff2');
+}
+
 /* ---- Reset & Base ---- */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -1046,25 +1055,4 @@ footer {
   border-radius: 999px;
   vertical-align: middle;
   line-height: 1.4;
-}
-
-/* ===========================
-   ROADMAP
-=========================== */
-.roadmap-list {
-  max-width: 760px;
-  margin: 8px auto 0;
-  padding-left: 1.15rem;
-  list-style: none;
-}
-.roadmap-list li {
-  position: relative;
-  margin: 16px 0;
-  padding-left: 14px;
-  line-height: 1.6;
-  color: var(--text-2);
-  border-left: 2px solid var(--border, rgba(255,255,255,0.12));
-}
-.roadmap-list li strong {
-  color: var(--text-1);
 }
