@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 
 from .composer import compose
-from .naming import compose_combined_filename
+from .naming import compose_combined_filename, external_subtitles_dir
 from .rules import resolve_source_paths
 
 _TWO_LETTER_RE = re.compile(r"^[a-z]{2}$")
@@ -79,6 +79,18 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
             format=rule["format"],
         )
 
+        # Path-injection barrier: the combined filename is built from the DB video
+        # path plus already-validated 2-letter language codes, so it must resolve
+        # inside this video's external-subtitles directory. Re-assert it here so a
+        # crafted code can never steer makedirs/open/remove outside that folder.
+        safe_root = os.path.realpath(external_subtitles_dir(video_path))
+        out_path = os.path.realpath(out_path)
+        if os.path.commonpath([safe_root, out_path]) != safe_root:
+            return CombineResult(
+                status="failed",
+                error=f"combined output path escaped the subtitles directory: {out_path!r}",
+            )
+
         try:
             content = compose(
                 primary_path=sources.primary,
@@ -108,7 +120,7 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
         # changes or a rebuild switches format) before re-indexing, so the same
         # combined language is not indexed twice and the editor does not load a
         # stale positioned ASS as overlapping cues.
-        _remove_stale_combined_siblings(out_path)
+        _remove_stale_combined_siblings(out_path, video_path)
 
         _post_write(out_path, video_path, media_type,
                      sonarr_episode_id, radarr_id)
@@ -125,16 +137,25 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
 _COMBINED_OUTPUT_EXTS = (".srt", ".ass", ".ssa")
 
 
-def _remove_stale_combined_siblings(out_path):
+def _remove_stale_combined_siblings(out_path, video_path):
     """Remove combined-output siblings that share this output's stem but use a
     different subtitle extension (e.g. a stale `.ass` left next to a freshly
-    written `.srt`). Best-effort: never raises."""
-    root, _ext = os.path.splitext(out_path)
+    written `.srt`). Best-effort: never raises.
+
+    Safety: only operate inside this video's external-subtitles directory, so a
+    crafted output path can never steer os.remove outside that folder."""
+    safe_dir = os.path.realpath(external_subtitles_dir(video_path))
+    out_real = os.path.realpath(out_path)
+    if os.path.dirname(out_real) != safe_dir:
+        return
+    root, _ext = os.path.splitext(out_real)
     for ext in _COMBINED_OUTPUT_EXTS:
-        sibling = root + ext
-        if sibling == out_path:
+        sibling = os.path.realpath(root + ext)
+        if sibling == out_real:
             continue
         try:
+            if os.path.commonpath([safe_dir, sibling]) != safe_dir:
+                continue
             if os.path.isfile(sibling):
                 os.remove(sibling)
                 logging.info("BAZARR combine removed stale sibling %s", sibling)

@@ -1,5 +1,6 @@
 # coding=utf-8
 
+import logging
 import os
 import sys
 
@@ -419,6 +420,25 @@ class Subtitles(Resource):
 
 
 def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id):
+    # Path-injection containment: only chmod a subtitle that lives where Bazarr
+    # stores subtitles for this video, i.e. alongside it (or a relative subfolder
+    # under it) or the configured absolute custom subfolder. A crafted `path` must
+    # not steer chmod at an arbitrary file. chmod only runs off-Windows, where
+    # realpaths share the / root so commonpath never raises.
+    real_sub = os.path.realpath(subtitles_path)
+    video_dir = os.path.realpath(os.path.dirname(video_path))
+    contained = os.path.commonpath([video_dir, real_sub]) == video_dir
+    if not contained and settings.general.subfolder == "absolute":
+        custom = str(settings.general.subfolder_custom).strip()
+        if custom:
+            custom_dir = os.path.realpath(custom)
+            contained = os.path.commonpath([custom_dir, real_sub]) == custom_dir
+    if not contained:
+        logging.warning(
+            "BAZARR refusing to postprocess a subtitle outside the video's subtitle folder: %s",
+            subtitles_path)
+        return
+
     # apply chmod if required
     chmod = (
         int(settings.general.chmod, 8)
@@ -426,7 +446,7 @@ def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id):
         else None
     )
     if chmod:
-        os.chmod(subtitles_path, chmod)
+        os.chmod(real_sub, chmod)
 
     if media_type == "episode":
         store_subtitles(path_mappings.path_replace_reverse(video_path), video_path)

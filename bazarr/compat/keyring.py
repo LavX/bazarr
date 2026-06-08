@@ -10,12 +10,14 @@ the rest of bazarr resolves modules from `bazarr/` as the sys.path root.
 """
 from __future__ import annotations
 import hashlib
+import hmac
 import json
 import secrets
 import time
 from datetime import datetime
 from threading import Lock
 
+from app.config import settings
 from app.database import (database, select, insert, update as sa_update,
                           delete as sa_delete, TableCompatApiKeys)
 
@@ -25,8 +27,18 @@ _cache: dict[str, tuple[float, dict | None]] = {}   # key_hash -> (expiry, rec|N
 _CACHE_TTL = 30.0
 
 
+def _key_hash_secret() -> bytes:
+    # Keyed digest (HMAC) rather than a bare SHA256 of the token: the stored
+    # key_hash is then useless without the instance secret, and it is the correct
+    # primitive for a server-held key. The token itself is a 256-bit CSPRNG value
+    # (see generate_token), so HMAC-SHA256 is more than sufficient. Read lazily so
+    # config is loaded. The key store is introduced in this release, so there are
+    # no pre-existing SHA256 hashes to migrate.
+    return (settings.general.flask_secret_key or "").encode()
+
+
 def hash_token(token: str) -> str:
-    return hashlib.sha256((token or "").encode()).hexdigest()
+    return hmac.new(_key_hash_secret(), (token or "").encode(), hashlib.sha256).hexdigest()
 
 
 def generate_token() -> tuple[str, str, str]:
