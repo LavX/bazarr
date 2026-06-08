@@ -197,14 +197,18 @@ def _format_from_member(name: str | None) -> str | None:
     return _SUBTITLE_FORMATS.get(name.rsplit(".", 1)[-1].lower())
 
 
-def worker_download_to_content(subtitle: HubWorkerSubtitle, payload: dict[str, Any]) -> bool:
+def worker_download_to_content(
+    subtitle: HubWorkerSubtitle, payload: dict[str, Any], select_member_cb=None
+) -> bool:
     if payload.get("empty"):
         subtitle.content = b""
         return True
 
     archive_b64 = payload.get("archive_b64")
     if isinstance(archive_b64, str):
-        return _worker_archive_to_content(subtitle, payload, archive_b64)
+        return _worker_archive_to_content(
+            subtitle, payload, archive_b64, select_member_cb=select_member_cb
+        )
 
     content_b64 = payload.get("content_b64")
     if not isinstance(content_b64, str):
@@ -254,6 +258,19 @@ def _guard_archive_members(archive) -> None:
         total += size
         if total > _MAX_ARCHIVE_TOTAL_BYTES:
             raise WorkerProtocolError("download.archive_b64 decompresses past the size limit")
+
+
+def _list_archive_members(archive):
+    """Member names offered to the worker for language selection: subtitle files only,
+    excluding dotfiles. Extraction guards (_guard_archive_members) still apply on read."""
+    names = []
+    for name in archive.namelist():
+        base = name.rsplit("/", 1)[-1]
+        if not base or base.startswith("."):
+            continue
+        if name.lower().endswith((".srt", ".sub", ".ssa", ".ass", ".vtt")):
+            names.append(name)
+    return names
 
 
 _SEVEN_ZIP_MAGIC = b"7z\xbc\xaf\x27\x1c"
@@ -319,7 +336,7 @@ def _seven_zip_archive(raw: bytes):
 
 
 def _worker_archive_to_content(
-    subtitle: HubWorkerSubtitle, payload: dict[str, Any], archive_b64: str
+    subtitle: HubWorkerSubtitle, payload: dict[str, Any], archive_b64: str, select_member_cb=None
 ) -> bool:
     """Extract a subtitle from an archive the worker handed back.
 
@@ -351,18 +368,12 @@ def _worker_archive_to_content(
         raise WorkerProtocolError("download.archive_b64 is not a zip, rar, or 7z archive")
     _guard_archive_members(archive)
 
-    member = payload.get("member")
-    if member:
-        if member not in set(archive.namelist()):
-            raise WorkerProtocolError(f"download.member is not in the archive: {member}")
-        content = fix_line_ending(archive.read(member))
-        chosen = member
-    else:
+    def _episode_pick():
         forced = bool(getattr(getattr(subtitle, "language", None), "forced", False))
         episode = payload.get("episode")
         if isinstance(episode, (list, tuple)):
             episode = episode[0] if episode else None
-        content = get_subtitle_from_archive(
+        picked = get_subtitle_from_archive(
             archive,
             forced=forced,
             episode=episode,
@@ -370,8 +381,38 @@ def _worker_archive_to_content(
             get_first_subtitle=bool(payload.get("first_subtitle")),
             extensions=(".srt", ".sub", ".ssa", ".ass", ".vtt"),
         )
-        if content is None:
+        if picked is None:
             raise WorkerProtocolError("download.archive_b64 has no usable subtitle member")
+        return picked
+
+    member = payload.get("member")
+    if member:
+        if member not in set(archive.namelist()):
+            raise WorkerProtocolError(f"download.member is not in the archive: {member}")
+        content = fix_line_ending(archive.read(member))
+        chosen = member
+    elif payload.get("select_member") and select_member_cb is not None:
+        # Host lists the members; the worker language-pins one (tri-state pin/defer/reject).
+        # This is the only way to language-select rar/7z, which the stdlib-only worker
+        # cannot list. "defer" => safe episode pick (single-language); "reject" => fail loud.
+        result = select_member_cb(_list_archive_members(archive)) or {}
+        decision = result.get("decision")
+        if decision == "pin":
+            chosen = result.get("member")
+            if chosen not in set(archive.namelist()):
+                raise WorkerProtocolError(
+                    f"select_archive_member returned a member not in the archive: {chosen!r}"
+                )
+            content = fix_line_ending(archive.read(chosen))
+        elif decision == "defer":
+            content = _episode_pick()
+            chosen = payload.get("filename") or ""
+        else:
+            raise WorkerProtocolError(
+                "select_archive_member rejected the archive (no language match)"
+            )
+    else:
+        content = _episode_pick()
         chosen = payload.get("filename") or ""
 
     subtitle.content = content

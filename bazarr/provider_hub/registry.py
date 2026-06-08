@@ -88,7 +88,23 @@ class HubProxyProvider(Provider):
             "config": self.config,
         }
         result = self._worker().request("download", request, timeout=self.timeout)
-        worker_download_to_content(subtitle, result.payload)
+
+        def _select_member_cb(members):
+            response = self._worker().select_archive_member(
+                {
+                    "provider": self.provider_name,
+                    "provider_payload": subtitle.provider_payload,
+                    "language": language_to_payload(subtitle.language),
+                    "members": members,
+                    "season": getattr(subtitle, "season", None),
+                    "episode": getattr(subtitle, "episode", None),
+                    "config": self.config,
+                },
+                timeout=self.timeout,
+            )
+            return response.payload
+
+        worker_download_to_content(subtitle, result.payload, select_member_cb=_select_member_cb)
         return True
 
 

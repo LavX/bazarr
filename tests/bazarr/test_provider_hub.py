@@ -2362,6 +2362,64 @@ def test_hub_proxy_provider_search_and_download_uses_worker_payload():
     assert worker.requests[1][1]["config"] == provider_config
 
 
+def test_hub_proxy_download_invokes_select_archive_member():
+    import io
+    import zipfile
+
+    from provider_hub.manifest import validate_manifest
+    from provider_hub.registry import _make_provider_class
+    from provider_hub.protocol import language_to_payload
+
+    def _zip(names):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as archive:
+            for name in names:
+                archive.writestr(name, b"1\n00:00:01,000 --> 00:00:02,000\nx\n")
+        return buf.getvalue()
+
+    body = _zip(["show.eng.srt", "show.fre.srt"])
+
+    class FakeWorker:
+        def __init__(self):
+            self.select_calls = []
+
+        def request(self, op, payload, timeout):
+            if op == "search":
+                return type("R", (), {"payload": {"candidates": [{
+                    "provider": "selecthub", "id": "sub-1",
+                    "language": language_to_payload(Language("eng")),
+                    "release_info": "Example.Movie.2024-GROUP", "filename": "x.srt",
+                    "matches": ["title"],
+                    "provider_payload": {"provider": "selecthub", "schema": 1},
+                }]}, "events": []})()
+            return type("R", (), {"payload": {
+                "archive_b64": base64.b64encode(body).decode("ascii"),
+                "archive_sha256": _sha256(body),
+                "select_member": True,
+            }, "events": []})()
+
+        def select_archive_member(self, payload, timeout=None):
+            self.select_calls.append(payload)
+            return type("R", (), {"payload": {"member": "show.eng.srt", "decision": "pin"}, "events": []})()
+
+        def stop(self):
+            return None
+
+    worker = FakeWorker()
+    manifest = validate_manifest(_manifest(provider_id="selecthub"), built_in_provider_ids=set())
+    provider = _make_provider_class(manifest, worker_client=worker)(
+        timeout=9, profile_name="smoke-profile", api_token="secret-token"
+    )
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    subtitle = provider.list_subtitles(movie, {Language("eng")})[0]
+
+    provider.download_subtitle(subtitle)
+
+    assert worker.select_calls, "download must call select_archive_member for select_member payloads"
+    assert sorted(worker.select_calls[0]["members"]) == ["show.eng.srt", "show.fre.srt"]
+    assert subtitle.content is not None and b"00:00:01" in subtitle.content
+
+
 def test_worker_runner_executes_simple_bundle(tmp_path):
     import sys
 
