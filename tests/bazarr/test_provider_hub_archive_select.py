@@ -96,6 +96,29 @@ def test_worker_runner_dispatches_select_archive_member():
     assert out == {"member": "b.srt", "decision": "pin"}
 
 
+def test_worker_runner_forwards_episode_context_to_selector():
+    # The host sends season/episode at the top level of the op payload (the registry derives
+    # them from the requested subtitle). The runner must surface them on provider_payload so a
+    # selector can disambiguate season-pack members even when the search payload omitted them.
+    from provider_hub import worker_runner
+
+    seen = {}
+
+    class P:
+        def select_archive_member(self, provider_payload, language, members, config):
+            seen["payload"] = provider_payload
+            return {"member": members[0], "decision": "pin"}
+
+    worker_runner._handle(P(), "select_archive_member", {
+        "members": ["a.srt"], "language": {"alpha3": "fra"},
+        "provider_payload": {"url": "x"}, "config": {},
+        "season": 1, "episode": 2,
+    })
+    assert seen["payload"]["season"] == 1
+    assert seen["payload"]["episode"] == 2
+    assert seen["payload"]["url"] == "x"
+
+
 def test_worker_runner_select_archive_member_rejects_when_unimplemented():
     from provider_hub import worker_runner
 

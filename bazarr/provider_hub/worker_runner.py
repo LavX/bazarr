@@ -81,8 +81,15 @@ def _handle(provider, op, payload):
             # Provider asked the host to list members (select_member) but exposes no
             # selector: reject so the host fails loud rather than risk a wrong member.
             return {"member": None, "decision": "reject"}
+        provider_payload = dict(payload.get("provider_payload") or {})
+        # The host forwards the requested season/episode at the top level of the op payload.
+        # Surface them on provider_payload (host context is authoritative) so a selector can
+        # disambiguate season-pack members even when the search payload didn't carry them.
+        for key in ("season", "episode"):
+            if payload.get(key) is not None:
+                provider_payload[key] = payload.get(key)
         result = selector(
-            provider_payload=payload.get("provider_payload") or {},
+            provider_payload=provider_payload,
             language=payload.get("language") or {},
             members=payload.get("members") or [],
             config=payload.get("config") or {},
