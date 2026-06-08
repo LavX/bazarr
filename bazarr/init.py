@@ -138,6 +138,10 @@ write_config()
 # would drop it from enabled_providers. main.py runs activate_staged_
 # installations() later, but that's already past this filter.
 from subliminal_patch.extensions import provider_registry  # noqa: E402
+# Register ISO 639-3 languages missing from babelfish's bundled snapshot (e.g. Montenegrin
+# "cnr") before any Language() is constructed below, so providers declaring them resolve.
+from languages.extra import register_extra_languages  # noqa: E402
+register_extra_languages()
 provider_hub_registration_ok = True
 # Auto-install official-catalog versions of enabled built-in providers so the
 # catalog becomes the canonical provider source. Staged here so the

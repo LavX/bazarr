@@ -109,6 +109,7 @@ class HubProxyProvider(Provider):
 
 
 def _languages_from_manifest(manifest):
+    import logging
     from subzero.language import Language
 
     languages = set()
@@ -116,7 +117,15 @@ def _languages_from_manifest(manifest):
         try:
             languages.add(Language.fromietf(code))
         except Exception:
-            languages.add(Language(code))
+            try:
+                languages.add(Language(code))
+            except Exception:
+                # A single code babelfish doesn't know (e.g. "cnr") must not drop the
+                # whole provider during registration: skip it, keep the valid ones.
+                logging.getLogger(__name__).warning(
+                    "Provider Hub: skipping unsupported language %r in manifest for %s",
+                    code, getattr(manifest, "provider_id", "?"),
+                )
     return languages
 
 
