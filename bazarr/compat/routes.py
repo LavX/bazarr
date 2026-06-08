@@ -26,6 +26,27 @@ from .auth import compat_auth  # noqa: E402
 
 _SUPPORTED_SUB_FORMATS = frozenset({"srt"})
 
+# Per-key admission lock: limits.check (read) and meter.record (write) must run as
+# one atomic step, or concurrent requests from the same key all read the same
+# pre-increment usage and admit past the limit. meter.record invalidates the
+# sum cache, so under this lock each request sees the prior request's increment.
+# Different keys never contend; the critical section is just a DB read+write
+# (the provider fanout / download happen outside it).
+from threading import Lock as _Lock  # noqa: E402
+
+_admission_locks_guard = _Lock()
+_admission_locks: dict[int, "_Lock"] = {}
+
+
+def _admission_lock(key_rec: dict):
+    kid = int(key_rec.get("id") or 0)
+    with _admission_locks_guard:
+        lk = _admission_locks.get(kid)
+        if lk is None:
+            lk = _Lock()
+            _admission_locks[kid] = lk
+    return lk
+
 
 def _current_key() -> dict:
     """The key record stashed by compat_auth (always set on authed routes)."""
@@ -250,17 +271,18 @@ def subtitles():
     # Distribution Hub: meter + rate-limit search per API key (req #3, #5, #6).
     from app.config import settings
     key_rec = _current_key()
-    if bool(settings.compat_endpoint.search_rate_limit_enabled):
-        decision = limits.check(key_rec, "search")
-        if not decision.allowed:
-            _meter_blocked(key_rec, "search")
-            return _throttle_response("search", decision)
-
     # The request is admitted: meter it now, before the fanout. Metering on
     # admission (not on success) means a provider outage or empty result still
     # counts against the key's quota, so failing searches can't be spammed to
-    # evade the rate limit.
-    _meter_ok(key_rec, "search")
+    # evade the rate limit. check + record run under the per-key lock so a
+    # concurrent burst from one key cannot all admit past the limit.
+    with _admission_lock(key_rec):
+        if bool(settings.compat_endpoint.search_rate_limit_enabled):
+            decision = limits.check(key_rec, "search")
+            if not decision.allowed:
+                _meter_blocked(key_rec, "search")
+                return _throttle_response("search", decision)
+        _meter_ok(key_rec, "search")
 
     # Per-request provider exclusion + timeout, falling back to the key's
     # configured defaults (req #1, #2). Clamp the timeout to the same [5, 120]
@@ -364,14 +386,20 @@ def download():
     # download throttle keeps the OS-contract 406 (the Jellyfin plugin treats
     # this code as a quota signal). The Api-Key resolves the key on every
     # request, so g.compat_key is authoritative for whose quota is spent.
-    decision = limits.check(key_rec, "download")
-    if not decision.allowed:
-        _meter_blocked(key_rec, "download")
-        resp = jsonify({"message": "download quota exhausted",
-                        "reset_time_utc": _iso_utc(int(decision.reset_epoch))})
-        resp.status_code = 406
-        resp.headers["x-reason"] = "throttled"
-        return resp
+    # check + consume run under the per-key lock so a concurrent burst from one
+    # key cannot all admit past the download limit. The actual download (token
+    # mint) happens outside the lock.
+    with _admission_lock(key_rec):
+        decision = limits.check(key_rec, "download")
+        if not decision.allowed:
+            _meter_blocked(key_rec, "download")
+            resp = jsonify({"message": "download quota exhausted",
+                            "reset_time_utc": _iso_utc(int(decision.reset_epoch))})
+            resp.status_code = 406
+            resp.headers["x-reason"] = "throttled"
+            return resp
+        # Admitted: consume the quota now, atomically with the check.
+        _meter_ok(key_rec, "download")
 
     try:
         scheme, host = _infer_client_base(request)
@@ -380,7 +408,6 @@ def download():
         else:
             base_host = request.host_url.rstrip("/")
         # Compute the post-consume remaining for the displayed quota.
-        _meter_ok(key_rec, "download")
         _allowed, remaining, reset = _display_download_quota(key_rec)
         resp = service.download(fid_int, base_host=base_host,
                                 remaining=remaining,
