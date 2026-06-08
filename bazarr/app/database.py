@@ -664,6 +664,18 @@ def migrate_db(app):
             .values(configured='0', updated='0'))
     optimize_sqlite_database(engine)
 
+    # Refresh the cached migration revision now that pending migrations have run. init_db()
+    # caches it right after create_all (before this upgrade), so a boot with a pending
+    # migration would otherwise leave /system/status reporting the pre-upgrade revision until
+    # the next restart. migrate_db() runs before the webserver starts, so this stays current.
+    try:
+        with engine.connect() as connection:
+            os.environ["BAZARR_DB_MIGRATION_VERSION"] = (
+                MigrationContext.configure(connection).get_current_revision() or "unknown"
+            )
+    except Exception:
+        logger.exception("Failed to refresh database migration revision after upgrade")
+
 
 def get_exclusion_clause(exclusion_type):
     where_clause = []
