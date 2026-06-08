@@ -15,6 +15,7 @@ from sqlalchemy import create_engine, inspect, DateTime, ForeignKey, Index, Inte
 from sqlalchemy import update, delete, select, func  # noqa: F401, F811
 from sqlalchemy.orm import scoped_session, sessionmaker, mapped_column, close_all_sessions, declarative_base
 from sqlalchemy.pool import NullPool
+from alembic.migration import MigrationContext
 
 from flask_sqlalchemy import SQLAlchemy
 
@@ -598,6 +599,34 @@ def init_db():
 
     # Create tables if they don't exist.
     metadata.create_all(engine)
+
+    # Resolve the DB engine/version and current migration revision once, at startup, and
+    # stash them in env vars for /system/status to read. The status endpoint used to open a
+    # fresh engine.connect() on every request to read the migration revision and never closed
+    # it; on Postgres (QueuePool) that leaked a connection per call until the pool was
+    # exhausted and requests blocked on pool_timeout (upstream #3361). SQLite was merely
+    # wasteful. Computed here so the leak is gone and the values are cheap to serve.
+    try:
+        database_engine = engine.dialect.name.capitalize()
+    except Exception:
+        logger.exception("Failed to determine database engine type")
+        database_engine = ""
+
+    try:
+        database_version = ".".join(str(x) for x in (engine.dialect.server_version_info or ()))
+    except Exception:
+        logger.exception("Failed to determine database engine version")
+        database_version = ""
+
+    os.environ["BAZARR_DB_ENGINE_VERSION"] = f"{database_engine} {database_version}"
+
+    try:
+        with engine.connect() as connection:
+            migration_revision = MigrationContext.configure(connection).get_current_revision()
+    except Exception:
+        logger.exception("Failed to determine database migration revision")
+        migration_revision = "unknown"
+    os.environ["BAZARR_DB_MIGRATION_VERSION"] = migration_revision or "unknown"
 
 
 def create_db_revision(app):
