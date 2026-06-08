@@ -58,6 +58,13 @@ def register_extra_languages() -> None:
         if alpha3 in known:
             continue
         try:
+            # alpha3b/alpha3t (ISO 639-2 bibliographic/terminologic) are intentionally empty:
+            # cnr is a 639-3-only code with no 639-2 assignment, exactly like the ~7455 other
+            # 639-3-only languages babelfish ships with empty 3b/3t. Reverse lookups for cnr go
+            # through Language()/fromalpha3/fromietf/fromname (all work post-registration);
+            # fromalpha3b is not the lookup path for 639-3 codes and raises for every such
+            # language. Faking 3b/3t='cnr' would be the only inconsistency in the matrix and is
+            # covered against by test_montenegrin_alpha3b_is_unset_matching_babelfish_convention.
             matrix.append(
                 iso_language(
                     alpha3=alpha3,
