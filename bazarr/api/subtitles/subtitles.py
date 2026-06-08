@@ -420,25 +420,6 @@ class Subtitles(Resource):
 
 
 def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id):
-    # Path-injection containment: only chmod a subtitle that lives where Bazarr
-    # stores subtitles for this video, i.e. alongside it (or a relative subfolder
-    # under it) or the configured absolute custom subfolder. A crafted `path` must
-    # not steer chmod at an arbitrary file. chmod only runs off-Windows, where
-    # realpaths share the / root so commonpath never raises.
-    real_sub = os.path.realpath(subtitles_path)
-    video_dir = os.path.realpath(os.path.dirname(video_path))
-    contained = os.path.commonpath([video_dir, real_sub]) == video_dir
-    if not contained and settings.general.subfolder == "absolute":
-        custom = str(settings.general.subfolder_custom).strip()
-        if custom:
-            custom_dir = os.path.realpath(custom)
-            contained = os.path.commonpath([custom_dir, real_sub]) == custom_dir
-    if not contained:
-        logging.warning(
-            "BAZARR refusing to postprocess a subtitle outside the video's subtitle folder: %s",
-            subtitles_path)
-        return
-
     # apply chmod if required
     chmod = (
         int(settings.general.chmod, 8)
@@ -446,7 +427,30 @@ def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id):
         else None
     )
     if chmod:
-        os.chmod(real_sub, chmod)
+        # Path-injection containment for the chmod sink only: a crafted `path` must
+        # not steer chmod at an arbitrary file. Only chmod a subtitle that lives
+        # where Bazarr stores subtitles for this video (alongside it / a relative
+        # subfolder under it, or the configured absolute custom subfolder). This
+        # gates ONLY the chmod; the store/refresh below uses video_path and runs
+        # regardless. commonpath raises across different Windows drives, so guard it.
+        real_sub = os.path.realpath(subtitles_path)
+        contained = False
+        try:
+            video_dir = os.path.realpath(os.path.dirname(video_path))
+            contained = os.path.commonpath([video_dir, real_sub]) == video_dir
+            if not contained and settings.general.subfolder == "absolute":
+                custom = str(settings.general.subfolder_custom).strip()
+                if custom:
+                    custom_dir = os.path.realpath(custom)
+                    contained = os.path.commonpath([custom_dir, real_sub]) == custom_dir
+        except ValueError:
+            contained = False  # paths on different Windows drives: not contained
+        if contained:
+            os.chmod(real_sub, chmod)
+        else:
+            logging.warning(
+                "BAZARR refusing to chmod a subtitle outside the video's subtitle folder: %s",
+                subtitles_path)
 
     if media_type == "episode":
         store_subtitles(path_mappings.path_replace_reverse(video_path), video_path)

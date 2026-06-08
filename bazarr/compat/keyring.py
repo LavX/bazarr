@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import secrets
 import time
 from datetime import datetime
@@ -20,6 +21,8 @@ from threading import Lock
 from app.config import settings
 from app.database import (database, select, insert, update as sa_update,
                           delete as sa_delete, TableCompatApiKeys)
+
+logger = logging.getLogger(__name__)
 
 _PREFIX = "bzr_"
 _cache_lock = Lock()
@@ -32,13 +35,19 @@ def _key_hash_secret() -> bytes:
     # key_hash is then useless without the instance secret, and it is the correct
     # primitive for a server-held key. The token itself is a 256-bit CSPRNG value
     # (see generate_token), so HMAC-SHA256 is more than sufficient. Read lazily so
-    # config is loaded. The key store is introduced in this release, so there are
-    # no pre-existing SHA256 hashes to migrate.
+    # config is loaded. Keys issued before this switch were stored under the bare
+    # SHA256 digest; resolve() accepts that legacy hash and migrates the row.
     return (settings.general.flask_secret_key or "").encode()
 
 
 def hash_token(token: str) -> str:
     return hmac.new(_key_hash_secret(), (token or "").encode(), hashlib.sha256).hexdigest()
+
+
+def _legacy_hash_token(token: str) -> str:
+    """The pre-HMAC bare SHA256 digest. Kept so named keys issued before the
+    HMAC switch keep authenticating; resolve() migrates them to HMAC on first use."""
+    return hashlib.sha256((token or "").encode()).hexdigest()
 
 
 def generate_token() -> tuple[str, str, str]:
@@ -92,6 +101,26 @@ def resolve(token: str) -> dict | None:
     row = database.execute(
         select(TableCompatApiKeys).where(TableCompatApiKeys.key_hash == h)
     ).scalar_one_or_none()
+    if row is None:
+        # Back-compat: a named key issued before the HMAC switch is stored under
+        # the legacy bare SHA256 hash, which cannot be migrated without the
+        # plaintext. Match it on the presented token, then re-store the row under
+        # the HMAC hash so future lookups hit the fast path and the weak digest
+        # is gone. Without this, every previously-issued key stops authenticating.
+        legacy_h = _legacy_hash_token(token)
+        if legacy_h != h:
+            row = database.execute(
+                select(TableCompatApiKeys).where(TableCompatApiKeys.key_hash == legacy_h)
+            ).scalar_one_or_none()
+            if row is not None:
+                try:
+                    database.execute(
+                        sa_update(TableCompatApiKeys)
+                        .where(TableCompatApiKeys.id == int(row.id))
+                        .values(key_hash=h))
+                    invalidate_cache()
+                except Exception:
+                    logger.debug("compat keyring: legacy hash migration failed", exc_info=True)
     rec = _row_to_dict(row) if (row is not None and int(row.enabled) == 1) else None
     with _cache_lock:
         _cache[h] = (now + _CACHE_TTL, rec)
