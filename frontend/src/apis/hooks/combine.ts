@@ -37,9 +37,16 @@ export function useCombineSubtitles() {
           });
           break;
         case "episode":
+          // The single-episode cache is keyed [Episodes, episodeId], but the
+          // episodes table is keyed [Series, seriesId, Episodes, All], which the
+          // former does not prefix-match, so the new combined subtitle stayed
+          // invisible until a broader refetch. The episode scope carries no
+          // seriesId, so invalidate the Series tree too; only the active series'
+          // episode query refetches immediately, the rest just go stale.
           void qc.invalidateQueries({
             queryKey: [QueryKeys.Episodes, variables.scope.episodeId],
           });
+          void qc.invalidateQueries({ queryKey: [QueryKeys.Series] });
           break;
         case "series":
           void qc.invalidateQueries({
