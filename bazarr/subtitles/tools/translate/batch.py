@@ -448,7 +448,16 @@ def extract_embedded_subtitle(
 
     extract_dir = os.path.join(bazarr_args.config_dir, "extracted_subs")
     os.makedirs(extract_dir, exist_ok=True)
-    video_hash = hashlib.md5(video_path.encode()).hexdigest()
+    # Key the cache on the video's identity (path + size + mtime), not just the
+    # path: a replaced/upgraded file at the same path would otherwise reuse the
+    # previous video's extracted subtitle (stale text), the exact upgrade case
+    # embedded translation targets.
+    try:
+        _st = os.stat(video_path)
+        _identity = f"{video_path}:{_st.st_size}:{int(_st.st_mtime)}"
+    except OSError:
+        _identity = video_path
+    video_hash = hashlib.md5(_identity.encode()).hexdigest()
     suffix = ""
     if hi:
         suffix += ".hi"

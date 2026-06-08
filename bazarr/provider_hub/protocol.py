@@ -188,7 +188,7 @@ def candidate_from_worker(provider_name: str, payload: dict[str, Any]) -> HubWor
     return subtitle
 
 
-_SUBTITLE_FORMATS = {"srt": "srt", "ass": "ass", "ssa": "ass", "vtt": "vtt", "sub": "sub"}
+_SUBTITLE_FORMATS = {"srt": "srt", "ass": "ass", "ssa": "ass", "vtt": "vtt", "sub": "microdvd"}
 
 
 def _format_from_member(name: str | None) -> str | None:
@@ -416,7 +416,11 @@ def _worker_archive_to_content(
         chosen = payload.get("filename") or ""
 
     subtitle.content = content
-    subtitle.format = payload.get("format") or _format_from_member(chosen) or getattr(subtitle, "format", "srt")
+    # Prefer the chosen member's actual extension over a worker-supplied format:
+    # the worker's format can be stale/wrong (e.g. an SRT member labeled "vtt"),
+    # which would otherwise save SRT bytes to a .vtt file. Fall back to the
+    # worker format, then the existing one.
+    subtitle.format = _format_from_member(chosen) or payload.get("format") or getattr(subtitle, "format", "srt")
     # Clear any encoding carried over from search (e.g. via the display attribute splat)
     # so Subtitle.normalize()/chardet detects it from the extracted bytes, the same as
     # native subliminal providers; do not let a stale or worker-supplied guess pin it.
