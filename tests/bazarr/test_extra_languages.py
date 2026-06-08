@@ -57,6 +57,24 @@ def test_montenegrin_alpha3b_is_unset_matching_babelfish_convention():
         Language.fromalpha3b("cnr")
 
 
+def test_register_extra_languages_refreshes_subzero_suffix_list():
+    # subzero.language builds FULL_LANGUAGE_LIST from babelfish's matrix at import time, which
+    # (via subliminal_patch.extensions) happens before register_extra_languages() at startup.
+    # If we don't patch it in place, _search_external_subtitles won't recognise the trailing
+    # ".cnr" of an external file like "Movie.cnr.srt" and skips it under strict matching.
+    import subzero.language as sl
+
+    register_extra_languages()
+
+    assert "cnr" in sl.FULL_LANGUAGE_LIST
+    # Exercise the actual suffix-stripping path the matcher uses.
+    stripped = sl.ENDSWITH_LANGUAGECODE_RE.sub(
+        lambda m: "" if str(m.group(1)).lower() in sl.FULL_LANGUAGE_LIST else m.group(0),
+        "Movie.cnr",
+    )
+    assert stripped == "Movie"
+
+
 def test_extra_settings_language_rows_makes_montenegrin_selectable():
     # cnr has no ISO 639-1 code, so it needs an explicit settings-languages row with a
     # synthetic code2 to be selectable in profiles (load_language_in_db only ingests

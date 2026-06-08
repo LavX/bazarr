@@ -6,11 +6,14 @@ babelfish ships a pre-2017 iso-639-3 table that lacks some codes - notably Monte
 startup so they resolve like any other language across subzero, subliminal, the Provider
 Hub registry, and the UI. Idempotent and safe to call repeatedly.
 
-Registration touches three babelfish internals because they are built once at import:
-  * LANGUAGE_MATRIX / LANGUAGES  - so Language("cnr") constructs;
-  * NameConverter.SYMBOLS        - so .name / fromname work (it's a class-level dict
-                                   built from LANGUAGE_MATRIX at module import);
-  * language_converters cache    - cleared so already-loaded converters rebuild.
+Registration touches several structures that are built once at import:
+  * LANGUAGE_MATRIX / LANGUAGES        - so Language("cnr") constructs;
+  * NameConverter.SYMBOLS              - so .name / fromname work (it's a class-level dict
+                                         built from LANGUAGE_MATRIX at module import);
+  * language_converters cache          - cleared so already-loaded converters rebuild;
+  * subzero FULL_LANGUAGE_LIST/ALPHA3b - so external-subtitle suffix stripping recognises
+                                         ".cnr" (subzero.language builds these from the
+                                         pre-patch matrix when imported before this runs).
 """
 from __future__ import annotations
 
@@ -93,3 +96,31 @@ def register_extra_languages() -> None:
             language_converters.converters.pop("name", None)
         except Exception:
             logger.exception("Failed to refresh babelfish name converter")
+
+    # Always refresh subzero's cached language lists (idempotent). subzero.language builds
+    # them from LANGUAGE_MATRIX at import, which - via subliminal_patch.extensions - happens
+    # before this runs at startup, so the lists would otherwise miss our codes regardless of
+    # whether this particular call added anything to babelfish.
+    _refresh_subzero_language_lists()
+
+
+def _refresh_subzero_language_lists() -> None:
+    # _search_external_subtitles strips a trailing ".<lang>" from a filename only when the
+    # token is in subzero.language.FULL_LANGUAGE_LIST, so an external file like "Movie.cnr.srt"
+    # is skipped under strict matching unless "cnr" is in that list. The list is a plain
+    # module-level list built once at import; append our alpha3 codes in place. Only patch if
+    # subzero.language is already imported - if it is imported later it builds from the
+    # now-patched matrix and includes the codes anyway.
+    import sys
+
+    sl = sys.modules.get("subzero.language")
+    if sl is None:
+        return
+    try:
+        for alpha3, _alpha2, _settings_code2, _name in _EXTRA_LANGUAGES:
+            for list_name in ("ALPHA3b_LIST", "FULL_LANGUAGE_LIST"):
+                lst = getattr(sl, list_name, None)
+                if isinstance(lst, list) and alpha3 not in lst:
+                    lst.append(alpha3)
+    except Exception:
+        logger.exception("Failed to refresh subzero language lists")
