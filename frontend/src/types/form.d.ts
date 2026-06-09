@@ -44,6 +44,7 @@ declare namespace FormType {
     id: number;
     type: "episode" | "movie";
     language: string;
+    /** File path. Empty string signals an embedded track, backend extracts it. */
     path: string;
     forced?: PythonBoolean;
     hi?: PythonBoolean;
@@ -52,6 +53,13 @@ declare namespace FormType {
     max_offset_seconds?: string;
     no_fix_framerate?: PythonBoolean;
     gss?: PythonBoolean;
+    output_mode?: "overwrite" | "keep_all";
+    /** Source language code2; required when path is empty (embedded track). */
+    from_language?: string;
+    /** HI flag of the embedded source track (defaults to hi when omitted). */
+    from_hi?: PythonBoolean;
+    /** Forced flag of the embedded source track (defaults to forced when omitted). */
+    from_forced?: PythonBoolean;
   }
 
   interface DownloadSeries {

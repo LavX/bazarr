@@ -4,6 +4,7 @@ import { faBookmark as farBookmark } from "@fortawesome/free-regular-svg-icons";
 import {
   faBookmark,
   faHistory,
+  faLayerGroup,
   faMagnifyingGlass,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
@@ -12,12 +13,17 @@ import { useDownloadEpisodeSubtitles, useEpisodesProvider } from "@/apis/hooks";
 import { useShowOnlyDesired } from "@/apis/hooks/site";
 import { Action, GroupTable } from "@/components";
 import { AudioList } from "@/components/bazarr";
+import { CombineModal } from "@/components/forms/CombineForm";
 import { EpisodeHistoryModal } from "@/components/modals";
 import { EpisodeSearchModal } from "@/components/modals/ManualSearchModal";
 import TextPopover from "@/components/TextPopover";
 import { useModals } from "@/modules/modals";
 import { BuildKey, filterSubtitleBy } from "@/utilities";
 import { useProfileItemsToLanguages } from "@/utilities/languages";
+import {
+  isCombinedOutputSubtitle,
+  isSyncOutputSubtitle,
+} from "@/utilities/subtitles";
 import { Subtitle } from "./components";
 import tableStyles from "@/components/tables/BaseTable.module.scss";
 
@@ -102,6 +108,7 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
               seriesId={seriesId}
               episodeId={episodeId}
               subtitle={val}
+              availableSubtitles={episode.subtitles}
             ></Subtitle>
           ));
 
@@ -194,6 +201,18 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
         {
           header: "Actions",
           cell: ({ row }) => {
+            const episodeAvailableLangs = Array.from(
+              new Set(
+                (row.original.subtitles ?? [])
+                  .filter(
+                    (s) =>
+                      s.path &&
+                      !isSyncOutputSubtitle(s) &&
+                      !isCombinedOutputSubtitle(s),
+                  )
+                  .map((s) => s.code2),
+              ),
+            );
             return (
               <Group gap="xs" wrap="nowrap">
                 <Action
@@ -208,6 +227,21 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
                     });
                   }}
                   icon={faMagnifyingGlass}
+                ></Action>
+                <Action
+                  label="Combine Subtitles"
+                  disabled={disabled || episodeAvailableLangs.length < 2}
+                  className={tableStyles.actionIcon}
+                  onClick={() => {
+                    modals.openContextModal(CombineModal, {
+                      scope: {
+                        kind: "episode",
+                        episodeId: row.original.sonarrEpisodeId,
+                      },
+                      availableLanguages: episodeAvailableLangs,
+                    });
+                  }}
+                  icon={faLayerGroup}
                 ></Action>
                 <Action
                   label="History"

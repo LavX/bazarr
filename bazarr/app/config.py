@@ -155,6 +155,7 @@ validators = [
     Validator('general.multithreading', must_exist=True, default=True, is_type_of=bool),
     Validator('general.chmod_enabled', must_exist=True, default=False, is_type_of=bool),
     Validator('general.enable_strm_support', must_exist=True, default=False, is_type_of=bool),
+    Validator('general.provider_hub_auto_install', must_exist=True, default=False, is_type_of=bool),
     Validator('general.chmod', must_exist=True, default='0640', is_type_of=str),
     Validator('general.subfolder', must_exist=True, default='current', is_type_of=str),
     Validator('general.subfolder_custom', must_exist=True, default='', is_type_of=str),
@@ -493,6 +494,10 @@ validators = [
     Validator('subsync.gss', must_exist=True, default=True, is_type_of=bool),
     Validator('subsync.max_offset_seconds', must_exist=True, default=60, is_type_of=int,
               is_in=[60, 120, 300, 600]),
+    Validator('subsync.enabled_engines', must_exist=True, default=['ffsubsync', 'autosubsync', 'alass'],
+              is_type_of=list),
+    Validator('subsync.output_mode', must_exist=True, default='overwrite', is_type_of=str,
+              is_in=['overwrite', 'keep_all']),
 
     # postgresql section
     Validator('postgresql.enabled', must_exist=True, default=False, is_type_of=bool),
@@ -560,6 +565,15 @@ validators = [
               default=86400, cast=int, gte=60, lte=2592000),
     Validator('compat_endpoint.serve_local_subs',
               default=True, is_type_of=bool),
+    # Distribution Hub: tiered rate limiting. `tiers` is an operator-editable
+    # dict merged over the built-in presets (see compat/tiers.py). A limit of
+    # 0 means unlimited for that window. `default_tier` is applied to new keys.
+    Validator('compat_endpoint.default_tier', default='free', cast=str),
+    Validator('compat_endpoint.tiers', default={}, is_type_of=dict),
+    Validator('compat_endpoint.search_rate_limit_enabled',
+              default=True, is_type_of=bool),
+    Validator('compat_endpoint.usage_retention_days',
+              default=400, cast=int, gte=35, lte=1000),
     # OMDB: optional title/year resolution for movies that aren't in the
     # local library. Free tier at omdbapi.com (1000 req/day). Empty = skip.
     Validator('omdb.apikey', default='', cast=str),
@@ -827,6 +841,34 @@ def _settings_mapping(parent, key):
     return mapping
 
 
+def _settings_value(parent, keys):
+    value = parent
+    for key in keys:
+        if value is None:
+            return None
+        if hasattr(value, "get"):
+            value = value.get(key)
+        else:
+            value = getattr(value, key, None)
+    return value
+
+
+def _active_provider_hub_provider_ids():
+    try:
+        from provider_hub.state import active_installations
+        return {
+            str(provider_id)
+            for provider_id in (
+                getattr(installation, "provider_id", None)
+                for installation in active_installations()
+            )
+            if provider_id
+        }
+    except Exception:
+        logging.exception("Unable to inspect active Provider Hub providers")
+        return set()
+
+
 def save_settings(settings_items):
     configure_debug = False
     configure_captcha = False
@@ -846,6 +888,7 @@ def save_settings(settings_items):
     reset_providers = False
     reset_fanout_pool = False
     reset_compat_pool = False
+    active_provider_hub_provider_ids = None
 
     # Subzero Mods
     update_subzero = False
@@ -888,7 +931,7 @@ def save_settings(settings_items):
             value = False
 
         # Handle JSON strings for dict settings
-        if settings_keys[-1] in ['provider_priorities', 'provider_languages'] and isinstance(value, str):
+        if settings_keys[-1] in ['provider_priorities', 'provider_languages', 'tiers'] and isinstance(value, str):
             try:
                 value = json.loads(value)
             except ValueError:
@@ -1026,10 +1069,20 @@ def save_settings(settings_items):
             if value != settings.subsource.apikey:
                 reset_providers = True
 
-        if key == 'settings-general-enabled_providers':
+        if key in ('settings-general-enabled_providers',
+                   'settings-general-provider_languages'):
             # Defer the reset until AFTER all values in this batch are
             # written, same reasoning as reset_fanout_pool below.
+            # provider_languages changes affect per-provider exclusions
+            # which alter compat cache keys and provider pool behavior.
             reset_compat_pool = True
+
+        if settings_keys[0] == 'settings' and len(settings_keys) >= 3:
+            if active_provider_hub_provider_ids is None:
+                active_provider_hub_provider_ids = _active_provider_hub_provider_ids()
+            if settings_keys[1] in active_provider_hub_provider_ids:
+                if value != _settings_value(settings, settings_keys[1:]):
+                    reset_compat_pool = True
 
         if key in ('settings-compat_endpoint-fanout_max_workers',
                    'settings-compat_endpoint-max_concurrent_fanouts'):

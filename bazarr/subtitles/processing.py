@@ -19,6 +19,7 @@ from .utils import _get_download_code3
 from .post_processing import postprocessing
 from .utils import _get_scores
 from .language_profiles import profile_item_language_code
+from .tools.combine.main import try_combine_for_video
 
 
 class ProcessSubtitlesResult:
@@ -60,6 +61,8 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
         from app.database import get_profile_id, get_profiles_list
         from subtitles.tools.translate.main import translate_subtitles_file
         from subtitles.download import check_missing_languages
+        from app.database import (TableEpisodes, TableShows, TableMovies,
+                                  database, select)
 
         if not subtitle_path or not downloaded_lang:
             return
@@ -89,6 +92,29 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
         profile = get_profiles_list(profile_id=profile_id)
         if not profile:
             return
+
+        # Fetch the episode/movie row that postprocess_subtitles dereferences
+        # for plex/jellyfin refresh (sonarrSeriesId, imdbId, season, episode,
+        # tvdbId for episodes; imdbId, tmdbId for movies). Passing None here
+        # crashed the translation job during post-processing.
+        translation_metadata = None
+        if media_type == 'series' and episode_id:
+            translation_metadata = database.execute(
+                select(TableEpisodes.sonarrSeriesId,
+                       TableEpisodes.season,
+                       TableEpisodes.episode,
+                       TableShows.imdbId,
+                       TableShows.tvdbId)
+                .select_from(TableEpisodes)
+                .join(TableShows)
+                .where(TableEpisodes.sonarrEpisodeId == episode_id)
+            ).first()
+        elif media_type == 'movies' and radarr_id:
+            translation_metadata = database.execute(
+                select(TableMovies.imdbId,
+                       TableMovies.tmdbId)
+                .where(TableMovies.radarrId == radarr_id)
+            ).first()
 
         # Hoisted out of the loop: check_missing_languages is independent of the
         # profile item being considered, so calling it once per profile item
@@ -143,10 +169,26 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
                 sonarr_series_id=series_id,
                 sonarr_episode_id=episode_id,
                 radarr_id=radarr_id,
-                metadata=None,
+                metadata=translation_metadata,
             )
     except Exception:
         logging.exception('BAZARR error in _trigger_auto_translation')
+
+
+def _trigger_combine(video_path, media_type, radarr_id, series_id, episode_id):
+    """After a subtitle download/upgrade/translate completes, try to build or
+    rebuild the combined subtitle file for the video's profile rule. Best-effort:
+    never raises, never blocks the caller."""
+    try:
+        try_combine_for_video(
+            video_path=video_path,
+            media_type=media_type,
+            radarr_id=radarr_id,
+            sonarr_series_id=series_id,
+            sonarr_episode_id=episode_id,
+        )
+    except Exception:
+        logging.exception("BAZARR error in _trigger_combine")
 
 
 def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_upgrade=False, is_manual=False,
@@ -304,6 +346,16 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         radarr_id=movie_metadata.radarrId if media_type != 'series' else None,
         source_score_percent=percent_score,
         forced=subtitle.language.forced,
+    )
+
+    # Combined subtitle: if the profile defines a combine rule and all sources
+    # are now on disk, build or refresh the combined file.
+    _trigger_combine(
+        video_path=path,
+        media_type=media_type,
+        radarr_id=movie_metadata.radarrId if media_type != 'series' else None,
+        series_id=series_id if media_type == 'series' else None,
+        episode_id=episode_id if media_type == 'series' else None,
     )
 
     return ProcessSubtitlesResult(message=message,

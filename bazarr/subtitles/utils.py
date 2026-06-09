@@ -5,6 +5,8 @@ import logging
 import os
 import json
 
+from urllib.parse import unquote
+
 from subzero.language import Language
 from subzero.video import parse_video
 from guessit.jsonutils import GuessitEncoder
@@ -34,13 +36,15 @@ def get_video(path, title, sceneName, providers=None, media_type="movie"):
         skip_hashing = settings.general.skip_hashing
         video = parse_video(path, hints=hints, skip_hashing=skip_hashing, dry_run=False, providers=providers)
         if sceneName != "None":
-            # refine the video object using the sceneName and update the video object accordingly
-            scenename_with_extension = sceneName + os.path.splitext(path)[1]
-            logging.debug(f'BAZARR guessing video object using scene name: {scenename_with_extension}')  # noqa: G004
-            scenename_video = parse_video(scenename_with_extension, hints=hints, dry_run=True)
-            refine_video_with_scenename(initial_video=video, scenename_video=scenename_video)
-            logging.debug('BAZARR resulting video object once refined using scene name: %s',
-                          json.dumps(vars(video), cls=GuessitEncoder, indent=4, ensure_ascii=False))
+            # Refine the video object using the sceneName. A scene name we can't parse
+            # (e.g. a URL-encoded release title from some indexers) must never discard the
+            # good on-disk parse and abort the search (LavX/bazarr#198): _parse_scenename_video
+            # returns None on failure so we keep the video parsed from the file path.
+            scenename_video = _parse_scenename_video(sceneName, os.path.splitext(path)[1], hints)
+            if scenename_video is not None:
+                refine_video_with_scenename(initial_video=video, scenename_video=scenename_video)
+                logging.debug('BAZARR resulting video object once refined using scene name: %s',
+                              json.dumps(vars(video), cls=GuessitEncoder, indent=4, ensure_ascii=False))
 
         for key, refiner in registered_refiners.items():
             logging.debug("Running refiner: %s", key)
@@ -53,6 +57,35 @@ def get_video(path, title, sceneName, providers=None, media_type="movie"):
 
     except Exception as error:
         logging.exception("BAZARR Error (%s) trying to get video information for this file: %s", error, path)
+
+
+def _parse_scenename_video(scene_name, extension, hints):
+    """Parse a scene name into a Video for refinement, degrading gracefully.
+
+    Some indexers store a URL-encoded release title as the scene name (e.g.
+    ``Rick%20and%20Morty%20S09E02%20...``). guessit can't make sense of that and
+    subliminal raises, which previously bubbled up and made ``get_video`` return None,
+    discarding the good on-disk parse and aborting subtitle search (LavX/bazarr#198).
+    Try the scene name as-is, then URL-decoded; if both fail, return None so the caller
+    keeps the video parsed from the on-disk filename.
+    """
+    candidates = [scene_name]
+    decoded = unquote(scene_name)
+    if decoded != scene_name:
+        candidates.append(decoded)
+
+    last_error = None
+    for candidate in candidates:
+        scenename_with_extension = candidate + extension
+        try:
+            logging.debug('BAZARR guessing video object using scene name: %s', scenename_with_extension)
+            return parse_video(scenename_with_extension, hints=hints, dry_run=True)
+        except Exception as error:
+            last_error = error
+
+    logging.warning("BAZARR could not parse the scene name %r (%s); falling back to the on-disk "
+                    "filename for subtitle search", scene_name, last_error)
+    return None
 
 
 def _get_download_code3(subtitle):

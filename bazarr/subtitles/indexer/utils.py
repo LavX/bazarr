@@ -12,6 +12,11 @@ from constants import MAXIMUM_SUBTITLE_SIZE
 from app.config import settings
 from utilities.path_mappings import path_mappings
 from languages.custom_lang import CustomLanguage
+from subtitles.tools.subsync_engines import SYNC_ENGINES, sync_engine_from_output_path
+
+import re as _re_combine
+
+_COMBINED_MODIFIER_PATTERN = _re_combine.compile(r'^combined-[a-z]{2}(?:-[a-z]{2})?$')
 
 
 def get_external_subtitles_path(file, subtitle):
@@ -46,13 +51,193 @@ def normalize_subtitle_language_variant(language, forced=False, hi=False):
     parts = language_text.split(':')
     base = parts[0]
     variants = {part.lower() for part in parts[1:]}
+    normalized_variants = []
 
     # Keep the same priority as ProcessSubtitlesResult.language_code.
     if hi or "hi" in variants:
-        return f"{base}:hi"
+        normalized_variants.append('hi')
     if forced or "forced" in variants:
-        return f"{base}:forced"
-    return base
+        normalized_variants.append('forced')
+    sync_variants = sorted(part for part in variants if part.startswith('sync-'))
+    normalized_variants.extend(sync_variants)
+    combined_variant = next(
+        (part for part in variants if _COMBINED_MODIFIER_PATTERN.match(part)),
+        None,
+    )
+    if combined_variant:
+        normalized_variants.append(combined_variant)
+    if not normalized_variants:
+        return base
+    return ':'.join([base] + normalized_variants)
+
+
+def sync_engine_from_subtitle_name(subtitle):
+    return sync_engine_from_output_path(subtitle)
+
+
+def _language_code_from_sync_engine_output(subtitle):
+    filename = os.path.basename(subtitle).lower()
+    stem, extension = os.path.splitext(filename)
+    if extension not in core.SUBTITLE_EXTENSIONS:
+        return None
+
+    parts = stem.split('.')
+    if len(parts) < 3 or parts[-1] not in SYNC_ENGINES:
+        return None
+
+    parts = parts[:-1]
+    # A keep-all sync of a combined file produces e.g.
+    # Movie.en.combined-hu.ffsubsync.srt. That is not a plain-language sync
+    # output: skip it cleanly here (returning None) so the indexer does not
+    # mis-parse "combined-hu" as a language and raise downstream. Such a synced
+    # combined output is a known limitation: it is left on disk but not indexed
+    # as a tracked variant. Overwrite-mode sync of a combined file works in
+    # place (it keeps the Movie.en.combined-hu.srt name) and is unaffected.
+    if parts and _COMBINED_MODIFIER_PATTERN.match(parts[-1]):
+        return None
+    variants = []
+    if parts and parts[-1] in ['hi', 'sdh', 'cc']:
+        variants.append('hi')
+        parts = parts[:-1]
+    if parts and parts[-1] == 'forced':
+        variants.append('forced')
+        parts = parts[:-1]
+    if not parts:
+        return None
+
+    language = parts[-1].replace('_', '-')
+    if not language:
+        return None
+
+    return ':'.join([language] + variants)
+
+
+def add_sync_engine_outputs(dest_folder, subtitles):
+    if not os.path.isdir(dest_folder):
+        return subtitles
+
+    for subtitle in os.listdir(dest_folder):
+        if subtitle in subtitles or not sync_engine_from_subtitle_name(subtitle):
+            continue
+
+        subtitle_path = os.path.join(dest_folder, subtitle)
+        if not os.path.isfile(subtitle_path):
+            continue
+
+        language_code = _language_code_from_sync_engine_output(subtitle)
+        if not language_code:
+            logging.debug("BAZARR skipping generated sync subtitle with unknown language: %s", subtitle_path)
+            continue
+
+        try:
+            subtitles[subtitle] = _get_lang_from_str(language_code)
+        except Exception:
+            logging.debug("BAZARR skipping generated sync subtitle with unsupported language: %s", subtitle_path)
+
+    return subtitles
+
+
+def subtitle_language_with_sync_modifier(language_str, subtitle):
+    engine = sync_engine_from_subtitle_name(subtitle)
+    if not engine:
+        return language_str
+    parts = [part for part in str(language_str).split(':') if part]
+    if not parts:
+        return language_str
+    base_language = parts[0]
+    modifiers = [part.lower() for part in parts[1:] if not part.lower().startswith('sync-')]
+    modifiers.append(f'sync-{engine}')
+    return ':'.join([base_language] + modifiers)
+
+
+def combined_modifier_from_subtitle_name(subtitle):
+    """Return the 'combined-X[-Y]' modifier if the filename matches the
+    combined-subtitle convention, else None."""
+    from subtitles.tools.combine.naming import parse_combined_filename
+    info = parse_combined_filename(subtitle)
+    if info is None:
+        return None
+    return "combined-" + "-".join(info.secondaries)
+
+
+def _language_code_from_combined_output(subtitle):
+    from subtitles.tools.combine.naming import parse_combined_filename
+    info = parse_combined_filename(subtitle)
+    if info is None:
+        return None
+    return info.primary
+
+
+def add_combined_outputs(dest_folder, subtitles, video_filename=None):
+    """Scan dest_folder for combined-subtitle files and add them to the
+    subtitles dict so the rest of the indexer treats them as known artifacts.
+
+    video_filename: the basename of the video being indexed. When provided,
+    only combined files belonging to that video are added. This matters in
+    folders holding multiple episodes/movies, where an unfiltered scan would
+    attach another item's combined file to the wrong video.
+
+    Mirrors add_sync_engine_outputs from PR 158 in structure."""
+    from subtitles.tools.combine.naming import parse_combined_filename
+    if not os.path.isdir(dest_folder):
+        return subtitles
+
+    video_stem = os.path.splitext(video_filename)[0] if video_filename else None
+
+    for subtitle in os.listdir(dest_folder):
+        if subtitle in subtitles:
+            continue
+
+        info = parse_combined_filename(subtitle)
+        if info is None:
+            continue
+
+        # Exact-base match, not a prefix test: the combined file must be exactly
+        # <video_stem>.<primary>.combined-<secondaries>.<ext>. A prefix check
+        # would wrongly attach a sibling's file (e.g. "Movie.Extended.en.combined
+        # -es.srt") to "Movie" when their stems share a dotted prefix.
+        if video_stem is not None:
+            expected = (f"{video_stem}.{info.primary}.combined-"
+                        f"{'-'.join(info.secondaries)}.{info.format}")
+            if subtitle != expected:
+                continue
+
+        subtitle_path = os.path.join(dest_folder, subtitle)
+        if not os.path.isfile(subtitle_path):
+            continue
+
+        language_code = info.primary
+
+        try:
+            subtitles[subtitle] = _get_lang_from_str(language_code)
+        except Exception:
+            logging.debug(
+                "BAZARR skipping combined subtitle with unsupported language: %s",
+                subtitle_path,
+            )
+
+    return subtitles
+
+
+def subtitle_language_with_combined_modifier(language_str, subtitle):
+    """Stamp the combined modifier onto the language string for this subtitle
+    file, preserving any pre-existing hi/forced/sync- modifiers."""
+    modifier = combined_modifier_from_subtitle_name(subtitle)
+    if not modifier:
+        return language_str
+    parts = [part for part in str(language_str).split(':') if part]
+    if not parts:
+        return language_str
+    base_language = parts[0]
+    # Drop any pre-existing combined-* modifier; we always re-stamp from the
+    # filename so it is authoritative.
+    modifiers = [
+        part.lower()
+        for part in parts[1:]
+        if not part.lower().startswith('combined-')
+    ]
+    modifiers.append(modifier)
+    return ':'.join([base_language] + modifiers)
 
 
 def guess_external_subtitles(dest_folder, subtitles, media_type, previously_indexed_subtitles_to_exclude=None):

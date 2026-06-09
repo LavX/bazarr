@@ -48,6 +48,10 @@ export interface ProviderHubInstallation {
   installed_at?: string | null;
   activated_at?: string | null;
   manifest?: ProviderHubManifest;
+  /** "catalog" for marketplace installs, "local" for uploaded packages. */
+  origin?: string;
+  /** Catalog source id this install came from, or null for local packages. */
+  source_id?: string | null;
 }
 
 export interface ProviderHubInstallRequest {
@@ -126,6 +130,20 @@ class ProviderHubApi extends BaseApi {
     const response = await this.postRaw<ProviderHubInstallation>(
       "/installations",
       { manifest },
+    );
+    return response.data;
+  }
+
+  async installLocal(file: File) {
+    const form = new FormData();
+    form.append("file", file);
+    // Override the client's default application/json Content-Type so Axios sends
+    // real multipart/form-data (with boundary) and Flask populates request.files.
+    const response = await this.postRaw<ProviderHubInstallation>(
+      "/installations/local",
+      form,
+      undefined,
+      { "Content-Type": "multipart/form-data" },
     );
     return response.data;
   }

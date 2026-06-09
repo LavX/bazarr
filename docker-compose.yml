@@ -10,24 +10,21 @@
 # =============================================================================
 
 services:
-  # OpenSubtitles.org Scraper Service (required for the fork's custom provider)
-  opensubtitles-scraper:
-    build:
-      context: ./opensubtitles-scraper
-      dockerfile: Dockerfile
-    image: ghcr.io/lavx/opensubtitles-scraper:latest
-    container_name: opensubtitles-scraper
+  # FlareSolverr (strongly recommended)
+  # The OpenSubtitles.org provider is a native Provider Hub plugin in Bazarr+.
+  # It scrapes in-process with ai-cloudscraper, and falls back to FlareSolverr
+  # when OpenSubtitles.org returns a Cloudflare browser challenge. After you
+  # install the OpenSubtitles.org plugin from the Marketplace, set its
+  # "FlareSolverr URL" to http://flaresolverr:8191/v1 in the provider settings.
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
     restart: unless-stopped
     ports:
-      - "${SCRAPER_PORT:-8000}:8000"
+      - "${FLARESOLVERR_PORT:-8191}:8191"
     environment:
-      - DEBUG=${SCRAPER_DEBUG:-false}
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
+      - LOG_LEVEL=${FLARESOLVERR_LOG_LEVEL:-info}
+      - TZ=${TZ:-UTC}
     networks:
       - bazarr-network
 
@@ -36,9 +33,8 @@ services:
     container_name: bazarr
     restart: unless-stopped
     depends_on:
-      opensubtitles-scraper:
-        condition: service_healthy
-    
+      - flaresolverr
+
     ports:
       - "${BAZARR_PORT:-6767}:6767"
     
@@ -50,13 +46,7 @@ services:
       
       # Timezone (e.g., Europe/Budapest, America/New_York)
       - TZ=${TZ:-UTC}
-      
-      # OpenSubtitles Scraper Configuration
-      # Enable the web scraper for OpenSubtitles.org (bypasses API/VIP requirement)
-      - OPENSUBTITLES_USE_WEB_SCRAPER=true
-      # Scraper service URL - points to the scraper container
-      - OPENSUBTITLES_SCRAPER_URL=http://opensubtitles-scraper:8000
-    
+
     volumes:
       # Configuration directory - contains database, logs, and settings
       - ${CONFIG_PATH:-./config}:/config
@@ -100,7 +90,7 @@ networks:
 # Example .env file contents:
 # =============================================================================
 # BAZARR_PORT=6767
-# SCRAPER_PORT=8000
+# FLARESOLVERR_PORT=8191
 # PUID=1000
 # PGID=1000
 # TZ=Europe/Budapest

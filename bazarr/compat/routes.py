@@ -1,10 +1,10 @@
 from __future__ import annotations
-from flask import Blueprint, request, jsonify, Response
+from flask import Blueprint, request, jsonify, Response, g
 # Intra-package and intra-app imports MUST drop the `bazarr.` prefix - the
 # rest of bazarr resolves modules from `bazarr/` as sys.path root, and a
 # `bazarr.foo` import resolves to a SECOND module instance with its own
-# state. Codex flagged duplicate settings/database instances on writes
-# from /system/compat/regenerate.
+# state. The compat regenerate path previously showed duplicate
+# settings/database instances when these imports used the package prefix.
 from .auth import compat_error
 from utilities.url_guard import UnsafeURLError
 
@@ -18,11 +18,89 @@ def _all_disabled(path):
 
 
 import datetime as _dt  # noqa: E402
-from . import auth, service, response_mapper as M, rate_limiter  # noqa: E402
+import time as _time  # noqa: E402
+from . import auth, service, response_mapper as M  # noqa: E402
+from . import meter, limits, keyring  # noqa: E402
 from .auth import compat_auth  # noqa: E402
 
 
 _SUPPORTED_SUB_FORMATS = frozenset({"srt"})
+
+# Per-key admission lock: limits.check (read) and meter.record (write) must run as
+# one atomic step, or concurrent requests from the same key all read the same
+# pre-increment usage and admit past the limit. meter.record invalidates the
+# sum cache, so under this lock each request sees the prior request's increment.
+# Different keys never contend; the critical section is just a DB read+write
+# (the provider fanout / download happen outside it).
+from threading import Lock as _Lock  # noqa: E402
+
+_admission_locks_guard = _Lock()
+_admission_locks: dict[int, "_Lock"] = {}
+
+
+def _admission_lock(key_rec: dict):
+    kid = int(key_rec.get("id") or 0)
+    with _admission_locks_guard:
+        lk = _admission_locks.get(kid)
+        if lk is None:
+            lk = _Lock()
+            _admission_locks[kid] = lk
+    return lk
+
+
+def _current_key() -> dict:
+    """The key record stashed by compat_auth (always set on authed routes)."""
+    return getattr(g, "compat_key", None) or auth._legacy_key_record()
+
+
+def _meter_ok(key_rec: dict, kind: str) -> None:
+    """Record a successful metered hit + touch last-used (best-effort)."""
+    kid = int(key_rec.get("id") or 0)
+    if kid <= 0:
+        return  # unkeyed legacy fallback: nothing persistent to meter
+    meter.record(kid, kind)
+    try:
+        keyring.touch_last_used(kid)
+    except Exception:
+        pass
+
+
+def _meter_blocked(key_rec: dict, kind: str) -> None:
+    kid = int(key_rec.get("id") or 0)
+    if kid > 0:
+        meter.record(kid, kind, blocked=True)
+
+
+def _display_download_quota(key_rec: dict) -> tuple[int, int, int]:
+    """(allowed, remaining, reset_epoch) for the download quota shown to
+    OS-compat clients. Unlimited keys report the legacy downloads_per_window
+    as a cosmetic ceiling so the plugin UI still shows a sensible number."""
+    from app.config import settings
+    d = limits.check(key_rec, "download")
+    if d.window == "none":
+        ceiling = int(settings.compat_endpoint.downloads_per_window)
+        reset = int(_time.time()) + int(settings.compat_endpoint.downloads_window_seconds)
+        return ceiling, ceiling, reset
+    return d.limit, max(0, d.remaining), d.reset_epoch
+
+
+def _throttle_response(kind: str, decision):
+    """429 for the search surface (the OS contract has no search-throttle
+    code, so use the standard Too Many Requests). Carries Retry-After and
+    X-RateLimit-* headers plus the OS-style x-reason + reset_time_utc."""
+    reset = int(decision.reset_epoch)
+    retry_after = max(1, reset - int(_time.time()))
+    resp = jsonify({
+        "message": f"{kind} rate limit exceeded ({decision.window})",
+        "reset_time_utc": _iso_utc(reset),
+    })
+    resp.status_code = 429
+    resp.headers["x-reason"] = "throttled"
+    resp.headers["Retry-After"] = str(retry_after)
+    resp.headers["X-RateLimit-Limit"] = str(int(decision.limit))
+    resp.headers["X-RateLimit-Remaining"] = "0"
+    resp.headers["X-RateLimit-Reset"] = str(reset)
+    return resp
 
 
 def _normalize_lang(lang):
@@ -58,25 +136,10 @@ def _resolve_tmdb_to_imdb(tmdb_id: str) -> str:
     return ""
 
 
-def _quota_config() -> tuple[int, int]:
-    from app.config import settings
-    return (int(settings.compat_endpoint.downloads_per_window),
-            int(settings.compat_endpoint.downloads_window_seconds))
-
-
 def _iso_utc(epoch: int) -> str:
     return _dt.datetime.fromtimestamp(epoch, _dt.timezone.utc)\
                        .strftime("%Y-%m-%dT%H:%M:%SZ")
 
-
-def _jti_from_request() -> str | None:
-    """Pull jti from the (pre-validated) bearer. Returns None when there
-    is no bearer or the bearer doesn't decode."""
-    bearer = (request.headers.get("Authorization") or "")
-    if not bearer.startswith("Bearer "):
-        return None
-    ok, claims = auth.validate_jwt(bearer[7:])
-    return claims.get("jti") if ok else None
 
 compat_bp = Blueprint("compat", __name__)
 
@@ -86,8 +149,8 @@ def _enforce_runtime_disable():
     """Refuse traffic when the operator toggles compat_endpoint.enabled
     off at runtime. The blueprint is mounted at startup based on the
     boot-time value, so without this guard a previously-enabled endpoint
-    keeps serving with the old token until restart. Codex P2: re-check
-    the live setting on every request and 503 if it has been disabled.
+    keeps serving with the old token until restart. Re-check the live
+    setting on every request and 503 if it has been disabled.
     """
     from app.config import settings
     if not bool(settings.compat_endpoint.enabled):
@@ -129,12 +192,13 @@ def _infer_client_base(req) -> tuple[str, str]:
 def login():
     scheme, host = _infer_client_base(request)
     base_url = host or request.host
-    limit, window = _quota_config()
-    remaining, reset = rate_limiter.inspect("", limit, window)
-    user_data = M.user_info_response(remaining=remaining, allowed=limit,
+    key_rec = _current_key()
+    allowed, remaining, reset = _display_download_quota(key_rec)
+    user_data = M.user_info_response(remaining=remaining, allowed=allowed,
                                       reset_iso=_iso_utc(reset))["data"]
+    # Bind the JWT to the resolving key so /infos/user can attribute usage.
     return jsonify({
-        "token": auth.mint_jwt(),
+        "token": auth.mint_jwt({"kid": int(key_rec.get("id") or 0)}),
         "status": 200,
         "base_url": base_url,
         "user": user_data,
@@ -168,6 +232,19 @@ def subtitles():
     if not imdb and tmdb:
         imdb = _resolve_tmdb_to_imdb(tmdb)
     moviehash = args.get("moviehash") or None
+    moviebytesize = args.get("moviebytesize", type=int)
+    if moviebytesize is not None and moviebytesize <= 0:
+        return compat_error("moviebytesize must be a positive integer", 400, "bad-request")
+    series_anidb_id = args.get("series_anidb_id", type=int)
+    if series_anidb_id is None:
+        series_anidb_id = args.get("anidb_id", type=int)
+    series_anidb_episode_id = args.get("series_anidb_episode_id", type=int)
+    if series_anidb_episode_id is None:
+        series_anidb_episode_id = args.get("anidb_episode_id", type=int)
+    if series_anidb_id is not None and series_anidb_id <= 0:
+        return compat_error("series_anidb_id must be a positive integer", 400, "bad-request")
+    if series_anidb_episode_id is not None and series_anidb_episode_id <= 0:
+        return compat_error("series_anidb_episode_id must be a positive integer", 400, "bad-request")
     moviehash_match = args.get("moviehash_match") or None
     if moviehash_match and moviehash_match not in ("include", "only"):
         return compat_error("moviehash_match must be include|only", 400, "bad-request")
@@ -190,11 +267,71 @@ def subtitles():
         media_type = "episode"
     else:
         media_type = "movie"
+
+    # Distribution Hub: meter + rate-limit search per API key (req #3, #5, #6).
+    from app.config import settings
+    key_rec = _current_key()
+    # The request is admitted: meter it now, before the fanout. Metering on
+    # admission (not on success) means a provider outage or empty result still
+    # counts against the key's quota, so failing searches can't be spammed to
+    # evade the rate limit. check + record run under the per-key lock so a
+    # concurrent burst from one key cannot all admit past the limit.
+    with _admission_lock(key_rec):
+        if bool(settings.compat_endpoint.search_rate_limit_enabled):
+            decision = limits.check(key_rec, "search")
+            if not decision.allowed:
+                _meter_blocked(key_rec, "search")
+                return _throttle_response("search", decision)
+        _meter_ok(key_rec, "search")
+
+    # Per-request provider exclusion + timeout, falling back to the key's
+    # configured defaults (req #1, #2). Clamp the timeout to the same [5, 120]
+    # bounds the fanout enforces, here at the edge, so the effective value is
+    # what feeds the cache key (an out-of-range value can't fragment the cache
+    # into a key that behaves identically to the clamped one).
+    exclude_param = args.get("exclude_providers") or ""
+    req_exclude = [p.strip() for p in exclude_param.split(",") if p.strip()]
+    # Always enforce the key's excluded_providers; a per-request exclude_providers
+    # can only ADD to them, never replace them. Otherwise a key scoped out of a
+    # provider could reach it just by sending a non-empty exclude list that omits
+    # the blocked provider.
+    key_exclude = key_rec.get("excluded_providers") or []
+    eff_exclude = list(dict.fromkeys([*key_exclude, *req_exclude]))
+    # `only_providers` is tri-state by PRESENCE, not just content: a present-
+    # but-empty param (?only_providers= or only commas/whitespace) is a
+    # deliberate "select nothing" and stays active (-> data: []), distinct from
+    # an absent param (no allow-list, every provider in play). It still NARROWS
+    # within the key's allowed_providers grant by intersection.
+    only_raw = args.get("only_providers")
+    only_present = only_raw is not None
+    req_only = [p.strip() for p in (only_raw or "").split(",") if p.strip()]
+    key_allowed = key_rec.get("allowed_providers") or []
+    if only_present and key_allowed:
+        allowed_set = set(key_allowed)
+        eff_only = [p for p in req_only if p in allowed_set]
+    elif only_present:
+        eff_only = req_only
+    elif key_allowed:
+        eff_only = list(key_allowed)
+    else:
+        eff_only = []
+    allow_list_active = only_present or bool(key_allowed)
+    only_arg = eff_only if allow_list_active else None
+    req_timeout = args.get("timeout_seconds", type=int)
+    raw_timeout = req_timeout or key_rec.get("timeout_seconds")
+    eff_timeout = max(5, min(120, int(raw_timeout))) if raw_timeout else None
+
     try:
         result = service.search(imdb or "", season, episode, langs, media_type,
                                 query=query_filename, moviehash=moviehash,
+                                moviebytesize=moviebytesize,
+                                series_anidb_id=series_anidb_id,
+                                series_anidb_episode_id=series_anidb_episode_id,
                                 moviehash_match=moviehash_match,
-                                requested_languages=requested_codes)
+                                requested_languages=requested_codes,
+                                exclude_providers=eff_exclude or None,
+                                timeout_seconds=eff_timeout,
+                                only_providers=only_arg)
     except Exception:
         return compat_error("upstream providers unavailable", 503, "upstream")
     page = max(1, args.get("page", default=1, type=int) or 1)
@@ -231,15 +368,38 @@ def download():
         return compat_error(f"unsupported sub_format: {sub_format}",
                             400, "bad-request")
 
-    limit, window = _quota_config()
-    jti = _jti_from_request() or ""
-    allowed, remaining, reset = rate_limiter.try_consume(jti, limit, window)
-    if not allowed:
-        resp = jsonify({"message": "download quota exhausted",
-                        "reset_time_utc": _iso_utc(reset)})
-        resp.status_code = 406
-        resp.headers["x-reason"] = "throttled"
-        return resp
+    key_rec = _current_key()
+
+    # Bind the file_id to this key's provider scope before spending quota. file_ids
+    # are process-wide monotonic ints, so a key walled off from a provider must not
+    # be able to reuse/guess an id minted under another key to fetch that provider's
+    # (or a local) result. Resolve the payload and reject (as not-found, to avoid
+    # leaking the id's existence) when its provider is outside this key's reach.
+    ok, fid_payload = auth.parse_file_id(fid_int)
+    if not ok:
+        return compat_error("subtitle not found", 404, "not_found")
+    fid_provider = "local" if fid_payload.get("kind") == "local" else fid_payload.get("p")
+    if not fid_provider or not _key_allows_provider(key_rec, fid_provider):
+        return compat_error("subtitle not found", 404, "not_found")
+
+    # Distribution Hub: per-key download metering + limit (req #5, #6). The
+    # download throttle keeps the OS-contract 406 (the Jellyfin plugin treats
+    # this code as a quota signal). The Api-Key resolves the key on every
+    # request, so g.compat_key is authoritative for whose quota is spent.
+    # check + consume run under the per-key lock so a concurrent burst from one
+    # key cannot all admit past the download limit. The actual download (token
+    # mint) happens outside the lock.
+    with _admission_lock(key_rec):
+        decision = limits.check(key_rec, "download")
+        if not decision.allowed:
+            _meter_blocked(key_rec, "download")
+            resp = jsonify({"message": "download quota exhausted",
+                            "reset_time_utc": _iso_utc(int(decision.reset_epoch))})
+            resp.status_code = 406
+            resp.headers["x-reason"] = "throttled"
+            return resp
+        # Admitted: consume the quota now, atomically with the check.
+        _meter_ok(key_rec, "download")
 
     try:
         scheme, host = _infer_client_base(request)
@@ -247,6 +407,8 @@ def download():
             base_host = f"{scheme}://{host}"
         else:
             base_host = request.host_url.rstrip("/")
+        # Compute the post-consume remaining for the displayed quota.
+        _allowed, remaining, reset = _display_download_quota(key_rec)
         resp = service.download(fid_int, base_host=base_host,
                                 remaining=remaining,
                                 reset_iso=_iso_utc(reset))
@@ -297,17 +459,70 @@ def download_stream(stream_token):
 @compat_auth(require_jwt=False)
 def infos_user():
     """Api-Key alone is sufficient. OS-compat clients (Jellyfin) poll /infos/user
-    for remaining-downloads updates without re-minting the JWT each time."""
-    limit, window = _quota_config()
-    jti = _jti_from_request() or ""
-    remaining, reset = rate_limiter.inspect(jti, limit, window)
-    return jsonify(M.user_info_response(remaining=remaining, allowed=limit,
+    for remaining-downloads updates without re-minting the JWT each time.
+
+    Reports the resolved key's download quota (inspect-only, no consume)."""
+    key_rec = _current_key()
+    allowed, remaining, reset = _display_download_quota(key_rec)
+    return jsonify(M.user_info_response(remaining=remaining, allowed=allowed,
                                           reset_iso=_iso_utc(reset)))
 
 
 @compat_bp.route("/infos/languages", methods=["GET"])
 def infos_languages():
     return jsonify(M.languages_response())
+
+
+@compat_bp.route("/providers", methods=["GET"])
+@compat_auth(require_jwt=False)
+def providers():
+    """Discovery for the exclude_providers / only_providers knobs.
+
+    Additive to the OpenSubtitles contract (OS has no provider concept), so it
+    can't break existing clients. Returns the provider names THIS key may
+    actually reach: the install's enabled providers (plus the reserved `local`
+    name when serve_local_subs is on), minus the key's excluded_providers,
+    intersected with the key's allowed_providers default when one is set. That
+    way the list a client sees is exactly the set it can select from - a provider
+    the operator walled off for this key never appears.
+    """
+    key_rec = _current_key()
+    return jsonify({"data": [{"name": n} for n in _key_reachable_providers(key_rec)]})
+
+
+def _key_reachable_providers(key_rec) -> list[str]:
+    """Provider names THIS key may actually reach: the install's enabled providers
+    (plus the reserved `local` name when serve_local_subs is on), minus the key's
+    excluded_providers, intersected with allowed_providers when one is set. Used by
+    the /providers discovery route."""
+    from app.config import settings
+    universe = service.available_providers()
+    if bool(settings.compat_endpoint.serve_local_subs):
+        universe = [*universe, "local"]
+    excluded = {str(p).strip() for p in (key_rec.get("excluded_providers") or [])}
+    allowed = {str(p).strip() for p in (key_rec.get("allowed_providers") or [])}
+    names = [p for p in universe if p not in excluded]
+    if allowed:
+        names = [p for p in names if p in allowed]
+    return names
+
+
+def _key_allows_provider(key_rec, provider: str) -> bool:
+    """Whether this key's allow/exclude POLICY permits a result from `provider`
+    (or the reserved `local`). Backs the /download file_id scope check. Checks
+    policy only, not current availability: a stale file_id for a now-disabled
+    provider fails later at fetch, and the security boundary here is the key's
+    allow/exclude, not the live provider set."""
+    from app.config import settings
+    if provider == "local" and not bool(settings.compat_endpoint.serve_local_subs):
+        return False
+    excluded = {str(p).strip() for p in (key_rec.get("excluded_providers") or [])}
+    allowed = {str(p).strip() for p in (key_rec.get("allowed_providers") or [])}
+    if provider in excluded:
+        return False
+    if allowed and provider not in allowed:
+        return False
+    return True
 
 
 @compat_bp.route("/utilities/guessit", methods=["POST"])

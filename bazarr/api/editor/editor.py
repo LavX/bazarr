@@ -19,6 +19,7 @@ from app.database import TableEpisodes, TableMovies, TableShows, database, selec
 from app.get_args import args
 from utilities.path_mappings import path_mappings
 from api.subtitles.content import resolve_subtitle_path  # noqa: F401
+from subtitles.tools.subsync_engines import is_sync_engine_language_key
 
 from ..utils import authenticate
 
@@ -947,7 +948,7 @@ _editor_sync_jobs = {}  # job_key -> {status, content, message}
 
 
 def run_editor_sync(job_key, video_path, tmp_in, tmp_out, encoding, max_offset, gss, reference,
-                    no_fix_framerate=True, vad=None, job_id=None):
+                    no_fix_framerate=True, vad=None, job_id=None, output_mode='keep_all', enabled_engines=None):
     """Background sync worker. Called by jobs_queue."""
     from app.jobs_queue import jobs_queue
 
@@ -956,6 +957,7 @@ def run_editor_sync(job_key, video_path, tmp_in, tmp_out, encoding, max_offset, 
         if job_id:
             jobs_queue.update_job_progress(job_id, progress_value=value, progress_max=count, progress_message=name)
 
+    cleanup_paths = [tmp_in, tmp_out]
     try:
         update_progress('Extracting audio...', 0, 3)
         logger.info('Editor sync starting: video=%s, srt=%s, max_offset=%s, gss=%s, ref=%s, vad=%s, no_fix_framerate=%s',
@@ -965,8 +967,8 @@ def run_editor_sync(job_key, video_path, tmp_in, tmp_out, encoding, max_offset, 
         if vad:
             subsync.vad = vad
         try:
-            update_progress('Running ffsubsync...', 1, 3)
-            subsync.sync(
+            update_progress('Running synchronization...', 1, 3)
+            sync_result = subsync.sync(
                 video_path=video_path,
                 srt_path=tmp_in,
                 srt_lang='und',
@@ -977,24 +979,62 @@ def run_editor_sync(job_key, video_path, tmp_in, tmp_out, encoding, max_offset, 
                 gss=gss,
                 reference=reference,
                 force_sync=True,
+                output_mode=output_mode,
+                enabled_engines=enabled_engines,
+                write_history=False,
             )
         finally:
             del subsync
 
-        logger.info('Editor sync ffsubsync finished, reading result...')
+        logger.info('Editor sync finished, reading result...')
         update_progress('Reading result...', 2, 3)
-        synced_path = tmp_out if os.path.isfile(tmp_out) else tmp_in
-        logger.info('Editor sync result path: %s (exists=%s)', synced_path, os.path.isfile(synced_path))
-        if not os.path.isfile(synced_path):
-            raise FileNotFoundError(f'Synced subtitle file not found (expected at {synced_path})')
-        with open(synced_path, 'r', encoding=encoding, errors='replace') as f:
-            synced_content = f.read()
+
+        if sync_result is not None and getattr(sync_result, 'success', True) is False:
+            messages = []
+            for result_group in ('failed_results', 'skipped_results'):
+                results = getattr(sync_result, result_group, None)
+                if not isinstance(results, (list, tuple)):
+                    continue
+                for engine_result in results:
+                    message = getattr(engine_result, 'message', None)
+                    engine = getattr(engine_result, 'engine', None)
+                    if message and engine:
+                        messages.append(f'{engine}: {message}')
+                    elif message:
+                        messages.append(message)
+            raise RuntimeError('; '.join(messages) or 'No synchronization engine produced output')
+
+        engine_results = []
+        for engine_result in getattr(sync_result, 'successful_results', []) or []:
+            result_path = getattr(engine_result, 'output_path', None)
+            engine = getattr(engine_result, 'engine', None)
+            if result_path:
+                cleanup_paths.append(result_path)
+            if not result_path or not engine or not os.path.isfile(result_path):
+                continue
+            with open(result_path, 'r', encoding=encoding, errors='replace') as f:
+                result_content = f.read()
+            if result_content.strip():
+                engine_results.append({'engine': engine, 'content': result_content})
+
+        if engine_results:
+            synced_content = engine_results[0]['content']
+        else:
+            synced_path = tmp_out
+            logger.info('Editor sync result path: %s (exists=%s)', synced_path, os.path.isfile(synced_path))
+            if not os.path.isfile(synced_path):
+                raise FileNotFoundError(f'Synced subtitle file not found (expected at {synced_path})')
+            with open(synced_path, 'r', encoding=encoding, errors='replace') as f:
+                synced_content = f.read()
 
         if not synced_content.strip():
             raise ValueError('Synced subtitle file is empty')
 
         update_progress('Sync complete', 3, 3)
-        _editor_sync_jobs[job_key] = {'status': 'completed', 'content': synced_content, 'message': 'Sync complete'}
+        completed_job = {'status': 'completed', 'content': synced_content, 'message': 'Sync complete'}
+        if engine_results:
+            completed_job['results'] = engine_results
+        _editor_sync_jobs[job_key] = completed_job
 
     except Exception as e:
         logger.exception('Editor sync failed')
@@ -1005,7 +1045,7 @@ def run_editor_sync(job_key, video_path, tmp_in, tmp_out, encoding, max_offset, 
         def cleanup():
             _editor_sync_jobs.pop(job_key, None)
             # Clean up temp files only after result has been consumed
-            for p in (tmp_in, tmp_out):
+            for p in cleanup_paths:
                 if p and os.path.isfile(p):
                     try:
                         os.unlink(p)
@@ -1018,7 +1058,7 @@ def run_editor_sync(job_key, video_path, tmp_in, tmp_out, encoding, max_offset, 
 class EditorSync(Resource):
     @authenticate
     def post(self):
-        """Start syncing editor content via ffsubsync. Returns a job key to poll."""
+        """Start syncing editor content. Returns a job key to poll."""
         import tempfile
         import hashlib
 
@@ -1030,11 +1070,14 @@ class EditorSync(Resource):
         content = data.get('content', '')
         encoding = data.get('encoding', 'utf-8')
         fmt = data.get('format', 'srt')
+        language = data.get('language')
         max_offset = str(data.get('maxOffsetSeconds', 120))
         gss = data.get('gss', False)
         reference = data.get('reference', 'a:0')
         no_fix_framerate = data.get('noFixFramerate', True)
         vad = data.get('vad', None)
+        output_mode = data.get('outputMode') or data.get('output_mode') or 'keep_all'
+        enabled_engines = data.get('enabledEngines') or data.get('enabled_engines')
         if vad and vad not in ('subs_then_webrtc', 'subs_then_auditok', 'webrtc', 'auditok'):
             return 'Invalid vad option', 400
 
@@ -1044,6 +1087,8 @@ class EditorSync(Resource):
             return 'mediaId is required', 400
         if not content:
             return 'content is required', 400
+        if is_sync_engine_language_key(language):
+            return 'Generated sync output files cannot be synchronized again.', 400
 
         # Whitelist the format so we never feed attacker-controlled characters
         # (e.g. path-traversal, shell metachars) into the tempfile suffix.
@@ -1089,6 +1134,8 @@ class EditorSync(Resource):
                 'reference': reference,
                 'no_fix_framerate': no_fix_framerate,
                 'vad': vad,
+                'output_mode': output_mode,
+                'enabled_engines': enabled_engines,
             },
             is_progress=True,
             progress_max=3,
@@ -1119,7 +1166,10 @@ class EditorSync(Resource):
             content = job['content']
             logger.info('Editor sync poll: returning completed content (%d chars) for key=%s', len(content) if content else 0, job_key)
             _editor_sync_jobs.pop(job_key, None)
-            return {'status': 'completed', 'content': content}, 200
+            response = {'status': 'completed', 'content': content}
+            if job.get('results'):
+                response['results'] = job['results']
+            return response, 200
 
         # Failed
         msg = job.get('message', 'Unknown error')

@@ -73,6 +73,17 @@ def test_deathbycaptcha_is_loaded_from_official_package_not_custom_libs():
     assert "deathbycaptcha" not in custom_versions
 
 
+def test_python_anticaptcha_uses_pypi_distribution_not_git_source():
+    from app.requirements import RUNTIME_REQUIREMENTS
+
+    repo_root = Path(__file__).resolve().parents[2]
+    requirements = (repo_root / "requirements.txt").read_text()
+
+    assert RUNTIME_REQUIREMENTS["python_anticaptcha"] == ("python-anticaptcha", "==2.0.0")
+    assert "python-anticaptcha==2.0.0" in requirements
+    assert "github.com/morpheus65535/python-anticaptcha" not in requirements
+
+
 def test_filebot_refiner_does_not_ship_libfilebot_or_pyads_packages():
     repo_root = Path(__file__).resolve().parents[2]
     custom_libs_dir = repo_root / "custom_libs"
@@ -189,6 +200,13 @@ def test_startup_requirements_probe_covers_unvendored_runtime_imports():
         "msgpack",
         "yaml",
     } <= set(RUNTIME_IMPORTS)
+
+
+def test_docker_build_forces_setuptools_into_install_prefix():
+    repo_root = Path(__file__).resolve().parents[2]
+    dockerfile = (repo_root / "Dockerfile").read_text()
+
+    assert 'pip install --prefix=/install --ignore-installed "setuptools>=82.0.1"' in dockerfile
 
 
 def test_startup_requirements_probe_uses_security_patched_dependency_versions():

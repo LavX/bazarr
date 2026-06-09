@@ -1,14 +1,26 @@
 # coding=utf-8
 import base64
+import io
 import json
 import os
 import subprocess
 import threading
+import zipfile
 from pathlib import Path
 
 import pytest
 from subzero.language import Language
 from subliminal.video import Movie
+from subliminal_patch.core import Episode
+
+
+@pytest.fixture(autouse=True)
+def _enable_provider_hub_auto_install(monkeypatch):
+    # Startup auto-install is opt-in (default off). These tests predate that gate and
+    # exercise the install path, so enable the flag for the whole module. The OFF behavior
+    # is covered separately in test_provider_hub_auto_install_optin.py.
+    from app.config import settings
+    monkeypatch.setattr(settings.general, "provider_hub_auto_install", True, raising=False)
 
 
 def _sha256(value):
@@ -74,6 +86,29 @@ def _manifest(**overrides):
     }
     manifest.update(overrides)
     return manifest
+
+
+def _provider_zip(manifest, file_payloads, *, manifest_name="provider.json", prefix=""):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(f"{prefix}{manifest_name}", json.dumps(manifest))
+        for path, content in file_payloads.items():
+            archive.writestr(f"{prefix}{path}", content)
+    return buffer.getvalue()
+
+
+def _patch_local_install_env(monkeypatch, tmp_path):
+    class FakeEnvironment:
+        def __init__(self, root):
+            self.root = Path(root)
+
+        def install(self, validated, timeout=None):
+            return self.root / "envs" / validated.provider_id / validated.version / "test"
+
+    monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
+    monkeypatch.setattr("provider_hub.service.python_executable", lambda env_path: tmp_path / "python")
+    monkeypatch.setattr("provider_hub.service._smoke_validate_worker", lambda manifest, bundle_path, python_path: None)
+    monkeypatch.setattr("provider_hub.service._set_bazarr_provider_enabled", lambda provider_id, enabled: True)
 
 
 class _FakeResponse:
@@ -228,6 +263,14 @@ def test_worker_protocol_round_trips_language_video_and_download_payload():
     )
     movie.hashes["opensubtitles"] = "abc123"
     movie.radarrId = 12
+    episode = Episode(
+        "/media/anime.mkv",
+        "Solo Leveling",
+        1,
+        12,
+        series_anidb_id=17495,
+        series_anidb_episode_id=277518,
+    )
 
     candidate = candidate_from_worker(
         provider_name="examplehub",
@@ -251,6 +294,9 @@ def test_worker_protocol_round_trips_language_video_and_download_payload():
     assert language_to_payload(language)["hi"] is True
     assert video_to_payload(movie)["hashes"]["opensubtitles"] == "abc123"
     assert video_to_payload(movie)["media_ids"]["radarrId"] == 12
+    assert video_to_payload(episode)["series_anidb_id"] == 17495
+    assert video_to_payload(episode)["series_anidb_series_id"] == 17495
+    assert video_to_payload(episode)["series_anidb_episode_id"] == 277518
     assert candidate.provider_name == "examplehub"
     assert candidate.source_provider == "upstream"
     assert candidate.id == "upstream:sub-1"
@@ -268,6 +314,258 @@ def test_worker_protocol_round_trips_language_video_and_download_payload():
         },
     )
     assert candidate.content == content
+
+
+def test_hub_subtitle_release_matches_persist_for_download_scoring():
+    """Regression: the listing phase (list_subtitles_prioritized) scores a candidate
+    via get_matches(), which augments the worker's lean matches with release-info
+    matches; the download phase (download_best_subtitles) instead reuses the cached
+    subtitle.matches. If get_matches doesn't persist the augmented set, the two phases
+    score the SAME subtitle differently: listing sees the release matches and may flag
+    the language 'satisfied' (early-exit), while download re-reads the lean cache,
+    under-scores the subtitle, and rejects it. Net effect: search stops on a candidate
+    download then discards. get_matches must persist the augmented matches so the cache
+    download reads matches what listing scored."""
+    from provider_hub.protocol import candidate_from_worker, language_to_payload
+
+    movie = Movie(
+        "/media/Clue.1985.1080p.BluRay.Remux.AVC.DTS-HD.MA.mkv",
+        "Clue",
+        year=1985,
+        source="Blu-ray",
+        video_codec="H.264",
+        imdb_id="tt0088930",
+    )
+    candidate = candidate_from_worker(
+        provider_name="opensubtitles",
+        payload={
+            "provider": "opensubtitles",
+            "id": "sub-clue",
+            "language": language_to_payload(Language("hun")),
+            "release_info": "Clue 1985 720p BluRay x264 EbP",
+            "matches": ["title", "year", "imdb_id"],  # lean worker-computed set
+            "provider_payload": {"provider": "opensubtitles", "schema": 1},
+        },
+    )
+    worker_matches = set(candidate.matches)
+
+    # Listing phase: get_matches augments the worker set with release-based matches.
+    listing_matches = candidate.get_matches(movie)
+    assert listing_matches > worker_matches, (
+        "release_info should add at least one match (e.g. source/video_codec); "
+        f"got {listing_matches} from base {worker_matches}"
+    )
+
+    # Download phase reads the cached candidate.matches. It MUST equal the set the
+    # listing phase scored, or the two phases disagree and the early-exit misfires.
+    assert candidate.matches == listing_matches
+
+    # The returned set is handed straight to compute_score, which mutates it in place
+    # (adds hearing_impaired and equivalent matches). Those scoring-only mutations must
+    # NOT leak into the cached candidate.matches the download phase reads, or e.g. a
+    # force-HI skip in download_best_subtitles can be bypassed. The cache must be an
+    # independent copy, not the same object handed to scoring.
+    assert "hearing_impaired" not in listing_matches  # guard: not added by get_matches
+    listing_matches.add("hearing_impaired")
+    assert "hearing_impaired" not in candidate.matches, (
+        "scoring mutations on the returned set leaked into the cached matches"
+    )
+
+
+def _hub_candidate(worker_id="sub-arch"):
+    from provider_hub.protocol import candidate_from_worker, language_to_payload
+
+    return candidate_from_worker(
+        provider_name="examplehub",
+        payload={
+            "provider": "upstream",
+            "id": worker_id,
+            "language": language_to_payload(Language("ces")),
+            "provider_payload": {"provider": "upstream", "schema": 1},
+        },
+    )
+
+
+def test_worker_download_extracts_named_archive_member_host_side():
+    from provider_hub.protocol import worker_download_to_content
+
+    candidate = _hub_candidate()
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("Show.S01E01.ces.srt", b"1\r\n00:00:01,000 --> 00:00:02,000\r\nAhoj\r\n")
+        archive.writestr("readme.txt", b"ignore me")
+    archive_bytes = buffer.getvalue()
+
+    worker_download_to_content(
+        candidate,
+        {
+            "archive_b64": base64.b64encode(archive_bytes).decode("ascii"),
+            "archive_sha256": _sha256(archive_bytes),
+            "member": "Show.S01E01.ces.srt",
+            "encoding": "latin-1",  # a wrong worker guess that must be ignored
+        },
+    )
+
+    assert b"Ahoj" in candidate.content
+    assert b"\r\n" not in candidate.content  # host applied fix_line_ending
+    assert candidate.format == "srt"
+    # Archive mode ignores any worker-supplied encoding and keeps the detect-friendly
+    # default (utf-8 first, then chardet via Subtitle.normalize()), so a wrong latin-1
+    # guess cannot lock in mojibake the way it did in per-provider download payloads.
+    assert candidate.encoding != "latin-1"
+
+
+def test_worker_download_auto_selects_single_archive_member():
+    from provider_hub.protocol import worker_download_to_content
+
+    candidate = _hub_candidate("sub-single")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("only.srt", b"1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+    archive_bytes = buffer.getvalue()
+
+    worker_download_to_content(
+        candidate,
+        {"archive_b64": base64.b64encode(archive_bytes).decode("ascii")},
+    )
+
+    assert b"Hi" in candidate.content
+
+
+def test_worker_download_rejects_missing_member_and_bad_archive():
+    from provider_hub.protocol import WorkerProtocolError, worker_download_to_content
+
+    candidate = _hub_candidate("sub-bad")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("Show.S01E01.srt", b"1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+    archive_bytes = buffer.getvalue()
+
+    with pytest.raises(WorkerProtocolError):
+        worker_download_to_content(
+            candidate,
+            {
+                "archive_b64": base64.b64encode(archive_bytes).decode("ascii"),
+                "member": "does-not-exist.srt",
+            },
+        )
+
+    with pytest.raises(WorkerProtocolError):
+        worker_download_to_content(
+            candidate,
+            {"archive_b64": base64.b64encode(b"not an archive").decode("ascii")},
+        )
+
+
+def test_worker_download_rejects_decompression_bomb(monkeypatch):
+    from provider_hub import protocol
+    from provider_hub.protocol import WorkerProtocolError, worker_download_to_content
+
+    candidate = _hub_candidate("sub-bomb")
+    # 2 MiB member that compresses to almost nothing: a classic zip bomb shape.
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("Show.S01E01.srt", b"\0" * (2 * 1024 * 1024))
+    archive_bytes = buffer.getvalue()
+    assert len(archive_bytes) < 50 * 1024  # tiny on disk, huge decompressed
+
+    monkeypatch.setattr(protocol, "_MAX_MEMBER_BYTES", 64 * 1024)
+    with pytest.raises(WorkerProtocolError):
+        worker_download_to_content(
+            candidate, {"archive_b64": base64.b64encode(archive_bytes).decode("ascii")}
+        )
+
+
+def test_worker_download_rejects_oversized_archive(monkeypatch):
+    from provider_hub import protocol
+    from provider_hub.protocol import WorkerProtocolError, worker_download_to_content
+
+    candidate = _hub_candidate("sub-big")
+    monkeypatch.setattr(protocol, "_MAX_ARCHIVE_BYTES", 1024)
+    payload_b64 = base64.b64encode(b"x" * 4096).decode("ascii")
+    with pytest.raises(WorkerProtocolError):
+        worker_download_to_content(candidate, {"archive_b64": payload_b64})
+
+
+def test_worker_download_extracts_seven_zip_member_host_side():
+    py7zr = pytest.importorskip("py7zr")
+    from provider_hub.protocol import worker_download_to_content
+
+    candidate = _hub_candidate("sub-7z")
+    buffer = io.BytesIO()
+    with py7zr.SevenZipFile(buffer, "w") as archive:
+        archive.writestr(b"1\r\n00:00:01,000 --> 00:00:02,000\r\nAhoj\r\n", "Show.S01E01.ces.srt")
+    archive_bytes = buffer.getvalue()
+    assert archive_bytes[:6] == b"7z\xbc\xaf\x27\x1c"
+
+    worker_download_to_content(
+        candidate,
+        {"archive_b64": base64.b64encode(archive_bytes).decode("ascii"), "member": "Show.S01E01.ces.srt"},
+    )
+
+    assert b"Ahoj" in candidate.content
+    assert b"\r\n" not in candidate.content  # host applied fix_line_ending
+    assert candidate.format == "srt"
+
+
+def test_worker_reader_caps_oversized_response_line(monkeypatch):
+    # The reader thread must reject an oversized response at the transport layer
+    # (a giant readline() line buffers in full before json.loads otherwise).
+    import queue
+    from types import SimpleNamespace
+    from provider_hub import worker as worker_mod
+
+    monkeypatch.setattr(worker_mod, "_MAX_RESPONSE_LINE_BYTES", 8)
+    monkeypatch.setattr(worker_mod, "_READ_CHUNK_CHARS", 4)
+
+    class FakeStdout:
+        def __init__(self, data):
+            self.data = data
+            self.pos = 0
+
+        def readline(self, size=-1):
+            if self.pos >= len(self.data):
+                return ""
+            window = len(self.data) if size is None or size < 0 else size
+            end = min(self.pos + window, len(self.data))
+            newline = self.data.find("\n", self.pos, end)
+            if newline != -1:
+                end = newline + 1
+            chunk = self.data[self.pos:end]
+            self.pos = end
+            return chunk
+
+    stdout_queue: queue.Queue = queue.Queue()
+    # A long line with no newline until the very end exceeds the 8-byte cap.
+    worker_mod.ProviderWorkerClient._enqueue_stdout(
+        SimpleNamespace(stdout=FakeStdout("X" * 100 + "\n")), stdout_queue
+    )
+    items = []
+    while True:
+        item = stdout_queue.get_nowait()
+        items.append(item)
+        if item is None:
+            break
+    assert worker_mod._OVERSIZE_RESPONSE in items
+    # The reader stopped early instead of buffering the whole 100-char line.
+    buffered = sum(len(i) for i in items if isinstance(i, str))
+    assert buffered <= worker_mod._MAX_RESPONSE_LINE_BYTES + worker_mod._READ_CHUNK_CHARS
+
+
+def test_worker_consumer_kills_on_oversized_sentinel():
+    import queue
+    from types import SimpleNamespace
+    from provider_hub import worker as worker_mod
+    from provider_hub.worker import ProviderWorkerClient, WorkerError
+
+    client = ProviderWorkerClient.__new__(ProviderWorkerClient)
+    client.process = SimpleNamespace(
+        stdout=object(), kill=lambda: None, wait=lambda timeout=None: None
+    )
+    client._stdout_queue = queue.Queue()
+    client._stdout_queue.put(worker_mod._OVERSIZE_RESPONSE)
+    with pytest.raises(WorkerError, match="exceeded"):
+        client._read_line_with_deadline(5.0)
 
 
 def test_venv_installer_uses_isolated_hash_checked_pip(monkeypatch, tmp_path):
@@ -293,7 +591,8 @@ def test_venv_installer_uses_isolated_hash_checked_pip(monkeypatch, tmp_path):
     assert pip_calls, calls
     install_cmd = " ".join(pip_calls[-1])
     assert "--require-hashes" in install_cmd
-    assert "--only-binary=:all:" in install_cmd
+    assert "--prefer-binary" in install_cmd
+    assert "--only-binary=:all:" not in install_cmd
     assert "--no-warn-script-location" in install_cmd
     assert "-r" in install_cmd
     assert "/usr/local" not in install_cmd
@@ -306,6 +605,7 @@ def test_venv_installer_uses_isolated_hash_checked_pip(monkeypatch, tmp_path):
 
 
 def test_active_provider_hub_installation_registers_proxy(tmp_path, monkeypatch):
+    import provider_hub.registry as hub_registry
     from provider_hub.registry import register_active_provider_classes
     from subliminal_patch.extensions import provider_registry
 
@@ -335,13 +635,360 @@ def test_active_provider_hub_installation_registers_proxy(tmp_path, monkeypatch)
 
     register_active_provider_classes()
 
-    assert provider_id in provider_registry.names()
-    provider_cls = provider_registry[provider_id]
-    assert provider_cls.provider_name == provider_id
-    assert provider_cls.languages
+    try:
+        assert provider_id in provider_registry.names()
+        provider_cls = provider_registry[provider_id]
+        assert provider_cls.provider_name == provider_id
+        assert provider_cls.languages
+    finally:
+        # Do not leak this registration into the shared provider_registry, or the
+        # subliminal rebase guard (run in the same pytest process in CI) fails.
+        hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if provider_id in provider_registry:
+            del provider_registry[provider_id]
+
+
+def test_active_trusted_migrated_provider_replaces_built_in(tmp_path, monkeypatch):
+    import provider_hub.registry as hub_registry
+    from provider_hub.registry import HubProxyProvider, register_active_provider_classes
+    from subliminal_patch.extensions import provider_registry
+    from subliminal_patch.providers import Provider
+
+    provider_id = "gestdown"
+    had_existing = provider_id in provider_registry
+    original_cls = provider_registry[provider_id] if had_existing else None
+
+    class BuiltInGestdownProvider(Provider):
+        provider_name = provider_id
+        languages = {Language("eng")}
+        video_types = (Movie,)
+
+    if not had_existing:
+        provider_registry.register(provider_id, BuiltInGestdownProvider)
+        original_cls = BuiltInGestdownProvider
+
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "installations": {
+                    provider_id: {
+                        "provider_id": provider_id,
+                        "name": "Gestdown",
+                        "active_version": "1.0.0",
+                        "state": "active",
+                        "pending_restart": False,
+                        "trusted": True,
+                        "manifest": _manifest(
+                            provider_id=provider_id,
+                            name="Gestdown",
+                            dependencies={"requirements": []},
+                        ),
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    try:
+        registered = register_active_provider_classes()
+
+        assert registered == [provider_id]
+        assert provider_registry[provider_id] is not original_cls
+        assert issubclass(provider_registry[provider_id], HubProxyProvider)
+        assert provider_registry[provider_id].provider_name == provider_id
+    finally:
+        hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if provider_id in provider_registry:
+            del provider_registry[provider_id]
+        if had_existing and original_cls is not None:
+            provider_registry.register(provider_id, original_cls)
+
+
+def _install(provider_id, *, trusted, manifest):
+    from provider_hub.state import ProviderHubInstallation
+
+    return ProviderHubInstallation(
+        provider_id=provider_id,
+        name=provider_id.title(),
+        active_version="1.0.0",
+        state="active",
+        pending_restart=False,
+        manifest=manifest,
+        trusted=trusted,
+    )
+
+
+def test_active_trusted_non_allowlisted_provider_cannot_shadow_built_in():
+    # The shadow gate is "trusted AND on the migration allowlist". Trust alone must
+    # not be enough: a trusted provider whose id is NOT in MIGRATED_BUILT_IN_PROVIDER_IDS
+    # must still be refused and the built-in left untouched. A regression that dropped
+    # the allowlist check (e.g. `return bool(trusted)`) would silently fail this test.
+    import provider_hub.registry as hub_registry
+    from provider_hub.migration import MIGRATED_BUILT_IN_PROVIDER_IDS
+    from provider_hub.registry import register_active_provider_classes
+    from subliminal_patch.extensions import provider_registry
+    from subliminal_patch.providers import Provider
+
+    provider_id = "examplebuiltin"
+    assert provider_id not in MIGRATED_BUILT_IN_PROVIDER_IDS
+    had_existing = provider_id in provider_registry
+    original_cls = provider_registry[provider_id] if had_existing else None
+
+    class BuiltInExampleProvider(Provider):
+        provider_name = provider_id
+        languages = {Language("eng")}
+        video_types = (Movie,)
+
+    if not had_existing:
+        provider_registry.register(provider_id, BuiltInExampleProvider)
+        original_cls = BuiltInExampleProvider
+
+    installation = _install(
+        provider_id,
+        trusted=True,
+        manifest=_manifest(
+            provider_id=provider_id,
+            name="Example Built-in",
+            dependencies={"requirements": []},
+        ),
+    )
+
+    try:
+        registered = register_active_provider_classes(installations=[installation])
+
+        assert provider_id not in registered
+        assert provider_registry[provider_id] is original_cls
+    finally:
+        hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if not had_existing and provider_id in provider_registry:
+            del provider_registry[provider_id]
+
+
+def test_active_untrusted_migrated_provider_cannot_shadow_built_in():
+    # The provider id IS on the migration allowlist, but the install is untrusted, so
+    # register must skip it and leave the built-in class in place (last line of defense
+    # against an untrusted state row that shadows a built-in).
+    import provider_hub.registry as hub_registry
+    from provider_hub.migration import MIGRATED_BUILT_IN_PROVIDER_IDS
+    from provider_hub.registry import register_active_provider_classes
+    from subliminal_patch.extensions import provider_registry
+    from subliminal_patch.providers import Provider
+
+    provider_id = "gestdown"
+    assert provider_id in MIGRATED_BUILT_IN_PROVIDER_IDS
+    had_existing = provider_id in provider_registry
+    original_cls = provider_registry[provider_id] if had_existing else None
+
+    class BuiltInGestdownProvider(Provider):
+        provider_name = provider_id
+        languages = {Language("eng")}
+        video_types = (Movie,)
+
+    if not had_existing:
+        provider_registry.register(provider_id, BuiltInGestdownProvider)
+        original_cls = BuiltInGestdownProvider
+
+    installation = _install(
+        provider_id,
+        trusted=False,
+        manifest=_manifest(
+            provider_id=provider_id,
+            name="Gestdown",
+            dependencies={"requirements": []},
+        ),
+    )
+
+    try:
+        registered = register_active_provider_classes(installations=[installation])
+
+        assert provider_id not in registered
+        assert provider_registry[provider_id] is original_cls
+    finally:
+        hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if not had_existing and provider_id in provider_registry:
+            del provider_registry[provider_id]
+
+
+def test_failed_proxy_build_preserves_shadowed_built_in(monkeypatch):
+    # A trusted, allowlisted manifest that passes validation but blows up while the
+    # proxy class is being built must not destroy the built-in it shadows: the build
+    # happens before the registry is mutated, so on failure the built-in stays intact
+    # and the exception does not propagate out of the loop.
+    import provider_hub.registry as hub_registry
+    from provider_hub.registry import register_active_provider_classes
+    from subliminal_patch.extensions import provider_registry
+    from subliminal_patch.providers import Provider
+
+    provider_id = "gestdown"
+    had_existing = provider_id in provider_registry
+    original_cls = provider_registry[provider_id] if had_existing else None
+
+    class BuiltInGestdownProvider(Provider):
+        provider_name = provider_id
+        languages = {Language("eng")}
+        video_types = (Movie,)
+
+    if not had_existing:
+        provider_registry.register(provider_id, BuiltInGestdownProvider)
+        original_cls = BuiltInGestdownProvider
+
+    def _boom(manifest, installation=None):
+        raise RuntimeError("proxy class construction failed")
+
+    monkeypatch.setattr(hub_registry, "_make_provider_class", _boom)
+
+    installation = _install(
+        provider_id,
+        trusted=True,
+        manifest=_manifest(
+            provider_id=provider_id,
+            name="Gestdown",
+            dependencies={"requirements": []},
+        ),
+    )
+
+    try:
+        registered = register_active_provider_classes(installations=[installation])
+
+        assert provider_id not in registered
+        assert provider_registry[provider_id] is original_cls
+    finally:
+        hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if not had_existing and provider_id in provider_registry:
+            del provider_registry[provider_id]
+
+
+def test_built_in_denylist_keeps_migrated_id_after_registration():
+    # Once the trusted migration registers gestdown as a hub provider, gestdown is in
+    # _REGISTERED_PROVIDER_HUB_IDS and is no longer a plain built-in class. It must still
+    # be reported as a built-in id so a later untrusted install cannot shadow it.
+    import provider_hub.registry as hub_registry
+    from provider_hub.service import _built_in_provider_ids
+    from subliminal_patch.extensions import provider_registry
+
+    provider_id = "gestdown"
+    had_existing = provider_id in provider_registry
+    original_cls = provider_registry[provider_id] if had_existing else None
+
+    # Simulate post-migration state: registered as a hub id, absent as a built-in class.
+    if had_existing:
+        del provider_registry[provider_id]
+    hub_registry._REGISTERED_PROVIDER_HUB_IDS.add(provider_id)
+
+    try:
+        assert provider_id in _built_in_provider_ids()
+    finally:
+        hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if had_existing and original_cls is not None:
+            provider_registry.register(provider_id, original_cls)
+
+
+def test_untrusted_install_cannot_replace_registered_migrated_provider():
+    # gestdown is already registered as a (trusted) hub provider. An untrusted gestdown
+    # installation must still be skipped, leaving the registered provider untouched, even
+    # though gestdown is no longer in the dynamic built-in set.
+    import provider_hub.registry as hub_registry
+    from provider_hub.registry import register_active_provider_classes
+    from subliminal_patch.extensions import provider_registry
+    from subliminal_patch.providers import Provider
+
+    provider_id = "gestdown"
+    had_existing = provider_id in provider_registry
+    original_cls = provider_registry[provider_id] if had_existing else None
+
+    class RegisteredHubGestdown(Provider):
+        provider_name = provider_id
+        languages = {Language("eng")}
+        video_types = (Movie,)
+
+    provider_registry.register(provider_id, RegisteredHubGestdown)
+    hub_registry._REGISTERED_PROVIDER_HUB_IDS.add(provider_id)
+
+    installation = _install(
+        provider_id,
+        trusted=False,
+        manifest=_manifest(
+            provider_id=provider_id,
+            name="Gestdown",
+            dependencies={"requirements": []},
+        ),
+    )
+
+    try:
+        registered = register_active_provider_classes(installations=[installation])
+
+        assert provider_id not in registered
+        assert provider_registry[provider_id] is RegisteredHubGestdown
+    finally:
+        hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if provider_id in provider_registry:
+            del provider_registry[provider_id]
+        if had_existing and original_cls is not None:
+            provider_registry.register(provider_id, original_cls)
+
+
+def test_dead_origin_providers_are_not_builtin_replacements():
+    # Providers whose upstream origin is dead must never be on the trusted-replacement
+    # allowlist, so a catalog cannot resurrect them by shadowing a (removed) built-in.
+    from provider_hub.migration import MIGRATED_BUILT_IN_PROVIDER_IDS
+
+    assert {"hosszupuska", "podnapisi", "subscenter", "xsubs"}.isdisjoint(
+        MIGRATED_BUILT_IN_PROVIDER_IDS
+    )
+
+
+def test_active_trusted_provider_replaces_non_gestdown_built_in():
+    # The allowlist covers the full built-in set, not just gestdown: a trusted catalog
+    # entry for any allowlisted built-in (here addic7ed) replaces it with a hub proxy.
+    import provider_hub.registry as hub_registry
+    from provider_hub.migration import MIGRATED_BUILT_IN_PROVIDER_IDS
+    from provider_hub.registry import HubProxyProvider, register_active_provider_classes
+    from subliminal_patch.extensions import provider_registry
+    from subliminal_patch.providers import Provider
+
+    provider_id = "addic7ed"
+    assert provider_id in MIGRATED_BUILT_IN_PROVIDER_IDS
+    had_existing = provider_id in provider_registry
+    original_cls = provider_registry[provider_id] if had_existing else None
+
+    class BuiltInAddic7edProvider(Provider):
+        provider_name = provider_id
+        languages = {Language("eng")}
+        video_types = (Movie,)
+
+    if not had_existing:
+        provider_registry.register(provider_id, BuiltInAddic7edProvider)
+        original_cls = BuiltInAddic7edProvider
+
+    installation = _install(
+        provider_id,
+        trusted=True,
+        manifest=_manifest(
+            provider_id=provider_id,
+            name="Addic7ed",
+            dependencies={"requirements": []},
+        ),
+    )
+
+    try:
+        registered = register_active_provider_classes(installations=[installation])
+
+        assert registered == [provider_id]
+        assert provider_registry[provider_id] is not original_cls
+        assert issubclass(provider_registry[provider_id], HubProxyProvider)
+    finally:
+        hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if provider_id in provider_registry:
+            del provider_registry[provider_id]
+        if had_existing and original_cls is not None:
+            provider_registry.register(provider_id, original_cls)
 
 
 def test_get_providers_registers_active_provider_hub_installation(tmp_path, monkeypatch):
+    import provider_hub.registry as hub_registry
     from app import get_providers
     from subliminal_patch.extensions import provider_registry
 
@@ -370,7 +1017,14 @@ def test_get_providers_registers_active_provider_hub_installation(tmp_path, monk
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     monkeypatch.setattr(get_providers.settings.general, "enabled_providers", [provider_id], raising=False)
 
-    assert get_providers.get_providers() == [provider_id]
+    try:
+        assert get_providers.get_providers() == [provider_id]
+    finally:
+        # Avoid leaking this registration into the shared provider_registry (see the
+        # subliminal rebase guard, which runs in the same pytest process in CI).
+        hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if provider_id in provider_registry:
+            del provider_registry[provider_id]
 
 
 def test_get_providers_retries_provider_hub_registration_after_failure(monkeypatch):
@@ -550,12 +1204,12 @@ def test_apply_update_uses_latest_catalog_manifest(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
-    monkeypatch.setattr("provider_hub.service._fetch_bundle", lambda manifest: tmp_path / "bundle")
+    monkeypatch.setattr("provider_hub.service._fetch_bundle", lambda manifest, deadline=None: tmp_path / "bundle")
     class FakeEnvironment:
         def __init__(self, root):
             self.root = root
 
-        def install(self, validated):
+        def install(self, validated, timeout=None):
             return tmp_path / "env"
 
     monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
@@ -1368,7 +2022,7 @@ def test_stage_install_fetches_bundle_builds_env_and_records_staged_paths(tmp_pa
         def __init__(self, root):
             self.root = Path(root)
 
-        def install(self, validated):
+        def install(self, validated, timeout=None):
             env_calls.append((self.root, validated.provider_id, validated.version))
             env_path = self.root / "envs" / validated.provider_id / validated.version / "test"
             python_path = env_path / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
@@ -1435,7 +2089,7 @@ def test_stage_install_fetches_bundle_from_manifest_source_path(tmp_path, monkey
         def __init__(self, root):
             self.root = Path(root)
 
-        def install(self, validated):
+        def install(self, validated, timeout=None):
             env_path = self.root / "envs" / validated.provider_id / validated.version / "test"
             python_path = env_path / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
             python_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1506,7 +2160,7 @@ def test_stage_install_trust_comes_from_catalog_entry_only(tmp_path, monkeypatch
         def __init__(self, root):
             self.root = Path(root)
 
-        def install(self, validated):
+        def install(self, validated, timeout=None):
             env_path = self.root / "envs" / validated.provider_id / validated.version / "test"
             python_path = env_path / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
             python_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1529,6 +2183,94 @@ def test_stage_install_trust_comes_from_catalog_entry_only(tmp_path, monkeypatch
     assert installation["trusted"] is False
 
 
+def test_stage_install_rejects_untrusted_built_in_shadow(tmp_path, monkeypatch):
+    from provider_hub.manifest import ManifestValidationError
+    from provider_hub.service import stage_install
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    monkeypatch.setattr("provider_hub.service._built_in_provider_ids", lambda: {"gestdown"})
+
+    with pytest.raises(ManifestValidationError, match="built-in"):
+        stage_install(
+            _manifest(
+                provider_id="gestdown",
+                name="Gestdown",
+                dependencies={"requirements": []},
+            )
+        )
+
+
+def test_stage_install_accepts_trusted_migrated_built_in_shadow(tmp_path, monkeypatch):
+    from provider_hub.service import stage_install
+    from provider_hub.state import load_state, official_catalog_source
+
+    provider_content = b"class GestdownProvider: pass\n"
+    catalog_manifest = _manifest(
+        provider_id="gestdown",
+        name="Gestdown",
+        file_payloads={"provider.py": provider_content},
+        dependencies={"requirements": []},
+        source={
+            "type": "github",
+            "repo": "owner/repo",
+            "ref": "main",
+            "commit": "e" * 40,
+            "catalog_url": "https://github.com/owner/repo/blob/main/catalog.json",
+            "trusted": True,
+        },
+    )
+    install_manifest = json.loads(json.dumps(catalog_manifest))
+    install_manifest["source"].pop("trusted")
+
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(
+        json.dumps(
+            {
+                "catalog_sources": {"official": official_catalog_source()},
+                "catalog_entries": {
+                    "official:gestdown:1.0.0": {
+                        "source": "official",
+                        "provider_id": "gestdown",
+                        "version": "1.0.0",
+                        "trusted": True,
+                        "manifest": catalog_manifest,
+                    }
+                },
+                "installations": {},
+                "jobs": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    monkeypatch.setattr("provider_hub.service._built_in_provider_ids", lambda: {"gestdown"})
+    monkeypatch.setattr("provider_hub.service._fetch_bundle", lambda manifest, deadline=None: tmp_path / "bundle")
+
+    class FakeEnvironment:
+        def __init__(self, root):
+            self.root = Path(root)
+
+        def install(self, validated, timeout=None):
+            return self.root / "envs" / validated.provider_id / validated.version / "test"
+
+    monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
+    monkeypatch.setattr("provider_hub.service.python_executable", lambda env_path: tmp_path / "python")
+    monkeypatch.setattr("provider_hub.service._smoke_validate_worker", lambda manifest, bundle_path, python_path: None)
+    monkeypatch.setattr("provider_hub.service._set_bazarr_provider_enabled", lambda provider_id, enabled: True)
+
+    installation = stage_install(install_manifest)
+
+    assert installation["provider_id"] == "gestdown"
+    assert installation["trusted"] is True
+    assert installation["state"] == "staged"
+    assert installation["pending_restart"] is True
+    assert installation["staged_version"] == "1.0.0"
+    stored = load_state()["installations"]["gestdown"]
+    assert stored["trusted"] is True
+    assert stored["staged_manifest"] == install_manifest
+
+
 def test_stage_install_smoke_failure_records_failed_install(tmp_path, monkeypatch):
     from provider_hub.service import ProviderHubInstallError, stage_install
     from provider_hub.state import load_state
@@ -1547,7 +2289,7 @@ def test_stage_install_smoke_failure_records_failed_install(tmp_path, monkeypatc
         def __init__(self, root):
             self.root = Path(root)
 
-        def install(self, validated):
+        def install(self, validated, timeout=None):
             env_path = self.root / "envs" / validated.provider_id / validated.version / "test"
             python_path = env_path / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
             python_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1674,6 +2416,64 @@ def test_hub_proxy_provider_search_and_download_uses_worker_payload():
     assert worker.requests[0][1]["config"] == provider_config
     assert worker.requests[1][0] == "download"
     assert worker.requests[1][1]["config"] == provider_config
+
+
+def test_hub_proxy_download_invokes_select_archive_member():
+    import io
+    import zipfile
+
+    from provider_hub.manifest import validate_manifest
+    from provider_hub.registry import _make_provider_class
+    from provider_hub.protocol import language_to_payload
+
+    def _zip(names):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as archive:
+            for name in names:
+                archive.writestr(name, b"1\n00:00:01,000 --> 00:00:02,000\nx\n")
+        return buf.getvalue()
+
+    body = _zip(["show.eng.srt", "show.fre.srt"])
+
+    class FakeWorker:
+        def __init__(self):
+            self.select_calls = []
+
+        def request(self, op, payload, timeout):
+            if op == "search":
+                return type("R", (), {"payload": {"candidates": [{
+                    "provider": "selecthub", "id": "sub-1",
+                    "language": language_to_payload(Language("eng")),
+                    "release_info": "Example.Movie.2024-GROUP", "filename": "x.srt",
+                    "matches": ["title"],
+                    "provider_payload": {"provider": "selecthub", "schema": 1},
+                }]}, "events": []})()
+            return type("R", (), {"payload": {
+                "archive_b64": base64.b64encode(body).decode("ascii"),
+                "archive_sha256": _sha256(body),
+                "select_member": True,
+            }, "events": []})()
+
+        def select_archive_member(self, payload, timeout=None):
+            self.select_calls.append(payload)
+            return type("R", (), {"payload": {"member": "show.eng.srt", "decision": "pin"}, "events": []})()
+
+        def stop(self):
+            return None
+
+    worker = FakeWorker()
+    manifest = validate_manifest(_manifest(provider_id="selecthub"), built_in_provider_ids=set())
+    provider = _make_provider_class(manifest, worker_client=worker)(
+        timeout=9, profile_name="smoke-profile", api_token="secret-token"
+    )
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    subtitle = provider.list_subtitles(movie, {Language("eng")})[0]
+
+    provider.download_subtitle(subtitle)
+
+    assert worker.select_calls, "download must call select_archive_member for select_member payloads"
+    assert sorted(worker.select_calls[0]["members"]) == ["show.eng.srt", "show.fre.srt"]
+    assert subtitle.content is not None and b"00:00:01" in subtitle.content
 
 
 def test_worker_runner_executes_simple_bundle(tmp_path):
@@ -2307,7 +3107,7 @@ def test_stage_install_records_install_job_on_success(tmp_path, monkeypatch):
         def __init__(self, root):
             self.root = Path(root)
 
-        def install(self, validated):
+        def install(self, validated, timeout=None):
             env_path = self.root / "envs" / validated.provider_id / validated.version / "test"
             python_path = env_path / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
             python_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2349,7 +3149,7 @@ def test_stage_install_records_failed_job_on_smoke_error(tmp_path, monkeypatch):
         def __init__(self, root):
             self.root = Path(root)
 
-        def install(self, validated):
+        def install(self, validated, timeout=None):
             env_path = self.root / "envs" / validated.provider_id / validated.version / "test"
             python_path = env_path / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
             python_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2541,3 +3341,730 @@ def test_remove_catalog_source_purges_catalog_entries(tmp_path, monkeypatch):
     remaining = load_state()["catalog_entries"]
     assert "community:foo:1.0.0" not in remaining
     assert "official:bar:1.0.0" in remaining
+
+
+def test_install_origin_resolves_catalog_source_id():
+    # A catalog install is always origin="catalog"; the source_id is resolved from
+    # the manifest's catalog_url, or None when no configured source matches.
+    # ("local" is reserved for uploads, recorded explicitly by stage_install_local.)
+    from provider_hub.service import _install_origin
+
+    state = {
+        "catalog_sources": {
+            "official": {
+                "id": "official",
+                "url": "https://github.com/owner/repo/blob/main/catalog.json",
+            }
+        }
+    }
+    catalog_manifest = _manifest()  # source.catalog_url matches the official source
+    assert _install_origin(catalog_manifest, state) == ("catalog", "official")
+
+    unmatched_manifest = _manifest(
+        source={
+            "type": "github",
+            "repo": "someone/elsewhere",
+            "ref": "main",
+            "commit": "a" * 40,
+            "catalog_url": "https://github.com/someone/elsewhere/blob/main/catalog.json",
+            "trusted": False,
+        }
+    )
+    assert _install_origin(unmatched_manifest, state) == ("catalog", None)
+
+
+def test_stage_install_local_records_origin_local_and_untrusted(tmp_path, monkeypatch):
+    from provider_hub.service import stage_install_local
+    from provider_hub.state import load_state
+
+    provider_content = b"class LocalProvider: pass\n"
+    file_payloads = {"provider.py": provider_content}
+    manifest = _manifest(
+        provider_id="locallyinstalled",
+        name="Locally Installed",
+        provider_content=provider_content,
+        dependencies={"requirements": []},
+        # Even with a catalog_url, an uploaded package is always local + untrusted.
+        source={
+            "type": "github",
+            "repo": "owner/repo",
+            "ref": "main",
+            "commit": "b" * 40,
+            "catalog_url": "https://github.com/owner/repo/blob/main/catalog.json",
+            "trusted": True,
+        },
+    )
+    package = _provider_zip(manifest, file_payloads, prefix="locallyinstalled/")
+
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(json.dumps({"installations": {}, "jobs": []}), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    _patch_local_install_env(monkeypatch, tmp_path)
+
+    installation = stage_install_local(package)
+
+    assert installation["provider_id"] == "locallyinstalled"
+    assert installation["origin"] == "local"
+    assert installation["source_id"] is None
+    assert installation["trusted"] is False
+    assert installation["state"] == "staged"
+
+    stored = load_state()["installations"]["locallyinstalled"]
+    assert stored["origin"] == "local"
+    assert stored["trusted"] is False
+    # A local install is authoritative: even a catalog_url that matches a source
+    # must not relabel it as a catalog provider on read.
+    from provider_hub.service import list_providers
+    listed = {p["provider_id"]: p for p in list_providers()}
+    assert listed["locallyinstalled"]["origin"] == "local"
+
+
+def test_stage_install_local_rejects_built_in_shadow(tmp_path, monkeypatch):
+    from provider_hub.manifest import ManifestValidationError
+    from provider_hub.service import stage_install_local
+
+    provider_content = b"class GestdownProvider: pass\n"
+    file_payloads = {"provider.py": provider_content}
+    manifest = _manifest(
+        provider_id="gestdown",
+        name="Gestdown",
+        provider_content=provider_content,
+        dependencies={"requirements": []},
+    )
+    package = _provider_zip(manifest, file_payloads)
+
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(json.dumps({"installations": {}, "jobs": []}), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    monkeypatch.setattr("provider_hub.service._built_in_provider_ids", lambda: {"gestdown"})
+    _patch_local_install_env(monkeypatch, tmp_path)
+
+    # Untrusted local packages can never shadow a built-in, even an allowlisted one.
+    with pytest.raises(ManifestValidationError, match="built-in"):
+        stage_install_local(package)
+
+
+def test_stage_install_local_rejects_zip_slip(tmp_path, monkeypatch):
+    from provider_hub.service import ProviderHubInstallError, stage_install_local
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("../escaped.py", b"print('pwned')\n")
+
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(json.dumps({"installations": {}, "jobs": []}), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    with pytest.raises(ProviderHubInstallError, match="unsafe path"):
+        stage_install_local(buffer.getvalue())
+
+
+def test_stage_install_local_creates_hub_dir_when_missing(tmp_path, monkeypatch):
+    # A local upload can be the first Provider Hub write, before the hub dir exists;
+    # it must create the directory instead of failing with FileNotFoundError.
+    from provider_hub.service import stage_install_local
+
+    provider_content = b"class LocalProvider: pass\n"
+    file_payloads = {"provider.py": provider_content}
+    manifest = _manifest(
+        provider_id="firstlocal",
+        name="First Local",
+        provider_content=provider_content,
+        dependencies={"requirements": []},
+    )
+    package = _provider_zip(manifest, file_payloads)
+
+    # Point the state at a provider_hub dir that does not exist yet.
+    state_file = tmp_path / "provider_hub" / "state.json"
+    assert not state_file.parent.exists()
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    _patch_local_install_env(monkeypatch, tmp_path)
+
+    installation = stage_install_local(package)
+
+    assert installation["provider_id"] == "firstlocal"
+    assert installation["origin"] == "local"
+    assert state_file.parent.exists()
+
+
+def _local_install_state_file(tmp_path):
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(
+        json.dumps(
+            {
+                "catalog_entries": {
+                    "official:locallyowned:2.0.0": {
+                        "source": "official",
+                        "provider_id": "locallyowned",
+                        "version": "2.0.0",
+                        "trusted": True,
+                        "manifest": _manifest(
+                            provider_id="locallyowned",
+                            version="2.0.0",
+                            dependencies={"requirements": []},
+                        ),
+                    }
+                },
+                "installations": {
+                    "locallyowned": {
+                        "provider_id": "locallyowned",
+                        "name": "Locally Owned",
+                        "active_version": "1.0.0",
+                        "state": "active",
+                        "pending_restart": False,
+                        "origin": "local",
+                        "trusted": False,
+                        "manifest": _manifest(
+                            provider_id="locallyowned",
+                            version="1.0.0",
+                            dependencies={"requirements": []},
+                        ),
+                    }
+                },
+                "jobs": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return state_file
+
+
+def test_check_updates_skips_local_installs(tmp_path, monkeypatch):
+    # A local install with a higher catalog version must NOT be reported as an
+    # available update; the catalog does not own local packages.
+    from provider_hub.service import check_updates
+
+    monkeypatch.setenv(
+        "BAZARR_PROVIDER_HUB_STATE", str(_local_install_state_file(tmp_path))
+    )
+
+    result = check_updates()
+
+    assert (result.get("details") or {}).get("updates_available") == 0
+
+
+def test_apply_update_ignores_local_install(tmp_path, monkeypatch):
+    # apply_update must refuse to replace a local package with a catalog version.
+    from provider_hub.service import apply_update
+    from provider_hub.state import load_state
+
+    monkeypatch.setenv(
+        "BAZARR_PROVIDER_HUB_STATE", str(_local_install_state_file(tmp_path))
+    )
+
+    provider = apply_update("locallyowned")
+
+    assert provider["origin"] == "local"
+    assert provider.get("staged_version") is None
+    stored = load_state()["installations"]["locallyowned"]
+    assert stored["active_version"] == "1.0.0"
+    assert stored.get("staged_version") is None
+
+
+def test_stage_install_local_rejects_oversized_package(tmp_path, monkeypatch):
+    # An upload whose declared uncompressed size exceeds the bound is rejected as a
+    # 400-class error before extraction, not allowed to fill the disk.
+    import provider_hub.service as svc
+    from provider_hub.service import ProviderHubInstallError, stage_install_local
+
+    monkeypatch.setattr(svc, "_LOCAL_PACKAGE_MAX_TOTAL_BYTES", 10)
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(json.dumps({"installations": {}, "jobs": []}), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    manifest = _manifest(provider_id="toobig", dependencies={"requirements": []})
+    package = _provider_zip(manifest, {"provider.py": b"class P: pass\n"})
+
+    with pytest.raises(ProviderHubInstallError, match="too large"):
+        stage_install_local(package)
+
+
+def _catalog_state(tmp_path, *, installations=None, entries=None):
+    state = {
+        "catalog_sources": {
+            "official": {"id": "official", "name": "Official Bazarr Provider Catalog",
+                         "type": "github", "url": "https://github.com/LavX/bazarr-provider-catalog/blob/main/catalog.json",
+                         "enabled": True, "official": True, "trusted": True},
+        },
+        "catalog_entries": entries or {},
+        "installations": installations or {},
+        "jobs": [],
+    }
+    f = tmp_path / "state.json"
+    f.write_text(json.dumps(state), encoding="utf-8")
+    return f
+
+
+def _official_entry(provider_id, version="1.0.0"):
+    return {
+        "source": "official",
+        "provider_id": provider_id,
+        "version": version,
+        "trusted": True,
+        "manifest": _manifest(provider_id=provider_id, version=version,
+                              dependencies={"requirements": []}),
+    }
+
+
+def test_autoinstall_stages_enabled_official_providers_not_yet_installed(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    state_file = _catalog_state(
+        tmp_path,
+        installations={},  # nothing installed yet
+        entries={
+            "official:subdl:1.0.0": _official_entry("subdl"),
+            "official:gestdown:1.0.0": _official_entry("gestdown"),
+        },
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
+    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl", "opensubtitlescom"])
+    staged = []
+    monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: staged.append(manifest["provider_id"]))
+
+    result = service.autoinstall_enabled_builtins()
+
+    # only "subdl" is enabled AND in the official catalog AND not installed.
+    # "opensubtitlescom" is enabled but not in the catalog -> skipped.
+    # "gestdown" is in the catalog but not enabled -> skipped.
+    assert result == ["subdl"]
+    assert staged == ["subdl"]
+
+
+def test_autoinstall_is_idempotent_skips_existing_installs(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    state_file = _catalog_state(
+        tmp_path,
+        installations={"subdl": {"provider_id": "subdl", "state": "active",
+                                 "active_version": "1.0.0", "manifest": _manifest(provider_id="subdl")}},
+        entries={"official:subdl:1.0.0": _official_entry("subdl")},
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
+    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    staged = []
+    monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: staged.append(manifest["provider_id"]))
+
+    assert service.autoinstall_enabled_builtins() == []
+    assert staged == []
+
+
+def test_autoinstall_ignores_non_official_catalog_entries(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    third_party = _official_entry("subdl")
+    third_party["source"] = "thirdparty"
+    third_party["trusted"] = False
+    state_file = _catalog_state(tmp_path, entries={"thirdparty:subdl:1.0.0": third_party})
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
+    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    staged = []
+    monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: staged.append(manifest["provider_id"]))
+
+    assert service.autoinstall_enabled_builtins() == []
+    assert staged == []
+
+
+def test_autoinstall_swallows_stage_failures(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    state_file = _catalog_state(tmp_path, entries={
+        "official:subdl:1.0.0": _official_entry("subdl"),
+        "official:gestdown:1.0.0": _official_entry("gestdown"),
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
+    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl", "gestdown"])
+
+    calls = []
+
+    def flaky(manifest, install_timeout=None):
+        calls.append(manifest["provider_id"])
+        if manifest["provider_id"] == "subdl":
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(service, "stage_install", flaky)
+
+    # subdl fails (swallowed), gestdown still staged; never raises.
+    assert service.autoinstall_enabled_builtins() == ["gestdown"]
+    assert calls == ["subdl", "gestdown"]
+
+
+def test_autoinstall_kill_switch_returns_empty(monkeypatch):
+    from provider_hub import service
+    monkeypatch.setenv("BAZARR_DISABLE_PROVIDER_AUTOINSTALL", "1")
+    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    assert service.autoinstall_enabled_builtins() == []
+
+
+def test_autoinstall_returns_empty_when_state_load_fails(monkeypatch):
+    from provider_hub import service
+    monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
+    def boom(*a, **k):
+        raise RuntimeError("corrupt state")
+    monkeypatch.setattr(service, "load_state", boom)
+    # Must not raise; returns [].
+    assert service.autoinstall_enabled_builtins() == []
+
+
+def test_autoinstall_proceeds_when_catalog_refresh_fails(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    state_file = _catalog_state(tmp_path, entries={"official:subdl:1.0.0": _official_entry("subdl")})
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    def boom(source_ids=None):
+        raise RuntimeError("github unreachable")
+
+    monkeypatch.setattr(service, "refresh_catalog", boom)
+    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    staged = []
+    monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: staged.append(manifest["provider_id"]))
+
+    # Refresh failure is swallowed; auto-install still stages from the cached catalog.
+    assert service.autoinstall_enabled_builtins() == ["subdl"]
+    assert staged == ["subdl"]
+
+
+def test_autoinstall_retries_failed_install_rows(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    # A previous attempt left a "failed" row; it must not be treated as installed.
+    state_file = _catalog_state(
+        tmp_path,
+        installations={"subdl": {"provider_id": "subdl", "state": "failed",
+                                 "active_version": None, "manifest": _manifest(provider_id="subdl")}},
+        entries={"official:subdl:1.0.0": _official_entry("subdl")},
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
+    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    staged = []
+    monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: staged.append(manifest["provider_id"]))
+
+    assert service.autoinstall_enabled_builtins() == ["subdl"]
+    assert staged == ["subdl"]
+
+
+def test_autoinstall_skips_refresh_when_nothing_to_install(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    # Every enabled provider already has an install row -> no migration work, so the
+    # network is never touched (no refresh_catalog call).
+    state_file = _catalog_state(
+        tmp_path,
+        installations={"subdl": {"provider_id": "subdl", "state": "active",
+                                 "active_version": "1.0.0", "manifest": _manifest(provider_id="subdl")}},
+        entries={"official:subdl:1.0.0": _official_entry("subdl")},
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    refresh_calls = []
+    monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: refresh_calls.append(source_ids))
+    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: (_ for _ in ()).throw(AssertionError("should not install")))
+
+    assert service.autoinstall_enabled_builtins() == []
+    assert refresh_calls == []  # no candidates -> no catalog fetch
+
+
+def test_autoinstall_refreshes_only_the_official_source(tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import OFFICIAL_CATALOG_SOURCE_ID
+
+    state_file = _catalog_state(tmp_path, entries={"official:subdl:1.0.0": _official_entry("subdl")})
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    refresh_calls = []
+    monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: refresh_calls.append(source_ids))
+    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: None)
+
+    service.autoinstall_enabled_builtins()
+    assert refresh_calls == [{OFFICIAL_CATALOG_SOURCE_ID}]
+
+
+def test_autoinstall_bounds_each_install_with_remaining_budget(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    state_file = _catalog_state(tmp_path, entries={"official:subdl:1.0.0": _official_entry("subdl")})
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
+    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    captured = {}
+
+    def capture(manifest, install_timeout=None):
+        captured["install_timeout"] = install_timeout
+
+    monkeypatch.setattr(service, "stage_install", capture)
+
+    service.autoinstall_enabled_builtins()
+    # The install is bounded by the remaining startup budget, not left unbounded.
+    assert captured["install_timeout"] is not None
+    assert 0 < captured["install_timeout"] <= 180.0
+
+
+def test_plugin_environment_install_times_out(tmp_path, monkeypatch):
+    import subprocess
+
+    from provider_hub.manifest import validate_manifest
+    from provider_hub.venv import PluginEnvironment, PluginEnvironmentError
+
+    validated = validate_manifest(
+        _manifest(dependencies={"requirements": []}), built_in_provider_ids=set()
+    )
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    # A stuck venv/pip step is surfaced as a clean PluginEnvironmentError rather than
+    # hanging the install (and therefore boot) indefinitely.
+    with pytest.raises(PluginEnvironmentError):
+        PluginEnvironment(tmp_path).install(validated, timeout=30)
+
+
+def test_deadline_request_timeout_bounds_and_rejects():
+    import time
+
+    from provider_hub.service import ProviderHubInstallError, _deadline_request_timeout
+
+    # No deadline -> the full per-request default.
+    assert _deadline_request_timeout(None) == 30.0
+    # Plenty of budget left -> still capped at the default.
+    assert _deadline_request_timeout(time.monotonic() + 1000) == 30.0
+    # Little budget left -> shrunk to the remaining time.
+    shrunk = _deadline_request_timeout(time.monotonic() + 5)
+    assert 1.0 <= shrunk <= 5.0
+    # Budget exhausted -> the bundle fetch is rejected instead of running long.
+    with pytest.raises(ProviderHubInstallError):
+        _deadline_request_timeout(time.monotonic() - 1)
+
+
+def test_worker_download_rejects_excessive_archive_member_count(monkeypatch):
+    # The byte caps never trip on an archive full of tiny members, so an entry-count
+    # bomb (hundreds of thousands of zero-byte members) would still be scanned/extracted.
+    # The guard must also cap the member count, like service.py's _LOCAL_PACKAGE_MAX_MEMBERS.
+    from provider_hub import protocol
+    from provider_hub.protocol import WorkerProtocolError, worker_download_to_content
+
+    candidate = _hub_candidate("sub-manymembers")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        # Without a count cap this archive extracts fine (one usable .srt); the only
+        # thing that should reject it is the member-count guard.
+        archive.writestr("only.srt", b"1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+        for i in range(20):
+            archive.writestr(f"junk{i}.txt", b"x")
+    archive_bytes = buffer.getvalue()
+
+    monkeypatch.setattr(protocol, "_MAX_ARCHIVE_MEMBERS", 5, raising=False)
+    with pytest.raises(WorkerProtocolError):
+        worker_download_to_content(
+            candidate, {"archive_b64": base64.b64encode(archive_bytes).decode("ascii")}
+        )
+
+
+def test_worker_download_archive_clears_stale_encoding():
+    # An encoding can be carried onto the subtitle at search time (e.g. via the display
+    # attribute splat in candidate_from_worker). The archive path must clear it so
+    # Subtitle.normalize()/chardet detects encoding from the extracted bytes instead of
+    # pinning a stale legacy guess (which silently decodes UTF-8 as mojibake).
+    from provider_hub.protocol import worker_download_to_content
+
+    candidate = _hub_candidate("sub-staleenc")
+    candidate.encoding = "latin-1"
+    candidate._guessed_encoding = "latin-1"
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("only.srt", b"1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+    archive_bytes = buffer.getvalue()
+
+    worker_download_to_content(
+        candidate, {"archive_b64": base64.b64encode(archive_bytes).decode("ascii")}
+    )
+
+    assert candidate.encoding is None
+    assert candidate._guessed_encoding is None
+
+
+def test_worker_download_auto_selects_single_vtt_member():
+    # The explicit-member path already supports VTT; the auto-select path must too, so a
+    # worker archive containing a lone WebVTT file is not rejected as "no usable member".
+    from provider_hub.protocol import worker_download_to_content
+
+    candidate = _hub_candidate("sub-vtt")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("only.vtt", b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHi\n")
+    archive_bytes = buffer.getvalue()
+
+    worker_download_to_content(
+        candidate, {"archive_b64": base64.b64encode(archive_bytes).decode("ascii")}
+    )
+
+    assert b"WEBVTT" in candidate.content
+
+
+def test_worker_download_forwards_episode_title_to_archive_selection(monkeypatch):
+    # Episode packs are disambiguated by episode_title when filenames carry the title
+    # rather than the number (as subdl/subf2m do). The host must forward episode_title
+    # into the shared selector, not just the episode number.
+    import subliminal_patch.providers.utils as utils
+
+    from provider_hub.protocol import worker_download_to_content
+
+    captured = {}
+
+    def fake_select(archive, **kwargs):
+        captured.update(kwargs)
+        return b"1\n00:00:01,000 --> 00:00:02,000\nHi\n"
+
+    monkeypatch.setattr(utils, "get_subtitle_from_archive", fake_select)
+
+    candidate = _hub_candidate("sub-eptitle")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("a.srt", b"x")
+        archive.writestr("b.srt", b"y")
+    archive_bytes = buffer.getvalue()
+
+    worker_download_to_content(
+        candidate,
+        {
+            "archive_b64": base64.b64encode(archive_bytes).decode("ascii"),
+            "episode": 1,
+            "episode_title": "The One With The Test",
+        },
+    )
+
+    assert captured.get("episode_title") == "The One With The Test"
+
+
+def test_get_matches_unions_release_derived_matches_for_episode():
+    # Provider Hub workers run isolated and cannot run guessit, so they return only the
+    # structural matches they verified. The host must derive resolution/source/video_codec/
+    # release_group from the candidate's release_info, exactly like native subliminal
+    # providers do (e.g. SubdlSubtitle.get_matches calls utils.update_matches).
+    from provider_hub.protocol import candidate_from_worker
+
+    episode = Episode(
+        "/media/Show.S01E01.1080p.WEB-DL.x264-GROUP.mkv",
+        "Show",
+        1,
+        1,
+        source="Web",
+        release_group="GROUP",
+        resolution="1080p",
+        video_codec="H.264",
+    )
+    candidate = candidate_from_worker(
+        provider_name="examplehub",
+        payload={
+            "id": "sub-1",
+            "language": {"alpha3": "eng"},
+            "release_info": "Show.S01E01.1080p.WEB-DL.x264-GROUP",
+            "matches": ["series", "season", "episode"],
+            "provider_payload": {"provider": "examplehub"},
+        },
+    )
+
+    matches = candidate.get_matches(episode)
+
+    # Worker-provided structural matches are preserved ...
+    assert {"series", "season", "episode"}.issubset(matches)
+    # ... and the host adds the release-derived matches on top.
+    assert {"resolution", "source", "video_codec", "release_group"}.issubset(matches)
+
+
+def test_get_matches_handles_release_info_as_list():
+    # Some workers return release_info as a list of release names (the protocol allows it,
+    # and update_matches accepts an iterable). Each entry is guessed and unioned, so a
+    # candidate whose best release matches the file scores like a native provider would.
+    from provider_hub.protocol import candidate_from_worker
+
+    movie = Movie(
+        "/media/Example.Movie.2024.1080p.WEB-DL.x264-GROUP.mkv",
+        "Example Movie",
+        year=2024,
+        source="Web",
+        release_group="GROUP",
+        resolution="1080p",
+        video_codec="H.264",
+    )
+    candidate = candidate_from_worker(
+        provider_name="examplehub",
+        payload={
+            "id": "sub-1",
+            "language": {"alpha3": "eng"},
+            "release_info": [
+                "Example.Movie.2024.720p.HDTV.x265-OTHER",
+                "Example.Movie.2024.1080p.WEB-DL.x264-GROUP",
+            ],
+            "matches": ["title", "year"],
+            "provider_payload": {"provider": "examplehub"},
+        },
+    )
+
+    matches = candidate.get_matches(movie)
+
+    assert {"title", "year"}.issubset(matches)
+    assert {"resolution", "source", "video_codec", "release_group"}.issubset(matches)
+
+
+def test_get_matches_without_release_info_returns_only_worker_matches():
+    # Backward compatibility: a candidate with no release_info is unaffected by the
+    # host-side derivation and yields exactly the matches the worker reported.
+    from provider_hub.protocol import candidate_from_worker
+
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    candidate = candidate_from_worker(
+        provider_name="examplehub",
+        payload={
+            "id": "sub-1",
+            "language": {"alpha3": "eng"},
+            "matches": ["title"],
+            "provider_payload": {"provider": "examplehub"},
+        },
+    )
+
+    assert candidate.get_matches(movie) == {"title"}
+
+
+def test_get_matches_swallows_release_update_errors(monkeypatch):
+    # A malformed release string must never break scoring for a candidate: if the
+    # release-based match update raises, get_matches falls back to the worker matches.
+    # This also guards the module-level logger the except branch needs -- without it the
+    # handler would raise NameError and propagate, breaking scoring for the candidate.
+    import subliminal_patch.providers.utils as utils
+
+    from provider_hub.protocol import candidate_from_worker
+
+    def boom(matches, video, release_info, *args, **kwargs):
+        raise ValueError("bad release")
+
+    monkeypatch.setattr(utils, "update_matches", boom)
+
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    candidate = candidate_from_worker(
+        provider_name="examplehub",
+        payload={
+            "id": "sub-1",
+            "language": {"alpha3": "eng"},
+            "release_info": "Example.Movie.2024.1080p.WEB-DL.x264-GROUP",
+            "matches": ["title", "year"],
+            "provider_payload": {"provider": "examplehub"},
+        },
+    )
+
+    matches = candidate.get_matches(movie)
+
+    assert matches == {"title", "year"}

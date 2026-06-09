@@ -13,9 +13,9 @@ from datetime import datetime
 from sqlalchemy import create_engine, inspect, DateTime, ForeignKey, Index, Integer, LargeBinary, Text, func, text, BigInteger
 # importing here to be indirectly imported in other modules later
 from sqlalchemy import update, delete, select, func  # noqa: F401, F811
-from sqlalchemy.orm import scoped_session, sessionmaker, mapped_column, close_all_sessions
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import scoped_session, sessionmaker, mapped_column, close_all_sessions, declarative_base
 from sqlalchemy.pool import NullPool
+from alembic.migration import MigrationContext
 
 from flask_sqlalchemy import SQLAlchemy
 
@@ -211,6 +211,47 @@ class TableAnnouncements(Base):
     text = mapped_column(Text)
 
 
+class TableCompatApiKeys(Base):
+    # Distribution Hub: named API keys for the OpenSubtitles-compat endpoint.
+    # The full token is never stored - only its sha256 (key_hash) and an
+    # 8-char prefix for UI identification. The legacy shared
+    # compat_endpoint.token is migrated in as an is_legacy Unlimited row.
+    __tablename__ = 'compat_api_keys'
+
+    id = mapped_column(Integer, primary_key=True)
+    name = mapped_column(Text, nullable=False)
+    key_prefix = mapped_column(Text)
+    key_hash = mapped_column(Text, nullable=False, unique=True, index=True)
+    tier = mapped_column(Text, nullable=False, default='free')
+    custom_limits = mapped_column(Text)            # JSON dict or NULL = inherit tier
+    excluded_providers = mapped_column(Text)       # JSON list or NULL = drop these
+    allowed_providers = mapped_column(Text)        # JSON list or NULL = allow all (only these)
+    timeout_seconds = mapped_column(Integer)       # NULL = inherit global
+    enabled = mapped_column(Integer, nullable=False, default=1)
+    is_legacy = mapped_column(Integer, nullable=False, default=0)
+    created_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+    last_used_at = mapped_column(DateTime)
+    note = mapped_column(Text)
+
+
+class TableCompatUsage(Base):
+    # Distribution Hub: hourly-bucketed per-key usage counters. Source of
+    # truth for both rate-limit window sums and usage statistics. One row
+    # per (key_id, kind, hour_start); upserted on each metered request.
+    __tablename__ = 'compat_usage'
+    __table_args__ = (
+        Index('ix_compat_usage_key_kind_hour', 'key_id', 'kind', 'hour_start',
+              unique=True),
+    )
+
+    id = mapped_column(Integer, primary_key=True)
+    key_id = mapped_column(Integer, nullable=False, index=True)
+    kind = mapped_column(Text, nullable=False)        # 'search' | 'download'
+    hour_start = mapped_column(DateTime, nullable=False, index=True)
+    count = mapped_column(Integer, nullable=False, default=0)
+    blocked = mapped_column(Integer, nullable=False, default=0)
+
+
 class TableBlacklist(Base):
     __tablename__ = 'table_blacklist'
 
@@ -325,6 +366,7 @@ class TableLanguagesProfiles(Base):
     mustContain = mapped_column(Text)
     mustNotContain = mapped_column(Text)
     tag = mapped_column(Text)
+    combine = mapped_column(Text)
 
 
 class TableMovies(Base):
@@ -371,6 +413,22 @@ class TableMoviesRootfolder(Base):
     error = mapped_column(Text)
     id = mapped_column(Integer, primary_key=True)
     path = mapped_column(Text)
+
+
+class TableSubsyncEngineFailure(Base):
+    __tablename__ = 'subsync_engine_failures'
+    __table_args__ = (
+        Index('ix_subsync_engine_failures_path_engine', 'subtitle_path', 'engine', unique=True),
+    )
+
+    id = mapped_column(Integer, primary_key=True)
+    subtitle_path = mapped_column(Text, nullable=False)
+    engine = mapped_column(Text, nullable=False)
+    consecutive_failures = mapped_column(Integer, nullable=False, default=0)
+    is_skipped = mapped_column(Integer, nullable=False, default=0)
+    last_error = mapped_column(Text)
+    created_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+    updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
 
 
 class TableSettingsLanguages(Base):
@@ -542,6 +600,34 @@ def init_db():
     # Create tables if they don't exist.
     metadata.create_all(engine)
 
+    # Resolve the DB engine/version and current migration revision once, at startup, and
+    # stash them in env vars for /system/status to read. The status endpoint used to open a
+    # fresh engine.connect() on every request to read the migration revision and never closed
+    # it; on Postgres (QueuePool) that leaked a connection per call until the pool was
+    # exhausted and requests blocked on pool_timeout (upstream #3361). SQLite was merely
+    # wasteful. Computed here so the leak is gone and the values are cheap to serve.
+    try:
+        database_engine = engine.dialect.name.capitalize()
+    except Exception:
+        logger.exception("Failed to determine database engine type")
+        database_engine = ""
+
+    try:
+        database_version = ".".join(str(x) for x in (engine.dialect.server_version_info or ()))
+    except Exception:
+        logger.exception("Failed to determine database engine version")
+        database_version = ""
+
+    os.environ["BAZARR_DB_ENGINE_VERSION"] = f"{database_engine} {database_version}"
+
+    try:
+        with engine.connect() as connection:
+            migration_revision = MigrationContext.configure(connection).get_current_revision()
+    except Exception:
+        logger.exception("Failed to determine database migration revision")
+        migration_revision = "unknown"
+    os.environ["BAZARR_DB_MIGRATION_VERSION"] = migration_revision or "unknown"
+
 
 def create_db_revision(app):
     logging.info("Creating a new database revision for future migration")
@@ -577,6 +663,18 @@ def migrate_db(app):
             insert(System)
             .values(configured='0', updated='0'))
     optimize_sqlite_database(engine)
+
+    # Refresh the cached migration revision now that pending migrations have run. init_db()
+    # caches it right after create_all (before this upgrade), so a boot with a pending
+    # migration would otherwise leave /system/status reporting the pre-upgrade revision until
+    # the next restart. migrate_db() runs before the webserver starts, so this stays current.
+    try:
+        with engine.connect() as connection:
+            os.environ["BAZARR_DB_MIGRATION_VERSION"] = (
+                MigrationContext.configure(connection).get_current_revision() or "unknown"
+            )
+    except Exception:
+        logger.exception("Failed to refresh database migration revision after upgrade")
 
 
 def get_exclusion_clause(exclusion_type):
@@ -623,6 +721,7 @@ def update_profile_id_list():
         'mustNotContain': ast.literal_eval(x.mustNotContain) if x.mustNotContain else [],
         'originalFormat': x.originalFormat,
         'tag': x.tag,
+        'combine': json.loads(x.combine) if x.combine else None,
     } for x in database.execute(
         select(TableLanguagesProfiles.profileId,
                TableLanguagesProfiles.name,
@@ -631,7 +730,8 @@ def update_profile_id_list():
                TableLanguagesProfiles.mustContain,
                TableLanguagesProfiles.mustNotContain,
                TableLanguagesProfiles.originalFormat,
-               TableLanguagesProfiles.tag))
+               TableLanguagesProfiles.tag,
+               TableLanguagesProfiles.combine))
         .all()
     ]
 
@@ -666,7 +766,12 @@ def get_profile_cutoff(profile_id):
     if profile_id and profile_id != 'null':
         cutoff_language = []
         for profile in profile_id_list:
-            profileId, name, cutoff, items, mustContain, mustNotContain, originalFormat, tag = profile.values()
+            # Access by key, not positional .values() unpacking: the profile
+            # dict can grow new keys (e.g. 'combine') and a fixed-arity unpack
+            # would raise ValueError for every profile during indexing.
+            profileId = profile['profileId']
+            cutoff = profile['cutoff']
+            items = profile['items']
             if cutoff:
                 if profileId == int(profile_id):
                     for item in items:

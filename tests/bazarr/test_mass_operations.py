@@ -79,6 +79,7 @@ class TestProcessSubtitleItem:
             gss=True,
             force_sync=True,
             job_id='test_job',
+            track_job_progress=False,
         )
 
     @patch('subtitles.mass_operations.subtitles_apply_mods')
@@ -653,6 +654,33 @@ class TestForceResync:
         assert len(items) == 1
         assert skipped == 0
 
+    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
+    @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
+    @patch('subtitles.mass_operations.path_mappings')
+    @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
+    @patch('subtitles.mass_operations._get_synced_movie_paths', return_value=set())
+    @patch('subtitles.mass_operations.database')
+    @patch('subtitles.mass_operations.settings')
+    def test_force_resync_still_skips_generated_sync_outputs(self, mock_settings, mock_db, mock_synced_mov,
+                                                             mock_synced_ep, mock_path_map, mock_isfile, mock_lang):
+        from subtitles.mass_operations import _collect_subtitle_items
+
+        mock_settings.subsync.max_offset_seconds = 60
+        mock_settings.subsync.gss = True
+        mock_settings.subsync.no_fix_framerate = True
+        mock_path_map.path_replace.side_effect = lambda x: x
+        mock_path_map.path_replace_reverse.side_effect = lambda x: x
+        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
+
+        episode = self._make_episode(subtitles="[['en:sync-ffsubsync', '/subs/ep1.en.ffsubsync.srt']]")
+        mock_db.execute.return_value.all.return_value = [episode]
+
+        items_list = [{'type': 'episode', 'sonarrEpisodeId': 1}]
+        items, skipped = _collect_subtitle_items(items_list, action='sync', options={'force_resync': True})
+
+        assert items == []
+        assert skipped == 1
+
 
 class TestTranslateSkipsExistingLang:
     """Test translate action skips episodes/movies that already have the target language."""
@@ -964,6 +992,38 @@ class TestMassBatchOperationProcessing:
         assert result['queued'] == 1
         assert result['skipped'] == 0
         mock_process.assert_called_once()
+
+    @patch('subtitles.mass_operations.jobs_queue')
+    @patch('subtitles.mass_operations._collect_subtitle_items')
+    def test_sync_progress_does_not_complete_before_item_finishes(self, mock_collect, mock_jq):
+        from subtitles.mass_operations import mass_batch_operation
+
+        mock_collect.return_value = ([
+            {'srt_path': '/subs/test.srt', 'video_path': '/video/test.mkv'},
+        ], 0)
+        progress_calls_before_processing = []
+
+        def process_item(*args, **kwargs):
+            progress_calls_before_processing.extend(mock_jq.update_job_progress.call_args_list)
+            return True
+
+        with patch('subtitles.mass_operations._process_subtitle_item', side_effect=process_item):
+            result = mass_batch_operation(
+                items=[{'type': 'movie', 'radarrId': 1}],
+                action='sync',
+                job_id='test',
+            )
+
+        assert result['queued'] == 1
+        assert any(
+            progress_call.kwargs.get('progress_value') == 0
+            and progress_call.kwargs.get('progress_message') == 'sync: test.srt (1/1)'
+            for progress_call in progress_calls_before_processing
+        )
+        assert not any(
+            progress_call.kwargs.get('progress_value') == 1
+            for progress_call in progress_calls_before_processing
+        )
 
     @patch('subtitles.mass_operations.jobs_queue')
     @patch('subtitles.mass_operations._process_subtitle_item', side_effect=Exception("failed"))

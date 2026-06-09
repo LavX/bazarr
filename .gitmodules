@@ -1,9 +1,9 @@
-[submodule "opensubtitles-scraper"]
-	path = opensubtitles-scraper
-	url = https://github.com/LavX/opensubtitles-scraper.git
 [submodule "ai-subtitle-translator"]
 	path = ai-subtitle-translator
 	url = https://github.com/LavX/ai-subtitle-translator.git
 [submodule "bazarr-binaries"]
 	path = bazarr-binaries
 	url = https://github.com/LavX/bazarr-binaries.git
+[submodule "bazarr-provider-catalog"]
+	path = bazarr-provider-catalog
+	url = https://github.com/LavX/bazarr-provider-catalog.git

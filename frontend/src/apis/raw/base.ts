@@ -20,8 +20,11 @@ class BaseApi {
           } else {
             form.append(key, "");
           }
-        } else {
-          form.append(key, object[key]);
+        } else if (data !== undefined && data !== null) {
+          // Skip undefined/null so an optional field (e.g. from_language on a
+          // non-embedded translate) is omitted rather than appended as the literal
+          // string "undefined", which the backend would reject.
+          form.append(key, data);
         }
       }
       return form;
@@ -51,8 +54,9 @@ class BaseApi {
     path: string,
     data?: unknown,
     params?: LooseObject,
+    headers?: LooseObject,
   ): Promise<AxiosResponse<T>> {
-    return client.axios.post(this.prefix + path, data, { params });
+    return client.axios.post(this.prefix + path, data, { params, headers });
   }
 
   protected patch<T = void>(
@@ -70,6 +74,14 @@ class BaseApi {
     params?: LooseObject,
   ): Promise<AxiosResponse<T>> {
     return client.axios.patch(this.prefix + path, data, { params });
+  }
+
+  protected putRaw<T = void>(
+    path: string,
+    data?: unknown,
+    params?: LooseObject,
+  ): Promise<AxiosResponse<T>> {
+    return client.axios.put(this.prefix + path, data, { params });
   }
 
   protected delete<T = void>(

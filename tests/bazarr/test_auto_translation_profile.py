@@ -132,7 +132,15 @@ def test_wanted_series_translation_uses_exact_profile_variant():
         }
         mock_path_mappings.path_replace.side_effect = lambda value: value
         mock_settings.translator.min_source_score = 0
-        mock_database.execute.return_value.first.side_effect = [None, None]
+        # 3 queries inside _wanted_episode when auto-translate fires:
+        # source-score lookup, already-translated guard, and the metadata
+        # fetch for postprocess_subtitles.
+        mock_database.execute.return_value.first.side_effect = [
+            None,
+            None,
+            SimpleNamespace(sonarrSeriesId=10, season=1, episode=1,
+                            imdbId='tt1', tvdbId='1'),
+        ]
         mock_jobs_queue._is_an_existing_job.return_value = False
 
         _wanted_episode(episode, providers_list=[])

@@ -760,8 +760,12 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
         ...staged,
         [`settings-general-provider_priorities-${info?.key}`]:
           seededPriorities[info?.key ?? ""] ?? 100,
-        [`settings-general-provider_languages-${info?.key}`]:
-          seededProviderLanguageExclusions[info?.key ?? ""] ?? [],
+        ...(info?.key
+          ? {
+              [`settings-general-provider_languages-${info.key}`]:
+                seededProviderLanguageExclusions[info.key] ?? [],
+            }
+          : {}),
       },
       hooks: {},
     },
@@ -872,6 +876,9 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
           changes["settings-general-provider_languages"] = JSON.stringify(
             providerLanguageExclusions,
           );
+          delete changes[languageKey];
+        } else {
+          const languageKey = `settings-general-provider_languages-${info.key}`;
           delete changes[languageKey];
         }
 

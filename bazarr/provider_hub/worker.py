@@ -19,6 +19,19 @@ from . import WORKER_ABI_VERSION
 
 logger = logging.getLogger(__name__)
 
+# Cap a single worker->host NDJSON response line. ``readline()`` buffers a whole
+# line before ``json.loads`` runs, and the protocol-level archive cap only fires
+# after the line is already in memory, so a runaway or malicious worker could OOM
+# the host with one giant line. Sized comfortably above the 32 MB archive cap
+# (base64 is ~43 MB, plus the JSON envelope) so legitimate responses still pass.
+_MAX_RESPONSE_LINE_BYTES = 48 * 1024 * 1024
+# Read granularity for the bounded readline loop, so the cap is enforced before a
+# whole oversized line accumulates.
+_READ_CHUNK_CHARS = 1024 * 1024
+# Queued by the reader thread when a response line exceeds the cap, so the
+# consumer kills the worker at the transport layer instead of assembling it.
+_OVERSIZE_RESPONSE = object()
+
 
 def _json_default(obj):
     """Coerce values not natively JSON-serializable into safe representations.
@@ -60,8 +73,9 @@ class ProviderWorkerClient:
         self.env = env
         self.process: subprocess.Popen | None = None
         self._lock = threading.Lock()
-        self._stdout_queue: queue.Queue[str | None] | None = None
+        self._stdout_queue: queue.Queue[Any] | None = None
         self._stdout_thread: threading.Thread | None = None
+        self._stderr_thread: threading.Thread | None = None
 
     def start(self) -> None:
         if self.process and self.process.poll() is None:
@@ -92,21 +106,57 @@ class ProviderWorkerClient:
             daemon=True,
         )
         self._stdout_thread.start()
+        # Continuously drain stderr too: the worker writes tracebacks there, and an
+        # undrained pipe can fill before the worker writes its JSON error to stdout,
+        # blocking the worker until the request times out. Drain + log instead.
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr,
+            args=(self.process,),
+            daemon=True,
+        )
+        self._stderr_thread.start()
 
     @staticmethod
-    def _enqueue_stdout(process: subprocess.Popen, stdout_queue: queue.Queue[str | None]) -> None:
+    def _enqueue_stdout(process: subprocess.Popen, stdout_queue: queue.Queue[Any]) -> None:
         stdout = process.stdout
         if stdout is None:
             stdout_queue.put(None)
             return
         try:
+            # Read in bounded chunks (readline(size) stops at a newline or after
+            # ``size`` chars) and track the current line's length, so an oversized
+            # response is rejected here instead of buffering in full before
+            # json.loads. A normal multi-chunk line is reassembled downstream.
+            line_len = 0
             while True:
-                line = stdout.readline()
-                if not line:
+                chunk = stdout.readline(_READ_CHUNK_CHARS)
+                if not chunk:
                     break
-                stdout_queue.put(line)
+                line_len += len(chunk)
+                if line_len > _MAX_RESPONSE_LINE_BYTES:
+                    stdout_queue.put(_OVERSIZE_RESPONSE)
+                    break
+                stdout_queue.put(chunk)
+                if chunk.endswith("\n"):
+                    line_len = 0
         finally:
             stdout_queue.put(None)
+
+    @staticmethod
+    def _drain_stderr(process: subprocess.Popen) -> None:
+        """Drain the worker's stderr so a large or repeated traceback can never
+        fill the pipe buffer and block the worker before it writes its JSON error
+        to stdout. Surfaces the diagnostics in the host log (per-line capped)."""
+        stderr = process.stderr
+        if stderr is None:
+            return
+        try:
+            for line in stderr:
+                line = line.rstrip("\n")
+                if line:
+                    logging.debug("provider-worker stderr: %s", line[:2000])
+        except Exception:
+            pass
 
     def stop(self, grace_seconds: float = 5.0) -> None:
         process = self.process
@@ -149,6 +199,11 @@ class ProviderWorkerClient:
                 continue
             if chunk is None:
                 return "".join(chunks)
+            if chunk is _OVERSIZE_RESPONSE:
+                self._kill_worker()
+                raise WorkerError(
+                    f"worker response exceeded {_MAX_RESPONSE_LINE_BYTES} bytes"
+                )
             chunks.append(chunk)
             if chunk.endswith("\n"):
                 return "".join(chunks)
@@ -166,6 +221,14 @@ class ProviderWorkerClient:
                 process.wait(timeout=5.0)
             except Exception:
                 pass
+
+    def select_archive_member(
+        self, payload: dict[str, Any] | None = None, timeout: float | None = None
+    ) -> WorkerResult:
+        """Ask the worker to language-pin a member from a host-listed archive."""
+        return self.request(
+            "select_archive_member", payload, timeout=30.0 if timeout is None else timeout
+        )
 
     def request(self, op: str, payload: dict[str, Any] | None = None, timeout: float = 30.0) -> WorkerResult:
         self.start()

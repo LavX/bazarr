@@ -17,8 +17,9 @@ from utilities.helper import get_subtitle_destination_folder
 from utilities.path_mappings import path_mappings
 from utilities.video_analyzer import embedded_subs_reader
 from app.event_handler import event_stream
-from subtitles.indexer.utils import guess_external_subtitles, get_external_subtitles_path, \
-    normalize_subtitle_language_variant
+from subtitles.indexer.utils import add_sync_engine_outputs, add_combined_outputs, guess_external_subtitles, \
+    get_external_subtitles_path, normalize_subtitle_language_variant, subtitle_language_with_sync_modifier, \
+    subtitle_language_with_combined_modifier
 from subtitles.processing import ProcessSubtitlesResult
 from subtitles.utils import _get_scores
 from radarr.history import history_log_movie
@@ -102,6 +103,9 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
                     full_dest_folder_path = dest_folder
                 elif settings.general.subfolder == "relative":
                     full_dest_folder_path = os.path.join(os.path.dirname(reversed_path), dest_folder)
+            subtitles = add_sync_engine_outputs(full_dest_folder_path, subtitles)
+            subtitles = add_combined_outputs(full_dest_folder_path, subtitles,
+                                             video_filename=os.path.basename(reversed_path))
             subtitles = guess_external_subtitles(full_dest_folder_path, subtitles, "movie",
                                                  previously_indexed_subtitles_to_exclude)
         except Exception as e:
@@ -141,6 +145,8 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
                         language_str = f'{language}:hi'
                     else:
                         language_str = str(language)
+                    language_str = subtitle_language_with_sync_modifier(language_str, subtitle)
+                    language_str = subtitle_language_with_combined_modifier(language_str, subtitle)
                     logging.debug(f"BAZARR external subtitles detected: {language_str}")  # noqa: G004
                     actual_subtitles.append([language_str, path_mappings.path_replace_reverse_movie(subtitle_path),
                                              subtitle_size])
@@ -159,7 +165,12 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
                 logging.debug(f"BAZARR storing those languages to DB: {actual_subtitles}")  # noqa: G004
                 list_missing_subtitles_movies(no=movie.radarrId)
                 if embedded_languages:
-                    _log_embedded_history_movie(movie.radarrId, embedded_languages, reversed_path)
+                    # Pass the DB-side path (original_path), not the local
+                    # filesystem path. history_log_movie stores result.path
+                    # verbatim, and download history rows store DB-side paths
+                    # via path_replace_reverse_movie. Embedded rows must match
+                    # so path comparisons line up in path-mapped installs.
+                    _log_embedded_history_movie(movie.radarrId, embedded_languages, original_path)
             else:
                 logging.debug(f"BAZARR haven't been able to update existing subtitles to DB: {actual_subtitles}")  # noqa: G004
     else:
@@ -188,6 +199,17 @@ def _log_embedded_history_movie(radarr_id, embedded_languages, reversed_path):
 
         for lang in embedded_languages:
             lang = normalize_subtitle_language_variant(lang)
+            # Reduce the (possibly multi-variant, e.g. "en:hi:forced") normalized
+            # value to the canonical hi-priority code that ProcessSubtitlesResult
+            # actually stores, and use it for BOTH the dedup lookup and the written
+            # row so a forced+hi track matches an existing "en:hi" entry instead of
+            # creating a duplicate with a divergent "en:forced" code.
+            parts = lang.split(':')
+            base = parts[0]
+            variants = set(parts[1:])
+            is_hi = 'hi' in variants
+            is_forced = 'forced' in variants
+            canonical = base + (':hi' if is_hi else ':forced' if is_forced else '')
             # Dedup: skip if we already logged action=7 for this movie+language.
             # Not atomic under AUTOCOMMIT. Concurrent indexing of the same movie
             # could produce duplicates, but this is rare in practice and consistent
@@ -195,21 +217,21 @@ def _log_embedded_history_movie(radarr_id, embedded_languages, reversed_path):
             existing = database.execute(
                 select(TableHistoryMovie.id)
                 .where(TableHistoryMovie.radarrId == radarr_id)
-                .where(TableHistoryMovie.language == lang)
+                .where(TableHistoryMovie.language == canonical)
                 .where(TableHistoryMovie.action == 7)).first()
             if existing:
                 continue
 
             result = ProcessSubtitlesResult(
-                message=f"{lang} embedded subtitles detected.",
+                message=f"{canonical} embedded subtitles detected.",
                 reversed_path=reversed_path,
-                downloaded_language_code2=lang.split(':')[0],
+                downloaded_language_code2=base,
                 downloaded_provider="embedded",
                 score=score_out_of,
-                forced=lang.endswith(':forced'),
+                forced=is_forced,
                 subtitle_id=None,
                 reversed_subtitles_path=None,
-                hearing_impaired=lang.endswith(':hi'))
+                hearing_impaired=is_hi)
             history_log_movie(action=7, radarr_id=radarr_id, result=result,
                               fake_provider="embedded", fake_score=score_out_of)
     except Exception:
@@ -264,6 +286,13 @@ def list_missing_subtitles_movies(no=None):
                     lang = subtitles[0]
                     forced = False
                     hi = False
+                    # A combined artifact (e.g. en:combined-hu) is a bilingual
+                    # stacked file, not a standalone subtitle of its base language,
+                    # so it must not count toward fulfilling that language. Without
+                    # this, removing the plain en while a combined remains left
+                    # Bazarr believing en was satisfied and it stopped searching.
+                    if any(p.startswith('combined-') for p in subtitles[1:]):
+                        continue
                     if len(subtitles) > 1:
                         if subtitles[1] == 'forced':
                             forced = True

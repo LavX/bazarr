@@ -5,6 +5,7 @@ import {
   Divider,
   Group,
   NumberInput,
+  SegmentedControl,
   Stack,
   Text,
 } from "@mantine/core";
@@ -29,6 +30,7 @@ const MassSyncForm: FunctionComponent<MassSyncFormProps> = ({ items }) => {
       noFixFramerate: settings?.subsync.no_fix_framerate ?? true,
       gss: settings?.subsync.gss ?? true,
       forceResync: false,
+      outputMode: settings?.subsync.output_mode ?? "overwrite",
     },
   });
 
@@ -94,6 +96,20 @@ const MassSyncForm: FunctionComponent<MassSyncFormProps> = ({ items }) => {
           description="Re-sync subtitles that have already been synced"
           {...form.getInputProps("forceResync", { type: "checkbox" })}
         />
+
+        <Stack gap={4}>
+          <Text size="sm" fw={500}>
+            Output
+          </Text>
+          <SegmentedControl
+            fullWidth
+            data={[
+              { label: "Overwrite current subtitle", value: "overwrite" },
+              { label: "Keep all engine outputs", value: "keep_all" },
+            ]}
+            {...form.getInputProps("outputMode")}
+          />
+        </Stack>
 
         <Divider />
 

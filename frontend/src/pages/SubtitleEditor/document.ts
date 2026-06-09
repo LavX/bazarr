@@ -513,6 +513,7 @@ export function computeCueWarnings(
   prevCue: Cue | null,
   nextCue: Cue | null,
   preset: QCPreset = DEFAULT_QC_PRESET,
+  combined = false,
 ): CueWarning | null {
   const durationMs = cue.endMs - cue.startMs;
   const durationSec = durationMs / 1000;
@@ -524,11 +525,38 @@ export function computeCueWarnings(
   if (cue.endMs < cue.startMs) {
     return { level: "red", message: "End time is before start time" };
   }
-  if (prevCue && cue.startMs < prevCue.endMs) {
+  // Combined outputs stack each language as its own cue at the SAME start, so a
+  // same-start overlap is intentional; a genuine overlap (different start that
+  // still runs into the previous cue) is a real error and must still flag.
+  if (
+    prevCue &&
+    cue.startMs < prevCue.endMs &&
+    !(combined && cue.startMs === prevCue.startMs)
+  ) {
     return { level: "red", message: "Overlaps with previous cue" };
   }
   if (cue.text.trim() === "") {
     return { level: "red", message: "Empty text" };
+  }
+
+  // A combined subtitle stacks one language per line at shared timestamps, so the
+  // per-line CPS, length, and line-count heuristics do not apply. The duration
+  // checks still do (a too-short or over-long combined cue is a real timing
+  // issue), so run only those for combined rather than skipping QC entirely.
+  if (combined) {
+    if (durationMs < preset.minDurationMs && durationMs > 0) {
+      return {
+        level: "orange",
+        message: `Duration too short (${durationMs.toFixed(0)}ms, min ${preset.minDurationMs}ms)`,
+      };
+    }
+    if (durationMs > preset.maxDurationMs) {
+      return {
+        level: "yellow",
+        message: `Duration too long (${durationSec.toFixed(1)}s, max ${(preset.maxDurationMs / 1000).toFixed(1)}s)`,
+      };
+    }
+    return null;
   }
 
   // Orange checks

@@ -341,6 +341,136 @@ describe("Settings > Providers (Provider Hub)", () => {
     ).toBeInTheDocument();
   });
 
+  it("replaces the shipped built-in card with its same-id replacement plugin", async () => {
+    const embeddedPluginManifest = {
+      ...manifest,
+      provider_id: "embeddedsubtitles",
+      name: "Embedded Subtitles",
+      description: "Embedded subtitles plugin.",
+      version: "0.1.2",
+      config_schema: {
+        type: "object",
+        properties: {
+          ffmpeg_path: {
+            type: "string",
+            title: "ffmpeg path",
+          },
+        },
+      },
+    };
+    server.use(
+      http.get("/api/provider-hub/providers", () => {
+        return HttpResponse.json({
+          data: [
+            {
+              // Catalog plugin reuses the built-in id it replaces.
+              provider_id: "embeddedsubtitles",
+              name: "Embedded Subtitles",
+              active_version: "0.1.2",
+              staged_version: null,
+              state: "active",
+              pending_restart: false,
+              trusted: true,
+              last_error: null,
+              manifest: embeddedPluginManifest,
+            },
+          ],
+        });
+      }),
+    );
+
+    customRender(<SettingsProvidersView />);
+
+    const panel = await screen.findByRole("tabpanel", {
+      name: /My Providers/i,
+    });
+
+    await userEvent.click(
+      await within(panel).findByRole("button", {
+        name: /Add search provider/i,
+      }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: /Provider settings/i,
+    });
+
+    // Exactly one "Embedded Subtitles" option: the plugin replaces the shipped
+    // built-in card instead of appearing as a second, duplicate provider.
+    const embeddedOptions =
+      await within(dialog).findAllByText("Embedded Subtitles");
+    expect(embeddedOptions).toHaveLength(1);
+
+    await userEvent.click(embeddedOptions[0]);
+
+    // The single card is plugin-backed: it renders the plugin's config schema
+    // and the Provider Hub notice (not the shipped built-in inputs).
+    expect(screen.getByLabelText("ffmpeg path")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Provider Hub plugin is installed but not enabled/i),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the plugin card while a same-id update is staged for restart", async () => {
+    const subdlPluginManifest = {
+      ...manifest,
+      provider_id: "subdl",
+      name: "SubDL",
+      description: "SubDL plugin.",
+      version: "0.1.0",
+      config_schema: {
+        type: "object",
+        properties: {
+          api_key: { type: "string", title: "API key", secret: true },
+        },
+      },
+      secret_fields: ["api_key"],
+    };
+    server.use(
+      http.get("/api/provider-hub/providers", () => {
+        return HttpResponse.json({
+          data: [
+            {
+              // An update is staged: the backend keeps active_version serving and
+              // marks pending_restart, so the plugin must still own the card.
+              provider_id: "subdl",
+              name: "SubDL",
+              active_version: "0.1.0",
+              staged_version: "0.2.0",
+              state: "staged",
+              pending_restart: true,
+              trusted: true,
+              last_error: null,
+              manifest: subdlPluginManifest,
+            },
+          ],
+        });
+      }),
+    );
+
+    customRender(<SettingsProvidersView />);
+
+    const panel = await screen.findByRole("tabpanel", {
+      name: /My Providers/i,
+    });
+    await userEvent.click(
+      await within(panel).findByRole("button", {
+        name: /Add search provider/i,
+      }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: /Provider settings/i,
+    });
+
+    // Exactly one SubDL option (the plugin), not the shipped built-in card.
+    const subdlOptions = await within(dialog).findAllByText("SubDL");
+    expect(subdlOptions).toHaveLength(1);
+    await userEvent.click(subdlOptions[0]);
+    expect(screen.getByLabelText("API key")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Provider Hub plugin is installed but not enabled/i),
+    ).toBeInTheDocument();
+  });
+
   it("stages per-provider excluded language configuration from the provider drawer", async () => {
     const updateRequest = vi.fn();
     server.use(
@@ -400,6 +530,46 @@ describe("Settings > Providers (Provider Hub)", () => {
         JSON.stringify({ opensubtitlescom: ["eng", "bul"] }),
       ),
     );
+  });
+
+  it("nudges to the Marketplace when no providers are enabled", async () => {
+    server.use(
+      http.get("/api/system/settings", () => {
+        return HttpResponse.json({
+          general: {
+            enabled_providers: [],
+            provider_priorities: {},
+            provider_languages: {},
+            use_provider_priority: true,
+          },
+        });
+      }),
+      http.get("/api/provider-hub/providers", () => {
+        return HttpResponse.json({ data: [] });
+      }),
+    );
+
+    customRender(<SettingsProvidersView />);
+
+    const panel = await screen.findByRole("tabpanel", {
+      name: /My Providers/i,
+    });
+    expect(
+      await within(panel).findByText(/no providers enabled/i),
+    ).toBeInTheDocument();
+
+    // The add-provider control stays available in the empty state so a shipped
+    // provider can still be added directly (not only via the Marketplace).
+    expect(
+      within(panel).getByRole("button", { name: /Add search provider/i }),
+    ).toBeInTheDocument();
+
+    await userEvent.click(
+      within(panel).getByRole("button", { name: /browse the marketplace/i }),
+    );
+    expect(
+      await screen.findByRole("tabpanel", { name: /Marketplace/i }),
+    ).toBeInTheDocument();
   });
 
   it("preserves the trusted-source attribution when installing from catalog", async () => {

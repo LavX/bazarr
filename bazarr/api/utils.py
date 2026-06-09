@@ -18,6 +18,21 @@ None_Keys = ['null', 'undefined', '', None]
 False_Keys = ['False', 'false', '0']
 
 
+def _subtitle_language_details(language_code):
+    language = language_code.split(':')
+    modifiers = language[1:]
+    sync_modifier = next((modifier for modifier in modifiers if modifier.startswith('sync-')), None)
+    combined_modifier = next((modifier for modifier in modifiers if modifier.startswith('combined-')), None)
+
+    return {
+        "base": language[0],
+        "full": language_code,
+        "forced": any(modifier.lower() == 'forced' for modifier in modifiers),
+        "hi": any(modifier.lower() == 'hi' for modifier in modifiers),
+        "modifier": sync_modifier or combined_modifier,
+    }
+
+
 def _safe_apikey_compare(provided, expected):
     if not provided:
         return False
@@ -80,22 +95,17 @@ def postprocess(item):
     if item.get('subtitles'):
         item['subtitles'] = ast.literal_eval(item['subtitles'])
         for i, subs in enumerate(item['subtitles']):
-            language = subs[0].split(':')
+            language = _subtitle_language_details(subs[0])
             file_size = subs[2] if len(subs) > 2 else 0
             item['subtitles'][i] = {"path": path_replace(subs[1]),
-                                    "name": language_from_alpha2(language[0]),
-                                    "code2": language[0],
-                                    "code3": alpha3_from_alpha2(language[0]),
-                                    "forced": False,
-                                    "hi": False,
+                                    "name": language_from_alpha2(language["base"]),
+                                    "code2": language["base"],
+                                    "code3": alpha3_from_alpha2(language["base"]),
+                                    "language": language["full"],
+                                    "modifier": language["modifier"],
+                                    "forced": language["forced"],
+                                    "hi": language["hi"],
                                     "file_size": file_size}
-            if len(language) > 1:
-                item['subtitles'][i].update(
-                    {
-                        "forced": language[1].lower() == 'forced',
-                        "hi": language[1].lower() == 'hi',
-                    }
-                )
         if settings.general.embedded_subs_show_desired and item.get('profileId'):
             desired_lang_list = get_desired_languages(item['profileId'])
             item['subtitles'] = [x for x in item['subtitles'] if x['code2'] in desired_lang_list or x['path']]

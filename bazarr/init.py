@@ -138,7 +138,23 @@ write_config()
 # would drop it from enabled_providers. main.py runs activate_staged_
 # installations() later, but that's already past this filter.
 from subliminal_patch.extensions import provider_registry  # noqa: E402
+# Register ISO 639-3 languages missing from babelfish's bundled snapshot (e.g. Montenegrin
+# "cnr") before any Language() is constructed below, so providers declaring them resolve.
+from languages.extra import register_extra_languages  # noqa: E402
+register_extra_languages()
 provider_hub_registration_ok = True
+# Auto-install official-catalog versions of enabled built-in providers so the
+# catalog becomes the canonical provider source. Staged here so the
+# activate_staged_installations() + register_active_provider_classes() calls
+# below bring them live and shadow the built-in in this same boot. Best-effort:
+# failures must never prevent startup.
+try:
+    from provider_hub.service import autoinstall_enabled_builtins
+    auto_staged = autoinstall_enabled_builtins()
+    if auto_staged:
+        logging.info("Provider Hub auto-installed from official catalog: %s", auto_staged)
+except Exception:  # pragma: no cover - hub failures must not prevent startup
+    logging.exception("Unable to auto-install Provider Hub providers on startup")
 try:
     from provider_hub.service import activate_staged_installations
     activated = activate_staged_installations()

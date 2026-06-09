@@ -6,8 +6,10 @@ import {
   useRef,
   useState,
 } from "react";
+import { Button, Group, Modal, Radio, Stack, Text } from "@mantine/core";
 import { showNotification } from "@mantine/notifications";
 import { Environment } from "@/utilities/env";
+import { isSyncOutputLanguageKey } from "@/utilities/subtitles";
 import { createEditTiming, type CueOperation } from "./document";
 import type { Cue } from "./types";
 
@@ -29,6 +31,24 @@ interface TimingToolsPanelProps {
 }
 
 type TabId = "shift" | "linear" | "autosync";
+
+interface SyncEngineContentResult {
+  engine: string;
+  content: string;
+}
+
+function syncEngineLabel(engine: string) {
+  switch (engine) {
+    case "ffsubsync":
+      return "FFsubsync";
+    case "autosubsync":
+      return "Autosubsync";
+    case "alass":
+      return "ALASS";
+    default:
+      return engine;
+  }
+}
 
 const styles = {
   container: {
@@ -528,9 +548,18 @@ function AutoSyncTab({
   const [vad, setVad] = useState("");
   const [syncing, setSyncing] = useState(false);
   const [progressMsg, setProgressMsg] = useState("");
+  const [engineResults, setEngineResults] = useState<
+    SyncEngineContentResult[] | null
+  >(null);
+  const [selectedEngine, setSelectedEngine] = useState<string | null>(null);
 
+  const isSyncOutput = isSyncOutputLanguageKey(language);
   const canSync =
-    !!mediaType && mediaId !== undefined && !!language && !syncing;
+    !!mediaType &&
+    mediaId !== undefined &&
+    !!language &&
+    !syncing &&
+    !isSyncOutput;
 
   const handleSync = useCallback(async () => {
     if (!canSync || mediaId === undefined) return;
@@ -560,6 +589,7 @@ function AutoSyncTab({
         body: JSON.stringify({
           mediaType,
           mediaId,
+          language,
           content: editorData.content,
           format: editorData.format,
           encoding: editorData.encoding,
@@ -582,7 +612,7 @@ function AutoSyncTab({
       }
 
       const jobKey = submitResult.jobKey;
-      setProgressMsg("ffsubsync running (check Jobs Manager for progress)...");
+      setProgressMsg("Synchronization engines running...");
 
       // Poll for completion
       for (let i = 0; i < 600; i++) {
@@ -596,7 +626,20 @@ function AutoSyncTab({
           const pollResult = await pollResp.json();
 
           if (pollResult.status === "completed" && pollResult.content) {
-            onApplySyncedContent(pollResult.content);
+            const results = Array.isArray(pollResult.results)
+              ? (pollResult.results as SyncEngineContentResult[]).filter(
+                  (item) => item.engine && item.content,
+                )
+              : [];
+            if (results.length > 1) {
+              setEngineResults(results);
+              setSelectedEngine(results[0].engine);
+              setProgressMsg("");
+              setSyncing(false);
+              return;
+            }
+
+            onApplySyncedContent(results[0]?.content ?? pollResult.content);
             showNotification({
               message: "Sync complete, cues updated",
               color: "green",
@@ -666,8 +709,70 @@ function AutoSyncTab({
     onApplySyncedContent,
   ]);
 
+  const applySelectedEngineResult = useCallback(() => {
+    if (!engineResults || !selectedEngine) return;
+    const selected = engineResults.find(
+      (item) => item.engine === selectedEngine,
+    );
+    if (!selected) return;
+    onApplySyncedContent(selected.content);
+    showNotification({
+      message: `${syncEngineLabel(selected.engine)} result loaded into editor`,
+      color: "green",
+      autoClose: 3000,
+    });
+    setEngineResults(null);
+    setSelectedEngine(null);
+  }, [engineResults, selectedEngine, onApplySyncedContent]);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <Modal
+        opened={!!engineResults}
+        onClose={() => {
+          setEngineResults(null);
+          setSelectedEngine(null);
+        }}
+        title="Choose Sync Result"
+        centered
+      >
+        <Stack gap="md">
+          <Text size="sm">
+            Multiple synchronization engines produced results for this subtitle.
+          </Text>
+          <Radio.Group
+            value={selectedEngine ?? ""}
+            onChange={setSelectedEngine}
+          >
+            <Stack gap="xs">
+              {engineResults?.map((result) => (
+                <Radio
+                  key={result.engine}
+                  value={result.engine}
+                  label={syncEngineLabel(result.engine)}
+                />
+              ))}
+            </Stack>
+          </Radio.Group>
+          <Group justify="flex-end" gap="sm">
+            <Button
+              variant="default"
+              onClick={() => {
+                setEngineResults(null);
+                setSelectedEngine(null);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={applySelectedEngineResult}
+              disabled={!selectedEngine}
+            >
+              Load Result
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
       <div
         style={{
           fontSize: 11,
@@ -682,9 +787,9 @@ function AutoSyncTab({
         timing.
       </div>
       <div style={styles.hint}>
-        Runs ffsubsync on the server to align this subtitle to the audio track.
-        Synced cues will be loaded into the editor (save manually to write to
-        disk).
+        Runs synchronization engines on the server to align this subtitle to the
+        audio track. Synced cues will be loaded into the editor (save manually
+        to write to disk).
       </div>
 
       <div style={styles.row}>
@@ -763,6 +868,12 @@ function AutoSyncTab({
           <option value="auditok">auditok</option>
         </select>
       </div>
+
+      {isSyncOutput && (
+        <div style={{ ...styles.hint, color: "#f59e0b" }}>
+          Sync output files cannot be synchronized again.
+        </div>
+      )}
 
       {!mediaId && (
         <div style={{ ...styles.hint, color: "#f59e0b" }}>

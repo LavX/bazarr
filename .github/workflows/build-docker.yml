@@ -29,6 +29,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
+  DOCKERHUB_IMAGE: lavx/bazarr
   UI_DIRECTORY: ./frontend
 
 jobs:
@@ -106,6 +107,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Determine if release build
+        id: release
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]] || [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.version_tag }}" ]]; then
+            echo "is_release=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_release=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Login to Docker Hub
+        if: steps.release.outputs.is_release == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Determine Version
         id: version
         run: |
@@ -140,11 +157,20 @@ jobs:
           echo "- **Version:** $FORK_VERSION" >> $GITHUB_STEP_SUMMARY
           echo "- **Short SHA:** $SHORT_SHA" >> $GITHUB_STEP_SUMMARY
 
+      - name: Build image list
+        id: images
+        run: |
+          IMAGES="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          if [[ "${{ steps.release.outputs.is_release }}" == "true" ]]; then
+            IMAGES="${IMAGES},${{ env.DOCKERHUB_IMAGE }}"
+          fi
+          echo "list=${IMAGES}" >> $GITHUB_OUTPUT
+
       - name: Extract Docker Metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ steps.images.outputs.list }}
           # `latest` only ever points at a versioned release, never a
           # bare master commit. A docs-only push to master used to
           # quietly overwrite `latest` with whatever was on HEAD; we
@@ -168,7 +194,7 @@ jobs:
 
       - name: Build and Push Docker Image
         id: push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
@@ -193,20 +219,37 @@ jobs:
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
 
+      - name: Generate Docker Hub Attestation
+        if: steps.release.outputs.is_release == 'true'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: docker.io/${{ env.DOCKERHUB_IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
       - name: Create Release Summary
         run: |
-          echo "## 🐳 Docker Images Published" >> $GITHUB_STEP_SUMMARY
+          echo "## Docker Images Published" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Bazarr+" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
           echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
           echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.fork_version }}" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ steps.release.outputs.is_release }}" == "true" ]]; then
+            echo "docker pull ${{ env.DOCKERHUB_IMAGE }}:latest" >> $GITHUB_STEP_SUMMARY
+            echo "docker pull ${{ env.DOCKERHUB_IMAGE }}:${{ steps.version.outputs.fork_version }}" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Image Details" >> $GITHUB_STEP_SUMMARY
           echo "- **Digest:** \`${{ steps.push.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Platforms:** linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
           echo "- **Cache Status:** GHA cache enabled" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ steps.release.outputs.is_release }}" == "true" ]]; then
+            echo "- **Docker Hub:** published" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Docker Hub:** skipped (not a release build)" >> $GITHUB_STEP_SUMMARY
+          fi
 
   # Release-body management is intentionally NOT done from this workflow.
   # Releases for the Bazarr+ fork are drafted by hand with a pandoc GFM

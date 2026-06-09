@@ -1,5 +1,11 @@
 import { FunctionComponent, useMemo, useState } from "react";
-import { Anchor, Stack, Tabs } from "@mantine/core";
+import {
+  Anchor,
+  Button,
+  Stack,
+  Tabs,
+  Text as MantineText,
+} from "@mantine/core";
 import {
   faGears,
   faListCheck,
@@ -27,6 +33,7 @@ import {
 } from "@/pages/Settings/Providers/hub";
 import { summarizeUpdates } from "@/pages/Settings/Providers/hub/utils";
 import { antiCaptchaOption } from "@/pages/Settings/Providers/options";
+import { useSettingValue } from "@/pages/Settings/utilities/hooks";
 import { ProviderView } from "./components";
 import {
   AvailableInput,
@@ -134,40 +141,74 @@ function useProviderOptions(
   providers: ProviderHubInstallation[] | undefined,
 ): Readonly<ProviderInfo[]> {
   return useMemo(() => {
-    const seen = new Set(ProviderList.map((provider) => provider.key));
-    const hubOptions = (providers ?? [])
-      .filter(
-        (provider) => provider.state === "active" && !provider.pending_restart,
-      )
+    // A plugin "owns" its id (and shadows the built-in) for as long as it has an
+    // active version serving searches. Gate on active_version rather than
+    // state/pending_restart: while an update is staged for restart the backend
+    // keeps active_version set with pending_restart=true and
+    // runtime_provider_configs still routes through the plugin, so the card must
+    // stay put instead of briefly falling back to the shipped card (which would
+    // expose the wrong config schema in the drawer). A first-install staged row
+    // has no active_version yet, so the built-in keeps serving until activation.
+    const live = (providers ?? []).filter((provider) =>
+      Boolean(provider.active_version),
+    );
+    // A catalog plugin reuses the built-in's id when it replaces it (e.g. subdl,
+    // embeddedsubtitles). Drop the shipped card for any id a live plugin owns
+    // so the plugin replaces it instead of appearing as a second duplicate, and
+    // so a same-id plugin can actually be added (the shipped key no longer masks
+    // it). Plugins with a brand-new id are simply appended.
+    const replaced = new Set(live.map((provider) => provider.provider_id));
+    const base = ProviderList.filter((provider) => !replaced.has(provider.key));
+    const seen = new Set(base.map((provider) => provider.key));
+    const hubOptions = live
       .filter((provider) => !seen.has(provider.provider_id))
       .map((provider) => {
         seen.add(provider.provider_id);
         return providerHubOption(provider);
       });
-    return [...ProviderList, ...hubOptions];
+    return [...base, ...hubOptions];
   }, [providers]);
 }
 
 const EnabledProvidersSection: FunctionComponent<{
   providerOptions: Readonly<ProviderInfo[]>;
-}> = ({ providerOptions }) => (
-  <Stack gap="xs">
-    <Check
-      label="Provider Priority"
-      settingKey="settings-general-use_provider_priority"
-    />
-    <Message>
-      Query providers in priority order and stop when a subtitle meeting the
-      minimum score is found. When disabled, all providers are queried
-      simultaneously and the best result is selected.
-    </Message>
-    <ProviderView
-      addLabel="Add search provider"
-      availableOptions={providerOptions}
-      settingsKey="settings-general-enabled_providers"
-    />
-  </Stack>
-);
+  onBrowseMarketplace: () => void;
+}> = ({ providerOptions, onBrowseMarketplace }) => {
+  const enabled = useSettingValue<string[]>(
+    "settings-general-enabled_providers",
+  );
+  const isEmpty = Array.isArray(enabled) && enabled.length === 0;
+  return (
+    <Stack gap="xs">
+      <Check
+        label="Provider Priority"
+        settingKey="settings-general-use_provider_priority"
+      />
+      <Message>
+        Query providers in priority order and stop when a subtitle meeting the
+        minimum score is found. When disabled, all providers are queried
+        simultaneously and the best result is selected.
+      </Message>
+      {isEmpty && (
+        <Stack gap="xs" align="flex-start" py="xs">
+          <MantineText fw={600}>No providers enabled</MantineText>
+          <Message>
+            New here? Install subtitle providers from the Marketplace, then add
+            them below. You can also add a shipped provider with the + button.
+          </Message>
+          <Button variant="light" onClick={onBrowseMarketplace}>
+            Browse the Marketplace
+          </Button>
+        </Stack>
+      )}
+      <ProviderView
+        addLabel="Add search provider"
+        availableOptions={providerOptions}
+        settingsKey="settings-general-enabled_providers"
+      />
+    </Stack>
+  );
+};
 
 const AntiCaptchaSection: FunctionComponent = () => (
   <Stack gap="xs">
@@ -289,7 +330,10 @@ const SettingsProvidersView: FunctionComponent = () => {
         <Tabs.Panel value="my-providers" pt="md">
           <MyProvidersPanel
             enabledProviders={
-              <EnabledProvidersSection providerOptions={providerOptions} />
+              <EnabledProvidersSection
+                providerOptions={providerOptions}
+                onBrowseMarketplace={() => setTab("marketplace")}
+              />
             }
             antiCaptcha={<AntiCaptchaSection />}
             integrations={<IntegrationsSection />}

@@ -9,6 +9,7 @@ export enum QueryKeys {
   Subtitles = "subtitles",
   Providers = "providers",
   ProviderHub = "provider-hub",
+  DistributionHub = "distribution-hub",
   Languages = "languages",
   LanguagesProfiles = "languages-profiles",
   Blacklist = "blacklist",

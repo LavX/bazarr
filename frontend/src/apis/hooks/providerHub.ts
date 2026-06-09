@@ -88,6 +88,17 @@ export function useProviderHubInstall() {
   });
 }
 
+export function useProviderHubInstallLocal() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationKey: [...providerHubKey, QueryKeys.Actions, "install-local"],
+    mutationFn: (file: File) => api.providerHub.installLocal(file),
+    onSettled: () => {
+      client.invalidateQueries({ queryKey: providerHubKey });
+    },
+  });
+}
+
 export function useProviderHubUninstall() {
   const client = useQueryClient();
   return useMutation({

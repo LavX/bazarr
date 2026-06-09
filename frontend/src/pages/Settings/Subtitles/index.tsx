@@ -25,7 +25,9 @@ import {
   folderOptions,
   hiExtensionOptions,
   providerOptions,
+  syncEngineOptions,
   syncMaxOffsetSecondsOptions,
+  syncOutputModeOptions,
 } from "./options";
 
 interface CommandOption {
@@ -439,13 +441,10 @@ const SettingsSubtitlesView: FunctionComponent = () => {
         </Message>
         <CollapseBox settingKey="settings-subsync-use_subsync">
           <Message>
-            This feature uses ffsubsync, which can provide better
-            synchronization results than traditional methods, especially for
-            subtitles that are significantly out of sync. However, it may also
-            increase the time it takes to process subtitles. If you have a lot
-            of subtitles that need synchronization or if you are on a
-            low-powered device, you may want to leave this option disabled and
-            synchronize subtitles manually when needed.
+            This feature uses the configured synchronization engines, which can
+            provide better results than traditional methods, especially for
+            subtitles that are significantly out of sync. It may also increase
+            processing time.
           </Message>
           <Check
             label="Series Score Threshold For Audio Sync"
@@ -494,7 +493,26 @@ const SettingsSubtitlesView: FunctionComponent = () => {
             Subtitles downloaded from the providers listed above will not be
             automatically synchronized.
           </Message>
-          <Section header="Advanced FFsubsync Options">
+          <Section header="Advanced Synchronization Options">
+            <MultiSelector
+              label="Synchronization Engines"
+              placeholder="Select engines..."
+              options={syncEngineOptions}
+              settingKey="settings-subsync-enabled_engines"
+            ></MultiSelector>
+            <Message>
+              Engines run in this order: FFsubsync, Autosubsync, ALASS.
+            </Message>
+            <Selector
+              label="Default Output Mode"
+              options={syncOutputModeOptions}
+              settingKey="settings-subsync-output_mode"
+              defaultValue="overwrite"
+            ></Selector>
+            <Message>
+              Automatic synchronization uses this output behavior. Manual sync
+              can override it in the sync dialog.
+            </Message>
             <Check
               label="Use Audio Track as Synchronization Reference"
               settingKey="settings-subsync-force_audio"

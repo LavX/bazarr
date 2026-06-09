@@ -7,11 +7,24 @@ import React, {
   useState,
 } from "react";
 import { matchPath, NavLink, RouteObject, useLocation } from "react-router";
-import { AppShell, Badge, Collapse, Stack, Text } from "@mantine/core";
+import {
+  ActionIcon,
+  AppShell,
+  Badge,
+  Collapse,
+  Stack,
+  Text,
+  Tooltip,
+} from "@mantine/core";
 import { useHover } from "@mantine/hooks";
-import { IconDefinition } from "@fortawesome/free-solid-svg-icons";
+import { faGift, IconDefinition } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import clsx from "clsx";
+import { useSystemStatus } from "@/apis/hooks";
+import {
+  hasWhatsNew,
+  useOpenWhatsNew,
+} from "@/components/modals/useWhatsNewAutoOpen";
 import { useNavbar } from "@/contexts/Navbar";
 import { useRouteItems } from "@/Router";
 import { CustomRouteObject, Route } from "@/Router/type";
@@ -84,7 +97,10 @@ function useIsActive(parent: string, route: RouteObject) {
 const sectionGroups = [
   { label: "Media", paths: ["series", "movies"] },
   { label: "Management", paths: ["history", "wanted", "blacklist"] },
-  { label: "System", paths: ["subtitle-hub", "settings", "system"] },
+  {
+    label: "System",
+    paths: ["subtitle-hub", "distribution-hub", "settings", "system"],
+  },
 ];
 
 function groupRoutes(routes: CustomRouteObject[]) {
@@ -119,6 +135,9 @@ const AppNavbar: FunctionComponent = () => {
   const [selection, select] = useState<string | null>(null);
 
   const routes = useRouteItems();
+  const { data: status } = useSystemStatus();
+  const openWhatsNew = useOpenWhatsNew();
+  const showWhatsNew = hasWhatsNew();
 
   const { pathname } = useLocation();
   useEffect(() => {
@@ -164,6 +183,22 @@ const AppNavbar: FunctionComponent = () => {
             })}
           </Stack>
         </Selection.Provider>
+      </div>
+      <div className={styles.navFooter}>
+        <Text size="xs" c="var(--bz-text-tertiary)" truncate>
+          {status?.bazarr_version ?? ""}
+        </Text>
+        {showWhatsNew && (
+          <Tooltip label="What's new" position="top" withArrow>
+            <ActionIcon
+              variant="subtle"
+              aria-label="What's new"
+              onClick={openWhatsNew}
+            >
+              <FontAwesomeIcon icon={faGift} />
+            </ActionIcon>
+          </Tooltip>
+        )}
       </div>
     </AppShell.Navbar>
   );

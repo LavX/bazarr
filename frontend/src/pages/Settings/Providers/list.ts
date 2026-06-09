@@ -763,4 +763,17 @@ export const IntegrationList: Readonly<ProviderInfo[]> = [
       },
     ],
   },
+  {
+    key: "omdb",
+    name: "OMDB",
+    description:
+      "Optional metadata key. Resolves title and year for titles that are not in your local library so the OpenSubtitles-compatible endpoint can match out-of-library content. Free tier allows 1000 requests/day at omdbapi.com.",
+    inputs: [
+      {
+        type: "password",
+        key: "apikey",
+        name: "OMDB API Key",
+      },
+    ],
+  },
 ];
