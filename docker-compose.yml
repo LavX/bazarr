@@ -16,6 +16,9 @@ services:
   # when OpenSubtitles.org returns a Cloudflare browser challenge. After you
   # install the OpenSubtitles.org plugin from the Marketplace, set its
   # "FlareSolverr URL" to http://flaresolverr:8191/v1 in the provider settings.
+  # That hostname resolves because both services share the bazarr-network
+  # bridge defined below. If you instead run Bazarr with host networking
+  # (network_mode: host), use http://localhost:8191/v1 in the plugin settings.
   flaresolverr:
     image: ghcr.io/flaresolverr/flaresolverr:latest
     container_name: flaresolverr
