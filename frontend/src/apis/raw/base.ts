@@ -20,8 +20,11 @@ class BaseApi {
           } else {
             form.append(key, "");
           }
-        } else {
-          form.append(key, object[key]);
+        } else if (data !== undefined && data !== null) {
+          // Skip undefined/null so an optional field (e.g. from_language on a
+          // non-embedded translate) is omitted rather than appended as the literal
+          // string "undefined", which the backend would reject.
+          form.append(key, data);
         }
       }
       return form;

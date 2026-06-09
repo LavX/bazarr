@@ -26,6 +26,27 @@ from .auth import compat_auth  # noqa: E402
 
 _SUPPORTED_SUB_FORMATS = frozenset({"srt"})
 
+# Per-key admission lock: limits.check (read) and meter.record (write) must run as
+# one atomic step, or concurrent requests from the same key all read the same
+# pre-increment usage and admit past the limit. meter.record invalidates the
+# sum cache, so under this lock each request sees the prior request's increment.
+# Different keys never contend; the critical section is just a DB read+write
+# (the provider fanout / download happen outside it).
+from threading import Lock as _Lock  # noqa: E402
+
+_admission_locks_guard = _Lock()
+_admission_locks: dict[int, "_Lock"] = {}
+
+
+def _admission_lock(key_rec: dict):
+    kid = int(key_rec.get("id") or 0)
+    with _admission_locks_guard:
+        lk = _admission_locks.get(kid)
+        if lk is None:
+            lk = _Lock()
+            _admission_locks[kid] = lk
+    return lk
+
 
 def _current_key() -> dict:
     """The key record stashed by compat_auth (always set on authed routes)."""
@@ -250,17 +271,18 @@ def subtitles():
     # Distribution Hub: meter + rate-limit search per API key (req #3, #5, #6).
     from app.config import settings
     key_rec = _current_key()
-    if bool(settings.compat_endpoint.search_rate_limit_enabled):
-        decision = limits.check(key_rec, "search")
-        if not decision.allowed:
-            _meter_blocked(key_rec, "search")
-            return _throttle_response("search", decision)
-
     # The request is admitted: meter it now, before the fanout. Metering on
     # admission (not on success) means a provider outage or empty result still
     # counts against the key's quota, so failing searches can't be spammed to
-    # evade the rate limit.
-    _meter_ok(key_rec, "search")
+    # evade the rate limit. check + record run under the per-key lock so a
+    # concurrent burst from one key cannot all admit past the limit.
+    with _admission_lock(key_rec):
+        if bool(settings.compat_endpoint.search_rate_limit_enabled):
+            decision = limits.check(key_rec, "search")
+            if not decision.allowed:
+                _meter_blocked(key_rec, "search")
+                return _throttle_response("search", decision)
+        _meter_ok(key_rec, "search")
 
     # Per-request provider exclusion + timeout, falling back to the key's
     # configured defaults (req #1, #2). Clamp the timeout to the same [5, 120]
@@ -269,7 +291,12 @@ def subtitles():
     # into a key that behaves identically to the clamped one).
     exclude_param = args.get("exclude_providers") or ""
     req_exclude = [p.strip() for p in exclude_param.split(",") if p.strip()]
-    eff_exclude = req_exclude or (key_rec.get("excluded_providers") or [])
+    # Always enforce the key's excluded_providers; a per-request exclude_providers
+    # can only ADD to them, never replace them. Otherwise a key scoped out of a
+    # provider could reach it just by sending a non-empty exclude list that omits
+    # the blocked provider.
+    key_exclude = key_rec.get("excluded_providers") or []
+    eff_exclude = list(dict.fromkeys([*key_exclude, *req_exclude]))
     # `only_providers` is tri-state by PRESENCE, not just content: a present-
     # but-empty param (?only_providers= or only commas/whitespace) is a
     # deliberate "select nothing" and stays active (-> data: []), distinct from
@@ -341,19 +368,38 @@ def download():
         return compat_error(f"unsupported sub_format: {sub_format}",
                             400, "bad-request")
 
+    key_rec = _current_key()
+
+    # Bind the file_id to this key's provider scope before spending quota. file_ids
+    # are process-wide monotonic ints, so a key walled off from a provider must not
+    # be able to reuse/guess an id minted under another key to fetch that provider's
+    # (or a local) result. Resolve the payload and reject (as not-found, to avoid
+    # leaking the id's existence) when its provider is outside this key's reach.
+    ok, fid_payload = auth.parse_file_id(fid_int)
+    if not ok:
+        return compat_error("subtitle not found", 404, "not_found")
+    fid_provider = "local" if fid_payload.get("kind") == "local" else fid_payload.get("p")
+    if not fid_provider or not _key_allows_provider(key_rec, fid_provider):
+        return compat_error("subtitle not found", 404, "not_found")
+
     # Distribution Hub: per-key download metering + limit (req #5, #6). The
     # download throttle keeps the OS-contract 406 (the Jellyfin plugin treats
     # this code as a quota signal). The Api-Key resolves the key on every
     # request, so g.compat_key is authoritative for whose quota is spent.
-    key_rec = _current_key()
-    decision = limits.check(key_rec, "download")
-    if not decision.allowed:
-        _meter_blocked(key_rec, "download")
-        resp = jsonify({"message": "download quota exhausted",
-                        "reset_time_utc": _iso_utc(int(decision.reset_epoch))})
-        resp.status_code = 406
-        resp.headers["x-reason"] = "throttled"
-        return resp
+    # check + consume run under the per-key lock so a concurrent burst from one
+    # key cannot all admit past the download limit. The actual download (token
+    # mint) happens outside the lock.
+    with _admission_lock(key_rec):
+        decision = limits.check(key_rec, "download")
+        if not decision.allowed:
+            _meter_blocked(key_rec, "download")
+            resp = jsonify({"message": "download quota exhausted",
+                            "reset_time_utc": _iso_utc(int(decision.reset_epoch))})
+            resp.status_code = 406
+            resp.headers["x-reason"] = "throttled"
+            return resp
+        # Admitted: consume the quota now, atomically with the check.
+        _meter_ok(key_rec, "download")
 
     try:
         scheme, host = _infer_client_base(request)
@@ -362,7 +408,6 @@ def download():
         else:
             base_host = request.host_url.rstrip("/")
         # Compute the post-consume remaining for the displayed quota.
-        _meter_ok(key_rec, "download")
         _allowed, remaining, reset = _display_download_quota(key_rec)
         resp = service.download(fid_int, base_host=base_host,
                                 remaining=remaining,
@@ -441,8 +486,16 @@ def providers():
     way the list a client sees is exactly the set it can select from - a provider
     the operator walled off for this key never appears.
     """
-    from app.config import settings
     key_rec = _current_key()
+    return jsonify({"data": [{"name": n} for n in _key_reachable_providers(key_rec)]})
+
+
+def _key_reachable_providers(key_rec) -> list[str]:
+    """Provider names THIS key may actually reach: the install's enabled providers
+    (plus the reserved `local` name when serve_local_subs is on), minus the key's
+    excluded_providers, intersected with allowed_providers when one is set. Used by
+    the /providers discovery route."""
+    from app.config import settings
     universe = service.available_providers()
     if bool(settings.compat_endpoint.serve_local_subs):
         universe = [*universe, "local"]
@@ -451,7 +504,25 @@ def providers():
     names = [p for p in universe if p not in excluded]
     if allowed:
         names = [p for p in names if p in allowed]
-    return jsonify({"data": [{"name": n} for n in names]})
+    return names
+
+
+def _key_allows_provider(key_rec, provider: str) -> bool:
+    """Whether this key's allow/exclude POLICY permits a result from `provider`
+    (or the reserved `local`). Backs the /download file_id scope check. Checks
+    policy only, not current availability: a stale file_id for a now-disabled
+    provider fails later at fetch, and the security boundary here is the key's
+    allow/exclude, not the live provider set."""
+    from app.config import settings
+    if provider == "local" and not bool(settings.compat_endpoint.serve_local_subs):
+        return False
+    excluded = {str(p).strip() for p in (key_rec.get("excluded_providers") or [])}
+    allowed = {str(p).strip() for p in (key_rec.get("allowed_providers") or [])}
+    if provider in excluded:
+        return False
+    if allowed and provider not in allowed:
+        return False
+    return True
 
 
 @compat_bp.route("/utilities/guessit", methods=["POST"])

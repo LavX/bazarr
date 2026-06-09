@@ -89,7 +89,10 @@ const CombineRuleEditor: FunctionComponent<CombineRuleEditorProps> = ({
 }) => {
   const enabled = value != null;
   const itemCodes = useMemo(
-    () => items.map((it) => it.language).filter(Boolean),
+    // Deduplicate base language codes: a profile with normal + forced/HI English
+    // yields ['en','en'], and seeding a combine rule with duplicate languages is
+    // rejected by validate_combine_rule, leaving the rule inert (no auto-combine).
+    () => [...new Set(items.map((it) => it.language).filter(Boolean))],
     [items],
   );
 

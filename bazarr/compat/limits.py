@@ -43,7 +43,15 @@ def check(key_rec: dict, kind: str) -> Decision:
         if limit <= 0:
             continue                       # unlimited for this window
         used = meter.window_sum(key_id, kind, w)
-        reset = now + _WINDOW_SECONDS[w]
+        # The meter rolls on hour-aligned buckets, so the soonest the count can
+        # change is the next hour boundary. For the hour window report that boundary
+        # instead of now+3600, which over-throttled a key capped at HH:59 by telling
+        # it to wait until ~HH+1:59 even though the bucket resets at HH+1:00. Coarser
+        # windows keep now+window.
+        if w == "hour":
+            reset = ((now // 3600) + 1) * 3600
+        else:
+            reset = now + _WINDOW_SECONDS[w]
         if used >= limit:
             return Decision(False, w, limit, 0, reset)
         remaining = limit - used

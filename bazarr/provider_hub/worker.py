@@ -75,6 +75,7 @@ class ProviderWorkerClient:
         self._lock = threading.Lock()
         self._stdout_queue: queue.Queue[Any] | None = None
         self._stdout_thread: threading.Thread | None = None
+        self._stderr_thread: threading.Thread | None = None
 
     def start(self) -> None:
         if self.process and self.process.poll() is None:
@@ -105,6 +106,15 @@ class ProviderWorkerClient:
             daemon=True,
         )
         self._stdout_thread.start()
+        # Continuously drain stderr too: the worker writes tracebacks there, and an
+        # undrained pipe can fill before the worker writes its JSON error to stdout,
+        # blocking the worker until the request times out. Drain + log instead.
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr,
+            args=(self.process,),
+            daemon=True,
+        )
+        self._stderr_thread.start()
 
     @staticmethod
     def _enqueue_stdout(process: subprocess.Popen, stdout_queue: queue.Queue[Any]) -> None:
@@ -131,6 +141,22 @@ class ProviderWorkerClient:
                     line_len = 0
         finally:
             stdout_queue.put(None)
+
+    @staticmethod
+    def _drain_stderr(process: subprocess.Popen) -> None:
+        """Drain the worker's stderr so a large or repeated traceback can never
+        fill the pipe buffer and block the worker before it writes its JSON error
+        to stdout. Surfaces the diagnostics in the host log (per-line capped)."""
+        stderr = process.stderr
+        if stderr is None:
+            return
+        try:
+            for line in stderr:
+                line = line.rstrip("\n")
+                if line:
+                    logging.debug("provider-worker stderr: %s", line[:2000])
+        except Exception:
+            pass
 
     def stop(self, grace_seconds: float = 5.0) -> None:
         process = self.process

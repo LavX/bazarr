@@ -50,7 +50,18 @@ class HubWorkerSubtitle(Subtitle):
         return self.worker_id
 
     def get_matches(self, video):
-        matches = set(self.matches or set())
+        # The worker sends a lean match set (self.matches); the release-info matches are
+        # computed here, in the host, against the real video. Derive from a frozen base so
+        # repeat calls are idempotent, then PERSIST the augmented set back onto self.matches.
+        # download_best_subtitles reuses the cached subtitle.matches instead of re-calling
+        # get_matches, so without this write it would score hub subtitles on the lean set
+        # only - under-scoring them and disagreeing with the listing phase that scores via
+        # get_matches (which mis-fires the 'language satisfied' early-exit).
+        base = getattr(self, "_worker_matches", None)
+        if base is None:
+            base = set(self.matches or set())
+            self._worker_matches = base
+        matches = set(base)
         release_info = getattr(self, "release_info", None)
         if release_info:
             try:
@@ -61,6 +72,12 @@ class HubWorkerSubtitle(Subtitle):
                 logger.debug(
                     "provider_hub: release-based match update failed", exc_info=True
                 )
+        # Cache an independent copy, NOT the returned object: compute_score mutates the
+        # set it is handed in place (adds hearing_impaired and equivalent matches), and
+        # the caller passes our return value straight to it. Sharing the object would
+        # leak those scoring-only mutations into the download-phase cache (e.g. bypassing
+        # a force-HI skip). The cache is the release-augmented, pre-scoring set.
+        self.matches = set(matches)
         return matches
 
 
@@ -188,7 +205,7 @@ def candidate_from_worker(provider_name: str, payload: dict[str, Any]) -> HubWor
     return subtitle
 
 
-_SUBTITLE_FORMATS = {"srt": "srt", "ass": "ass", "ssa": "ass", "vtt": "vtt", "sub": "sub"}
+_SUBTITLE_FORMATS = {"srt": "srt", "ass": "ass", "ssa": "ass", "vtt": "vtt", "sub": "microdvd"}
 
 
 def _format_from_member(name: str | None) -> str | None:
@@ -416,7 +433,11 @@ def _worker_archive_to_content(
         chosen = payload.get("filename") or ""
 
     subtitle.content = content
-    subtitle.format = payload.get("format") or _format_from_member(chosen) or getattr(subtitle, "format", "srt")
+    # Prefer the chosen member's actual extension over a worker-supplied format:
+    # the worker's format can be stale/wrong (e.g. an SRT member labeled "vtt"),
+    # which would otherwise save SRT bytes to a .vtt file. Fall back to the
+    # worker format, then the existing one.
+    subtitle.format = _format_from_member(chosen) or payload.get("format") or getattr(subtitle, "format", "srt")
     # Clear any encoding carried over from search (e.g. via the display attribute splat)
     # so Subtitle.normalize()/chardet detects it from the extracted bytes, the same as
     # native subliminal providers; do not let a stale or worker-supplied guess pin it.

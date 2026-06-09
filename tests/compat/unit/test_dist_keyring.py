@@ -17,6 +17,30 @@ def test_generate_and_resolve(compat_db):
     assert keyring.resolve("") is None
 
 
+def test_legacy_sha256_hash_resolves_and_migrates(compat_db):
+    """A key issued before the HMAC switch (stored under the bare SHA256 hash)
+    must still authenticate, and resolve() migrates its stored hash to HMAC."""
+    from compat import keyring
+    from app.database import database, select, update as sa_update, TableCompatApiKeys
+    kid, token = keyring.create("legacy-site", tier="pro")
+    legacy_h = keyring._legacy_hash_token(token)
+    assert legacy_h != keyring.hash_token(token)
+    # Simulate the pre-HMAC stored hash.
+    database.execute(sa_update(TableCompatApiKeys)
+                     .where(TableCompatApiKeys.id == kid)
+                     .values(key_hash=legacy_h))
+    keyring.invalidate_cache()
+    # Resolves via the legacy fallback...
+    rec = keyring.resolve(token)
+    assert rec and rec["id"] == kid and rec["tier"] == "pro"
+    # ...and migrates the stored hash forward to the HMAC digest.
+    keyring.invalidate_cache()
+    stored = database.execute(
+        select(TableCompatApiKeys.key_hash).where(TableCompatApiKeys.id == kid)
+    ).scalar_one()
+    assert stored == keyring.hash_token(token)
+
+
 def test_resolve_returns_prefix_not_token(compat_db):
     from compat import keyring
     kid, token = keyring.create("site-prefix")
