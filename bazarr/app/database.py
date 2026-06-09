@@ -311,6 +311,10 @@ class TableCompatUsage(Base):
 class TableBlacklist(Base):
     __tablename__ = 'table_blacklist'
 
+    # multi-instance additive columns (#156): nullable owner + local refs.
+    arr_instance_id = mapped_column(Integer)
+    series_id = mapped_column(Integer)
+    episode_id = mapped_column(Integer)
     id = mapped_column(Integer, primary_key=True)
     language = mapped_column(Text)
     provider = mapped_column(Text)
@@ -323,6 +327,9 @@ class TableBlacklist(Base):
 class TableBlacklistMovie(Base):
     __tablename__ = 'table_blacklist_movie'
 
+    # multi-instance additive columns (#156): nullable owner + local ref.
+    arr_instance_id = mapped_column(Integer)
+    movie_id = mapped_column(Integer)
     id = mapped_column(Integer, primary_key=True)
     language = mapped_column(Text)
     provider = mapped_column(Text)
@@ -375,6 +382,10 @@ class TableHistory(Base):
               'video_path', 'language', 'timestamp'),
     )
 
+    # multi-instance additive columns (#156): nullable owner + local refs.
+    arr_instance_id = mapped_column(Integer)
+    series_id = mapped_column(Integer)
+    episode_id = mapped_column(Integer)
     id = mapped_column(Integer, primary_key=True)
     action = mapped_column(Integer, nullable=False, index=True)
     description = mapped_column(Text, nullable=False)
@@ -400,6 +411,9 @@ class TableHistoryMovie(Base):
               'video_path', 'language', 'timestamp'),
     )
 
+    # multi-instance additive columns (#156): nullable owner + local ref.
+    arr_instance_id = mapped_column(Integer)
+    movie_id = mapped_column(Integer)
     id = mapped_column(Integer, primary_key=True)
     action = mapped_column(Integer, nullable=False, index=True)
     description = mapped_column(Text, nullable=False)
@@ -476,6 +490,12 @@ class TableMovies(Base):
 class TableMoviesRootfolder(Base):
     __tablename__ = 'table_movies_rootfolder'
 
+    # multi-instance additive columns (#156): nullable owner plus an
+    # upstream/local rootfolder id split (the current id stays the PK until a
+    # later cutover). Nullable for now; FK and scoped uniqueness land later.
+    arr_instance_id = mapped_column(Integer)
+    upstream_rootfolder_id = mapped_column(Integer)
+    local_rootfolder_id = mapped_column(Integer)
     accessible = mapped_column(Integer)
     error = mapped_column(Text)
     id = mapped_column(Integer, primary_key=True)
@@ -553,6 +573,12 @@ class TableShows(Base):
 class TableShowsRootfolder(Base):
     __tablename__ = 'table_shows_rootfolder'
 
+    # multi-instance additive columns (#156): nullable owner plus an
+    # upstream/local rootfolder id split (the current id stays the PK until a
+    # later cutover). Nullable for now; FK and scoped uniqueness land later.
+    arr_instance_id = mapped_column(Integer)
+    upstream_rootfolder_id = mapped_column(Integer)
+    local_rootfolder_id = mapped_column(Integer)
     accessible = mapped_column(Integer)
     error = mapped_column(Text)
     id = mapped_column(Integer, primary_key=True)

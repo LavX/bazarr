@@ -65,3 +65,72 @@ def test_table_movies_has_nullable_ownership_and_local_id(schema_session):
     row = schema_session.execute(select(TableMovies)).scalar_one()
     assert row.arr_instance_id == 2
     assert row.id == 3000
+
+
+def test_table_history_has_ownership_and_local_refs(schema_session):
+    from app.database import TableHistory
+
+    schema_session.execute(insert(TableHistory).values(
+        action=1, description="x",
+        arr_instance_id=1, series_id=1000, episode_id=2000,
+    ))
+    row = schema_session.execute(select(TableHistory)).scalar_one()
+    assert row.arr_instance_id == 1
+    assert row.series_id == 1000
+    assert row.episode_id == 2000
+
+
+def test_table_history_movie_has_ownership_and_local_ref(schema_session):
+    from app.database import TableHistoryMovie
+
+    schema_session.execute(insert(TableHistoryMovie).values(
+        action=1, description="x",
+        arr_instance_id=2, movie_id=3000,
+    ))
+    row = schema_session.execute(select(TableHistoryMovie)).scalar_one()
+    assert row.arr_instance_id == 2
+    assert row.movie_id == 3000
+
+
+def test_table_blacklist_has_ownership_and_local_refs(schema_session):
+    from app.database import TableBlacklist
+
+    schema_session.execute(insert(TableBlacklist).values(
+        arr_instance_id=1, series_id=1000, episode_id=2000,
+    ))
+    row = schema_session.execute(select(TableBlacklist)).scalar_one()
+    assert row.arr_instance_id == 1
+    assert row.series_id == 1000
+    assert row.episode_id == 2000
+
+
+def test_table_blacklist_movie_has_ownership_and_local_ref(schema_session):
+    from app.database import TableBlacklistMovie
+
+    schema_session.execute(insert(TableBlacklistMovie).values(
+        arr_instance_id=2, movie_id=3000,
+    ))
+    row = schema_session.execute(select(TableBlacklistMovie)).scalar_one()
+    assert row.arr_instance_id == 2
+    assert row.movie_id == 3000
+
+
+def test_rootfolder_tables_have_ownership_and_identity_columns(schema_session):
+    # Both rootfolder tables gain arr_instance_id plus an upstream/local id
+    # split. The same upstream rootfolder id can later live under two
+    # instances; the scoped unique constraint enforcing that lands in a
+    # later increment.
+    from app.database import TableMoviesRootfolder, TableShowsRootfolder
+
+    schema_session.execute(insert(TableShowsRootfolder).values(
+        id=1, path="/tv", arr_instance_id=1,
+        upstream_rootfolder_id=1, local_rootfolder_id=500,
+    ))
+    schema_session.execute(insert(TableMoviesRootfolder).values(
+        id=1, path="/movies", arr_instance_id=2,
+        upstream_rootfolder_id=1, local_rootfolder_id=600,
+    ))
+    s = schema_session.execute(select(TableShowsRootfolder)).scalar_one()
+    m = schema_session.execute(select(TableMoviesRootfolder)).scalar_one()
+    assert (s.arr_instance_id, s.upstream_rootfolder_id, s.local_rootfolder_id) == (1, 1, 500)
+    assert (m.arr_instance_id, m.upstream_rootfolder_id, m.local_rootfolder_id) == (2, 1, 600)
