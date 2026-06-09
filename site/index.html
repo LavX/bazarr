@@ -402,7 +402,8 @@
 
   # FlareSolverr (recommended): solves Cloudflare challenges for the native
   # OpenSubtitles.org plugin. After installing the plugin from the Marketplace,
-  # set its FlareSolverr URL to http://flaresolverr:8191/v1 in the provider settings.
+  # set its FlareSolverr URL to http://flaresolverr:8191/v1 in the provider settings
+  # (or http://localhost:8191/v1 if you run Bazarr with host networking).
   flaresolverr:
     image: ghcr.io/flaresolverr/flaresolverr:latest
     container_name: flaresolverr

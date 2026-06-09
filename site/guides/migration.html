@@ -167,15 +167,16 @@ image: ghcr.io/lavx/bazarr:latest</code></pre>
           </div>
         </li>
         <li>
-          <strong>Add the companion services.</strong> The only companion service recommended now is FlareSolverr, plus the optional AI translator. OpenSubtitles.org is a native <a href="provider-hub.html">Provider Hub</a> plugin in v2.4: install it from the Marketplace, then point its <strong>FlareSolverr URL</strong> setting at the flaresolverr service below. There is no separate scraper container anymore.
+          <strong>Add the companion services.</strong> The only companion service recommended now is FlareSolverr, plus the optional AI translator. OpenSubtitles.org is a native <a href="provider-hub.html">Provider Hub</a> plugin in v2.4: install it from the Marketplace, then point its <strong>FlareSolverr URL</strong> setting at the flaresolverr service below (<code>http://flaresolverr:8191/v1</code> on a shared Docker network, or <code>http://localhost:8191/v1</code> if Bazarr+ runs with host networking). There is no separate scraper container anymore.
           <div class="code-wrap" style="margin-top: 12px;">
             <div class="code-header">
               <span class="code-lang">docker-compose.yml additions</span>
               <button class="copy-btn" data-copy-from="migration-scraper-code" aria-label="Copy companion services config">Copy</button>
             </div>
             <pre id="migration-scraper-code"><code># Add these services:
-  # Recommended for the OpenSubtitles.org plugin. Set this container's
-  # /v1 URL (http://flaresolverr:8191/v1) in the plugin's FlareSolverr URL.
+  # Recommended for the OpenSubtitles.org and many other plugins. Set this container's
+  # /v1 URL (http://flaresolverr:8191/v1) in the plugin's FlareSolverr URL
+  # (use http://localhost:8191/v1 instead if Bazarr runs with host networking).
   flaresolverr:
     image: ghcr.io/flaresolverr/flaresolverr:latest
     container_name: flaresolverr
