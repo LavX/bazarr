@@ -318,6 +318,8 @@ generate_compose() {
   # FlareSolverr service. The native OpenSubtitles.org plugin reads its FlareSolverr URL
   # from the provider settings in the UI (http://flaresolverr:8191/v1), so no env var is
   # wired here; we only make Bazarr wait for FlareSolverr to be healthy when it is enabled.
+  # Compose puts both services on the same network, so the flaresolverr hostname resolves.
+  # If you switch Bazarr to host networking, use http://localhost:8191/v1 instead.
   if [[ "$flaresolverr" == "y" ]]; then
     flare_block="
   flaresolverr:
