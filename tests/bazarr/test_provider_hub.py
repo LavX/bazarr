@@ -360,6 +360,17 @@ def test_hub_subtitle_release_matches_persist_for_download_scoring():
     # listing phase scored, or the two phases disagree and the early-exit misfires.
     assert candidate.matches == listing_matches
 
+    # The returned set is handed straight to compute_score, which mutates it in place
+    # (adds hearing_impaired and equivalent matches). Those scoring-only mutations must
+    # NOT leak into the cached candidate.matches the download phase reads, or e.g. a
+    # force-HI skip in download_best_subtitles can be bypassed. The cache must be an
+    # independent copy, not the same object handed to scoring.
+    assert "hearing_impaired" not in listing_matches  # guard: not added by get_matches
+    listing_matches.add("hearing_impaired")
+    assert "hearing_impaired" not in candidate.matches, (
+        "scoring mutations on the returned set leaked into the cached matches"
+    )
+
 
 def _hub_candidate(worker_id="sub-arch"):
     from provider_hub.protocol import candidate_from_worker, language_to_payload

@@ -72,7 +72,12 @@ class HubWorkerSubtitle(Subtitle):
                 logger.debug(
                     "provider_hub: release-based match update failed", exc_info=True
                 )
-        self.matches = matches
+        # Cache an independent copy, NOT the returned object: compute_score mutates the
+        # set it is handed in place (adds hearing_impaired and equivalent matches), and
+        # the caller passes our return value straight to it. Sharing the object would
+        # leak those scoring-only mutations into the download-phase cache (e.g. bypassing
+        # a force-HI skip). The cache is the release-augmented, pre-scoring set.
+        self.matches = set(matches)
         return matches
 
 
