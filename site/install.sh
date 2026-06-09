@@ -319,7 +319,9 @@ generate_compose() {
   # from the provider settings in the UI (http://flaresolverr:8191/v1), so no env var is
   # wired here; we only make Bazarr wait for FlareSolverr to be healthy when it is enabled.
   # Compose puts both services on the same network, so the flaresolverr hostname resolves.
-  # If you switch Bazarr to host networking, use http://localhost:8191/v1 instead.
+  # If you switch Bazarr to host networking, that hostname stops resolving: use
+  # http://localhost:8191/v1 and make port 8191 reachable on the host, either by adding a
+  # "8191:8191" ports mapping to flaresolverr below or running flaresolverr on host networking too.
   if [[ "$flaresolverr" == "y" ]]; then
     flare_block="
   flaresolverr:

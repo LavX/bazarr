@@ -202,7 +202,7 @@ Encryption covers both the disk surface (the credentials above, at rest) and key
 ### OpenSubtitles.org (Native Provider Hub Plugin)
 OpenSubtitles.org shut down their XML-RPC API for all third-party apps, VIP included. In v2.4, OpenSubtitles.org is a native Provider Hub plugin. Install "OpenSubtitles.org" from the Provider Hub Marketplace and it scrapes the site in-process using `ai-cloudscraper`, solving the Anubis proof-of-work challenge inline. There is no separate microservice or sidecar container anymore. No API key or VIP subscription needed.
 
-FlareSolverr is strongly recommended. Run a FlareSolverr container and set its `/v1` endpoint in the plugin's **FlareSolverr URL** setting. FlareSolverr is used as a fallback to solve Cloudflare browser challenges when `ai-cloudscraper` is itself challenged. The plugin exposes `flaresolverr_url` and `flaresolverr_timeout_ms` settings. Use `http://flaresolverr:8191/v1` when Bazarr+ and FlareSolverr share a Docker network (the Compose default below), or `http://localhost:8191/v1` if you run Bazarr+ with host networking.
+FlareSolverr is strongly recommended. Run a FlareSolverr container and set its `/v1` endpoint in the plugin's **FlareSolverr URL** setting. FlareSolverr is used as a fallback to solve Cloudflare browser challenges when `ai-cloudscraper` is itself challenged. The plugin exposes `flaresolverr_url` and `flaresolverr_timeout_ms` settings. Use `http://flaresolverr:8191/v1` when Bazarr+ and FlareSolverr share a Docker network (the Compose default below), or `http://localhost:8191/v1` if you run Bazarr+ with host networking (in which case also publish FlareSolverr's `8191:8191` port, or run it on host networking too, so 8191 is reachable on the host loopback).
 
 ### Provider Priority
 Upstream Bazarr queries all subtitle providers simultaneously and picks the highest-scored result. There's no way to prefer one provider over another. This has been [requested for 6 years](https://bazarr.featureupvote.com/suggestions/112323/provider-prioritization) (62 votes), but upstream rejected it as "won't happen," calling it a "major rework" that "would take months of development."
@@ -477,7 +477,7 @@ curl -s -X POST http://localhost:8191/v1 \
 docker logs flaresolverr
 ```
 
-Then confirm the plugin's **FlareSolverr URL** in Settings > Providers: `http://flaresolverr:8191/v1` when Bazarr+ and FlareSolverr share a Docker network, or `http://localhost:8191/v1` if Bazarr+ runs with host networking. A `Name or service not known` error means the `flaresolverr` hostname can't be resolved, which is what happens under host networking; switch the URL to `localhost`.
+Then confirm the plugin's **FlareSolverr URL** in Settings > Providers: `http://flaresolverr:8191/v1` when Bazarr+ and FlareSolverr share a Docker network, or `http://localhost:8191/v1` if Bazarr+ runs with host networking. A `Name or service not known` error means the `flaresolverr` hostname can't be resolved, which is what happens under host networking; switch the URL to `localhost`. If `localhost` then gives a connection error, FlareSolverr's port isn't reachable on the host: publish `8191:8191` on the FlareSolverr service or run it with host networking too.
 
 ### Common Issues
 
