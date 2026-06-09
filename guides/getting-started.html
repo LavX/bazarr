@@ -206,7 +206,7 @@
       </div>
 
       <div class="note">
-        <strong>OpenSubtitles.org:</strong> in v2.4 OpenSubtitles.org is a native <a href="provider-hub.html">Provider Hub</a> plugin you install from the Marketplace. It scrapes the site in-process, so there is no separate scraper container. The FlareSolverr service above is recommended: set its <code>/v1</code> URL (e.g. <code>http://flaresolverr:8191/v1</code>) in the plugin's <strong>FlareSolverr URL</strong> setting so it can solve Cloudflare challenges when needed.
+        <strong>OpenSubtitles.org:</strong> in v2.4 OpenSubtitles.org is a native <a href="provider-hub.html">Provider Hub</a> plugin you install from the Marketplace. It scrapes the site in-process, so there is no separate scraper container. The FlareSolverr service above is recommended: set its <code>/v1</code> URL (e.g. <code>http://flaresolverr:8191/v1</code>) in the plugin's <strong>FlareSolverr URL</strong> setting so it can solve Cloudflare challenges when needed. If you run Bazarr+ with host networking (<code>network_mode: host</code>), use <code>http://localhost:8191/v1</code> instead, since the <code>flaresolverr</code> hostname only resolves on a shared Docker network.
       </div>
 
       <h2 id="first-login">First login</h2>
