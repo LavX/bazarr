@@ -334,6 +334,12 @@ class TableBlacklistMovie(Base):
 class TableEpisodes(Base):
     __tablename__ = 'table_episodes'
 
+    # multi-instance additive columns (#156): nullable for now; FK, NOT NULL,
+    # and backfill land in later increments. ``id`` is the future canonical
+    # local id; ``series_id`` is the future local ref to table_shows.id.
+    id = mapped_column(Integer)
+    arr_instance_id = mapped_column(Integer)
+    series_id = mapped_column(Integer)
     absoluteEpisode = mapped_column(Integer)
     audio_codec = mapped_column(Text)
     audio_language = mapped_column(Text)
@@ -428,6 +434,11 @@ class TableLanguagesProfiles(Base):
 class TableMovies(Base):
     __tablename__ = 'table_movies'
 
+    # multi-instance additive columns (#156): nullable for now; FK, NOT NULL,
+    # and backfill land in later increments. ``id`` is the future canonical
+    # local id (radarrId stays the PK until the Phase 8 cutover).
+    id = mapped_column(Integer)
+    arr_instance_id = mapped_column(Integer)
     alternativeTitles = mapped_column(Text)
     audio_codec = mapped_column(Text)
     audio_language = mapped_column(Text)
@@ -508,6 +519,11 @@ class TableSettingsNotifier(Base):
 class TableShows(Base):
     __tablename__ = 'table_shows'
 
+    # multi-instance additive columns (#156): nullable for now; FK, NOT NULL,
+    # and backfill land in later increments. ``id`` is the future canonical
+    # local id (sonarrSeriesId stays the PK until the Phase 8 cutover).
+    id = mapped_column(Integer)
+    arr_instance_id = mapped_column(Integer)
     tvdbId = mapped_column(Integer)
     alternativeTitles = mapped_column(Text)
     audio_language = mapped_column(Text)
