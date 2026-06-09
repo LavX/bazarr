@@ -286,6 +286,13 @@ def list_missing_subtitles_movies(no=None):
                     lang = subtitles[0]
                     forced = False
                     hi = False
+                    # A combined artifact (e.g. en:combined-hu) is a bilingual
+                    # stacked file, not a standalone subtitle of its base language,
+                    # so it must not count toward fulfilling that language. Without
+                    # this, removing the plain en while a combined remains left
+                    # Bazarr believing en was satisfied and it stopped searching.
+                    if any(p.startswith('combined-') for p in subtitles[1:]):
+                        continue
                     if len(subtitles) > 1:
                         if subtitles[1] == 'forced':
                             forced = True

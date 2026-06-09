@@ -221,7 +221,14 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
                 skipped += 1
                 continue
 
-            if action == 'sync' and is_sync_engine_output(mapped_sub_path):
+            # Never use a generated sync output or a combined artifact as a source.
+            # For translate they would queue a duplicate job targeting the same
+            # output language/file as the real subtitle (e.g. en + en:sync-ffsubsync
+            # both translate-from en), causing duplicate work and overwrite races; a
+            # sync output also cannot be meaningfully re-synced.
+            modifiers = [p.lower() for p in lang_string.split(':')[1:]]
+            is_combined = any(m.startswith('combined-') for m in modifiers)
+            if action in ('sync', 'translate') and (is_sync_engine_output(mapped_sub_path) or is_combined):
                 skipped += 1
                 continue
 
@@ -312,7 +319,14 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
                 skipped += 1
                 continue
 
-            if action == 'sync' and is_sync_engine_output(mapped_sub_path):
+            # Never use a generated sync output or a combined artifact as a source.
+            # For translate they would queue a duplicate job targeting the same
+            # output language/file as the real subtitle (e.g. en + en:sync-ffsubsync
+            # both translate-from en), causing duplicate work and overwrite races; a
+            # sync output also cannot be meaningfully re-synced.
+            modifiers = [p.lower() for p in lang_string.split(':')[1:]]
+            is_combined = any(m.startswith('combined-') for m in modifiers)
+            if action in ('sync', 'translate') and (is_sync_engine_output(mapped_sub_path) or is_combined):
                 skipped += 1
                 continue
 

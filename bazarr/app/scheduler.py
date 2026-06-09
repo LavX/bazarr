@@ -84,6 +84,18 @@ def _release_session_after_job(event):
         logging.exception("BAZARR failed to release database session after job")
 
 
+def _compat_usage_prune():
+    """Prune Distribution Hub usage rows older than the configured retention so
+    compat_usage cannot grow unbounded. No-op when the endpoint is disabled."""
+    try:
+        if not bool(settings.compat_endpoint.enabled):
+            return
+        from compat import meter
+        meter.prune(int(settings.compat_endpoint.usage_retention_days))
+    except Exception:
+        logging.exception("BAZARR failed to prune Distribution Hub usage table")
+
+
 class Scheduler:
 
     def __init__(self):
@@ -121,6 +133,7 @@ class Scheduler:
 
         # configure all tasks
         self.__cache_cleanup_task()
+        self.__compat_usage_prune_task()
         self.__check_health_task()
         self.update_configurable_tasks()
 
@@ -243,6 +256,11 @@ class Scheduler:
         self.aps_scheduler.add_job(cache_maintenance, 'interval', hours=24, max_instances=1, coalesce=True,
                                    misfire_grace_time=15, id='cache_cleanup', name='Cache Maintenance',
                                    kwargs=dict(wait_for_completion=True))
+
+    def __compat_usage_prune_task(self):
+        self.aps_scheduler.add_job(_compat_usage_prune, 'interval', hours=24, max_instances=1, coalesce=True,
+                                   misfire_grace_time=60, id='compat_usage_prune',
+                                   name='Distribution Hub Usage Cleanup')
 
     def __check_health_task(self):
         self.aps_scheduler.add_job(check_health, 'interval', hours=6, max_instances=1, coalesce=True,

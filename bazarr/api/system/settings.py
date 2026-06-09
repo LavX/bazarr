@@ -14,6 +14,7 @@ from app.config import settings, save_settings, get_settings
 from app.scheduler import scheduler  # noqa: F401
 from subtitles.indexer.series import list_missing_subtitles
 from subtitles.indexer.movies import list_missing_subtitles_movies
+from subtitles.language_profiles import validate_combine_rule, CombineRuleError
 
 from ..utils import authenticate
 
@@ -61,7 +62,17 @@ class SystemSettings(Resource):
                 .all()
             existing = [x.profileId for x in existing_ids]
             for item in json.loads(languages_profiles):
-                combine_value = json.dumps(item['combine']) if item.get('combine') else None
+                # Validate the combine rule at save time and reject it, instead of
+                # storing an invalid rule that get_combine_rule then silently drops
+                # (returns None), leaving the profile looking configured while
+                # auto-combine never runs.
+                combine_rule = item.get('combine')
+                if combine_rule:
+                    try:
+                        validate_combine_rule(combine_rule, item.get('items') or [])
+                    except CombineRuleError as error:
+                        return f"Invalid combine rule for profile '{item.get('name')}': {error}", 400
+                combine_value = json.dumps(combine_rule) if combine_rule else None
                 if item['profileId'] in existing:
                     # Update existing profiles
                     database.execute(

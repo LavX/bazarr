@@ -14,7 +14,7 @@ import zipfile
 import requests
 
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
@@ -1055,8 +1055,16 @@ def _safe_extract_zip(archive_bytes: bytes, dest: Path) -> None:
             name = member.filename
             if not name or name.endswith("/"):
                 continue
-            target = (dest / name).resolve()
-            if target != dest_root and dest_root not in target.parents:
+            # Reject absolute paths and any traversal before joining, then confirm
+            # the resolved target stays under dest_root (zip-slip containment that
+            # CodeQL recognizes as a barrier on the member name).
+            member_path = PurePosixPath(name)
+            if member_path.is_absolute() or ".." in member_path.parts:
+                raise ProviderHubInstallError(f"unsafe path in package: {name}")
+            target = dest_root.joinpath(*member_path.parts).resolve()
+            try:
+                target.relative_to(dest_root)
+            except ValueError:
                 raise ProviderHubInstallError(f"unsafe path in package: {name}")
             target.parent.mkdir(parents=True, exist_ok=True)
             try:

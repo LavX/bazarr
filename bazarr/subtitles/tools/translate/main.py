@@ -80,6 +80,23 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         # Call postprocess_subtitles after translation (handles chmod, re-indexing, events)
         postprocess_subtitles(dest_srt_file, video_path, media_type, metadata, sonarr_episode_id if media_type == 'episode' else radarr_id)
 
+        # The translated file is now on disk. The download-time combine ran before
+        # this async translation finished (so it skipped, source missing); build or
+        # refresh the combined output now if the profile rule's sources are all
+        # present. try_combine_for_video is best-effort and _profile_for accepts the
+        # 'episode'/'movies'/'movie' media_type this path uses.
+        try:
+            from subtitles.tools.combine.main import try_combine_for_video
+            try_combine_for_video(
+                video_path=video_path,
+                media_type=media_type,
+                sonarr_series_id=sonarr_series_id,
+                sonarr_episode_id=sonarr_episode_id,
+                radarr_id=radarr_id,
+            )
+        except Exception:
+            logging.exception("BAZARR combine-after-translate failed for %s", video_path)
+
         # Get current job name (which batch.py already set with title) and mark as done
         current_name = jobs_queue.get_job_name(job_id)
         if current_name and 'Translating' in current_name:

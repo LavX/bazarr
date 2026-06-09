@@ -9,6 +9,21 @@ import pysubs2
 from .aligner import detect_mode
 
 
+def _load_subtitle(path):
+    """Load a subtitle, detecting its on-disk encoding rather than assuming UTF-8.
+    Bazarr indexes legacy-encoded externals (Windows-1250/1252, Latin-1) elsewhere,
+    and a hard utf-8 load raised UnicodeDecodeError and failed the whole combine."""
+    encoding = "utf-8"
+    try:
+        from charset_normalizer import from_path
+        match = from_path(path).best()
+        if match and match.encoding:
+            encoding = match.encoding
+    except Exception:
+        logging.debug("BAZARR combine could not detect encoding for %s, using utf-8", path)
+    return pysubs2.load(path, encoding=encoding)
+
+
 def compose(primary_path, secondary_paths, format):
     """Compose primary + 1-2 secondaries into one SRT or ASS file.
 
@@ -20,8 +35,8 @@ def compose(primary_path, secondary_paths, format):
     if not secondary_paths or len(secondary_paths) > 2:
         raise ValueError("secondary_paths must have 1 or 2 entries")
 
-    primary = pysubs2.load(primary_path, encoding="utf-8")
-    secondaries = [pysubs2.load(p, encoding="utf-8") for p in secondary_paths]
+    primary = _load_subtitle(primary_path)
+    secondaries = [_load_subtitle(p) for p in secondary_paths]
 
     modes = []
     aligned_secondaries = []
