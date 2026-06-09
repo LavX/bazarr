@@ -167,7 +167,7 @@ image: ghcr.io/lavx/bazarr:latest</code></pre>
           </div>
         </li>
         <li>
-          <strong>Add the companion services.</strong> The only companion service recommended now is FlareSolverr, plus the optional AI translator. OpenSubtitles.org is a native <a href="provider-hub.html">Provider Hub</a> plugin in v2.4: install it from the Marketplace, then point its <strong>FlareSolverr URL</strong> setting at the flaresolverr service below (<code>http://flaresolverr:8191/v1</code> on a shared Docker network, or <code>http://localhost:8191/v1</code> if Bazarr+ runs with host networking). There is no separate scraper container anymore.
+          <strong>Add the companion services.</strong> The only companion service recommended now is FlareSolverr, plus the optional AI translator. OpenSubtitles.org is a native <a href="provider-hub.html">Provider Hub</a> plugin in v2.4: install it from the Marketplace, then point its <strong>FlareSolverr URL</strong> setting at the flaresolverr service below (<code>http://flaresolverr:8191/v1</code> on a shared Docker network, or <code>http://localhost:8191/v1</code> with host networking, in which case also publish FlareSolverr's <code>8191:8191</code> port or run it on host networking too so 8191 is reachable on the host). There is no separate scraper container anymore.
           <div class="code-wrap" style="margin-top: 12px;">
             <div class="code-header">
               <span class="code-lang">docker-compose.yml additions</span>
@@ -175,8 +175,9 @@ image: ghcr.io/lavx/bazarr:latest</code></pre>
             </div>
             <pre id="migration-scraper-code"><code># Add these services:
   # Recommended for the OpenSubtitles.org and many other plugins. Set this container's
-  # /v1 URL (http://flaresolverr:8191/v1) in the plugin's FlareSolverr URL
-  # (use http://localhost:8191/v1 instead if Bazarr runs with host networking).
+  # /v1 URL (http://flaresolverr:8191/v1) in the plugin's FlareSolverr URL. With host
+  # networking use http://localhost:8191/v1 and add a "8191:8191" ports mapping below
+  # (or run flaresolverr on host networking too) so 8191 is reachable on the host.
   flaresolverr:
     image: ghcr.io/flaresolverr/flaresolverr:latest
     container_name: flaresolverr
