@@ -202,6 +202,13 @@
 
       <p>This is useful for spot-checking quality or handling files that need special attention, like subtitles with heavy slang or technical terminology.</p>
 
+      <h2 id="translate-from-embedded">Translate from an embedded track <span class="badge-new" aria-label="New in v2.4">v2.4</span></h2>
+      <p>As of v2.4 you can translate directly from an embedded (in-container) subtitle track, without exporting it first. In the subtitle table, an embedded track shows a 100% source score and a translate-only action. Choosing it extracts the text stream with ffmpeg and runs the configured translator against it.</p>
+
+      <div class="note">
+        <strong>Text tracks only.</strong> Embedded translation works on text-based tracks. Bitmap tracks (PGS, VobSub) carry no extractable text and are rejected with a clear error. For how embedded tracks are scored and recorded in history, see <a href="subtitle-processing.html">Subtitle processing</a>.
+      </div>
+
       <h2 id="cost-estimates">Cost estimates</h2>
       <p>Translation costs depend entirely on the model and subtitle length. Here are rough estimates for a typical 90-minute movie (~1,500 subtitle lines):</p>
 

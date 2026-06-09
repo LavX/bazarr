@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Provider Hub - Bazarr+ Guides</title>
-  <meta name="description" content="Install and manage Provider Hub subtitle provider plugins in Bazarr+ v2.3.">
+  <meta name="description" content="Provider Hub in Bazarr+ v2.4.0: the catalog is now the canonical provider source. Catalog plugins replace shipped built-ins and Bazarr+ auto-installs them on startup.">
   <link rel="canonical" href="https://lavx.github.io/bazarr/guides/provider-hub.html">
 
   <!-- Open Graph -->
   <meta property="og:type" content="website">
   <meta property="og:title" content="Provider Hub - Bazarr+ Guides">
-  <meta property="og:description" content="Install and manage Provider Hub subtitle provider plugins in Bazarr+ v2.3.">
+  <meta property="og:description" content="Provider Hub in Bazarr+ v2.4.0: the catalog is now the canonical provider source. Catalog plugins replace shipped built-ins and Bazarr+ auto-installs them on startup.">
   <meta property="og:url" content="https://lavx.github.io/bazarr/guides/provider-hub.html">
   <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
   <meta property="og:image:width" content="1200">
@@ -22,7 +22,7 @@
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Provider Hub - Bazarr+ Guides">
-  <meta name="twitter:description" content="Install and manage Provider Hub subtitle provider plugins in Bazarr+ v2.3.">
+  <meta name="twitter:description" content="Provider Hub in Bazarr+ v2.4.0: the catalog is now the canonical provider source. Catalog plugins replace shipped built-ins and Bazarr+ auto-installs them on startup.">
   <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
 
   <!-- Geist font: self-hosted preload -->
@@ -112,44 +112,129 @@
     <nav class="breadcrumb" aria-label="Breadcrumb">
       <a href="../">Home</a><span class="sep">/</span><a href="./">Guides</a><span class="sep">/</span><span>Provider Hub</span>
     </nav>
-    <h1>Provider Hub <span class="badge-new" aria-label="New in v2.3">v2.3</span></h1>
+    <h1>Provider Hub <span class="badge-new" aria-label="New in v2.4">v2.4</span></h1>
 
     <article class="content">
 
-      <p class="lede">Bazarr+ v2.3.0 (Keystone) introduces Provider Hub: a plugin foundation for subtitle providers. It lets you install providers from catalog sources while Bazarr+ keeps third-party code staged, verified, and isolated.</p>
+      <p class="lede">In Bazarr+ v2.4.0 (Prism) the catalog becomes the canonical source for subtitle providers. Catalog plugins now install under the same id as the shipped built-in and replace it, and on startup Bazarr+ auto-installs the official-catalog version of every provider you have enabled. You manage all of this from the <strong>Subtitle Hub</strong> page in the left navigation.</p>
 
-      <h2 id="what-provider-hub-adds">What Provider Hub adds</h2>
+      <h2 id="whats-new">What's new in 2.4.0</h2>
       <ul>
-        <li><strong>Marketplace</strong>: browse installable subtitle provider plugins from Settings &gt; Providers.</li>
-        <li><strong>Catalog sources</strong>: use the official catalog source or add community GitHub catalog sources.</li>
-        <li><strong>Trust labels</strong>: see whether a provider came from the official source or an untrusted custom source.</li>
-        <li><strong>Staged lifecycle</strong>: installs, updates, and active removals wait for restart before they become live.</li>
-        <li><strong>Worker validation</strong>: plugin code is imported and smoke-tested in a worker before Bazarr+ stages it.</li>
-        <li><strong>Activity log</strong>: catalog refreshes, installs, updates, tests, removals, durations, versions, and errors are visible to operators.</li>
+        <li><strong>Built-in replacement.</strong> A trusted official-catalog plugin (for example <code>subdl</code>, <code>opensubtitles</code>, <code>embeddedsubtitles</code>) installs under the same id as the shipped built-in and overwrites it in the registry. You get one card per provider, marked <strong>PLUGIN</strong>, not a duplicate.</li>
+        <li><strong>Startup auto-install and shadow.</strong> On every startup Bazarr+ reconciles your enabled providers against the official catalog. For each enabled provider still served by a shipped built-in that the catalog offers, it installs the catalog version and shadows the built-in. This is the migration bridge toward an all-catalog provider set.</li>
+        <li><strong>"Installing providers" startup stage.</strong> The startup checklist ("Bazarr+ is starting up") shows an <strong>Installing providers</strong> stage while this work runs.</li>
+        <li><strong>Local package installs.</strong> You can install a provider from a local <code>.zip</code> package. Local packages are always treated as untrusted and can never shadow a built-in.</li>
+        <li><strong>Config carries over.</strong> Because the plugin reuses the built-in id, it reads the same <code>settings.&lt;id&gt;</code> section, so credentials, enabled state, priority, and language exclusions move to the plugin automatically.</li>
       </ul>
 
-      <h2 id="installing-a-provider">Installing a provider</h2>
-      <ol class="steps">
-        <li>Open <strong>Settings &gt; Providers</strong>.</li>
-        <li>Open the <strong>Marketplace</strong> tab.</li>
-        <li>Refresh the official catalog source if the list is empty or stale.</li>
-        <li>Review the provider card, including source, trust label, version, supported media, and languages.</li>
-        <li>Click <strong>Install</strong>. Bazarr+ downloads the pinned bundle, verifies hashes, installs dependencies into an isolated environment, and validates the worker.</li>
-        <li>Restart Bazarr+ when the staged-change banner appears.</li>
-        <li>After restart, add the installed plugin to the enabled provider list and save settings.</li>
-      </ol>
+      <div class="note">
+        <strong>The direction of travel.</strong> Shipped built-in providers are being phased out in favour of catalog plugins. In 2.4.0 the auto-install bridge does this for you on startup, so your enabled providers converge on their catalog versions without manual steps.
+      </div>
+
+      <h2 id="startup-auto-install">How startup auto-install works</h2>
+      <p>Auto-install runs once per startup, inside the init sequence, before providers are activated and registered. You do not trigger it, and there is nothing to click. It is the engine behind the <strong>Installing providers</strong> stage on the startup screen.</p>
+      <p>Here is exactly what it does and what bounds it:</p>
+      <ul>
+        <li><strong>Force-refreshes only the official catalog source</strong> so a newly published provider id is picked up.</li>
+        <li><strong>Runs only when there is work.</strong> If an enabled provider is not yet installed from the catalog, it installs it. If everything is already installed, it does nothing.</li>
+        <li><strong>Idempotent.</strong> It skips providers that are already installed and retries previously failed rows on a later boot.</li>
+        <li><strong>Bounded by a 180 second wall-clock budget</strong> shared across bundle fetch and virtual environment build, so a slow or stuck install can never block boot.</li>
+        <li><strong>Never blocks or crashes startup.</strong> If a catalog is unreachable, Bazarr+ logs it and continues. The shipped built-in keeps serving until its plugin is ready.</li>
+      </ul>
+      <p>Your provider configuration is preserved through this process. The plugin reuses the built-in id, so it reads the same <code>settings.&lt;id&gt;</code> config section. Credentials such as a SubDL API key, the enabled state, priority order, and language exclusions all carry over automatically. The only values that do not auto-carry are keys a plugin deliberately renamed.</p>
 
       <div class="note">
-        <strong>Existing providers keep working.</strong> Provider Hub is additive. Shipped providers and existing provider settings continue to work after upgrade.
+        <strong>Kill-switch.</strong> To disable startup auto-install entirely, set the environment variable <code>BAZARR_DISABLE_PROVIDER_AUTOINSTALL=1</code>. Bazarr+ then leaves your enabled built-ins as they are and skips the reconcile step. Installs you perform yourself from the Marketplace still work.
+      </div>
+
+      <div class="code-wrap">
+        <div class="code-header">
+          <span class="code-lang">Disable auto-install</span>
+          <button class="copy-btn" data-copy="BAZARR_DISABLE_PROVIDER_AUTOINSTALL=1" aria-label="Copy environment variable">Copy</button>
+        </div>
+        <pre><code>BAZARR_DISABLE_PROVIDER_AUTOINSTALL=1</code></pre>
+      </div>
+
+      <h2 id="subtitle-hub-tabs">The Subtitle Hub tabs</h2>
+      <p>Open <strong>Subtitle Hub</strong> from the left navigation (route <code>/subtitle-hub</code>). The page has four tabs: My Providers, Marketplace, Updates, and Activity.</p>
+
+      <h3 id="my-providers">My Providers</h3>
+      <p>This is the enabled search providers grid. Add shipped providers or active Provider Hub plugins from the same <code>+</code> button. The <strong>Provider Priority</strong> toggle queries providers in priority order and stops at the minimum score. Each enabled provider is a card numbered by priority. Catalog-backed providers are marked <strong>PLUGIN</strong> with their language count and signup type (NO SIGNUP, API KEY, or ACCOUNT). The same tab holds the Anti-captcha and Integrations (embedded and metadata) sections. When no provider is enabled, the empty state nudges you toward the Marketplace but keeps the <code>+</code> add control.</p>
+
+      <figure class="screenshot-frame">
+        <div class="screenshot-chrome" aria-hidden="true">
+          <span class="chrome-dot"></span><span class="chrome-dot"></span><span class="chrome-dot"></span>
+          <span class="chrome-title">Subtitle Hub - My Providers</span>
+        </div>
+        <picture>
+          <source type="image/webp" srcset="../screenshots/v2.4.0/provider-hub-my-providers.webp">
+          <img src="../screenshots/v2.4.0/provider-hub-my-providers.png" alt="Subtitle Hub My Providers tab showing the enabled search providers grid, where every enabled provider appears as a numbered PLUGIN card from startup auto-install, with a staged change restart banner at the top" loading="lazy" decoding="async" width="2864" height="2600">
+        </picture>
+      </figure>
+
+      <h3 id="marketplace">Marketplace</h3>
+      <p>This tab browses the catalog. It has a search box, an All / Trusted / Community filter, and a card for each catalog provider with <strong>Trusted</strong>, <strong>Active</strong>, and <strong>Installed</strong> badges plus an <strong>Install</strong> button. Manage installed plugins (Test connection, Uninstall) from each card's actions menu. You add and configure catalog sources here too.</p>
+
+      <figure class="screenshot-frame">
+        <div class="screenshot-chrome" aria-hidden="true">
+          <span class="chrome-dot"></span><span class="chrome-dot"></span><span class="chrome-dot"></span>
+          <span class="chrome-title">Marketplace</span>
+        </div>
+        <picture>
+          <source type="image/webp" srcset="../screenshots/v2.4.0/provider-hub-marketplace.webp">
+          <img src="../screenshots/v2.4.0/provider-hub-marketplace.png" alt="Subtitle Hub Marketplace tab browsing the catalog, with provider cards showing Trusted, Active, and Installed badges, a search box, an All Trusted Community filter, and Install buttons" loading="lazy" decoding="async" width="2864" height="2600">
+        </picture>
+      </figure>
+
+      <h3 id="updates">Updates</h3>
+      <p>The Updates tab lists pending plugin updates and pending-restart items. When a plugin has a newer catalog version, or when an install, update, or removal is staged and waiting for restart, it shows here.</p>
+
+      <figure class="screenshot-frame">
+        <div class="screenshot-chrome" aria-hidden="true">
+          <span class="chrome-dot"></span><span class="chrome-dot"></span><span class="chrome-dot"></span>
+          <span class="chrome-title">Updates</span>
+        </div>
+        <picture>
+          <source type="image/webp" srcset="../screenshots/v2.4.0/provider-hub-updates.webp">
+          <img src="../screenshots/v2.4.0/provider-hub-updates.png" alt="Subtitle Hub Updates tab listing pending plugin updates and staged changes that are waiting for a restart to apply" loading="lazy" decoding="async" width="2864" height="1800">
+        </picture>
+      </figure>
+
+      <h3 id="activity">Activity</h3>
+      <p>The Activity tab records catalog refreshes, installs, updates, tests, and removals, each with durations, versions, and any errors. When something does not behave as expected, this is where you look first.</p>
+
+      <h2 id="installing-from-marketplace">Installing a provider from the Marketplace</h2>
+      <p>Most providers reach you automatically through startup auto-install. To add one yourself, or to install a provider you have not enabled before:</p>
+      <ol class="steps">
+        <li>Open <strong>Subtitle Hub</strong> and switch to the <strong>Marketplace</strong> tab.</li>
+        <li>Refresh the official catalog source if the list is empty or stale.</li>
+        <li>Use the search box and the All / Trusted / Community filter to find the provider. Review its card: trust label, version, supported media, and languages.</li>
+        <li>Click <strong>Install</strong>. Bazarr+ downloads the pinned bundle, verifies hashes, installs dependencies into an isolated virtual environment, and smoke-tests the worker.</li>
+        <li>Restart Bazarr+ when the staged-change banner appears.</li>
+        <li>After restart, open <strong>My Providers</strong>, add the provider with the <code>+</code> button if it is not already there, and save settings.</li>
+      </ol>
+
+      <h2 id="installing-local-package">Installing a local package</h2>
+      <p>You can install a provider from a local <code>.zip</code> package instead of a catalog source. The install is tracked with origin <strong>local</strong>.</p>
+      <ol class="steps">
+        <li>Open the <strong>Marketplace</strong> tab and choose to install from a local package.</li>
+        <li>Select the <code>.zip</code> file. Bazarr+ verifies, dependency-installs, and smoke-tests it the same way it does a catalog install.</li>
+        <li>Restart Bazarr+ when the staged-change banner appears.</li>
+      </ol>
+      <div class="note">
+        <strong>Local packages are always untrusted.</strong> A local <code>.zip</code> install can never shadow or replace a built-in provider. Only trusted official-catalog entries are allowed to take over a built-in id.
       </div>
 
       <h2 id="sources-and-trust">Sources and trust</h2>
-      <p>Bazarr+ ships with an official Provider Hub catalog source. Community sources can be added as GitHub catalog URLs, but Bazarr+ stores custom sources as untrusted even if a caller tries to mark them trusted.</p>
-      <p>That does not block community plugins. It keeps the trust signal honest so operators can tell official catalog entries from custom source entries before installing code.</p>
+      <p>Bazarr+ ships with the official catalog source (<a href="https://github.com/LavX/bazarr-provider-catalog" target="_blank" rel="noopener">LavX/bazarr-provider-catalog</a>). You can add community GitHub catalog sources, but Bazarr+ stores custom sources as untrusted even if a caller tries to mark them trusted.</p>
+      <p>Only trusted official-catalog entries are allowed to replace a built-in, which is the migration allow-list. Untrusted custom-source plugins and local packages can never shadow a built-in. This does not block community plugins, it keeps the trust signal honest so you can tell official entries from custom ones before installing code.</p>
+      <div class="note">
+        <strong>Operational gotcha.</strong> The official source can carry a <code>dev_ref</code> override that pins it to a specific branch. A stale <code>dev_ref</code> hides catalog updates, because the source keeps reading the old branch. If new catalog providers are not appearing, check whether a <code>dev_ref</code> override is pinning the official source.
+      </div>
 
-      <h2 id="restart-lifecycle">Restart lifecycle</h2>
-      <p>Provider Hub does not hot-reload Python provider modules. Live unload and reload of provider code is risky when third-party dependencies are involved. Bazarr+ keeps the currently active provider running until restart, then promotes or removes staged plugins during startup.</p>
-      <p>If you see a pending restart banner, the change is staged correctly. Restart Bazarr+ to make it active.</p>
+      <h2 id="staged-lifecycle">Staged lifecycle and restart</h2>
+      <p>Provider Hub does not hot-reload Python provider modules, because live unload and reload of provider code is risky when third-party dependencies are involved. Installs, updates, and removals are staged and applied on restart. When a change is staged you see a banner: "a Provider Hub change is staged. Restart Bazarr+ to apply it."</p>
+      <p>Before staging, provider code is hash-verified, dependency-installed into an isolated virtual environment, and smoke-tested in a worker. Bazarr+ keeps the currently active provider running until restart, then promotes or removes staged plugins during startup. A heavy provider with large dependencies installs within the 180 second budget during the <strong>Installing providers</strong> stage, and the built-in keeps serving until the plugin activates.</p>
 
       <h2 id="catalog-and-sdk">Catalog and SDK</h2>
       <p>The official catalog lives at <a href="https://github.com/LavX/bazarr-provider-catalog" target="_blank" rel="noopener">LavX/bazarr-provider-catalog</a>. It contains the catalog manifest, provider packages, SDK tooling, and tests for provider authors.</p>
@@ -167,20 +252,21 @@ python3 -B -m sdk build-catalog
 python3 -B -m sdk smoke-test</code></pre>
       </div>
 
-      <p>Provider packages must declare a manifest, pinned files, SHA-256 hashes, bundle hash, entry module, entry class, supported media, languages, and exact hash-checked dependencies.</p>
-
-      <h2 id="first-catalog-provider">First catalog provider</h2>
-      <p>SubtitleCat is the first real Provider Hub catalog provider. It targets the official catalog and supports movie and episode search without a login, broad language coverage, optional cached machine-translated subtitles, request delay control, and source page links in provider payloads.</p>
+      <p>Provider packages must declare a manifest, pinned files, SHA-256 hashes, bundle hash, entry module, entry class, supported media, languages, and exact hash-checked dependencies. To replace a built-in, a package must publish under that built-in's id in the trusted official catalog.</p>
 
       <h2 id="troubleshooting">Troubleshooting</h2>
-      <p><strong>Marketplace is empty.</strong> Refresh the official source under Settings &gt; Providers. If you use a custom source, confirm the GitHub URL and branch are reachable.</p>
-      <p><strong>Provider installed but does not run.</strong> Check for the pending restart banner. Active providers are promoted during startup, not while Python provider code is already loaded.</p>
-      <p><strong>Install failed.</strong> Open the Activity tab. Hash mismatches, missing files, dependency failures, worker import errors, and smoke-test failures are recorded there.</p>
-      <p><strong>Custom source looks untrusted.</strong> That is expected. Custom catalog sources are intentionally labeled untrusted so operators can distinguish them from the official source.</p>
+      <p><strong>Marketplace is empty.</strong> Refresh the official source from the Marketplace tab. If you use a custom source, confirm the GitHub URL and branch are reachable.</p>
+      <p><strong>Provider installed but does not run.</strong> Check for the staged-change banner. Staged plugins are promoted during startup, not while Python provider code is already loaded. Restart Bazarr+ to apply.</p>
+      <p><strong>A newly published catalog provider is not appearing.</strong> Auto-install runs on startup only. A freshly published catalog change needs a restart to be picked up. Also confirm a stale <code>dev_ref</code> is not pinning the official source to an old branch.</p>
+      <p><strong>Install failed.</strong> Open the <strong>Activity</strong> tab. Hash mismatches, missing files, dependency failures, worker import errors, and smoke-test failures are recorded there. Auto-install retries previously failed rows on a later boot.</p>
+      <p><strong>Duplicate provider cards.</strong> A pre-2.4 install that used a different plugin id can briefly show a duplicate next to the canonical built-in id. Uninstall the old one. Startup auto-install brings back the canonical provider under the built-in id.</p>
+      <p><strong>Auto-install is taking too long or you want it off.</strong> Set <code>BAZARR_DISABLE_PROVIDER_AUTOINSTALL=1</code> to skip the startup reconcile. The 180 second budget already prevents auto-install from blocking boot, so this is for operators who want to manage providers manually.</p>
+      <p><strong>Custom source looks untrusted.</strong> That is expected. Custom catalog sources are intentionally labeled untrusted so you can distinguish them from the official source, and they cannot replace a built-in.</p>
 
       <h2 id="next-steps">Next steps</h2>
       <ul>
         <li><a href="getting-started.html">Getting Started</a> if you have not installed Bazarr+ yet</li>
+        <li><a href="distribution-hub.html">Distribution Hub</a> to expose your providers through the multi-tenant API</li>
         <li><a href="external-integration.html">External Integration</a> for Jellyfin and VLSub clients</li>
         <li><a href="migration.html">Migration from upstream</a> if you are switching from stock Bazarr</li>
       </ul>
