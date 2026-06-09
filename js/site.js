@@ -239,3 +239,28 @@ document.addEventListener('click', function (e) {
 
   update();
 })();
+
+/* GitHub star count.
+   Fetched directly from GitHub's own API at runtime, NOT rendered as a
+   third-party badge image. shields.io's /github/stars badge runs off a shared
+   GitHub token pool that is frequently rate-limited and then serves an error
+   image ("Unable to select next GitHub token from pool") - which is why the old
+   badge kept "breaking" no matter how the URL was tweaked. Here the button text
+   is static and always works; the count is appended only if the API responds.
+   Worst case (offline / unauthenticated 60-req/hr limit hit): no count, never a
+   broken badge. */
+(function () {
+  var el = document.getElementById('gh-stars');
+  if (!el || typeof window.fetch !== 'function') return;
+  fetch('https://api.github.com/repos/LavX/bazarr', {
+    headers: { 'Accept': 'application/vnd.github+json' }
+  })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (d) {
+      if (d && typeof d.stargazers_count === 'number') {
+        el.textContent = d.stargazers_count.toLocaleString();
+        el.hidden = false;
+      }
+    })
+    .catch(function () { /* offline or rate-limited: leave the button countless */ });
+})();

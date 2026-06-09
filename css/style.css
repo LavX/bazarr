@@ -310,6 +310,16 @@ section:nth-child(even) {
   border-color: rgba(255,255,255,0.25);
   background: rgba(255,255,255,0.06);
 }
+.btn .gh-icon { flex-shrink: 0; }
+/* GitHub star count: populated client-side from GitHub's own API (see site.js).
+   Hidden until/unless the count loads, so a failed fetch never shows anything
+   broken - the button just reads "Star on GitHub". */
+.btn .gh-stars {
+  font-weight: 700;
+  color: var(--amber-text);
+  font-variant-numeric: tabular-nums;
+}
+.btn .gh-stars::before { content: "\2605\00a0"; }
 
 /* ===========================
    COMPARISON TABLE
