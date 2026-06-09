@@ -50,7 +50,18 @@ class HubWorkerSubtitle(Subtitle):
         return self.worker_id
 
     def get_matches(self, video):
-        matches = set(self.matches or set())
+        # The worker sends a lean match set (self.matches); the release-info matches are
+        # computed here, in the host, against the real video. Derive from a frozen base so
+        # repeat calls are idempotent, then PERSIST the augmented set back onto self.matches.
+        # download_best_subtitles reuses the cached subtitle.matches instead of re-calling
+        # get_matches, so without this write it would score hub subtitles on the lean set
+        # only - under-scoring them and disagreeing with the listing phase that scores via
+        # get_matches (which mis-fires the 'language satisfied' early-exit).
+        base = getattr(self, "_worker_matches", None)
+        if base is None:
+            base = set(self.matches or set())
+            self._worker_matches = base
+        matches = set(base)
         release_info = getattr(self, "release_info", None)
         if release_info:
             try:
@@ -61,6 +72,7 @@ class HubWorkerSubtitle(Subtitle):
                 logger.debug(
                     "provider_hub: release-based match update failed", exc_info=True
                 )
+        self.matches = matches
         return matches
 
 

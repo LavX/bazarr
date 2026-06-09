@@ -316,6 +316,51 @@ def test_worker_protocol_round_trips_language_video_and_download_payload():
     assert candidate.content == content
 
 
+def test_hub_subtitle_release_matches_persist_for_download_scoring():
+    """Regression: the listing phase (list_subtitles_prioritized) scores a candidate
+    via get_matches(), which augments the worker's lean matches with release-info
+    matches; the download phase (download_best_subtitles) instead reuses the cached
+    subtitle.matches. If get_matches doesn't persist the augmented set, the two phases
+    score the SAME subtitle differently: listing sees the release matches and may flag
+    the language 'satisfied' (early-exit), while download re-reads the lean cache,
+    under-scores the subtitle, and rejects it. Net effect: search stops on a candidate
+    download then discards. get_matches must persist the augmented matches so the cache
+    download reads matches what listing scored."""
+    from provider_hub.protocol import candidate_from_worker, language_to_payload
+
+    movie = Movie(
+        "/media/Clue.1985.1080p.BluRay.Remux.AVC.DTS-HD.MA.mkv",
+        "Clue",
+        year=1985,
+        source="Blu-ray",
+        video_codec="H.264",
+        imdb_id="tt0088930",
+    )
+    candidate = candidate_from_worker(
+        provider_name="opensubtitles",
+        payload={
+            "provider": "opensubtitles",
+            "id": "sub-clue",
+            "language": language_to_payload(Language("hun")),
+            "release_info": "Clue 1985 720p BluRay x264 EbP",
+            "matches": ["title", "year", "imdb_id"],  # lean worker-computed set
+            "provider_payload": {"provider": "opensubtitles", "schema": 1},
+        },
+    )
+    worker_matches = set(candidate.matches)
+
+    # Listing phase: get_matches augments the worker set with release-based matches.
+    listing_matches = candidate.get_matches(movie)
+    assert listing_matches > worker_matches, (
+        "release_info should add at least one match (e.g. source/video_codec); "
+        f"got {listing_matches} from base {worker_matches}"
+    )
+
+    # Download phase reads the cached candidate.matches. It MUST equal the set the
+    # listing phase scored, or the two phases disagree and the early-exit misfires.
+    assert candidate.matches == listing_matches
+
+
 def _hub_candidate(worker_id="sub-arch"):
     from provider_hub.protocol import candidate_from_worker, language_to_payload
 
