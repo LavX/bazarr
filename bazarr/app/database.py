@@ -10,7 +10,7 @@ import flask_migrate
 from dogpile.cache import make_region
 from datetime import datetime
 
-from sqlalchemy import create_engine, inspect, DateTime, ForeignKey, Index, Integer, LargeBinary, Text, func, text, BigInteger
+from sqlalchemy import create_engine, inspect, CheckConstraint, DateTime, ForeignKey, Index, Integer, LargeBinary, Text, func, text, BigInteger
 # importing here to be indirectly imported in other modules later
 from sqlalchemy import update, delete, select, func  # noqa: F401, F811
 from sqlalchemy.orm import scoped_session, sessionmaker, mapped_column, close_all_sessions, declarative_base
@@ -209,6 +209,62 @@ class TableAnnouncements(Base):
     timestamp = mapped_column(DateTime, nullable=False, default=datetime.now)
     hash = mapped_column(Text)
     text = mapped_column(Text)
+
+
+class TableArrInstances(Base):
+    # Multiple Sonarr/Radarr instances (#156). One Bazarr+ install can connect
+    # to several named Sonarr/Radarr instances - e.g. split libraries: TV,
+    # anime, 4K. Bazarr local IDs are canonical; upstream Sonarr/Radarr IDs
+    # become per-instance metadata scoped by arr_instance_id on owned rows.
+    #
+    # api_key holds an ENCRYPTED payload (secret_store.crypto.encrypt_secret,
+    # 'enc:v1:' marker), encrypted/decrypted at the ArrInstanceRepository
+    # boundary: arr_instances lives outside config.yaml and does not inherit
+    # its Fernet-at-rest encryption.
+    __tablename__ = 'arr_instances'
+    __table_args__ = (
+        CheckConstraint("kind IN ('sonarr', 'radarr')", name='ck_arr_instances_kind'),
+        CheckConstraint("enabled IN (0, 1)", name='ck_arr_instances_enabled'),
+        CheckConstraint("is_default IN (0, 1)", name='ck_arr_instances_is_default'),
+        CheckConstraint("is_default = 0 OR enabled = 1", name='ck_arr_instances_default_enabled'),
+        Index('ux_arr_instances_kind_stable_key', 'kind', 'stable_key', unique=True),
+        # At most one enabled default per kind. Partial unique index so disabled
+        # or non-default rows never collide. SQLite and PostgreSQL both honour
+        # the WHERE predicate; backends without partial-index support fall back
+        # to repository/API-level enforcement.
+        Index('ux_arr_instances_default_kind', 'kind', unique=True,
+              sqlite_where=text('is_default = 1 AND enabled = 1'),
+              postgresql_where=text('is_default = 1 AND enabled = 1')),
+    )
+
+    id = mapped_column(Integer, primary_key=True)
+    kind = mapped_column(Text, nullable=False)
+    stable_key = mapped_column(Text, nullable=False)
+    name = mapped_column(Text, nullable=False)
+    enabled = mapped_column(Integer, nullable=False, default=1)
+    is_default = mapped_column(Integer, nullable=False, default=0)
+    # connection - mirrors the scalar settings.sonarr / settings.radarr fields
+    ip = mapped_column(Text, nullable=False, default='127.0.0.1')
+    port = mapped_column(Integer, nullable=False)
+    base_url = mapped_column(Text, nullable=False, default='/')
+    ssl = mapped_column(Integer, nullable=False, default=0)
+    verify_ssl = mapped_column(Integer, nullable=False, default=0)
+    http_timeout = mapped_column(Integer, nullable=False, default=60)
+    api_key = mapped_column(Text, nullable=False, default='')  # encrypted at rest
+    # per-instance JSON config blobs
+    options = mapped_column(Text)        # sync / exclusion options
+    path_mappings = mapped_column(Text)  # per-instance remote->local path map
+    schedule = mapped_column(Text)       # full_update / sync cadence
+    # runtime status
+    status = mapped_column(Text)
+    last_error = mapped_column(Text)
+    last_sync_at = mapped_column(DateTime)
+    # timestamps
+    created_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+    updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+    def to_dict(self):
+        return {column.name: getattr(self, column.name) for column in self.__table__.columns}
 
 
 class TableCompatApiKeys(Base):
