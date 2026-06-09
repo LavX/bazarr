@@ -55,7 +55,7 @@ Bazarr+ uses its own versioning starting at v2.0.0, unrelated to upstream versio
 
 | Feature | Upstream Bazarr | Bazarr+ |
 |---------|-----------------|---------|
-| **Provider Hub (catalog plugins)** | Not available | Marketplace for installable subtitle provider plugins. Catalog sources, trust labels, staged activation, worker validation, isolated environments, activity log. Catalog plugins can replace shipped built-ins, and enabled built-ins auto-install from the official catalog on startup. Local `.zip` package installs supported. |
+| **Provider Hub (catalog plugins)** | Not available | Marketplace for installable subtitle provider plugins. Catalog sources, trust labels, staged activation, worker validation, isolated environments, activity log. Catalog plugins can replace shipped built-ins, and enabled built-ins can opt in to auto-install from the official catalog on startup (off by default). Local `.zip` package installs supported. |
 | **Distribution Hub (multi-tenant subtitle API)** | Not available | Multi-tenant control plane for the OpenSubtitles-compatible API. Named API keys, editable tiers, per-window metering and rate limits, per-key provider scoping. Two first-party clients: [Jellyfin plugin](https://github.com/LavX/jellyfin-plugin-bazarr-plus) and [VLSub Bazarr+](https://github.com/LavX/vlsub-bazarr-plus). |
 | **Combined subtitles (bilingual / trilingual)** | Not available | Composes existing on-disk subtitles into a single bilingual or trilingual SRT or ASS file, per language profile or on demand. Pure composition, never triggers translation. |
 | **Translate from embedded tracks** | Not available | Embedded (in-container) text tracks score at 100% source quality and can be translated directly. Bitmap tracks (PGS/VobSub) are rejected with a clear error. |
@@ -109,7 +109,7 @@ docker pull ghcr.io/lavx/ai-subtitle-translator:latest
 
 ### Option 3: Run without Docker
 
-Requires Python 3.12+ and Node.js 18+ (for building the frontend).
+Requires Python 3.14 and Node.js 18+ (for building the frontend).
 
 ```bash
 # Clone with submodules
@@ -164,7 +164,7 @@ Provider Hub supports the official [LavX/bazarr-provider-catalog](https://github
 
 - **Marketplace install flow**: browse provider cards, filter by source, see trust labels, install providers, test connections, uninstall plugins, and discover updates
 - **Built-in replacement**: a trusted catalog entry can reuse a built-in provider id and replace the shipped version, collapsing the built-in and its catalog mirror into a single provider card. Untrusted catalogs can never shadow a built-in
-- **Startup auto-install**: on startup Bazarr+ installs the official-catalog version of your enabled built-ins, with an "Installing providers" stage shown during boot
+- **Startup auto-install** (opt-in, off by default): when enabled, Bazarr+ installs the official-catalog version of your enabled built-ins on startup, with an "Installing providers" stage shown during boot. Manual Marketplace installs always work
 - **Local package installs**: upload a provider `.zip` from the Marketplace. It is extracted (zip-slip and zip-bomb guarded), manifest-validated, hash-verified, built into a venv, and smoke-tested. Local installs are always untrusted, never shadow a built-in, and are never overwritten by a catalog update
 - **Staged lifecycle**: installs, updates, and active removals are staged first, then promoted or removed during restart
 - **Safety boundary**: bundles are hash-checked, dependencies are exact and hash-pinned, provider files are fetched from pinned GitHub commits, and imports are worker-validated before activation
@@ -319,7 +319,7 @@ Upstream Bazarr ships two analytics systems that phone home to Google: a GA4 pro
 - **API key comparison**: `hmac.compare_digest()` for constant-time comparison (upstream uses Python `in` operator, which is timing-dependent)
 
 ### Python 3.14
-Dockerfile uses `python:3.14-slim-bookworm`. Upstream supports Python 3.8-3.13 and relies on third-party Docker images (LinuxServer.io, hotio). Bazarr+ builds and publishes its own multi-arch image to GHCR.
+Dockerfile uses `python:3.14-slim-trixie`. Upstream supports Python 3.8-3.13 and relies on third-party Docker images (LinuxServer.io, hotio). Bazarr+ builds and publishes its own multi-arch image to GHCR.
 
 </details>
 
@@ -467,8 +467,10 @@ The OpenSubtitles.org plugin no longer uses environment variables. Configure its
 The OpenSubtitles.org plugin scrapes in-process, so there is no scraper container to check. When searches fail with Cloudflare challenges, verify FlareSolverr.
 
 ```bash
-# Check if FlareSolverr is healthy
-curl http://localhost:8191/health
+# Check if FlareSolverr is responding (lists active sessions)
+curl -s -X POST http://localhost:8191/v1 \
+  -H "Content-Type: application/json" \
+  -d '{"cmd":"sessions.list"}'
 
 # Check FlareSolverr logs
 docker logs flaresolverr
@@ -576,7 +578,6 @@ This fork is maintained by **LavX**. Explore more projects and services:
 
 Where Bazarr+ is heading. Plans shift, but the direction is steady.
 
-- **v2.4.0 "Prism"** (prepared): the Distribution Hub multi-tenant subtitle API, Provider Hub built-in replacement with startup auto-install, combined bilingual and trilingual subtitles, embedded-track scoring, and host-side archive extraction.
 - **v2.5.0**: [multiple Radarr and Sonarr instances](https://github.com/LavX/bazarr/issues/156).
 - **v2.6.0**: universal providers and federation. Point Bazarr+ at any OpenSubtitles.com-compatible endpoint, including another Bazarr+ instance, and daisy-chain instances together over a loop-safe federation protocol.
 - **v3.0.0 "Subnet"**: peer-to-peer subtitle federation, a self-organizing mesh of Bazarr+ instances.
