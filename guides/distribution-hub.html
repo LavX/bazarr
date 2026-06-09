@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Distribution Hub - Bazarr+ Guides</title>
+  <meta name="description" content="Use the Distribution Hub in Bazarr+ v2.4 to turn the OpenSubtitles-compatible /api/v1 endpoint into a multi-tenant subtitle API with named keys, tiers, metering, and per-key provider scoping.">
+  <link rel="canonical" href="https://lavx.github.io/bazarr/guides/distribution-hub.html">
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Distribution Hub - Bazarr+ Guides">
+  <meta property="og:description" content="Use the Distribution Hub in Bazarr+ v2.4 to turn the OpenSubtitles-compatible /api/v1 endpoint into a multi-tenant subtitle API with named keys, tiers, metering, and per-key provider scoping.">
+  <meta property="og:url" content="https://lavx.github.io/bazarr/guides/distribution-hub.html">
+  <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Distribution Hub - Bazarr+ Guides">
+  <meta name="twitter:description" content="Use the Distribution Hub in Bazarr+ v2.4 to turn the OpenSubtitles-compatible /api/v1 endpoint into a multi-tenant subtitle API with named keys, tiers, metering, and per-key provider scoping.">
+  <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
+
+  <!-- Geist font: async preload -->
+  <link rel="preload" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" as="style" crossorigin>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" media="print" onload="this.media='all'">
+  <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css"></noscript>
+
+  <link rel="icon" href="../screenshots/logo128.png" type="image/png">
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+
+<a href="#main-content" class="skip-link">Skip to content</a>
+
+<!-- Grain overlay -->
+<svg class="grain" aria-hidden="true">
+  <filter id="grain-filter">
+    <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/>
+  </filter>
+  <rect width="100%" height="100%" filter="url(#grain-filter)"/>
+</svg>
+
+<!-- Ambient gradients -->
+<div class="ambient" aria-hidden="true"></div>
+
+<nav class="sticky-nav" aria-label="Site navigation">
+  <div class="container">
+    <img src="../screenshots/logo128.png" alt="Bazarr+" class="nav-logo" width="22" height="22">
+    <a href="../">Home</a>
+    <a href="../#comparison-heading">Compare</a>
+    <a href="../#quick-start">Install</a>
+    <a href="../#screenshots-heading">Screenshots</a>
+    <a href="../#faq-heading">FAQ</a>
+    <a href="./" class="nav-active">Guides</a>
+    <a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a>
+  </div>
+</nav>
+
+<main id="main-content" class="guide-page">
+  <div class="container">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <a href="../">Home</a><span class="sep">/</span><a href="./">Guides</a><span class="sep">/</span><span>Distribution Hub</span>
+    </nav>
+    <h1>Distribution Hub <span class="badge-new" aria-label="New in v2.4">v2.4</span></h1>
+
+    <article class="content">
+
+      <p class="lede">Bazarr+ v2.4.0 (Prism) adds the Distribution Hub: a control plane that turns Bazarr's OpenSubtitles-compatible <code>/api/v1</code> endpoint into a multi-tenant subtitle API. Instead of one shared token, you issue many named API keys, give each a rate-limit tier, meter and throttle usage per key, and scope each key to the providers it may reach. Then you hand those keys to your downstream clients: a Jellyfin plugin, VLSub, or a custom app.</p>
+
+      <h2 id="what-it-adds">What the Distribution Hub adds</h2>
+      <p>The Distribution Hub is the new top-level menu item (tower-broadcast icon, route <code>#/distribution-hub</code>). The page itself is the admin-authenticated control plane under <code>/api/distribution-hub</code>. The data plane it manages is the public, OpenSubtitles-compatible endpoint mounted at <code>&lt;your base URL&gt;/api/v1</code>, which external clients authenticate against with an <code>Api-Key</code> HTTP header.</p>
+      <ul>
+        <li><strong>Named API keys</strong>: issue one key per client instead of sharing a single token. Each key has a name, a prefix, its own tier or custom limits, and its own provider scope.</li>
+        <li><strong>Rate-limit tiers</strong>: editable preset tiers (Free, Basic, Pro, Unlimited) define search and download limits across four windows (hourly, daily, weekly, monthly).</li>
+        <li><strong>Per-window metering and rate limits</strong>: usage is counted in hourly buckets that survive restarts. Keys that exceed their tier are throttled (429 on search, 406 on download).</li>
+        <li><strong>Per-key provider scoping</strong>: allow or exclude specific providers per key, including the reserved <code>local</code> name for on-disk subtitles.</li>
+        <li><strong>One home for the compat endpoint</strong>: the Distribution Hub replaces the old Settings &gt; External Integration page as the single place to enable, configure, and meter the OpenSubtitles-compatible API.</li>
+      </ul>
+
+      <div class="note">
+        <strong>The endpoint is opt-in.</strong> It is gated behind a consent switch and an enable switch in the Settings tab. The consent text warns that this endpoint must not be exposed to the public internet and that you are responsible for provider ToS compliance.
+      </div>
+
+      <h2 id="the-four-tabs">The four tabs</h2>
+      <p>The Distribution Hub has four tabs: <strong>Overview</strong>, <strong>API Keys</strong>, <strong>Tiers</strong>, and <strong>Settings</strong>.</p>
+
+      <p>The <strong>Overview</strong> tab shows four stat cards (Searches today, Downloads today, Active keys, Throttled over 30 days), a 30-day usage chart, and a Top keys table.</p>
+
+      <figure class="screenshot-frame">
+        <div class="screenshot-chrome" aria-hidden="true">
+          <span class="chrome-dot"></span><span class="chrome-dot"></span><span class="chrome-dot"></span>
+          <span class="chrome-title">Distribution Hub - Overview</span>
+        </div>
+        <picture>
+          <source type="image/webp" srcset="../screenshots/v2.4.0/distribution-hub-overview.webp">
+          <img src="../screenshots/v2.4.0/distribution-hub-overview.png" alt="Distribution Hub Overview tab with stat cards for searches, downloads, active keys, and throttled requests, plus a 30-day usage chart and a top keys table" loading="lazy" decoding="async" width="2864" height="1800">
+        </picture>
+      </figure>
+
+      <p>The <strong>API Keys</strong> tab is where you create, edit, rotate, disable, and delete keys. The table lists each key by name, prefix, tier, today's usage, last used, and an enabled switch.</p>
+
+      <figure class="screenshot-frame">
+        <div class="screenshot-chrome" aria-hidden="true">
+          <span class="chrome-dot"></span><span class="chrome-dot"></span><span class="chrome-dot"></span>
+          <span class="chrome-title">API Keys</span>
+        </div>
+        <picture>
+          <source type="image/webp" srcset="../screenshots/v2.4.0/distribution-hub-keys.webp">
+          <img src="../screenshots/v2.4.0/distribution-hub-keys.png" alt="Distribution Hub API Keys tab showing the keys table with name, prefix, tier badge, usage, last used, and enabled switch columns, plus a New key button" loading="lazy" decoding="async" width="2864" height="1800">
+        </picture>
+      </figure>
+
+      <p>The <strong>Tiers</strong> tab holds the editable limit grid for each preset tier and the default tier new keys inherit.</p>
+
+      <figure class="screenshot-frame">
+        <div class="screenshot-chrome" aria-hidden="true">
+          <span class="chrome-dot"></span><span class="chrome-dot"></span><span class="chrome-dot"></span>
+          <span class="chrome-title">Tiers</span>
+        </div>
+        <picture>
+          <source type="image/webp" srcset="../screenshots/v2.4.0/distribution-hub-tiers.webp">
+          <img src="../screenshots/v2.4.0/distribution-hub-tiers.png" alt="Distribution Hub Tiers tab with the default tier selector and per-tier cards showing editable hourly, daily, weekly, and monthly search and download limits" loading="lazy" decoding="async" width="2864" height="2628">
+        </picture>
+      </figure>
+
+      <p>The <strong>Settings</strong> tab carries the consent and enable switches, the global search timeout, usage retention, secret regeneration, and the OpenSubtitles affiliation disclaimer.</p>
+
+      <figure class="screenshot-frame">
+        <div class="screenshot-chrome" aria-hidden="true">
+          <span class="chrome-dot"></span><span class="chrome-dot"></span><span class="chrome-dot"></span>
+          <span class="chrome-title">Settings</span>
+        </div>
+        <picture>
+          <source type="image/webp" srcset="../screenshots/v2.4.0/distribution-hub-settings.webp">
+          <img src="../screenshots/v2.4.0/distribution-hub-settings.png" alt="Distribution Hub Settings tab with the endpoint consent and enable switches, search rate-limit toggle, global timeout, usage retention, regenerate secrets button, and OpenSubtitles affiliation disclaimer" loading="lazy" decoding="async" width="2864" height="1800">
+        </picture>
+      </figure>
+
+      <h2 id="named-api-keys">Named API keys</h2>
+      <p>Open the <strong>API Keys</strong> tab and click <strong>New key</strong>. The key editor opens in create mode with these fields:</p>
+      <ul>
+        <li><strong>Name</strong> (required): how the key shows up in the table and usage stats.</li>
+        <li><strong>Tier</strong>: pick a preset tier, or skip it to inherit the default tier.</li>
+        <li><strong>Excluded providers</strong>: providers this key skips on search unless a request overrides it.</li>
+        <li><strong>Allowed providers</strong>: restrict the key to only these providers. Leave empty to allow all.</li>
+        <li><strong>Search timeout override (seconds)</strong>: a per-key value from 5 to 120. Leave empty to use the global timeout.</li>
+        <li><strong>Custom rate limits (override the tier)</strong>: a switch that reveals hourly, daily, weekly, and monthly inputs for Search and Download. A value of 0 means unlimited.</li>
+        <li><strong>Note</strong>: free text for your own reference.</li>
+      </ul>
+
+      <p>Click <strong>Create key</strong>. The full token is returned once in the "Copy your API key" modal.</p>
+
+      <div class="note">
+        <strong>The token is shown exactly once.</strong> Tokens look like <code>bzr_…</code>. Bazarr+ stores only a SHA-256 hash and an 8-character prefix, never the full token, so the table shows only <code>&lt;prefix&gt;…</code>. Copy the token immediately and store it securely. If you lose it, you rotate the key to get a new one. You cannot retrieve the old one.
+      </div>
+
+      <p>Each key row carries an <strong>Enabled</strong> switch and a <strong>...</strong> actions menu:</p>
+      <ul>
+        <li><strong>Rotate token</strong>: issues a fresh token while keeping the key's id and usage history. The new token is revealed once. The old token stops working.</li>
+        <li><strong>Disable</strong>: toggle the Enabled switch off. A disabled key is rejected on the data plane (treated as unknown). There is a short in-memory resolve cache (about 30 seconds) before a disabled or rotated key is fully rejected.</li>
+        <li><strong>Delete</strong>: removes the key after a confirm. Apps using that key stop working immediately, and this cannot be undone.</li>
+        <li><strong>Edit</strong>: reopens the editor to change the tier, custom limits, timeout, provider lists, or note.</li>
+      </ul>
+
+      <h2 id="tiers-and-metering">Tiers and metering</h2>
+      <p>Tiers are reusable limit profiles. Bazarr+ ships four presets: Free, Basic, Pro, and Unlimited. Each tier defines <strong>search</strong> and <strong>download</strong> limits across four windows: hourly, daily, weekly, and monthly.</p>
+
+      <div class="note">
+        <strong>A limit of 0 means unlimited for that window, not zero requests.</strong> The Unlimited tier is simply a tier whose windows are all 0.
+      </div>
+
+      <p>In the <strong>Tiers</strong> tab you edit the numbers per window and click <strong>Save tiers</strong>; your edits are merged over the presets and stored. The <strong>Default tier for new keys</strong> selector decides which tier a new key inherits when you do not pick one explicitly. It resolves to Free if unset.</p>
+
+      <p>How metering works in practice:</p>
+      <ul>
+        <li><strong>Search is metered on admission</strong>, before the provider fanout. Even failing or empty searches count, so a client cannot spam failed searches to evade its limits.</li>
+        <li><strong>The tightest binding window wins.</strong> A key is throttled as soon as any one of its windows (hourly, daily, weekly, monthly) is exceeded.</li>
+        <li><strong>Resolution order is custom override, then tier.</strong> If a key has custom rate limits switched on, those win over its tier.</li>
+        <li><strong>Search throttling returns 429</strong> (for non-Unlimited keys); <strong>download throttling returns 406</strong>. Invalid Api-Key returns 403 and invalid JWT returns 401, so the OpenSubtitles status-code contract is preserved.</li>
+        <li><strong>Metering is best-effort.</strong> It counts usage in hourly buckets that survive restarts, but it never causes a subtitle request to 500.</li>
+      </ul>
+
+      <p>If you turn off <strong>Rate-limit search requests</strong> in the Settings tab, searches are still metered (counted) but never throttled.</p>
+
+      <h2 id="per-key-provider-scoping">Per-key provider scoping</h2>
+      <p>Each key can be scoped to a subset of your providers. Two lists do the work, and a key default can be narrowed (never widened) at request time.</p>
+      <ul>
+        <li><strong>Excluded providers</strong>: a default list of providers the key skips on search. A request can override it with <code>?exclude_providers=</code>.</li>
+        <li><strong>Allowed providers</strong>: restricts the key to only the listed providers. Empty means allow all. Exclusions still apply on top.</li>
+      </ul>
+
+      <div class="note">
+        <strong>A request can only narrow a key's grant, never widen it.</strong> A per-request <code>?only_providers=</code> value intersects with the key's allowed list. It can never reach a provider outside that list, which makes the allowed list an authorization boundary, not just a default.
+      </div>
+
+      <p>The <code>only_providers</code> parameter is three-state by presence. Omitting it means "no allow-list, every provider in play." A present-but-empty value (<code>?only_providers=</code> or only whitespace and commas) is a deliberate "select nothing" and returns an empty result set, which is kept distinct in the cache from omitting the parameter.</p>
+
+      <p>The reserved provider name <strong>local</strong> governs on-disk subtitles in the same allow and exclude knobs. With an allow-list active, locals are served only when the list names <code>local</code>. With no allow-list, locals follow the global "Serve subtitles already on disk" setting unless <code>local</code> is explicitly excluded. The <code>local</code> name only appears in the pickers and discovery when that global setting is on.</p>
+
+      <p>To see exactly which provider names a key can reach, a client can call the discovery endpoint:</p>
+
+      <div class="code-wrap">
+        <div class="code-header">
+          <span class="code-lang">Discovery</span>
+          <button class="copy-btn" data-copy="curl -H &quot;Api-Key: bzr_your_token&quot; https://your-bazarr/api/v1/providers" aria-label="Copy provider discovery request">Copy</button>
+        </div>
+        <pre><code>curl -H "Api-Key: bzr_your_token" https://your-bazarr/api/v1/providers</code></pre>
+      </div>
+
+      <h2 id="quickstart">Quickstart</h2>
+      <ol class="steps">
+        <li>Open <strong>Distribution Hub</strong> from the left main menu.</li>
+        <li>Go to the <strong>Settings</strong> tab. Tick the consent switch and <strong>Enable the Distribution Hub endpoint</strong>, then click <strong>Save settings</strong>. If a <strong>Restart required</strong> banner appears, restart Bazarr so the <code>/api/v1</code> routes are mounted.</li>
+        <li>Open the <strong>API Keys</strong> tab and click <strong>New key</strong>.</li>
+        <li>Enter a <strong>Name</strong>, pick a <strong>Tier</strong> (or set custom hourly/daily/weekly/monthly limits), optionally set a search timeout and the allowed or excluded providers, then click <strong>Create key</strong>.</li>
+        <li>In the "Copy your API key" modal, click <strong>Copy</strong> and store the <code>bzr_…</code> token. It is shown only once.</li>
+        <li>Point your client at <code>&lt;your base URL&gt;/api/v1</code> and send the token in the <code>Api-Key</code> header. Hand the token to your Jellyfin plugin, VLSub, or app.</li>
+      </ol>
+
+      <div class="code-wrap">
+        <div class="code-header">
+          <span class="code-lang">Client request</span>
+          <button class="copy-btn" data-copy="curl -H &quot;Api-Key: bzr_your_token&quot; \&#10;  &quot;https://your-bazarr/api/v1/subtitles?query=Dune&amp;languages=en&quot;" aria-label="Copy client search request">Copy</button>
+        </div>
+        <pre><code>curl -H "Api-Key: bzr_your_token" \
+  "https://your-bazarr/api/v1/subtitles?query=Dune&amp;languages=en"</code></pre>
+      </div>
+
+      <p>Clients may add <code>?exclude_providers=</code>, <code>?only_providers=</code>, and <code>?timeout_seconds=</code> on <code>/api/v1/subtitles</code> to narrow a key per request. For full client setup (Jellyfin, VLSub), see the <a href="external-integration.html">External Integration</a> guide.</p>
+
+      <h2 id="upgrading">Upgrading from v2.2 or v2.3</h2>
+      <p>The upgrade is transparent. Existing integrations keep working without any change on your side.</p>
+      <ul>
+        <li><strong>Your old shared token is auto-seeded.</strong> On first boot, the previous shared compat token becomes a single non-deletable key named "Default (legacy token)" on the Unlimited tier, flagged with a gray <code>legacy</code> badge. Existing Jellyfin and VLSub clients keep authenticating, and because it is Unlimited, the legacy token is never throttled.</li>
+        <li><strong>The External Integration page is gone.</strong> The old Settings &gt; External Integration page is removed, and <code>/settings/external</code> now redirects to the Distribution Hub. Its consent toggle and disclaimer moved into the Settings tab; the inline legacy-key rotate moved into the API Keys tab.</li>
+        <li><strong>Recover the shared token.</strong> The legacy Default key's <strong>...</strong> menu shows <strong>Reveal token</strong> instead of Delete. It calls the legacy-token endpoint and shows the current shared token in a re-viewable modal, so you can copy it to a new client without breaking the others.</li>
+        <li><strong>Rotate the shared token.</strong> The legacy key cannot be deleted and cannot be rotated through the normal rotate action. Rotate it with the legacy key's <strong>Rotate token</strong> action or with <strong>Regenerate secrets</strong> in the Settings tab. Both run the regenerate flow, which rotates the signing secrets and the shared token together, re-points the Default key at the new token, and reveals it once. Every client still on the old token must re-paste the new one. Named keys are unaffected.</li>
+      </ul>
+
+      <div class="note">
+        <strong>Schema migrations run on boot.</strong> The Distribution Hub adds the <code>compat_api_keys</code> and <code>compat_usage</code> tables and the <code>allowed_providers</code> column. These run automatically on first start after upgrade. Existing settings, providers, and the shared token carry over.
+      </div>
+
+      <h2 id="troubleshooting">Troubleshooting</h2>
+      <p><strong>I enabled the endpoint but clients still cannot reach it.</strong> Enabling at runtime sets the flag but does not mount the routes. The <code>/api/v1</code> blueprint is chosen once at startup, so the "Restart required" banner stays up until you restart Bazarr. Restart, and the banner clears.</p>
+      <p><strong>A client gets 403.</strong> The Api-Key is invalid, disabled, or was rotated. Confirm the client sends the exact <code>bzr_…</code> token in the <code>Api-Key</code> header. If you just disabled or rotated the key, allow up to about 30 seconds for the resolve cache to expire.</p>
+      <p><strong>A client gets 429 on search or 406 on download.</strong> The key hit a rate limit on one of its windows. Move it to a higher tier, set custom limits, or use the Unlimited tier. Remember a limit of 0 means unlimited.</p>
+      <p><strong>A search returns no providers (empty data).</strong> The key's allowed list, or a per-request <code>only_providers</code>, resolved to nothing. A present-but-empty <code>only_providers</code> intentionally returns an empty set. Check the allowed and excluded lists, and call <code>/api/v1/providers</code> to see what the key can actually reach.</p>
+      <p><strong>On-disk subtitles are not served.</strong> Local subs need the global "Serve subtitles already on disk" setting on, and when an allow-list is active, the reserved <code>local</code> name must be in it. The <code>local</code> name only appears in the pickers when that global setting is on.</p>
+      <p><strong>I lost a named key's token.</strong> It cannot be retrieved. Rotate the key to get a new token, then update the client. Only the legacy Default key supports re-viewing its token.</p>
+
+      <h2 id="next-steps">Next steps</h2>
+      <ul>
+        <li><a href="external-integration.html">External Integration</a> for setting up Jellyfin and VLSub clients against the endpoint</li>
+        <li><a href="provider-hub.html">Provider Hub</a> to install and manage the subtitle providers your keys can scope to</li>
+        <li><a href="getting-started.html">Getting Started</a> if you have not installed Bazarr+ yet</li>
+      </ul>
+
+    </article>
+  </div>
+</main>
+
+<!-- Footer -->
+<footer>
+  <div class="container">
+    <div class="footer-inner">
+      <p class="footer-credit">Built by <a href="https://github.com/LavX" target="_blank" rel="noopener">LavX</a>. Based on <a href="https://github.com/morpheus65535/bazarr" target="_blank" rel="noopener">Bazarr</a> by morpheus65535.</p>
+      <ul class="footer-links">
+        <li><a href="./">Guides</a></li>
+        <li><a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a></li>
+        <li><a href="https://github.com/LavX/bazarr/issues" target="_blank" rel="noopener">Issues</a></li>
+        <li><a href="https://github.com/LavX/bazarr/wiki" target="_blank" rel="noopener">Wiki</a></li>
+      </ul>
+    </div>
+  </div>
+</footer>
+
+<script src="../js/site.js"></script>
+
+</body>
+</html>
