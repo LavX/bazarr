@@ -15,6 +15,9 @@
   <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
+  <meta property="og:site_name" content="Bazarr+">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:image:alt" content="Bazarr+ subtitle management dashboard">
 
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image">
@@ -22,13 +25,59 @@
   <meta name="twitter:description" content="Set up Bazarr+'s External Integration endpoint, install the Jellyfin plugin and VLSub Bazarr+ extension, and manage the API token.">
   <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
 
-  <!-- Geist font: async preload -->
-  <link rel="preload" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" as="style" crossorigin>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" media="print" onload="this.media='all'">
-  <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css"></noscript>
+  <!-- Geist font: self-hosted variable font -->
+  <link rel="preload" href="../fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
 
   <link rel="icon" href="../screenshots/logo128.png" type="image/png">
+  <meta name="theme-color" content="#1a1a2e">
+  <link rel="apple-touch-icon" href="../apple-touch-icon.png">
   <link rel="stylesheet" href="../css/style.css">
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [
+      {
+        "@type": "ListItem",
+        "position": 1,
+        "name": "Home",
+        "item": "https://lavx.github.io/bazarr/"
+      },
+      {
+        "@type": "ListItem",
+        "position": 2,
+        "name": "Guides",
+        "item": "https://lavx.github.io/bazarr/guides/"
+      },
+      {
+        "@type": "ListItem",
+        "position": 3,
+        "name": "External Integration",
+        "item": "https://lavx.github.io/bazarr/guides/external-integration.html"
+      }
+    ]
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "TechArticle",
+    "headline": "External Integration (Jellyfin & VLSub)",
+    "description": "Set up Bazarr+'s External Integration endpoint, install the Jellyfin plugin and VLSub Bazarr+ extension, and manage the API token.",
+    "url": "https://lavx.github.io/bazarr/guides/external-integration.html",
+    "author": {
+      "@type": "Person",
+      "name": "LavX",
+      "sameAs": "https://github.com/LavX"
+    },
+    "isPartOf": {
+      "@type": "WebSite",
+      "name": "Bazarr+",
+      "url": "https://lavx.github.io/bazarr/"
+    }
+  }
+  </script>
 </head>
 <body>
 

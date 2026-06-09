@@ -1,3 +1,12 @@
+/* ---- Self-hosted Geist (variable) ---- */
+@font-face {
+  font-family: 'Geist Variable';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('../fonts/Geist-Variable.woff2') format('woff2');
+}
+
 /* ---- Reset & Base ---- */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
