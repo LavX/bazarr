@@ -39,6 +39,16 @@ _update_parser.add_argument("http_timeout", type=int, location="json")
 _update_parser.add_argument("enabled", type=bool, location="json")
 _update_parser.add_argument("is_default", type=bool, location="json")
 
+_test_parser = reqparse.RequestParser()
+_test_parser.add_argument("kind", type=str, required=True, location="json")
+_test_parser.add_argument("api_key", type=str, location="json")
+_test_parser.add_argument("ip", type=str, location="json")
+_test_parser.add_argument("port", type=int, location="json")
+_test_parser.add_argument("base_url", type=str, location="json")
+_test_parser.add_argument("ssl", type=bool, location="json")
+_test_parser.add_argument("verify_ssl", type=bool, location="json")
+_test_parser.add_argument("http_timeout", type=int, location="json")
+
 
 @api_ns_system_arr_instances.route("/system/arr-instances")
 class ArrInstancesList(Resource):
@@ -77,4 +87,16 @@ class ArrInstanceItem(Resource):
         body, status = service.delete_instance(database, instance_id)
         if status < 400:
             database.commit()
+        return body, status
+
+
+@api_ns_system_arr_instances.route("/system/arr-instances/test")
+class ArrInstanceTest(Resource):
+    @authenticate
+    def post(self):
+        # Connection details, including the plaintext API key, come from the
+        # JSON body only - never the URL/query - so the key never lands in logs
+        # or request lines.
+        args = _test_parser.parse_args()
+        body, status = service.test_connection(args)
         return body, status

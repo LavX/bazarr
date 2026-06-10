@@ -9,7 +9,34 @@ chain, and keeps the resources to thin parse/commit glue.
 The session is flushed but NOT committed here; the HTTP boundary owns the
 transaction and commits on success.
 """
-from .repository import ArrInstanceRepository, to_safe_dict
+from .repository import VALID_KINDS, ArrInstanceRepository, to_safe_dict
+
+
+def test_connection(args, http_get=None):
+    """Probe a Sonarr/Radarr instance described by raw body params.
+
+    Reads connection details (including the plaintext API key) only from the
+    request body, never from the URL/query. Returns ``(result, 200)`` where
+    result carries ok/version or a structured error; an invalid kind is 400.
+    """
+    from .client import ArrClientFactory
+
+    kind = args.get("kind")
+    if kind not in VALID_KINDS:
+        return {"ok": False, "error": "invalid", "message": "invalid kind"}, 400
+
+    client = ArrClientFactory().from_params(
+        kind=kind,
+        ip=args.get("ip") or "127.0.0.1",
+        port=args.get("port"),
+        base_url=args.get("base_url") or "/",
+        ssl=bool(args.get("ssl")),
+        verify_ssl=bool(args.get("verify_ssl")),
+        api_key=args.get("api_key") or "",
+        http_timeout=args.get("http_timeout") or 60,
+        http_get=http_get,
+    )
+    return client.test_connection(), 200
 
 
 def list_instances(session, kind=None):
