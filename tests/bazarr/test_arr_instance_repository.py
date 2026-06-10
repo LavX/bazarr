@@ -123,3 +123,90 @@ def test_to_safe_dict_never_exposes_api_key(schema_session):
 
     empty = repo.create("radarr", "R", api_key="")
     assert to_safe_dict(empty)["api_key_set"] is False
+
+
+# --------------------------------------------------------------- update/delete
+
+def test_update_changes_fields_and_preserves_api_key_when_omitted(schema_session):
+    repo = _repo(schema_session)
+    inst = repo.create("sonarr", "Main", api_key="orig-key", port=8989)
+
+    repo.update(inst.id, name="Renamed", port=8990)
+    schema_session.refresh(inst)
+
+    assert inst.name == "Renamed"
+    assert inst.port == 8990
+    # api_key omitted -> preserved
+    assert repo.get_decrypted_api_key(inst.id) == "orig-key"
+
+
+def test_update_sets_new_api_key_when_provided(schema_session):
+    from secret_store import is_encrypted
+
+    repo = _repo(schema_session)
+    inst = repo.create("sonarr", "Main", api_key="orig-key")
+
+    repo.update(inst.id, api_key="new-key")
+    schema_session.refresh(inst)
+
+    assert is_encrypted(inst.api_key)
+    assert repo.get_decrypted_api_key(inst.id) == "new-key"
+
+
+def test_update_clears_api_key_only_with_clear_flag(schema_session):
+    repo = _repo(schema_session)
+    inst = repo.create("sonarr", "Main", api_key="orig-key")
+
+    # empty api_key without the flag does NOT clear (treated as "no change")
+    repo.update(inst.id, api_key="")
+    assert repo.get_decrypted_api_key(inst.id) == "orig-key"
+
+    # explicit clear flag wipes it
+    repo.update(inst.id, clear_api_key=True)
+    assert repo.get_decrypted_api_key(inst.id) == ""
+
+
+def test_set_default_demotes_previous_and_promotes_target(schema_session):
+    repo = _repo(schema_session)
+    main = repo.create("sonarr", "Main", api_key="k")      # default
+    anime = repo.create("sonarr", "Anime", api_key="k")    # not default
+
+    repo.set_default(anime.id)
+    schema_session.refresh(main)
+    schema_session.refresh(anime)
+
+    assert main.is_default == 0
+    assert anime.is_default == 1
+
+
+def test_disabling_a_default_clears_its_default_flag(schema_session):
+    # the DB CHECK requires is_default=0 OR enabled=1, so disabling a default
+    # must also drop the default flag.
+    repo = _repo(schema_session)
+    inst = repo.create("sonarr", "Main", api_key="k")
+    repo.update(inst.id, enabled=False)
+    schema_session.refresh(inst)
+    assert inst.enabled == 0
+    assert inst.is_default == 0
+
+
+def test_delete_removes_instance_when_no_owned_rows(schema_session):
+    repo = _repo(schema_session)
+    inst = repo.create("sonarr", "Main", api_key="k")
+    assert repo.delete(inst.id) is True
+    assert repo.get(inst.id) is None
+
+
+def test_delete_refused_when_owned_media_rows_exist(schema_session):
+    from sqlalchemy import insert
+
+    from app.database import TableShows
+
+    repo = _repo(schema_session)
+    inst = repo.create("sonarr", "Main", api_key="k")
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=1, path="/tv/show", title="Show", arr_instance_id=inst.id))
+
+    with pytest.raises(ValueError):
+        repo.delete(inst.id)
+    assert repo.get(inst.id) is not None

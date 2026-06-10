@@ -8,6 +8,7 @@ Fernet-encrypted settings, so the key is encrypted here on write via
 API-facing callers use :func:`to_safe_dict`, which never carries the key.
 """
 import re
+from datetime import datetime
 
 from sqlalchemy import select
 
@@ -15,6 +16,7 @@ from app.database import TableArrInstances
 
 VALID_KINDS = ("sonarr", "radarr")
 _DEFAULT_PORTS = {"sonarr": 8989, "radarr": 7878}
+_UNSET = object()
 
 
 def _slugify(value):
@@ -120,6 +122,112 @@ class ArrInstanceRepository:
         self._session.add(row)
         self._session.flush()
         return row
+
+    def update(self, instance_id, *, name=_UNSET, enabled=_UNSET,
+               is_default=_UNSET, ip=_UNSET, port=_UNSET, base_url=_UNSET,
+               ssl=_UNSET, verify_ssl=_UNSET, http_timeout=_UNSET,
+               api_key=_UNSET, clear_api_key=False, options=_UNSET,
+               path_mappings=_UNSET, schedule=_UNSET):
+        """Update mutable fields. ``kind`` and ``stable_key`` are immutable.
+
+        API-key policy: ``clear_api_key=True`` wipes the key; otherwise a
+        non-empty ``api_key`` replaces it (encrypted); an omitted or empty
+        ``api_key`` preserves the existing one (so a UI that never received
+        the key cannot accidentally erase it).
+        """
+        row = self.get(instance_id)
+        if row is None:
+            return None
+
+        if name is not _UNSET:
+            row.name = name
+        if ip is not _UNSET:
+            row.ip = ip
+        if port is not _UNSET:
+            row.port = port
+        if base_url is not _UNSET:
+            row.base_url = base_url
+        if ssl is not _UNSET:
+            row.ssl = 1 if ssl else 0
+        if verify_ssl is not _UNSET:
+            row.verify_ssl = 1 if verify_ssl else 0
+        if http_timeout is not _UNSET:
+            row.http_timeout = http_timeout
+        if options is not _UNSET:
+            row.options = options
+        if path_mappings is not _UNSET:
+            row.path_mappings = path_mappings
+        if schedule is not _UNSET:
+            row.schedule = schedule
+
+        # api-key policy
+        if clear_api_key:
+            row.api_key = ""
+        elif api_key is not _UNSET and api_key:
+            from secret_store import encrypt_secret
+            row.api_key = encrypt_secret(api_key)
+
+        # enabled/default interaction (mirrors DB check: is_default=0 OR enabled=1)
+        if enabled is not _UNSET:
+            row.enabled = 1 if enabled else 0
+            if not row.enabled:
+                row.is_default = 0
+        if is_default is not _UNSET:
+            if is_default:
+                self.set_default(instance_id)
+            else:
+                row.is_default = 0
+
+        row.updated_at = datetime.now()
+        self._session.flush()
+        return row
+
+    def set_default(self, instance_id):
+        """Promote one instance to its kind's default, demoting the previous."""
+        row = self.get(instance_id)
+        if row is None:
+            return None
+        if not row.enabled:
+            raise ValueError("cannot make a disabled instance the default")
+        current = self.get_default(row.kind)
+        if current is not None and current.id != row.id:
+            current.is_default = 0
+            self._session.flush()
+        row.is_default = 1
+        self._session.flush()
+        return row
+
+    def delete(self, instance_id):
+        """Delete an instance. Refuse while it still owns any rows."""
+        row = self.get(instance_id)
+        if row is None:
+            return False
+        if self._has_owned_rows(instance_id):
+            raise ValueError("cannot delete an instance that still owns rows")
+        self._session.delete(row)
+        self._session.flush()
+        return True
+
+    def _has_owned_rows(self, instance_id):
+        from app.database import (
+            TableBlacklist, TableBlacklistMovie, TableEpisodes, TableHistory,
+            TableHistoryMovie, TableMovies, TableMoviesRootfolder, TableShows,
+            TableShowsRootfolder,
+        )
+        owned = (
+            TableShows, TableEpisodes, TableMovies, TableHistory,
+            TableHistoryMovie, TableBlacklist, TableBlacklistMovie,
+            TableShowsRootfolder, TableMoviesRootfolder,
+        )
+        for model in owned:
+            hit = self._session.execute(
+                select(model.arr_instance_id)
+                .where(model.arr_instance_id == instance_id)
+                .limit(1)
+            ).first()
+            if hit is not None:
+                return True
+        return False
 
     def _unique_stable_key(self, kind, base):
         candidate = base
