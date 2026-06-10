@@ -32,6 +32,7 @@ import SeriesHistoryView from "@/pages/History/Series";
 import MovieView from "@/pages/Movies";
 import MovieDetailView from "@/pages/Movies/Details";
 import SeriesView from "@/pages/Series";
+import SettingsArrInstancesView from "@/pages/Settings/ArrInstances";
 import SettingsGeneralView from "@/pages/Settings/General";
 import SettingsJellyfinView from "@/pages/Settings/Jellyfin";
 import SettingsLanguagesView from "@/pages/Settings/Languages";
@@ -212,6 +213,11 @@ function useRoutes(): CustomRouteObject[] {
                 path: "radarr",
                 name: "Radarr",
                 element: <SettingsRadarrView></SettingsRadarrView>,
+              },
+              {
+                path: "instances",
+                name: "Instances",
+                element: <SettingsArrInstancesView></SettingsArrInstancesView>,
               },
               {
                 path: "plex",

@@ -1,3 +1,4 @@
+import arrInstances from "./arrInstances";
 import badges from "./badges";
 import distributionHub from "./distributionHub";
 import episodes from "./episodes";
@@ -28,6 +29,7 @@ const api = {
   plex,
   providerHub,
   distributionHub,
+  arrInstances,
 };
 
 export default api;
