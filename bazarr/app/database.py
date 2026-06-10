@@ -760,6 +760,19 @@ def migrate_db(app):
         database.execute(
             insert(System)
             .values(configured='0', updated='0'))
+
+    # Multiple Sonarr/Radarr instances (#156): represent the existing scalar
+    # Sonarr/Radarr config as the default arr_instances rows and stamp existing
+    # owned rows with their arr_instance_id. Idempotent and non-destructive;
+    # guarded so a backfill hiccup never blocks startup.
+    try:
+        from arr_instances.backfill import backfill_default_instances
+        backfill_default_instances(database, settings)
+        database.commit()
+    except Exception:
+        database.rollback()
+        logging.exception("Multi-instance default backfill failed; continuing startup")
+
     optimize_sqlite_database(engine)
 
     # Refresh the cached migration revision now that pending migrations have run. init_db()

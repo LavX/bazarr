@@ -137,6 +137,7 @@ jobs:
             tests/bazarr/test_arr_instance_repository.py \
             tests/bazarr/test_arr_instances_api.py \
             tests/bazarr/test_arr_client.py \
+            tests/bazarr/test_arr_backfill.py \
             tests/subliminal_patch/test_subliminal_rebase.py \
             tests/subliminal_patch/test_embeddedsubtitles.py \
             tests/subliminal_patch/test_subsunacs.py \
