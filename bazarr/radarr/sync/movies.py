@@ -314,12 +314,20 @@ def update_movies(job_id=None, wait_for_completion=False, arr_instance_id=None, 
     jobs_queue.update_job_name(job_id=job_id, new_job_name="Synced movies with Radarr")
 
 
-def update_movies_for_instance(arr_instance_id, job_id):
-    """Bulk-sync one Radarr instance (future scheduler fan-out entry). Builds the
-    instance client and forwards; a missing/disabled instance is skipped."""
+def update_movies_for_instance(arr_instance_id, job_id=None, wait_for_completion=False):
+    """Bulk-sync one Radarr instance (scheduler fan-out entry).
+
+    Mirrors update_movies's enqueue-then-run so only the int arr_instance_id
+    travels the job queue; the per-instance ArrClient is built on the real run.
+    A missing/disabled instance is skipped.
+    """
+    if not job_id:
+        jobs_queue.add_job_from_function(f"Syncing movies with Radarr (instance {arr_instance_id})",
+                                         is_progress=True, wait_for_completion=wait_for_completion)
+        return
     arr_client = client_for_instance(database, arr_instance_id)
     if arr_client is None:
-        logging.warning('BAZARR skipping Radarr sync for unknown instance %s', arr_instance_id)
+        logging.warning('BAZARR skipping Radarr sync for unknown/disabled instance %s', arr_instance_id)
         return
     update_movies(job_id=job_id, arr_instance_id=arr_instance_id, arr_client=arr_client)
 

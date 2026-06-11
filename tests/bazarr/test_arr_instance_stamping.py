@@ -514,6 +514,27 @@ def test_update_movies_for_instance_skips_unknown(monkeypatch):
     assert called == []
 
 
+def test_for_instance_enqueues_without_job_id_no_client_in_queue(monkeypatch):
+    # The scheduler schedules *_for_instance with no job_id -> it must enqueue
+    # itself (only the int arr_instance_id in this frame's locals; the ArrClient
+    # is built on the real run, never put on the queue) and not run the sync.
+    import sonarr.sync.series as series_mod
+    import radarr.sync.movies as mv_mod
+
+    for mod, fn, base in ((series_mod, "update_series_for_instance", "update_series"),
+                          (mv_mod, "update_movies_for_instance", "update_movies")):
+        enq = []
+        ran = []
+        monkeypatch.setattr(mod.jobs_queue, "add_job_from_function",
+                            lambda *a, **k: enq.append((a, k)) or 1)
+        monkeypatch.setattr(mod, base, lambda **k: ran.append(k))
+        monkeypatch.setattr(mod, "client_for_instance", lambda *a, **k: object())
+
+        getattr(mod, fn)(2)  # no job_id -> enqueue branch
+        assert len(enq) == 1, fn
+        assert ran == [], fn  # did not run the sync directly
+
+
 # ============================================================================
 # INC7: instance-scoped reads/deletes/updates. The default path (arr_instance_id
 # None) stays unscoped (byte-identical). The ORM still keys on the upstream id,

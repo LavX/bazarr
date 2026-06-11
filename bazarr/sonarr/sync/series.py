@@ -194,13 +194,21 @@ def update_series(job_id=None, wait_for_completion=False, arr_instance_id=None, 
     gc.collect()
 
 
-def update_series_for_instance(arr_instance_id, job_id):
-    """Bulk-sync one Sonarr instance. Built for the (future) scheduler fan-out,
-    which creates a per-instance job and calls this; builds the instance client
-    and forwards to update_series. A missing/disabled instance is skipped."""
+def update_series_for_instance(arr_instance_id, job_id=None, wait_for_completion=False):
+    """Bulk-sync one Sonarr instance (scheduler fan-out entry).
+
+    Mirrors update_series's enqueue-then-run so only the int arr_instance_id
+    travels through the job queue (add_job_from_function captures this frame's
+    locals); the per-instance ArrClient is built on the real run, never queued.
+    A missing/disabled instance is skipped.
+    """
+    if not job_id:
+        jobs_queue.add_job_from_function(f"Syncing series with Sonarr (instance {arr_instance_id})",
+                                         is_progress=True, wait_for_completion=wait_for_completion)
+        return
     arr_client = client_for_instance(database, arr_instance_id)
     if arr_client is None:
-        logging.warning('BAZARR skipping Sonarr sync for unknown instance %s', arr_instance_id)
+        logging.warning('BAZARR skipping Sonarr sync for unknown/disabled instance %s', arr_instance_id)
         return
     update_series(job_id=job_id, arr_instance_id=arr_instance_id, arr_client=arr_client)
 
