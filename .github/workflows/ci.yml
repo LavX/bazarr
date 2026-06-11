@@ -138,6 +138,7 @@ jobs:
             tests/bazarr/test_arr_instances_api.py \
             tests/bazarr/test_arr_client.py \
             tests/bazarr/test_arr_backfill.py \
+            tests/bazarr/test_arr_instance_stamping.py \
             tests/bazarr/test_sonarr_sync_utils.py \
             tests/bazarr/test_radarr_sync_utils.py \
             tests/bazarr/test_arr_aux_leaves.py \

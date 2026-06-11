@@ -20,6 +20,7 @@ from sonarr.info import get_sonarr_info
 from app.jobs_queue import jobs_queue
 from app.notifier import send_notifications
 from subtitles.adaptive_searching import is_search_active
+from arr_instances.resolution import sonarr_series_owner, stamp_owner
 
 from .parser import episodeParser
 from .utils import get_episodes_from_sonarr_api, get_episodesFiles_from_sonarr_api
@@ -203,6 +204,11 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
 
     rows_changed = False
 
+    # Episodes inherit their owning instance (and local series ref) from their
+    # parent series, resolved once here. Falls back to the default instance when
+    # the parent is unstamped; leaves both unset for a pre-backfill install.
+    owner_instance_id, parent_local_id = sonarr_series_owner(database, series_id)
+
     if len(episodes_to_delete):
         try:
             database.execute(delete(TableEpisodes).where(TableEpisodes.sonarrEpisodeId.in_(episodes_to_delete)))
@@ -227,6 +233,9 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
         insertion_timestamp = datetime.now()
         for added_episode in episodes_to_add:
             added_episode['created_at_timestamp'] = insertion_timestamp
+            stamp_owner(added_episode, owner_instance_id)
+            if parent_local_id is not None:
+                added_episode['series_id'] = parent_local_id
 
         for chunk_start in range(0, len(episodes_to_add), EPISODE_INSERT_CHUNK_SIZE):
             chunk = episodes_to_add[chunk_start:chunk_start + EPISODE_INSERT_CHUNK_SIZE]
@@ -264,6 +273,11 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
 
             try:
                 updated_episode['updated_at_timestamp'] = datetime.now()
+                # Stamp AFTER the subset-diff above (line ~188) so the added
+                # key never forces a spurious update on the next sync.
+                stamp_owner(updated_episode, owner_instance_id)
+                if parent_local_id is not None:
+                    updated_episode['series_id'] = parent_local_id
                 database.execute(update(TableEpisodes)
                                  .values(updated_episode)
                                  .where(TableEpisodes.sonarrEpisodeId == updated_episode['sonarrEpisodeId']))
@@ -359,6 +373,13 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False):
     if not episode and not existing_episode:
         return
 
+    # Resolve the owning instance + local series ref from the parent series for
+    # the write branches below (episode is None only on the delete path, which
+    # needs neither). Guarded so a pre-backfill install stays NULL.
+    owner_instance_id = parent_local_id = None
+    if episode:
+        owner_instance_id, parent_local_id = sonarr_series_owner(database, episode['sonarrSeriesId'])
+
     # Remove episode from DB
     if not episode and existing_episode:
         try:
@@ -377,6 +398,9 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False):
     elif episode and existing_episode:
         try:
             episode['updated_at_timestamp'] = datetime.now()
+            stamp_owner(episode, owner_instance_id)
+            if parent_local_id is not None:
+                episode['series_id'] = parent_local_id
             database.execute(
                 update(TableEpisodes)
                 .values(episode)
@@ -393,6 +417,9 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False):
     elif episode and not existing_episode:
         try:
             episode['created_at_timestamp'] = datetime.now()
+            stamp_owner(episode, owner_instance_id)
+            if parent_local_id is not None:
+                episode['series_id'] = parent_local_id
             database.execute(
                 insert(TableEpisodes)
                 .values(episode))

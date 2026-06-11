@@ -18,6 +18,7 @@ from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.mass_download import movies_download_subtitles  # noqa: F401
 from utilities.path_mappings import path_mappings
 from subtitles.adaptive_searching import is_search_active
+from arr_instances.resolution import default_instance_id, stamp_owner
 
 from sqlalchemy.exc import IntegrityError
 from .parser import movieParser
@@ -135,6 +136,10 @@ def update_movies(job_id=None, wait_for_completion=False):
         audio_profiles = get_profile_list()
         tagsDict = get_tags()
         language_profiles = get_language_profiles()
+
+        # Resolve the owning instance once (the enabled default for the
+        # single-instance path); stamp_owner leaves it unset pre-backfill.
+        instance_id = default_instance_id(database, 'radarr')
 
         # Get movies data from radarr
         movies = get_movies_from_radarr_api(apikey_radarr=apikey_radarr)
@@ -267,6 +272,9 @@ def update_movies(job_id=None, wait_for_completion=False):
                                                            audio_profiles=audio_profiles)
                                 cached_db_row = current_movies_in_db_dict[movie['id']]
                                 if not (parsed_movie.items() <= cached_db_row.items()):
+                                    # Stamp AFTER the subset-diff so the added
+                                    # key never forces a spurious update.
+                                    stamp_owner(parsed_movie, instance_id)
                                     update_movie(parsed_movie)
                                     movies_updated.append(parsed_movie['title'])
                             else:
@@ -275,6 +283,7 @@ def update_movies(job_id=None, wait_for_completion=False):
                                                            language_profiles=language_profiles,
                                                            movie_default_profile=movie_default_profile,
                                                            audio_profiles=audio_profiles)
+                                stamp_owner(parsed_movie, instance_id)
                                 add_movie(parsed_movie)
                                 movies_added.append(parsed_movie['title'])
                 else:
@@ -334,6 +343,9 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False):
     tagsDict = get_tags()
     language_profiles = get_language_profiles()
 
+    # Resolve the owning instance once (default for the single-instance path).
+    instance_id = default_instance_id(database, 'radarr')
+
     try:
         # Get movie data from radarr api
         movie = None
@@ -374,6 +386,7 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False):
     elif movie and existing_movie:
         try:
             movie['updated_at_timestamp'] = datetime.now()
+            stamp_owner(movie, instance_id)
             database.execute(
                 update(TableMovies)
                 .values(movie)
@@ -391,6 +404,7 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False):
     elif movie and not existing_movie:
         try:
             movie['created_at_timestamp'] = datetime.now()
+            stamp_owner(movie, instance_id)
             database.execute(
                 insert(TableMovies)
                 .values(movie))

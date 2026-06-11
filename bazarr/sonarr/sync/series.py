@@ -14,6 +14,7 @@ from app.database import TableShows, TableLanguagesProfiles, database, insert, u
 from utilities.path_mappings import path_mappings
 from app.event_handler import event_stream
 from app.jobs_queue import jobs_queue
+from arr_instances.resolution import default_instance_id, stamp_owner
 
 from .episodes import sync_episodes
 from .parser import seriesParser
@@ -253,6 +254,11 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
     else:
         series_payload = series_data
 
+    # Resolve the owning instance once (the enabled default for the
+    # single-instance path). stamp_owner leaves the column unset when no
+    # default exists yet, so a pre-backfill install keeps legacy NULL behaviour.
+    instance_id = default_instance_id(database, 'sonarr')
+
     if action == 'updated' and existing_in_db:
         # Update existing series in DB
         series = seriesParser(series_payload, action='update', tags_dict=tags_dict,
@@ -261,6 +267,7 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
                               audio_profiles=audio_profiles)
         try:
             series['updated_at_timestamp'] = datetime.now()
+            stamp_owner(series, instance_id)
             database.execute(
                 update(TableShows)
                 .values(series)
@@ -286,6 +293,7 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
 
         try:
             series['created_at_timestamp'] = datetime.now()
+            stamp_owner(series, instance_id)
             database.execute(
                 insert(TableShows)
                 .values(series))
