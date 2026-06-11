@@ -5,16 +5,19 @@ class EpisodeApi extends BaseApi {
     super("/episodes");
   }
 
-  async bySeriesId(seriesid: number[]) {
+  async bySeriesId(ids: number[]) {
+    // Fetch by the local series id (#156); backend dual-accepts series_id[] and
+    // the legacy seriesid[]. series_id == sonarrSeriesId single-instance.
     const response = await this.get<DataWrapper<Item.Episode[]>>("", {
-      seriesid,
+      series_id: ids,
     });
     return response.data;
   }
 
-  async byEpisodeId(episodeid: number[]) {
+  async byEpisodeId(ids: number[]) {
+    // Fetch by the local episode id (#156); backend dual-accepts id[] + episodeid[].
     const response = await this.get<DataWrapper<Item.Episode[]>>("", {
-      episodeid,
+      id: ids,
     });
     return response.data;
   }

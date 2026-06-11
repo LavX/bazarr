@@ -22,7 +22,9 @@ class Movies(Resource):
     get_request_parser.add_argument('start', type=int, required=False, default=0, help='Paging start integer')
     get_request_parser.add_argument('length', type=int, required=False, default=-1, help='Paging length integer')
     get_request_parser.add_argument('radarrid[]', type=int, action='append', required=False, default=[],
-                                    help='Movies IDs to get metadata for')
+                                    help='Upstream Radarr movie IDs (legacy; not unique across instances)')
+    get_request_parser.add_argument('id[]', type=int, action='append', required=False, default=[],
+                                    help='Canonical local movie IDs (#156; preferred, unique across instances)')
 
     get_subtitles_model = api_ns_movies.model('subtitles_model', subtitles_model)
     get_subtitles_language_model = api_ns_movies.model('subtitles_language_model', subtitles_language_model)
@@ -66,6 +68,7 @@ class Movies(Resource):
         start = args.get('start')
         length = args.get('length')
         radarrId = args.get('radarrid[]')
+        localId = args.get('id[]')
 
         stmt = select(TableMovies.id,
                       TableMovies.arr_instance_id,
@@ -88,7 +91,11 @@ class Movies(Resource):
                       )\
             .order_by(TableMovies.sortTitle)
 
-        if len(radarrId) != 0:
+        # Prefer the canonical local id (#156); fall back to the upstream id for
+        # back-compat (old bookmarks, the not-yet-migrated action layer).
+        if len(localId) != 0:
+            stmt = stmt.where(TableMovies.id.in_(localId))
+        elif len(radarrId) != 0:
             stmt = stmt.where(TableMovies.radarrId.in_(radarrId))
 
         if length > 0:

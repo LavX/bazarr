@@ -14,9 +14,13 @@ api_ns_episodes = Namespace('Episodes', description='List episodes metadata for 
 class Episodes(Resource):
     get_request_parser = reqparse.RequestParser()
     get_request_parser.add_argument('seriesid[]', type=int, action='append', required=False, default=[],
-                                    help='Series IDs to list episodes for')
+                                    help='Upstream Sonarr series IDs (legacy; not unique across instances)')
     get_request_parser.add_argument('episodeid[]', type=int, action='append', required=False, default=[],
-                                    help='Episodes ID to list')
+                                    help='Upstream Sonarr episode IDs (legacy; not unique across instances)')
+    get_request_parser.add_argument('series_id[]', type=int, action='append', required=False, default=[],
+                                    help='Canonical local series IDs (#156; preferred)')
+    get_request_parser.add_argument('id[]', type=int, action='append', required=False, default=[],
+                                    help='Canonical local episode IDs (#156; preferred)')
 
     get_subtitles_model = api_ns_episodes.model('subtitles_model', subtitles_model)
     get_subtitles_language_model = api_ns_episodes.model('subtitles_language_model', subtitles_language_model)
@@ -51,6 +55,8 @@ class Episodes(Resource):
         args = self.get_request_parser.parse_args()
         seriesId = args.get('seriesid[]')
         episodeId = args.get('episodeid[]')
+        localSeriesId = args.get('series_id[]')
+        localEpisodeId = args.get('id[]')
 
         stmt = select(
                 TableEpisodes.id,
@@ -69,7 +75,19 @@ class Episodes(Resource):
                 TableEpisodes.sceneName,
             )
 
-        if len(episodeId) > 0:
+        # Prefer the canonical local ids (#156); fall back to upstream ids.
+        if len(localEpisodeId) > 0:
+            stmt_query = database.execute(
+                stmt
+                .where(TableEpisodes.id.in_(localEpisodeId)))\
+                .all()
+        elif len(localSeriesId) > 0:
+            stmt_query = database.execute(
+                stmt
+                .where(TableEpisodes.series_id.in_(localSeriesId))
+                .order_by(TableEpisodes.season.desc(), TableEpisodes.episode.desc()))\
+                .all()
+        elif len(episodeId) > 0:
             stmt_query = database.execute(
                 stmt
                 .where(TableEpisodes.sonarrEpisodeId.in_(episodeId)))\

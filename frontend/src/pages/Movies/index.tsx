@@ -194,10 +194,10 @@ const MovieView: FunctionComponent = () => {
         accessorKey: "title",
         cell: ({
           row: {
-            original: { title, radarrId },
+            original: { title, id },
           },
         }) => {
-          const target = `/movies/${radarrId}`;
+          const target = `/movies/${id}`;
           return (
             <Anchor className="table-primary" component={Link} to={target}>
               {title}

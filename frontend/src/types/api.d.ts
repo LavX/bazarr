@@ -113,10 +113,18 @@ interface TagType {
 }
 
 interface SeriesIdType {
+  // Canonical local id (#156); arr_instance_id is the owning Sonarr instance.
+  // sonarrSeriesId is the upstream id, no longer globally unique.
+  id: number;
+  arr_instance_id?: number;
   sonarrSeriesId: number;
 }
 
-type EpisodeIdType = SeriesIdType & {
+// Episode's own local id, distinct from the series' id (Omit avoids inheriting
+// the series id). series_id is the local ref to the owning show (table_shows.id).
+type EpisodeIdType = Omit<SeriesIdType, "id"> & {
+  id: number;
+  series_id: number;
   sonarrEpisodeId: number;
 };
 
@@ -126,6 +134,8 @@ interface EpisodeTitleType {
 }
 
 interface MovieIdType {
+  id: number;
+  arr_instance_id?: number;
   radarrId: number;
 }
 

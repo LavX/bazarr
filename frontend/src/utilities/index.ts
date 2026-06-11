@@ -12,7 +12,11 @@ export function toggleState(
 }
 
 export function GetItemId<T extends object>(item: T): number | undefined {
-  if (isMovie(item)) {
+  // Prefer the canonical local id (#156); fall back to the upstream id for any
+  // partially-typed payload. On a single default instance they are equal.
+  if ("id" in item && typeof (item as { id?: number }).id === "number") {
+    return (item as { id: number }).id;
+  } else if (isMovie(item)) {
     return item.radarrId;
   } else if (isEpisode(item)) {
     return item.sonarrEpisodeId;

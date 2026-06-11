@@ -29,7 +29,9 @@ class Series(Resource):
     get_request_parser.add_argument('start', type=int, required=False, default=0, help='Paging start integer')
     get_request_parser.add_argument('length', type=int, required=False, default=-1, help='Paging length integer')
     get_request_parser.add_argument('seriesid[]', type=int, action='append', required=False, default=[],
-                                    help='Series IDs to get metadata for')
+                                    help='Upstream Sonarr series IDs (legacy; not unique across instances)')
+    get_request_parser.add_argument('id[]', type=int, action='append', required=False, default=[],
+                                    help='Canonical local series IDs (#156; preferred, unique across instances)')
 
     get_subtitles_model = api_ns_series.model('subtitles_model', subtitles_model)
     get_subtitles_language_model = api_ns_series.model('subtitles_language_model', subtitles_language_model)
@@ -76,6 +78,7 @@ class Series(Resource):
         start = args.get('start')
         length = args.get('length')
         seriesId = args.get('seriesid[]')
+        localId = args.get('id[]')
 
         episodeFileCount = select(TableShows.sonarrSeriesId,
                                   func.count(TableEpisodes.sonarrSeriesId).label('episodeFileCount')) \
@@ -139,7 +142,10 @@ class Series(Resource):
             .join(episodeMissingCount, TableShows.sonarrSeriesId == episodeMissingCount.c.sonarrSeriesId, isouter=True)\
             .order_by(TableShows.sortTitle)
 
-        if len(seriesId) != 0:
+        # Prefer the canonical local id (#156); fall back to the upstream id.
+        if len(localId) != 0:
+            stmt = stmt.where(TableShows.id.in_(localId))
+        elif len(seriesId) != 0:
             stmt = stmt.where(TableShows.sonarrSeriesId.in_(seriesId))
         elif length > 0:
             stmt = stmt.limit(length).offset(start)

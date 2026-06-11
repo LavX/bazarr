@@ -11,15 +11,12 @@ import api from "@/apis/raw";
 
 const cacheEpisodes = (client: QueryClient, episodes: Item.Episode[]) => {
   episodes.forEach((item) => {
-    client.setQueryData([QueryKeys.Episodes, item.sonarrEpisodeId], item);
+    // Key by canonical local ids (#156): episode local id + the parent show's
+    // local id (series_id). Equal to the upstream ids on a single instance.
+    client.setQueryData([QueryKeys.Episodes, item.id], item);
 
     client.setQueryData(
-      [
-        QueryKeys.Series,
-        item.sonarrSeriesId,
-        QueryKeys.Episodes,
-        item.sonarrEpisodeId,
-      ],
+      [QueryKeys.Series, item.series_id, QueryKeys.Episodes, item.id],
       item,
     );
   });

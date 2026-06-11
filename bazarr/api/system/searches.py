@@ -33,6 +33,8 @@ class Searches(Resource):
                 # Get matching series
                 search_list += database.execute(
                     select(TableShows.title,
+                           TableShows.id,
+                           TableShows.arr_instance_id,
                            TableShows.sonarrSeriesId,
                            TableShows.poster,
                            TableShows.year)
@@ -43,6 +45,8 @@ class Searches(Resource):
                 # Get matching movies
                 search_list += database.execute(
                     select(TableMovies.title,
+                           TableMovies.id,
+                           TableMovies.arr_instance_id,
                            TableMovies.radarrId,
                            TableMovies.poster,
                            TableMovies.year)
@@ -56,6 +60,10 @@ class Searches(Resource):
                 result = {
                     'title': x.title,
                     'year': x.year,
+                    # Canonical local id + owning instance (#156); the frontend
+                    # routes by id, id == upstream id on a single instance.
+                    'id': x.id,
+                    'arr_instance_id': x.arr_instance_id,
                 }
 
                 if hasattr(x, 'sonarrSeriesId'):

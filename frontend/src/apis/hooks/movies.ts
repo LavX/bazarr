@@ -11,7 +11,9 @@ import api from "@/apis/raw";
 
 const cacheMovies = (client: QueryClient, movies: Item.Movie[]) => {
   movies.forEach((item) => {
-    client.setQueryData([QueryKeys.Movies, item.radarrId], item);
+    // Key by the canonical local id (#156) so a detail fetch by local id hits
+    // the list-populated cache. id == radarrId on a single default instance.
+    client.setQueryData([QueryKeys.Movies, item.id], item);
   });
 };
 

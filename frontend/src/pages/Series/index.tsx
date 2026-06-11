@@ -198,7 +198,7 @@ const SeriesView: FunctionComponent = () => {
         header: "Name",
         accessorKey: "title",
         cell: ({ row: { original } }) => {
-          const target = `/series/${original.sonarrSeriesId}`;
+          const target = `/series/${original.id}`;
           return (
             <Anchor className="table-primary" component={Link} to={target}>
               {original.title}

@@ -19,9 +19,11 @@ class MovieApi extends BaseApi {
     await this.delete("/blacklist", form, { all });
   }
 
-  async movies(radarrid?: number[]) {
+  async movies(ids?: number[]) {
+    // Fetch by the canonical local id (#156); the backend dual-accepts id[] and
+    // the legacy radarrid[]. id == radarrId on a single default instance.
     const response = await this.get<DataWrapperWithTotal<Item.Movie>>("", {
-      radarrid,
+      id: ids,
     });
     return response.data;
   }
