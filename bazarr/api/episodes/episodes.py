@@ -23,6 +23,11 @@ class Episodes(Resource):
     get_audio_language_model = api_ns_episodes.model('audio_language_model', audio_language_model)
 
     get_response_model = api_ns_episodes.model('EpisodeGetResponse', {
+        # Canonical local ids + owning instance (#156); additive alongside the
+        # upstream sonarrEpisodeId/sonarrSeriesId. series_id is the local ref.
+        'id': fields.Integer(),
+        'arr_instance_id': fields.Integer(),
+        'series_id': fields.Integer(),
         'audio_language': fields.Nested(get_audio_language_model),
         'episode': fields.Integer(),
         'missing_subtitles': fields.Nested(get_subtitles_language_model),
@@ -48,6 +53,9 @@ class Episodes(Resource):
         episodeId = args.get('episodeid[]')
 
         stmt = select(
+                TableEpisodes.id,
+                TableEpisodes.arr_instance_id,
+                TableEpisodes.series_id,
                 TableEpisodes.audio_language,
                 TableEpisodes.episode,
                 TableEpisodes.missing_subtitles,
@@ -76,6 +84,9 @@ class Episodes(Resource):
             return "Series or Episode ID not provided", 404
 
         return marshal([postprocess({
+                'id': x.id,
+                'arr_instance_id': x.arr_instance_id,
+                'series_id': x.series_id,
                 'audio_language': x.audio_language,
                 'episode': x.episode,
                 'missing_subtitles': x.missing_subtitles,

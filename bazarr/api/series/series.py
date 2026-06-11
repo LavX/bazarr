@@ -36,6 +36,10 @@ class Series(Resource):
     get_audio_language_model = api_ns_series.model('audio_language_model', audio_language_model)
 
     data_model = api_ns_series.model('series_data_model', {
+        # Canonical local id + owning instance (#156). Additive: the upstream
+        # sonarrSeriesId stays for back-compat; the frontend migrates to id.
+        'id': fields.Integer(),
+        'arr_instance_id': fields.Integer(),
         'alternativeTitles': fields.List(fields.String),
         'audio_language': fields.Nested(get_audio_language_model),
         'episodeFileCount': fields.Integer(default=0),
@@ -109,7 +113,9 @@ class Series(Resource):
             else_=TableShows.audio_language
         ).label('audio_language')
 
-        stmt = select(TableShows.tvdbId,
+        stmt = select(TableShows.id,
+                      TableShows.arr_instance_id,
+                      TableShows.tvdbId,
                       TableShows.alternativeTitles,
                       audio_language_col,
                       TableShows.fanart,
@@ -139,6 +145,8 @@ class Series(Resource):
             stmt = stmt.limit(length).offset(start)
 
         results = [postprocess({
+            'id': x.id,
+            'arr_instance_id': x.arr_instance_id,
             'tvdbId': x.tvdbId,
             'alternativeTitles': x.alternativeTitles,
             'audio_language': x.audio_language,

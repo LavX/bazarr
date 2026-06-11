@@ -29,6 +29,10 @@ class Movies(Resource):
     get_audio_language_model = api_ns_movies.model('audio_language_model', audio_language_model)
 
     data_model = api_ns_movies.model('movies_data_model', {
+        # Canonical local id + owning instance (#156); additive, frontend
+        # migrates to id while radarrId stays for back-compat.
+        'id': fields.Integer(),
+        'arr_instance_id': fields.Integer(),
         'alternativeTitles': fields.List(fields.String),
         'audio_language': fields.Nested(get_audio_language_model),
         'fanart': fields.String(),
@@ -63,7 +67,9 @@ class Movies(Resource):
         length = args.get('length')
         radarrId = args.get('radarrid[]')
 
-        stmt = select(TableMovies.alternativeTitles,
+        stmt = select(TableMovies.id,
+                      TableMovies.arr_instance_id,
+                      TableMovies.alternativeTitles,
                       TableMovies.audio_language,
                       TableMovies.fanart,
                       TableMovies.imdbId,
@@ -89,6 +95,8 @@ class Movies(Resource):
             stmt = stmt.limit(length).offset(start)
 
         results = [postprocess({
+            'id': x.id,
+            'arr_instance_id': x.arr_instance_id,
             'alternativeTitles': x.alternativeTitles,
             'audio_language': x.audio_language,
             'fanart': x.fanart,
