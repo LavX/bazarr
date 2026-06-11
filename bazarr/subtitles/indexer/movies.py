@@ -25,6 +25,7 @@ from subtitles.utils import _get_scores
 from radarr.history import history_log_movie
 from app.jobs_queue import jobs_queue
 from subtitles.adaptive_searching import is_search_given_up
+from arr_instances.resolution import scoped
 
 gc.enable()
 
@@ -156,14 +157,17 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
             .values(subtitles=str(actual_subtitles))
             .where(TableMovies.path == original_path))
         matching_movies = database.execute(
-            select(TableMovies.radarrId)
+            select(TableMovies.radarrId, TableMovies.arr_instance_id)
             .where(TableMovies.path == original_path))\
             .all()
 
         for movie in matching_movies:
             if movie:
                 logging.debug(f"BAZARR storing those languages to DB: {actual_subtitles}")  # noqa: G004
-                list_missing_subtitles_movies(no=movie.radarrId)
+                # Scope the missing-subtitle recompute to the owning instance
+                # (no-op for the default/single-instance path).
+                list_missing_subtitles_movies(no=movie.radarrId,
+                                              arr_instance_id=movie.arr_instance_id)
                 if embedded_languages:
                     # Pass the DB-side path (original_path), not the local
                     # filesystem path. history_log_movie stores result.path
@@ -238,15 +242,18 @@ def _log_embedded_history_movie(radarr_id, embedded_languages, reversed_path):
         logging.exception("BAZARR error writing embedded subtitle history for movie %s", radarr_id)
 
 
-def list_missing_subtitles_movies(no=None):
+def list_missing_subtitles_movies(no=None, arr_instance_id=None):
     stmt = select(TableMovies.radarrId,
                   TableMovies.subtitles,
                   TableMovies.failedAttempts,
                   TableMovies.profileId,
                   TableMovies.audio_language)
 
+    # Scope to the owning instance when supplied (no-op for the default path).
     if no:
-        movies_subtitles = database.execute(stmt.where(TableMovies.radarrId == no)).all()
+        movies_subtitles = database.execute(
+            scoped(stmt.where(TableMovies.radarrId == no),
+                   TableMovies.arr_instance_id, arr_instance_id)).all()
     else:
         movies_subtitles = database.execute(stmt).all()
 
@@ -363,9 +370,10 @@ def list_missing_subtitles_movies(no=None):
                 missing_subtitles_text = str(missing_subtitles_output_list)
 
         database.execute(
-            update(TableMovies)
-            .values(missing_subtitles=missing_subtitles_text)
-            .where(TableMovies.radarrId == movie_subtitles.radarrId))
+            scoped(update(TableMovies)
+                   .values(missing_subtitles=missing_subtitles_text)
+                   .where(TableMovies.radarrId == movie_subtitles.radarrId),
+                   TableMovies.arr_instance_id, arr_instance_id))
 
         event_stream(type='movie', payload=movie_subtitles.radarrId)
         event_stream(type='movie-wanted', action='update', payload=movie_subtitles.radarrId)
