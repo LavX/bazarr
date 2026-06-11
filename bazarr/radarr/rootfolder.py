@@ -11,16 +11,16 @@ from radarr.http_session import radarr_session
 from radarr.info import radarr_headers, url_api_radarr
 
 
-def get_radarr_rootfolder():
+def get_radarr_rootfolder(arr_instance_id=None, arr_client=None):
     apikey_radarr = settings.radarr.apikey
     radarr_rootfolder = []
 
-    # Get root folder data from Radarr
-    url_radarr_api_rootfolder = f"{url_api_radarr()}rootfolder"
-
     try:
-        rootfolder = radarr_session().get(url_radarr_api_rootfolder, timeout=int(settings.radarr.http_timeout), verify=get_ssl_verify('radarr'),
-                                          headers=radarr_headers(apikey_radarr))
+        if arr_client is not None:
+            rootfolder = arr_client.get("/api/v3/rootfolder")
+        else:
+            rootfolder = radarr_session().get(f"{url_api_radarr()}rootfolder", timeout=int(settings.radarr.http_timeout),
+                                              verify=get_ssl_verify('radarr'), headers=radarr_headers(apikey_radarr))
     except requests.exceptions.ConnectionError:
         logging.exception("BAZARR Error trying to get rootfolder from Radarr. Connection Error.")
         return []
@@ -31,14 +31,19 @@ def get_radarr_rootfolder():
         logging.exception("BAZARR Error trying to get rootfolder from Radarr.")
         return []
     else:
+        # Scope the existing-movies lookup and the rootfolder table to the
+        # owning instance when one is supplied; with no instance, the statements
+        # are unscoped exactly as before (default-instance behaviour unchanged).
+        movies_paths_stmt = select(TableMovies.path)
+        db_rootfolder_stmt = select(TableMoviesRootfolder.id, TableMoviesRootfolder.path)
+        if arr_instance_id is not None:
+            movies_paths_stmt = movies_paths_stmt.where(TableMovies.arr_instance_id == arr_instance_id)
+            db_rootfolder_stmt = db_rootfolder_stmt.where(TableMoviesRootfolder.arr_instance_id == arr_instance_id)
+
         for folder in rootfolder.json():
-            if any(item.path.startswith(folder['path']) for item in database.execute(
-                    select(TableMovies.path))
-                    .all()):
+            if any(item.path.startswith(folder['path']) for item in database.execute(movies_paths_stmt).all()):
                 radarr_rootfolder.append({'id': folder['id'], 'path': folder['path']})  # noqa: PERF401
-        db_rootfolder = database.execute(
-            select(TableMoviesRootfolder.id, TableMoviesRootfolder.path))\
-            .all()
+        db_rootfolder = database.execute(db_rootfolder_stmt).all()
         rootfolder_to_remove = [x for x in db_rootfolder if not
                                 next((item for item in radarr_rootfolder if item['id'] == x.id), False)]
         rootfolder_to_update = [x for x in radarr_rootfolder if
@@ -47,18 +52,23 @@ def get_radarr_rootfolder():
                                 next((item for item in db_rootfolder if item.id == x['id']), False)]
 
         for item in rootfolder_to_remove:
-            database.execute(
-                delete(TableMoviesRootfolder)
-                .where(TableMoviesRootfolder.id == item.id))
+            stmt = delete(TableMoviesRootfolder).where(TableMoviesRootfolder.id == item.id)
+            if arr_instance_id is not None:
+                stmt = stmt.where(TableMoviesRootfolder.arr_instance_id == arr_instance_id)
+            database.execute(stmt)
         for item in rootfolder_to_update:
-            database.execute(
-                update(TableMoviesRootfolder)
-                .values(path=item['path'])
-                .where(TableMoviesRootfolder.id == item['id']))
+            stmt = (update(TableMoviesRootfolder).values(path=item['path'])
+                    .where(TableMoviesRootfolder.id == item['id']))
+            if arr_instance_id is not None:
+                stmt = stmt.where(TableMoviesRootfolder.arr_instance_id == arr_instance_id)
+            database.execute(stmt)
         for item in rootfolder_to_insert:
-            database.execute(
-                insert(TableMoviesRootfolder)
-                .values(id=item['id'], path=item['path']))
+            values = {'id': item['id'], 'path': item['path']}
+            if arr_instance_id is not None:
+                values.update(arr_instance_id=arr_instance_id,
+                              upstream_rootfolder_id=item['id'],
+                              local_rootfolder_id=item['id'])
+            database.execute(insert(TableMoviesRootfolder).values(**values))
 
 
 def check_radarr_rootfolder():

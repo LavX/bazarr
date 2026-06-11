@@ -11,16 +11,16 @@ from sonarr.http_session import sonarr_session
 from sonarr.info import sonarr_headers, url_api_sonarr
 
 
-def get_sonarr_rootfolder():
+def get_sonarr_rootfolder(arr_instance_id=None, arr_client=None):
     apikey_sonarr = settings.sonarr.apikey
     sonarr_rootfolder = []
 
-    # Get root folder data from Sonarr
-    url_sonarr_api_rootfolder = f"{url_api_sonarr()}rootfolder"
-
     try:
-        rootfolder = sonarr_session().get(url_sonarr_api_rootfolder, timeout=int(settings.sonarr.http_timeout), verify=get_ssl_verify('sonarr'),
-                                          headers=sonarr_headers(apikey_sonarr))
+        if arr_client is not None:
+            rootfolder = arr_client.get("/api/v3/rootfolder")
+        else:
+            rootfolder = sonarr_session().get(f"{url_api_sonarr()}rootfolder", timeout=int(settings.sonarr.http_timeout),
+                                              verify=get_ssl_verify('sonarr'), headers=sonarr_headers(apikey_sonarr))
     except requests.exceptions.ConnectionError:
         logging.exception("BAZARR Error trying to get rootfolder from Sonarr. Connection Error.")
         return []
@@ -31,14 +31,19 @@ def get_sonarr_rootfolder():
         logging.exception("BAZARR Error trying to get rootfolder from Sonarr.")
         return []
     else:
+        # Scope the existing-shows lookup and the rootfolder table to the owning
+        # instance when one is supplied; with no instance, the statements are
+        # unscoped exactly as before (default-instance behaviour unchanged).
+        shows_paths_stmt = select(TableShows.path)
+        db_rootfolder_stmt = select(TableShowsRootfolder.id, TableShowsRootfolder.path)
+        if arr_instance_id is not None:
+            shows_paths_stmt = shows_paths_stmt.where(TableShows.arr_instance_id == arr_instance_id)
+            db_rootfolder_stmt = db_rootfolder_stmt.where(TableShowsRootfolder.arr_instance_id == arr_instance_id)
+
         for folder in rootfolder.json():
-            if any(item.path.startswith(folder['path']) for item in database.execute(
-                    select(TableShows.path))
-                    .all()):
+            if any(item.path.startswith(folder['path']) for item in database.execute(shows_paths_stmt).all()):
                 sonarr_rootfolder.append({'id': folder['id'], 'path': folder['path']})  # noqa: PERF401
-        db_rootfolder = database.execute(
-            select(TableShowsRootfolder.id, TableShowsRootfolder.path))\
-            .all()
+        db_rootfolder = database.execute(db_rootfolder_stmt).all()
         rootfolder_to_remove = [x for x in db_rootfolder if not
                                 next((item for item in sonarr_rootfolder if item['id'] == x.id), False)]
         rootfolder_to_update = [x for x in sonarr_rootfolder if
@@ -47,18 +52,23 @@ def get_sonarr_rootfolder():
                                 next((item for item in db_rootfolder if item.id == x['id']), False)]
 
         for item in rootfolder_to_remove:
-            database.execute(
-                delete(TableShowsRootfolder)
-                .where(TableShowsRootfolder.id == item.id))
+            stmt = delete(TableShowsRootfolder).where(TableShowsRootfolder.id == item.id)
+            if arr_instance_id is not None:
+                stmt = stmt.where(TableShowsRootfolder.arr_instance_id == arr_instance_id)
+            database.execute(stmt)
         for item in rootfolder_to_update:
-            database.execute(
-                update(TableShowsRootfolder)
-                .values(path=item['path'])
-                .where(TableShowsRootfolder.id == item['id']))
+            stmt = (update(TableShowsRootfolder).values(path=item['path'])
+                    .where(TableShowsRootfolder.id == item['id']))
+            if arr_instance_id is not None:
+                stmt = stmt.where(TableShowsRootfolder.arr_instance_id == arr_instance_id)
+            database.execute(stmt)
         for item in rootfolder_to_insert:
-            database.execute(
-                insert(TableShowsRootfolder)
-                .values(id=item['id'], path=item['path']))
+            values = {'id': item['id'], 'path': item['path']}
+            if arr_instance_id is not None:
+                values.update(arr_instance_id=arr_instance_id,
+                              upstream_rootfolder_id=item['id'],
+                              local_rootfolder_id=item['id'])
+            database.execute(insert(TableShowsRootfolder).values(**values))
 
 
 def check_sonarr_rootfolder():
