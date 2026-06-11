@@ -16,7 +16,7 @@ import os
 import shutil
 
 import pytest
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, insert, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 
 _HEAD_BEFORE_CUTOVER = "d9a3b7c1e240"
@@ -216,5 +216,36 @@ def test_cutover_local_pk_autoincrements_and_scopes_uniqueness(legacy_db_at_head
         with eng.begin() as c:  # same path + same instance -> violation
             with pytest.raises(IntegrityError):
                 c.execute(text(ins), {"p": "/p1e/x", "t": "X3", "s": 999993, "i": inst})
+    finally:
+        eng.dispose()
+
+
+def test_migrated_db_works_with_current_orm_models(legacy_db_at_head):
+    # The ORM PK flip is intentionally deferred (it would break single-instance
+    # callers keyed by the upstream id). This proves the CURRENT models
+    # (upstream-id PK) keep working against the migrated id-PK DB: get-by-radarrId,
+    # select-by-path, and a legacy-style insert + fetch all succeed.
+    from sqlalchemy.orm import Session
+
+    from app.database import TableMovies
+
+    _run_migration(legacy_db_at_head, _CUTOVER)
+    eng = create_engine(f"sqlite:///{legacy_db_at_head}")
+    try:
+        with Session(eng) as s:
+            existing = s.execute(text("select radarrId from table_movies limit 1")).scalar()
+            if existing is not None:
+                m = s.get(TableMovies, existing)            # model PK is radarrId
+                assert m is not None and m.radarrId == existing
+                by_path = s.execute(
+                    select(TableMovies).where(TableMovies.path == m.path)).scalar_one()
+                assert by_path.radarrId == existing
+            inst = s.execute(text("select id from arr_instances where kind='radarr'")).scalar()
+            s.execute(insert(TableMovies).values(
+                radarrId=987654, path="/orm/new.mkv", title="ORM", tmdbId="orm987654",
+                arr_instance_id=inst))
+            s.commit()
+            got = s.get(TableMovies, 987654)               # legacy get-by-radarrId
+            assert got is not None and got.path == "/orm/new.mkv"
     finally:
         eng.dispose()
