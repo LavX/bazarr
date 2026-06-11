@@ -119,3 +119,30 @@ def test_cutover_bootstraps_default_instances_and_stamps_owners(legacy_db_at_hea
                 assert nulls == 0, f"{table} has {nulls} unstamped rows after cutover"
     finally:
         eng.dispose()
+
+
+def test_cutover_backfills_local_ids_equal_to_upstream(legacy_db_at_head):
+    # Step C+D: local id = upstream id everywhere; history/blacklist local refs
+    # copied from their upstream id columns. The backup DB (9376 history /
+    # 2052 history_movie / 8 blacklist) is the load-bearing case here.
+    _run_migration(legacy_db_at_head, _CUTOVER)
+    eng = create_engine(f"sqlite:///{legacy_db_at_head}")
+    mismatches = [
+        "select count(*) from table_shows where id != sonarrSeriesId",
+        "select count(*) from table_episodes where id != sonarrEpisodeId",
+        "select count(*) from table_episodes where series_id != sonarrSeriesId and sonarrSeriesId is not null",
+        "select count(*) from table_movies where id != radarrId",
+        "select count(*) from table_shows_rootfolder where local_rootfolder_id != id or upstream_rootfolder_id != id",
+        "select count(*) from table_movies_rootfolder where local_rootfolder_id != id or upstream_rootfolder_id != id",
+        "select count(*) from table_history where series_id != sonarrSeriesId and sonarrSeriesId is not null",
+        "select count(*) from table_history where episode_id != sonarrEpisodeId and sonarrEpisodeId is not null",
+        "select count(*) from table_history_movie where movie_id != radarrId and radarrId is not null",
+        "select count(*) from table_blacklist where series_id != sonarr_series_id and sonarr_series_id is not null",
+        "select count(*) from table_blacklist_movie where movie_id != radarr_id and radarr_id is not null",
+    ]
+    try:
+        with eng.connect() as conn:
+            for sql in mismatches:
+                assert conn.execute(text(sql)).scalar() == 0, sql
+    finally:
+        eng.dispose()
