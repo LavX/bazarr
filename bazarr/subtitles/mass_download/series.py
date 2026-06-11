@@ -10,6 +10,7 @@ from functools import reduce
 
 from utilities.path_mappings import path_mappings
 from subtitles.indexer.series import store_subtitles, list_missing_subtitles
+from arr_instances.resolution import scoped
 from sonarr.history import history_log
 from app.notifier import send_notifications
 from app.get_providers import get_providers
@@ -22,16 +23,18 @@ from app.config import settings
 from ..download import generate_subtitles
 
 
-def series_download_subtitles(no, job_id=None, job_sub_function=False):
+def series_download_subtitles(no, job_id=None, job_sub_function=False, arr_instance_id=None):
     if not job_sub_function and not job_id:
         jobs_queue.add_job_from_function(f"""Downloading missing subtitles for {database.scalar(
-            select(TableShows.title).where(TableShows.sonarrSeriesId == no)) or 'Unknown Series'}""", is_progress=True)
+            scoped(select(TableShows.title).where(TableShows.sonarrSeriesId == no),
+                   TableShows.arr_instance_id, arr_instance_id)) or 'Unknown Series'}""", is_progress=True)
         return
 
-    series_row = database.execute(
+    series_row = database.execute(scoped(
         select(TableShows.path,
                TableShows.title)
-        .where(TableShows.sonarrSeriesId == no))\
+        .where(TableShows.sonarrSeriesId == no),
+        TableShows.arr_instance_id, arr_instance_id))\
         .first()
 
     if series_row and not os.path.exists(path_mappings.path_replace(series_row.path)):
@@ -40,8 +43,9 @@ def series_download_subtitles(no, job_id=None, job_sub_function=False):
     conditions = [(TableEpisodes.sonarrSeriesId == no),
                   (TableEpisodes.missing_subtitles != '[]')]
     conditions += get_exclusion_clause('series')
-    episodes_details = database.execute(
+    episodes_details = database.execute(scoped(
         select(TableEpisodes.sonarrEpisodeId,
+               TableEpisodes.arr_instance_id,
                TableShows.title,
                TableEpisodes.season,
                TableEpisodes.episode,
@@ -49,7 +53,8 @@ def series_download_subtitles(no, job_id=None, job_sub_function=False):
                TableEpisodes.missing_subtitles)
         .select_from(TableEpisodes)
         .join(TableShows)
-        .where(reduce(operator.and_, conditions))) \
+        .where(reduce(operator.and_, conditions)),
+        TableEpisodes.arr_instance_id, arr_instance_id)) \
         .all()
     throttled = False
     if not episodes_details:
@@ -68,7 +73,8 @@ def series_download_subtitles(no, job_id=None, job_sub_function=False):
             fallback_allowed = settings.general.use_whisper_fallback and settings.general.use_whisper_fallback_series
             if providers_list:
                 episode_download_subtitles(no=episode.sonarrEpisodeId, job_id=job_id, job_sub_function=True,
-                                           providers_list=providers_list, fallback_allowed=fallback_allowed)
+                                           providers_list=providers_list, fallback_allowed=fallback_allowed,
+                                           arr_instance_id=episode.arr_instance_id)
             else:
                 jobs_queue.update_job_progress(job_id=job_id, progress_value=count_episodes_details)
                 logging.info("BAZARR All providers are throttled")
@@ -81,15 +87,17 @@ def series_download_subtitles(no, job_id=None, job_sub_function=False):
     jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Downloaded missing subtitles for {series_row.title}")
 
 
-def episode_download_subtitles(no, job_id=None, job_sub_function=False, providers_list=None, fallback_allowed=False):
+def episode_download_subtitles(no, job_id=None, job_sub_function=False, providers_list=None, fallback_allowed=False,
+                               arr_instance_id=None):
     if not job_sub_function and not job_id:
         jobs_queue.add_job_from_function(f"""Downloading missing subtitles for {database.scalar(
-            select(TableShows.title).where(TableShows.sonarrSeriesId == no)) or 'Unknown Series'}""", is_progress=True)
+            scoped(select(TableShows.title).where(TableShows.sonarrSeriesId == no),
+                   TableShows.arr_instance_id, arr_instance_id)) or 'Unknown Series'}""", is_progress=True)
         return
 
     conditions = [(TableEpisodes.sonarrEpisodeId == no)]
     conditions += get_exclusion_clause('series')
-    stmt = select(TableEpisodes.path,
+    stmt = scoped(select(TableEpisodes.path,
                   TableEpisodes.missing_subtitles,
                   TableEpisodes.monitored,
                   TableEpisodes.sonarrEpisodeId,
@@ -103,10 +111,11 @@ def episode_download_subtitles(no, job_id=None, job_sub_function=False, provider
                   TableEpisodes.season,
                   TableEpisodes.episode,
                   TableShows.profileId,
-                  TableEpisodes.subtitles) \
-        .select_from(TableEpisodes) \
-        .join(TableShows) \
-        .where(reduce(operator.and_, conditions))
+                  TableEpisodes.subtitles)
+        .select_from(TableEpisodes)
+        .join(TableShows)
+        .where(reduce(operator.and_, conditions)),
+        TableEpisodes.arr_instance_id, arr_instance_id)
     episode = database.execute(stmt).first()
 
     if not episode:
@@ -119,7 +128,7 @@ def episode_download_subtitles(no, job_id=None, job_sub_function=False, provider
         episode = database.execute(stmt).first()
     elif episode.missing_subtitles is None:
         # missing subtitles calculation for this episode is incomplete, we'll do it again
-        list_missing_subtitles(epno=no)
+        list_missing_subtitles(epno=no, arr_instance_id=arr_instance_id)
         episode = database.execute(stmt).first()
 
     episodePath = path_mappings.path_replace(episode.path)
@@ -168,7 +177,8 @@ def episode_download_subtitles(no, job_id=None, job_sub_function=False, provider
                     if isinstance(result, tuple) and len(result):
                         result = result[0]
                     store_subtitles(episode.path, path_mappings.path_replace(episode.path))
-                    history_log(1, episode.sonarrSeriesId, episode.sonarrEpisodeId, result)
+                    history_log(1, episode.sonarrSeriesId, episode.sonarrEpisodeId, result,
+                                arr_instance_id=arr_instance_id)
                     send_notifications(episode.sonarrSeriesId, episode.sonarrEpisodeId, result.message)
                     downloaded_count += 1
         outcome_msg = (f"{downloaded_count} subtitle(s) downloaded"

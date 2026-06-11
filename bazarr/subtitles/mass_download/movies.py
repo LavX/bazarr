@@ -11,6 +11,7 @@ from functools import reduce
 from utilities.path_mappings import path_mappings
 from subtitles.indexer.movies import store_subtitles_movie, list_missing_subtitles_movies
 from radarr.history import history_log_movie
+from arr_instances.resolution import scoped
 from app.notifier import send_notifications_movie
 from app.get_providers import get_providers
 from app.database import (get_exclusion_clause, get_audio_profile_languages, TableMovies, database, select,
@@ -21,19 +22,21 @@ from app.event_handler import event_stream
 from ..download import generate_subtitles
 
 
-def movies_download_subtitles(no, job_id=None, job_sub_function=False):
+def movies_download_subtitles(no, job_id=None, job_sub_function=False, arr_instance_id=None):
     if not job_sub_function and not job_id:
         jobs_queue.add_job_from_function(f"""Downloading missing subtitles for """
-                                         f"""{database.scalar(select(TableMovies.title)
-                                                              .where(TableMovies.radarrId == no))}"""
-                                         f""" ({database.scalar(select(TableMovies.year)
-                                                                .where(TableMovies.radarrId == no))})""",
+                                         f"""{database.scalar(scoped(select(TableMovies.title)
+                                                              .where(TableMovies.radarrId == no),
+                                                              TableMovies.arr_instance_id, arr_instance_id))}"""
+                                         f""" ({database.scalar(scoped(select(TableMovies.year)
+                                                                .where(TableMovies.radarrId == no),
+                                                                TableMovies.arr_instance_id, arr_instance_id))})""",
                                          is_progress=True)
         return
 
     conditions = [(TableMovies.radarrId == no)]
     conditions += get_exclusion_clause('movie')
-    stmt = select(TableMovies.path,
+    stmt = scoped(select(TableMovies.path,
                   TableMovies.missing_subtitles,
                   TableMovies.audio_language,
                   TableMovies.radarrId,
@@ -43,8 +46,9 @@ def movies_download_subtitles(no, job_id=None, job_sub_function=False):
                   TableMovies.tags,
                   TableMovies.monitored,
                   TableMovies.profileId,
-                  TableMovies.subtitles) \
-        .where(reduce(operator.and_, conditions))
+                  TableMovies.subtitles)
+        .where(reduce(operator.and_, conditions)),
+        TableMovies.arr_instance_id, arr_instance_id)
     movie = database.execute(stmt).first()
 
     if not movie:
@@ -57,7 +61,7 @@ def movies_download_subtitles(no, job_id=None, job_sub_function=False):
         movie = database.execute(stmt).first()
     elif movie.missing_subtitles is None:
         # missing subtitles calculation for this movie is incomplete, we'll do it again
-        list_missing_subtitles_movies(no=no)
+        list_missing_subtitles_movies(no=no, arr_instance_id=arr_instance_id)
         movie = database.execute(stmt).first()
 
     moviePath = path_mappings.path_replace_movie(movie.path)
@@ -106,7 +110,7 @@ def movies_download_subtitles(no, job_id=None, job_sub_function=False):
                     if isinstance(result, tuple) and len(result):
                         result = result[0]
                     store_subtitles_movie(movie.path, moviePath)
-                    history_log_movie(1, no, result)
+                    history_log_movie(1, no, result, arr_instance_id=arr_instance_id)
                     send_notifications_movie(no, result.message)
                     downloaded_count += 1
         outcome_msg = (f"{downloaded_count} subtitle(s) downloaded"
