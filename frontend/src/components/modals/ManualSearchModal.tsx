@@ -35,6 +35,52 @@ interface Props<T extends SupportType> {
   item: T;
 }
 
+// Stable identity for a search result. SearchResultType has no id field, so we
+// derive one from provider + url + release name. Keying downloaded state on this
+// (instead of the row index) keeps the "already downloaded" highlight attached to
+// the correct subtitle after "Search Again" reorders or replaces results.
+function getResultKey(result: SearchResultType): string {
+  return [result.provider, result.url ?? "", result.release_info[0] ?? ""].join(
+    "|",
+  );
+}
+
+// Declared at module scope so its component type is stable across renders.
+// If declared inside ManualSearchView, React would unmount/remount every cell
+// (losing the expanded "open" state) whenever the parent re-renders.
+const ReleaseInfoCell = React.memo(
+  ({ releaseInfo }: { releaseInfo: string[] }) => {
+    const [open, setOpen] = useState(false);
+
+    const items = useMemo(
+      () => releaseInfo.slice(1).map((v, idx) => <Text key={idx}>{v}</Text>),
+      [releaseInfo],
+    );
+
+    if (releaseInfo.length === 0) {
+      return <Text c="var(--bz-text-tertiary)">Cannot get release info</Text>;
+    }
+
+    return (
+      <Stack gap={0} onClick={() => setOpen((o) => !o)}>
+        <Text className="table-primary" span>
+          {releaseInfo[0]}
+          {releaseInfo.length > 1 && (
+            <FontAwesomeIcon
+              icon={faCaretDown}
+              rotation={open ? 180 : undefined}
+            ></FontAwesomeIcon>
+          )}
+        </Text>
+        <Collapse expanded={open}>
+          <>{items}</>
+        </Collapse>
+      </Stack>
+    );
+  },
+);
+ReleaseInfoCell.displayName = "ReleaseInfoCell";
+
 function ManualSearchView<T extends SupportType>(props: Props<T>) {
   const { download, query: useSearch, item } = props;
 
@@ -52,39 +98,7 @@ function ManualSearchView<T extends SupportType>(props: Props<T>) {
     void results.refetch();
   }, [results]);
 
-  const ReleaseInfoCell = React.memo(
-    ({ releaseInfo }: { releaseInfo: string[] }) => {
-      const [open, setOpen] = useState(false);
-
-      const items = useMemo(
-        () => releaseInfo.slice(1).map((v, idx) => <Text key={idx}>{v}</Text>),
-        [releaseInfo],
-      );
-
-      if (releaseInfo.length === 0) {
-        return <Text c="var(--bz-text-tertiary)">Cannot get release info</Text>;
-      }
-
-      return (
-        <Stack gap={0} onClick={() => setOpen((o) => !o)}>
-          <Text className="table-primary" span>
-            {releaseInfo[0]}
-            {releaseInfo.length > 1 && (
-              <FontAwesomeIcon
-                icon={faCaretDown}
-                rotation={open ? 180 : undefined}
-              ></FontAwesomeIcon>
-            )}
-          </Text>
-          <Collapse expanded={open}>
-            <>{items}</>
-          </Collapse>
-        </Stack>
-      );
-    },
-  );
-
-  const [Downloaded, setDownloaded] = useState({ id: "", state: false });
+  const [downloadedKey, setDownloadedKey] = useState<string | null>(null);
 
   const columns = useMemo<ColumnDef<SearchResultType>[]>(
     () => [
@@ -187,7 +201,8 @@ function ManualSearchView<T extends SupportType>(props: Props<T>) {
         accessorKey: "subtitle",
         cell: ({ row }) => {
           const result = row.original;
-          const isDownloaded = Downloaded.id === row.id && Downloaded.state;
+          const resultKey = getResultKey(result);
+          const isDownloaded = downloadedKey === resultKey;
           return (
             <Action
               label="Download"
@@ -197,7 +212,7 @@ function ManualSearchView<T extends SupportType>(props: Props<T>) {
               onClick={async () => {
                 if (!item) return;
 
-                setDownloaded({ id: row.id, state: true });
+                setDownloadedKey(resultKey);
                 await download(item, result);
               }}
             ></Action>
@@ -205,7 +220,7 @@ function ManualSearchView<T extends SupportType>(props: Props<T>) {
         },
       },
     ],
-    [download, item, ReleaseInfoCell, Downloaded],
+    [download, item, downloadedKey],
   );
 
   const bSceneNameAvailable =

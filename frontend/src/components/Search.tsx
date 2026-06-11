@@ -72,7 +72,11 @@ function useSearch(query: string) {
 
 const optionsFilter: OptionsFilter = ({ options, search }) => {
   const lowercaseSearch = search.toLowerCase();
-  const trimmedSearch = search.trim();
+  const normalizedSearch = search
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
 
   return (options as ComboboxItem[]).filter((option) => {
     return (
@@ -81,7 +85,7 @@ const optionsFilter: OptionsFilter = ({ options, search }) => {
         .normalize("NFD")
         .replace(/[\u0300-\u036f]/g, "")
         .toLowerCase()
-        .includes(trimmedSearch)
+        .includes(normalizedSearch)
     );
   });
 };

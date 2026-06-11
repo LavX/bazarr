@@ -12,8 +12,18 @@ interface SearchReplaceProps {
   open: boolean;
   cues: Array<{ id: string; text: string }>;
   onNavigate: (cueIndex: number) => void;
-  onReplace: (cueIndex: number, oldText: string, newText: string) => void;
-  onReplaceAll: (oldText: string, newText: string) => void;
+  onReplace: (
+    cueIndex: number,
+    startChar: number,
+    endChar: number,
+    newText: string,
+  ) => void;
+  onReplaceAll: (
+    pattern: string,
+    newText: string,
+    caseSensitive: boolean,
+    isRegex: boolean,
+  ) => void;
   onClose: () => void;
 }
 
@@ -188,15 +198,24 @@ function SearchReplace({
     if (matches.length === 0) return;
     const m = matches[currentMatchIndex];
     if (!m) return;
-    const oldText = cues[m.cueIndex].text.substring(m.startChar, m.endChar);
-    onReplace(m.cueIndex, oldText, replaceText);
-  }, [matches, currentMatchIndex, cues, onReplace, replaceText]);
+    // Pass the exact highlighted offsets so the right occurrence is replaced
+    // even when the same text appears multiple times in a cue.
+    onReplace(m.cueIndex, m.startChar, m.endChar, replaceText);
+  }, [matches, currentMatchIndex, onReplace, replaceText]);
 
   const handleReplaceAll = useCallback(() => {
     if (!searchText || matches.length === 0) return;
-    const pattern = isRegex ? searchText : escapeRegex(searchText);
-    onReplaceAll(pattern, replaceText);
-  }, [searchText, matches.length, isRegex, replaceText, onReplaceAll]);
+    // Pass the raw search text plus the active flags; the parent builds the
+    // RegExp (escaping when not in regex mode and honoring case sensitivity).
+    onReplaceAll(searchText, replaceText, isCaseSensitive, isRegex);
+  }, [
+    searchText,
+    matches.length,
+    isCaseSensitive,
+    isRegex,
+    replaceText,
+    onReplaceAll,
+  ]);
 
   const handleSearchKeyDown = useCallback(
     (e: KeyboardEvent<HTMLInputElement>) => {

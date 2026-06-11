@@ -282,7 +282,12 @@ function buildEmbeddedScoreKey(sub: {
   return sub.code2;
 }
 
-const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
+const Table: FunctionComponent<Props> = ({
+  movie,
+  profile,
+  history,
+  disabled,
+}) => {
   const onlyDesired = useShowOnlyDesired();
   const [compareSelection, setCompareSelection] = useState<{
     original: Subtitle;
@@ -414,7 +419,11 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
             }
           }}
         >
-          <Action label="Combined Subtitle Actions" icon={faEllipsis} />
+          <Action
+            label="Combined Subtitle Actions"
+            icon={faEllipsis}
+            disabled={disabled}
+          />
         </SubtitleToolsMenu>
       );
     }
@@ -452,7 +461,11 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
             }
           }}
         >
-          <Action label="Subtitle Actions" icon={faEllipsis}></Action>
+          <Action
+            label="Subtitle Actions"
+            icon={faEllipsis}
+            disabled={disabled}
+          ></Action>
         </SubtitleToolsMenu>
       );
     }
@@ -500,7 +513,11 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
           }
         }}
       >
-        <Action label="Subtitle Actions" icon={faEllipsis}></Action>
+        <Action
+          label="Subtitle Actions"
+          icon={faEllipsis}
+          disabled={disabled}
+        ></Action>
       </SubtitleToolsMenu>
     );
   });

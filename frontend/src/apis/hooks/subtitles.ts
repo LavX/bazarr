@@ -15,19 +15,26 @@ export function useSubtitleAction() {
       api.subtitles.modify(param.action, param.form),
 
     onSuccess: (_, param) => {
-      client.invalidateQueries({
-        queryKey: [QueryKeys.History],
-      });
-
       // TODO: Query less
       const { type, id } = param.form;
       if (type === "episode") {
+        // id is the sonarrEpisodeId here, not a series id. Invalidate the
+        // individual episode cache and the Series root so the episode list,
+        // wanted, blacklist and episode history all refresh.
         client.invalidateQueries({
-          queryKey: [QueryKeys.Series, id],
+          queryKey: [QueryKeys.Episodes, id],
+        });
+        client.invalidateQueries({
+          queryKey: [QueryKeys.Series],
         });
       } else {
         client.invalidateQueries({
           queryKey: [QueryKeys.Movies, id],
+        });
+        // Movie history lives under [Movies, History] and is not covered by
+        // the per-movie invalidation above.
+        client.invalidateQueries({
+          queryKey: [QueryKeys.Movies, QueryKeys.History],
         });
       }
     },
@@ -302,8 +309,10 @@ export function useBatchAction() {
       void client.invalidateQueries({
         queryKey: [QueryKeys.Movies],
       });
+      // Episode/movie history live under the Series/Movies roots above. The
+      // only history query not covered is the System history stats.
       void client.invalidateQueries({
-        queryKey: [QueryKeys.History],
+        queryKey: [QueryKeys.System, QueryKeys.History],
       });
       void client.invalidateQueries({
         queryKey: [QueryKeys.Translator],
@@ -409,7 +418,11 @@ export function usePromoteSyncSubtitle() {
       } else {
         client.invalidateQueries({ queryKey: [QueryKeys.Movies] });
       }
-      client.invalidateQueries({ queryKey: [QueryKeys.History] });
+      // Episode/movie history live under the Series/Movies roots above; only
+      // the System history stats need a separate invalidation.
+      client.invalidateQueries({
+        queryKey: [QueryKeys.System, QueryKeys.History],
+      });
       client.invalidateQueries({
         queryKey: [
           QueryKeys.Subtitles,

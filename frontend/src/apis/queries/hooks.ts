@@ -15,6 +15,7 @@ export type UsePaginationQueryResult<T extends object> = UseQueryResult<
 > & {
   controls: {
     gotoPage: (index: number) => void;
+    setPageSize: (size: number) => void;
   };
   paginationStatus: {
     isPageLoading: boolean;
@@ -39,11 +40,25 @@ export function usePaginationQuery<
 
   const [searchParams] = useSearchParams();
 
-  const [page, setIndex] = useState(
-    searchParams.get("page") ? Number(searchParams.get("page")) - 1 : 0,
-  );
+  // The URL always carries a 1-based page; clamp missing/0/negative/NaN values
+  // to page 1 (index 0) so the first request never sends a negative or NaN
+  // start (the out-of-bounds clamp effect only runs after the first response).
+  const [page, setIndex] = useState(() => {
+    const raw = Number(searchParams.get("page"));
+    if (!Number.isFinite(raw) || raw < 1) return 0;
+    return Math.floor(raw) - 1;
+  });
 
-  const pageSize = usePageSize();
+  // The global setting is the default; a per-table selection (null = unset)
+  // overrides it so the same size drives the fetch, page count and clamp.
+  const globalPageSize = usePageSize();
+  const [selectedPageSize, setSelectedPageSize] = useState<number | null>(null);
+  const pageSize = selectedPageSize ?? globalPageSize;
+
+  const setPageSize = useCallback((size: number) => {
+    setSelectedPageSize(size);
+    setIndex(0);
+  }, []);
 
   // Reset to page 0 when switching between fetchAll modes
   const prevFetchAllRef = useRef(fetchAll);
@@ -142,6 +157,7 @@ export function usePaginationQuery<
     },
     controls: {
       gotoPage,
+      setPageSize,
     },
   };
 }

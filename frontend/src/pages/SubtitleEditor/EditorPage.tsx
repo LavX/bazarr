@@ -41,6 +41,7 @@ import api from "@/apis/raw";
 import client from "@/apis/raw/client";
 import { Environment } from "@/utilities/env";
 import { isCombinedOutputLanguageKey } from "@/utilities/subtitles";
+import { cueId } from "./parsers/uuid";
 import DetailPane, { type DetailPaneHandle } from "./DetailPane";
 import {
   computeCueWarnings,
@@ -73,6 +74,12 @@ import type { Cue, ParseResult, SubtitleFormat } from "./types";
 import type { VideoPreviewHandle } from "./VideoPreview";
 import VideoPreview from "./VideoPreview";
 import WaveformTimeline from "./WaveformTimeline";
+
+// Escape regex special chars so a plain (non-regex) search treats "." etc.
+// as literal characters.
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 export function findActiveCueIndex(cues: Cue[], playbackTimeMs: number) {
   return cues.findIndex(
@@ -149,6 +156,9 @@ export default function EditorPage() {
 
   // Track whether we've loaded data into the reducer
   const loadedRef = useRef(false);
+  // Mirror loadedRef as state so effects that must run AFTER load completes
+  // (e.g. draft recovery) re-evaluate once the document is loaded.
+  const [loaded, setLoaded] = useState(false);
   const etagRef = useRef<string>("");
 
   // Reset when switching to a different subtitle
@@ -156,6 +166,7 @@ export default function EditorPage() {
   useEffect(() => {
     if (prevLangRef.current !== language) {
       loadedRef.current = false;
+      setLoaded(false);
       setCreatedSuccessfully(false);
       prevLangRef.current = language;
     }
@@ -166,6 +177,7 @@ export default function EditorPage() {
     if (parseResult && !loadedRef.current) {
       dispatch({ type: "LOAD", cues: parseResult.cues });
       loadedRef.current = true;
+      setLoaded(true);
     }
   }, [parseResult]);
 
@@ -178,7 +190,9 @@ export default function EditorPage() {
   );
 
   useEffect(() => {
-    if (!autoSaveKey || docState.cues.length === 0) return;
+    // Only persist a draft when there are actual unsaved edits, so opening an
+    // untouched file never writes a phantom draft to localStorage.
+    if (!autoSaveKey || docState.cues.length === 0 || !docState.dirty) return;
     const timer = setTimeout(() => {
       try {
         const serialized = getSerializer(format).serialize({
@@ -199,7 +213,13 @@ export default function EditorPage() {
       }
     }, 2000);
     return () => clearTimeout(timer);
-  }, [autoSaveKey, docState.cues, format, parseResult?.metadata]);
+  }, [
+    autoSaveKey,
+    docState.cues,
+    docState.dirty,
+    format,
+    parseResult?.metadata,
+  ]);
 
   // Auto-save recovery: check on load if there's a newer draft in localStorage
   const [recoveryAvailable, setRecoveryAvailable] = useState<{
@@ -210,7 +230,7 @@ export default function EditorPage() {
   } | null>(null);
 
   useEffect(() => {
-    if (!autoSaveKey || !loadedRef.current) return;
+    if (!autoSaveKey || !loaded) return;
     try {
       const raw = localStorage.getItem(autoSaveKey);
       if (!raw) return;
@@ -225,7 +245,7 @@ export default function EditorPage() {
     } catch {
       localStorage.removeItem(autoSaveKey!);
     }
-  }, [autoSaveKey]);
+  }, [autoSaveKey, loaded]);
 
   const handleRecoverDraft = useCallback(() => {
     if (!recoveryAvailable) return;
@@ -429,6 +449,12 @@ export default function EditorPage() {
   const [userSeekMs, setUserSeekMs] = useState<number | null>(null);
   const [seekCounter, setSeekCounter] = useState(0);
   const [playbackTimeMs, setPlaybackTimeMs] = useState(0);
+  // Mirror playbackTimeMs into a ref so callbacks (e.g. Add Cue) can read the
+  // current position without being recreated on every playback tick.
+  const playbackTimeMsRef = useRef(0);
+  useEffect(() => {
+    playbackTimeMsRef.current = playbackTimeMs;
+  }, [playbackTimeMs]);
   const [shouldFocusTextarea, setShouldFocusTextarea] = useState(false);
 
   // Build a ParseResult from current state for serialization
@@ -890,7 +916,7 @@ export default function EditorPage() {
           setReferenceOpen((v) => !v);
           break;
         case "addCue": {
-          const currentPos = playbackTimeMs;
+          const currentPos = playbackTimeMsRef.current;
           const startMs =
             currentPos > 0
               ? currentPos
@@ -898,7 +924,7 @@ export default function EditorPage() {
                 ? docState.cues[Math.max(0, selectedIndex)].endMs + 100
                 : 0;
           const newCue: Cue = {
-            id: crypto.randomUUID(),
+            id: cueId(),
             startMs,
             endMs: startMs + 3000,
             text: "",
@@ -968,7 +994,6 @@ export default function EditorPage() {
         }
       }
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       handleSave,
       handleUpload,
@@ -1017,24 +1042,40 @@ export default function EditorPage() {
   }, []);
 
   const handleSearchReplace = useCallback(
-    (cueIndex: number, oldText: string, newText: string) => {
+    (cueIndex: number, startChar: number, endChar: number, newText: string) => {
       const cue = docState.cues[cueIndex];
       if (!cue) return;
-      // Find exact first occurrence and splice at that offset
-      const pos = cue.text.indexOf(oldText);
-      if (pos === -1) return;
+      // Splice exactly at the highlighted offsets so the currently selected
+      // match is replaced, not just the first occurrence in the cue.
+      if (startChar < 0 || endChar > cue.text.length || startChar > endChar) {
+        return;
+      }
       const updatedText =
-        cue.text.slice(0, pos) + newText + cue.text.slice(pos + oldText.length);
+        cue.text.slice(0, startChar) + newText + cue.text.slice(endChar);
       dispatch({ type: "APPLY_OP", op: createEditText(cueIndex, updatedText) });
     },
     [docState.cues],
   );
 
   const handleSearchReplaceAll = useCallback(
-    (pattern: string, replacement: string) => {
+    (
+      pattern: string,
+      replacement: string,
+      caseSensitive: boolean,
+      isRegex: boolean,
+    ) => {
+      // Honor the case-sensitivity toggle ("g" vs "gi") and, for plain (non
+      // regex) search, escape special chars so "." etc. match literally.
+      const source = isRegex ? pattern : escapeRegExp(pattern);
+      const flags = caseSensitive ? "g" : "gi";
+      let regex: RegExp;
+      try {
+        regex = new RegExp(source, flags);
+      } catch {
+        return;
+      }
       // Batch all replacements into a single undoable operation
       const ops: ReturnType<typeof createEditText>[] = [];
-      const regex = new RegExp(pattern, "gi");
       for (let i = 0; i < docState.cues.length; i++) {
         const cue = docState.cues[i];
         regex.lastIndex = 0;
@@ -1120,7 +1161,7 @@ export default function EditorPage() {
         translations.forEach((text, idx) => {
           if (idx < referenceCueList.length) {
             newCues.push({
-              id: crypto.randomUUID(),
+              id: cueId(),
               startMs: referenceCueList[idx].startMs,
               endMs: referenceCueList[idx].endMs,
               text,
@@ -1269,7 +1310,7 @@ export default function EditorPage() {
     } else {
       // Create new cue at reference timing
       const newCue: Cue = {
-        id: crypto.randomUUID(),
+        id: cueId(),
         startMs: refStartMs,
         endMs: refEndMs,
         text,
@@ -1313,7 +1354,7 @@ export default function EditorPage() {
       const overlaps = cue && cue.startMs < refEndMs && cue.endMs > refStartMs;
       if (!overlaps) {
         const newCue: Cue = {
-          id: crypto.randomUUID(),
+          id: cueId(),
           startMs: refStartMs,
           endMs: refEndMs,
           text: "",
@@ -1392,7 +1433,7 @@ export default function EditorPage() {
   const handleCreateFromGap = useCallback(
     (startMs: number, endMs: number, afterIndex: number) => {
       const newCue: Cue = {
-        id: crypto.randomUUID(),
+        id: cueId(),
         startMs,
         endMs,
         text: "",
@@ -1703,6 +1744,7 @@ export default function EditorPage() {
     if (isNewSubtitle && !loadedRef.current) {
       dispatch({ type: "LOAD", cues: [] });
       loadedRef.current = true;
+      setLoaded(true);
     }
   }, [isNewSubtitle]);
 

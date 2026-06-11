@@ -20,7 +20,11 @@ export function useSeriesByIds(ids: number[]) {
   const client = useQueryClient();
 
   const query = useQuery({
-    queryKey: [QueryKeys.Series, ...ids],
+    // Discriminate from the single-item [Series, id] key used by useSeriesById:
+    // a single-element ids array would otherwise collide and overwrite the cached
+    // Item.Series object with an Item.Series[] array. QueryKeys.Range marks this
+    // as a multi-id list query (same convention as the pagination range key).
+    queryKey: [QueryKeys.Series, QueryKeys.Range, ...ids],
     queryFn: () => api.series.series(ids),
   });
 

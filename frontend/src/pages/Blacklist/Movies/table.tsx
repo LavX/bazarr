@@ -23,13 +23,13 @@ const Table: FunctionComponent<Props> = ({ blacklist }) => {
         accessorKey: "title",
         cell: ({
           row: {
-            original: { id, radarrId },
+            original: { id, title },
           },
         }) => {
           const target = `/movies/${id}`;
           return (
             <Anchor className="table-primary" component={Link} to={target}>
-              {radarrId}
+              {title}
             </Anchor>
           );
         },

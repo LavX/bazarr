@@ -1,3 +1,4 @@
+import { cueId } from "./parsers/uuid";
 import type { Cue } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -195,8 +196,8 @@ export function createSplitCue(
       const proportion = totalChars > 0 ? splitAtChar / totalChars : 0.5;
       const midpoint = cue.startMs + Math.round(duration * proportion);
 
-      firstId = crypto.randomUUID();
-      secondId = crypto.randomUUID();
+      firstId = cueId();
+      secondId = cueId();
 
       const first: Cue = {
         id: firstId,
@@ -243,7 +244,7 @@ export function createMergeCues(indices: number[]): CueOperation {
       const ends = targets.map((c) => c.endMs);
 
       const merged: Cue = {
-        id: crypto.randomUUID(),
+        id: cueId(),
         startMs: Math.min(...starts),
         endMs: Math.max(...ends),
         text: texts.join("\n"),

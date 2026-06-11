@@ -12,11 +12,11 @@ const Redirector: FunctionComponent = () => {
     if (data) {
       const { use_sonarr: useSonarr, use_radarr: useRadarr } = data.general;
       if (useSonarr) {
-        navigate("/series");
+        navigate("/series", { replace: true });
       } else if (useRadarr) {
-        navigate("/movies");
+        navigate("/movies", { replace: true });
       } else {
-        navigate("/settings/general");
+        navigate("/settings/general", { replace: true });
       }
     }
   }, [data, navigate]);
