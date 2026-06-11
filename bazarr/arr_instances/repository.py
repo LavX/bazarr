@@ -177,10 +177,33 @@ class ArrInstanceRepository:
                 self.set_default(instance_id)
             else:
                 row.is_default = 0
+        if enabled is not _UNSET or is_default is not _UNSET:
+            self._reconcile_default(row.kind, demoted_id=instance_id)
 
         row.updated_at = datetime.now()
         self._session.flush()
         return row
+
+    def _reconcile_default(self, kind, demoted_id=None):
+        """Keep a kind with any enabled instance owning exactly one default.
+
+        No-op when an enabled default already exists. Otherwise it promotes an
+        enabled instance, preferring one other than the row just demoted so a
+        deliberate "unset default" hands off to a sibling instead of bouncing
+        back. If the kind has no enabled instance, it is left with no default.
+        """
+        if self.get_default(kind) is not None:
+            return
+        candidates = self._session.execute(
+            select(TableArrInstances)
+            .where(TableArrInstances.kind == kind, TableArrInstances.enabled == 1)
+            .order_by(TableArrInstances.id)
+        ).scalars().all()
+        if not candidates:
+            return
+        chosen = next((c for c in candidates if c.id != demoted_id), None) or candidates[0]
+        chosen.is_default = 1
+        self._session.flush()
 
     def set_default(self, instance_id):
         """Promote one instance to its kind's default, demoting the previous."""
@@ -204,8 +227,10 @@ class ArrInstanceRepository:
             return False
         if self._has_owned_rows(instance_id):
             raise ValueError("cannot delete an instance that still owns rows")
+        kind = row.kind
         self._session.delete(row)
         self._session.flush()
+        self._reconcile_default(kind, demoted_id=instance_id)
         return True
 
     def _has_owned_rows(self, instance_id):

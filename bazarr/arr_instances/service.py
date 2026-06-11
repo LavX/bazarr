@@ -9,7 +9,26 @@ chain, and keeps the resources to thin parse/commit glue.
 The session is flushed but NOT committed here; the HTTP boundary owns the
 transaction and commits on success.
 """
+from sqlalchemy.exc import IntegrityError
+
 from .repository import VALID_KINDS, ArrInstanceRepository, to_safe_dict
+
+_CONFLICT_MESSAGE = "An instance with these connection properties already exists."
+
+
+def _connection_arg_error(args):
+    """Return a validation message for out-of-range connection args, else None.
+
+    Mirrors the scalar config validators (port 1-65535, positive timeout) so the
+    API rejects bad values instead of storing them or silently coercing them.
+    """
+    port = args.get("port")
+    if port is not None and not (1 <= port <= 65535):
+        return "port must be between 1 and 65535"
+    timeout = args.get("http_timeout")
+    if timeout is not None and timeout <= 0:
+        return "http_timeout must be a positive number of seconds"
+    return None
 
 
 def test_connection(args, http_get=None):
@@ -24,6 +43,9 @@ def test_connection(args, http_get=None):
     kind = args.get("kind")
     if kind not in VALID_KINDS:
         return {"ok": False, "error": "invalid", "message": "invalid kind"}, 400
+    arg_error = _connection_arg_error(args)
+    if arg_error:
+        return {"ok": False, "error": "invalid", "message": arg_error}, 400
 
     client = ArrClientFactory().from_params(
         kind=kind,
@@ -53,6 +75,9 @@ def get_instance(session, instance_id):
 
 
 def create_instance(session, args):
+    arg_error = _connection_arg_error(args)
+    if arg_error:
+        return {"error": "invalid", "message": arg_error}, 400
     repo = ArrInstanceRepository(session)
     try:
         row = repo.create(
@@ -70,10 +95,16 @@ def create_instance(session, args):
         )
     except ValueError as exc:
         return {"error": "invalid", "message": str(exc)}, 400
+    except IntegrityError:
+        session.rollback()
+        return {"error": "conflict", "message": _CONFLICT_MESSAGE}, 409
     return to_safe_dict(row), 201
 
 
 def update_instance(session, instance_id, args):
+    arg_error = _connection_arg_error(args)
+    if arg_error:
+        return {"error": "invalid", "message": arg_error}, 400
     repo = ArrInstanceRepository(session)
     if repo.get(instance_id) is None:
         return {"error": "not_found"}, 404
@@ -92,6 +123,9 @@ def update_instance(session, instance_id, args):
         row = repo.update(instance_id, **kwargs)
     except ValueError as exc:
         return {"error": "invalid", "message": str(exc)}, 400
+    except IntegrityError:
+        session.rollback()
+        return {"error": "conflict", "message": _CONFLICT_MESSAGE}, 409
     return to_safe_dict(row), 200
 
 

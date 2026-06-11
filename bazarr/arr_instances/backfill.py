@@ -45,8 +45,11 @@ def _has_any_rows(session, tables):
 
 
 def _backfill_kind(session, repo, kind, scalar, use_flag, tables):
-    if repo.get_default(kind) is not None:
-        return {"created": False, "reason": "default already exists"}
+    # Skip if ANY instance of this kind already exists (not just a default):
+    # once the user manages instances, a demoted/disabled instance must not be
+    # silently resurrected into a duplicate on the next startup.
+    if repo.list(kind=kind):
+        return {"created": False, "reason": "instance already exists"}
     if not use_flag and not _has_any_rows(session, tables):
         return {"created": False, "reason": "nothing to own"}
 

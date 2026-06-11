@@ -210,3 +210,52 @@ def test_delete_refused_when_owned_media_rows_exist(schema_session):
     with pytest.raises(ValueError):
         repo.delete(inst.id)
     assert repo.get(inst.id) is not None
+
+
+# ----------------------------------------------- default invariant maintenance
+
+def test_disabling_the_default_promotes_another_enabled_instance(schema_session):
+    repo = _repo(schema_session)
+    a = repo.create("sonarr", "A", api_key="k")   # default
+    b = repo.create("sonarr", "B", api_key="k")   # enabled, not default
+
+    repo.update(a.id, enabled=False)
+    schema_session.refresh(a)
+    schema_session.refresh(b)
+
+    assert a.enabled == 0 and a.is_default == 0
+    assert b.is_default == 1
+    assert repo.get_default("sonarr").id == b.id
+
+
+def test_clearing_default_flag_promotes_another_enabled_instance(schema_session):
+    repo = _repo(schema_session)
+    a = repo.create("sonarr", "A", api_key="k")   # default
+    b = repo.create("sonarr", "B", api_key="k")
+
+    repo.update(a.id, is_default=False)
+
+    # the kind still has exactly one default, and it is the OTHER instance
+    assert repo.get_default("sonarr").id == b.id
+
+
+def test_disabling_the_only_instance_leaves_no_default_without_error(schema_session):
+    repo = _repo(schema_session)
+    a = repo.create("sonarr", "A", api_key="k")
+
+    repo.update(a.id, enabled=False)
+    schema_session.refresh(a)
+
+    assert a.enabled == 0 and a.is_default == 0
+    # all instances of the kind are disabled -> no active default is fine
+    assert repo.get_default("sonarr") is None
+
+
+def test_deleting_the_default_promotes_another_enabled_instance(schema_session):
+    repo = _repo(schema_session)
+    a = repo.create("sonarr", "A", api_key="k")   # default
+    b = repo.create("sonarr", "B", api_key="k")
+
+    repo.delete(a.id)
+
+    assert repo.get_default("sonarr").id == b.id

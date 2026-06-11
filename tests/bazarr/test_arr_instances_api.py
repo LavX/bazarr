@@ -98,3 +98,61 @@ def test_delete_with_owned_rows_returns_409(schema_session):
     body, status = service.delete_instance(schema_session, created["id"])
     assert status == 409
     assert body["error"] == "conflict"
+
+
+# ------------------------------------------------------ validation + conflicts
+
+def test_create_rejects_invalid_port(schema_session):
+    from arr_instances import service
+
+    for bad in (0, 70000, -1):
+        body, status = service.create_instance(
+            schema_session, {"kind": "sonarr", "name": "X", "port": bad})
+        assert status == 400, bad
+        assert body["error"] == "invalid"
+
+
+def test_create_rejects_nonpositive_http_timeout(schema_session):
+    from arr_instances import service
+
+    body, status = service.create_instance(
+        schema_session, {"kind": "sonarr", "name": "X", "http_timeout": 0})
+    assert status == 400
+    assert body["error"] == "invalid"
+
+
+def test_update_rejects_invalid_port(schema_session):
+    from arr_instances import service
+
+    created, _ = service.create_instance(
+        schema_session, {"kind": "sonarr", "name": "X", "api_key": "k"})
+    body, status = service.update_instance(
+        schema_session, created["id"], {"port": 0})
+    assert status == 400
+
+
+def test_test_connection_rejects_invalid_port():
+    from arr_instances import service
+
+    body, status = service.test_connection({"kind": "sonarr", "port": 0})
+    assert status == 400
+    assert body["ok"] is False
+
+
+def test_create_maps_integrity_error_to_409(schema_session, monkeypatch):
+    # A unique-constraint violation (realistically a concurrent create racing
+    # the check-then-insert) must surface as 409, not an unhandled 500.
+    from sqlalchemy.exc import IntegrityError
+
+    from arr_instances import service
+    from arr_instances.repository import ArrInstanceRepository
+
+    def boom(*args, **kwargs):
+        raise IntegrityError("INSERT", {}, Exception("UNIQUE constraint failed"))
+
+    monkeypatch.setattr(ArrInstanceRepository, "create", boom)
+    body, status = service.create_instance(
+        schema_session, {"kind": "sonarr", "name": "Dup", "api_key": "k"})
+
+    assert status == 409
+    assert body["error"] == "conflict"

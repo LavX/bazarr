@@ -102,3 +102,20 @@ def test_backfill_does_not_clobber_existing_default(schema_session):
 
     assert repo.get_default("sonarr").id == existing.id
     assert repo.get_decrypted_api_key(existing.id) == "manual"
+
+
+def test_backfill_does_not_resurrect_after_default_demoted(schema_session):
+    # Regression: demoting/disabling the only instance left the kind with no
+    # default, and a second backfill used to resurrect a duplicate. Backfill
+    # must skip a kind that already has ANY instance, not just a default.
+    from arr_instances.backfill import backfill_default_instances
+    from arr_instances.repository import ArrInstanceRepository
+
+    repo = ArrInstanceRepository(schema_session)
+    backfill_default_instances(schema_session, _settings())
+    sonarr = repo.get_default("sonarr")
+    repo.update(sonarr.id, enabled=False)  # no default for sonarr now
+
+    backfill_default_instances(schema_session, _settings())
+
+    assert len(repo.list("sonarr")) == 1
