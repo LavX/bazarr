@@ -32,6 +32,12 @@ depends_on = None
 logger = logging.getLogger(__name__)
 
 
+_SONARR_OWNED = ('table_shows', 'table_episodes', 'table_history',
+                 'table_blacklist', 'table_shows_rootfolder')
+_RADARR_OWNED = ('table_movies', 'table_history_movie', 'table_blacklist_movie',
+                 'table_movies_rootfolder')
+
+
 def _already_cut_over(insp):
     """True once table_shows' PK is the local ``id``.
 
@@ -45,13 +51,55 @@ def _already_cut_over(insp):
     return 'id' in (pk.get('constrained_columns') or [])
 
 
+def _bootstrap_and_stamp(bind):
+    """Step A+B: ensure the default Sonarr/Radarr arr_instances rows exist (with
+    encrypted api keys) and stamp arr_instance_id on every owned row.
+
+    arr_instance_id is NULL when this migration runs (the post-upgrade
+    backfill_default_instances in migrate_db runs later), so the cutover must
+    establish ownership itself before adding scoped-unique indexes / NOT NULL.
+    Reuses the idempotent backfill, so the later migrate_db call no-ops.
+    """
+    from sqlalchemy.orm import Session
+
+    from app.config import settings
+    from arr_instances.backfill import backfill_default_instances
+
+    session = Session(bind=bind)
+    try:
+        backfill_default_instances(session, settings)
+        session.flush()
+    finally:
+        session.close()
+
+
+def _validate_owners(bind):
+    """Step E (ownership slice): abort before any DDL if a non-empty owned
+    table still has a NULL arr_instance_id (would break the NOT NULL/scoped
+    unique steps and leave rows unowned)."""
+    for table in _SONARR_OWNED + _RADARR_OWNED:
+        nulls = bind.execute(
+            sa.text(f"SELECT COUNT(*) FROM {table} WHERE arr_instance_id IS NULL")
+        ).scalar()
+        if nulls:
+            raise RuntimeError(
+                f"Phase 1e abort: {table} has {nulls} rows with NULL arr_instance_id "
+                f"after bootstrap; cannot proceed to the PK cutover")
+
+
 def upgrade():
-    insp = sa.inspect(op.get_context().bind)
+    bind = op.get_context().bind
+    insp = sa.inspect(bind)
     if _already_cut_over(insp):
         logger.info("Phase 1e local-id PK cutover already applied; no-op")
         return
-    # Steps A-H are implemented across build increments 1-4. Scaffold only here.
-    logger.info("Phase 1e local-id PK cutover: scaffold reached (no DDL yet)")
+
+    _bootstrap_and_stamp(bind)
+    _validate_owners(bind)
+
+    # Steps C-H (local-id backfill, validation, table rebuilds, FK repoint) land
+    # in build increments 2-4.
+    logger.info("Phase 1e: default instances bootstrapped + owners stamped (no DDL yet)")
 
 
 def downgrade():

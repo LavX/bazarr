@@ -91,3 +91,31 @@ def test_cutover_is_idempotent_noop_on_rerun(legacy_db_at_head):
     _run_migration(legacy_db_at_head, _CUTOVER)  # second run must no-op cleanly
     assert _alembic_version(legacy_db_at_head) == _CUTOVER
     assert _pk_columns(legacy_db_at_head, "table_shows") == pk_after_first
+
+
+_OWNED_TABLES = (
+    "table_shows", "table_episodes", "table_history", "table_blacklist",
+    "table_shows_rootfolder", "table_movies", "table_history_movie",
+    "table_blacklist_movie", "table_movies_rootfolder",
+)
+
+
+def test_cutover_bootstraps_default_instances_and_stamps_owners(legacy_db_at_head):
+    # Step A+B: whether the source DB was already backfilled (backup) or not
+    # (bench, simulating a fresh upgrade), after the cutover every owned row has
+    # an owner and each kind has exactly one enabled default.
+    _run_migration(legacy_db_at_head, _CUTOVER)
+    eng = create_engine(f"sqlite:///{legacy_db_at_head}")
+    try:
+        with eng.connect() as conn:
+            for kind in ("sonarr", "radarr"):
+                n = conn.execute(text(
+                    "select count(*) from arr_instances "
+                    "where kind=:k and is_default=1 and enabled=1"), {"k": kind}).scalar()
+                assert n == 1, f"{kind}: expected 1 enabled default, got {n}"
+            for table in _OWNED_TABLES:
+                nulls = conn.execute(text(
+                    f"select count(*) from {table} where arr_instance_id is null")).scalar()
+                assert nulls == 0, f"{table} has {nulls} unstamped rows after cutover"
+    finally:
+        eng.dispose()
