@@ -44,7 +44,7 @@ class MoviesBlacklist(Resource):
         start = args.get('start')
         length = args.get('length')
 
-        data = database.execute(
+        stmt = (
             select(TableMovies.title,
                    TableMovies.radarrId,
                    TableBlacklistMovie.provider,
@@ -54,8 +54,11 @@ class MoviesBlacklist(Resource):
             .select_from(TableBlacklistMovie)
             .join(TableMovies)
             .order_by(TableBlacklistMovie.timestamp.desc()))
+        # Pagination must be applied to the statement, not the executed Result
+        # (a Result has no .limit()). Pre-existing bug: paginated requests 500'd.
         if length > 0:
-            data = data.limit(length).offset(start)
+            stmt = stmt.limit(length).offset(start)
+        data = database.execute(stmt)
 
         return marshal([postprocess({
             'title': x.title,
