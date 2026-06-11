@@ -76,4 +76,4 @@ whichcraft==0.6.1
 python-anticaptcha==2.0.0
 
 # Windows runtime dependencies
-pywin32>=311; platform_system == "Windows"
+pywin32>=312; platform_system == "Windows"
