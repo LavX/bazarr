@@ -481,13 +481,13 @@ def _process_media_action(items, action, job_id):
                     if not series_id:
                         skipped += 1
                         continue
-                    series_download_subtitles(series_id)
+                    series_download_subtitles(series_id, arr_instance_id=item.get('arr_instance_id'))
                 elif item_type == 'movie':
                     radarr_id = item.get('radarrId')
                     if not radarr_id:
                         skipped += 1
                         continue
-                    movies_download_subtitles(radarr_id)
+                    movies_download_subtitles(radarr_id, arr_instance_id=item.get('arr_instance_id'))
                 else:
                     skipped += 1
                     continue
