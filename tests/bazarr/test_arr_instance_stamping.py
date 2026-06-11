@@ -298,3 +298,167 @@ def test_movie_bulk_insert_leaves_null_when_no_default(schema_session, monkeypat
     row = schema_session.execute(
         select(TableMovies.arr_instance_id).where(TableMovies.radarrId == 10)).first()
     assert row is not None and row.arr_instance_id is None
+
+
+# ============================================================================
+# INC5: thread arr_instance_id + arr_client through the orchestrators.
+# Default (both None) must stay byte-identical; a passed id is stamped instead
+# of the default, and a passed arr_client routes every leaf fetch through it.
+# ============================================================================
+
+def test_update_one_series_passed_instance_id_wins_over_default(schema_session, monkeypatch):
+    import sonarr.sync.series as series_mod
+
+    _seed_default(schema_session, "sonarr")  # a default exists, id != 2
+    monkeypatch.setattr(series_mod, "database", schema_session)
+    monkeypatch.setattr(series_mod, "event_stream", _noop)
+    monkeypatch.setattr(series_mod, "sync_episodes", _noop)
+    monkeypatch.setattr(series_mod, "seriesParser",
+                        lambda *a, **k: {"sonarrSeriesId": 5, "path": "/tv/s", "title": "S"})
+
+    series_mod.update_one_series(
+        5, action="updated", series_data={"id": 5}, existing_in_db=False,
+        audio_profiles=[], tags_dict=[], language_profiles=[],
+        skip_episode_sync=True, is_signalr=True, arr_instance_id=2, arr_client=object())
+
+    row = schema_session.execute(
+        select(TableShows.arr_instance_id).where(TableShows.sonarrSeriesId == 5)).first()
+    assert row.arr_instance_id == 2  # explicit instance, not the default
+
+
+def test_update_one_series_routes_arr_client_to_leaf_fetch(schema_session, monkeypatch):
+    import sonarr.sync.series as series_mod
+
+    _seed_default(schema_session, "sonarr")
+    captured = {}
+
+    def fake_fetch(apikey_sonarr=None, sonarr_series_id=None, arr_client=None):
+        captured["arr_client"] = arr_client
+        return [{"id": 5}]
+
+    monkeypatch.setattr(series_mod, "database", schema_session)
+    monkeypatch.setattr(series_mod, "event_stream", _noop)
+    monkeypatch.setattr(series_mod, "sync_episodes", _noop)
+    monkeypatch.setattr(series_mod, "get_series_from_sonarr_api", fake_fetch)
+    monkeypatch.setattr(series_mod, "seriesParser",
+                        lambda *a, **k: {"sonarrSeriesId": 5, "path": "/tv/s", "title": "S"})
+    sentinel = object()
+
+    # series_data omitted -> update_one_series must fetch, threading the client
+    series_mod.update_one_series(
+        5, action="updated", existing_in_db=False,
+        audio_profiles=[], tags_dict=[], language_profiles=[],
+        skip_episode_sync=True, is_signalr=True, arr_client=sentinel)
+
+    assert captured["arr_client"] is sentinel
+
+
+def test_update_series_default_threads_none_everywhere(schema_session, monkeypatch):
+    import sonarr.sync.series as series_mod
+
+    seen = {}
+
+    def rec_update_one(*a, **k):
+        seen["uos_arr_client"] = k.get("arr_client", "MISSING")
+        seen["uos_instance"] = k.get("arr_instance_id", "MISSING")
+
+    def rec_sync_eps(*a, **k):
+        seen["se_arr_client"] = k.get("arr_client", "MISSING")
+
+    monkeypatch.setattr(series_mod, "database", schema_session)
+    monkeypatch.setattr(series_mod, "check_sonarr_rootfolder", _noop)
+    monkeypatch.setattr(series_mod, "jobs_queue", _DummyJobs())
+    monkeypatch.setattr(series_mod, "get_series_from_sonarr_api",
+                        lambda *a, **k: [{"id": 5, "monitored": True, "title": "S"}])
+    monkeypatch.setattr(series_mod, "get_tags", lambda *a, **k: [])
+    monkeypatch.setattr(series_mod, "get_language_profiles", lambda *a, **k: [])
+    monkeypatch.setattr(series_mod, "get_episodes_from_sonarr_api", lambda *a, **k: [])
+    monkeypatch.setattr(series_mod, "update_one_series", rec_update_one)
+    monkeypatch.setattr(series_mod, "sync_episodes", rec_sync_eps)
+
+    series_mod.update_series(job_id="job-1")
+
+    # default path forwards arr_client=None and arr_instance_id=None
+    assert seen["uos_arr_client"] is None
+    assert seen["uos_instance"] is None
+    assert seen["se_arr_client"] is None
+
+
+def test_sync_episodes_passed_instance_id_wins(schema_session, monkeypatch):
+    import sonarr.sync.episodes as ep_mod
+
+    _seed_default(schema_session, "sonarr")
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=5, id=5, arr_instance_id=1, path="/tv/s", title="S", audio_language="[]"))
+    monkeypatch.setattr(ep_mod, "database", schema_session)
+    monkeypatch.setattr(ep_mod, "store_subtitles", _noop)
+    monkeypatch.setattr(ep_mod, "event_stream", _noop)
+    monkeypatch.setattr(ep_mod, "get_sonarr_info", _SonarrInfoStub())
+    monkeypatch.setattr(ep_mod, "episodeParser", lambda e: {
+        "sonarrSeriesId": 5, "sonarrEpisodeId": 100, "path": "/tv/s/e", "season": 1,
+        "episode": 1, "title": "E", "monitored": "True"})
+
+    episodes_data = [{"id": 100, "hasFile": True, "monitored": True, "episodeFileId": 100,
+                      "episodeFile": {"size": 999999, "path": "/tv/s/e"}}]
+    ep_mod.sync_episodes(series_id=5, episodes_data=episodes_data, defer_search=True,
+                         arr_instance_id=2, arr_client=object())
+
+    row = schema_session.execute(
+        select(TableEpisodes.arr_instance_id).where(TableEpisodes.sonarrEpisodeId == 100)).first()
+    assert row.arr_instance_id == 2  # the synced instance, overriding the parent/default
+
+
+def test_update_movies_passed_instance_id_and_client_bypasses_apikey_gate(schema_session, monkeypatch):
+    import radarr.sync.movies as mv_mod
+    from app.config import settings
+
+    _seed_default(schema_session, "radarr")
+    monkeypatch.setattr(settings.radarr, "apikey", None)  # no scalar key
+    captured = {}
+
+    def fake_movies(apikey_radarr=None, radarr_id=None, arr_client=None):
+        captured["arr_client"] = arr_client
+        return [{"id": 10, "hasFile": True, "monitored": True, "title": "M",
+                 "movieFile": {"size": 999999, "path": "/m"}}]
+
+    monkeypatch.setattr(mv_mod, "database", schema_session)
+    monkeypatch.setattr(mv_mod, "event_stream", _noop)
+    monkeypatch.setattr(mv_mod, "store_subtitles_movie", _noop)
+    monkeypatch.setattr(mv_mod, "check_radarr_rootfolder", _noop)
+    monkeypatch.setattr(mv_mod, "jobs_queue", _DummyJobs())
+    monkeypatch.setattr(mv_mod, "get_profile_list", lambda *a, **k: [])
+    monkeypatch.setattr(mv_mod, "get_tags", lambda *a, **k: [])
+    monkeypatch.setattr(mv_mod, "get_language_profiles", lambda *a, **k: [])
+    monkeypatch.setattr(mv_mod, "get_movies_from_radarr_api", fake_movies)
+    monkeypatch.setattr(mv_mod, "movieParser",
+                        lambda *a, **k: {"radarrId": 10, "title": "M", "path": "/m", "tmdbId": "t10"})
+    sentinel = object()
+
+    # scalar apikey is None, but a client is provided -> the sync must still run
+    mv_mod.update_movies(job_id="job-1", arr_instance_id=2, arr_client=sentinel)
+
+    assert captured["arr_client"] is sentinel
+    row = schema_session.execute(
+        select(TableMovies.arr_instance_id).where(TableMovies.radarrId == 10)).first()
+    assert row is not None and row.arr_instance_id == 2
+
+
+def test_update_one_movie_passed_instance_id_wins(schema_session, monkeypatch):
+    import radarr.sync.movies as mv_mod
+
+    _seed_default(schema_session, "radarr")
+    monkeypatch.setattr(mv_mod, "database", schema_session)
+    monkeypatch.setattr(mv_mod, "event_stream", _noop)
+    monkeypatch.setattr(mv_mod, "store_subtitles_movie", _noop)
+    monkeypatch.setattr(mv_mod, "get_profile_list", lambda *a, **k: [])
+    monkeypatch.setattr(mv_mod, "get_tags", lambda *a, **k: [])
+    monkeypatch.setattr(mv_mod, "get_language_profiles", lambda *a, **k: [])
+    monkeypatch.setattr(mv_mod, "get_movies_from_radarr_api", lambda *a, **k: {"id": 10})
+    monkeypatch.setattr(mv_mod, "movieParser",
+                        lambda *a, **k: {"radarrId": 10, "title": "M", "path": "/m", "tmdbId": "t10"})
+
+    mv_mod.update_one_movie(10, action="updated", defer_search=True, arr_instance_id=2, arr_client=object())
+
+    row = schema_session.execute(
+        select(TableMovies.arr_instance_id).where(TableMovies.radarrId == 10)).first()
+    assert row is not None and row.arr_instance_id == 2

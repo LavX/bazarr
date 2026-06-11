@@ -104,7 +104,9 @@ def add_movie(added_movie):
         event_stream(type='movie', action='update', payload=int(added_movie['radarrId']))
 
 
-def update_movies(job_id=None, wait_for_completion=False):
+def update_movies(job_id=None, wait_for_completion=False, arr_instance_id=None, arr_client=None):
+    # arr_instance_id/arr_client thread an instance identity through the sync;
+    # both None = today's exact default-instance path (byte-identical).
     if not job_id:
         jobs_queue.add_job_from_function("Syncing movies with Radarr", is_progress=True,
                                          wait_for_completion=wait_for_completion)
@@ -130,19 +132,22 @@ def update_movies(job_id=None, wait_for_completion=False):
             .first()):
         movie_default_profile = None
 
-    if apikey_radarr is None:
+    # The scalar apikey gate only blocks the legacy default path; an
+    # instance-scoped sync carries its own credentials in arr_client.
+    if arr_client is None and apikey_radarr is None:
         pass
     else:
-        audio_profiles = get_profile_list()
-        tagsDict = get_tags()
+        audio_profiles = get_profile_list(arr_client=arr_client)
+        tagsDict = get_tags(arr_client=arr_client)
         language_profiles = get_language_profiles()
 
-        # Resolve the owning instance once (the enabled default for the
-        # single-instance path); stamp_owner leaves it unset pre-backfill.
-        instance_id = default_instance_id(database, 'radarr')
+        # Resolve the owning instance once: the explicit instance when scoped,
+        # else the enabled default. stamp_owner leaves it unset pre-backfill.
+        instance_id = arr_instance_id if arr_instance_id is not None \
+            else default_instance_id(database, 'radarr')
 
         # Get movies data from radarr
-        movies = get_movies_from_radarr_api(apikey_radarr=apikey_radarr)
+        movies = get_movies_from_radarr_api(apikey_radarr=apikey_radarr, arr_client=arr_client)
         if not isinstance(movies, list):
             return
         else:
@@ -304,7 +309,8 @@ def update_movies(job_id=None, wait_for_completion=False):
     jobs_queue.update_job_name(job_id=job_id, new_job_name="Synced movies with Radarr")
 
 
-def update_one_movie(movie_id, action, defer_search=False, is_signalr=False):
+def update_one_movie(movie_id, action, defer_search=False, is_signalr=False,
+                     arr_instance_id=None, arr_client=None):
     logging.debug('BAZARR syncing this specific movie from Radarr: %s', movie_id)
 
     # Check if there's a row in the database for this movie ID
@@ -339,17 +345,19 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False):
     else:
         movie_default_profile = None
 
-    audio_profiles = get_profile_list()
-    tagsDict = get_tags()
+    audio_profiles = get_profile_list(arr_client=arr_client)
+    tagsDict = get_tags(arr_client=arr_client)
     language_profiles = get_language_profiles()
 
-    # Resolve the owning instance once (default for the single-instance path).
-    instance_id = default_instance_id(database, 'radarr')
+    # Resolve the owning instance: explicit when scoped, else the default.
+    instance_id = arr_instance_id if arr_instance_id is not None \
+        else default_instance_id(database, 'radarr')
 
     try:
         # Get movie data from radarr api
         movie = None
-        movie_data = get_movies_from_radarr_api(apikey_radarr=settings.radarr.apikey, radarr_id=movie_id)
+        movie_data = get_movies_from_radarr_api(apikey_radarr=settings.radarr.apikey, radarr_id=movie_id,
+                                                arr_client=arr_client)
         if not movie_data:
             return
         else:

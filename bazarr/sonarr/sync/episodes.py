@@ -61,7 +61,8 @@ def check_actual_file_size(original_episode_path):
     return bazarr_file_size > MINIMUM_VIDEO_SIZE
 
 
-def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data=None):
+def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data=None,
+                  arr_instance_id=None, arr_client=None):
     """Sync one series' episodes between Sonarr and the local DB.
 
     The bulk update_series() caller pre-fetches episode lists in
@@ -132,7 +133,8 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
     # Get episodes data for a series from Sonarr (or use the
     # pre-fetched payload from the bulk update_series() caller).
     if episodes_data is None:
-        episodes = get_episodes_from_sonarr_api(apikey_sonarr=apikey_sonarr, series_id=series_id)
+        episodes = get_episodes_from_sonarr_api(apikey_sonarr=apikey_sonarr, series_id=series_id,
+                                                arr_client=arr_client)
     else:
         episodes = episodes_data
     if episodes:
@@ -143,7 +145,8 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
         else:
             # For Sonarr lower than 4.0.9.2421, we need to update episodes to integrate the
             # episodeFile API endpoint results
-            episodeFiles = get_episodesFiles_from_sonarr_api(apikey_sonarr=apikey_sonarr, series_id=series_id)
+            episodeFiles = get_episodesFiles_from_sonarr_api(apikey_sonarr=apikey_sonarr, series_id=series_id,
+                                                             arr_client=arr_client)
             if episodeFiles:
                 for episode in episodes:
                     if episodeFiles and episode['hasFile']:
@@ -206,8 +209,11 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
 
     # Episodes inherit their owning instance (and local series ref) from their
     # parent series, resolved once here. Falls back to the default instance when
-    # the parent is unstamped; leaves both unset for a pre-backfill install.
+    # the parent is unstamped; leaves both unset for a pre-backfill install. When
+    # this sync is instance-scoped, the explicit instance owns the episodes.
     owner_instance_id, parent_local_id = sonarr_series_owner(database, series_id)
+    if arr_instance_id is not None:
+        owner_instance_id = arr_instance_id
 
     if len(episodes_to_delete):
         try:
@@ -342,7 +348,8 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
     logging.debug('BAZARR All episodes from series ID %s synced from Sonarr into database.', series_id)
 
 
-def sync_one_episode(episode_id, defer_search=False, is_signalr=False):
+def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
+                     arr_instance_id=None, arr_client=None):
     logging.debug('BAZARR syncing this specific episode from Sonarr: %s', episode_id)
     apikey_sonarr = settings.sonarr.apikey
 
@@ -355,7 +362,8 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False):
     try:
         # Get episode data from sonarr api
         episode = None
-        episode_data = get_episodes_from_sonarr_api(apikey_sonarr=apikey_sonarr, episode_id=episode_id)
+        episode_data = get_episodes_from_sonarr_api(apikey_sonarr=apikey_sonarr, episode_id=episode_id,
+                                                    arr_client=arr_client)
         if not episode_data:
             return
 
@@ -363,7 +371,8 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False):
             if existing_episode and episode_data['hasFile']:
                 episode_data['episodeFile'] = \
                     get_episodesFiles_from_sonarr_api(apikey_sonarr=apikey_sonarr,
-                                                      episode_file_id=episode_data['episodeFileId'])
+                                                      episode_file_id=episode_data['episodeFileId'],
+                                                      arr_client=arr_client)
             episode = episodeParser(episode_data)
     except Exception:
         logging.exception('BAZARR cannot get episode returned by SignalR feed from Sonarr API.')
@@ -379,6 +388,8 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False):
     owner_instance_id = parent_local_id = None
     if episode:
         owner_instance_id, parent_local_id = sonarr_series_owner(database, episode['sonarrSeriesId'])
+        if arr_instance_id is not None:
+            owner_instance_id = arr_instance_id
 
     # Remove episode from DB
     if not episode and existing_episode:
