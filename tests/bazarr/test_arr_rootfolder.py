@@ -29,7 +29,9 @@ def _client(folders, kind="sonarr"):
         http_timeout=scalar.http_timeout, http_get=http_get)
 
 
-def test_default_path_inserts_rootfolder_without_instance(schema_session, monkeypatch):
+def test_default_path_without_default_instance_leaves_null(schema_session, monkeypatch):
+    # Pre-backfill install: no default instance exists -> ownership/split stay
+    # NULL (legacy behaviour, no literal owner forced).
     from app.database import TableShows, TableShowsRootfolder
     from sonarr import rootfolder
 
@@ -41,7 +43,28 @@ def test_default_path_inserts_rootfolder_without_instance(schema_session, monkey
 
     row = schema_session.execute(select(TableShowsRootfolder)).scalar_one()
     assert row.id == 1 and row.path == "/tv"
-    assert row.arr_instance_id is None  # default path does not stamp
+    assert row.arr_instance_id is None  # no default to resolve -> unowned
+
+
+def test_default_path_stamps_owner_when_default_instance_exists(schema_session, monkeypatch):
+    # INC0: a backfilled single-instance install resolves the default and stamps
+    # the rootfolder ownership + upstream/local split (closing the NULL gap).
+    from app.database import TableShows, TableShowsRootfolder
+    from arr_instances.repository import ArrInstanceRepository
+    from sonarr import rootfolder
+
+    monkeypatch.setattr(rootfolder, "database", schema_session)
+    inst = ArrInstanceRepository(schema_session).create("sonarr", "Sonarr")  # default
+    schema_session.flush()
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=1, path="/tv/show", title="S", arr_instance_id=inst.id))
+
+    rootfolder.get_sonarr_rootfolder(arr_client=_client([{"id": 1, "path": "/tv"}]))
+
+    row = schema_session.execute(select(TableShowsRootfolder)).scalar_one()
+    assert row.id == 1 and row.path == "/tv"
+    assert row.arr_instance_id == inst.id
+    assert row.upstream_rootfolder_id == 1 and row.local_rootfolder_id == 1
 
 
 def test_instance_path_stamps_rootfolder(schema_session, monkeypatch):

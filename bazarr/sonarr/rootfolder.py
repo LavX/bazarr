@@ -6,6 +6,7 @@ import logging
 
 from app.config import settings, get_ssl_verify
 from app.database import TableShowsRootfolder, TableShows, database, insert, update, delete, select
+from arr_instances.resolution import default_instance_id
 from utilities.path_mappings import path_mappings
 from sonarr.http_session import sonarr_session
 from sonarr.info import sonarr_headers, url_api_sonarr
@@ -31,6 +32,12 @@ def get_sonarr_rootfolder(arr_instance_id=None, arr_client=None):
         logging.exception("BAZARR Error trying to get rootfolder from Sonarr.")
         return []
     else:
+        # Resolve the owning instance: the explicit one when instance-scoped,
+        # else the enabled default. owner=None on a pre-backfill install leaves
+        # the ownership/split columns NULL (legacy behaviour).
+        owner = arr_instance_id if arr_instance_id is not None \
+            else default_instance_id(database, 'sonarr')
+
         # Scope the existing-shows lookup and the rootfolder table to the owning
         # instance when one is supplied; with no instance, the statements are
         # unscoped exactly as before (default-instance behaviour unchanged).
@@ -63,9 +70,13 @@ def get_sonarr_rootfolder(arr_instance_id=None, arr_client=None):
                 stmt = stmt.where(TableShowsRootfolder.arr_instance_id == arr_instance_id)
             database.execute(stmt)
         for item in rootfolder_to_insert:
+            # Stamp ownership + the upstream/local split on every insert (default
+            # path included) so new rootfolders are owned, closing the same
+            # NULL-accumulation gap INC4 closed for media. On a single default
+            # install local==upstream==id, so matching stays byte-identical.
             values = {'id': item['id'], 'path': item['path']}
-            if arr_instance_id is not None:
-                values.update(arr_instance_id=arr_instance_id,
+            if owner is not None:
+                values.update(arr_instance_id=owner,
                               upstream_rootfolder_id=item['id'],
                               local_rootfolder_id=item['id'])
             database.execute(insert(TableShowsRootfolder).values(**values))
