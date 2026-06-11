@@ -61,6 +61,51 @@ def test_connection(args, http_get=None):
     return client.test_connection(), 200
 
 
+def test_connection_for_instance(session, instance_id, args=None, http_get=None):
+    """Probe a SAVED instance using its STORED (decrypted) API key.
+
+    The card "Test" and the edit-modal "Keep current key" mode never hold the
+    plaintext key in the browser (stored keys never leave the server), so they
+    cannot use ``test_connection`` which reads the key from the request body.
+    This loads the row, decrypts the stored key server-side, and probes
+    /system/status.
+
+    Optional ``args`` carry connection overrides (ip/port/base_url/ssl/
+    verify_ssl/http_timeout) from an unsaved edit form, so the test reflects the
+    values on screen while still using the stored key. Returns ``(result, 200)``,
+    a 404 for an unknown id, or 400 for out-of-range overrides.
+    """
+    from secret_store import decrypt_secret
+
+    from .client import ArrClientFactory
+
+    args = args or {}
+    repo = ArrInstanceRepository(session)
+    row = repo.get(instance_id)
+    if row is None:
+        return {"ok": False, "error": "not_found", "message": "instance not found"}, 404
+    arg_error = _connection_arg_error(args)
+    if arg_error:
+        return {"ok": False, "error": "invalid", "message": arg_error}, 400
+
+    def pick(key, fallback):
+        value = args.get(key)
+        return fallback if value is None else value
+
+    client = ArrClientFactory().from_params(
+        kind=row.kind,
+        ip=args.get("ip") or row.ip,
+        port=pick("port", row.port),
+        base_url=args.get("base_url") or row.base_url or "/",
+        ssl=bool(pick("ssl", row.ssl)),
+        verify_ssl=bool(pick("verify_ssl", row.verify_ssl)),
+        api_key=decrypt_secret(row.api_key or ""),
+        http_timeout=pick("http_timeout", row.http_timeout) or 60,
+        http_get=http_get,
+    )
+    return client.test_connection(), 200
+
+
 def list_instances(session, kind=None):
     repo = ArrInstanceRepository(session)
     return [to_safe_dict(i) for i in repo.list(kind=kind)], 200

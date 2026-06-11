@@ -49,6 +49,16 @@ _test_parser.add_argument("ssl", type=bool, location="json")
 _test_parser.add_argument("verify_ssl", type=bool, location="json")
 _test_parser.add_argument("http_timeout", type=int, location="json")
 
+# By-id test: the kind and API key come from the stored row (the key never
+# leaves the server), so only optional connection overrides are accepted here.
+_test_by_id_parser = reqparse.RequestParser()
+_test_by_id_parser.add_argument("ip", type=str, location="json")
+_test_by_id_parser.add_argument("port", type=int, location="json")
+_test_by_id_parser.add_argument("base_url", type=str, location="json")
+_test_by_id_parser.add_argument("ssl", type=bool, location="json")
+_test_by_id_parser.add_argument("verify_ssl", type=bool, location="json")
+_test_by_id_parser.add_argument("http_timeout", type=int, location="json")
+
 
 @api_ns_system_arr_instances.route("/system/arr-instances")
 class ArrInstancesList(Resource):
@@ -99,4 +109,17 @@ class ArrInstanceTest(Resource):
         # or request lines.
         args = _test_parser.parse_args()
         body, status = service.test_connection(args)
+        return body, status
+
+
+@api_ns_system_arr_instances.route("/system/arr-instances/<int:instance_id>/test")
+class ArrInstanceTestById(Resource):
+    @authenticate
+    def post(self, instance_id):
+        # Tests a SAVED instance with its stored (decrypted) key, so the card
+        # "Test" and the edit-modal "Keep current key" mode work without the
+        # plaintext key ever reaching the browser. The body carries only
+        # optional connection overrides for unsaved edits.
+        args = _test_by_id_parser.parse_args()
+        body, status = service.test_connection_for_instance(database, instance_id, args)
         return body, status

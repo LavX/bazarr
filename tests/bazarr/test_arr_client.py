@@ -111,3 +111,53 @@ def test_service_test_connection_ok():
     assert status == 200
     assert body["ok"] is True
     assert body["version"] == "4.0.0"
+
+
+def test_service_test_connection_for_instance_uses_stored_key(schema_session):
+    from arr_instances import service
+    from arr_instances.repository import ArrInstanceRepository
+
+    inst = ArrInstanceRepository(schema_session).create(
+        "sonarr", "Main", api_key="stored-secret", ip="1.2.3.4", port=8989)
+
+    captured = {}
+
+    def fake_get(url, headers=None, timeout=None, verify=None):
+        captured.update(url=url, headers=headers)
+        return _FakeResp(200, {"version": "4.0.0"})
+
+    body, status = service.test_connection_for_instance(
+        schema_session, inst.id, http_get=fake_get)
+
+    assert status == 200 and body["ok"] is True and body["version"] == "4.0.0"
+    # the decrypted STORED key is what reaches the instance, not a body param
+    assert captured["headers"]["X-Api-Key"] == "stored-secret"
+    assert captured["url"].startswith("http://1.2.3.4:8989")
+
+
+def test_service_test_connection_for_instance_404(schema_session):
+    from arr_instances import service
+
+    body, status = service.test_connection_for_instance(schema_session, 99999)
+    assert status == 404
+
+
+def test_service_test_connection_for_instance_applies_overrides_with_stored_key(schema_session):
+    # edit-form "keep current key" + edited host: stored key, body connection override
+    from arr_instances import service
+    from arr_instances.repository import ArrInstanceRepository
+
+    inst = ArrInstanceRepository(schema_session).create(
+        "sonarr", "Main", api_key="stored-secret", ip="1.2.3.4", port=8989)
+
+    captured = {}
+
+    def fake_get(url, headers=None, timeout=None, verify=None):
+        captured.update(url=url, headers=headers)
+        return _FakeResp(200, {"version": "4.0.0"})
+
+    service.test_connection_for_instance(
+        schema_session, inst.id, args={"ip": "9.9.9.9", "port": 9000}, http_get=fake_get)
+
+    assert captured["url"].startswith("http://9.9.9.9:9000")
+    assert captured["headers"]["X-Api-Key"] == "stored-secret"

@@ -26,10 +26,7 @@ import {
   faXmark,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import {
-  useTestArrInstanceConnection,
-  useUpdateArrInstance,
-} from "@/apis/hooks";
+import { useTestArrInstanceById, useUpdateArrInstance } from "@/apis/hooks";
 import type { ArrInstance } from "@/apis/raw/arrInstances";
 import { ARR_META, buildHostUrl } from "./meta";
 import styles from "./ArrInstances.module.scss";
@@ -53,24 +50,16 @@ const InstanceCard: FunctionComponent<Props> = ({
   onDelete,
 }) => {
   const update = useUpdateArrInstance();
-  const test = useTestArrInstanceConnection();
+  const test = useTestArrInstanceById();
 
   const meta = ARR_META[instance.kind];
   const host = buildHostUrl(instance);
 
   const runTest = () => {
-    // The stored key never reaches the browser, so card-level tests verify
-    // reachability only. Authentication is tested from the edit form where a
-    // key can be re-entered.
-    test.mutate({
-      kind: instance.kind,
-      ip: instance.ip,
-      port: instance.port,
-      base_url: instance.base_url,
-      ssl: instance.ssl,
-      verify_ssl: instance.verify_ssl,
-      http_timeout: instance.http_timeout,
-    });
+    // Tests the saved instance with its stored key (decrypted server-side), so
+    // a green result confirms reachability AND authentication without the key
+    // ever reaching the browser.
+    test.mutate({ id: instance.id });
   };
 
   let status: TestStatus | null = null;
@@ -90,12 +79,12 @@ const InstanceCard: FunctionComponent<Props> = ({
           ? `Connected: ${app} v${test.data.version}`
           : `Connected: ${app}`,
       };
-    } else if (test.data.error === "unauthorized" && instance.api_key_set) {
+    } else if (test.data.error === "unauthorized" && !instance.api_key_set) {
       status = {
         tone: "warn",
         icon: <FontAwesomeIcon icon={faTriangleExclamation} />,
-        label: "Reachable, key not verified",
-        hint: "Stored keys never leave the server, so quick tests run without one. Open Edit and re-enter the key to verify authentication.",
+        label: "No API key stored",
+        hint: "This instance has no API key. Open Edit and enter one to authenticate.",
       };
     } else {
       status = {

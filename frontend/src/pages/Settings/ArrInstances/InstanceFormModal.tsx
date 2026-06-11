@@ -25,6 +25,7 @@ import {
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   useCreateArrInstance,
+  useTestArrInstanceById,
   useTestArrInstanceConnection,
   useUpdateArrInstance,
 } from "@/apis/hooks";
@@ -104,10 +105,18 @@ const InstanceFormModal: FunctionComponent<Props> = ({
 }) => {
   const create = useCreateArrInstance();
   const update = useUpdateArrInstance();
+  // Two test paths: `test` sends a typed key from the body (create/replace);
+  // `testById` uses the instance's stored key server-side (keep current key).
   const test = useTestArrInstanceConnection();
+  const testById = useTestArrInstanceById();
 
   const [keyMode, setKeyMode] = useState<KeyMode>("keep");
   const hasStoredKey = instance !== null && instance.api_key_set;
+
+  const resetTests = () => {
+    test.reset();
+    testById.reset();
+  };
 
   const form = useForm<FormValues>({
     initialValues: initialValues(kind, instance),
@@ -128,7 +137,7 @@ const InstanceFormModal: FunctionComponent<Props> = ({
       },
     },
     // Any change makes a previous test result stale, so drop it.
-    onValuesChange: () => test.reset(),
+    onValuesChange: () => resetTests(),
   });
 
   useEffect(() => {
@@ -137,7 +146,7 @@ const InstanceFormModal: FunctionComponent<Props> = ({
       form.resetDirty();
       form.clearErrors();
       setKeyMode("keep");
-      test.reset();
+      resetTests();
     }
     // The form and test objects are recreated every render; syncing on them
     // would loop. This effect only needs to run when the modal opens.
@@ -174,8 +183,7 @@ const InstanceFormModal: FunctionComponent<Props> = ({
       return;
     }
     const values = form.values;
-    const body: ArrInstanceTest = {
-      kind: values.kind,
+    const overrides = {
       ip: values.ip.trim(),
       port: Number(values.port),
       base_url: normalizeBaseUrl(values.baseUrl),
@@ -183,12 +191,27 @@ const InstanceFormModal: FunctionComponent<Props> = ({
       verify_ssl: values.verifySsl,
       http_timeout: Number(values.httpTimeout),
     };
+    // Keeping the stored key: test server-side with that key (it never reaches
+    // the browser), using the on-screen connection values as overrides.
+    if (instance && hasStoredKey && keyMode === "keep") {
+      test.reset();
+      testById.mutate({ id: instance.id, overrides });
+      return;
+    }
+    // Creating, replacing, or clearing the key: test with the typed key (if
+    // any) straight from the body.
+    testById.reset();
+    const body: ArrInstanceTest = { kind: values.kind, ...overrides };
     const key = typedApiKey();
     if (key) {
       body.api_key = key;
     }
     test.mutate(body);
   };
+
+  const testResult = testById.data ?? test.data;
+  const testPending = test.isPending || testById.isPending;
+  const testErrored = test.isError || testById.isError;
 
   const saving = create.isPending || update.isPending;
 
@@ -353,7 +376,7 @@ const InstanceFormModal: FunctionComponent<Props> = ({
                 value={keyMode}
                 onChange={(value) => {
                   setKeyMode(value as KeyMode);
-                  test.reset();
+                  resetTests();
                 }}
                 data={[
                   { value: "keep", label: "Keep current key" },
@@ -364,8 +387,7 @@ const InstanceFormModal: FunctionComponent<Props> = ({
               {keyMode === "keep" && (
                 <Text size="xs" c="dimmed">
                   The stored key never leaves the server, so it is not shown
-                  here. Connection tests run without it unless you re-enter the
-                  key.
+                  here. Connection tests use it automatically.
                 </Text>
               )}
               {keyMode === "replace" && (
@@ -419,22 +441,22 @@ const InstanceFormModal: FunctionComponent<Props> = ({
               type="button"
               variant="light"
               leftSection={<FontAwesomeIcon icon={faPlugCircleBolt} />}
-              loading={test.isPending}
+              loading={testPending}
               onClick={runTest}
             >
               Test Connection
             </Button>
           </Group>
 
-          {test.data &&
-            (test.data.ok ? (
+          {testResult &&
+            (testResult.ok ? (
               <Alert
                 color="green"
                 icon={<FontAwesomeIcon icon={faCircleCheck} />}
-                title={`Connected to ${test.data.app_name ?? meta.label}`}
+                title={`Connected to ${testResult.app_name ?? meta.label}`}
               >
-                {test.data.version
-                  ? `Version ${test.data.version}`
+                {testResult.version
+                  ? `Version ${testResult.version}`
                   : "The instance responded successfully."}
               </Alert>
             ) : (
@@ -443,12 +465,12 @@ const InstanceFormModal: FunctionComponent<Props> = ({
                 icon={<FontAwesomeIcon icon={faCircleXmark} />}
                 title="Connection failed"
               >
-                {test.data.message ??
-                  test.data.error ??
+                {testResult.message ??
+                  testResult.error ??
                   "The instance did not respond."}
               </Alert>
             ))}
-          {test.isError && (
+          {testErrored && (
             <Alert
               color="red"
               icon={<FontAwesomeIcon icon={faCircleXmark} />}

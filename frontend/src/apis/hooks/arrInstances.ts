@@ -6,6 +6,7 @@ import api from "@/apis/raw";
 import type {
   ArrInstanceCreate,
   ArrInstanceTest,
+  ArrInstanceTestOverrides,
   ArrInstanceUpdate,
 } from "@/apis/raw/arrInstances";
 
@@ -114,5 +115,21 @@ export function useTestArrInstanceConnection() {
     // request body is the only place credentials travel.
     mutationKey: [...arrKey, QueryKeys.Actions, "test"],
     mutationFn: (body: ArrInstanceTest) => api.arrInstances.test(body),
+  });
+}
+
+// Tests a saved instance using its stored key (decrypted server-side). The key
+// never reaches the browser, so this is how the card "Test" and the edit
+// modal's "Keep current key" mode verify the connection.
+export function useTestArrInstanceById() {
+  return useMutation({
+    mutationKey: [...arrKey, QueryKeys.Actions, "test-existing"],
+    mutationFn: ({
+      id,
+      overrides,
+    }: {
+      id: number;
+      overrides?: ArrInstanceTestOverrides;
+    }) => api.arrInstances.testExisting(id, overrides),
   });
 }

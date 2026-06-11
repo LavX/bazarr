@@ -60,6 +60,17 @@ export interface ArrInstanceTest {
   http_timeout?: number;
 }
 
+// Connection overrides for testing a saved instance. The kind and the stored
+// API key come from the row server-side, so neither is sent here.
+export type ArrInstanceTestOverrides = Partial<{
+  ip: string;
+  port: number;
+  base_url: string;
+  ssl: boolean;
+  verify_ssl: boolean;
+  http_timeout: number;
+}>;
+
 export interface ArrInstanceTestResult {
   ok: boolean;
   version?: string;
@@ -98,6 +109,18 @@ class ArrInstancesApi extends BaseApi {
   // The API key travels in the JSON body only, never in a URL or query string.
   async test(body: ArrInstanceTest) {
     const response = await this.postRaw<ArrInstanceTestResult>("/test", body);
+    return response.data;
+  }
+
+  // Tests a saved instance with its stored key (decrypted server-side). Used by
+  // the card "Test" and the edit modal's "Keep current key" mode, where the
+  // plaintext key is never available in the browser. Optional overrides let an
+  // unsaved edit form test the on-screen connection values with the stored key.
+  async testExisting(id: number, overrides?: ArrInstanceTestOverrides) {
+    const response = await this.postRaw<ArrInstanceTestResult>(
+      `/${id}/test`,
+      overrides ?? {},
+    );
     return response.data;
   }
 }
