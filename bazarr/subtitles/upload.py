@@ -19,6 +19,7 @@ from utilities.path_mappings import path_mappings
 from radarr.history import history_log_movie
 from radarr.notify import notify_radarr
 from sonarr.history import history_log
+from arr_instances.resolution import scoped
 from sonarr.notify import notify_sonarr
 from languages.custom_lang import CustomLanguage
 from app.database import (TableEpisodes, TableMovies, TableShows, get_profiles_list, get_audio_profile_languages,
@@ -38,7 +39,7 @@ from jellyfin.operations import jellyfin_refresh_item
 
 
 def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, filename, audio_language, job_id=None,
-                           sonarrSeriesId=None, sonarrEpisodeId=None, radarrId=None):
+                           sonarrSeriesId=None, sonarrEpisodeId=None, radarrId=None, arr_instance_id=None):
     if not job_id:
         return jobs_queue.add_job_from_function(f"Uploading {filename}", is_progress=False)
 
@@ -67,7 +68,7 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
         lang_obj = Language.rebuild(lang_obj, forced=True)
 
     if media_type == 'series':
-        episode_metadata = database.execute(
+        episode_metadata = database.execute(scoped(
             select(TableEpisodes.sonarrSeriesId,
                    TableEpisodes.sonarrEpisodeId,
                    TableEpisodes.season,
@@ -77,7 +78,8 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
                    TableShows.tvdbId)
             .select_from(TableEpisodes)
             .join(TableShows)
-            .where(TableEpisodes.sonarrEpisodeId == sonarrEpisodeId)) \
+            .where(TableEpisodes.sonarrEpisodeId == sonarrEpisodeId),
+            TableEpisodes.arr_instance_id, arr_instance_id)) \
             .first()
 
         if episode_metadata:
@@ -85,10 +87,11 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
         else:
             return
     else:
-        movie_metadata = database.execute(
+        movie_metadata = database.execute(scoped(
             select(TableMovies.radarrId, TableMovies.profileId,
                    TableMovies.imdbId, TableMovies.tmdbId)
-            .where(TableMovies.radarrId == radarrId)) \
+            .where(TableMovies.radarrId == radarrId),
+            TableMovies.arr_instance_id, arr_instance_id)) \
             .first()
 
         if movie_metadata:
@@ -206,7 +209,7 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
         provider = "manual"
         if media_type == 'series':
             history_log(4, sonarrSeriesId, sonarrEpisodeId, result, fake_provider=provider,
-                        fake_score=MAX_SCORES['episode'])
+                        fake_score=MAX_SCORES['episode'], arr_instance_id=arr_instance_id)
             if not settings.general.dont_notify_manual_actions:
                 send_notifications(sonarrSeriesId, sonarrEpisodeId, result.message)
             store_subtitles(result.path, path)
@@ -221,7 +224,8 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
                                       season=episode_metadata.season, episode=episode_metadata.episode,
                                       tvdb_id=episode_metadata.tvdbId)
         else:
-            history_log_movie(4, radarrId, result, fake_provider=provider, fake_score=MAX_SCORES['movie'])
+            history_log_movie(4, radarrId, result, fake_provider=provider, fake_score=MAX_SCORES['movie'],
+                              arr_instance_id=arr_instance_id)
             if not settings.general.dont_notify_manual_actions:
                 send_notifications_movie(radarrId, result.message)
             store_subtitles_movie(result.path, path)
