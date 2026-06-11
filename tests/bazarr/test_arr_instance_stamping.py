@@ -462,3 +462,225 @@ def test_update_one_movie_passed_instance_id_wins(schema_session, monkeypatch):
     row = schema_session.execute(
         select(TableMovies.arr_instance_id).where(TableMovies.radarrId == 10)).first()
     assert row is not None and row.arr_instance_id == 2
+
+
+# ============================================================================
+# INC6: thin *_for_instance entry points build the instance client and forward.
+# ============================================================================
+
+def test_update_series_for_instance_forwards(monkeypatch):
+    import sonarr.sync.series as series_mod
+
+    sentinel = object()
+    seen = {}
+    monkeypatch.setattr(series_mod, "client_for_instance", lambda *a, **k: sentinel)
+    monkeypatch.setattr(series_mod, "update_series", lambda **k: seen.update(k))
+
+    series_mod.update_series_for_instance(2, job_id="job-x")
+    assert seen["arr_instance_id"] == 2 and seen["arr_client"] is sentinel and seen["job_id"] == "job-x"
+
+
+def test_update_series_for_instance_skips_unknown(monkeypatch):
+    import sonarr.sync.series as series_mod
+
+    called = []
+    monkeypatch.setattr(series_mod, "client_for_instance", lambda *a, **k: None)
+    monkeypatch.setattr(series_mod, "update_series", lambda **k: called.append(k))
+
+    series_mod.update_series_for_instance(999, job_id="job-x")
+    assert called == []  # missing/disabled instance -> no sync attempted
+
+
+def test_update_movies_for_instance_forwards(monkeypatch):
+    import radarr.sync.movies as mv_mod
+
+    sentinel = object()
+    seen = {}
+    monkeypatch.setattr(mv_mod, "client_for_instance", lambda *a, **k: sentinel)
+    monkeypatch.setattr(mv_mod, "update_movies", lambda **k: seen.update(k))
+
+    mv_mod.update_movies_for_instance(3, job_id="job-y")
+    assert seen["arr_instance_id"] == 3 and seen["arr_client"] is sentinel
+
+
+def test_update_movies_for_instance_skips_unknown(monkeypatch):
+    import radarr.sync.movies as mv_mod
+
+    called = []
+    monkeypatch.setattr(mv_mod, "client_for_instance", lambda *a, **k: None)
+    monkeypatch.setattr(mv_mod, "update_movies", lambda **k: called.append(k))
+
+    mv_mod.update_movies_for_instance(999, job_id="job-y")
+    assert called == []
+
+
+# ============================================================================
+# INC7: instance-scoped reads/deletes/updates. The default path (arr_instance_id
+# None) stays unscoped (byte-identical). The ORM still keys on the upstream id,
+# so the test DB can't hold two rows with the same sonarrSeriesId/radarrId;
+# isolation is proven via "a scoped query must NOT touch another instance's row".
+# ============================================================================
+
+def test_update_series_delete_is_scoped_to_instance(schema_session, monkeypatch):
+    import sonarr.sync.series as series_mod
+
+    # instance 1 owns series 5; instance 2 owns series 7
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=5, id=5, arr_instance_id=1, path="/i1", title="I1"))
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=7, id=7, arr_instance_id=2, path="/i2", title="I2"))
+
+    deleted = []
+
+    def rec_update_one(series_id, action, **k):
+        if action == "deleted":
+            deleted.append(series_id)
+
+    monkeypatch.setattr(series_mod, "database", schema_session)
+    monkeypatch.setattr(series_mod, "check_sonarr_rootfolder", _noop)
+    monkeypatch.setattr(series_mod, "jobs_queue", _DummyJobs())
+    monkeypatch.setattr(series_mod, "event_stream", _noop)
+    monkeypatch.setattr(series_mod, "sync_episodes", _noop)
+    monkeypatch.setattr(series_mod, "update_one_series", rec_update_one)
+    monkeypatch.setattr(series_mod, "get_tags", lambda *a, **k: [])
+    monkeypatch.setattr(series_mod, "get_language_profiles", lambda *a, **k: [])
+    monkeypatch.setattr(series_mod, "get_episodes_from_sonarr_api", lambda *a, **k: [])
+    # instance 2's API returns only its own series 7
+    monkeypatch.setattr(series_mod, "get_series_from_sonarr_api",
+                        lambda *a, **k: [{"id": 7, "monitored": True, "title": "I2"}])
+
+    series_mod.update_series(job_id="job-1", arr_instance_id=2, arr_client=object())
+
+    # scoped: instance 1's series 5 is NOT seen as "removed" by instance 2's sync
+    assert deleted == []
+
+
+def test_update_series_default_path_unscoped_sees_all(schema_session, monkeypatch):
+    import sonarr.sync.series as series_mod
+
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=5, id=5, arr_instance_id=1, path="/i1", title="I1"))
+    deleted = []
+
+    def rec_update_one(series_id, action, **k):
+        if action == "deleted":
+            deleted.append(series_id)
+
+    monkeypatch.setattr(series_mod, "database", schema_session)
+    monkeypatch.setattr(series_mod, "check_sonarr_rootfolder", _noop)
+    monkeypatch.setattr(series_mod, "jobs_queue", _DummyJobs())
+    monkeypatch.setattr(series_mod, "event_stream", _noop)
+    monkeypatch.setattr(series_mod, "sync_episodes", _noop)
+    monkeypatch.setattr(series_mod, "update_one_series", rec_update_one)
+    monkeypatch.setattr(series_mod, "get_tags", lambda *a, **k: [])
+    monkeypatch.setattr(series_mod, "get_language_profiles", lambda *a, **k: [])
+    monkeypatch.setattr(series_mod, "get_episodes_from_sonarr_api", lambda *a, **k: [])
+    monkeypatch.setattr(series_mod, "get_series_from_sonarr_api", lambda *a, **k: [])  # API empty
+
+    series_mod.update_series(job_id="job-1")  # default path: unscoped
+
+    # unscoped default path considers all rows -> series 5 is "removed"
+    assert deleted == [5]
+
+
+def test_update_one_series_scoped_update_misses_other_instance(schema_session, monkeypatch):
+    import sonarr.sync.series as series_mod
+
+    # row owned by instance 1; an instance-2 sync of the same upstream id must
+    # not overwrite it (scoped UPDATE matches nothing for instance 2)
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=5, id=5, arr_instance_id=1, path="/i1", title="I1"))
+    monkeypatch.setattr(series_mod, "database", schema_session)
+    monkeypatch.setattr(series_mod, "event_stream", _noop)
+    monkeypatch.setattr(series_mod, "sync_episodes", _noop)
+    monkeypatch.setattr(series_mod, "seriesParser",
+                        lambda *a, **k: {"sonarrSeriesId": 5, "path": "/hijacked", "title": "X"})
+
+    series_mod.update_one_series(
+        5, action="updated", series_data={"id": 5}, existing_in_db=True,
+        audio_profiles=[], tags_dict=[], language_profiles=[],
+        skip_episode_sync=True, is_signalr=True, arr_instance_id=2, arr_client=object())
+
+    row = schema_session.execute(
+        select(TableShows.path).where(TableShows.sonarrSeriesId == 5)).first()
+    assert row.path == "/i1"  # instance 1's row untouched by instance 2's scoped update
+
+
+def test_update_movies_delete_is_scoped_to_instance(schema_session, monkeypatch):
+    import radarr.sync.movies as mv_mod
+
+    schema_session.execute(insert(TableMovies).values(
+        radarrId=5, id=5, arr_instance_id=1, path="/m1", title="M1", tmdbId="t5"))
+    monkeypatch.setattr(mv_mod, "database", schema_session)
+    monkeypatch.setattr(mv_mod, "event_stream", _noop)
+    monkeypatch.setattr(mv_mod, "store_subtitles_movie", _noop)
+    monkeypatch.setattr(mv_mod, "check_radarr_rootfolder", _noop)
+    monkeypatch.setattr(mv_mod, "jobs_queue", _DummyJobs())
+    monkeypatch.setattr(mv_mod, "get_profile_list", lambda *a, **k: [])
+    monkeypatch.setattr(mv_mod, "get_tags", lambda *a, **k: [])
+    monkeypatch.setattr(mv_mod, "get_language_profiles", lambda *a, **k: [])
+    monkeypatch.setattr(mv_mod, "get_movies_from_radarr_api", lambda *a, **k: [])  # instance 2 has no movies
+
+    mv_mod.update_movies(job_id="job-1", arr_instance_id=2, arr_client=object())
+
+    # scoped delete: instance 1's movie 5 survives instance 2's empty sync
+    row = schema_session.execute(
+        select(TableMovies.radarrId).where(TableMovies.radarrId == 5)).first()
+    assert row is not None
+
+
+def test_update_one_movie_scoped_update_misses_other_instance(schema_session, monkeypatch):
+    import radarr.sync.movies as mv_mod
+
+    schema_session.execute(insert(TableMovies).values(
+        radarrId=5, id=5, arr_instance_id=1, path="/m1", title="M1", tmdbId="t5"))
+    monkeypatch.setattr(mv_mod, "database", schema_session)
+    monkeypatch.setattr(mv_mod, "event_stream", _noop)
+    monkeypatch.setattr(mv_mod, "store_subtitles_movie", _noop)
+    monkeypatch.setattr(mv_mod, "get_profile_list", lambda *a, **k: [])
+    monkeypatch.setattr(mv_mod, "get_tags", lambda *a, **k: [])
+    monkeypatch.setattr(mv_mod, "get_language_profiles", lambda *a, **k: [])
+    monkeypatch.setattr(mv_mod, "get_movies_from_radarr_api", lambda *a, **k: {"id": 5})
+    monkeypatch.setattr(mv_mod, "movieParser",
+                        lambda *a, **k: {"radarrId": 5, "title": "X", "path": "/hijacked", "tmdbId": "t5"})
+
+    # existing_movie is looked up scoped to instance 2 -> not found -> insert path
+    # would try, but the row already exists under instance 1; the scoped lookup
+    # missing it must not let instance 2 overwrite instance 1's row.
+    mv_mod.update_one_movie(5, action="updated", defer_search=True,
+                            arr_instance_id=2, arr_client=object())
+
+    rows = schema_session.execute(
+        select(TableMovies.arr_instance_id, TableMovies.path)
+        .where(TableMovies.radarrId == 5).order_by(TableMovies.id)).all()
+    # instance 1's original row is intact
+    assert any(r.arr_instance_id == 1 and r.path == "/m1" for r in rows)
+
+
+def test_sync_episodes_delete_is_scoped_to_instance(schema_session, monkeypatch):
+    import sonarr.sync.episodes as ep_mod
+
+    # instance 1 owns episode 100 of series 5
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=5, id=5, arr_instance_id=1, path="/tv/s", title="S", audio_language="[]"))
+    schema_session.execute(insert(TableEpisodes).values(
+        sonarrSeriesId=5, sonarrEpisodeId=100, id=100, arr_instance_id=1,
+        path="/tv/s/e1", title="E1", season=1, episode=1, monitored="True"))
+    monkeypatch.setattr(ep_mod, "database", schema_session)
+    monkeypatch.setattr(ep_mod, "store_subtitles", _noop)
+    monkeypatch.setattr(ep_mod, "event_stream", _noop)
+    monkeypatch.setattr(ep_mod, "get_sonarr_info", _SonarrInfoStub())
+    monkeypatch.setattr(ep_mod, "episodeParser", lambda e: {
+        "sonarrSeriesId": 5, "sonarrEpisodeId": 200, "path": "/tv/s/e2", "season": 1,
+        "episode": 2, "title": "E2", "monitored": "True"})
+
+    # instance 2 syncs series 5 with a different episode set (200)
+    episodes_data = [{"id": 200, "hasFile": True, "monitored": True, "episodeFileId": 200,
+                      "episodeFile": {"size": 999999, "path": "/tv/s/e2"}}]
+    ep_mod.sync_episodes(series_id=5, episodes_data=episodes_data, defer_search=True,
+                         arr_instance_id=2, arr_client=object())
+
+    # scoped: instance 1's episode 100 must NOT be deleted by instance 2's sync
+    survives = schema_session.execute(
+        select(TableEpisodes.sonarrEpisodeId).where(TableEpisodes.sonarrEpisodeId == 100)).first()
+    assert survives is not None

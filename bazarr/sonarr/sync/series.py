@@ -14,7 +14,7 @@ from app.database import TableShows, TableLanguagesProfiles, database, insert, u
 from utilities.path_mappings import path_mappings
 from app.event_handler import event_stream
 from app.jobs_queue import jobs_queue
-from arr_instances.resolution import default_instance_id, stamp_owner
+from arr_instances.resolution import client_for_instance, default_instance_id, scoped, stamp_owner
 
 from .episodes import sync_episodes
 from .parser import seriesParser
@@ -82,9 +82,11 @@ def update_series(job_id=None, wait_for_completion=False, arr_instance_id=None, 
         tags_dict = get_tags(arr_client=arr_client)
         language_profiles = get_language_profiles()
 
-        # Get current shows in DB
+        # Get current shows in DB (scoped to this instance when instance-synced,
+        # so removed-series computation never sees another instance's shows).
         current_shows_db = set(database.execute(
-            select(TableShows.sonarrSeriesId)).scalars().all())
+            scoped(select(TableShows.sonarrSeriesId),
+                   TableShows.arr_instance_id, arr_instance_id)).scalars().all())
 
         current_shows_sonarr = set()
 
@@ -192,6 +194,28 @@ def update_series(job_id=None, wait_for_completion=False, arr_instance_id=None, 
     gc.collect()
 
 
+def update_series_for_instance(arr_instance_id, job_id):
+    """Bulk-sync one Sonarr instance. Built for the (future) scheduler fan-out,
+    which creates a per-instance job and calls this; builds the instance client
+    and forwards to update_series. A missing/disabled instance is skipped."""
+    arr_client = client_for_instance(database, arr_instance_id)
+    if arr_client is None:
+        logging.warning('BAZARR skipping Sonarr sync for unknown instance %s', arr_instance_id)
+        return
+    update_series(job_id=job_id, arr_instance_id=arr_instance_id, arr_client=arr_client)
+
+
+def update_one_series_for_instance(arr_instance_id, series_id, action, **kwargs):
+    """Single-series sync scoped to one instance (webhook/signalr entry)."""
+    arr_client = client_for_instance(database, arr_instance_id)
+    if arr_client is None:
+        logging.warning('BAZARR skipping Sonarr series %s for unknown instance %s',
+                        series_id, arr_instance_id)
+        return
+    update_one_series(series_id, action, arr_instance_id=arr_instance_id,
+                      arr_client=arr_client, **kwargs)
+
+
 def update_one_series(series_id, action, is_signalr=False, series_data=None,
                       audio_profiles=None, tags_dict=None, language_profiles=None,
                       existing_in_db=None, skip_episode_sync=False,
@@ -219,14 +243,16 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
     # row (the rest of this function only uses the boolean answer).
     if existing_in_db is None:
         existing_in_db = database.execute(
-            select(TableShows.sonarrSeriesId)
-            .where(TableShows.sonarrSeriesId == series_id)).scalar() is not None
+            scoped(select(TableShows.sonarrSeriesId)
+                   .where(TableShows.sonarrSeriesId == series_id),
+                   TableShows.arr_instance_id, arr_instance_id)).scalar() is not None
 
     # Delete series from DB
     if action == 'deleted' and existing_in_db:
         database.execute(
-            delete(TableShows)
-            .where(TableShows.sonarrSeriesId == int(series_id)))
+            scoped(delete(TableShows)
+                   .where(TableShows.sonarrSeriesId == int(series_id)),
+                   TableShows.arr_instance_id, arr_instance_id))
 
         event_stream(type='series', action='delete', payload=int(series_id))
         return
@@ -281,9 +307,10 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
             series['updated_at_timestamp'] = datetime.now()
             stamp_owner(series, instance_id)
             database.execute(
-                update(TableShows)
-                .values(series)
-                .where(TableShows.sonarrSeriesId == series['sonarrSeriesId']))
+                scoped(update(TableShows)
+                       .values(series)
+                       .where(TableShows.sonarrSeriesId == series['sonarrSeriesId']),
+                       TableShows.arr_instance_id, arr_instance_id))
         except IntegrityError as e:
             logging.error(f"BAZARR cannot update series {series['path']} because of {e}")  # noqa: G004
         else:

@@ -33,6 +33,20 @@ def default_instance_id(session, kind):
     return row.id if row is not None else None
 
 
+def scoped(stmt, column, arr_instance_id):
+    """Add ``column == arr_instance_id`` to a select/update/delete when the sync
+    is instance-scoped; a no-op for the default path (``arr_instance_id`` None)
+    so the statement stays byte-identical to the legacy unscoped query.
+
+    This is the guard against the cross-instance hazard: in multi-instance the
+    upstream ids (sonarrSeriesId/radarrId) are no longer globally unique, so an
+    unscoped WHERE on the upstream id would update or delete a DIFFERENT
+    instance's row that happens to share that id. Scoping confines every
+    read/delete/update to the instance being synced.
+    """
+    return stmt if arr_instance_id is None else stmt.where(column == arr_instance_id)
+
+
 def stamp_owner(row, instance_id):
     """Set ``arr_instance_id`` on a parser-output dict, guarded.
 
@@ -46,7 +60,20 @@ def stamp_owner(row, instance_id):
     return row
 
 
-def sonarr_series_owner(session, sonarr_series_id):
+def client_for_instance(session, instance_id, http_get=None):
+    """Build an :class:`ArrClient` for a saved instance (key decrypted at the
+    repository boundary), or None when the instance no longer exists. The INC7
+    fan-out + webhook/signalr entry points use this to route HTTP at one
+    specific instance.
+    """
+    from .client import ArrClientFactory
+    from .repository import ArrInstanceRepository
+
+    return ArrClientFactory(ArrInstanceRepository(session)).for_instance(
+        instance_id, http_get=http_get)
+
+
+def sonarr_series_owner(session, sonarr_series_id, arr_instance_id=None):
     """Return ``(owner_instance_id, local_series_id)`` for a series.
 
     Episodes inherit their owner from their parent series rather than
@@ -55,10 +82,16 @@ def sonarr_series_owner(session, sonarr_series_id):
     parent row exists but is not yet stamped (a transient pre-INC4 row).
     ``local_series_id`` is the parent's canonical ``id`` (None when the parent
     is not in the DB yet, e.g. an episode event arriving before its series).
+
+    When ``arr_instance_id`` is given the parent lookup is scoped to that
+    instance, so a colliding upstream id under another instance is never
+    mistaken for this instance's parent series.
     """
-    parent = session.execute(
+    stmt = scoped(
         select(TableShows.arr_instance_id, TableShows.id)
-        .where(TableShows.sonarrSeriesId == sonarr_series_id)).first()
+        .where(TableShows.sonarrSeriesId == sonarr_series_id),
+        TableShows.arr_instance_id, arr_instance_id)
+    parent = session.execute(stmt).first()
     if parent is None:
         return default_instance_id(session, "sonarr"), None
     instance_id = parent.arr_instance_id

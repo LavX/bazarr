@@ -20,7 +20,7 @@ from sonarr.info import get_sonarr_info
 from app.jobs_queue import jobs_queue
 from app.notifier import send_notifications
 from subtitles.adaptive_searching import is_search_active
-from arr_instances.resolution import sonarr_series_owner, stamp_owner
+from arr_instances.resolution import client_for_instance, scoped, sonarr_series_owner, stamp_owner
 
 from .parser import episodeParser
 from .utils import get_episodes_from_sonarr_api, get_episodesFiles_from_sonarr_api
@@ -42,10 +42,11 @@ def trace(message):
         logging.debug(FEATURE_PREFIX + message)  # noqa: G003
 
 
-def get_episodes_monitored_table(series_id):
+def get_episodes_monitored_table(series_id, arr_instance_id=None):
     episodes_monitored = database.execute(
-        select(TableEpisodes.episode_file_id, TableEpisodes.monitored)
-        .where(TableEpisodes.sonarrSeriesId == series_id))\
+        scoped(select(TableEpisodes.episode_file_id, TableEpisodes.monitored)
+               .where(TableEpisodes.sonarrSeriesId == series_id),
+               TableEpisodes.arr_instance_id, arr_instance_id))\
         .all()
     episode_dict = dict((x, y) for x, y in episodes_monitored)
     return episode_dict
@@ -105,24 +106,25 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
             'tvdbId': row.tvdbId,
         }
         for row in database.execute(
-            select(TableEpisodes.sonarrSeriesId,
-                   TableEpisodes.sonarrEpisodeId,
-                   TableEpisodes.title,
-                   TableEpisodes.path,
-                   TableEpisodes.season,
-                   TableEpisodes.episode,
-                   TableEpisodes.sceneName,
-                   TableEpisodes.monitored,
-                   TableEpisodes.format,
-                   TableEpisodes.resolution,
-                   TableEpisodes.video_codec,
-                   TableEpisodes.audio_codec,
-                   TableEpisodes.episode_file_id,
-                   TableEpisodes.audio_language,
-                   TableEpisodes.file_size,
-                   TableEpisodes.absoluteEpisode,
-                   TableEpisodes.tvdbId)
-            .where(TableEpisodes.sonarrSeriesId == series_id)).all()
+            scoped(select(TableEpisodes.sonarrSeriesId,
+                          TableEpisodes.sonarrEpisodeId,
+                          TableEpisodes.title,
+                          TableEpisodes.path,
+                          TableEpisodes.season,
+                          TableEpisodes.episode,
+                          TableEpisodes.sceneName,
+                          TableEpisodes.monitored,
+                          TableEpisodes.format,
+                          TableEpisodes.resolution,
+                          TableEpisodes.video_codec,
+                          TableEpisodes.audio_codec,
+                          TableEpisodes.episode_file_id,
+                          TableEpisodes.audio_language,
+                          TableEpisodes.file_size,
+                          TableEpisodes.absoluteEpisode,
+                          TableEpisodes.tvdbId)
+                   .where(TableEpisodes.sonarrSeriesId == series_id),
+                   TableEpisodes.arr_instance_id, arr_instance_id)).all()
     }
     current_episodes_id_db_list = list(current_episodes_in_db_row_as_dict.keys())
 
@@ -156,7 +158,7 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
 
         sync_monitored = settings.sonarr.sync_only_monitored_series and settings.sonarr.sync_only_monitored_episodes
         if sync_monitored:
-            episodes_monitored = get_episodes_monitored_table(series_id)
+            episodes_monitored = get_episodes_monitored_table(series_id, arr_instance_id)
             skipped_count = 0
 
         for episode in episodes:
@@ -199,7 +201,7 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
     if sync_monitored:
         # try to avoid unnecessary database calls
         if settings.general.debug:
-            series_title = database.execute(select(TableShows.title).where(TableShows.sonarrSeriesId == series_id)).first()[0]
+            series_title = database.execute(scoped(select(TableShows.title).where(TableShows.sonarrSeriesId == series_id), TableShows.arr_instance_id, arr_instance_id)).first()[0]
             trace(f"Skipped {skipped_count} unmonitored episodes out of {len(episodes)} for {series_title}")
 
     # Remove old episodes from DB
@@ -211,13 +213,14 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
     # parent series, resolved once here. Falls back to the default instance when
     # the parent is unstamped; leaves both unset for a pre-backfill install. When
     # this sync is instance-scoped, the explicit instance owns the episodes.
-    owner_instance_id, parent_local_id = sonarr_series_owner(database, series_id)
+    owner_instance_id, parent_local_id = sonarr_series_owner(database, series_id, arr_instance_id)
     if arr_instance_id is not None:
         owner_instance_id = arr_instance_id
 
     if len(episodes_to_delete):
         try:
-            database.execute(delete(TableEpisodes).where(TableEpisodes.sonarrEpisodeId.in_(episodes_to_delete)))
+            database.execute(scoped(delete(TableEpisodes).where(TableEpisodes.sonarrEpisodeId.in_(episodes_to_delete)),
+                                    TableEpisodes.arr_instance_id, arr_instance_id))
         except IntegrityError as e:
             logging.error(f"BAZARR cannot delete episodes because of {e}")  # noqa: G004
         else:
@@ -284,9 +287,10 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
                 stamp_owner(updated_episode, owner_instance_id)
                 if parent_local_id is not None:
                     updated_episode['series_id'] = parent_local_id
-                database.execute(update(TableEpisodes)
-                                 .values(updated_episode)
-                                 .where(TableEpisodes.sonarrEpisodeId == updated_episode['sonarrEpisodeId']))
+                database.execute(scoped(update(TableEpisodes)
+                                        .values(updated_episode)
+                                        .where(TableEpisodes.sonarrEpisodeId == updated_episode['sonarrEpisodeId']),
+                                        TableEpisodes.arr_instance_id, arr_instance_id))
             except IntegrityError as e:
                 logging.error(f"BAZARR cannot update episodes because of {e}")  # noqa: G004
             else:
@@ -302,10 +306,11 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
 
     # Downloading missing subtitles
     series_data = database.execute(
-        select(TableShows.title,
-               TableShows.year,
-               TableShows.path)
-        .where(TableShows.sonarrSeriesId == series_id)
+        scoped(select(TableShows.title,
+                      TableShows.year,
+                      TableShows.path)
+               .where(TableShows.sonarrSeriesId == series_id),
+               TableShows.arr_instance_id, arr_instance_id)
     ).first()
     if not series_data:
         pass
@@ -348,6 +353,16 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
     logging.debug('BAZARR All episodes from series ID %s synced from Sonarr into database.', series_id)
 
 
+def sync_one_episode_for_instance(arr_instance_id, episode_id, **kwargs):
+    """Single-episode sync scoped to one instance (webhook/signalr entry)."""
+    arr_client = client_for_instance(database, arr_instance_id)
+    if arr_client is None:
+        logging.warning('BAZARR skipping Sonarr episode %s for unknown instance %s',
+                        episode_id, arr_instance_id)
+        return
+    sync_one_episode(episode_id, arr_instance_id=arr_instance_id, arr_client=arr_client, **kwargs)
+
+
 def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
                      arr_instance_id=None, arr_client=None):
     logging.debug('BAZARR syncing this specific episode from Sonarr: %s', episode_id)
@@ -355,8 +370,9 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
 
     # Check if there's a row in database for this episode ID
     existing_episode = database.execute(
-        select(TableEpisodes.path, TableEpisodes.episode_file_id)
-        .where(TableEpisodes.sonarrEpisodeId == episode_id)) \
+        scoped(select(TableEpisodes.path, TableEpisodes.episode_file_id)
+               .where(TableEpisodes.sonarrEpisodeId == episode_id),
+               TableEpisodes.arr_instance_id, arr_instance_id)) \
         .first()
 
     try:
@@ -387,7 +403,7 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
     # needs neither). Guarded so a pre-backfill install stays NULL.
     owner_instance_id = parent_local_id = None
     if episode:
-        owner_instance_id, parent_local_id = sonarr_series_owner(database, episode['sonarrSeriesId'])
+        owner_instance_id, parent_local_id = sonarr_series_owner(database, episode['sonarrSeriesId'], arr_instance_id)
         if arr_instance_id is not None:
             owner_instance_id = arr_instance_id
 
@@ -395,8 +411,9 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
     if not episode and existing_episode:
         try:
             database.execute(
-                delete(TableEpisodes)
-                .where(TableEpisodes.sonarrEpisodeId == episode_id))
+                scoped(delete(TableEpisodes)
+                       .where(TableEpisodes.sonarrEpisodeId == episode_id),
+                       TableEpisodes.arr_instance_id, arr_instance_id))
         except IntegrityError as e:
             logging.error(f"BAZARR cannot delete episode {existing_episode.path} because of {e}")  # noqa: G004
         else:
@@ -413,9 +430,10 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
             if parent_local_id is not None:
                 episode['series_id'] = parent_local_id
             database.execute(
-                update(TableEpisodes)
-                .values(episode)
-                .where(TableEpisodes.sonarrEpisodeId == episode_id))
+                scoped(update(TableEpisodes)
+                       .values(episode)
+                       .where(TableEpisodes.sonarrEpisodeId == episode_id),
+                       TableEpisodes.arr_instance_id, arr_instance_id))
         except IntegrityError as e:
             logging.error(f"BAZARR cannot update episode {episode['path']} because of {e}")  # noqa: G004
         else:
@@ -449,8 +467,9 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
             '%s', path_mappings.path_replace(episode["path"]))
     else:
         series_title = database.execute(
-            select(TableShows.title)
-            .where(TableShows.sonarrSeriesId == episode["sonarrSeriesId"])
+            scoped(select(TableShows.title)
+                   .where(TableShows.sonarrSeriesId == episode["sonarrSeriesId"]),
+                   TableShows.arr_instance_id, arr_instance_id)
         ).first()[0]
         episode_full_title = (f'{series_title} - S{episode["season"]:02d}E{episode["episode"]:02d} - '
                               f'{episode["title"]}')
