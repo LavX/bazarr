@@ -11,6 +11,7 @@ from functools import reduce
 
 from utilities.path_mappings import path_mappings
 from subtitles.indexer.series import store_subtitles, list_missing_subtitles
+from arr_instances.resolution import scoped
 from sonarr.history import history_log
 from app.notifier import send_notifications
 from app.get_providers import get_providers
@@ -197,20 +198,22 @@ def _wanted_episode(episode, providers_list, job_id=None):
                        episode.sonarrEpisodeId))
 
 
-def wanted_download_subtitles(sonarr_episode_id, job_id=None):
-    stmt = select(TableEpisodes.path,
-                  TableEpisodes.missing_subtitles,
-                  TableEpisodes.sonarrEpisodeId,
-                  TableEpisodes.sonarrSeriesId,
-                  TableEpisodes.audio_language,
-                  TableEpisodes.sceneName,
-                  TableEpisodes.failedAttempts,
-                  TableShows.title,
-                  TableShows.profileId,
-                  TableEpisodes.subtitles) \
-        .select_from(TableEpisodes) \
-        .join(TableShows) \
-        .where((TableEpisodes.sonarrEpisodeId == sonarr_episode_id))
+def wanted_download_subtitles(sonarr_episode_id, job_id=None, arr_instance_id=None):
+    stmt = scoped(
+        select(TableEpisodes.path,
+               TableEpisodes.missing_subtitles,
+               TableEpisodes.sonarrEpisodeId,
+               TableEpisodes.sonarrSeriesId,
+               TableEpisodes.audio_language,
+               TableEpisodes.sceneName,
+               TableEpisodes.failedAttempts,
+               TableShows.title,
+               TableShows.profileId,
+               TableEpisodes.subtitles)
+        .select_from(TableEpisodes)
+        .join(TableShows)
+        .where((TableEpisodes.sonarrEpisodeId == sonarr_episode_id)),
+        TableEpisodes.arr_instance_id, arr_instance_id)
     episode_details = database.execute(stmt).first()
 
     if not episode_details:
@@ -222,7 +225,7 @@ def wanted_download_subtitles(sonarr_episode_id, job_id=None):
         episode_details = database.execute(stmt).first()
     elif episode_details.missing_subtitles is None:
         # missing subtitles calculation for this episode is incomplete, we'll do it again
-        list_missing_subtitles(epno=sonarr_episode_id)
+        list_missing_subtitles(epno=sonarr_episode_id, arr_instance_id=arr_instance_id)
         episode_details = database.execute(stmt).first()
 
     providers_list = get_providers()
@@ -281,6 +284,7 @@ def wanted_search_missing_subtitles_series(job_id=None, wait_for_completion=Fals
     episodes = database.execute(
         select(TableEpisodes.sonarrSeriesId,
                TableEpisodes.sonarrEpisodeId,
+               TableEpisodes.arr_instance_id,
                TableShows.tags,
                TableEpisodes.monitored,
                TableShows.title,
@@ -307,7 +311,8 @@ def wanted_search_missing_subtitles_series(job_id=None, wait_for_completion=Fals
 
         providers = get_providers()
         if providers:
-            wanted_download_subtitles(episode.sonarrEpisodeId, job_id=job_id)
+            wanted_download_subtitles(episode.sonarrEpisodeId, job_id=job_id,
+                                      arr_instance_id=episode.arr_instance_id)
 
             # make sure to override the progress value updated by the subtitles synchronization
             jobs_queue.update_job_progress(job_id=job_id, progress_value=i, progress_max=count_episodes)

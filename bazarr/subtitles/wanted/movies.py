@@ -10,6 +10,7 @@ from functools import reduce
 
 from utilities.path_mappings import path_mappings
 from subtitles.indexer.movies import store_subtitles_movie, list_missing_subtitles_movies
+from arr_instances.resolution import scoped
 from radarr.history import history_log_movie
 from app.notifier import send_notifications_movie
 from app.get_providers import get_providers
@@ -189,17 +190,19 @@ def _wanted_movie(movie, providers_list, job_id=None):
                 .where(TableMovies.radarrId == movie.radarrId))
 
 
-def wanted_download_subtitles_movie(radarr_id, job_id=None):
-    stmt = select(TableMovies.path,
-                  TableMovies.missing_subtitles,
-                  TableMovies.radarrId,
-                  TableMovies.audio_language,
-                  TableMovies.sceneName,
-                  TableMovies.failedAttempts,
-                  TableMovies.title,
-                  TableMovies.profileId,
-                  TableMovies.subtitles) \
-        .where(TableMovies.radarrId == radarr_id)
+def wanted_download_subtitles_movie(radarr_id, job_id=None, arr_instance_id=None):
+    stmt = scoped(
+        select(TableMovies.path,
+               TableMovies.missing_subtitles,
+               TableMovies.radarrId,
+               TableMovies.audio_language,
+               TableMovies.sceneName,
+               TableMovies.failedAttempts,
+               TableMovies.title,
+               TableMovies.profileId,
+               TableMovies.subtitles)
+        .where(TableMovies.radarrId == radarr_id),
+        TableMovies.arr_instance_id, arr_instance_id)
     movie = database.execute(stmt).first()
 
     if not movie:
@@ -211,7 +214,7 @@ def wanted_download_subtitles_movie(radarr_id, job_id=None):
         movie = database.execute(stmt).first()
     elif movie.missing_subtitles is None:
         # missing subtitles calculation for this movie is incomplete, we'll do it again
-        list_missing_subtitles_movies(no=radarr_id)
+        list_missing_subtitles_movies(no=radarr_id, arr_instance_id=arr_instance_id)
         movie = database.execute(stmt).first()
 
     providers_list = get_providers()
@@ -261,6 +264,7 @@ def wanted_search_missing_subtitles_movies(job_id=None, wait_for_completion=Fals
     conditions += get_exclusion_clause('movie')
     movies = database.execute(
         select(TableMovies.radarrId,
+               TableMovies.arr_instance_id,
                TableMovies.tags,
                TableMovies.monitored,
                TableMovies.title)
@@ -279,7 +283,8 @@ def wanted_search_missing_subtitles_movies(job_id=None, wait_for_completion=Fals
 
         providers = get_providers()
         if providers:
-            wanted_download_subtitles_movie(movie.radarrId, job_id=job_id)
+            wanted_download_subtitles_movie(movie.radarrId, job_id=job_id,
+                                            arr_instance_id=movie.arr_instance_id)
 
             # make sure to override the progress value updated by the subtitles synchronization
             jobs_queue.update_job_progress(job_id=job_id, progress_value=i, progress_max=count_movies)
