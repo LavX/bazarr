@@ -8,14 +8,16 @@ from sonarr.http_session import sonarr_session
 from sonarr.info import sonarr_headers, url_api_sonarr
 
 
-def browse_sonarr_filesystem(path='#'):
+def browse_sonarr_filesystem(path='#', arr_client=None):
     if path == '#':
         path = ''
-    url_sonarr_api_filesystem = (f"{url_api_sonarr()}filesystem?path={path}&allowFoldersWithoutTrailingSlashes=true&"
-                                 f"includeFiles=false")
+    suffix = f"filesystem?path={path}&allowFoldersWithoutTrailingSlashes=true&includeFiles=false"
     try:
-        r = sonarr_session().get(url_sonarr_api_filesystem, timeout=int(settings.sonarr.http_timeout), verify=get_ssl_verify('sonarr'),
-                                 headers=sonarr_headers(settings.sonarr.apikey))
+        if arr_client is not None:
+            r = arr_client.get(f"/api/v3/{suffix}")
+        else:
+            r = sonarr_session().get(f"{url_api_sonarr()}{suffix}", timeout=int(settings.sonarr.http_timeout),
+                                     verify=get_ssl_verify('sonarr'), headers=sonarr_headers(settings.sonarr.apikey))
         r.raise_for_status()
     except requests.exceptions.HTTPError:
         logging.exception("BAZARR Error trying to get series from Sonarr. Http error.")

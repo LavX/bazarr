@@ -13,7 +13,8 @@ _EMPTY_PORTS = (None, "", 0)
 
 class ArrClient:
     def __init__(self, *, kind, ip, port, base_url="/", ssl=False,
-                 verify_ssl=False, api_key="", http_timeout=60, http_get=None):
+                 verify_ssl=False, api_key="", http_timeout=60, http_get=None,
+                 http_post=None):
         self.kind = kind
         self.ip = ip
         self.port = port
@@ -23,6 +24,7 @@ class ArrClient:
         self.http_timeout = http_timeout
         self._base_url_raw = base_url
         self._http_get = http_get  # None -> use the kind's shared session pool
+        self._http_post = http_post
 
     def base_url(self):
         protocol = "https" if self.ssl else "http"
@@ -54,6 +56,25 @@ class ArrClient:
         getter = self._http_get or self._session_get
         return getter(
             f"{self.base_url()}{path}",
+            headers=self._headers(),
+            timeout=int(self.http_timeout),
+            verify=self.verify_ssl,
+        )
+
+    def _session_post(self, url, json=None, headers=None, timeout=None, verify=None):
+        if self.kind == "radarr":
+            from radarr.http_session import radarr_session
+            return radarr_session().post(url, json=json, headers=headers, timeout=timeout, verify=verify)
+        from sonarr.http_session import sonarr_session
+        return sonarr_session().post(url, json=json, headers=headers, timeout=timeout, verify=verify)
+
+    def post(self, path, json=None):
+        """POST to an absolute API path against this instance and return the raw
+        requests.Response. Mirrors the legacy session.post call."""
+        poster = self._http_post or self._session_post
+        return poster(
+            f"{self.base_url()}{path}",
+            json=json,
             headers=self._headers(),
             timeout=int(self.http_timeout),
             verify=self.verify_ssl,
