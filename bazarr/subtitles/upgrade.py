@@ -62,8 +62,10 @@ def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, wait_for_com
                TableShows.profileId,
                TableEpisodes.subtitles.label('external_subtitles')) \
         .select_from(TableHistory) \
-        .join(TableShows, onclause=TableHistory.sonarrSeriesId == TableShows.sonarrSeriesId) \
-        .join(TableEpisodes, onclause=TableHistory.sonarrEpisodeId == TableEpisodes.sonarrEpisodeId)
+        .join(TableShows, onclause=and_(TableHistory.sonarrSeriesId == TableShows.sonarrSeriesId,
+                                  TableHistory.arr_instance_id == TableShows.arr_instance_id)) \
+        .join(TableEpisodes, onclause=and_(TableHistory.sonarrEpisodeId == TableEpisodes.sonarrEpisodeId,
+                                     TableHistory.arr_instance_id == TableEpisodes.arr_instance_id))
 
     if sonarr_series_ids:
         query = query.where(TableHistory.sonarrSeriesId.in_(sonarr_series_ids))
@@ -187,7 +189,8 @@ def upgrade_movies_subtitles(job_id=None, radarr_ids=None, wait_for_completion=F
                TableMovies.profileId,
                TableMovies.subtitles.label('external_subtitles')) \
         .select_from(TableHistoryMovie) \
-        .join(TableMovies, onclause=TableHistoryMovie.radarrId == TableMovies.radarrId)
+        .join(TableMovies, onclause=and_(TableHistoryMovie.radarrId == TableMovies.radarrId,
+                                  TableHistoryMovie.arr_instance_id == TableMovies.arr_instance_id))
 
     if radarr_ids:
         query = query.where(TableHistoryMovie.radarrId.in_(radarr_ids))
@@ -384,8 +387,10 @@ def get_upgradable_episode_subtitles(history_id_list=None):
                TableHistory.language,
                TableHistory.upgradedFromId)
         .select_from(TableHistory)
-        .join(TableShows, onclause=TableHistory.sonarrSeriesId == TableShows.sonarrSeriesId)
-        .join(TableEpisodes, onclause=TableHistory.sonarrEpisodeId == TableEpisodes.sonarrEpisodeId)
+        .join(TableShows, onclause=and_(TableHistory.sonarrSeriesId == TableShows.sonarrSeriesId,
+                                  TableHistory.arr_instance_id == TableShows.arr_instance_id))
+        .join(TableEpisodes, onclause=and_(TableHistory.sonarrEpisodeId == TableEpisodes.sonarrEpisodeId,
+                                     TableHistory.arr_instance_id == TableEpisodes.arr_instance_id))
         .join(max_id_timestamp, onclause=and_(TableHistory.video_path == max_id_timestamp.c.video_path,
                                               TableHistory.language == max_id_timestamp.c.language,
                                               max_id_timestamp.c.timestamp == TableHistory.timestamp))
@@ -452,7 +457,8 @@ def get_upgradable_movies_subtitles(history_id_list=None):
                TableHistoryMovie.language,
                TableHistoryMovie.upgradedFromId)
         .select_from(TableHistoryMovie)
-        .join(TableMovies, onclause=TableHistoryMovie.radarrId == TableMovies.radarrId)
+        .join(TableMovies, onclause=and_(TableHistoryMovie.radarrId == TableMovies.radarrId,
+                                  TableHistoryMovie.arr_instance_id == TableMovies.arr_instance_id))
         .join(max_id_timestamp, onclause=and_(TableHistoryMovie.video_path == max_id_timestamp.c.video_path,
                                               TableHistoryMovie.language == max_id_timestamp.c.language,
                                               max_id_timestamp.c.timestamp == TableHistoryMovie.timestamp))
