@@ -62,6 +62,9 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
         return mutateAsync({
           seriesId,
           episodeId,
+          // Scope the download to the episode's owning instance (#156); the
+          // backend dual-uses the upstream ids + this to disambiguate.
+          arrInstanceId: item.arr_instance_id,
           form: {
             language,
             hi,

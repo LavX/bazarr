@@ -96,6 +96,8 @@ class ProviderEpisodes(Resource):
                                      help='Use original subtitles format from ["True", "False"]')
     post_request_parser.add_argument('provider', type=str, required=True, help='Provider name')
     post_request_parser.add_argument('subtitle', type=str, required=True, help='Subtitle ID as returned by GET')
+    post_request_parser.add_argument('arr_instance_id', type=int, required=False,
+                                     help='Owning Sonarr instance id (#156); scopes the download to it')
 
     @authenticate
     @api_ns_providers_episodes.doc(parser=post_request_parser)
@@ -114,6 +116,7 @@ class ProviderEpisodes(Resource):
                                                     use_original_format=args.get('original_format').capitalize(),
                                                     selected_provider=args.get('provider'),
                                                     subtitle=args.get('subtitle'),
-                                                    job_id=None)
+                                                    job_id=None,
+                                                    arr_instance_id=args.get('arr_instance_id'))
 
         return '', 204

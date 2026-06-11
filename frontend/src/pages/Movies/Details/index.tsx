@@ -85,6 +85,8 @@ const MovieDetailView: FunctionComponent = () => {
 
       return downloadAsync({
         radarrId,
+        // Scope the download to the movie's owning instance (#156).
+        arrInstanceId: item.arr_instance_id,
         form: {
           language,
           hi,
