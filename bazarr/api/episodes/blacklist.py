@@ -80,6 +80,8 @@ class EpisodesBlacklist(Resource):
     post_request_parser.add_argument('subs_id', type=str, required=True, help='Subtitles ID')
     post_request_parser.add_argument('language', type=str, required=True, help='Subtitles language')
     post_request_parser.add_argument('subtitles_path', type=str, required=True, help='Subtitles file path')
+    post_request_parser.add_argument('arr_instance_id', type=int, required=False,
+                                     help='Owning Sonarr instance id (#156)')
 
     @authenticate
     @api_ns_episodes_blacklist.doc(parser=post_request_parser)
@@ -111,7 +113,8 @@ class EpisodesBlacklist(Resource):
                       sonarr_episode_id=sonarr_episode_id,
                       provider=provider,
                       subs_id=subs_id,
-                      language=language)
+                      language=language,
+                      arr_instance_id=args.get('arr_instance_id'))
         if delete_subtitles(media_type='series',
                             language=language,
                             forced=False,
