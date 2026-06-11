@@ -10,7 +10,7 @@ never replaced. Runs at startup after migrations.
 """
 import logging
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text
 
 from app.database import (
     TableBlacklist,
@@ -38,8 +38,13 @@ _RADARR_TABLES = (
 
 
 def _has_any_rows(session, tables):
+    # Select a single column (not the full entity): a full-entity select loads
+    # ORM objects into the identity map keyed by the PK, and during the cutover
+    # migration the local-id PK is still NULL on every row, which corrupts the
+    # identity map and breaks the bulk stamp below. A scalar existence check is
+    # also cheaper.
     for model in tables:
-        if session.execute(select(model).limit(1)).first() is not None:
+        if session.execute(select(model.arr_instance_id).limit(1)).first() is not None:
             return True
     return False
 
@@ -69,10 +74,16 @@ def _backfill_kind(session, repo, kind, scalar, use_flag, tables):
 
     stamped = 0
     for model in tables:
+        # Stamp via raw SQL keyed on the table name, not an ORM bulk update:
+        # the ORM update synchronizes the session by the model PK, which during
+        # the cutover migration is the still-NULL local id (the cutover
+        # populates it AFTER this bootstrap), leaving rows unstamped. Raw SQL is
+        # PK-agnostic and behaves identically at runtime (post-cutover).
+        # Table name is a trusted ORM constant, not user input.
         result = session.execute(
-            update(model)
-            .where(model.arr_instance_id.is_(None))
-            .values(arr_instance_id=instance.id)
+            text(f"UPDATE {model.__tablename__} "
+                 "SET arr_instance_id = :iid WHERE arr_instance_id IS NULL"),
+            {"iid": instance.id},
         )
         stamped += result.rowcount or 0
 

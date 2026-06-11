@@ -25,10 +25,12 @@ def test_table_shows_has_nullable_ownership_and_local_id(schema_session):
     assert row.id == 1000
 
 
-def test_table_shows_ownership_columns_are_nullable(schema_session):
+def test_table_shows_legacy_insert_autoincrements_local_id(schema_session):
     from app.database import TableShows
 
-    # legacy-style insert without the new columns still works
+    # Post-flip: a legacy-style insert without the new columns still works; the
+    # owner stays nullable, but the local id is the PK so it autoincrements
+    # rather than staying NULL.
     schema_session.execute(insert(TableShows).values(
         sonarrSeriesId=11, path="/series/show2", title="Show 2",
     ))
@@ -36,14 +38,15 @@ def test_table_shows_ownership_columns_are_nullable(schema_session):
         select(TableShows).where(TableShows.sonarrSeriesId == 11)
     ).scalar_one()
     assert row.arr_instance_id is None
-    assert row.id is None
+    assert row.id is not None  # local id PK autoincremented
 
 
 def test_table_episodes_has_ownership_local_id_and_series_id(schema_session):
     from app.database import TableEpisodes, TableShows
 
+    # Post-flip series_id is an FK to table_shows.id, so the parent must exist.
     schema_session.execute(insert(TableShows).values(
-        sonarrSeriesId=10, path="/series/show", title="Show"))
+        id=1000, sonarrSeriesId=10, path="/series/show", title="Show"))
     schema_session.execute(insert(TableEpisodes).values(
         sonarrEpisodeId=20, sonarrSeriesId=10, season=1, episode=1,
         path="/series/show/s01e01.mkv", title="Pilot",
@@ -67,9 +70,24 @@ def test_table_movies_has_nullable_ownership_and_local_id(schema_session):
     assert row.id == 3000
 
 
+def _seed_show_episode_movie(schema_session):
+    # Post-flip the history/blacklist local refs are FKs to the parents' local
+    # id, so parent rows must exist (id 1000 show, 2000 episode, 3000 movie).
+    from app.database import TableEpisodes, TableMovies, TableShows
+
+    schema_session.execute(insert(TableShows).values(
+        id=1000, sonarrSeriesId=10, path="/series/show", title="Show"))
+    schema_session.execute(insert(TableEpisodes).values(
+        id=2000, sonarrEpisodeId=20, sonarrSeriesId=10, series_id=1000, season=1,
+        episode=1, path="/series/show/s01e01.mkv", title="Pilot"))
+    schema_session.execute(insert(TableMovies).values(
+        id=3000, radarrId=30, path="/movies/movie.mkv", title="Movie", tmdbId="100"))
+
+
 def test_table_history_has_ownership_and_local_refs(schema_session):
     from app.database import TableHistory
 
+    _seed_show_episode_movie(schema_session)
     schema_session.execute(insert(TableHistory).values(
         action=1, description="x",
         arr_instance_id=1, series_id=1000, episode_id=2000,
@@ -83,6 +101,7 @@ def test_table_history_has_ownership_and_local_refs(schema_session):
 def test_table_history_movie_has_ownership_and_local_ref(schema_session):
     from app.database import TableHistoryMovie
 
+    _seed_show_episode_movie(schema_session)
     schema_session.execute(insert(TableHistoryMovie).values(
         action=1, description="x",
         arr_instance_id=2, movie_id=3000,
@@ -95,6 +114,7 @@ def test_table_history_movie_has_ownership_and_local_ref(schema_session):
 def test_table_blacklist_has_ownership_and_local_refs(schema_session):
     from app.database import TableBlacklist
 
+    _seed_show_episode_movie(schema_session)
     schema_session.execute(insert(TableBlacklist).values(
         arr_instance_id=1, series_id=1000, episode_id=2000,
     ))
@@ -107,6 +127,7 @@ def test_table_blacklist_has_ownership_and_local_refs(schema_session):
 def test_table_blacklist_movie_has_ownership_and_local_ref(schema_session):
     from app.database import TableBlacklistMovie
 
+    _seed_show_episode_movie(schema_session)
     schema_session.execute(insert(TableBlacklistMovie).values(
         arr_instance_id=2, movie_id=3000,
     ))

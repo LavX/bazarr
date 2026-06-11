@@ -220,11 +220,55 @@ def test_cutover_local_pk_autoincrements_and_scopes_uniqueness(legacy_db_at_head
         eng.dispose()
 
 
-def test_migrated_db_works_with_current_orm_models(legacy_db_at_head):
-    # The ORM PK flip is intentionally deferred (it would break single-instance
-    # callers keyed by the upstream id). This proves the CURRENT models
-    # (upstream-id PK) keep working against the migrated id-PK DB: get-by-radarrId,
-    # select-by-path, and a legacy-style insert + fetch all succeed.
+_OWNED_FOR_PARITY = (
+    "table_shows", "table_episodes", "table_movies",
+    "table_shows_rootfolder", "table_movies_rootfolder",
+    "table_history", "table_history_movie", "table_blacklist", "table_blacklist_movie",
+)
+
+
+def _schema_shape(db_path):
+    """PK / FK / unique-index shape per owned table - the load-bearing schema
+    facts that must agree between a fresh create_all and a migrated DB."""
+    eng = create_engine(f"sqlite:///{db_path}")
+    try:
+        insp = inspect(eng)
+        shape = {}
+        for t in _OWNED_FOR_PARITY:
+            pk = insp.get_pk_constraint(t)["constrained_columns"]
+            fks = sorted((f["constrained_columns"][0], f["referred_table"], f["referred_columns"][0])
+                         for f in insp.get_foreign_keys(t))
+            uq = sorted(tuple(i["column_names"]) for i in insp.get_indexes(t) if i["unique"])
+            shape[t] = {"pk": pk, "fks": fks, "uniques": uq}
+        return shape
+    finally:
+        eng.dispose()
+
+
+def test_fresh_create_all_matches_migrated_schema(legacy_db_at_head, tmp_path):
+    # INC6 gate: the flipped ORM models' create_all must produce the SAME
+    # PK/FK/unique shape that the cutover migration produces on an upgraded DB,
+    # for all 9 owned tables - otherwise fresh installs diverge from upgrades.
+    from app.database import Base
+
+    _run_migration(legacy_db_at_head, _CUTOVER)
+    migrated = _schema_shape(legacy_db_at_head)
+
+    fresh_path = tmp_path / "fresh.db"
+    fresh_eng = create_engine(f"sqlite:///{fresh_path}")
+    Base.metadata.create_all(fresh_eng)
+    fresh_eng.dispose()
+    fresh = _schema_shape(str(fresh_path))
+
+    for t in _OWNED_FOR_PARITY:
+        assert fresh[t] == migrated[t], f"{t}: fresh create_all {fresh[t]} != migrated {migrated[t]}"
+
+
+def test_migrated_db_works_with_flipped_orm_models(legacy_db_at_head):
+    # Post-flip: the ORM PK is the local id. This proves the flipped models work
+    # against the migrated DB: get-by-local-id, select/get-by-upstream-id (now a
+    # scoped column query, no longer the PK), select-by-path, and a fresh insert
+    # whose local id autoincrements independently of the upstream radarrId.
     from sqlalchemy.orm import Session
 
     from app.database import TableMovies
@@ -233,19 +277,27 @@ def test_migrated_db_works_with_current_orm_models(legacy_db_at_head):
     eng = create_engine(f"sqlite:///{legacy_db_at_head}")
     try:
         with Session(eng) as s:
-            existing = s.execute(text("select radarrId from table_movies limit 1")).scalar()
+            existing = s.execute(text("select id, radarrId from table_movies limit 1")).first()
             if existing is not None:
-                m = s.get(TableMovies, existing)            # model PK is radarrId
-                assert m is not None and m.radarrId == existing
+                local_id, upstream = existing.id, existing.radarrId
+                m = s.get(TableMovies, local_id)            # model PK is now id
+                assert m is not None and m.id == local_id
+                by_upstream = s.execute(
+                    select(TableMovies).where(TableMovies.radarrId == upstream)).scalar_one()
+                assert by_upstream.id == local_id
                 by_path = s.execute(
                     select(TableMovies).where(TableMovies.path == m.path)).scalar_one()
-                assert by_path.radarrId == existing
+                assert by_path.id == local_id
             inst = s.execute(text("select id from arr_instances where kind='radarr'")).scalar()
             s.execute(insert(TableMovies).values(
                 radarrId=987654, path="/orm/new.mkv", title="ORM", tmdbId="orm987654",
                 arr_instance_id=inst))
             s.commit()
-            got = s.get(TableMovies, 987654)               # legacy get-by-radarrId
-            assert got is not None and got.path == "/orm/new.mkv"
+            # local id autoincremented (a fresh rowid, not the upstream radarrId);
+            # the row is reachable by its upstream id via a scoped column query.
+            new_row = s.execute(
+                select(TableMovies).where(TableMovies.radarrId == 987654)).scalar_one()
+            assert new_row.path == "/orm/new.mkv"
+            assert s.get(TableMovies, new_row.id) is new_row
     finally:
         eng.dispose()

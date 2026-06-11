@@ -313,13 +313,13 @@ class TableBlacklist(Base):
 
     # multi-instance additive columns (#156): nullable owner + local refs.
     arr_instance_id = mapped_column(Integer)
-    series_id = mapped_column(Integer)
-    episode_id = mapped_column(Integer)
+    series_id = mapped_column(Integer, ForeignKey('table_shows.id', ondelete='CASCADE'))
+    episode_id = mapped_column(Integer, ForeignKey('table_episodes.id', ondelete='CASCADE'))
     id = mapped_column(Integer, primary_key=True)
     language = mapped_column(Text)
     provider = mapped_column(Text)
-    sonarr_episode_id = mapped_column(Integer, ForeignKey('table_episodes.sonarrEpisodeId', ondelete='CASCADE'))
-    sonarr_series_id = mapped_column(Integer, ForeignKey('table_shows.sonarrSeriesId', ondelete='CASCADE'))
+    sonarr_episode_id = mapped_column(Integer)
+    sonarr_series_id = mapped_column(Integer)
     subs_id = mapped_column(Text, index=True)
     timestamp = mapped_column(DateTime, default=datetime.now)
 
@@ -329,24 +329,26 @@ class TableBlacklistMovie(Base):
 
     # multi-instance additive columns (#156): nullable owner + local ref.
     arr_instance_id = mapped_column(Integer)
-    movie_id = mapped_column(Integer)
+    movie_id = mapped_column(Integer, ForeignKey('table_movies.id', ondelete='CASCADE'))
     id = mapped_column(Integer, primary_key=True)
     language = mapped_column(Text)
     provider = mapped_column(Text)
-    radarr_id = mapped_column(Integer, ForeignKey('table_movies.radarrId', ondelete='CASCADE'))
+    radarr_id = mapped_column(Integer)
     subs_id = mapped_column(Text, index=True)
     timestamp = mapped_column(DateTime, default=datetime.now)
 
 
 class TableEpisodes(Base):
     __tablename__ = 'table_episodes'
+    # Phase 8 ORM PK flip (#156): local ``id`` PK; ``series_id`` is the local FK
+    # to table_shows.id; the upstream sonarrEpisodeId is unique per instance.
+    __table_args__ = (
+        Index('ux_episodes_instance_upstream', 'arr_instance_id', 'sonarrEpisodeId', unique=True),
+    )
 
-    # multi-instance additive columns (#156): nullable for now; FK, NOT NULL,
-    # and backfill land in later increments. ``id`` is the future canonical
-    # local id; ``series_id`` is the future local ref to table_shows.id.
-    id = mapped_column(Integer)
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
     arr_instance_id = mapped_column(Integer)
-    series_id = mapped_column(Integer)
+    series_id = mapped_column(Integer, ForeignKey('table_shows.id', ondelete='CASCADE'))
     absoluteEpisode = mapped_column(Integer)
     audio_codec = mapped_column(Text)
     audio_language = mapped_column(Text)
@@ -363,8 +365,8 @@ class TableEpisodes(Base):
     resolution = mapped_column(Text)
     sceneName = mapped_column(Text)
     season = mapped_column(Integer, nullable=False)
-    sonarrEpisodeId = mapped_column(Integer, primary_key=True)
-    sonarrSeriesId = mapped_column(Integer, ForeignKey('table_shows.sonarrSeriesId', ondelete='CASCADE'), index=True)
+    sonarrEpisodeId = mapped_column(Integer)
+    sonarrSeriesId = mapped_column(Integer, index=True)
     subtitles = mapped_column(Text)
     title = mapped_column(Text, nullable=False)
     tvdbId = mapped_column(Integer)
@@ -384,8 +386,8 @@ class TableHistory(Base):
 
     # multi-instance additive columns (#156): nullable owner + local refs.
     arr_instance_id = mapped_column(Integer)
-    series_id = mapped_column(Integer)
-    episode_id = mapped_column(Integer)
+    series_id = mapped_column(Integer, ForeignKey('table_shows.id', ondelete='CASCADE'))
+    episode_id = mapped_column(Integer, ForeignKey('table_episodes.id', ondelete='CASCADE'))
     id = mapped_column(Integer, primary_key=True)
     action = mapped_column(Integer, nullable=False, index=True)
     description = mapped_column(Text, nullable=False)
@@ -393,8 +395,8 @@ class TableHistory(Base):
     provider = mapped_column(Text)
     score = mapped_column(Integer)
     score_out_of = mapped_column(Integer, nullable=True)
-    sonarrEpisodeId = mapped_column(Integer, ForeignKey('table_episodes.sonarrEpisodeId', ondelete='CASCADE'), index=True)
-    sonarrSeriesId = mapped_column(Integer, ForeignKey('table_shows.sonarrSeriesId', ondelete='CASCADE'), index=True)
+    sonarrEpisodeId = mapped_column(Integer, index=True)
+    sonarrSeriesId = mapped_column(Integer, index=True)
     subs_id = mapped_column(Text)
     subtitles_path = mapped_column(Text)
     timestamp = mapped_column(DateTime, nullable=False, default=datetime.now)
@@ -413,13 +415,13 @@ class TableHistoryMovie(Base):
 
     # multi-instance additive columns (#156): nullable owner + local ref.
     arr_instance_id = mapped_column(Integer)
-    movie_id = mapped_column(Integer)
+    movie_id = mapped_column(Integer, ForeignKey('table_movies.id', ondelete='CASCADE'))
     id = mapped_column(Integer, primary_key=True)
     action = mapped_column(Integer, nullable=False, index=True)
     description = mapped_column(Text, nullable=False)
     language = mapped_column(Text)
     provider = mapped_column(Text)
-    radarrId = mapped_column(Integer, ForeignKey('table_movies.radarrId', ondelete='CASCADE'), index=True)
+    radarrId = mapped_column(Integer, index=True)
     score = mapped_column(Integer)
     score_out_of = mapped_column(Integer, nullable=True)
     subs_id = mapped_column(Text)
@@ -447,11 +449,15 @@ class TableLanguagesProfiles(Base):
 
 class TableMovies(Base):
     __tablename__ = 'table_movies'
+    # Phase 8 ORM PK flip (#156): local ``id`` is the canonical PK; the upstream
+    # radarrId, path and tmdbId are unique only within an instance.
+    __table_args__ = (
+        Index('ux_movies_instance_path', 'arr_instance_id', 'path', unique=True),
+        Index('ux_movies_instance_upstream', 'arr_instance_id', 'radarrId', unique=True),
+        Index('ux_movies_instance_tmdb', 'arr_instance_id', 'tmdbId', unique=True),
+    )
 
-    # multi-instance additive columns (#156): nullable for now; FK, NOT NULL,
-    # and backfill land in later increments. ``id`` is the future canonical
-    # local id (radarrId stays the PK until the Phase 8 cutover).
-    id = mapped_column(Integer)
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
     arr_instance_id = mapped_column(Integer)
     alternativeTitles = mapped_column(Text)
     audio_codec = mapped_column(Text)
@@ -468,17 +474,17 @@ class TableMovies(Base):
     movie_file_id = mapped_column(Integer)
     originalLanguage = mapped_column(Text)
     overview = mapped_column(Text)
-    path = mapped_column(Text, nullable=False, unique=True)
+    path = mapped_column(Text, nullable=False)
     poster = mapped_column(Text)
     profileId = mapped_column(Integer, ForeignKey('table_languages_profiles.profileId', ondelete='SET NULL'), index=True)
-    radarrId = mapped_column(Integer, primary_key=True)
+    radarrId = mapped_column(Integer)
     resolution = mapped_column(Text)
     sceneName = mapped_column(Text)
     sortTitle = mapped_column(Text)
     subtitles = mapped_column(Text)
     tags = mapped_column(Text)
     title = mapped_column(Text, nullable=False)
-    tmdbId = mapped_column(Text, nullable=False, unique=True)
+    tmdbId = mapped_column(Text, nullable=False)
     updated_at_timestamp = mapped_column(DateTime)
     video_codec = mapped_column(Text)
     year = mapped_column(Text)
@@ -489,16 +495,19 @@ class TableMovies(Base):
 
 class TableMoviesRootfolder(Base):
     __tablename__ = 'table_movies_rootfolder'
+    # Phase 8 ORM PK flip (#156): local_rootfolder_id is the canonical PK; the
+    # upstream rootfolder id is unique only within an instance.
+    __table_args__ = (
+        Index('ux_movies_rootfolder_instance_upstream',
+              'arr_instance_id', 'upstream_rootfolder_id', unique=True),
+    )
 
-    # multi-instance additive columns (#156): nullable owner plus an
-    # upstream/local rootfolder id split (the current id stays the PK until a
-    # later cutover). Nullable for now; FK and scoped uniqueness land later.
     arr_instance_id = mapped_column(Integer)
     upstream_rootfolder_id = mapped_column(Integer)
-    local_rootfolder_id = mapped_column(Integer)
+    local_rootfolder_id = mapped_column(Integer, primary_key=True, autoincrement=True)
     accessible = mapped_column(Integer)
     error = mapped_column(Text)
-    id = mapped_column(Integer, primary_key=True)
+    id = mapped_column(Integer)
     path = mapped_column(Text)
 
 
@@ -538,11 +547,15 @@ class TableSettingsNotifier(Base):
 
 class TableShows(Base):
     __tablename__ = 'table_shows'
+    # Phase 8 ORM PK flip (#156): local ``id`` is the canonical PK (matches the
+    # physical schema the cutover migration produced); the upstream
+    # sonarrSeriesId and path are unique only within an instance.
+    __table_args__ = (
+        Index('ux_shows_instance_path', 'arr_instance_id', 'path', unique=True),
+        Index('ux_shows_instance_upstream', 'arr_instance_id', 'sonarrSeriesId', unique=True),
+    )
 
-    # multi-instance additive columns (#156): nullable for now; FK, NOT NULL,
-    # and backfill land in later increments. ``id`` is the future canonical
-    # local id (sonarrSeriesId stays the PK until the Phase 8 cutover).
-    id = mapped_column(Integer)
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
     arr_instance_id = mapped_column(Integer)
     tvdbId = mapped_column(Integer)
     alternativeTitles = mapped_column(Text)
@@ -555,11 +568,11 @@ class TableShows(Base):
     monitored = mapped_column(Text)
     originalLanguage = mapped_column(Text)
     overview = mapped_column(Text)
-    path = mapped_column(Text, nullable=False, unique=True)
+    path = mapped_column(Text, nullable=False)
     poster = mapped_column(Text)
     profileId = mapped_column(Integer, ForeignKey('table_languages_profiles.profileId', ondelete='SET NULL'), index=True)
     seriesType = mapped_column(Text)
-    sonarrSeriesId = mapped_column(Integer, primary_key=True)
+    sonarrSeriesId = mapped_column(Integer)
     sortTitle = mapped_column(Text)
     tags = mapped_column(Text)
     title = mapped_column(Text, nullable=False)
@@ -572,16 +585,19 @@ class TableShows(Base):
 
 class TableShowsRootfolder(Base):
     __tablename__ = 'table_shows_rootfolder'
+    # Phase 8 ORM PK flip (#156): local_rootfolder_id is the canonical PK; the
+    # upstream rootfolder id is unique only within an instance.
+    __table_args__ = (
+        Index('ux_shows_rootfolder_instance_upstream',
+              'arr_instance_id', 'upstream_rootfolder_id', unique=True),
+    )
 
-    # multi-instance additive columns (#156): nullable owner plus an
-    # upstream/local rootfolder id split (the current id stays the PK until a
-    # later cutover). Nullable for now; FK and scoped uniqueness land later.
     arr_instance_id = mapped_column(Integer)
     upstream_rootfolder_id = mapped_column(Integer)
-    local_rootfolder_id = mapped_column(Integer)
+    local_rootfolder_id = mapped_column(Integer, primary_key=True, autoincrement=True)
     accessible = mapped_column(Integer)
     error = mapped_column(Text)
-    id = mapped_column(Integer, primary_key=True)
+    id = mapped_column(Integer)
     path = mapped_column(Text)
 
 
