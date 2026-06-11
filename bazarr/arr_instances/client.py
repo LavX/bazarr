@@ -11,14 +11,6 @@ from constants import HEADERS
 _EMPTY_PORTS = (None, "", 0)
 
 
-def _default_get(url, headers=None, timeout=None, verify=None):
-    # Imported lazily so importing this module never forces requests/urllib3
-    # at module load and so the shared Sonarr session pool is reused.
-    from sonarr.http_session import sonarr_session
-
-    return sonarr_session().get(url, headers=headers, timeout=timeout, verify=verify)
-
-
 class ArrClient:
     def __init__(self, *, kind, ip, port, base_url="/", ssl=False,
                  verify_ssl=False, api_key="", http_timeout=60, http_get=None):
@@ -30,7 +22,7 @@ class ArrClient:
         self.api_key = api_key
         self.http_timeout = http_timeout
         self._base_url_raw = base_url
-        self._http_get = http_get or _default_get
+        self._http_get = http_get  # None -> use the kind's shared session pool
 
     def base_url(self):
         protocol = "https" if self.ssl else "http"
@@ -45,8 +37,22 @@ class ArrClient:
     def _headers(self):
         return {**HEADERS, "X-Api-Key": self.api_key}
 
-    def _get(self, path):
-        return self._http_get(
+    def _session_get(self, url, headers=None, timeout=None, verify=None):
+        # Reuse the kind's shared session pool (same retry config the legacy
+        # sync path uses); imported lazily to avoid an import-time dependency.
+        if self.kind == "radarr":
+            from radarr.http_session import radarr_session
+            return radarr_session().get(url, headers=headers, timeout=timeout, verify=verify)
+        from sonarr.http_session import sonarr_session
+        return sonarr_session().get(url, headers=headers, timeout=timeout, verify=verify)
+
+    def get(self, path):
+        """GET an absolute API path (e.g. '/api/v3/series/1') against this
+        instance and return the raw requests.Response. Mirrors the legacy
+        url_*() + shared-session call so default-instance behaviour is identical.
+        """
+        getter = self._http_get or self._session_get
+        return getter(
             f"{self.base_url()}{path}",
             headers=self._headers(),
             timeout=int(self.http_timeout),
@@ -56,7 +62,7 @@ class ArrClient:
     def test_connection(self):
         """Probe /api/v3/system/status. Returns a result dict (never raises)."""
         try:
-            resp = self._get("/api/v3/system/status")
+            resp = self.get("/api/v3/system/status")
         except Exception as exc:
             return {"ok": False, "error": "connection_failed", "message": str(exc)}
 

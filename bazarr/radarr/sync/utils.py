@@ -8,15 +8,29 @@ from radarr.http_session import radarr_session
 from radarr.info import get_radarr_info, radarr_headers, url_api_radarr
 
 
-def get_profile_list():
+def _api_get(suffix, v3_path, apikey_radarr, arr_client):
+    """GET a Radarr API path. With no client, the legacy call
+    (url_api_radarr() + suffix, version-aware base, via the shared session);
+    with an ArrClient, route through it pinned to /api/v3. Identical for the
+    default instance.
+    """
+    if arr_client is not None:
+        return arr_client.get(v3_path)
+    return radarr_session().get(
+        f"{url_api_radarr()}{suffix}",
+        timeout=int(settings.radarr.http_timeout),
+        verify=get_ssl_verify('radarr'),
+        headers=radarr_headers(apikey_radarr),
+    )
+
+
+def get_profile_list(arr_client=None):
     apikey_radarr = settings.radarr.apikey
     profiles_list = []
-    # Get profiles data from radarr
-    url_radarr_api_movies = f"{url_api_radarr()}{'quality' if url_api_radarr().endswith('v3/') else ''}profile"
 
+    suffix = f"{'quality' if url_api_radarr().endswith('v3/') else ''}profile"
     try:
-        profiles_json = radarr_session().get(url_radarr_api_movies, timeout=int(settings.radarr.http_timeout), verify=get_ssl_verify('radarr'),
-                                             headers=radarr_headers(apikey_radarr))
+        profiles_json = _api_get(suffix, "/api/v3/qualityprofile", apikey_radarr, arr_client)
     except requests.exceptions.ConnectionError:
         logging.exception("BAZARR Error trying to get profiles from Radarr. Connection Error.")
     except requests.exceptions.Timeout:
@@ -37,16 +51,12 @@ def get_profile_list():
     return profiles_list
 
 
-def get_tags():
+def get_tags(arr_client=None):
     apikey_radarr = settings.radarr.apikey
     tagsDict = []
 
-    # Get tags data from Radarr
-    url_radarr_api_series = f"{url_api_radarr()}tag"
-
     try:
-        tagsDict = radarr_session().get(url_radarr_api_series, timeout=int(settings.radarr.http_timeout), verify=get_ssl_verify('radarr'),
-                                        headers=radarr_headers(apikey_radarr))
+        tagsDict = _api_get("tag", "/api/v3/tag", apikey_radarr, arr_client)
     except requests.exceptions.ConnectionError:
         logging.exception("BAZARR Error trying to get tags from Radarr. Connection Error.")
         return []
@@ -66,12 +76,11 @@ def get_tags():
             return []
 
 
-def get_movies_from_radarr_api(apikey_radarr, radarr_id=None):
-    url_radarr_api_movies = f'{url_api_radarr()}movie{f"/{radarr_id}" if radarr_id else ""}'
+def get_movies_from_radarr_api(apikey_radarr, radarr_id=None, arr_client=None):
+    suffix = f'movie{f"/{radarr_id}" if radarr_id else ""}'
 
     try:
-        r = radarr_session().get(url_radarr_api_movies, timeout=int(settings.radarr.http_timeout), verify=get_ssl_verify('radarr'),
-                                 headers=radarr_headers(apikey_radarr))
+        r = _api_get(suffix, f"/api/v3/{suffix}", apikey_radarr, arr_client)
         if r.status_code == 404:
             return
         r.raise_for_status()
@@ -97,12 +106,11 @@ def get_movies_from_radarr_api(apikey_radarr, radarr_id=None):
             return
 
 
-def get_history_from_radarr_api(apikey_radarr, movie_id):
-    url_radarr_api_history = f"{url_api_radarr()}history?eventType=1&movieIds={movie_id}"
+def get_history_from_radarr_api(apikey_radarr, movie_id, arr_client=None):
+    suffix = f"history?eventType=1&movieIds={movie_id}"
 
     try:
-        r = radarr_session().get(url_radarr_api_history, timeout=int(settings.sonarr.http_timeout), verify=get_ssl_verify('radarr'),
-                                 headers=radarr_headers(apikey_radarr))
+        r = _api_get(suffix, f"/api/v3/{suffix}", apikey_radarr, arr_client)
         r.raise_for_status()
     except requests.exceptions.HTTPError:
         logging.exception("BAZARR Error trying to get history from Radarr. Http error.")
