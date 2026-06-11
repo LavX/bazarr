@@ -17,6 +17,7 @@ import shutil
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import IntegrityError
 
 _HEAD_BEFORE_CUTOVER = "d9a3b7c1e240"
 _CUTOVER = "e7f4c9d80abc"
@@ -144,5 +145,76 @@ def test_cutover_backfills_local_ids_equal_to_upstream(legacy_db_at_head):
         with eng.connect() as conn:
             for sql in mismatches:
                 assert conn.execute(text(sql)).scalar() == 0, sql
+    finally:
+        eng.dispose()
+
+
+def _counts(db):
+    eng = create_engine(f"sqlite:///{db}")
+    try:
+        with eng.connect() as c:
+            return {t: c.execute(text(f"select count(*) from {t}")).scalar()
+                    for t in _OWNED_TABLES}
+    finally:
+        eng.dispose()
+
+
+def test_cutover_rebuilds_tables_to_local_id_pk(legacy_db_at_head):
+    # Steps F+G+H: PK cutover, FK repoint, scoped uniques, with row parity and
+    # FK integrity. The backup DB (real history/blacklist) is load-bearing for
+    # the FK-repoint path.
+    pre = _counts(legacy_db_at_head)
+    _run_migration(legacy_db_at_head, _CUTOVER)
+
+    eng = create_engine(f"sqlite:///{legacy_db_at_head}")
+    try:
+        insp = inspect(eng)
+        assert insp.get_pk_constraint("table_shows")["constrained_columns"] == ["id"]
+        assert insp.get_pk_constraint("table_episodes")["constrained_columns"] == ["id"]
+        assert insp.get_pk_constraint("table_movies")["constrained_columns"] == ["id"]
+        assert insp.get_pk_constraint("table_shows_rootfolder")["constrained_columns"] == ["local_rootfolder_id"]
+        assert insp.get_pk_constraint("table_movies_rootfolder")["constrained_columns"] == ["local_rootfolder_id"]
+
+        with eng.connect() as c:
+            for t in _OWNED_TABLES:
+                assert c.execute(text(f"select count(*) from {t}")).scalar() == pre[t], t
+            assert c.execute(text("PRAGMA foreign_key_check")).fetchall() == []
+
+        # global uniques gone, scoped uniques present
+        shows_idx = insp.get_indexes("table_shows")
+        assert not any(i["unique"] and i["column_names"] == ["path"] for i in shows_idx)
+        assert any(i["unique"] and i["column_names"] == ["arr_instance_id", "path"] for i in shows_idx)
+        movies_idx = insp.get_indexes("table_movies")
+        assert not any(i["unique"] and i["column_names"] == ["tmdbId"] for i in movies_idx)
+        assert not any(i["unique"] and i["column_names"] == ["path"] for i in movies_idx)
+
+        # FK repoint: episodes.series_id -> table_shows.id, old sonarrSeriesId FK gone
+        ep_fks = insp.get_foreign_keys("table_episodes")
+        assert any(fk["referred_table"] == "table_shows" and
+                   fk["constrained_columns"] == ["series_id"] and
+                   fk["referred_columns"] == ["id"] for fk in ep_fks)
+        assert not any(fk["constrained_columns"] == ["sonarrSeriesId"] for fk in ep_fks)
+    finally:
+        eng.dispose()
+
+
+def test_cutover_local_pk_autoincrements_and_scopes_uniqueness(legacy_db_at_head):
+    _run_migration(legacy_db_at_head, _CUTOVER)
+    eng = create_engine(f"sqlite:///{legacy_db_at_head}")
+    ins = ('insert into table_shows (path, title, "sonarrSeriesId", arr_instance_id) '
+           'values (:p, :t, :s, :i)')
+    try:
+        with eng.begin() as c:
+            maxid = c.execute(text("select max(id) from table_shows")).scalar()
+            inst = c.execute(text("select id from arr_instances where kind='sonarr'")).scalar()
+            # bare insert (no id) -> rowid alias assigns MAX(id)+1
+            c.execute(text(ins), {"p": "/p1e/x", "t": "X", "s": 999991, "i": inst})
+            newid = c.execute(text("select id from table_shows where path='/p1e/x'")).scalar()
+            assert newid == maxid + 1
+            # same path under a DIFFERENT instance is allowed (scoped uniqueness)
+            c.execute(text(ins), {"p": "/p1e/x", "t": "X2", "s": 999992, "i": inst + 1000})
+        with eng.begin() as c:  # same path + same instance -> violation
+            with pytest.raises(IntegrityError):
+                c.execute(text(ins), {"p": "/p1e/x", "t": "X3", "s": 999993, "i": inst})
     finally:
         eng.dispose()
