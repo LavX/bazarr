@@ -1,8 +1,8 @@
 import { FunctionComponent, useCallback, useMemo, useState } from "react";
 import { Link } from "react-router";
-import { Anchor, Badge, Checkbox, Group } from "@mantine/core";
+import { Anchor, Badge, Checkbox, Group, Text } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
-import { faSearch } from "@fortawesome/free-solid-svg-icons";
+import { faSearch, faServer } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import {
@@ -11,6 +11,7 @@ import {
   useMovieSubtitleModification,
   useMovieWantedPagination,
 } from "@/apis/hooks";
+import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
 import { AudioList } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
 import { WantedItem } from "@/components/forms/MassTranslateForm";
@@ -34,6 +35,11 @@ const WantedMoviesView: FunctionComponent = () => {
     missingLanguage !== null;
 
   const { data: audioLangs = [] } = useAudioLanguages();
+  const {
+    multiInstance,
+    nameById: instanceNameById,
+    defaultId: instanceDefaultId,
+  } = useArrInstanceLabels("radarr");
   const query = useMovieWantedPagination(hasActiveFilter);
 
   const langOptions = useMemo(
@@ -126,6 +132,35 @@ const WantedMoviesView: FunctionComponent = () => {
           );
         },
       },
+      // Owning Radarr instance (#156), shown only with more than one Radarr.
+      ...(multiInstance
+        ? [
+            {
+              id: "instance",
+              header: "Instance",
+              cell: ({ row: { original } }) => {
+                const instanceId = original.arr_instance_id;
+                if (instanceId == null || instanceId === instanceDefaultId) {
+                  return (
+                    <Text size="sm" c="dimmed">
+                      –
+                    </Text>
+                  );
+                }
+                return (
+                  <Badge
+                    size="sm"
+                    variant="light"
+                    color="grape"
+                    leftSection={<FontAwesomeIcon icon={faServer} />}
+                  >
+                    {instanceNameById.get(instanceId) ?? `#${instanceId}`}
+                  </Badge>
+                );
+              },
+            } as ColumnDef<Wanted.Movie>,
+          ]
+        : []),
       {
         header: "Audio",
         accessorKey: "audio_language",
@@ -177,7 +212,7 @@ const WantedMoviesView: FunctionComponent = () => {
         },
       },
     ],
-    [download],
+    [download, multiInstance, instanceNameById, instanceDefaultId],
   );
 
   const getWantedItem = useCallback((row: Wanted.Movie): WantedItem => {

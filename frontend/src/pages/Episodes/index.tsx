@@ -71,8 +71,11 @@ const SeriesEpisodesView: FunctionComponent = () => {
 
   const seriesQuery = useSeriesById(id);
   const episodesQuery = useEpisodesBySeriesId(id);
-  const { multiInstance, nameById: instanceNameById } =
-    useArrInstanceLabels("sonarr");
+  const {
+    multiInstance,
+    nameById: instanceNameById,
+    defaultId: instanceDefaultId,
+  } = useArrInstanceLabels("sonarr");
 
   const { data: episodes } = episodesQuery;
   const { data: series, isFetched } = seriesQuery;
@@ -84,7 +87,9 @@ const SeriesEpisodesView: FunctionComponent = () => {
 
   const details = useMemo(
     () => [
-      ...(multiInstance && series?.arr_instance_id != null
+      ...(multiInstance &&
+      series?.arr_instance_id != null &&
+      series.arr_instance_id !== instanceDefaultId
         ? [
             {
               icon: faServer,
@@ -115,7 +120,7 @@ const SeriesEpisodesView: FunctionComponent = () => {
         text: series?.seriesType ?? "",
       },
     ],
-    [series, multiInstance, instanceNameById],
+    [series, multiInstance, instanceNameById, instanceDefaultId],
   );
 
   const modals = useModals();

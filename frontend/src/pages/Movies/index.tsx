@@ -8,6 +8,7 @@ import {
   Container,
   Group,
   Menu,
+  Text,
   Tooltip,
 } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
@@ -65,6 +66,7 @@ const MovieView: FunctionComponent = () => {
   const {
     multiInstance,
     nameById: instanceNameById,
+    defaultId: instanceDefaultId,
     options: instanceOptions,
   } = useArrInstanceLabels("radarr");
 
@@ -202,30 +204,48 @@ const MovieView: FunctionComponent = () => {
         accessorKey: "title",
         cell: ({
           row: {
-            original: { title, id, arr_instance_id: arrInstanceId },
+            original: { title, id },
           },
         }) => {
           const target = `/movies/${id}`;
           return (
-            <Group gap={6} wrap="nowrap">
-              <Anchor className="table-primary" component={Link} to={target}>
-                {title}
-              </Anchor>
-              {multiInstance && arrInstanceId != null && (
-                <Badge
-                  size="xs"
-                  variant="light"
-                  color="grape"
-                  leftSection={<FontAwesomeIcon icon={faServer} />}
-                  title="Owning Radarr instance"
-                >
-                  {instanceNameById.get(arrInstanceId) ?? `#${arrInstanceId}`}
-                </Badge>
-              )}
-            </Group>
+            <Anchor className="table-primary" component={Link} to={target}>
+              {title}
+            </Anchor>
           );
         },
       },
+      // Owning Radarr instance (#156). Only shown when more than one Radarr is
+      // configured; the default instance is the common case so its rows render
+      // a dim placeholder and only 2nd-instance items carry a visible badge.
+      ...(multiInstance
+        ? [
+            {
+              id: "instance",
+              header: "Instance",
+              cell: ({ row: { original } }) => {
+                const instanceId = original.arr_instance_id;
+                if (instanceId == null || instanceId === instanceDefaultId) {
+                  return (
+                    <Text size="sm" c="dimmed">
+                      –
+                    </Text>
+                  );
+                }
+                return (
+                  <Badge
+                    size="sm"
+                    variant="light"
+                    color="grape"
+                    leftSection={<FontAwesomeIcon icon={faServer} />}
+                  >
+                    {instanceNameById.get(instanceId) ?? `#${instanceId}`}
+                  </Badge>
+                );
+              },
+            } as ColumnDef<Item.Movie>,
+          ]
+        : []),
       {
         header: "Audio",
         accessorKey: "audio_language",
@@ -401,7 +421,14 @@ const MovieView: FunctionComponent = () => {
         },
       },
     ],
-    [modals, modifyMovie, upgradableMovieIds, multiInstance, instanceNameById],
+    [
+      modals,
+      modifyMovie,
+      upgradableMovieIds,
+      multiInstance,
+      instanceNameById,
+      instanceDefaultId,
+    ],
   );
 
   const selectionToolbar = useMemo(() => {

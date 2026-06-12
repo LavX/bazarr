@@ -48,6 +48,9 @@ export function useArrInstanceLabels(kind: "sonarr" | "radarr") {
     return {
       multiInstance: ofKind.length > 1,
       nameById,
+      // The default instance of this kind: its rows are the common case and
+      // are shown as a dim dash so only 2nd-instance items stand out.
+      defaultId: ofKind.find((i) => i.is_default)?.id ?? null,
       options: ofKind.map((i) => ({ value: String(i.id), label: i.name })),
     };
   }, [data, kind]);

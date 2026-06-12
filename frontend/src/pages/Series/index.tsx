@@ -9,6 +9,7 @@ import {
   Group,
   Menu,
   Progress,
+  Text,
   Tooltip,
 } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
@@ -67,6 +68,7 @@ const SeriesView: FunctionComponent = () => {
   const {
     multiInstance,
     nameById: instanceNameById,
+    defaultId: instanceDefaultId,
     options: instanceOptions,
   } = useArrInstanceLabels("sonarr");
 
@@ -209,26 +211,43 @@ const SeriesView: FunctionComponent = () => {
         cell: ({ row: { original } }) => {
           const target = `/series/${original.id}`;
           return (
-            <Group gap={6} wrap="nowrap">
-              <Anchor className="table-primary" component={Link} to={target}>
-                {original.title}
-              </Anchor>
-              {multiInstance && original.arr_instance_id != null && (
-                <Badge
-                  size="xs"
-                  variant="light"
-                  color="grape"
-                  leftSection={<FontAwesomeIcon icon={faServer} />}
-                  title="Owning Sonarr instance"
-                >
-                  {instanceNameById.get(original.arr_instance_id) ??
-                    `#${original.arr_instance_id}`}
-                </Badge>
-              )}
-            </Group>
+            <Anchor className="table-primary" component={Link} to={target}>
+              {original.title}
+            </Anchor>
           );
         },
       },
+      // Owning Sonarr instance (#156). Only shown when more than one Sonarr is
+      // configured; the default instance is the common case so its rows render
+      // a dim placeholder and only 2nd-instance items carry a visible badge.
+      ...(multiInstance
+        ? [
+            {
+              id: "instance",
+              header: "Instance",
+              cell: ({ row: { original } }) => {
+                const instanceId = original.arr_instance_id;
+                if (instanceId == null || instanceId === instanceDefaultId) {
+                  return (
+                    <Text size="sm" c="dimmed">
+                      –
+                    </Text>
+                  );
+                }
+                return (
+                  <Badge
+                    size="sm"
+                    variant="light"
+                    color="grape"
+                    leftSection={<FontAwesomeIcon icon={faServer} />}
+                  >
+                    {instanceNameById.get(instanceId) ?? `#${instanceId}`}
+                  </Badge>
+                );
+              },
+            } as ColumnDef<Item.Series>,
+          ]
+        : []),
       {
         header: "Audio",
         accessorKey: "audio_language",
@@ -428,7 +447,14 @@ const SeriesView: FunctionComponent = () => {
         },
       },
     ],
-    [mutation, modals, upgradableSeriesIds, multiInstance, instanceNameById],
+    [
+      mutation,
+      modals,
+      upgradableSeriesIds,
+      multiInstance,
+      instanceNameById,
+      instanceDefaultId,
+    ],
   );
 
   const selectionToolbar = useMemo(() => {
