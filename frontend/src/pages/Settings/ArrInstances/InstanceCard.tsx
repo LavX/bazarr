@@ -12,10 +12,12 @@ import {
   ThemeIcon,
   Tooltip,
 } from "@mantine/core";
+import { useClipboard } from "@mantine/hooks";
 import {
   faCircleCheck,
   faCircleInfo,
   faCircleXmark,
+  faCopy,
   faEllipsisVertical,
   faKey,
   faPen,
@@ -51,9 +53,13 @@ const InstanceCard: FunctionComponent<Props> = ({
 }) => {
   const update = useUpdateArrInstance();
   const test = useTestArrInstanceById();
+  const clipboard = useClipboard({ timeout: 1500 });
 
   const meta = ARR_META[instance.kind];
   const host = buildHostUrl(instance);
+  // Per-instance Connect webhook URL (#156): paste into this server's
+  // Settings -> Connect (On Grab / On Import) so it triggers the right instance.
+  const webhookUrl = `${window.location.origin}/api/webhooks/${instance.kind}/${instance.stable_key}`;
 
   const runTest = () => {
     // Tests the saved instance with its stored key (decrypted server-side), so
@@ -164,6 +170,44 @@ const InstanceCard: FunctionComponent<Props> = ({
                   </Text>
                 </>
               )}
+            </Group>
+            <Group gap={6} wrap="nowrap" style={{ minWidth: 0 }}>
+              <Tooltip
+                label={`Optional: add this URL as a Connect webhook in ${instance.name}'s Settings → Connect (On Grab / On Import) so its grabs trigger this instance.`}
+                w={320}
+                multiline
+                withArrow
+              >
+                <Text size="xs" c="dimmed" style={{ whiteSpace: "nowrap" }}>
+                  <FontAwesomeIcon icon={faPlugCircleBolt} /> Webhook
+                </Text>
+              </Tooltip>
+              <Code
+                style={{
+                  minWidth: 0,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {webhookUrl}
+              </Code>
+              <Tooltip
+                label={clipboard.copied ? "Copied!" : "Copy webhook URL"}
+                withArrow
+              >
+                <ActionIcon
+                  size="xs"
+                  variant="subtle"
+                  color="gray"
+                  aria-label="Copy webhook URL"
+                  onClick={() => clipboard.copy(webhookUrl)}
+                >
+                  <FontAwesomeIcon
+                    icon={clipboard.copied ? faCircleCheck : faCopy}
+                  />
+                </ActionIcon>
+              </Tooltip>
             </Group>
             {status && (
               <div className={styles.testResult} data-tone={status.tone}>
