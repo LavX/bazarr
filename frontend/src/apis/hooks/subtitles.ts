@@ -53,6 +53,7 @@ export function useEpisodeSubtitleModification() {
         param.seriesId,
         param.episodeId,
         param.form,
+        param.arrInstanceId,
       ),
 
     onSuccess: (_, param) => {
@@ -115,7 +116,11 @@ export function useMovieSubtitleModification() {
     mutationKey: [QueryKeys.Subtitles, QueryKeys.Movies],
 
     mutationFn: (param: Param<FormType.Subtitle>) =>
-      api.movies.downloadSubtitles(param.radarrId, param.form),
+      api.movies.downloadSubtitles(
+        param.radarrId,
+        param.form,
+        param.arrInstanceId,
+      ),
 
     onSuccess: (_, param) => {
       client.invalidateQueries({

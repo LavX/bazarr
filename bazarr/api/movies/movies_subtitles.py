@@ -32,6 +32,8 @@ class MoviesSubtitles(Resource):
     patch_request_parser.add_argument('language', type=str, required=True, help='Language code2')
     patch_request_parser.add_argument('forced', type=str, required=True, help='Forced true/false as string')
     patch_request_parser.add_argument('hi', type=str, required=True, help='HI true/false as string')
+    patch_request_parser.add_argument('arr_instance_id', type=int, required=False,
+                                      help='Owning Sonarr/Radarr instance id (#156)')
 
     @authenticate
     @api_ns_movies_subtitles.doc(parser=patch_request_parser)
@@ -46,7 +48,8 @@ class MoviesSubtitles(Resource):
 
         movie_download_specific_subtitles(radarr_id=args.get('radarrid'), language=args.get('language'),
                                           hi=args.get('hi').capitalize(),
-                                          forced=args.get('forced').capitalize(), job_id=None)
+                                          forced=args.get('forced').capitalize(), job_id=None,
+                                          arr_instance_id=args.get('arr_instance_id'))
 
         return '', 204
 

@@ -193,21 +193,24 @@ def episode_download_subtitles(no, job_id=None, job_sub_function=False, provider
         jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Downloaded missing subtitles for {episode.title}")
 
 
-def episode_download_specific_subtitles(sonarr_series_id, sonarr_episode_id, language, hi, forced, job_id=None):
+def episode_download_specific_subtitles(sonarr_series_id, sonarr_episode_id, language, hi, forced, job_id=None,
+                                        arr_instance_id=None):
     if not job_id:
         return jobs_queue.add_job_from_function("Searching subtitles", is_progress=True)
 
     episodeInfo = database.execute(
-        select(TableEpisodes.path,
-               TableEpisodes.sceneName,
-               TableEpisodes.audio_language,
-               TableEpisodes.season,
-               TableEpisodes.episode,
-               TableEpisodes.title.label("episodeTitle"),
-               TableShows.title)
-        .select_from(TableEpisodes)
-        .join(TableShows)
-        .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id)) \
+        scoped(
+            select(TableEpisodes.path,
+                   TableEpisodes.sceneName,
+                   TableEpisodes.audio_language,
+                   TableEpisodes.season,
+                   TableEpisodes.episode,
+                   TableEpisodes.title.label("episodeTitle"),
+                   TableShows.title)
+            .select_from(TableEpisodes)
+            .join(TableShows)
+            .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id),
+            TableEpisodes.arr_instance_id, arr_instance_id)) \
         .first()
 
     if not episodeInfo:
@@ -249,7 +252,7 @@ def episode_download_specific_subtitles(sonarr_series_id, sonarr_episode_id, lan
             result = result[0]
             if isinstance(result, tuple) and len(result):
                 result = result[0]
-            history_log(1, sonarr_series_id, sonarr_episode_id, result)
+            history_log(1, sonarr_series_id, sonarr_episode_id, result, arr_instance_id=arr_instance_id)
             send_notifications(sonarr_series_id, sonarr_episode_id, result.message)
             store_subtitles(result.path, episodePath)
             jobs_queue.update_job_progress(job_id=job_id, progress_value='max',

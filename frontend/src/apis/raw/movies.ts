@@ -78,8 +78,16 @@ class MovieApi extends BaseApi {
     await this.patch("", action);
   }
 
-  async downloadSubtitles(radarrid: number, form: FormType.Subtitle) {
-    await this.patch("/subtitles", form, { radarrid });
+  async downloadSubtitles(
+    radarrid: number,
+    form: FormType.Subtitle,
+    arrInstanceId?: number,
+  ) {
+    // arr_instance_id (#156) routes the search/download to the owning instance.
+    await this.patch("/subtitles", form, {
+      radarrid,
+      arr_instance_id: arrInstanceId,
+    });
   }
 
   async uploadSubtitles(

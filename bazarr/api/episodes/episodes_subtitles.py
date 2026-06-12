@@ -33,6 +33,8 @@ class EpisodesSubtitles(Resource):
     patch_request_parser.add_argument('language', type=str, required=True, help='Language code2')
     patch_request_parser.add_argument('forced', type=str, required=True, help='Forced true/false as string')
     patch_request_parser.add_argument('hi', type=str, required=True, help='HI true/false as string')
+    patch_request_parser.add_argument('arr_instance_id', type=int, required=False,
+                                      help='Owning Sonarr/Radarr instance id (#156)')
 
     @authenticate
     @api_ns_episodes_subtitles.doc(parser=patch_request_parser)
@@ -48,7 +50,8 @@ class EpisodesSubtitles(Resource):
         episode_download_specific_subtitles(sonarr_series_id=args.get('seriesid'),
                                             sonarr_episode_id=args.get('episodeid'),
                                             language=args.get('language'), hi=args.get('hi').capitalize(),
-                                            forced=args.get('forced').capitalize(), job_id=None)
+                                            forced=args.get('forced').capitalize(), job_id=None,
+                                            arr_instance_id=args.get('arr_instance_id'))
 
         return '', 204
 

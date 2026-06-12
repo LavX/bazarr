@@ -58,8 +58,14 @@ class EpisodeApi extends BaseApi {
     seriesid: number,
     episodeid: number,
     form: FormType.Subtitle,
+    arrInstanceId?: number,
   ) {
-    await this.patch("/subtitles", form, { seriesid, episodeid });
+    // arr_instance_id (#156) routes the search/download to the owning instance.
+    await this.patch("/subtitles", form, {
+      seriesid,
+      episodeid,
+      arr_instance_id: arrInstanceId,
+    });
   }
 
   async uploadSubtitles(

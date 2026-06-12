@@ -124,17 +124,19 @@ def movies_download_subtitles(no, job_id=None, job_sub_function=False, arr_insta
     jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Downloaded missing subtitles for {movie.title} ({movie.year})")
 
 
-def movie_download_specific_subtitles(radarr_id, language, hi, forced, job_id=None):
+def movie_download_specific_subtitles(radarr_id, language, hi, forced, job_id=None, arr_instance_id=None):
     if not job_id:
         return jobs_queue.add_job_from_function("Searching subtitles", is_progress=True)
 
     movieInfo = database.execute(
-        select(
-            TableMovies.title,
-            TableMovies.path,
-            TableMovies.sceneName,
-            TableMovies.audio_language)
-        .where(TableMovies.radarrId == radarr_id)) \
+        scoped(
+            select(
+                TableMovies.title,
+                TableMovies.path,
+                TableMovies.sceneName,
+                TableMovies.audio_language)
+            .where(TableMovies.radarrId == radarr_id),
+            TableMovies.arr_instance_id, arr_instance_id)) \
         .first()
 
     if not movieInfo:
@@ -173,7 +175,7 @@ def movie_download_specific_subtitles(radarr_id, language, hi, forced, job_id=No
             result = result[0]
             if isinstance(result, tuple) and len(result):
                 result = result[0]
-            history_log_movie(1, radarr_id, result)
+            history_log_movie(1, radarr_id, result, arr_instance_id=arr_instance_id)
             send_notifications_movie(radarr_id, result.message)
             store_subtitles_movie(result.path, moviePath)
             jobs_queue.update_job_progress(job_id=job_id, progress_value='max',

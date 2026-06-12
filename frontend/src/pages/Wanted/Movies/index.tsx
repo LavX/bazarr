@@ -142,7 +142,11 @@ const WantedMoviesView: FunctionComponent = () => {
         accessorKey: "missing_subtitles",
         cell: ({
           row: {
-            original: { radarrId, missing_subtitles: missingSubtitles },
+            original: {
+              radarrId,
+              arr_instance_id: arrInstanceId,
+              missing_subtitles: missingSubtitles,
+            },
           },
         }) => {
           return (
@@ -156,6 +160,7 @@ const WantedMoviesView: FunctionComponent = () => {
                   onClick={async () => {
                     await download.mutateAsync({
                       radarrId,
+                      arrInstanceId,
                       form: {
                         language: item.code2,
                         hi: item.hi,

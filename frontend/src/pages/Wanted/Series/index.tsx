@@ -170,6 +170,7 @@ const WantedSeriesView: FunctionComponent = () => {
             original: {
               sonarrSeriesId,
               sonarrEpisodeId,
+              arr_instance_id: arrInstanceId,
               missing_subtitles: missingSubtitles,
             },
           },
@@ -189,6 +190,7 @@ const WantedSeriesView: FunctionComponent = () => {
                     await download.mutateAsync({
                       seriesId,
                       episodeId,
+                      arrInstanceId,
                       form: {
                         language: item.code2,
                         hi: item.hi,
