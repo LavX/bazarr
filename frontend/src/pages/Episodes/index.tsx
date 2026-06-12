@@ -31,6 +31,7 @@ import {
   faLayerGroup,
   faPlay,
   faSearch,
+  faServer,
   faStop,
   faSync,
   faTriangleExclamation,
@@ -45,6 +46,7 @@ import {
   useSeriesById,
   useSeriesModification,
 } from "@/apis/hooks";
+import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
 import { useInstanceName } from "@/apis/hooks/site";
 import { DropContent, Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
@@ -69,6 +71,8 @@ const SeriesEpisodesView: FunctionComponent = () => {
 
   const seriesQuery = useSeriesById(id);
   const episodesQuery = useEpisodesBySeriesId(id);
+  const { multiInstance, nameById: instanceNameById } =
+    useArrInstanceLabels("sonarr");
 
   const { data: episodes } = episodesQuery;
   const { data: series, isFetched } = seriesQuery;
@@ -80,6 +84,16 @@ const SeriesEpisodesView: FunctionComponent = () => {
 
   const details = useMemo(
     () => [
+      ...(multiInstance && series?.arr_instance_id != null
+        ? [
+            {
+              icon: faServer,
+              text:
+                instanceNameById.get(series.arr_instance_id) ??
+                `#${series.arr_instance_id}`,
+            },
+          ]
+        : []),
       {
         icon: faHdd,
         text: `${series?.episodeFileCount} files`,
@@ -101,7 +115,7 @@ const SeriesEpisodesView: FunctionComponent = () => {
         text: series?.seriesType ?? "",
       },
     ],
-    [series],
+    [series, multiInstance, instanceNameById],
   );
 
   const modals = useModals();

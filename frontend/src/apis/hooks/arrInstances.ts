@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { showNotification } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AxiosError } from "axios";
@@ -31,6 +32,25 @@ export function useArrInstances() {
     queryKey: arrKey,
     queryFn: () => api.arrInstances.list(),
   });
+}
+
+/**
+ * Multi-instance UI helpers (#156) for a given kind: a name lookup by
+ * arr_instance_id, MultiSelect options for that kind's instances, and whether
+ * there is more than one (so the instance badge/filter only show when relevant).
+ */
+export function useArrInstanceLabels(kind: "sonarr" | "radarr") {
+  const { data } = useArrInstances();
+  return useMemo(() => {
+    const all = data ?? [];
+    const ofKind = all.filter((i) => i.kind === kind);
+    const nameById = new Map(all.map((i) => [i.id, i.name]));
+    return {
+      multiInstance: ofKind.length > 1,
+      nameById,
+      options: ofKind.map((i) => ({ value: String(i.id), label: i.name })),
+    };
+  }, [data, kind]);
 }
 
 export function useArrInstance(id: number) {

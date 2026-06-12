@@ -3,6 +3,7 @@ import { Link } from "react-router";
 import {
   ActionIcon,
   Anchor,
+  Badge,
   Checkbox,
   Container,
   Group,
@@ -23,6 +24,7 @@ import {
   faLayerGroup,
   faMagnifyingGlass,
   faPlay,
+  faServer,
   faStop,
   faSync,
   faToolbox,
@@ -33,6 +35,7 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import { uniqBy } from "lodash";
 import { useSeriesModification, useSeriesPagination } from "@/apis/hooks";
+import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
 import { useInstanceName } from "@/apis/hooks/site";
 import { useUpgradableItems } from "@/apis/hooks/subtitles";
 import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
@@ -60,6 +63,12 @@ const SeriesView: FunctionComponent = () => {
   const [search, setSearch] = useState("");
   const [audioLanguages, setAudioLanguages] = useState<string[]>([]);
   const [excludeLanguages, setExcludeLanguages] = useState<string[]>([]);
+  const [instanceFilter, setInstanceFilter] = useState<string[]>([]);
+  const {
+    multiInstance,
+    nameById: instanceNameById,
+    options: instanceOptions,
+  } = useArrInstanceLabels("sonarr");
 
   const query = useSeriesPagination(true);
   const { data: upgradableData } = useUpgradableItems();
@@ -200,9 +209,23 @@ const SeriesView: FunctionComponent = () => {
         cell: ({ row: { original } }) => {
           const target = `/series/${original.id}`;
           return (
-            <Anchor className="table-primary" component={Link} to={target}>
-              {original.title}
-            </Anchor>
+            <Group gap={6} wrap="nowrap">
+              <Anchor className="table-primary" component={Link} to={target}>
+                {original.title}
+              </Anchor>
+              {multiInstance && original.arr_instance_id != null && (
+                <Badge
+                  size="xs"
+                  variant="light"
+                  color="grape"
+                  leftSection={<FontAwesomeIcon icon={faServer} />}
+                  title="Owning Sonarr instance"
+                >
+                  {instanceNameById.get(original.arr_instance_id) ??
+                    `#${original.arr_instance_id}`}
+                </Badge>
+              )}
+            </Group>
           );
         },
       },
@@ -405,7 +428,7 @@ const SeriesView: FunctionComponent = () => {
         },
       },
     ],
-    [mutation, modals, upgradableSeriesIds],
+    [mutation, modals, upgradableSeriesIds, multiInstance, instanceNameById],
   );
 
   const selectionToolbar = useMemo(() => {
@@ -541,6 +564,9 @@ const SeriesView: FunctionComponent = () => {
         onAudioLanguagesChange={setAudioLanguages}
         excludeLanguages={excludeLanguages}
         onExcludeLanguagesChange={setExcludeLanguages}
+        instanceOptions={multiInstance ? instanceOptions : undefined}
+        instanceValues={instanceFilter}
+        onInstanceValuesChange={setInstanceFilter}
         enableRowSelection
         onSelectionChanged={setSelections}
         selectionToolbar={selectionToolbar}

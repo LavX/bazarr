@@ -22,6 +22,7 @@ import {
   faLanguage,
   faLayerGroup,
   faMagnifyingGlass,
+  faServer,
   faSync,
   faToolbox,
   faUndo,
@@ -31,6 +32,7 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import { uniqBy } from "lodash";
 import { useMovieModification, useMoviesPagination } from "@/apis/hooks";
+import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
 import { useInstanceName } from "@/apis/hooks/site";
 import { useUpgradableItems } from "@/apis/hooks/subtitles";
 import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
@@ -59,6 +61,12 @@ const MovieView: FunctionComponent = () => {
   const [search, setSearch] = useState("");
   const [audioLanguages, setAudioLanguages] = useState<string[]>([]);
   const [excludeLanguages, setExcludeLanguages] = useState<string[]>([]);
+  const [instanceFilter, setInstanceFilter] = useState<string[]>([]);
+  const {
+    multiInstance,
+    nameById: instanceNameById,
+    options: instanceOptions,
+  } = useArrInstanceLabels("radarr");
 
   const query = useMoviesPagination(true);
   const { data: upgradableData } = useUpgradableItems();
@@ -194,14 +202,27 @@ const MovieView: FunctionComponent = () => {
         accessorKey: "title",
         cell: ({
           row: {
-            original: { title, id },
+            original: { title, id, arr_instance_id: arrInstanceId },
           },
         }) => {
           const target = `/movies/${id}`;
           return (
-            <Anchor className="table-primary" component={Link} to={target}>
-              {title}
-            </Anchor>
+            <Group gap={6} wrap="nowrap">
+              <Anchor className="table-primary" component={Link} to={target}>
+                {title}
+              </Anchor>
+              {multiInstance && arrInstanceId != null && (
+                <Badge
+                  size="xs"
+                  variant="light"
+                  color="grape"
+                  leftSection={<FontAwesomeIcon icon={faServer} />}
+                  title="Owning Radarr instance"
+                >
+                  {instanceNameById.get(arrInstanceId) ?? `#${arrInstanceId}`}
+                </Badge>
+              )}
+            </Group>
           );
         },
       },
@@ -380,7 +401,7 @@ const MovieView: FunctionComponent = () => {
         },
       },
     ],
-    [modals, modifyMovie, upgradableMovieIds],
+    [modals, modifyMovie, upgradableMovieIds, multiInstance, instanceNameById],
   );
 
   const selectionToolbar = useMemo(() => {
@@ -516,6 +537,9 @@ const MovieView: FunctionComponent = () => {
         onAudioLanguagesChange={setAudioLanguages}
         excludeLanguages={excludeLanguages}
         onExcludeLanguagesChange={setExcludeLanguages}
+        instanceOptions={multiInstance ? instanceOptions : undefined}
+        instanceValues={instanceFilter}
+        onInstanceValuesChange={setInstanceFilter}
         enableRowSelection
         onSelectionChanged={setSelections}
         selectionToolbar={selectionToolbar}

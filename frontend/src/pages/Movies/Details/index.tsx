@@ -20,6 +20,7 @@ import {
   faLayerGroup,
   faMagnifyingGlass,
   faSearch,
+  faServer,
   faSync,
   faToolbox,
   faWrench,
@@ -31,6 +32,7 @@ import {
   useIsMovieActionRunning,
   useMoviesProvider,
 } from "@/apis/hooks";
+import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
 import {
   useMovieAction,
   useMovieById,
@@ -62,6 +64,19 @@ const MovieDetailView: FunctionComponent = () => {
   const movieQuery = useMovieById(id);
   const { data: movie, isFetched } = movieQuery;
   const { data: movieHistory } = useMovieHistory(movie?.radarrId);
+  const { multiInstance, nameById: instanceNameById } =
+    useArrInstanceLabels("radarr");
+  const overviewDetails =
+    multiInstance && movie?.arr_instance_id != null
+      ? [
+          {
+            icon: faServer,
+            text:
+              instanceNameById.get(movie.arr_instance_id) ??
+              `#${movie.arr_instance_id}`,
+          },
+        ]
+      : [];
 
   const profile = useLanguageProfileBy(movie?.profileId);
 
@@ -302,7 +317,10 @@ const MovieDetailView: FunctionComponent = () => {
           </Group>
         </Toolbox>
         <Stack>
-          <ItemOverview item={movie ?? null} details={[]}></ItemOverview>
+          <ItemOverview
+            item={movie ?? null}
+            details={overviewDetails}
+          ></ItemOverview>
           <Table
             movie={movie ?? null}
             profile={profile}
