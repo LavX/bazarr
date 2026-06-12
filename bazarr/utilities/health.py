@@ -12,6 +12,8 @@ from app.jobs_queue import jobs_queue
 from utilities.path_mappings import path_mappings
 from sonarr.rootfolder import check_sonarr_rootfolder
 from radarr.rootfolder import check_radarr_rootfolder
+from arr_instances.repository import ArrInstanceRepository
+from arr_instances.resolution import client_for_instance
 
 
 def check_health(job_id=None, wait_for_completion=False):
@@ -19,10 +21,28 @@ def check_health(job_id=None, wait_for_completion=False):
         jobs_queue.add_job_from_function("Checking Health", is_progress=False, wait_for_completion=wait_for_completion)
         return
 
+    # Re-validate rootfolders per enabled instance. Mirrors the scheduler's
+    # fan-out: a single default instance keeps the unscoped scalar-client path
+    # (byte-identical); with multiple instances each is checked against its own
+    # server, scoped, so one instance's health check can't fetch the wrong
+    # server's rootfolders or delete another instance's rows. (#156)
+    repo = ArrInstanceRepository(database)
     if settings.general.use_sonarr:
-        check_sonarr_rootfolder()
+        sonarr_instances = repo.list('sonarr', enabled_only=True)
+        if len(sonarr_instances) > 1:
+            for inst in sonarr_instances:
+                check_sonarr_rootfolder(arr_instance_id=inst.id,
+                                        arr_client=client_for_instance(database, inst.id))
+        else:
+            check_sonarr_rootfolder()
     if settings.general.use_radarr:
-        check_radarr_rootfolder()
+        radarr_instances = repo.list('radarr', enabled_only=True)
+        if len(radarr_instances) > 1:
+            for inst in radarr_instances:
+                check_radarr_rootfolder(arr_instance_id=inst.id,
+                                        arr_client=client_for_instance(database, inst.id))
+        else:
+            check_radarr_rootfolder()
     event_stream(type='badges')
 
     from .backup import backup_rotation

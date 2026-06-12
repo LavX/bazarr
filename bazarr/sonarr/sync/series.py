@@ -62,7 +62,7 @@ def update_series(job_id=None, wait_for_completion=False, arr_instance_id=None, 
         return
 
     # Update root folders and update their health status
-    check_sonarr_rootfolder()
+    check_sonarr_rootfolder(arr_instance_id=arr_instance_id, arr_client=arr_client)
 
     # Get shows data from Sonarr
     try:

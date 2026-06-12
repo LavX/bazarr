@@ -115,7 +115,7 @@ def update_movies(job_id=None, wait_for_completion=False, arr_instance_id=None, 
                                          wait_for_completion=wait_for_completion)
         return
 
-    check_radarr_rootfolder()
+    check_radarr_rootfolder(arr_instance_id=arr_instance_id, arr_client=arr_client)
     logging.debug('BAZARR Starting movie sync from Radarr.')
     apikey_radarr = settings.radarr.apikey
 

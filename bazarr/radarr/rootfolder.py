@@ -82,11 +82,18 @@ def get_radarr_rootfolder(arr_instance_id=None, arr_client=None):
             database.execute(insert(TableMoviesRootfolder).values(**values))
 
 
-def check_radarr_rootfolder():
-    get_radarr_rootfolder()
-    rootfolder = database.execute(
-        select(TableMoviesRootfolder.id, TableMoviesRootfolder.path))\
-        .all()
+def check_radarr_rootfolder(arr_instance_id=None, arr_client=None):
+    # Route the rootfolder fetch + ownership through the same instance the sync
+    # is running for. With no instance/client this is today's default-instance
+    # path (scalar settings + unscoped), byte-identical. (#156)
+    get_radarr_rootfolder(arr_instance_id=arr_instance_id, arr_client=arr_client)
+    # Only re-check the rootfolders owned by this instance: the accessibility
+    # update keys on the upstream rootfolder id, which collides across instances,
+    # so an unscoped write would clobber another instance's rows.
+    rootfolder_stmt = select(TableMoviesRootfolder.id, TableMoviesRootfolder.path)
+    if arr_instance_id is not None:
+        rootfolder_stmt = rootfolder_stmt.where(TableMoviesRootfolder.arr_instance_id == arr_instance_id)
+    rootfolder = database.execute(rootfolder_stmt).all()
     for item in rootfolder:
         root_path = item.path
         if not root_path.endswith(('/', '\\')):
@@ -94,36 +101,27 @@ def check_radarr_rootfolder():
                 root_path += '/'
             else:
                 root_path += '\\'
-        if not os.path.isdir(path_mappings.path_replace_movie(root_path)):
-            database.execute(
-                update(TableMoviesRootfolder)
-                .values(accessible=0, error='This Radarr root directory does not seem to be accessible by Bazarr. '
-                                            'Please check path mapping or if directory/drive is online.')
-                .where(TableMoviesRootfolder.id == item.id))
+        mapped_path = path_mappings.path_replace_movie(root_path)
+        if not os.path.isdir(mapped_path):
+            accessible, error = 0, ('This Radarr root directory does not seem to be accessible by Bazarr. '
+                                    'Please check path mapping or if directory/drive is online.')
+        # Try os.access() first (fast, no disk I/O); fall back to an actual write
+        # test only if os.access() fails (e.g. NFS mounts).
+        elif os.access(mapped_path, os.W_OK):
+            accessible, error = 1, ''
         else:
-            # Try os.access() first (fast, no disk I/O)
-            # Fall back to write test only if os.access() fails (e.g., NFS mounts)
-            mapped_path = path_mappings.path_replace_movie(root_path)
-            if os.access(mapped_path, os.W_OK):
-                # Path is writable according to os.access()
-                database.execute(
-                    update(TableMoviesRootfolder)
-                    .values(accessible=1, error='')
-                    .where(TableMoviesRootfolder.id == item.id))
+            try:
+                test_file = os.path.join(mapped_path, '.bazarr_write_test')
+                with open(test_file, 'w') as f:
+                    f.write('test')
+                os.remove(test_file)
+            except Exception as e:
+                accessible, error = 0, f"There's an issue with this Radarr root directory: {repr(e)}"
             else:
-                # os.access() failed, try actual write test (needed for NFS)
-                try:
-                    test_file = os.path.join(mapped_path, '.bazarr_write_test')
-                    with open(test_file, 'w') as f:
-                        f.write('test')
-                    os.remove(test_file)
-                except Exception as e:
-                    database.execute(
-                        update(TableMoviesRootfolder)
-                        .values(accessible=0, error=f"There's an issue with this Radarr root directory: {repr(e)}")
-                        .where(TableMoviesRootfolder.id == item.id))
-                else:
-                    database.execute(
-                        update(TableMoviesRootfolder)
-                        .values(accessible=1, error='')
-                        .where(TableMoviesRootfolder.id == item.id))
+                accessible, error = 1, ''
+        stmt = (update(TableMoviesRootfolder)
+                .values(accessible=accessible, error=error)
+                .where(TableMoviesRootfolder.id == item.id))
+        if arr_instance_id is not None:
+            stmt = stmt.where(TableMoviesRootfolder.arr_instance_id == arr_instance_id)
+        database.execute(stmt)
