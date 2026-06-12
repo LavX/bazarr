@@ -64,15 +64,10 @@ const MovieDetailView: FunctionComponent = () => {
   const movieQuery = useMovieById(id);
   const { data: movie, isFetched } = movieQuery;
   const { data: movieHistory } = useMovieHistory(movie?.radarrId);
-  const {
-    multiInstance,
-    nameById: instanceNameById,
-    defaultId: instanceDefaultId,
-  } = useArrInstanceLabels("radarr");
+  const { multiInstance, nameById: instanceNameById } =
+    useArrInstanceLabels("radarr");
   const overviewDetails =
-    multiInstance &&
-    movie?.arr_instance_id != null &&
-    movie.arr_instance_id !== instanceDefaultId
+    multiInstance && movie?.arr_instance_id != null
       ? [
           {
             icon: faServer,

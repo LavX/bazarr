@@ -218,8 +218,8 @@ const SeriesView: FunctionComponent = () => {
         },
       },
       // Owning Sonarr instance (#156). Only shown when more than one Sonarr is
-      // configured; the default instance is the common case so its rows render
-      // a dim placeholder and only 2nd-instance items carry a visible badge.
+      // configured. Every row is labeled: the default instance uses a muted
+      // grey badge and the other instances an accent badge so they stand out.
       ...(multiInstance
         ? [
             {
@@ -227,7 +227,7 @@ const SeriesView: FunctionComponent = () => {
               header: "Instance",
               cell: ({ row: { original } }) => {
                 const instanceId = original.arr_instance_id;
-                if (instanceId == null || instanceId === instanceDefaultId) {
+                if (instanceId == null) {
                   return (
                     <Text size="sm" c="dimmed">
                       –
@@ -238,7 +238,7 @@ const SeriesView: FunctionComponent = () => {
                   <Badge
                     size="sm"
                     variant="light"
-                    color="grape"
+                    color={instanceId === instanceDefaultId ? "gray" : "grape"}
                     leftSection={<FontAwesomeIcon icon={faServer} />}
                   >
                     {instanceNameById.get(instanceId) ?? `#${instanceId}`}

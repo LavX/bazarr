@@ -133,6 +133,7 @@ const WantedSeriesView: FunctionComponent = () => {
         },
       },
       // Owning Sonarr instance (#156), shown only with more than one Sonarr.
+      // Default instance gets a muted grey badge, others an accent badge.
       ...(multiInstance
         ? [
             {
@@ -140,7 +141,7 @@ const WantedSeriesView: FunctionComponent = () => {
               header: "Instance",
               cell: ({ row: { original } }) => {
                 const instanceId = original.arr_instance_id;
-                if (instanceId == null || instanceId === instanceDefaultId) {
+                if (instanceId == null) {
                   return (
                     <Text size="sm" c="dimmed">
                       –
@@ -151,7 +152,7 @@ const WantedSeriesView: FunctionComponent = () => {
                   <Badge
                     size="sm"
                     variant="light"
-                    color="grape"
+                    color={instanceId === instanceDefaultId ? "gray" : "grape"}
                     leftSection={<FontAwesomeIcon icon={faServer} />}
                   >
                     {instanceNameById.get(instanceId) ?? `#${instanceId}`}

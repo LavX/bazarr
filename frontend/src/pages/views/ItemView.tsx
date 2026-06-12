@@ -357,7 +357,11 @@ function ItemView<T extends Item.Base>({
                   </Text>
                 </Group>
                 <MultiSelect
-                  placeholder="Select languages to include..."
+                  placeholder={
+                    audioLanguages.length > 0
+                      ? undefined
+                      : "Select languages to include..."
+                  }
                   data={langOptions}
                   value={audioLanguages}
                   onChange={onAudioLanguagesChange}
@@ -387,7 +391,11 @@ function ItemView<T extends Item.Base>({
                     </Text>
                   </Group>
                   <MultiSelect
-                    placeholder="Select languages to exclude..."
+                    placeholder={
+                      excludeLanguages.length > 0
+                        ? undefined
+                        : "Select languages to exclude..."
+                    }
                     data={langOptions}
                     value={excludeLanguages}
                     onChange={onExcludeLanguagesChange}
@@ -412,7 +420,11 @@ function ItemView<T extends Item.Base>({
                   </Text>
                 </Group>
                 <MultiSelect
-                  placeholder="Filter by instance..."
+                  placeholder={
+                    instanceValues.length > 0
+                      ? undefined
+                      : "Filter by instance..."
+                  }
                   data={instanceOptions}
                   value={instanceValues}
                   onChange={onInstanceValuesChange}
