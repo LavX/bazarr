@@ -164,6 +164,36 @@ def video_to_payload(video) -> dict[str, Any]:
     }
 
 
+# Display metadata is worker-controlled and cosmetic. It must never replace the
+# attributes the host derives from the validated payload: language is a babelfish
+# Language (a plain string crashes every .alpha3/.basename access in the pool),
+# matches is a set, scores are numbers, and worker_id/provider_payload are the
+# candidate's identity. id/numeric_id are read-only properties, so an unguarded
+# setattr raises and discards the provider's entire result set.
+_RESERVED_DISPLAY_ATTRS = frozenset({
+    "language",
+    "language_type",
+    "id",
+    "numeric_id",
+    "provider_name",
+    "source_provider",
+    "worker_id",
+    "provider_payload",
+    "matches",
+    "content",
+    "pack_data",
+    "storage_path",
+    "subtitle_path",
+    "score",
+    "score_without_hash",
+    "score_out_of",
+    "hearing_impaired",
+    "foreign_only",
+    "hash_verifiable",
+    "hearing_impaired_verifiable",
+})
+
+
 def candidate_from_worker(provider_name: str, payload: dict[str, Any]) -> HubWorkerSubtitle:
     if not isinstance(payload, dict):
         raise WorkerProtocolError("candidate payload must be an object")
@@ -200,6 +230,17 @@ def candidate_from_worker(provider_name: str, payload: dict[str, Any]) -> HubWor
     display = payload.get("display") or {}
     if isinstance(display, dict):
         for key, value in display.items():
+            if (
+                not isinstance(key, str)
+                or key.startswith("_")
+                or key in _RESERVED_DISPLAY_ATTRS
+            ):
+                logger.debug(
+                    "provider_hub: ignoring reserved display key %r from %s",
+                    key,
+                    provider_name,
+                )
+                continue
             setattr(subtitle, key, value)
 
     return subtitle
