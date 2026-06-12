@@ -178,13 +178,26 @@ def postprocess(item):
         for i, subs in enumerate(item['external_subtitles']):
             item['external_subtitles'][i] = path_replace(subs)
 
-    # map poster and fanart to server proxy
+    # map poster and fanart to server proxy. Carry the owning instance (#156)
+    # so the proxy fetches the cover from THAT Sonarr/Radarr instead of the
+    # default one (a non-default instance's cover does not exist on the default
+    # server). No suffix when there is no owner -> byte-identical default path.
+    media = 'movies' if item.get('radarrId') else 'series'
+    arr_instance_id = item.get('arr_instance_id')
+
+    def _proxy_image(path):
+        if not path:
+            return None
+        # Radarr cover paths already carry a ?lastWrite=... query, so use & there.
+        if arr_instance_id is not None:
+            sep = '&' if '?' in path else '?'
+            path = f"{path}{sep}arr_instance_id={arr_instance_id}"
+        return f"{base_url}/images/{media}{path}"
+
     if item.get('poster') is not None:
-        poster = item['poster']
-        item['poster'] = f"{base_url}/images/{'movies' if item.get('radarrId') else 'series'}{poster}" if poster else None
+        item['poster'] = _proxy_image(item['poster'])
 
     if item.get('fanart') is not None:
-        fanart = item['fanart']
-        item['fanart'] = f"{base_url}/images/{'movies' if item.get('radarrId') else 'series'}{fanart}" if fanart else None
+        item['fanart'] = _proxy_image(item['fanart'])
 
     return item

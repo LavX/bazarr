@@ -134,15 +134,45 @@ def download_log():
     return send_file(get_log_file_path(), max_age=0, as_attachment=True)
 
 
+def _instance_image_url(kind, url):
+    """Build the (image_url, verify_ssl) for the cover proxy.
+
+    With an ``arr_instance_id`` query arg (#156) the cover is fetched from that
+    instance's Sonarr/Radarr (base url + decrypted key from its saved row);
+    without it the scalar/default path is used, byte-identical to before.
+    Returns (None, None) for an unknown/disabled instance.
+    """
+    from flask import request
+    arr_instance_id = request.args.get('arr_instance_id', type=int)
+    if arr_instance_id is None:
+        if kind == 'sonarr':
+            base = settings.sonarr.base_url
+            return f'{url_api_sonarr()}{url.lstrip(base)}?apikey={settings.sonarr.apikey}', get_ssl_verify('sonarr')
+        base = settings.radarr.base_url
+        return f'{url_api_radarr()}{url.lstrip(base)}?apikey={settings.radarr.apikey}', get_ssl_verify('radarr')
+
+    from arr_instances.resolution import client_for_instance
+    from app.database import database as _db
+    client = client_for_instance(_db, arr_instance_id)
+    if client is None:
+        return None, None
+    # Strip the instance's own base_url prefix from the stored path so it is not
+    # duplicated; then fetch from the instance's /api/v3 cover endpoint.
+    inst_base = (getattr(client, '_base_url_raw', '') or '').strip('/')
+    path = url[len(inst_base):].lstrip('/') if inst_base and url.startswith(inst_base) else url
+    return f'{client.base_url()}/api/v3/{path}?apikey={client.api_key}', client.verify_ssl
+
+
 @ui_bp.route('/images/series/<path:url>', methods=['GET'])
 @check_login
 def series_images(url):
     url = url.strip("/")
-    apikey = settings.sonarr.apikey
-    baseUrl = settings.sonarr.base_url
-    url_image = f'{url_api_sonarr()}{url.lstrip(baseUrl)}?apikey={apikey}'.replace('poster-250', 'poster-500')
+    url_image, verify = _instance_image_url('sonarr', url)
+    if url_image is None:
+        return '', 404
+    url_image = url_image.replace('poster-250', 'poster-500')
     try:
-        req = requests.get(url_image, stream=True, timeout=15, verify=get_ssl_verify('sonarr'), headers=HEADERS)
+        req = requests.get(url_image, stream=True, timeout=15, verify=verify, headers=HEADERS)
     except Exception:
         return '', 404
     else:
@@ -152,11 +182,12 @@ def series_images(url):
 @ui_bp.route('/images/movies/<path:url>', methods=['GET'])
 @check_login
 def movies_images(url):
-    apikey = settings.radarr.apikey
-    baseUrl = settings.radarr.base_url
-    url_image = f'{url_api_radarr()}{url.lstrip(baseUrl)}?apikey={apikey}'
+    url = url.strip("/")
+    url_image, verify = _instance_image_url('radarr', url)
+    if url_image is None:
+        return '', 404
     try:
-        req = requests.get(url_image, stream=True, timeout=15, verify=get_ssl_verify('radarr'), headers=HEADERS)
+        req = requests.get(url_image, stream=True, timeout=15, verify=verify, headers=HEADERS)
     except Exception:
         return '', 404
     else:
