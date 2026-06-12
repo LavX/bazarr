@@ -48,16 +48,21 @@ class ProviderEpisodes(Resource):
     def get(self):
         """Search manually for an episode subtitles"""
         args = self.get_request_parser.parse_args()
-        sonarrEpisodeId = args.get('episodeid')
+        # 'episodeid' is the canonical local episode id (globally unique across
+        # instances) that GetItemId and the browse endpoints use. Looking the row
+        # up by local id avoids the upstream-id collision between instances; on a
+        # single default instance local id == sonarrEpisodeId, so unchanged. (#156)
+        episode_id = args.get('episodeid')
         stmt = select(TableEpisodes.path,
                       TableEpisodes.sceneName,
+                      TableEpisodes.sonarrEpisodeId,
                       TableShows.title,
                       TableShows.profileId,
                       TableEpisodes.subtitles,
                       TableEpisodes.missing_subtitles) \
             .select_from(TableEpisodes) \
             .join(TableShows) \
-            .where(TableEpisodes.sonarrEpisodeId == sonarrEpisodeId)
+            .where(TableEpisodes.id == episode_id)
         episodeInfo = database.execute(stmt).first()
 
         if not episodeInfo:
@@ -68,7 +73,7 @@ class ProviderEpisodes(Resource):
             episodeInfo = database.execute(stmt).first()
         elif episodeInfo.missing_subtitles is None:
             # missing subtitles calculation for this episode is incomplete, we'll do it again
-            list_missing_subtitles(epno=sonarrEpisodeId)
+            list_missing_subtitles(epno=episodeInfo.sonarrEpisodeId)
             episodeInfo = database.execute(stmt).first()
 
         title = episodeInfo.title

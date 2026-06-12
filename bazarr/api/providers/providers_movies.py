@@ -49,14 +49,19 @@ class ProviderMovies(Resource):
     def get(self):
         """Search manually for a movie subtitles"""
         args = self.get_request_parser.parse_args()
-        radarrId = args.get('radarrid')
+        # 'radarrid' is the canonical local movie id (globally unique across
+        # instances) that GetItemId and the browse endpoints use. Looking the row
+        # up by local id avoids the upstream-id collision between instances; on a
+        # single default instance local id == radarrId, so unchanged. (#156)
+        movie_id = args.get('radarrid')
         stmt = select(TableMovies.title,
                       TableMovies.path,
+                      TableMovies.radarrId,
                       TableMovies.sceneName,
                       TableMovies.profileId,
                       TableMovies.subtitles,
                       TableMovies.missing_subtitles) \
-            .where(TableMovies.radarrId == radarrId)
+            .where(TableMovies.id == movie_id)
         movieInfo = database.execute(stmt).first()
 
         if not movieInfo:
@@ -67,7 +72,7 @@ class ProviderMovies(Resource):
             movieInfo = database.execute(stmt).first()
         elif movieInfo.missing_subtitles is None:
             # missing subtitles calculation for this movie is incomplete, we'll do it again
-            list_missing_subtitles_movies(no=radarrId)
+            list_missing_subtitles_movies(no=movieInfo.radarrId)
             movieInfo = database.execute(stmt).first()
 
         title = movieInfo.title
