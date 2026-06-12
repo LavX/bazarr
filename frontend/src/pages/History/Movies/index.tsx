@@ -145,6 +145,7 @@ const MoviesHistoryView: FunctionComponent = () => {
             subs_id,
             language,
             subtitles_path,
+            arr_instance_id,
           } = row.original;
 
           if (subs_id && provider && language) {
@@ -161,6 +162,7 @@ const MoviesHistoryView: FunctionComponent = () => {
                     subs_id,
                     subtitles_path,
                     language: language.code2,
+                    arr_instance_id,
                   },
                 })}
               ></MutateAction>

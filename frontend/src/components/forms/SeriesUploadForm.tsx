@@ -376,6 +376,7 @@ const SeriesUploadForm: FunctionComponent<Props> = ({
           upload.mutate({
             seriesId,
             episodeId,
+            arrInstanceId: episode.arr_instance_id,
             form: {
               file,
               language: code2,

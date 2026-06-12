@@ -309,6 +309,7 @@ const MovieUploadForm: FunctionComponent<Props> = ({
 
           upload.mutate({
             radarrId,
+            arrInstanceId: movie.arr_instance_id,
             form: { file, language: language.code2, hi, forced },
           });
         }

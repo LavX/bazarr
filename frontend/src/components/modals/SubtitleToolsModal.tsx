@@ -34,6 +34,7 @@ type LocalisedType = {
   type: "movie" | "episode";
   name: string;
   isMovie: boolean;
+  arr_instance_id?: number;
 };
 
 function getLocalisedValues(item: SupportType): LocalisedType {
@@ -44,6 +45,8 @@ function getLocalisedValues(item: SupportType): LocalisedType {
       type: "movie",
       name: item.title,
       isMovie: true,
+      // eslint-disable-next-line camelcase
+      arr_instance_id: item.arr_instance_id,
     };
   } else {
     return {
@@ -52,6 +55,8 @@ function getLocalisedValues(item: SupportType): LocalisedType {
       type: "episode",
       name: item.title,
       isMovie: false,
+      // eslint-disable-next-line camelcase
+      arr_instance_id: item.arr_instance_id,
     };
   }
 }
@@ -137,7 +142,8 @@ const SubtitleToolView: FunctionComponent<SubtitleToolViewProps> = ({
   const data = useMemo<TableColumnType[]>(
     () =>
       payload.flatMap((item) => {
-        const { seriesId, id, type, name, isMovie } = getLocalisedValues(item);
+        const { seriesId, id, type, name, isMovie, arr_instance_id } =
+          getLocalisedValues(item);
         return item.subtitles.flatMap((v) => {
           if (v.path) {
             return [
@@ -153,6 +159,8 @@ const SubtitleToolView: FunctionComponent<SubtitleToolViewProps> = ({
                 hi: toPython(v.hi),
                 forced: toPython(v.forced),
                 isMovie,
+                // eslint-disable-next-line camelcase
+                arr_instance_id,
               },
             ];
           } else {
@@ -190,6 +198,7 @@ const SubtitleToolView: FunctionComponent<SubtitleToolViewProps> = ({
                 radarrId: 0,
                 seriesId: 0,
                 episodeId: 0,
+                arrInstanceId: selection.arr_instance_id,
               };
               if (selection.isMovie) {
                 actionPayload.radarrId = selection.id;

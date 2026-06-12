@@ -22,6 +22,9 @@ import {
 interface Props {
   seriesId: number;
   episodeId: number;
+  // Owning Sonarr instance for this episode (#156); scopes subtitle
+  // download/delete to the correct instance on multi-instance setups.
+  arrInstanceId?: number;
   missing?: boolean;
   subtitle: Subtitle;
   availableSubtitles?: Subtitle[];
@@ -30,6 +33,7 @@ interface Props {
 export const Subtitle: FunctionComponent<Props> = ({
   seriesId,
   episodeId,
+  arrInstanceId,
   missing = false,
   subtitle,
   availableSubtitles,
@@ -157,6 +161,7 @@ export const Subtitle: FunctionComponent<Props> = ({
               await remove.mutateAsync({
                 seriesId,
                 episodeId,
+                arrInstanceId,
                 form: {
                   language: subtitle.code2,
                   hi: subtitle.hi,
@@ -195,6 +200,7 @@ export const Subtitle: FunctionComponent<Props> = ({
         canCompareSyncOutputs={canCompareSyncOutputs}
         mediaId={episodeId}
         mediaType="episode"
+        arrInstanceId={arrInstanceId}
         onAction={async (action) => {
           if (action === "view") {
             navigate(
@@ -208,6 +214,7 @@ export const Subtitle: FunctionComponent<Props> = ({
             await download.mutateAsync({
               seriesId,
               episodeId,
+              arrInstanceId,
               form: {
                 language: subtitle.code2,
                 hi: subtitle.hi,
@@ -220,6 +227,7 @@ export const Subtitle: FunctionComponent<Props> = ({
             await remove.mutateAsync({
               seriesId,
               episodeId,
+              arrInstanceId,
               form: {
                 language: subtitle.code2,
                 hi: subtitle.hi,

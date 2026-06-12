@@ -60,6 +60,8 @@ declare namespace FormType {
     from_hi?: PythonBoolean;
     /** Forced flag of the embedded source track (defaults to forced when omitted). */
     from_forced?: PythonBoolean;
+    /** Owning Sonarr/Radarr instance id (#156); routes the action to the right server. */
+    arr_instance_id?: number;
   }
 
   interface DownloadSeries {
@@ -78,11 +80,15 @@ declare namespace FormType {
     subs_id: string;
     language: Language.CodeType;
     subtitles_path: string;
+    /** Owning Sonarr/Radarr instance id (#156); routes the action to the right server. */
+    arr_instance_id?: number;
   }
 
   interface DeleteBlacklist {
     provider: string;
     subs_id: string;
+    /** Owning Sonarr/Radarr instance id (#156); scopes the removal to one instance. */
+    arr_instance_id?: number;
   }
 
   interface ManualDownload {

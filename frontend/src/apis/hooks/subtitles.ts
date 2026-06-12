@@ -40,6 +40,8 @@ export function useEpisodeSubtitleModification() {
   interface Param<T> {
     seriesId: number;
     episodeId: number;
+    // Owning Sonarr instance id (#156) so the action routes to the right server.
+    arrInstanceId?: number;
     form: T;
   }
 
@@ -64,7 +66,12 @@ export function useEpisodeSubtitleModification() {
     mutationKey: [QueryKeys.Subtitles, QueryKeys.Episodes],
 
     mutationFn: (param: Param<FormType.DeleteSubtitle>) =>
-      api.episodes.deleteSubtitles(param.seriesId, param.episodeId, param.form),
+      api.episodes.deleteSubtitles(
+        param.seriesId,
+        param.episodeId,
+        param.form,
+        param.arrInstanceId,
+      ),
 
     onSuccess: (_, param) => {
       client.invalidateQueries({
@@ -77,7 +84,12 @@ export function useEpisodeSubtitleModification() {
     mutationKey: [QueryKeys.Subtitles, QueryKeys.Episodes],
 
     mutationFn: (param: Param<FormType.UploadSubtitle>) =>
-      api.episodes.uploadSubtitles(param.seriesId, param.episodeId, param.form),
+      api.episodes.uploadSubtitles(
+        param.seriesId,
+        param.episodeId,
+        param.form,
+        param.arrInstanceId,
+      ),
 
     onSuccess: (_, { seriesId }) => {
       client.invalidateQueries({
@@ -94,6 +106,8 @@ export function useMovieSubtitleModification() {
 
   interface Param<T> {
     radarrId: number;
+    // Owning Radarr instance id (#156) so the action routes to the right server.
+    arrInstanceId?: number;
     form: T;
   }
 
@@ -114,7 +128,11 @@ export function useMovieSubtitleModification() {
     mutationKey: [QueryKeys.Subtitles, QueryKeys.Movies],
 
     mutationFn: (param: Param<FormType.DeleteSubtitle>) =>
-      api.movies.deleteSubtitles(param.radarrId, param.form),
+      api.movies.deleteSubtitles(
+        param.radarrId,
+        param.form,
+        param.arrInstanceId,
+      ),
 
     onSuccess: (_, param) => {
       client.invalidateQueries({
@@ -127,7 +145,11 @@ export function useMovieSubtitleModification() {
     mutationKey: [QueryKeys.Subtitles, QueryKeys.Movies],
 
     mutationFn: (param: Param<FormType.UploadSubtitle>) =>
-      api.movies.uploadSubtitles(param.radarrId, param.form),
+      api.movies.uploadSubtitles(
+        param.radarrId,
+        param.form,
+        param.arrInstanceId,
+      ),
 
     onSuccess: (_, { radarrId }) => {
       client.invalidateQueries({
@@ -183,6 +205,7 @@ export function useRefTracksByEpisodeId(
   subtitlesPath: string,
   sonarrEpisodeId: number,
   isEpisode: boolean,
+  arrInstanceId?: number,
 ) {
   return useQuery({
     queryKey: [
@@ -190,9 +213,14 @@ export function useRefTracksByEpisodeId(
       sonarrEpisodeId,
       QueryKeys.Subtitles,
       subtitlesPath,
+      arrInstanceId,
     ],
     queryFn: () =>
-      api.subtitles.getRefTracksByEpisodeId(subtitlesPath, sonarrEpisodeId),
+      api.subtitles.getRefTracksByEpisodeId(
+        subtitlesPath,
+        sonarrEpisodeId,
+        arrInstanceId,
+      ),
     enabled: isEpisode,
   });
 }
@@ -201,6 +229,7 @@ export function useRefTracksByMovieId(
   subtitlesPath: string,
   radarrMovieId: number,
   isMovie: boolean,
+  arrInstanceId?: number,
 ) {
   return useQuery({
     queryKey: [
@@ -208,9 +237,14 @@ export function useRefTracksByMovieId(
       radarrMovieId,
       QueryKeys.Subtitles,
       subtitlesPath,
+      arrInstanceId,
     ],
     queryFn: () =>
-      api.subtitles.getRefTracksByMovieId(subtitlesPath, radarrMovieId),
+      api.subtitles.getRefTracksByMovieId(
+        subtitlesPath,
+        radarrMovieId,
+        arrInstanceId,
+      ),
     enabled: isMovie,
   });
 }

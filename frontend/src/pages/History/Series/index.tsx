@@ -169,6 +169,7 @@ const SeriesHistoryView: FunctionComponent = () => {
             language,
             subtitles_path,
             blacklisted,
+            arr_instance_id,
           } = row.original;
           if (subs_id && provider && language) {
             return (
@@ -185,6 +186,7 @@ const SeriesHistoryView: FunctionComponent = () => {
                     subs_id,
                     subtitles_path,
                     language: language.code2,
+                    arr_instance_id,
                   },
                 })}
               ></MutateAction>

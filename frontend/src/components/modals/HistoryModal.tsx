@@ -120,6 +120,7 @@ const MovieHistoryView: FunctionComponent<MovieHistoryViewProps> = ({
               subs_id,
               language,
               subtitles_path,
+              arr_instance_id,
             },
           },
         }) => {
@@ -137,6 +138,7 @@ const MovieHistoryView: FunctionComponent<MovieHistoryViewProps> = ({
                     subs_id,
                     subtitles_path,
                     language: language.code2,
+                    arr_instance_id,
                   },
                 })}
               ></MutateAction>
@@ -279,6 +281,7 @@ const EpisodeHistoryView: FunctionComponent<EpisodeHistoryViewProps> = ({
               subs_id,
               language,
               subtitles_path,
+              arr_instance_id,
             },
           },
         }) => {
@@ -297,6 +300,7 @@ const EpisodeHistoryView: FunctionComponent<EpisodeHistoryViewProps> = ({
                     subs_id,
                     subtitles_path,
                     language: language.code2,
+                    arr_instance_id,
                   },
                 })}
               ></MutateAction>

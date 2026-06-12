@@ -66,16 +66,28 @@ class EpisodeApi extends BaseApi {
     seriesid: number,
     episodeid: number,
     form: FormType.UploadSubtitle,
+    arrInstanceId?: number,
   ) {
-    await this.post("/subtitles", form, { seriesid, episodeid });
+    // arr_instance_id (#156) scopes the action to the owning instance; the
+    // backend treats it as optional (None = legacy/single-instance).
+    await this.post("/subtitles", form, {
+      seriesid,
+      episodeid,
+      arr_instance_id: arrInstanceId,
+    });
   }
 
   async deleteSubtitles(
     seriesid: number,
     episodeid: number,
     form: FormType.DeleteSubtitle,
+    arrInstanceId?: number,
   ) {
-    await this.delete("/subtitles", form, { seriesid, episodeid });
+    await this.delete("/subtitles", form, {
+      seriesid,
+      episodeid,
+      arr_instance_id: arrInstanceId,
+    });
   }
 
   async blacklist() {

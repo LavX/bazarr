@@ -376,6 +376,7 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
             } else if (action === "delete" && path) {
               await remove.mutateAsync({
                 radarrId,
+                arrInstanceId: movie.arr_instance_id,
                 form: {
                   language: code2,
                   forced,
@@ -399,6 +400,7 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
           translationSources={availableSources}
           mediaId={radarrId}
           mediaType="movie"
+          arrInstanceId={movie.arr_instance_id}
           onAction={async (action) => {
             if (action === "edit") {
               navigate(
@@ -407,6 +409,7 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
             } else if (action === "search") {
               await download.mutateAsync({
                 radarrId,
+                arrInstanceId: movie.arr_instance_id,
                 form: {
                   language: code2,
                   forced,
@@ -441,6 +444,7 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
           } else if (action === "delete" && path) {
             await remove.mutateAsync({
               radarrId,
+              arrInstanceId: movie.arr_instance_id,
               form: {
                 language: code2,
                 forced,

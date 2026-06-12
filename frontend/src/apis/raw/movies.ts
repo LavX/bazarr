@@ -82,12 +82,28 @@ class MovieApi extends BaseApi {
     await this.patch("/subtitles", form, { radarrid });
   }
 
-  async uploadSubtitles(radarrid: number, form: FormType.UploadSubtitle) {
-    await this.post("/subtitles", form, { radarrid });
+  async uploadSubtitles(
+    radarrid: number,
+    form: FormType.UploadSubtitle,
+    arrInstanceId?: number,
+  ) {
+    // arr_instance_id (#156) scopes the action to the owning instance; the
+    // backend treats it as optional (None = legacy/single-instance).
+    await this.post("/subtitles", form, {
+      radarrid,
+      arr_instance_id: arrInstanceId,
+    });
   }
 
-  async deleteSubtitles(radarrid: number, form: FormType.DeleteSubtitle) {
-    await this.delete("/subtitles", form, { radarrid });
+  async deleteSubtitles(
+    radarrid: number,
+    form: FormType.DeleteSubtitle,
+    arrInstanceId?: number,
+  ) {
+    await this.delete("/subtitles", form, {
+      radarrid,
+      arr_instance_id: arrInstanceId,
+    });
   }
 }
 
