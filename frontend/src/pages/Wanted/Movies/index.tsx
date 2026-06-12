@@ -184,6 +184,7 @@ const WantedMoviesView: FunctionComponent = () => {
     return {
       type: "movie",
       radarrId: row.radarrId,
+      arrInstanceId: row.arr_instance_id,
       title: row.title,
     };
   }, []);

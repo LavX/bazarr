@@ -33,6 +33,8 @@ export interface BatchItem {
   sonarrSeriesId?: number;
   sonarrEpisodeId?: number;
   radarrId?: number;
+  // Owning Sonarr/Radarr instance id (#156) so the batch routes per instance.
+  arr_instance_id?: number;
 }
 
 export interface BatchOptions {

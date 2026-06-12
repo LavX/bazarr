@@ -84,6 +84,12 @@ def _collect_subtitle_items(items, action, options):
     series_ids = []
     episode_ids = []
     movie_ids = []
+    # Per-item owning instance (#156): maps an upstream id to the arr_instance_id
+    # the caller requested, so a colliding id under another instance is dropped.
+    # None entries (legacy/single-instance) impose no filter -> byte-identical.
+    series_instance = {}
+    episode_instance = {}
+    movie_instance = {}
 
     if items is None:
         # Entire library mode
@@ -91,18 +97,22 @@ def _collect_subtitle_items(items, action, options):
     else:
         for item in items:
             item_type = item.get('type')
+            inst = item.get('arr_instance_id')
             if item_type == 'series':
                 sid = item.get('sonarrSeriesId')
                 if sid is not None:
                     series_ids.append(sid)
+                    series_instance[sid] = inst
             elif item_type == 'episode':
                 eid = item.get('sonarrEpisodeId')
                 if eid is not None:
                     episode_ids.append(eid)
+                    episode_instance[eid] = inst
             elif item_type == 'movie':
                 rid = item.get('radarrId')
                 if rid is not None:
                     movie_ids.append(rid)
+                    movie_instance[rid] = inst
 
     all_items = []
     total_skipped = 0
@@ -124,6 +134,8 @@ def _collect_subtitle_items(items, action, options):
             enabled_engines=enabled_engines,
             target_lang=target_lang,
             source_lang=source_lang,
+            episode_instance=episode_instance,
+            series_instance=series_instance,
         )
         all_items.extend(ep_items)
         total_skipped += ep_skipped
@@ -142,6 +154,7 @@ def _collect_subtitle_items(items, action, options):
             enabled_engines=enabled_engines,
             target_lang=target_lang,
             source_lang=source_lang,
+            movie_instance=movie_instance,
         )
         all_items.extend(mov_items)
         total_skipped += mov_skipped
@@ -151,11 +164,15 @@ def _collect_subtitle_items(items, action, options):
 
 def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
                       force_resync=False, max_offset='60', gss=True, no_fix_framerate=True,
-                      output_mode=None, enabled_engines=None, target_lang=None, source_lang=None):
+                      output_mode=None, enabled_engines=None, target_lang=None, source_lang=None,
+                      episode_instance=None, series_instance=None):
     """Collect episode subtitles from the database."""
+    episode_instance = episode_instance or {}
+    series_instance = series_instance or {}
     columns = [
         TableEpisodes.sonarrEpisodeId,
         TableEpisodes.sonarrSeriesId,
+        TableEpisodes.arr_instance_id,
         TableEpisodes.path,
         TableEpisodes.subtitles,
     ]
@@ -192,6 +209,14 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
     skipped = 0
 
     for ep in episodes:
+        # Drop a row whose owner differs from the instance the caller asked for
+        # (#156); a requested instance of None imposes no filter (byte-identical).
+        req_inst = episode_instance.get(ep.sonarrEpisodeId)
+        if req_inst is None:
+            req_inst = series_instance.get(ep.sonarrSeriesId)
+        if req_inst is not None and ep.arr_instance_id != req_inst:
+            continue
+
         subtitles = _parse_subtitles_column(ep.subtitles)
         video_path = path_mappings.path_replace(ep.path)
 
@@ -247,6 +272,7 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
                 'sonarr_series_id': ep.sonarrSeriesId,
                 'sonarr_episode_id': ep.sonarrEpisodeId,
                 'radarr_id': None,
+                'arr_instance_id': ep.arr_instance_id,
                 'max_offset_seconds': max_offset,
                 'no_fix_framerate': no_fix_framerate,
                 'gss': gss,
@@ -262,10 +288,13 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
 
 def _collect_movies(movie_ids=None, action='sync', force_resync=False,
                     max_offset='60', gss=True, no_fix_framerate=True,
-                    output_mode=None, enabled_engines=None, target_lang=None, source_lang=None):
+                    output_mode=None, enabled_engines=None, target_lang=None, source_lang=None,
+                    movie_instance=None):
     """Collect movie subtitles from the database."""
+    movie_instance = movie_instance or {}
     columns = [
         TableMovies.radarrId,
+        TableMovies.arr_instance_id,
         TableMovies.path,
         TableMovies.subtitles,
     ]
@@ -290,6 +319,12 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
     skipped = 0
 
     for movie in movies:
+        # Drop a row whose owner differs from the requested instance (#156);
+        # a requested instance of None imposes no filter (byte-identical).
+        req_inst = movie_instance.get(movie.radarrId)
+        if req_inst is not None and movie.arr_instance_id != req_inst:
+            continue
+
         subtitles = _parse_subtitles_column(movie.subtitles)
         video_path = path_mappings.path_replace_movie(movie.path)
 
@@ -345,6 +380,7 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
                 'sonarr_series_id': None,
                 'sonarr_episode_id': None,
                 'radarr_id': movie.radarrId,
+                'arr_instance_id': movie.arr_instance_id,
                 'max_offset_seconds': max_offset,
                 'no_fix_framerate': no_fix_framerate,
                 'gss': gss,

@@ -215,6 +215,7 @@ const WantedSeriesView: FunctionComponent = () => {
       type: "episode",
       sonarrSeriesId: row.sonarrSeriesId,
       sonarrEpisodeId: row.sonarrEpisodeId,
+      arrInstanceId: row.arr_instance_id,
       seriesTitle: row.seriesTitle,
       episodeTitle: row.episodeTitle,
     };

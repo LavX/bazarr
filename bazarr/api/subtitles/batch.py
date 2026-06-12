@@ -37,6 +37,7 @@ class BatchOperation(Resource):
         'sonarrSeriesId': fields.Integer(description='Sonarr Series ID'),
         'sonarrEpisodeId': fields.Integer(description='Sonarr Episode ID'),
         'radarrId': fields.Integer(description='Radarr Movie ID'),
+        'arr_instance_id': fields.Integer(description='Owning Sonarr/Radarr instance id (#156)'),
     })
 
     post_options_model = api_ns_batch.model('BatchOptions', {
@@ -87,7 +88,7 @@ class BatchOperation(Resource):
         if not items:
             return {'error': 'Empty items list'}, 400
 
-        VALID_ITEM_KEYS = {'type', 'sonarrSeriesId', 'sonarrEpisodeId', 'radarrId'}
+        VALID_ITEM_KEYS = {'type', 'sonarrSeriesId', 'sonarrEpisodeId', 'radarrId', 'arr_instance_id'}
         VALID_TYPES = {'episode', 'movie', 'series'}
 
         sanitized_items = []
