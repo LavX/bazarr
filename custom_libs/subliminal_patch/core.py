@@ -17,7 +17,7 @@ import requests
 from os import scandir
 from collections import defaultdict
 from bs4 import UnicodeDammit
-from babelfish import LanguageReverseError
+from babelfish import Language as BabelfishLanguage, LanguageReverseError
 from guessit.jsonutils import GuessitEncoder
 from subliminal import refiner_manager
 from concurrent.futures import as_completed
@@ -406,6 +406,14 @@ class SZProviderPool(ProviderPool):
                 if not hasattr(s, 'id') or not hasattr(s, 'language'):
                     logger.warning('Provider %r returned invalid subtitle object (type: %s): %r',
                                    provider, type(s).__name__, s)
+                    continue
+
+                # Scoring and language bookkeeping dereference subtitle.language
+                # (.alpha3/.basename); a degraded value such as a plain string would
+                # abort the whole search, so drop just the broken subtitle here.
+                if not isinstance(s.language, BabelfishLanguage):
+                    logger.warning('Provider %r returned subtitle with invalid language (type: %s): %r',
+                                   provider, type(s.language).__name__, s)
                     continue
 
                 try:
