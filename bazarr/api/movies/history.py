@@ -26,6 +26,8 @@ class MoviesHistory(Resource):
     get_language_model = api_ns_movies_history.model('subtitles_language_model', subtitles_language_model)
 
     data_model = api_ns_movies_history.model('history_movies_data_model', {
+        # Owning instance (#156) so secondary actions (blacklist) can route.
+        'arr_instance_id': fields.Integer(),
         'action': fields.Integer(),
         'title': fields.String(),
         'timestamp': fields.String(),
@@ -70,6 +72,7 @@ class MoviesHistory(Resource):
             query_conditions.append((TableMovies.radarrId == radarrid))
 
         stmt = select(TableHistoryMovie.id,
+                      TableHistoryMovie.arr_instance_id,
                       TableHistoryMovie.action,
                       TableMovies.title,
                       TableHistoryMovie.timestamp,
@@ -100,6 +103,7 @@ class MoviesHistory(Resource):
             stmt = stmt.limit(length).offset(start)
         movie_history = [{
             'id': x.id,
+            'arr_instance_id': x.arr_instance_id,
             'action': x.action,
             'title': x.title,
             'timestamp': x.timestamp,

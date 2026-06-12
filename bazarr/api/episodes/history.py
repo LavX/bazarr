@@ -25,6 +25,8 @@ class EpisodesHistory(Resource):
     get_language_model = api_ns_episodes_history.model('subtitles_language_model', subtitles_language_model)
 
     data_model = api_ns_episodes_history.model('history_episodes_data_model', {
+        # Owning instance (#156) so secondary actions (blacklist) can route.
+        'arr_instance_id': fields.Integer(),
         'seriesTitle': fields.String(),
         'monitored': fields.Boolean(),
         'episode_number': fields.String(),
@@ -71,6 +73,7 @@ class EpisodesHistory(Resource):
             query_conditions.append((TableEpisodes.sonarrEpisodeId == episodeid))
 
         stmt = select(TableHistory.id,
+                      TableHistory.arr_instance_id,
                       TableShows.title.label('seriesTitle'),
                       TableEpisodes.monitored,
                       TableEpisodes.season.concat('x').concat(TableEpisodes.episode).label('episode_number'),
@@ -96,8 +99,8 @@ class EpisodesHistory(Resource):
                       TableEpisodes.subtitles.label('external_subtitles'),
                       blacklisted_subtitles.c.subs_id.label('blacklisted')) \
             .select_from(TableHistory) \
-            .join(TableShows, onclause=TableHistory.sonarrSeriesId == TableShows.sonarrSeriesId) \
-            .join(TableEpisodes, onclause=TableHistory.sonarrEpisodeId == TableEpisodes.sonarrEpisodeId) \
+            .join(TableShows, onclause=TableHistory.series_id == TableShows.id) \
+            .join(TableEpisodes, onclause=TableHistory.episode_id == TableEpisodes.id) \
             .join(blacklisted_subtitles, onclause=TableHistory.subs_id == blacklisted_subtitles.c.subs_id,
                   isouter=True) \
             .where(reduce(operator.and_, query_conditions)) \
@@ -106,6 +109,7 @@ class EpisodesHistory(Resource):
             stmt = stmt.limit(length).offset(start)
         episode_history = [{
             'id': x.id,
+            'arr_instance_id': x.arr_instance_id,
             'seriesTitle': x.seriesTitle,
             'monitored': x.monitored,
             'episode_number': x.episode_number,

@@ -26,6 +26,8 @@ class MoviesBlacklist(Resource):
     get_language_model = api_ns_movies_blacklist.model('subtitles_language_model', subtitles_language_model)
 
     get_response_model = api_ns_movies_blacklist.model('MovieBlacklistGetResponse', {
+        # Owning instance (#156) so the remove action can route.
+        'arr_instance_id': fields.Integer(),
         'title': fields.String(),
         'radarrId': fields.Integer(),
         'provider': fields.String(),
@@ -47,6 +49,7 @@ class MoviesBlacklist(Resource):
         stmt = (
             select(TableMovies.title,
                    TableMovies.radarrId,
+                   TableBlacklistMovie.arr_instance_id,
                    TableBlacklistMovie.provider,
                    TableBlacklistMovie.subs_id,
                    TableBlacklistMovie.language,
@@ -61,6 +64,7 @@ class MoviesBlacklist(Resource):
         data = database.execute(stmt)
 
         return marshal([postprocess({
+            'arr_instance_id': x.arr_instance_id,
             'title': x.title,
             'radarrId': x.radarrId,
             'provider': x.provider,

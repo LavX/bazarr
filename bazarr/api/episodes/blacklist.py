@@ -26,6 +26,8 @@ class EpisodesBlacklist(Resource):
     get_language_model = api_ns_episodes_blacklist.model('subtitles_language_model', subtitles_language_model)
 
     get_response_model = api_ns_episodes_blacklist.model('EpisodeBlacklistGetResponse', {
+        # Owning instance (#156) so the remove action can route.
+        'arr_instance_id': fields.Integer(),
         'seriesTitle': fields.String(),
         'episode_number': fields.String(),
         'episodeTitle': fields.String(),
@@ -50,18 +52,20 @@ class EpisodesBlacklist(Resource):
                       TableEpisodes.season.concat('x').concat(TableEpisodes.episode).label('episode_number'),
                       TableEpisodes.title.label('episodeTitle'),
                       TableEpisodes.sonarrSeriesId,
+                      TableBlacklist.arr_instance_id,
                       TableBlacklist.provider,
                       TableBlacklist.subs_id,
                       TableBlacklist.language,
                       TableBlacklist.timestamp) \
             .select_from(TableBlacklist) \
-            .join(TableShows, onclause=TableBlacklist.sonarr_series_id == TableShows.sonarrSeriesId) \
-            .join(TableEpisodes, onclause=TableBlacklist.sonarr_episode_id == TableEpisodes.sonarrEpisodeId) \
+            .join(TableShows, onclause=TableBlacklist.series_id == TableShows.id) \
+            .join(TableEpisodes, onclause=TableBlacklist.episode_id == TableEpisodes.id) \
             .order_by(TableBlacklist.timestamp.desc())
         if length > 0:
             stmt = stmt.limit(length).offset(start)
 
         return marshal([postprocess({
+            'arr_instance_id': x.arr_instance_id,
             'seriesTitle': x.seriesTitle,
             'episode_number': x.episode_number,
             'episodeTitle': x.episodeTitle,
