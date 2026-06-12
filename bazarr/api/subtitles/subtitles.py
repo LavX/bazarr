@@ -7,6 +7,7 @@ import sys
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
 
 from app.database import TableShows, TableEpisodes, TableMovies, database, select
+from arr_instances.resolution import scoped
 from languages.get_languages import alpha3_from_alpha2
 from utilities.path_mappings import path_mappings
 from utilities.video_analyzer import subtitles_sync_references
@@ -42,6 +43,12 @@ class Subtitles(Resource):
     )
     get_request_parser.add_argument(
         "radarrMovieId", type=int, required=False, help="Radarr Movie ID"
+    )
+    get_request_parser.add_argument(
+        "arr_instance_id",
+        type=int,
+        required=False,
+        help="Owning Sonarr/Radarr instance id (#156)",
     )
 
     audio_tracks_data_model = api_ns_subtitles.model(
@@ -95,11 +102,13 @@ class Subtitles(Resource):
         subtitlesPath = args.get("subtitlesPath")
         episodeId = args.get("sonarrEpisodeId", None)
         movieId = args.get("radarrMovieId", None)
+        arr_instance_id = args.get("arr_instance_id")
 
         result = subtitles_sync_references(
             subtitles_path=subtitlesPath,
             sonarr_episode_id=episodeId,
             radarr_movie_id=movieId,
+            arr_instance_id=arr_instance_id,
         )
 
         return marshal(result, self.get_response_model, envelope="data")
@@ -143,6 +152,12 @@ class Subtitles(Resource):
     )
     patch_request_parser.add_argument(
         "id", type=int, required=True, help="Media ID (episodeId, radarrId)"
+    )
+    patch_request_parser.add_argument(
+        "arr_instance_id",
+        type=int,
+        required=False,
+        help="Owning Sonarr/Radarr instance id (#156)",
     )
     patch_request_parser.add_argument(
         "forced",
@@ -214,6 +229,7 @@ class Subtitles(Resource):
         subtitles_path = args.get("path") or ""
         media_type = args.get("type")
         id = args.get("id")
+        arr_instance_id = args.get("arr_instance_id")
         forced = True if args.get("forced") == "True" else False
         hi = True if args.get("hi") == "True" else False
 
@@ -247,18 +263,24 @@ class Subtitles(Resource):
 
             # Resolve the video path from the DB using the media ID
             if media_type == "episode":
-                ep_meta = database.execute(
+                ep_stmt = scoped(
                     select(TableEpisodes.path).where(
                         TableEpisodes.sonarrEpisodeId == id
-                    )
-                ).first()
+                    ),
+                    TableEpisodes.arr_instance_id,
+                    arr_instance_id,
+                )
+                ep_meta = database.execute(ep_stmt).first()
                 if not ep_meta:
                     return "Episode not found", 404
                 embedded_video_path = path_mappings.path_replace(ep_meta.path)
             else:
-                mv_meta = database.execute(
-                    select(TableMovies.path).where(TableMovies.radarrId == id)
-                ).first()
+                mv_stmt = scoped(
+                    select(TableMovies.path).where(TableMovies.radarrId == id),
+                    TableMovies.arr_instance_id,
+                    arr_instance_id,
+                )
+                mv_meta = database.execute(mv_stmt).first()
                 if not mv_meta:
                     return "Movie not found", 404
                 embedded_video_path = path_mappings.path_replace_movie(mv_meta.path)
@@ -285,7 +307,7 @@ class Subtitles(Resource):
             return "Generated sync output files cannot be synchronized again.", 400
 
         if media_type == "episode":
-            metadata = database.execute(
+            metadata_stmt = scoped(
                 select(
                     TableEpisodes.path,
                     TableEpisodes.sonarrSeriesId,
@@ -296,22 +318,28 @@ class Subtitles(Resource):
                     TableShows.tvdbId,
                 )
                 .join(TableShows)
-                .where(TableEpisodes.sonarrEpisodeId == id)
-            ).first()
+                .where(TableEpisodes.sonarrEpisodeId == id),
+                TableEpisodes.arr_instance_id,
+                arr_instance_id,
+            )
+            metadata = database.execute(metadata_stmt).first()
 
             if not metadata:
                 return "Episode not found", 404
 
             video_path = path_mappings.path_replace(metadata.path)
         else:
-            metadata = database.execute(
+            metadata_stmt = scoped(
                 select(
                     TableMovies.path,
                     TableMovies.subtitles,
                     TableMovies.imdbId,
                     TableMovies.tmdbId,
-                ).where(TableMovies.radarrId == id)
-            ).first()
+                ).where(TableMovies.radarrId == id),
+                TableMovies.arr_instance_id,
+                arr_instance_id,
+            )
+            metadata = database.execute(metadata_stmt).first()
 
             if not metadata:
                 return "Movie not found", 404

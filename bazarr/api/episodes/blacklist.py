@@ -3,6 +3,7 @@
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
 
 from app.database import TableEpisodes, TableShows, TableBlacklist, database, select
+from arr_instances.resolution import scoped
 from subtitles.tools.delete import delete_subtitles
 from sonarr.blacklist import blacklist_log, blacklist_delete_all, blacklist_delete
 from utilities.path_mappings import path_mappings
@@ -101,10 +102,13 @@ class EpisodesBlacklist(Resource):
         provider = args.get('provider')
         subs_id = args.get('subs_id')
         language = args.get('language')
+        arr_instance_id = args.get('arr_instance_id')
 
         episodeInfo = database.execute(
-            select(TableEpisodes.path)
-            .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id)) \
+            scoped(
+                select(TableEpisodes.path)
+                .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id),
+                TableEpisodes.arr_instance_id, arr_instance_id)) \
             .first()
 
         if not episodeInfo:
@@ -118,7 +122,7 @@ class EpisodesBlacklist(Resource):
                       provider=provider,
                       subs_id=subs_id,
                       language=language,
-                      arr_instance_id=args.get('arr_instance_id'))
+                      arr_instance_id=arr_instance_id)
         if delete_subtitles(media_type='series',
                             language=language,
                             forced=False,
@@ -137,6 +141,8 @@ class EpisodesBlacklist(Resource):
     delete_request_parser.add_argument('all', type=str, required=False, help='Empty episodes subtitles blacklist')
     delete_request_parser.add_argument('provider', type=str, required=False, help='Provider name')
     delete_request_parser.add_argument('subs_id', type=str, required=False, help='Subtitles ID')
+    delete_request_parser.add_argument('arr_instance_id', type=int, required=False,
+                                       help='Owning Sonarr instance id (#156)')
 
     @authenticate
     @api_ns_episodes_blacklist.doc(parser=delete_request_parser)
@@ -150,5 +156,6 @@ class EpisodesBlacklist(Resource):
         else:
             provider = args.get('provider')
             subs_id = args.get('subs_id')
-            blacklist_delete(provider=provider, subs_id=subs_id)
+            blacklist_delete(provider=provider, subs_id=subs_id,
+                             arr_instance_id=args.get('arr_instance_id'))
         return '', 204

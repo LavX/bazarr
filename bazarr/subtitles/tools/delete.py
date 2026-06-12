@@ -8,6 +8,7 @@ from subliminal.subtitle import SUBTITLE_EXTENSIONS
 from app.event_handler import event_stream
 from app.config import settings
 from app.database import database, TableShows, TableEpisodes, TableMovies, select
+from arr_instances.resolution import scoped
 from languages.get_languages import language_from_alpha2
 from utilities.path_mappings import path_mappings
 from utilities.autopulse_webhook import call_external_webhook
@@ -23,7 +24,7 @@ from jellyfin.operations import jellyfin_refresh_item
 
 
 def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_path, sonarr_series_id=None,
-                     sonarr_episode_id=None, radarr_id=None):
+                     sonarr_episode_id=None, radarr_id=None, arr_instance_id=None):
     if not subtitles_path:
         logging.error('No subtitles to delete.')
         return False
@@ -45,17 +46,19 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
         pr = path_mappings.path_replace
         prr = path_mappings.path_replace_reverse
 
-        metadata = database.execute(
+        metadata = database.execute(scoped(
             select(TableEpisodes.season, TableEpisodes.episode, TableShows.imdbId, TableShows.tvdbId)
             .join(TableShows)
-            .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id)).first()
+            .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id),
+            TableEpisodes.arr_instance_id, arr_instance_id)).first()
     else:
         pr = path_mappings.path_replace_movie
         prr = path_mappings.path_replace_reverse_movie
 
-        metadata = database.execute(
+        metadata = database.execute(scoped(
             select(TableMovies.imdbId, TableMovies.tmdbId)
-            .where(TableMovies.radarrId == radarr_id)).first()
+            .where(TableMovies.radarrId == radarr_id),
+            TableMovies.arr_instance_id, arr_instance_id)).first()
 
     result = ProcessSubtitlesResult(message=f"{language_string} subtitles deleted from disk.",
                                     reversed_path=prr(media_path),
@@ -75,7 +78,7 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
             store_subtitles(prr(media_path), media_path)
             return False
         else:
-            history_log(0, sonarr_series_id, sonarr_episode_id, result)
+            history_log(0, sonarr_series_id, sonarr_episode_id, result, arr_instance_id=arr_instance_id)
             store_subtitles(prr(media_path), media_path)
             notify_sonarr(sonarr_series_id)
             event_stream(type='series', action='update', payload=sonarr_series_id)
@@ -105,7 +108,7 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
             store_subtitles_movie(prr(media_path), media_path)
             return False
         else:
-            history_log_movie(0, radarr_id, result)
+            history_log_movie(0, radarr_id, result, arr_instance_id=arr_instance_id)
             store_subtitles_movie(prr(media_path), media_path)
             notify_radarr(radarr_id)
             event_stream(type='movie-wanted', action='update', payload=radarr_id)

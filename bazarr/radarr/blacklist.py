@@ -41,10 +41,12 @@ def blacklist_log_movie(radarr_id, provider, subs_id, language, arr_instance_id=
     event_stream(type='movie-blacklist')
 
 
-def blacklist_delete_movie(provider, subs_id):
+def blacklist_delete_movie(provider, subs_id, arr_instance_id=None):
     database.execute(
-        delete(TableBlacklistMovie)
-        .where((TableBlacklistMovie.provider == provider) & (TableBlacklistMovie.subs_id == subs_id)))
+        scoped(
+            delete(TableBlacklistMovie)
+            .where((TableBlacklistMovie.provider == provider) & (TableBlacklistMovie.subs_id == subs_id)),
+            TableBlacklistMovie.arr_instance_id, arr_instance_id))
     event_stream(type='movie-blacklist', action='delete')
 
 
