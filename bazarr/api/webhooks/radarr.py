@@ -4,7 +4,9 @@ import logging
 from flask_restx import Resource, Namespace, fields
 
 from app.database import TableMovies, database, select
-from radarr.sync.movies import update_one_movie
+from arr_instances.repository import ArrInstanceRepository
+from arr_instances.resolution import scoped
+from radarr.sync.movies import update_one_movie, update_one_movie_for_instance
 from subtitles.mass_download import movies_download_subtitles
 from subtitles.indexer.movies import store_subtitles_movie
 from utilities.path_mappings import path_mappings
@@ -19,6 +21,7 @@ api_ns_webhooks_radarr = Namespace(
 
 
 @api_ns_webhooks_radarr.route("webhooks/radarr")
+@api_ns_webhooks_radarr.route("webhooks/radarr/<string:stable_key>")
 class WebHooksRadarr(Resource):
     movie_model = api_ns_webhooks_radarr.model(
         "RadarrMovie",
@@ -61,12 +64,28 @@ class WebHooksRadarr(Resource):
     @api_ns_webhooks_radarr.expect(radarr_webhook_model, validate=True)
     @api_ns_webhooks_radarr.response(200, "Success")
     @api_ns_webhooks_radarr.response(401, "Not Authenticated")
-    def post(self):
-        """Search for missing subtitles based on Radarr webhooks"""
+    def post(self, stable_key=None):
+        """Search for missing subtitles based on Radarr webhooks.
+
+        The optional <stable_key> path segment (#156) identifies the owning
+        Radarr instance so each instance can use its own webhook URL
+        (/api/webhooks/radarr/<stable_key>). With no key this is the legacy
+        single-instance path: arr_instance_id stays None, so every lookup and
+        action is unscoped exactly as before (byte-identical).
+        """
         args = api_ns_webhooks_radarr.payload
         event_type = args.get("eventType")
 
         logging.debug(f"Received Radarr webhook event: {event_type}")  # noqa: G004
+
+        arr_instance_id = None
+        if stable_key is not None:
+            instance = ArrInstanceRepository(database).get_by_key("radarr", stable_key)
+            if instance is None or not instance.enabled:
+                # Return 200 so Radarr does not flag the webhook unhealthy.
+                logging.warning("Radarr webhook for unknown/disabled instance key %s; ignoring.", stable_key)
+                return "Unknown or disabled instance.", 200
+            arr_instance_id = instance.id
 
         if event_type == "Test":
             message = "Received test hook, skipping database search."
@@ -86,8 +105,14 @@ class WebHooksRadarr(Resource):
         # so we update the movie first if we can.
         radarr_id = args.get("movie", {}).get("id")
 
-        q = select(TableMovies.radarrId, TableMovies.path).where(
-            TableMovies.movie_file_id == movie_file_id
+        # Scope by the owning instance: movie_file_id is per-Radarr, so it
+        # collides across instances. scoped() is a no-op when arr_instance_id
+        # is None (legacy URL), keeping the default path byte-identical.
+        q = scoped(
+            select(TableMovies.radarrId, TableMovies.path).where(
+                TableMovies.movie_file_id == movie_file_id
+            ),
+            TableMovies.arr_instance_id, arr_instance_id,
         )
 
         movie = database.execute(q).first()
@@ -95,7 +120,10 @@ class WebHooksRadarr(Resource):
             logging.debug(
                 f"No movie matching file ID {movie_file_id} found in the database. Attempting to sync from Radarr."  # noqa: G004
             )
-            update_one_movie(radarr_id, "updated")
+            if arr_instance_id is not None:
+                update_one_movie_for_instance(arr_instance_id, radarr_id, "updated")
+            else:
+                update_one_movie(radarr_id, "updated")
             movie = database.execute(q).first()
         if not movie:
             message = f"No movie matching file ID {movie_file_id} found in the database. Nothing to do."
@@ -103,6 +131,6 @@ class WebHooksRadarr(Resource):
             return message, 200
 
         store_subtitles_movie(movie.path, path_mappings.path_replace_movie(movie.path))
-        movies_download_subtitles(no=movie.radarrId)
+        movies_download_subtitles(no=movie.radarrId, arr_instance_id=arr_instance_id)
 
         return "Finished processing subtitles.", 200

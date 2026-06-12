@@ -4,7 +4,9 @@ import logging
 from flask_restx import Resource, Namespace, fields
 
 from app.database import TableEpisodes, TableShows, database, select
-from sonarr.sync.episodes import sync_one_episode
+from arr_instances.repository import ArrInstanceRepository
+from arr_instances.resolution import scoped
+from sonarr.sync.episodes import sync_one_episode, sync_one_episode_for_instance
 from subtitles.mass_download import episode_download_subtitles
 from subtitles.indexer.series import store_subtitles
 from utilities.path_mappings import path_mappings
@@ -20,6 +22,7 @@ api_ns_webhooks_sonarr = Namespace(
 
 
 @api_ns_webhooks_sonarr.route("webhooks/sonarr")
+@api_ns_webhooks_sonarr.route("webhooks/sonarr/<string:stable_key>")
 class WebHooksSonarr(Resource):
     episode_model = api_ns_webhooks_sonarr.model(
         "SonarrEpisode",
@@ -62,12 +65,28 @@ class WebHooksSonarr(Resource):
     @api_ns_webhooks_sonarr.expect(sonarr_webhook_model, validate=True)
     @api_ns_webhooks_sonarr.response(200, "Success")
     @api_ns_webhooks_sonarr.response(401, "Not Authenticated")
-    def post(self):
-        """Search for missing subtitles based on Sonarr webhooks"""
+    def post(self, stable_key=None):
+        """Search for missing subtitles based on Sonarr webhooks.
+
+        The optional <stable_key> path segment (#156) identifies the owning
+        Sonarr instance so each instance can use its own webhook URL
+        (/api/webhooks/sonarr/<stable_key>). With no key this is the legacy
+        single-instance path: arr_instance_id stays None, so every lookup and
+        action is unscoped exactly as before (byte-identical).
+        """
         args = api_ns_webhooks_sonarr.payload
         event_type = args.get("eventType")
 
         logging.debug(f"Received Sonarr webhook event: {event_type}")  # noqa: G004
+
+        arr_instance_id = None
+        if stable_key is not None:
+            instance = ArrInstanceRepository(database).get_by_key("sonarr", stable_key)
+            if instance is None or not instance.enabled:
+                # Return 200 so Sonarr does not flag the webhook unhealthy.
+                logging.warning("Sonarr webhook for unknown/disabled instance key %s; ignoring.", stable_key)
+                return "Unknown or disabled instance.", 200
+            arr_instance_id = instance.id
 
         if event_type == "Test":
             message = "Received test hook, skipping database search."
@@ -94,11 +113,15 @@ class WebHooksSonarr(Resource):
             sonarr_episode_ids = []
 
         for i, efid in enumerate(sonarr_episode_file_ids):
-            q = (
+            # Scope by the owning instance: episode_file_id is per-Sonarr, so it
+            # collides across instances. scoped() is a no-op when arr_instance_id
+            # is None (legacy URL), keeping the default path byte-identical.
+            q = scoped(
                 select(TableEpisodes.sonarrEpisodeId, TableEpisodes.path)
                 .select_from(TableEpisodes)
                 .join(TableShows)
-                .where(TableEpisodes.episode_file_id == efid)
+                .where(TableEpisodes.episode_file_id == efid),
+                TableEpisodes.arr_instance_id, arr_instance_id,
             )
 
             episode = database.execute(q).first()
@@ -107,7 +130,10 @@ class WebHooksSonarr(Resource):
                     "No episode found for episode file ID %s, attempting to sync from Sonarr.",
                     efid,
                 )
-                sync_one_episode(sonarr_episode_ids[i])
+                if arr_instance_id is not None:
+                    sync_one_episode_for_instance(arr_instance_id, sonarr_episode_ids[i])
+                else:
+                    sync_one_episode(sonarr_episode_ids[i])
                 episode = database.execute(q).first()
             if not episode:
                 logging.debug(
@@ -116,6 +142,6 @@ class WebHooksSonarr(Resource):
                 continue
 
             store_subtitles(episode.path, path_mappings.path_replace(episode.path))
-            episode_download_subtitles(no=episode.sonarrEpisodeId)
+            episode_download_subtitles(no=episode.sonarrEpisodeId, arr_instance_id=arr_instance_id)
 
         return "Finished processing subtitles.", 200
