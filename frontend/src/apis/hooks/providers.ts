@@ -93,6 +93,9 @@ export function useDownloadEpisodeSubtitles() {
       client.invalidateQueries({
         queryKey: [QueryKeys.Series, param.seriesId],
       });
+      client.invalidateQueries({
+        queryKey: [QueryKeys.Series],
+      });
     },
   });
 }
@@ -122,6 +125,9 @@ export function useDownloadMovieSubtitles() {
     onSuccess: (_, param) => {
       client.invalidateQueries({
         queryKey: [QueryKeys.Movies, param.radarrId],
+      });
+      client.invalidateQueries({
+        queryKey: [QueryKeys.Movies],
       });
     },
   });

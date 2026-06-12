@@ -37,7 +37,8 @@ def upgrade_subtitles(wait_for_completion=False):
     logging.info('BAZARR Finished searching for Subtitles to upgrade. Check History for more information.')
 
 
-def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, wait_for_completion=False):
+def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, sonarr_series_filters=None,
+                               wait_for_completion=False):
     if not job_id:
         jobs_queue.add_job_from_function("Trying to upgrade episodes subtitles", is_progress=True,
                                          wait_for_completion=wait_for_completion)
@@ -67,7 +68,14 @@ def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, wait_for_com
         .join(TableEpisodes, onclause=and_(TableHistory.sonarrEpisodeId == TableEpisodes.sonarrEpisodeId,
                                      TableHistory.arr_instance_id == TableEpisodes.arr_instance_id))
 
-    if sonarr_series_ids:
+    if sonarr_series_filters:
+        query = query.where(or_(*[
+            and_(TableHistory.sonarrSeriesId == series_id,
+                 TableHistory.arr_instance_id == arr_instance_id)
+            if arr_instance_id is not None else TableHistory.sonarrSeriesId == series_id
+            for series_id, arr_instance_id in sonarr_series_filters
+        ]))
+    elif sonarr_series_ids:
         query = query.where(TableHistory.sonarrSeriesId.in_(sonarr_series_ids))
 
     episodes_data = [{
@@ -168,7 +176,7 @@ def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, wait_for_com
     jobs_queue.update_job_name(job_id=job_id, new_job_name='Tried to upgrade episodes subtitles')
 
 
-def upgrade_movies_subtitles(job_id=None, radarr_ids=None, wait_for_completion=False):
+def upgrade_movies_subtitles(job_id=None, radarr_ids=None, radarr_filters=None, wait_for_completion=False):
     if not job_id:
         jobs_queue.add_job_from_function("Trying to upgrade movies subtitles", is_progress=True,
                                          wait_for_completion=wait_for_completion)
@@ -192,7 +200,14 @@ def upgrade_movies_subtitles(job_id=None, radarr_ids=None, wait_for_completion=F
         .join(TableMovies, onclause=and_(TableHistoryMovie.radarrId == TableMovies.radarrId,
                                   TableHistoryMovie.arr_instance_id == TableMovies.arr_instance_id))
 
-    if radarr_ids:
+    if radarr_filters:
+        query = query.where(or_(*[
+            and_(TableHistoryMovie.radarrId == radarr_id,
+                 TableHistoryMovie.arr_instance_id == arr_instance_id)
+            if arr_instance_id is not None else TableHistoryMovie.radarrId == radarr_id
+            for radarr_id, arr_instance_id in radarr_filters
+        ]))
+    elif radarr_ids:
         query = query.where(TableHistoryMovie.radarrId.in_(radarr_ids))
 
     all_rows = database.execute(query).all()

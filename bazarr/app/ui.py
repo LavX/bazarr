@@ -154,7 +154,7 @@ def _instance_image_url(kind, url):
     from arr_instances.resolution import client_for_instance
     from app.database import database as _db
     client = client_for_instance(_db, arr_instance_id)
-    if client is None:
+    if client is None or client.kind != kind:
         return None, None
     # Strip the instance's own base_url prefix from the stored path so it is not
     # duplicated; then fetch from the instance's /api/v3 cover endpoint.
@@ -342,8 +342,7 @@ def _format_host_header(hostname, original_port, scheme):
     IPv6 literals MUST be bracketed in the Host header (`[::1]:8989`,
     not `::1:8989`) because the colon is otherwise ambiguous with the
     port separator. urlparse(...).hostname strips brackets, so we have
-    to put them back when emitting the header. Codex P2 from PR #95
-    review round 3.
+    to put them back when emitting the header.
 
     Port is included only when non-default for the scheme, matching the
     convention urllib3 follows when it generates Host headers itself.
@@ -370,7 +369,7 @@ def _build_request_url(base_parsed, status_path, resolved_ip, hostname, pin):
     in that case would replace the hostname with an IP literal in the
     URL, urllib3 would set SNI to the IP, the server's cert (issued for
     e.g. sonarr.example.com) would not match the IP, and TLS hostname
-    validation would fail every legitimate test. Codex P2.
+    validation would fail every legitimate test.
     """
     base_path = (base_parsed.path or '').rstrip('/')
     test_path = base_path + status_path
@@ -431,7 +430,7 @@ def proxy_service(service):
     # attacker who poisons DNS still cannot mint a valid cert for the
     # hostname. Pinning in that case would replace the hostname with
     # the IP literal in the URL, SNI would be set to the IP, and a
-    # legitimate cert installation would fail TLS validation. Codex P2.
+    # legitimate cert installation would fail TLS validation.
     pin_to_ip = not (base_parsed.scheme == 'https' and verify is True)
     # When pinning is off, dual-stack fallback is unnecessary: urllib3
     # already iterates DNS-resolved addresses internally during the
@@ -491,7 +490,7 @@ def proxy_service(service):
                 return dict(status=False, error='Wrong URL Base.',
                             code=result.status_code)
             else:
-                # Codex P2: result.raise_for_status() RAISES on 4xx/5xx
+                # result.raise_for_status() raises on 4xx/5xx
                 # rather than returning a value, so wrapping it in dict()
                 # made the route propagate an HTTPError to Flask and
                 # surface as 500 to the frontend. Return a structured

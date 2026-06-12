@@ -63,7 +63,7 @@ const MovieDetailView: FunctionComponent = () => {
   const id = Number.parseInt(param.id ?? "");
   const movieQuery = useMovieById(id);
   const { data: movie, isFetched } = movieQuery;
-  const { data: movieHistory } = useMovieHistory(movie?.radarrId);
+  const { data: movieHistory } = useMovieHistory(movie?.id);
   const { multiInstance, nameById: instanceNameById } =
     useArrInstanceLabels("radarr");
   const overviewDetails =
@@ -189,7 +189,8 @@ const MovieDetailView: FunctionComponent = () => {
                 if (movie) {
                   await action({
                     action: "sync",
-                    radarrid: id,
+                    radarrid: movie.radarrId,
+                    arr_instance_id: movie.arr_instance_id,
                   });
                 }
               }}
@@ -203,7 +204,8 @@ const MovieDetailView: FunctionComponent = () => {
                 if (movie) {
                   task.create(movie.title, TaskGroup.ScanDisk, action, {
                     action: "scan-disk",
-                    radarrid: id,
+                    radarrid: movie.radarrId,
+                    arr_instance_id: movie.arr_instance_id,
                   });
                 }
               }}
@@ -218,7 +220,8 @@ const MovieDetailView: FunctionComponent = () => {
                 if (movie) {
                   await action({
                     action: "search-missing",
-                    radarrid: id,
+                    radarrid: movie.radarrId,
+                    arr_instance_id: movie.arr_instance_id,
                   });
                 }
               }}
@@ -246,7 +249,11 @@ const MovieDetailView: FunctionComponent = () => {
               onClick={() => {
                 if (movie) {
                   modals.openContextModal(CombineModal, {
-                    scope: { kind: "movie", radarrId: movie.radarrId },
+                    scope: {
+                      kind: "movie",
+                      radarrId: movie.radarrId,
+                      arrInstanceId: movie.arr_instance_id ?? undefined,
+                    },
                     availableLanguages: availableLangs,
                   });
                 }

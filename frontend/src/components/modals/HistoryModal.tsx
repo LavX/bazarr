@@ -26,7 +26,7 @@ interface MovieHistoryViewProps {
 const MovieHistoryView: FunctionComponent<MovieHistoryViewProps> = ({
   movie,
 }) => {
-  const history = useMovieHistory(movie.radarrId);
+  const history = useMovieHistory(movie.id);
 
   const { data } = history;
 
@@ -175,7 +175,7 @@ interface EpisodeHistoryViewProps {
 const EpisodeHistoryView: FunctionComponent<EpisodeHistoryViewProps> = ({
   episode,
 }) => {
-  const history = useEpisodeHistory(episode.sonarrEpisodeId);
+  const history = useEpisodeHistory(episode.id);
 
   const { data } = history;
 

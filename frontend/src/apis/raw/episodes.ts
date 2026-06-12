@@ -46,10 +46,10 @@ class EpisodeApi extends BaseApi {
     return response;
   }
 
-  async historyBy(episodeid: number) {
+  async historyBy(id: number) {
     const response = await this.get<DataWrapperWithTotal<History.Episode>>(
       "/history",
-      { episodeid },
+      { id },
     );
     return response.data;
   }

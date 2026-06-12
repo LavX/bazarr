@@ -60,6 +60,9 @@ export function useEpisodeSubtitleModification() {
       client.invalidateQueries({
         queryKey: [QueryKeys.Series, param.seriesId],
       });
+      client.invalidateQueries({
+        queryKey: [QueryKeys.Series],
+      });
     },
   });
 
@@ -78,6 +81,9 @@ export function useEpisodeSubtitleModification() {
       client.invalidateQueries({
         queryKey: [QueryKeys.Series, param.seriesId],
       });
+      client.invalidateQueries({
+        queryKey: [QueryKeys.Series],
+      });
     },
   });
 
@@ -95,6 +101,9 @@ export function useEpisodeSubtitleModification() {
     onSuccess: (_, { seriesId }) => {
       client.invalidateQueries({
         queryKey: [QueryKeys.Series, seriesId],
+      });
+      client.invalidateQueries({
+        queryKey: [QueryKeys.Series],
       });
     },
   });
@@ -126,6 +135,9 @@ export function useMovieSubtitleModification() {
       client.invalidateQueries({
         queryKey: [QueryKeys.Movies, param.radarrId],
       });
+      client.invalidateQueries({
+        queryKey: [QueryKeys.Movies],
+      });
     },
   });
 
@@ -143,6 +155,9 @@ export function useMovieSubtitleModification() {
       client.invalidateQueries({
         queryKey: [QueryKeys.Movies, param.radarrId],
       });
+      client.invalidateQueries({
+        queryKey: [QueryKeys.Movies],
+      });
     },
   });
 
@@ -159,6 +174,9 @@ export function useMovieSubtitleModification() {
     onSuccess: (_, { radarrId }) => {
       client.invalidateQueries({
         queryKey: [QueryKeys.Movies, radarrId],
+      });
+      client.invalidateQueries({
+        queryKey: [QueryKeys.Movies],
       });
     },
   });
@@ -187,6 +205,7 @@ export function useSubtitleSyncStatus(
   mediaId: number | undefined,
   language: string,
   enabled: boolean,
+  arrInstanceId?: number,
 ) {
   return useQuery({
     queryKey: [
@@ -195,8 +214,10 @@ export function useSubtitleSyncStatus(
       mediaType,
       mediaId,
       language,
+      arrInstanceId,
     ],
-    queryFn: () => api.subtitles.getSyncStatus(mediaType, mediaId!, language),
+    queryFn: () =>
+      api.subtitles.getSyncStatus(mediaType, mediaId!, language, arrInstanceId),
     enabled: enabled && mediaId !== undefined,
     refetchOnWindowFocus: false,
     refetchInterval: (query) => {
@@ -292,14 +313,27 @@ export function useSubtitleContent(
   mediaType: string | undefined,
   mediaId: number | undefined,
   language: string | undefined,
+  arrInstanceId?: number,
 ) {
   return useQuery({
-    queryKey: [QueryKeys.Subtitles, "content", mediaType, mediaId, language],
+    queryKey: [
+      QueryKeys.Subtitles,
+      "content",
+      mediaType,
+      mediaId,
+      language,
+      arrInstanceId,
+    ],
     queryFn: () => {
       if (!mediaType || mediaId === undefined || !language) {
         throw new Error("Missing parameters");
       }
-      return api.subtitles.getContent(mediaType, mediaId, language);
+      return api.subtitles.getContent(
+        mediaType,
+        mediaId,
+        language,
+        arrInstanceId,
+      );
     },
     enabled: !!mediaType && mediaId !== undefined && !!language,
     staleTime: 5 * 60 * 1000,
@@ -328,6 +362,7 @@ export function useSubtitleSave() {
       content: string;
       encoding: string;
       etag?: string;
+      arrInstanceId?: number;
     }) =>
       api.subtitles.saveContent(
         params.mediaType,
@@ -336,6 +371,7 @@ export function useSubtitleSave() {
         params.content,
         params.encoding,
         params.etag,
+        params.arrInstanceId,
       ),
     onSuccess: () => {
       // Do NOT invalidate the content query here. The editor already has
@@ -355,12 +391,14 @@ export function usePromoteSyncSubtitle() {
       mediaId: number;
       targetLanguage: string;
       sourceLanguage: string;
+      arrInstanceId?: number;
     }) =>
       api.subtitles.promoteSyncOutput(
         params.mediaType,
         params.mediaId,
         params.targetLanguage,
         params.sourceLanguage,
+        params.arrInstanceId,
       ),
     onSuccess: (_, params) => {
       if (params.mediaType === "episode") {
@@ -376,6 +414,7 @@ export function usePromoteSyncSubtitle() {
           params.mediaType,
           params.mediaId,
           params.targetLanguage,
+          params.arrInstanceId,
         ],
       });
     },
@@ -394,6 +433,7 @@ export function useSubtitleCreate() {
       format: string;
       forced: boolean;
       hi: boolean;
+      arrInstanceId?: number;
     }) =>
       api.subtitles.createSubtitle(
         params.mediaType,
@@ -403,6 +443,7 @@ export function useSubtitleCreate() {
         params.format,
         params.forced,
         params.hi,
+        params.arrInstanceId,
       ),
     onSuccess: (_, params) => {
       if (params.mediaType === "episode") {

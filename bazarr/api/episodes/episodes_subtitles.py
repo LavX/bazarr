@@ -184,9 +184,14 @@ class EpisodesSubtitlesCombine(Resource):
         languages = payload.get('languages')
         format_ = payload.get('format')
 
+        arr_instance_id = request.args.get('arr_instance_id', type=int)
         row = database.execute(
-            select(TableEpisodes.path, TableEpisodes.sonarrSeriesId)
-            .where(TableEpisodes.sonarrEpisodeId == episode_id)
+            scoped(
+                select(TableEpisodes.path, TableEpisodes.sonarrSeriesId)
+                .where(TableEpisodes.sonarrEpisodeId == episode_id),
+                TableEpisodes.arr_instance_id,
+                arr_instance_id,
+            )
         ).first()
         if not row:
             return {'status': 'not_found'}, 404

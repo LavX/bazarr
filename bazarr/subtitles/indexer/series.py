@@ -418,11 +418,13 @@ def series_full_scan_subtitles(job_id=None, use_cache=None, wait_for_completion=
     gc.collect()
 
 
-def series_scan_subtitles(no):
+def series_scan_subtitles(no, arr_instance_id=None):
     episodes = database.execute(
-        select(TableEpisodes.path)
-        .where(TableEpisodes.sonarrSeriesId == no)
-        .order_by(TableEpisodes.sonarrEpisodeId))\
+        scoped(
+            select(TableEpisodes.path)
+            .where(TableEpisodes.sonarrSeriesId == no)
+            .order_by(TableEpisodes.sonarrEpisodeId),
+            TableEpisodes.arr_instance_id, arr_instance_id))\
         .all()
 
     for episode in episodes:

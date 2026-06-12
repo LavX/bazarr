@@ -62,13 +62,26 @@ _patches = {
     'app.config': MagicMock(),
     'app.database': MagicMock(),
     'app.event_handler': MagicMock(),
+    'app.get_providers': MagicMock(),
     'app.jobs_queue': MagicMock(),
+    'app.scheduler': MagicMock(),
+    'app.signalr_client': MagicMock(),
     'utilities.path_mappings': MagicMock(),
     'utilities.binaries': MagicMock(),
     'api.utils': _api_utils_mock,
+    'subliminal_patch': MagicMock(),
     'subliminal_patch.core': MagicMock(SUBTITLE_EXTENSIONS=['.srt', '.ass']),
+    'subliminal_patch.core_persistent': MagicMock(),
+    'subliminal_patch.exceptions': MagicMock(),
+    'subliminal_patch.extensions': MagicMock(),
+    'subliminal_patch.score': MagicMock(MAX_SCORES={'movie': 100, 'episode': 100}),
+    'subliminal_patch.subtitle': MagicMock(),
+    'subtitles.indexer.movies': MagicMock(),
+    'subtitles.indexer.series': MagicMock(),
+    'subtitles.manual': MagicMock(),
     'subtitles.upload': MagicMock(),
     'subtitles.mass_download.movies': MagicMock(),
+    'subtitles.upgrade': MagicMock(),
     'subtitles.download': MagicMock(),
     'subtitles.tools.delete': MagicMock(),
     'subtitles.tools.combine': MagicMock(),
@@ -128,6 +141,7 @@ class TestMoviesSubtitlesCombinePost:
     def _make_request(self, payload):
         mock_request = MagicMock()
         mock_request.get_json.return_value = payload
+        mock_request.args.get.return_value = None
         return mock_request
 
     def test_post_combine_uses_profile_rule(self):

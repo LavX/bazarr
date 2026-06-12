@@ -6,6 +6,8 @@ import sys
 from datetime import datetime
 from types import SimpleNamespace
 
+from flask import Flask
+
 import app.database  # noqa: F401
 
 
@@ -26,6 +28,145 @@ def test_sync_modifier_language_code_is_valid():
     assert content._is_valid_language_code('eng:sync-alass')
 
 
+def test_resolve_movie_subtitle_path_scopes_by_arr_instance(schema_session, tmp_path, monkeypatch):
+    content = _real_module('api.subtitles.content')
+    from app.database import TableMovies
+
+    default_dir = tmp_path / 'default'
+    alt_dir = tmp_path / 'alt'
+    default_dir.mkdir()
+    alt_dir.mkdir()
+    default_video = default_dir / 'Movie.mkv'
+    alt_video = alt_dir / 'Movie.mkv'
+    default_subtitle = default_dir / 'Movie.en.srt'
+    alt_subtitle = alt_dir / 'Movie.en.srt'
+    default_video.write_text('', encoding='utf-8')
+    alt_video.write_text('', encoding='utf-8')
+    default_subtitle.write_text('default', encoding='utf-8')
+    alt_subtitle.write_text('alt', encoding='utf-8')
+
+    schema_session.add_all([
+        TableMovies(
+            id=10,
+            arr_instance_id=1,
+            radarrId=50,
+            path=str(default_video),
+            title='Default Movie',
+            tmdbId='100',
+            subtitles=str([['en', str(default_subtitle)]]),
+        ),
+        TableMovies(
+            id=20,
+            arr_instance_id=2,
+            radarrId=50,
+            path=str(alt_video),
+            title='Alt Movie',
+            tmdbId='200',
+            subtitles=str([['en', str(alt_subtitle)]]),
+        ),
+    ])
+    schema_session.flush()
+
+    monkeypatch.setattr(content, 'database', schema_session)
+    monkeypatch.setattr(content.path_mappings, 'path_replace_movie', lambda value: value)
+
+    subtitle_path, metadata = content.resolve_subtitle_path(
+        media_type='movie',
+        media_id=50,
+        language_code='en',
+        arr_instance_id=2,
+    )
+
+    assert subtitle_path == str(alt_subtitle)
+    assert metadata['mediaId'] == 20
+    assert metadata['mediaUpstreamId'] == 50
+    assert metadata['arrInstanceId'] == 2
+
+
+def test_resolve_episode_subtitle_path_scopes_by_arr_instance(schema_session, tmp_path, monkeypatch):
+    content = _real_module('api.subtitles.content')
+    from app.database import TableEpisodes, TableShows
+
+    default_dir = tmp_path / 'default-show'
+    alt_dir = tmp_path / 'alt-show'
+    default_dir.mkdir()
+    alt_dir.mkdir()
+    default_video = default_dir / 'Show.S01E01.mkv'
+    alt_video = alt_dir / 'Show.S01E01.mkv'
+    default_subtitle = default_dir / 'Show.S01E01.en.srt'
+    alt_subtitle = alt_dir / 'Show.S01E01.en.srt'
+    default_video.write_text('', encoding='utf-8')
+    alt_video.write_text('', encoding='utf-8')
+    default_subtitle.write_text('default', encoding='utf-8')
+    alt_subtitle.write_text('alt', encoding='utf-8')
+
+    schema_session.add_all([
+        TableShows(
+            id=100,
+            arr_instance_id=1,
+            sonarrSeriesId=70,
+            path=str(default_dir),
+            title='Default Show',
+            tags='[]',
+        ),
+        TableShows(
+            id=200,
+            arr_instance_id=2,
+            sonarrSeriesId=70,
+            path=str(alt_dir),
+            title='Alt Show',
+            tags='[]',
+        ),
+    ])
+    schema_session.flush()
+    schema_session.add_all([
+        TableEpisodes(
+            id=101,
+            series_id=100,
+            arr_instance_id=1,
+            sonarrSeriesId=70,
+            sonarrEpisodeId=80,
+            path=str(default_video),
+            title='Pilot',
+            season=1,
+            episode=1,
+            monitored='True',
+            subtitles=str([['en', str(default_subtitle)]]),
+        ),
+        TableEpisodes(
+            id=201,
+            series_id=200,
+            arr_instance_id=2,
+            sonarrSeriesId=70,
+            sonarrEpisodeId=80,
+            path=str(alt_video),
+            title='Pilot',
+            season=1,
+            episode=1,
+            monitored='True',
+            subtitles=str([['en', str(alt_subtitle)]]),
+        ),
+    ])
+    schema_session.flush()
+
+    monkeypatch.setattr(content, 'database', schema_session)
+    monkeypatch.setattr(content.path_mappings, 'path_replace', lambda value: value)
+
+    subtitle_path, metadata = content.resolve_subtitle_path(
+        media_type='episode',
+        media_id=80,
+        language_code='en',
+        arr_instance_id=2,
+    )
+
+    assert subtitle_path == str(alt_subtitle)
+    assert metadata['mediaId'] == 200
+    assert metadata['mediaUpstreamId'] == 70
+    assert metadata['episodeId'] == 201
+    assert metadata['episodeUpstreamId'] == 80
+    assert metadata['arrInstanceId'] == 2
+
+
 def test_promote_sync_output_overwrites_target_atomically(tmp_path, monkeypatch):
     content = _real_module('api.subtitles.content')
 
@@ -36,7 +177,7 @@ def test_promote_sync_output_overwrites_target_atomically(tmp_path, monkeypatch)
 
     metadata = {'mediaPath': '/movies/Movie.mkv', 'mediaId': 1203}
 
-    def fake_resolve(media_type, media_id, language_code):
+    def fake_resolve(media_type, media_id, language_code, arr_instance_id=None):
         if language_code == 'hu':
             return str(original), metadata
         if language_code == 'hu:sync-ffsubsync':
@@ -236,3 +377,63 @@ def test_sync_status_reports_running_job_as_unconfirmed(tmp_path, monkeypatch):
     assert response['jobStatus'] == 'running'
     assert response['jobId'] == 42
     assert response['confirmed'] is False
+
+
+def test_movie_subtitle_content_routes_pass_arr_instance_id(monkeypatch):
+    content = _real_module('api.subtitles.content')
+    app = Flask(__name__)
+    calls = []
+
+    def fake_get(media_type, media_id, language_code, arr_instance_id=None):
+        calls.append(('get', media_type, media_id, language_code, arr_instance_id))
+        return 'ok-get', 200
+
+    def fake_put(media_type, media_id, language_code, arr_instance_id=None):
+        calls.append(('put', media_type, media_id, language_code, arr_instance_id))
+        return 'ok-put', 204
+
+    def fake_promote(media_type, media_id, language_code, arr_instance_id=None):
+        calls.append(('promote', media_type, media_id, language_code, arr_instance_id))
+        return 'ok-promote', 200
+
+    def fake_status(media_type, media_id, language_code, arr_instance_id=None):
+        calls.append(('status', media_type, media_id, language_code, arr_instance_id))
+        return {'synced': True}, 200
+
+    def fake_create(media_type, media_id, arr_instance_id=None):
+        calls.append(('create', media_type, media_id, None, arr_instance_id))
+        return 'ok-create', 201
+
+    monkeypatch.setattr(content, '_get_subtitle_content', fake_get)
+    monkeypatch.setattr(content, '_save_subtitle_content', fake_put)
+    monkeypatch.setattr(content, '_promote_sync_subtitle_content', fake_promote)
+    monkeypatch.setattr(content, 'get_subtitle_sync_status', fake_status)
+    monkeypatch.setattr(content, '_create_subtitle', fake_create)
+
+    with app.test_request_context('/api/movies/50/subtitles/en/content?arr_instance_id=7'):
+        assert content.MovieSubtitleContent.get.__wrapped__(
+            content.MovieSubtitleContent(), 50, 'en') == ('ok-get', 200)
+    with app.test_request_context('/api/movies/50/subtitles/en/content?arr_instance_id=7',
+                                  method='PUT'):
+        assert content.MovieSubtitleContent.put.__wrapped__(
+            content.MovieSubtitleContent(), 50, 'en') == ('ok-put', 204)
+    with app.test_request_context('/api/movies/50/subtitles/en/promote?arr_instance_id=7',
+                                  method='POST'):
+        assert content.MovieSubtitlePromote.post.__wrapped__(
+            content.MovieSubtitlePromote(), 50, 'en') == ('ok-promote', 200)
+    with app.test_request_context('/api/movies/50/subtitles/en/sync-status?arr_instance_id=7'):
+        response = content.MovieSubtitleSyncStatus.get.__wrapped__(
+            content.MovieSubtitleSyncStatus(), 50, 'en')
+        assert response.get_json() == {'synced': True}
+    with app.test_request_context('/api/movies/50/subtitles?arr_instance_id=7',
+                                  method='POST'):
+        assert content.MovieSubtitleCreate.post.__wrapped__(
+            content.MovieSubtitleCreate(), 50) == ('ok-create', 201)
+
+    assert calls == [
+        ('get', 'movie', 50, 'en', 7),
+        ('put', 'movie', 50, 'en', 7),
+        ('promote', 'movie', 50, 'en', 7),
+        ('status', 'movie', 50, 'en', 7),
+        ('create', 'movie', 50, None, 7),
+    ]

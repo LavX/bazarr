@@ -32,7 +32,7 @@ const MoviesHistoryView: FunctionComponent = () => {
         header: "Name",
         accessorKey: "title",
         cell: ({ row }) => {
-          const target = `/movies/${row.original.radarrId}`;
+          const target = `/movies/${row.original.id}`;
           return (
             <Anchor className="table-primary" component={Link} to={target}>
               {row.original.title}

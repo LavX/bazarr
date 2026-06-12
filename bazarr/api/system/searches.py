@@ -6,11 +6,18 @@ from unidecode import unidecode
 from app.config import base_url, settings
 from app.database import TableShows, TableMovies, database, select
 
-from ..utils import authenticate
+from ..utils import authenticate, image_proxy_path_with_instance
 
 import textdistance 
 
 api_ns_system_searches = Namespace('System Searches', description='Search for series or movies by name')
+
+
+def _poster_url(media, path, arr_instance_id):
+    if not path:
+        return None
+    path = image_proxy_path_with_instance(path, arr_instance_id)
+    return f"{base_url}/images/{media}{path}"
 
 
 @api_ns_system_searches.route('system/searches')
@@ -68,11 +75,11 @@ class Searches(Resource):
 
                 if hasattr(x, 'sonarrSeriesId'):
                     result['sonarrSeriesId'] = x.sonarrSeriesId
-                    result['poster'] = f"{base_url}/images/series{x.poster}" if x.poster else None
+                    result['poster'] = _poster_url('series', x.poster, x.arr_instance_id)
 
                 else:
                     result['radarrId'] = x.radarrId
-                    result['poster'] = f"{base_url}/images/movies{x.poster}" if x.poster else None
+                    result['poster'] = _poster_url('movies', x.poster, x.arr_instance_id)
 
                 results.append(result)
 

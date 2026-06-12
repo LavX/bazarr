@@ -43,6 +43,16 @@ def _parse_subtitles_column(subtitles_raw):
         return []
 
 
+def _add_instance_filter(mapping, upstream_id, arr_instance_id):
+    mapping.setdefault(upstream_id, set()).add(arr_instance_id)
+
+
+def _instance_filter_matches(row_instance_id, requested_instances):
+    if not requested_instances or None in requested_instances:
+        return True
+    return row_instance_id in requested_instances
+
+
 def _get_synced_episode_paths():
     """Get set of subtitle paths that have been synced (action=5) from episode history."""
     results = database.execute(
@@ -85,8 +95,9 @@ def _collect_subtitle_items(items, action, options):
     episode_ids = []
     movie_ids = []
     # Per-item owning instance (#156): maps an upstream id to the arr_instance_id
-    # the caller requested, so a colliding id under another instance is dropped.
-    # None entries (legacy/single-instance) impose no filter -> byte-identical.
+    # values the caller requested, so colliding ids under different instances can
+    # be handled in the same batch. None entries (legacy/single-instance) impose
+    # no filter -> byte-identical.
     series_instance = {}
     episode_instance = {}
     movie_instance = {}
@@ -102,17 +113,17 @@ def _collect_subtitle_items(items, action, options):
                 sid = item.get('sonarrSeriesId')
                 if sid is not None:
                     series_ids.append(sid)
-                    series_instance[sid] = inst
+                    _add_instance_filter(series_instance, sid, inst)
             elif item_type == 'episode':
                 eid = item.get('sonarrEpisodeId')
                 if eid is not None:
                     episode_ids.append(eid)
-                    episode_instance[eid] = inst
+                    _add_instance_filter(episode_instance, eid, inst)
             elif item_type == 'movie':
                 rid = item.get('radarrId')
                 if rid is not None:
                     movie_ids.append(rid)
-                    movie_instance[rid] = inst
+                    _add_instance_filter(movie_instance, rid, inst)
 
     all_items = []
     total_skipped = 0
@@ -211,10 +222,12 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
     for ep in episodes:
         # Drop a row whose owner differs from the instance the caller asked for
         # (#156); a requested instance of None imposes no filter (byte-identical).
-        req_inst = episode_instance.get(ep.sonarrEpisodeId)
-        if req_inst is None:
-            req_inst = series_instance.get(ep.sonarrSeriesId)
-        if req_inst is not None and ep.arr_instance_id != req_inst:
+        req_instances = set()
+        if ep.sonarrEpisodeId in episode_instance:
+            req_instances.update(episode_instance[ep.sonarrEpisodeId])
+        if ep.sonarrSeriesId in series_instance:
+            req_instances.update(series_instance[ep.sonarrSeriesId])
+        if not _instance_filter_matches(ep.arr_instance_id, req_instances):
             continue
 
         subtitles = _parse_subtitles_column(ep.subtitles)
@@ -321,8 +334,8 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
     for movie in movies:
         # Drop a row whose owner differs from the requested instance (#156);
         # a requested instance of None imposes no filter (byte-identical).
-        req_inst = movie_instance.get(movie.radarrId)
-        if req_inst is not None and movie.arr_instance_id != req_inst:
+        req_instances = movie_instance.get(movie.radarrId)
+        if not _instance_filter_matches(movie.arr_instance_id, req_instances):
             continue
 
         subtitles = _parse_subtitles_column(movie.subtitles)
@@ -469,16 +482,16 @@ def _process_media_action(items, action, job_id):
     errors = []
 
     if action == 'upgrade':
-        sonarr_series_ids = [i.get('sonarrSeriesId') for i in items
-                             if i.get('type') in ('series', 'episode') and i.get('sonarrSeriesId')]
-        radarr_ids = [i.get('radarrId') for i in items
-                      if i.get('type') == 'movie' and i.get('radarrId')]
+        sonarr_series_filters = [(i.get('sonarrSeriesId'), i.get('arr_instance_id')) for i in items
+                                 if i.get('type') in ('series', 'episode') and i.get('sonarrSeriesId')]
+        radarr_filters = [(i.get('radarrId'), i.get('arr_instance_id')) for i in items
+                          if i.get('type') == 'movie' and i.get('radarrId')]
         try:
-            if sonarr_series_ids:
-                upgrade_episodes_subtitles(job_id=job_id, sonarr_series_ids=sonarr_series_ids)
-            if radarr_ids:
-                upgrade_movies_subtitles(job_id=job_id, radarr_ids=radarr_ids)
-            queued = len(sonarr_series_ids) + len(radarr_ids)
+            if sonarr_series_filters:
+                upgrade_episodes_subtitles(job_id=job_id, sonarr_series_filters=sonarr_series_filters)
+            if radarr_filters:
+                upgrade_movies_subtitles(job_id=job_id, radarr_filters=radarr_filters)
+            queued = len(sonarr_series_filters) + len(radarr_filters)
         except Exception as e:
             logger.error(f'Error during upgrade: {e}')  # noqa: G004
             errors.append(str(e))
@@ -501,13 +514,21 @@ def _process_media_action(items, action, job_id):
                     if not series_id:
                         skipped += 1
                         continue
-                    series_scan_subtitles(series_id)
+                    arr_instance_id = item.get('arr_instance_id')
+                    if arr_instance_id is None:
+                        series_scan_subtitles(series_id)
+                    else:
+                        series_scan_subtitles(series_id, arr_instance_id=arr_instance_id)
                 elif item_type == 'movie':
                     radarr_id = item.get('radarrId')
                     if not radarr_id:
                         skipped += 1
                         continue
-                    movies_scan_subtitles(radarr_id)
+                    arr_instance_id = item.get('arr_instance_id')
+                    if arr_instance_id is None:
+                        movies_scan_subtitles(radarr_id)
+                    else:
+                        movies_scan_subtitles(radarr_id, arr_instance_id=arr_instance_id)
                 else:
                     skipped += 1
                     continue

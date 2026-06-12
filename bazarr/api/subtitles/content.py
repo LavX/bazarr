@@ -70,6 +70,10 @@ def _language_modifier(code):
     return modifiers[0] if modifiers else ''
 
 
+def _request_arr_instance_id():
+    return request.args.get('arr_instance_id', type=int)
+
+
 def _language_non_sync_modifiers(code):
     return sorted(
         modifier.lower()
@@ -117,7 +121,7 @@ FORMAT_MAP = {
 FORMAT_TO_EXT = {v: k for k, v in FORMAT_MAP.items()}
 
 
-def resolve_subtitle_path(media_type, media_id, language_code):
+def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=None):
     """Resolve a subtitle file path from a media ID and language code.
 
     language_code can be like "en", "hu", "en:hi", "en:forced",
@@ -133,29 +137,58 @@ def resolve_subtitle_path(media_type, media_id, language_code):
 
     metadata = {}
     if media_type == 'episode':
-        row = database.execute(
-            select(TableEpisodes.subtitles, TableEpisodes.path, TableEpisodes.sonarrSeriesId, TableEpisodes.title)
+        query = (
+            select(TableEpisodes.id,
+                   TableEpisodes.series_id,
+                   TableEpisodes.arr_instance_id,
+                   TableEpisodes.subtitles,
+                   TableEpisodes.path,
+                   TableEpisodes.sonarrSeriesId,
+                   TableEpisodes.sonarrEpisodeId,
+                   TableEpisodes.title)
             .where(TableEpisodes.sonarrEpisodeId == media_id)
-        ).first()
+        )
+        if arr_instance_id is not None:
+            query = query.where(TableEpisodes.arr_instance_id == arr_instance_id)
+        row = database.execute(query).first()
         if row:
-            series_row = database.execute(
-                select(TableShows.title).where(TableShows.sonarrSeriesId == row.sonarrSeriesId)
-            ).first()
+            series_query = select(TableShows.id, TableShows.title, TableShows.sonarrSeriesId)
+            if row.series_id:
+                series_query = series_query.where(TableShows.id == row.series_id)
+            else:
+                series_query = series_query.where(TableShows.sonarrSeriesId == row.sonarrSeriesId)
+                if row.arr_instance_id is not None:
+                    series_query = series_query.where(TableShows.arr_instance_id == row.arr_instance_id)
+            series_row = database.execute(series_query).first()
             metadata = {
                 'mediaTitle': series_row.title if series_row else None,
-                'mediaId': row.sonarrSeriesId,
+                'mediaId': series_row.id if series_row else row.series_id,
+                'mediaUpstreamId': row.sonarrSeriesId,
+                'episodeId': row.id,
+                'episodeUpstreamId': row.sonarrEpisodeId,
+                'arrInstanceId': row.arr_instance_id,
                 'episodeTitle': row.title,
                 'mediaPath': row.path,
             }
     elif media_type == 'movie':
-        row = database.execute(
-            select(TableMovies.subtitles, TableMovies.path, TableMovies.title, TableMovies.radarrId)
+        query = (
+            select(TableMovies.id,
+                   TableMovies.arr_instance_id,
+                   TableMovies.subtitles,
+                   TableMovies.path,
+                   TableMovies.title,
+                   TableMovies.radarrId)
             .where(TableMovies.radarrId == media_id)
-        ).first()
+        )
+        if arr_instance_id is not None:
+            query = query.where(TableMovies.arr_instance_id == arr_instance_id)
+        row = database.execute(query).first()
         if row:
             metadata = {
                 'mediaTitle': row.title,
-                'mediaId': row.radarrId,
+                'mediaId': row.id,
+                'mediaUpstreamId': row.radarrId,
+                'arrInstanceId': row.arr_instance_id,
                 'mediaPath': row.path,
             }
     else:
@@ -307,16 +340,18 @@ def resolve_subtitle_path(media_type, media_id, language_code):
     # dict population, so the return value is not flagged as user-controlled.
     subtitle_basename = os.path.basename(os.path.normpath(subtitle_path))
     if media_type == 'episode':
-        fresh_row = database.execute(
-            select(TableEpisodes.path).where(TableEpisodes.sonarrEpisodeId == media_id)
-        ).first()
+        query = select(TableEpisodes.path).where(TableEpisodes.sonarrEpisodeId == media_id)
+        if arr_instance_id is not None:
+            query = query.where(TableEpisodes.arr_instance_id == arr_instance_id)
+        fresh_row = database.execute(query).first()
         if not fresh_row:
             return 'Media not found', 404
         trusted_media_path = path_mappings.path_replace(fresh_row.path)
     else:
-        fresh_row = database.execute(
-            select(TableMovies.path).where(TableMovies.radarrId == media_id)
-        ).first()
+        query = select(TableMovies.path).where(TableMovies.radarrId == media_id)
+        if arr_instance_id is not None:
+            query = query.where(TableMovies.arr_instance_id == arr_instance_id)
+        fresh_row = database.execute(query).first()
         if not fresh_row:
             return 'Media not found', 404
         trusted_media_path = path_mappings.path_replace_movie(fresh_row.path)
@@ -478,11 +513,11 @@ def _refresh_media_subtitles(media_type, media_id, metadata):
     media_path = metadata.get('mediaPath', '')
     if media_type == 'episode' and media_path:
         store_subtitles(media_path, path_mappings.path_replace(media_path), use_cache=False)
-        event_stream(type='series', payload=metadata['mediaId'])
-        event_stream(type='episode', payload=media_id)
+        event_stream(type='series', payload=metadata.get('mediaId'))
+        event_stream(type='episode', payload=metadata.get('episodeId', media_id))
     elif media_type == 'movie' and media_path:
         store_subtitles_movie(media_path, path_mappings.path_replace_movie(media_path), use_cache=False)
-        event_stream(type='movie', payload=media_id)
+        event_stream(type='movie', payload=metadata.get('mediaId', media_id))
 
 
 def _history_path_for_local_subtitle(media_type, subtitle_path):
@@ -491,26 +526,32 @@ def _history_path_for_local_subtitle(media_type, subtitle_path):
     return path_mappings.path_replace_reverse_movie(subtitle_path)
 
 
-def _latest_sync_history_for_path(media_type, media_id, subtitle_path):
+def _latest_sync_history_for_path(media_type, media_id, subtitle_path, arr_instance_id=None):
     history_path = _history_path_for_local_subtitle(media_type, subtitle_path)
     if media_type == 'episode':
-        return database.execute(
+        query = (
             select(TableHistory.timestamp)
             .where(TableHistory.sonarrEpisodeId == media_id)
             .where(TableHistory.action == 5)
             .where(TableHistory.subtitles_path == history_path)
             .order_by(TableHistory.timestamp.desc())
             .limit(1)
-        ).first()
+        )
+        if arr_instance_id is not None:
+            query = query.where(TableHistory.arr_instance_id == arr_instance_id)
+        return database.execute(query).first()
     if media_type == 'movie':
-        return database.execute(
+        query = (
             select(TableHistoryMovie.timestamp)
             .where(TableHistoryMovie.radarrId == media_id)
             .where(TableHistoryMovie.action == 5)
             .where(TableHistoryMovie.subtitles_path == history_path)
             .order_by(TableHistoryMovie.timestamp.desc())
             .limit(1)
-        ).first()
+        )
+        if arr_instance_id is not None:
+            query = query.where(TableHistoryMovie.arr_instance_id == arr_instance_id)
+        return database.execute(query).first()
     return None
 
 
@@ -542,8 +583,8 @@ def _active_sync_job_for_path(subtitle_path):
     return None
 
 
-def get_subtitle_sync_status(media_type, media_id, language_code):
-    result = resolve_subtitle_path(media_type, media_id, language_code)
+def get_subtitle_sync_status(media_type, media_id, language_code, arr_instance_id=None):
+    result = resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=arr_instance_id)
     if isinstance(result[1], int):
         return result[0], result[1]
 
@@ -553,7 +594,12 @@ def get_subtitle_sync_status(media_type, media_id, language_code):
     except FileNotFoundError:
         return 'Subtitle file or directory not found', 404
 
-    latest_sync = _latest_sync_history_for_path(media_type, media_id, subtitle_path)
+    latest_sync = _latest_sync_history_for_path(
+        media_type,
+        media_id,
+        subtitle_path,
+        arr_instance_id=arr_instance_id,
+    )
     last_sync_timestamp = latest_sync.timestamp if latest_sync else None
     last_modified = datetime.fromtimestamp(stat.st_mtime)
     edited_after_sync = bool(
@@ -601,9 +647,10 @@ def _log_promoted_sync_history(media_type, media_id, target_language, source_lan
         )
         history_log(
             action=5,
-            sonarr_series_id=metadata.get('mediaId'),
-            sonarr_episode_id=media_id,
+            sonarr_series_id=metadata.get('mediaUpstreamId'),
+            sonarr_episode_id=metadata.get('episodeUpstreamId', media_id),
             result=result,
+            arr_instance_id=metadata.get('arrInstanceId'),
         )
     elif media_type == 'movie':
         result = ProcessSubtitlesResult(
@@ -617,48 +664,70 @@ def _log_promoted_sync_history(media_type, media_id, target_language, source_lan
             reversed_subtitles_path=path_mappings.path_replace_reverse_movie(target_path),
             hearing_impaired=_is_hi_language(target_language),
         )
-        history_log_movie(action=5, radarr_id=media_id, result=result)
+        history_log_movie(
+            action=5,
+            radarr_id=metadata.get('mediaUpstreamId', media_id),
+            result=result,
+            arr_instance_id=metadata.get('arrInstanceId'),
+        )
 
 
-def _get_media_metadata(media_type, media_id):
+def _get_media_metadata(media_type, media_id, arr_instance_id=None):
     """Get media metadata without requiring a subtitle to exist."""
     if media_type == 'episode':
-        row = database.execute(
-            select(TableEpisodes.path, TableEpisodes.sonarrSeriesId, TableEpisodes.title)
+        query = (
+            select(TableEpisodes.id,
+                   TableEpisodes.series_id,
+                   TableEpisodes.arr_instance_id,
+                   TableEpisodes.path,
+                   TableEpisodes.sonarrSeriesId,
+                   TableEpisodes.sonarrEpisodeId,
+                   TableEpisodes.title)
             .where(TableEpisodes.sonarrEpisodeId == media_id)
-        ).first()
+        )
+        if arr_instance_id is not None:
+            query = query.where(TableEpisodes.arr_instance_id == arr_instance_id)
+        row = database.execute(query).first()
         if row:
-            series_row = database.execute(
-                select(TableShows.title).where(TableShows.sonarrSeriesId == row.sonarrSeriesId)
-            ).first()
+            series_query = select(TableShows.id, TableShows.title).where(TableShows.id == row.series_id)
+            series_row = database.execute(series_query).first()
             return {
                 'mediaTitle': series_row.title if series_row else None,
-                'mediaId': row.sonarrSeriesId,
+                'mediaId': series_row.id if series_row else row.series_id,
+                'mediaUpstreamId': row.sonarrSeriesId,
+                'episodeId': row.id,
+                'episodeUpstreamId': row.sonarrEpisodeId,
+                'arrInstanceId': row.arr_instance_id,
                 'episodeTitle': row.title,
             }
     elif media_type == 'movie':
-        row = database.execute(
-            select(TableMovies.title, TableMovies.radarrId)
+        query = (
+            select(TableMovies.id, TableMovies.arr_instance_id, TableMovies.title, TableMovies.radarrId)
             .where(TableMovies.radarrId == media_id)
-        ).first()
+        )
+        if arr_instance_id is not None:
+            query = query.where(TableMovies.arr_instance_id == arr_instance_id)
+        row = database.execute(query).first()
         if row:
             return {
                 'mediaTitle': row.title,
-                'mediaId': row.radarrId,
+                'mediaId': row.id,
+                'mediaUpstreamId': row.radarrId,
+                'arrInstanceId': row.arr_instance_id,
             }
     return None
 
 
-def _get_subtitle_content(media_type, media_id, language_code):
+def _get_subtitle_content(media_type, media_id, language_code, arr_instance_id=None):
     """Shared handler for episode and movie subtitle content."""
-    result = resolve_subtitle_path(media_type, media_id, language_code)
+    result = resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=arr_instance_id)
 
     # Error tuple: subtitle not found for this language
     if isinstance(result[1], int):
         # For 404 (subtitle doesn't exist), still return media metadata so the editor
         # can show the media title and start in create-new mode
         if result[1] == 404:
-            metadata = _get_media_metadata(media_type, media_id)
+            metadata = _get_media_metadata(media_type, media_id, arr_instance_id=arr_instance_id)
             if metadata:
                 response_data = {
                     'exists': False,
@@ -708,9 +777,9 @@ def _get_subtitle_content(media_type, media_id, language_code):
     return response
 
 
-def _save_subtitle_content(media_type, media_id, language_code):
+def _save_subtitle_content(media_type, media_id, language_code, arr_instance_id=None):
     """Shared handler for saving edited subtitle content."""
-    result = resolve_subtitle_path(media_type, media_id, language_code)
+    result = resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=arr_instance_id)
     if isinstance(result[1], int):
         return result[0], result[1]
 
@@ -762,7 +831,7 @@ def _save_subtitle_content(media_type, media_id, language_code):
     return response
 
 
-def promote_sync_subtitle(media_type, media_id, target_language, source_language):
+def promote_sync_subtitle(media_type, media_id, target_language, source_language, arr_instance_id=None):
     """Overwrite a base subtitle with one generated by a sync engine."""
     if not source_language or not isinstance(source_language, str):
         return 'Request body must include "sourceLanguage"', 400
@@ -780,10 +849,20 @@ def promote_sync_subtitle(media_type, media_id, target_language, source_language
     if _language_non_sync_modifiers(target_language) != _language_non_sync_modifiers(source_language):
         return 'Source and target language variants do not match', 400
 
-    source_result = resolve_subtitle_path(media_type, media_id, source_language)
+    source_result = resolve_subtitle_path(
+        media_type,
+        media_id,
+        source_language,
+        arr_instance_id=arr_instance_id,
+    )
     if isinstance(source_result[1], int):
         return source_result[0], source_result[1]
-    target_result = resolve_subtitle_path(media_type, media_id, target_language)
+    target_result = resolve_subtitle_path(
+        media_type,
+        media_id,
+        target_language,
+        arr_instance_id=arr_instance_id,
+    )
     if isinstance(target_result[1], int):
         return target_result[0], target_result[1]
 
@@ -829,7 +908,7 @@ def promote_sync_subtitle(media_type, media_id, target_language, source_language
     }, 200
 
 
-def _promote_sync_subtitle_content(media_type, media_id, language_code):
+def _promote_sync_subtitle_content(media_type, media_id, language_code, arr_instance_id=None):
     data = request.get_json()
     if not data:
         return 'Request body must be JSON', 400
@@ -838,6 +917,7 @@ def _promote_sync_subtitle_content(media_type, media_id, language_code):
         media_id=media_id,
         target_language=language_code,
         source_language=data.get('sourceLanguage'),
+        arr_instance_id=arr_instance_id,
     )
 
 
@@ -845,25 +925,29 @@ def _promote_sync_subtitle_content(media_type, media_id, language_code):
 class EpisodeSubtitleContent(Resource):
     @authenticate
     def get(self, sonarrEpisodeId, language):
-        return _get_subtitle_content('episode', sonarrEpisodeId, language)
+        return _get_subtitle_content('episode', sonarrEpisodeId, language,
+                                     arr_instance_id=_request_arr_instance_id())
 
     @authenticate
     def put(self, sonarrEpisodeId, language):
-        return _save_subtitle_content('episode', sonarrEpisodeId, language)
+        return _save_subtitle_content('episode', sonarrEpisodeId, language,
+                                      arr_instance_id=_request_arr_instance_id())
 
 
 @api_ns_subtitle_content.route('episodes/<int:sonarrEpisodeId>/subtitles/<language>/promote')
 class EpisodeSubtitlePromote(Resource):
     @authenticate
     def post(self, sonarrEpisodeId, language):
-        return _promote_sync_subtitle_content('episode', sonarrEpisodeId, language)
+        return _promote_sync_subtitle_content('episode', sonarrEpisodeId, language,
+                                              arr_instance_id=_request_arr_instance_id())
 
 
 @api_ns_subtitle_content.route('episodes/<int:sonarrEpisodeId>/subtitles/<language>/sync-status')
 class EpisodeSubtitleSyncStatus(Resource):
     @authenticate
     def get(self, sonarrEpisodeId, language):
-        response, status_code = get_subtitle_sync_status('episode', sonarrEpisodeId, language)
+        response, status_code = get_subtitle_sync_status('episode', sonarrEpisodeId, language,
+                                                         arr_instance_id=_request_arr_instance_id())
         if status_code != 200:
             return response, status_code
         return jsonify(response)
@@ -873,31 +957,35 @@ class EpisodeSubtitleSyncStatus(Resource):
 class MovieSubtitleContent(Resource):
     @authenticate
     def get(self, radarrId, language):
-        return _get_subtitle_content('movie', radarrId, language)
+        return _get_subtitle_content('movie', radarrId, language,
+                                     arr_instance_id=_request_arr_instance_id())
 
     @authenticate
     def put(self, radarrId, language):
-        return _save_subtitle_content('movie', radarrId, language)
+        return _save_subtitle_content('movie', radarrId, language,
+                                      arr_instance_id=_request_arr_instance_id())
 
 
 @api_ns_subtitle_content.route('movies/<int:radarrId>/subtitles/<language>/promote')
 class MovieSubtitlePromote(Resource):
     @authenticate
     def post(self, radarrId, language):
-        return _promote_sync_subtitle_content('movie', radarrId, language)
+        return _promote_sync_subtitle_content('movie', radarrId, language,
+                                              arr_instance_id=_request_arr_instance_id())
 
 
 @api_ns_subtitle_content.route('movies/<int:radarrId>/subtitles/<language>/sync-status')
 class MovieSubtitleSyncStatus(Resource):
     @authenticate
     def get(self, radarrId, language):
-        response, status_code = get_subtitle_sync_status('movie', radarrId, language)
+        response, status_code = get_subtitle_sync_status('movie', radarrId, language,
+                                                         arr_instance_id=_request_arr_instance_id())
         if status_code != 200:
             return response, status_code
         return jsonify(response)
 
 
-def _create_subtitle(media_type, media_id):
+def _create_subtitle(media_type, media_id, arr_instance_id=None):
     """Shared handler for creating a new subtitle file."""
     data = request.get_json()
     if not data:
@@ -927,15 +1015,21 @@ def _create_subtitle(media_type, media_id):
 
     # Look up the media to get the video file path
     if media_type == 'episode':
-        row = database.execute(
-            select(TableEpisodes.path)
+        query = (
+            select(TableEpisodes.id, TableEpisodes.path)
             .where(TableEpisodes.sonarrEpisodeId == media_id)
-        ).first()
+        )
+        if arr_instance_id is not None:
+            query = query.where(TableEpisodes.arr_instance_id == arr_instance_id)
+        row = database.execute(query).first()
     elif media_type == 'movie':
-        row = database.execute(
-            select(TableMovies.path)
+        query = (
+            select(TableMovies.id, TableMovies.path)
             .where(TableMovies.radarrId == media_id)
-        ).first()
+        )
+        if arr_instance_id is not None:
+            query = query.where(TableMovies.arr_instance_id == arr_instance_id)
+        row = database.execute(query).first()
     else:
         return 'Invalid media type', 400
 
@@ -1013,10 +1107,10 @@ def _create_subtitle(media_type, media_id):
     # Force re-scan subtitles from disk using the media (video) path
     if media_type == 'episode':
         store_subtitles(row.path, video_path, use_cache=False)
-        event_stream(type='episode', payload=media_id)
+        event_stream(type='episode', payload=row.id)
     else:
         store_subtitles_movie(row.path, video_path, use_cache=False)
-        event_stream(type='movie', payload=media_id)
+        event_stream(type='movie', payload=row.id)
 
     # Build language with modifiers
     language_with_modifiers = language
@@ -1032,11 +1126,11 @@ def _create_subtitle(media_type, media_id):
 class EpisodeSubtitleCreate(Resource):
     @authenticate
     def post(self, sonarrEpisodeId):
-        return _create_subtitle('episode', sonarrEpisodeId)
+        return _create_subtitle('episode', sonarrEpisodeId, arr_instance_id=_request_arr_instance_id())
 
 
 @api_ns_subtitle_content.route('movies/<int:radarrId>/subtitles')
 class MovieSubtitleCreate(Resource):
     @authenticate
     def post(self, radarrId):
-        return _create_subtitle('movie', radarrId)
+        return _create_subtitle('movie', radarrId, arr_instance_id=_request_arr_instance_id())

@@ -405,11 +405,13 @@ def movies_full_scan_subtitles(job_id=None, use_cache=None, wait_for_completion=
     gc.collect()
 
 
-def movies_scan_subtitles(no):
+def movies_scan_subtitles(no, arr_instance_id=None):
     movies = database.execute(
-        select(TableMovies.path)
-        .where(TableMovies.radarrId == no)
-        .order_by(TableMovies.radarrId)) \
+        scoped(
+            select(TableMovies.path)
+            .where(TableMovies.radarrId == no)
+            .order_by(TableMovies.radarrId),
+            TableMovies.arr_instance_id, arr_instance_id)) \
         .all()
 
     for movie in movies:

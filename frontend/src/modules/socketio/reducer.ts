@@ -52,6 +52,9 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
             queryKey: [QueryKeys.Series, id],
           });
         });
+        void queryClient.invalidateQueries({
+          queryKey: [QueryKeys.Series],
+        });
       },
     },
     {
@@ -75,6 +78,9 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
             queryKey: [QueryKeys.Movies, id],
           });
         });
+        void queryClient.invalidateQueries({
+          queryKey: [QueryKeys.Movies],
+        });
       },
     },
     {
@@ -91,7 +97,11 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
           ]);
           if (episode !== undefined) {
             void queryClient.invalidateQueries({
-              queryKey: [QueryKeys.Series, episode.sonarrSeriesId],
+              queryKey: [QueryKeys.Series, episode.series_id],
+            });
+          } else {
+            void queryClient.invalidateQueries({
+              queryKey: [QueryKeys.Series],
             });
           }
         });
@@ -105,7 +115,11 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
           ]);
           if (episode !== undefined) {
             void queryClient.invalidateQueries({
-              queryKey: [QueryKeys.Series, episode.sonarrSeriesId],
+              queryKey: [QueryKeys.Series, episode.series_id],
+            });
+          } else {
+            void queryClient.invalidateQueries({
+              queryKey: [QueryKeys.Series],
             });
           }
         });
@@ -116,12 +130,12 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       update: () => {
         // Find a better way to update wanted
         void queryClient.invalidateQueries({
-          queryKey: [QueryKeys.Episodes, QueryKeys.Wanted],
+          queryKey: [QueryKeys.Series, QueryKeys.Wanted],
         });
       },
       delete: () => {
         void queryClient.invalidateQueries({
-          queryKey: [QueryKeys.Episodes, QueryKeys.Wanted],
+          queryKey: [QueryKeys.Series, QueryKeys.Wanted],
         });
       },
     },
@@ -205,7 +219,7 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       key: "reset-episode-wanted",
       any: () => {
         void queryClient.invalidateQueries({
-          queryKey: [QueryKeys.Episodes, QueryKeys.Wanted],
+          queryKey: [QueryKeys.Series, QueryKeys.Wanted],
         });
       },
     },

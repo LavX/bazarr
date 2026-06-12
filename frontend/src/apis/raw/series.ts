@@ -23,7 +23,7 @@ class SeriesApi extends BaseApi {
   }
 
   async modify(form: FormType.ModifyItem) {
-    await this.post("", { seriesid: form.id, profileid: form.profileid });
+    await this.post("", { id: form.id, profileid: form.profileid });
   }
 
   async action(form: FormType.SeriesAction) {

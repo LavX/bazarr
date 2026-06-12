@@ -242,6 +242,8 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
                       scope: {
                         kind: "episode",
                         episodeId: row.original.sonarrEpisodeId,
+                        arrInstanceId:
+                          row.original.arr_instance_id ?? undefined,
                       },
                       availableLanguages: episodeAvailableLangs,
                     });

@@ -19,7 +19,7 @@ type SearchResultItem = {
   value: string;
   label: string;
   link: string;
-  poster: string;
+  poster: string | null;
   type: string;
 };
 

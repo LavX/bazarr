@@ -7,12 +7,17 @@ install uses the built-ins until the user opts in. The behavior is non-destructi
 the gate only prevents *new* staging; it never uninstalls/reverts anything.
 """
 import provider_hub.service as svc
-from app.config import settings
+from app.config import settings, validators
 
 
 def test_provider_hub_auto_install_defaults_false():
     """The new opt-in config key exists and defaults to False."""
-    assert settings.general.provider_hub_auto_install is False
+    validator = next(
+        v for v in validators
+        if "general.provider_hub_auto_install" in v.names
+    )
+
+    assert validator.default is False
 
 
 def test_autoinstall_skipped_when_optin_off(monkeypatch):

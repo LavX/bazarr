@@ -204,7 +204,8 @@ const SeriesEpisodesView: FunctionComponent = () => {
                 if (series) {
                   await action({
                     action: "sync",
-                    seriesid: id,
+                    seriesid: series.sonarrSeriesId,
+                    arr_instance_id: series.arr_instance_id,
                   });
                 }
               }}
@@ -217,7 +218,8 @@ const SeriesEpisodesView: FunctionComponent = () => {
                 if (series) {
                   await action({
                     action: "search-missing",
-                    seriesid: id,
+                    seriesid: series.sonarrSeriesId,
+                    arr_instance_id: series.arr_instance_id,
                   });
                 }
               }}
@@ -240,6 +242,7 @@ const SeriesEpisodesView: FunctionComponent = () => {
                     scope: {
                       kind: "series",
                       seriesId: series.sonarrSeriesId,
+                      arrInstanceId: series.arr_instance_id ?? undefined,
                     },
                     availableLanguages: seriesAvailableLangs,
                   });
@@ -307,7 +310,8 @@ const SeriesEpisodesView: FunctionComponent = () => {
                     if (series) {
                       task.create(series.title, TaskGroup.ScanDisk, action, {
                         action: "scan-disk",
-                        seriesid: id,
+                        seriesid: series.sonarrSeriesId,
+                        arr_instance_id: series.arr_instance_id,
                       });
                     }
                   }}

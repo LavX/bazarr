@@ -7,6 +7,7 @@ import logging
 from functools import wraps
 from flask import request, abort
 from operator import itemgetter
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from app.config import settings, base_url
 from languages.get_languages import language_from_alpha2, alpha3_from_alpha2
@@ -16,6 +17,26 @@ from utilities.path_mappings import path_mappings
 None_Keys = ['null', 'undefined', '', None]
 
 False_Keys = ['False', 'false', '0']
+
+
+def image_proxy_path_with_instance(path, arr_instance_id):
+    if arr_instance_id is None:
+        return path
+
+    parsed = urlsplit(path)
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key != 'arr_instance_id'
+    ]
+    query.append(('arr_instance_id', str(arr_instance_id)))
+    return urlunsplit((
+        parsed.scheme,
+        parsed.netloc,
+        parsed.path,
+        urlencode(query),
+        parsed.fragment,
+    ))
 
 
 def _subtitle_language_details(language_code):
@@ -188,10 +209,7 @@ def postprocess(item):
     def _proxy_image(path):
         if not path:
             return None
-        # Radarr cover paths already carry a ?lastWrite=... query, so use & there.
-        if arr_instance_id is not None:
-            sep = '&' if '?' in path else '?'
-            path = f"{path}{sep}arr_instance_id={arr_instance_id}"
+        path = image_proxy_path_with_instance(path, arr_instance_id)
         return f"{base_url}/images/{media}{path}"
 
     if item.get('poster') is not None:

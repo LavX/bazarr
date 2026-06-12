@@ -287,6 +287,113 @@ class TestCollectSubtitleItems:
     @patch('subtitles.mass_operations._get_synced_movie_paths', return_value=set())
     @patch('subtitles.mass_operations.database')
     @patch('subtitles.mass_operations.settings')
+    def test_collects_duplicate_movie_upstream_ids_by_instance(self, mock_settings, mock_db, mock_synced_mov,
+                                                               mock_synced_ep, mock_path_map, mock_isfile,
+                                                               mock_lang):
+        from subtitles.mass_operations import _collect_subtitle_items
+
+        mock_settings.subsync.max_offset_seconds = 60
+        mock_settings.subsync.gss = True
+        mock_settings.subsync.no_fix_framerate = True
+        mock_path_map.path_replace_movie.side_effect = lambda x: x
+        mock_path_map.path_replace_reverse_movie.side_effect = lambda x: x
+        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
+
+        movie_a = self._make_movie(path="/movies/a.mkv", subtitles="[['en', '/subs/a.en.srt']]")
+        movie_a.arr_instance_id = 1
+        movie_b = self._make_movie(path="/movies/b.mkv", subtitles="[['en', '/subs/b.en.srt']]")
+        movie_b.arr_instance_id = 2
+        mock_db.execute.return_value.all.return_value = [movie_a, movie_b]
+
+        items_list = [
+            {'type': 'movie', 'radarrId': 10, 'arr_instance_id': 1},
+            {'type': 'movie', 'radarrId': 10, 'arr_instance_id': 2},
+        ]
+        items, skipped = _collect_subtitle_items(items_list, action='sync', options={})
+
+        assert skipped == 0
+        assert [item['arr_instance_id'] for item in items] == [1, 2]
+        assert [item['srt_path'] for item in items] == ['/subs/a.en.srt', '/subs/b.en.srt']
+
+    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
+    @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
+    @patch('subtitles.mass_operations.path_mappings')
+    @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
+    @patch('subtitles.mass_operations._get_synced_movie_paths', return_value=set())
+    @patch('subtitles.mass_operations.database')
+    @patch('subtitles.mass_operations.settings')
+    def test_collects_duplicate_episode_upstream_ids_by_instance(self, mock_settings, mock_db, mock_synced_mov,
+                                                                 mock_synced_ep, mock_path_map, mock_isfile,
+                                                                 mock_lang):
+        from subtitles.mass_operations import _collect_subtitle_items
+
+        mock_settings.subsync.max_offset_seconds = 60
+        mock_settings.subsync.gss = True
+        mock_settings.subsync.no_fix_framerate = True
+        mock_path_map.path_replace.side_effect = lambda x: x
+        mock_path_map.path_replace_reverse.side_effect = lambda x: x
+        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
+
+        episode_a = self._make_episode(path="/series/a.mkv", subtitles="[['en', '/subs/a.en.srt']]")
+        episode_a.arr_instance_id = 1
+        episode_b = self._make_episode(path="/series/b.mkv", subtitles="[['en', '/subs/b.en.srt']]")
+        episode_b.arr_instance_id = 2
+        mock_db.execute.return_value.all.return_value = [episode_a, episode_b]
+
+        items_list = [
+            {'type': 'episode', 'sonarrEpisodeId': 1, 'arr_instance_id': 1},
+            {'type': 'episode', 'sonarrEpisodeId': 1, 'arr_instance_id': 2},
+        ]
+        items, skipped = _collect_subtitle_items(items_list, action='sync', options={})
+
+        assert skipped == 0
+        assert [item['arr_instance_id'] for item in items] == [1, 2]
+        assert [item['srt_path'] for item in items] == ['/subs/a.en.srt', '/subs/b.en.srt']
+
+    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
+    @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
+    @patch('subtitles.mass_operations.path_mappings')
+    @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
+    @patch('subtitles.mass_operations._get_synced_movie_paths', return_value=set())
+    @patch('subtitles.mass_operations.database')
+    @patch('subtitles.mass_operations.settings')
+    def test_collects_duplicate_series_upstream_ids_by_instance(self, mock_settings, mock_db, mock_synced_mov,
+                                                                mock_synced_ep, mock_path_map, mock_isfile,
+                                                                mock_lang):
+        from subtitles.mass_operations import _collect_subtitle_items
+
+        mock_settings.subsync.max_offset_seconds = 60
+        mock_settings.subsync.gss = True
+        mock_settings.subsync.no_fix_framerate = True
+        mock_path_map.path_replace.side_effect = lambda x: x
+        mock_path_map.path_replace_reverse.side_effect = lambda x: x
+        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
+
+        episode_a = self._make_episode(ep_id=1, series_id=42, path="/series/a.mkv",
+                                       subtitles="[['en', '/subs/a.en.srt']]")
+        episode_a.arr_instance_id = 1
+        episode_b = self._make_episode(ep_id=2, series_id=42, path="/series/b.mkv",
+                                       subtitles="[['en', '/subs/b.en.srt']]")
+        episode_b.arr_instance_id = 2
+        mock_db.execute.return_value.all.return_value = [episode_a, episode_b]
+
+        items_list = [
+            {'type': 'series', 'sonarrSeriesId': 42, 'arr_instance_id': 1},
+            {'type': 'series', 'sonarrSeriesId': 42, 'arr_instance_id': 2},
+        ]
+        items, skipped = _collect_subtitle_items(items_list, action='sync', options={})
+
+        assert skipped == 0
+        assert [item['arr_instance_id'] for item in items] == [1, 2]
+        assert [item['sonarr_episode_id'] for item in items] == [1, 2]
+
+    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
+    @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
+    @patch('subtitles.mass_operations.path_mappings')
+    @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
+    @patch('subtitles.mass_operations._get_synced_movie_paths', return_value=set())
+    @patch('subtitles.mass_operations.database')
+    @patch('subtitles.mass_operations.settings')
     def test_skips_forced_subtitles(self, mock_settings, mock_db, mock_synced_mov,
                                      mock_synced_ep, mock_path_map, mock_isfile, mock_lang):
         from subtitles.mass_operations import _collect_subtitle_items
@@ -566,7 +673,7 @@ class TestProcessMediaActions:
         items = [{'type': 'series', 'sonarrSeriesId': 1}]
         result = _process_media_action(items, action='search-missing', job_id='test')
 
-        mock_download.assert_called_once_with(1)
+        mock_download.assert_called_once_with(1, arr_instance_id=None)
         assert result['queued'] == 1
 
     @patch('subtitles.mass_operations.movies_download_subtitles')
@@ -577,8 +684,55 @@ class TestProcessMediaActions:
         items = [{'type': 'movie', 'radarrId': 10}]
         result = _process_media_action(items, action='search-missing', job_id='test')
 
-        mock_download.assert_called_once_with(10)
+        mock_download.assert_called_once_with(10, arr_instance_id=None)
         assert result['queued'] == 1
+
+    @patch('subtitles.mass_operations.series_scan_subtitles')
+    @patch('subtitles.mass_operations.jobs_queue')
+    def test_scan_disk_series_passes_arr_instance_id(self, mock_jobs_queue, mock_scan):
+        from subtitles.mass_operations import _process_media_action
+
+        items = [{'type': 'series', 'sonarrSeriesId': 1, 'arr_instance_id': 7}]
+        result = _process_media_action(items, action='scan-disk', job_id='test')
+
+        mock_scan.assert_called_once_with(1, arr_instance_id=7)
+        assert result['queued'] == 1
+
+    @patch('subtitles.mass_operations.movies_scan_subtitles')
+    @patch('subtitles.mass_operations.jobs_queue')
+    def test_scan_disk_movies_passes_arr_instance_id(self, mock_jobs_queue, mock_scan):
+        from subtitles.mass_operations import _process_media_action
+
+        items = [{'type': 'movie', 'radarrId': 10, 'arr_instance_id': 8}]
+        result = _process_media_action(items, action='scan-disk', job_id='test')
+
+        mock_scan.assert_called_once_with(10, arr_instance_id=8)
+        assert result['queued'] == 1
+
+    @patch('subtitles.mass_operations.upgrade_movies_subtitles')
+    @patch('subtitles.mass_operations.upgrade_episodes_subtitles')
+    @patch('subtitles.mass_operations.jobs_queue')
+    def test_upgrade_passes_instance_scoped_filters(self, mock_jobs_queue, mock_upgrade_series, mock_upgrade_movies):
+        from subtitles.mass_operations import _process_media_action
+
+        items = [
+            {'type': 'series', 'sonarrSeriesId': 1, 'arr_instance_id': 2},
+            {'type': 'series', 'sonarrSeriesId': 1, 'arr_instance_id': 3},
+            {'type': 'movie', 'radarrId': 10, 'arr_instance_id': 4},
+            {'type': 'movie', 'radarrId': 10, 'arr_instance_id': 5},
+        ]
+        result = _process_media_action(items, action='upgrade', job_id='test')
+
+        mock_upgrade_series.assert_called_once_with(
+            job_id='test',
+            sonarr_series_filters=[(1, 2), (1, 3)],
+        )
+        mock_upgrade_movies.assert_called_once_with(
+            job_id='test',
+            radarr_filters=[(10, 4), (10, 5)],
+        )
+        assert result['queued'] == 4
+        assert result['errors'] == []
 
     @patch('subtitles.mass_operations.series_scan_subtitles')
     @patch('subtitles.mass_operations.jobs_queue')

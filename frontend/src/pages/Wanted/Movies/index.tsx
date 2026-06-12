@@ -117,10 +117,10 @@ const WantedMoviesView: FunctionComponent = () => {
         accessorKey: "title",
         cell: ({
           row: {
-            original: { title, radarrId },
+            original: { id, title },
           },
         }) => {
-          const target = `/movies/${radarrId}`;
+          const target = `/movies/${id}`;
           return (
             <Anchor
               className={`table-primary ${tableStyles.episodeTitle}`}

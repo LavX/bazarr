@@ -27,6 +27,7 @@ class EpisodesBlacklist(Resource):
     get_language_model = api_ns_episodes_blacklist.model('subtitles_language_model', subtitles_language_model)
 
     get_response_model = api_ns_episodes_blacklist.model('EpisodeBlacklistGetResponse', {
+        'id': fields.Integer(),
         # Owning instance (#156) so the remove action can route.
         'arr_instance_id': fields.Integer(),
         'seriesTitle': fields.String(),
@@ -49,7 +50,8 @@ class EpisodesBlacklist(Resource):
         start = args.get('start')
         length = args.get('length')
 
-        stmt = select(TableShows.title.label('seriesTitle'),
+        stmt = select(TableShows.id,
+                      TableShows.title.label('seriesTitle'),
                       TableEpisodes.season.concat('x').concat(TableEpisodes.episode).label('episode_number'),
                       TableEpisodes.title.label('episodeTitle'),
                       TableEpisodes.sonarrSeriesId,
@@ -66,6 +68,7 @@ class EpisodesBlacklist(Resource):
             stmt = stmt.limit(length).offset(start)
 
         return marshal([postprocess({
+            'id': x.id,
             'arr_instance_id': x.arr_instance_id,
             'seriesTitle': x.seriesTitle,
             'episode_number': x.episode_number,
@@ -130,8 +133,9 @@ class EpisodesBlacklist(Resource):
                             media_path=path_mappings.path_replace(media_path),
                             subtitles_path=subtitles_path,
                             sonarr_series_id=sonarr_series_id,
-                            sonarr_episode_id=sonarr_episode_id):
-            episode_download_subtitles(no=sonarr_episode_id)
+                            sonarr_episode_id=sonarr_episode_id,
+                            arr_instance_id=arr_instance_id):
+            episode_download_subtitles(no=sonarr_episode_id, arr_instance_id=arr_instance_id)
             event_stream(type='episode-history')
             return '', 200
         else:

@@ -37,7 +37,7 @@ class MovieApi extends BaseApi {
   }
 
   async modify(form: FormType.ModifyItem) {
-    await this.post("", { radarrid: form.id, profileid: form.profileid });
+    await this.post("", { id: form.id, profileid: form.profileid });
   }
 
   async wanted(params: Parameter.Range) {
@@ -66,10 +66,10 @@ class MovieApi extends BaseApi {
     return response;
   }
 
-  async historyBy(radarrid: number) {
+  async historyBy(id: number) {
     const response = await this.get<DataWrapperWithTotal<History.Movie>>(
       "/history",
-      { radarrid },
+      { id },
     );
     return response.data;
   }

@@ -117,10 +117,10 @@ const WantedSeriesView: FunctionComponent = () => {
         accessorKey: "seriesTitle",
         cell: ({
           row: {
-            original: { sonarrSeriesId, seriesTitle },
+            original: { series_id: seriesId, seriesTitle },
           },
         }) => {
-          const target = `/series/${sonarrSeriesId}`;
+          const target = `/series/${seriesId}`;
           return (
             <Anchor
               className={`table-primary ${tableStyles.episodeTitle}`}

@@ -178,8 +178,13 @@ class MoviesSubtitlesCombine(Resource):
         languages = payload.get('languages')
         format_ = payload.get('format')
 
+        arr_instance_id = request.args.get('arr_instance_id', type=int)
         row = database.execute(
-            select(TableMovies.path).where(TableMovies.radarrId == radarr_id)
+            scoped(
+                select(TableMovies.path).where(TableMovies.radarrId == radarr_id),
+                TableMovies.arr_instance_id,
+                arr_instance_id,
+            )
         ).first()
         if not row:
             return {'status': 'not_found'}, 404
@@ -203,4 +208,3 @@ class MoviesSubtitlesCombine(Resource):
         }
         http_status = 500 if result.status == 'failed' else 200
         return body, http_status
-

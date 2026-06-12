@@ -19,6 +19,7 @@ interface TimingToolsPanelProps {
   selectedIndices: Set<number>;
   mediaType?: string;
   mediaId?: number;
+  arrInstanceId?: number;
   language?: string;
   onApplyBatch: (ops: CueOperation[]) => void;
   onGetContent: () => {
@@ -528,12 +529,14 @@ function LinearCorrectionTab({
 function AutoSyncTab({
   mediaType,
   mediaId,
+  arrInstanceId,
   language,
   onGetContent,
   onApplySyncedContent,
 }: {
   mediaType?: string;
   mediaId?: number;
+  arrInstanceId?: number;
   language?: string;
   onGetContent: () => {
     content: string;
@@ -589,6 +592,7 @@ function AutoSyncTab({
         body: JSON.stringify({
           mediaType,
           mediaId,
+          arrInstanceId,
           language,
           content: editorData.content,
           format: editorData.format,
@@ -701,6 +705,8 @@ function AutoSyncTab({
     canSync,
     mediaType,
     mediaId,
+    arrInstanceId,
+    language,
     maxOffset,
     gss,
     noFixFramerate,
@@ -932,6 +938,7 @@ export default function TimingToolsPanel({
   selectedIndices,
   mediaType,
   mediaId,
+  arrInstanceId,
   language,
   onApplyBatch,
   onGetContent,
@@ -1011,6 +1018,7 @@ export default function TimingToolsPanel({
         <AutoSyncTab
           mediaType={mediaType}
           mediaId={mediaId}
+          arrInstanceId={arrInstanceId}
           language={language}
           onGetContent={onGetContent}
           onApplySyncedContent={onApplySyncedContent}

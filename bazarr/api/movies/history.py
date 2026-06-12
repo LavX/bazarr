@@ -21,11 +21,13 @@ class MoviesHistory(Resource):
     get_request_parser = reqparse.RequestParser()
     get_request_parser.add_argument('start', type=int, required=False, default=0, help='Paging start integer')
     get_request_parser.add_argument('length', type=int, required=False, default=-1, help='Paging length integer')
+    get_request_parser.add_argument('id', type=int, required=False, help='Local movie ID')
     get_request_parser.add_argument('radarrid', type=int, required=False, help='Movie ID')
 
     get_language_model = api_ns_movies_history.model('subtitles_language_model', subtitles_language_model)
 
     data_model = api_ns_movies_history.model('history_movies_data_model', {
+        'id': fields.Integer(),
         # Owning instance (#156) so secondary actions (blacklist) can route.
         'arr_instance_id': fields.Integer(),
         'action': fields.Integer(),
@@ -61,17 +63,22 @@ class MoviesHistory(Resource):
         args = self.get_request_parser.parse_args()
         start = args.get('start')
         length = args.get('length')
+        movie_id = args.get('id')
         radarrid = args.get('radarrid')
 
         blacklisted_subtitles = select(TableBlacklistMovie.provider,
-                                       TableBlacklistMovie.subs_id) \
+                                       TableBlacklistMovie.subs_id,
+                                       TableBlacklistMovie.arr_instance_id) \
             .subquery()
 
         query_conditions = [(TableMovies.title.is_not(None))]
-        if radarrid:
+        if movie_id:
+            query_conditions.append((TableMovies.id == movie_id))
+        elif radarrid:
             query_conditions.append((TableMovies.radarrId == radarrid))
 
-        stmt = select(TableHistoryMovie.id,
+        stmt = select(TableHistoryMovie.id.label('history_id'),
+                      TableMovies.id,
                       TableHistoryMovie.arr_instance_id,
                       TableHistoryMovie.action,
                       TableMovies.title,
@@ -95,13 +102,19 @@ class MoviesHistory(Resource):
                       blacklisted_subtitles.c.subs_id.label('blacklisted')) \
             .select_from(TableHistoryMovie) \
             .join(TableMovies) \
-            .join(blacklisted_subtitles, onclause=TableHistoryMovie.subs_id == blacklisted_subtitles.c.subs_id,
+            .join(blacklisted_subtitles,
+                  onclause=((TableHistoryMovie.subs_id == blacklisted_subtitles.c.subs_id) &
+                            (func.coalesce(TableHistoryMovie.provider, '') ==
+                             func.coalesce(blacklisted_subtitles.c.provider, '')) &
+                            (func.coalesce(TableHistoryMovie.arr_instance_id, -1) ==
+                             func.coalesce(blacklisted_subtitles.c.arr_instance_id, -1))),
                   isouter=True) \
             .where(reduce(operator.and_, query_conditions)) \
             .order_by(TableHistoryMovie.timestamp.desc())
         if length > 0:
             stmt = stmt.limit(length).offset(start)
         movie_history = [{
+            'history_id': x.history_id,
             'id': x.id,
             'arr_instance_id': x.arr_instance_id,
             'action': x.action,
@@ -126,7 +139,7 @@ class MoviesHistory(Resource):
             'blacklisted': bool(x.blacklisted),
         } for x in database.execute(stmt).all()]
 
-        upgradable_movies_not_perfect = get_upgradable_movies_subtitles(history_id_list=[x['id'] for x in
+        upgradable_movies_not_perfect = get_upgradable_movies_subtitles(history_id_list=[x['history_id'] for x in
                                                                                          movie_history])
 
         for item in movie_history:
@@ -136,8 +149,8 @@ class MoviesHistory(Resource):
             item.update(postprocess(item))
 
             # Mark upgradable and get original_id
-            item.update({'original_id': upgradable_movies_not_perfect.get(item['id'])})
-            item.update({'upgradable': item['id'] in upgradable_movies_not_perfect.keys()})
+            item.update({'original_id': upgradable_movies_not_perfect.get(item['history_id'])})
+            item.update({'upgradable': item['history_id'] in upgradable_movies_not_perfect.keys()})
 
             # Mark not upgradable if video/subtitles file doesn't exist anymore or if language isn't desired anymore
             if item['upgradable']:
@@ -149,6 +162,7 @@ class MoviesHistory(Resource):
             del item['video_path']
             del item['external_subtitles']
             del item['profileId']
+            del item['history_id']
 
             if item['score']:
                 item['score'] = f"{round((int(item['score']) * 100 / item['score_out_of']), 2)}%"
@@ -173,7 +187,7 @@ class MoviesHistory(Resource):
             select(func.count())
             .select_from(TableHistoryMovie)
             .join(TableMovies)
-            .where(TableMovies.title.is_not(None))) \
+            .where(reduce(operator.and_, query_conditions))) \
             .scalar()
 
         return marshal({'data': movie_history, 'total': count}, self.get_response_model)

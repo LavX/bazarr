@@ -56,6 +56,7 @@ class ProviderEpisodes(Resource):
         stmt = select(TableEpisodes.path,
                       TableEpisodes.sceneName,
                       TableEpisodes.sonarrEpisodeId,
+                      TableEpisodes.arr_instance_id,
                       TableShows.title,
                       TableShows.profileId,
                       TableEpisodes.subtitles,
@@ -73,7 +74,8 @@ class ProviderEpisodes(Resource):
             episodeInfo = database.execute(stmt).first()
         elif episodeInfo.missing_subtitles is None:
             # missing subtitles calculation for this episode is incomplete, we'll do it again
-            list_missing_subtitles(epno=episodeInfo.sonarrEpisodeId)
+            list_missing_subtitles(epno=episodeInfo.sonarrEpisodeId,
+                                   arr_instance_id=episodeInfo.arr_instance_id)
             episodeInfo = database.execute(stmt).first()
 
         title = episodeInfo.title
@@ -113,15 +115,32 @@ class ProviderEpisodes(Resource):
     def post(self):
         """Manually download an episode subtitles"""
         args = self.post_request_parser.parse_args()
+        series_id = args.get('seriesid')
+        episode_id = args.get('episodeid')
+        arr_instance_id = args.get('arr_instance_id')
+        episode = database.execute(
+            select(
+                TableEpisodes.sonarrSeriesId,
+                TableEpisodes.sonarrEpisodeId,
+                TableEpisodes.arr_instance_id,
+            )
+            .where(TableEpisodes.id == episode_id)
+        ).first()
+        if episode:
+            if arr_instance_id is not None and arr_instance_id != episode.arr_instance_id:
+                return 'Episode not found', 404
+            series_id = episode.sonarrSeriesId
+            episode_id = episode.sonarrEpisodeId
+            arr_instance_id = episode.arr_instance_id
 
-        episode_manually_download_specific_subtitle(sonarr_series_id=args.get('seriesid'),
-                                                    sonarr_episode_id=args.get('episodeid'),
+        episode_manually_download_specific_subtitle(sonarr_series_id=series_id,
+                                                    sonarr_episode_id=episode_id,
                                                     hi=args.get('hi').capitalize(),
                                                     forced=args.get('forced').capitalize(),
                                                     use_original_format=args.get('original_format').capitalize(),
                                                     selected_provider=args.get('provider'),
                                                     subtitle=args.get('subtitle'),
                                                     job_id=None,
-                                                    arr_instance_id=args.get('arr_instance_id'))
+                                                    arr_instance_id=arr_instance_id)
 
         return '', 204

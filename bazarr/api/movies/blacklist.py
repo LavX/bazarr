@@ -27,6 +27,7 @@ class MoviesBlacklist(Resource):
     get_language_model = api_ns_movies_blacklist.model('subtitles_language_model', subtitles_language_model)
 
     get_response_model = api_ns_movies_blacklist.model('MovieBlacklistGetResponse', {
+        'id': fields.Integer(),
         # Owning instance (#156) so the remove action can route.
         'arr_instance_id': fields.Integer(),
         'title': fields.String(),
@@ -48,7 +49,8 @@ class MoviesBlacklist(Resource):
         length = args.get('length')
 
         stmt = (
-            select(TableMovies.title,
+            select(TableMovies.id,
+                   TableMovies.title,
                    TableMovies.radarrId,
                    TableBlacklistMovie.arr_instance_id,
                    TableBlacklistMovie.provider,
@@ -65,6 +67,7 @@ class MoviesBlacklist(Resource):
         data = database.execute(stmt)
 
         return marshal([postprocess({
+            'id': x.id,
             'arr_instance_id': x.arr_instance_id,
             'title': x.title,
             'radarrId': x.radarrId,
@@ -126,8 +129,9 @@ class MoviesBlacklist(Resource):
                             hi=hi,
                             media_path=path_mappings.path_replace_movie(media_path),
                             subtitles_path=subtitles_path,
-                            radarr_id=radarr_id):
-            movies_download_subtitles(radarr_id)
+                            radarr_id=radarr_id,
+                            arr_instance_id=arr_instance_id):
+            movies_download_subtitles(radarr_id, arr_instance_id=arr_instance_id)
             event_stream(type='movie-history')
             return '', 200
         else:

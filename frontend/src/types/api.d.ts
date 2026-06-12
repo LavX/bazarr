@@ -443,7 +443,7 @@ type ItemSearchResult = Partial<SeriesIdType> &
   Partial<MovieIdType> & {
     title: string;
     year: string;
-    poster: string;
+    poster: string | null;
   };
 
 type BackendError = {

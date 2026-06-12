@@ -152,13 +152,13 @@ export function useMovieHistoryPagination() {
   );
 }
 
-export function useMovieHistory(radarrId?: number) {
+export function useMovieHistory(movieId?: number) {
   return useQuery({
-    queryKey: [QueryKeys.Movies, QueryKeys.History, radarrId],
+    queryKey: [QueryKeys.Movies, QueryKeys.History, movieId],
 
     queryFn: () => {
-      if (radarrId) {
-        return api.movies.historyBy(radarrId);
+      if (movieId) {
+        return api.movies.historyBy(movieId);
       }
 
       return [];

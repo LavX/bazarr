@@ -36,10 +36,10 @@ const SeriesHistoryView: FunctionComponent = () => {
         accessorKey: "seriesTitle",
         cell: ({
           row: {
-            original: { seriesTitle, sonarrSeriesId },
+            original: { seriesTitle, series_id: seriesId },
           },
         }) => {
-          const target = `/series/${sonarrSeriesId}`;
+          const target = `/series/${seriesId}`;
 
           return (
             <Anchor className="table-primary" component={Link} to={target}>

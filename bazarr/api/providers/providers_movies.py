@@ -57,6 +57,7 @@ class ProviderMovies(Resource):
         stmt = select(TableMovies.title,
                       TableMovies.path,
                       TableMovies.radarrId,
+                      TableMovies.arr_instance_id,
                       TableMovies.sceneName,
                       TableMovies.profileId,
                       TableMovies.subtitles,
@@ -72,7 +73,7 @@ class ProviderMovies(Resource):
             movieInfo = database.execute(stmt).first()
         elif movieInfo.missing_subtitles is None:
             # missing subtitles calculation for this movie is incomplete, we'll do it again
-            list_missing_subtitles_movies(no=movieInfo.radarrId)
+            list_missing_subtitles_movies(no=movieInfo.radarrId, arr_instance_id=movieInfo.arr_instance_id)
             movieInfo = database.execute(stmt).first()
 
         title = movieInfo.title
@@ -111,14 +112,29 @@ class ProviderMovies(Resource):
     def post(self):
         """Manually download a movie subtitles"""
         args = self.post_request_parser.parse_args()
+        movie_id = args.get('radarrid')
+        arr_instance_id = args.get('arr_instance_id')
+        movie = database.execute(
+            select(TableMovies.radarrId, TableMovies.arr_instance_id)
+            .where(TableMovies.id == movie_id)
+        ).first()
+        if movie:
+            if arr_instance_id is not None and arr_instance_id != movie.arr_instance_id:
+                return 'Movie not found', 404
+            radarr_id = movie.radarrId
+            arr_instance_id = movie.arr_instance_id
+        else:
+            # Legacy API callers used upstream Radarr IDs here. Keep that path
+            # for clients not yet migrated to local ids.
+            radarr_id = movie_id
 
-        movie_manually_download_specific_subtitle(radarr_id=args.get('radarrid'),
+        movie_manually_download_specific_subtitle(radarr_id=radarr_id,
                                                   hi=args.get('hi').capitalize(),
                                                   forced=args.get('forced').capitalize(),
                                                   use_original_format=args.get('original_format').capitalize(),
                                                   selected_provider=args.get('provider'),
                                                   subtitle=args.get('subtitle'),
                                                   job_id=None,
-                                                  arr_instance_id=args.get('arr_instance_id'))
+                                                  arr_instance_id=arr_instance_id)
 
         return '', 204

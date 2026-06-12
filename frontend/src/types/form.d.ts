@@ -11,11 +11,13 @@ declare namespace FormType {
   interface OneMovieAction {
     action: "search-missing" | "scan-disk" | "sync";
     radarrid: number;
+    arr_instance_id?: number;
   }
 
   interface OneSeriesAction {
     action: "search-missing" | "scan-disk" | "sync";
     seriesid: number;
+    arr_instance_id?: number;
   }
 
   interface SearchWantedAction {

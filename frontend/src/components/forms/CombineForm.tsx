@@ -14,9 +14,9 @@ import { useModals, withModal } from "@/modules/modals";
 import { notification } from "@/modules/task";
 
 type Scope =
-  | { kind: "movie"; radarrId: number }
-  | { kind: "episode"; episodeId: number }
-  | { kind: "series"; seriesId: number };
+  | { kind: "movie"; radarrId: number; arrInstanceId?: number }
+  | { kind: "episode"; episodeId: number; arrInstanceId?: number }
+  | { kind: "series"; seriesId: number; arrInstanceId?: number };
 
 interface Props {
   scope: Scope;
