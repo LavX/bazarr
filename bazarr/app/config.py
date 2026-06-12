@@ -1218,16 +1218,17 @@ def save_settings(settings_items):
             event_stream(type='task')
 
         if sonarr_changed:
-            from .signalr_client import sonarr_signalr_client
+            # Restart every Sonarr SignalR client and re-fan-out (#156).
+            from .signalr_client import restart_sonarr_signalr
             try:
-                sonarr_signalr_client.restart()
+                restart_sonarr_signalr()
             except Exception:
                 pass
 
         if radarr_changed:
-            from .signalr_client import radarr_signalr_client
+            from .signalr_client import restart_radarr_signalr
             try:
-                radarr_signalr_client.restart()
+                restart_radarr_signalr()
             except Exception:
                 pass
 

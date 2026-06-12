@@ -16,6 +16,11 @@ from sonarr.sync.series import update_series, update_one_series  # noqa: F401
 from radarr.sync.movies import update_movies, update_one_movie  # noqa: F401
 from sonarr.info import get_sonarr_info, url_sonarr
 from radarr.info import url_radarr
+from sonarr.sync.episodes import sync_one_episode_for_instance
+from sonarr.sync.series import update_one_series_for_instance
+from radarr.sync.movies import update_one_movie_for_instance
+from arr_instances.repository import ArrInstanceRepository
+from arr_instances.resolution import client_for_instance
 from app.database import TableShows, TableMovies, database, select
 from app.jobs_queue import jobs_queue  # noqa: F401
 
@@ -28,9 +33,20 @@ patch_signalrcore_stop()
 sonarr_queue = deque()
 radarr_queue = deque()
 
-last_series_event_data = None
-last_episode_event_data = None
-last_movie_event_data = None
+# Per-instance dedup caches keyed by arr_instance_id (None == the legacy
+# single-instance / scalar path). The same event from two instances is no longer
+# collapsed into one; identical repeats from one instance still are. (#156)
+last_series_event_data = {}
+last_episode_event_data = {}
+last_movie_event_data = {}
+
+
+def _enabled_instances(kind):
+    """Enabled instances of a kind, or [] if the registry can't be read yet."""
+    try:
+        return ArrInstanceRepository(database).list(kind, enabled_only=True)
+    except Exception:
+        return []
 
 SIGNALR_ACTIVE_STATES = {0, 1, 2}
 UNKNOWN_SONARR_VERSION_VALUES = {"", "unknown", None}
@@ -57,8 +73,13 @@ def _sonarr_signalr_core_support_state():
 
 
 class SonarrSignalrClient:
-    def __init__(self):
+    def __init__(self, arr_instance_id=None):
         super(SonarrSignalrClient, self).__init__()
+        # arr_instance_id None == the legacy scalar/default path (byte-identical:
+        # scalar config, untagged events, the unsuffixed 'update_series' job).
+        # When set, the client connects to that instance's server, tags its
+        # events so the dispatcher scopes them, and triggers update_series_<id>.
+        self.arr_instance_id = arr_instance_id
         self.apikey_sonarr = None
         self.connection = None
         self.connected = False
@@ -118,7 +139,10 @@ class SonarrSignalrClient:
         event_stream(type='badges')
         logging.info('BAZARR SignalR client for Sonarr is connected and waiting for events.')
         if settings.sonarr.series_sync_on_live:
-            scheduler.execute_job_now(taskid="update_series")
+            # Match the scheduler fan-out: unsuffixed job for the single default
+            # instance, per-instance job id when fanned out.
+            taskid = "update_series" if self.arr_instance_id is None else f"update_series_{self.arr_instance_id}"
+            scheduler.execute_job_now(taskid=taskid)
 
     def on_reconnect_handler(self):
         self.connected = False
@@ -126,21 +150,31 @@ class SonarrSignalrClient:
         logging.error('BAZARR SignalR client for Sonarr connection as been lost. Trying to reconnect...')
 
     def configure(self):
-        self.apikey_sonarr = settings.sonarr.apikey
+        # None -> scalar config (the default instance), byte-identical. Otherwise
+        # resolve this instance's base URL + decrypted key from its saved row.
+        if self.arr_instance_id is None:
+            base_url = url_sonarr()
+            self.apikey_sonarr = settings.sonarr.apikey
+        else:
+            client = client_for_instance(database, self.arr_instance_id)
+            base_url = client.base_url()
+            self.apikey_sonarr = client.api_key
         self.connection = build_signalr_connection(
-            f"{url_sonarr()}/signalr/messages?access_token={self.apikey_sonarr}",
+            f"{base_url}/signalr/messages?access_token={self.apikey_sonarr}",
             HEADERS,
         )
         self.connection.on_open(self.on_connect_handler)
         self.connection.on_reconnect(self.on_reconnect_handler)
         self.connection.on_close(lambda: logging.debug('BAZARR SignalR client for Sonarr is disconnected.'))
         self.connection.on_error(self.exception_handler)
-        self.connection.on("receiveMessage", feed_queue)
+        self.connection.on("receiveMessage", lambda data: feed_queue(data, self.arr_instance_id))
 
 
 class RadarrSignalrClient:
-    def __init__(self):
+    def __init__(self, arr_instance_id=None):
         super(RadarrSignalrClient, self).__init__()
+        # arr_instance_id None == the legacy scalar/default path (byte-identical).
+        self.arr_instance_id = arr_instance_id
         self.apikey_radarr = None
         self.connection = None
         self.connected = False
@@ -180,7 +214,8 @@ class RadarrSignalrClient:
         event_stream(type='badges')
         logging.info('BAZARR SignalR client for Radarr is connected and waiting for events.')
         if settings.radarr.movies_sync_on_live:
-            scheduler.execute_job_now(taskid="update_movies")
+            taskid = "update_movies" if self.arr_instance_id is None else f"update_movies_{self.arr_instance_id}"
+            scheduler.execute_job_now(taskid=taskid)
 
     def on_reconnect_handler(self):
         self.connected = False
@@ -188,19 +223,27 @@ class RadarrSignalrClient:
         logging.error('BAZARR SignalR client for Radarr connection as been lost. Trying to reconnect...')
 
     def configure(self):
-        self.apikey_radarr = settings.radarr.apikey
+        if self.arr_instance_id is None:
+            base_url = url_radarr()
+            self.apikey_radarr = settings.radarr.apikey
+        else:
+            client = client_for_instance(database, self.arr_instance_id)
+            base_url = client.base_url()
+            self.apikey_radarr = client.api_key
         self.connection = build_signalr_connection(
-            f"{url_radarr()}/signalr/messages?access_token={self.apikey_radarr}",
+            f"{base_url}/signalr/messages?access_token={self.apikey_radarr}",
             HEADERS,
         )
         self.connection.on_open(self.on_connect_handler)
         self.connection.on_reconnect(self.on_reconnect_handler)
         self.connection.on_close(lambda: logging.debug('BAZARR SignalR client for Radarr is disconnected.'))
         self.connection.on_error(self.exception_handler)
-        self.connection.on("receiveMessage", feed_queue)
+        self.connection.on("receiveMessage", lambda data: feed_queue(data, self.arr_instance_id))
 
 
 def dispatcher(data):
+    # The owning instance tagged by feed_queue (None == legacy/default, unscoped).
+    arr_instance_id = data.get('_arr_instance_id') if isinstance(data, dict) else None
     try:
         series_title = series_year = episode_title = season_number = episode_number = movie_title = movie_year = None
 
@@ -252,17 +295,30 @@ def dispatcher(data):
             logging.debug(f'Event received from Sonarr for series: {series_title} ({series_year})')  # noqa: G004
             if episodesChanged:
                 # this will happen if a season's monitored status is changed.
-                sync_episodes(series_id=media_id, defer_search=settings.sonarr.defer_search_signalr, is_signalr=True)
+                arr_client = client_for_instance(database, arr_instance_id) if arr_instance_id is not None else None
+                sync_episodes(series_id=media_id, defer_search=settings.sonarr.defer_search_signalr, is_signalr=True,
+                              arr_instance_id=arr_instance_id, arr_client=arr_client)
+            elif arr_instance_id is not None:
+                update_one_series_for_instance(arr_instance_id, media_id, action, is_signalr=True)
             else:
                 update_one_series(series_id=media_id, action=action, is_signalr=True)
         elif topic == 'episode':
             logging.debug(f'Event received from Sonarr for episode: {series_title} ({series_year}) - '  # noqa: G004
                           f'S{season_number:0>2}E{episode_number:0>2} - {episode_title}')
-            sync_one_episode(episode_id=media_id, defer_search=settings.sonarr.defer_search_signalr, is_signalr=True)
+            if arr_instance_id is not None:
+                sync_one_episode_for_instance(arr_instance_id, media_id,
+                                              defer_search=settings.sonarr.defer_search_signalr, is_signalr=True)
+            else:
+                sync_one_episode(episode_id=media_id, defer_search=settings.sonarr.defer_search_signalr,
+                                 is_signalr=True)
         elif topic == 'movie':
             logging.debug(f'Event received from Radarr for movie: {movie_title} ({movie_year})')  # noqa: G004
-            update_one_movie(movie_id=media_id, action=action, defer_search=settings.radarr.defer_search_signalr,
-                             is_signalr=True)
+            if arr_instance_id is not None:
+                update_one_movie_for_instance(arr_instance_id, media_id, action,
+                                              defer_search=settings.radarr.defer_search_signalr, is_signalr=True)
+            else:
+                update_one_movie(movie_id=media_id, action=action, defer_search=settings.radarr.defer_search_signalr,
+                                 is_signalr=True)
     except Exception as e:
         logging.debug(f'BAZARR an exception occurred while parsing SignalR feed: {repr(e)}')  # noqa: G004
     finally:
@@ -311,7 +367,7 @@ def filter_nested_dict(data: dict) -> dict:
     return filtered_data
 
 
-def feed_queue(data):
+def feed_queue(data, arr_instance_id=None):
     # some sonarr version sends events as a list of a single dict, we make it a dict
     if isinstance(data, list) and len(data):
         data = data[0]
@@ -320,33 +376,29 @@ def feed_queue(data):
         # filter out some keys to reduce the size of the event data dictionary and prevent similar events from being
         # added to the queue
         data = filter_nested_dict(data)
+        name = data['name']
 
-        # check if event is duplicate from the previous one
-        if data['name'] == 'series':
-            global last_series_event_data
-            if data == last_series_event_data:
-                return
-            else:
-                last_series_event_data = data
-        elif data['name'] == 'episode':
-            global last_episode_event_data
-            if data == last_episode_event_data:
-                return
-            else:
-                last_episode_event_data = data
-        elif data['name'] == 'movie':
-            global last_movie_event_data
-            if data == last_movie_event_data:
-                return
-            else:
-                last_movie_event_data = data
+        # check if event is duplicate from the previous one FOR THIS INSTANCE
+        # (#156): the same event arriving from two instances is processed once
+        # per instance, while identical repeats from one instance are skipped.
+        cache = {
+            'series': last_series_event_data,
+            'episode': last_episode_event_data,
+            'movie': last_movie_event_data,
+        }[name]
+        if cache.get(arr_instance_id) == data:
+            return
+        cache[arr_instance_id] = data
 
-        # if data is a dict and contain an event for series, episode or movie, we add it to the event queue
-        if isinstance(data, dict) and 'name' in data:
-            if data['name'] in ['series', 'episode']:
-                sonarr_queue.append(data)
-            elif data['name'] == 'movie':
-                radarr_queue.append(data)
+        # tag the queued copy with the owning instance so the dispatcher can
+        # scope it (None == legacy/default path, unscoped). The cache holds the
+        # untagged event so dedup compares event content only.
+        tagged = dict(data)
+        tagged['_arr_instance_id'] = arr_instance_id
+        if name in ['series', 'episode']:
+            sonarr_queue.append(tagged)
+        elif name == 'movie':
+            radarr_queue.append(tagged)
 
 
 def consume_queue(queue):
@@ -371,6 +423,71 @@ radarr_queue_thread = threading.Thread(target=consume_queue, args=(radarr_queue,
 radarr_queue_thread.daemon = True
 radarr_queue_thread.start()
 
-# instantiate SignalR clients
+# instantiate SignalR clients. The module-level singletons remain the DEFAULT
+# (scalar) clients that badges + config restart reference by name; the manager
+# fans out additional per-instance clients when more than one instance exists.
 sonarr_signalr_client = SonarrSignalrClient()
 radarr_signalr_client = RadarrSignalrClient()
+
+# Extra per-instance clients beyond the singleton (multi-instance mode, #156).
+_sonarr_signalr_clients = []
+_radarr_signalr_clients = []
+
+
+def _start_clients_for_kind(kind, singleton, extra_list, client_cls):
+    """Start one SignalR client per enabled instance of a kind.
+
+    A single enabled instance keeps the singleton on the scalar/default path
+    (arr_instance_id None) -> byte-identical to the legacy behaviour. With more
+    than one, the singleton handles the first instance and one extra client per
+    remaining instance, each tagged so the dispatcher scopes its events and
+    triggers that instance's update_*_<id> job. Like the scheduler fan-out, new
+    instances are picked up on (re)start, not live.
+    """
+    instances = _enabled_instances(kind)
+    # Stop any previously-started extras before re-fanning out.
+    for client in extra_list:
+        try:
+            if client.connection and _signalr_connection_active(client.connection):
+                client.stop()
+        except Exception:
+            pass
+    extra_list.clear()
+
+    if len(instances) > 1:
+        singleton.arr_instance_id = instances[0].id
+        clients = [singleton] + [client_cls(inst.id) for inst in instances[1:]]
+        extra_list.extend(clients[1:])
+    else:
+        singleton.arr_instance_id = None
+        clients = [singleton]
+
+    for client in clients:
+        thread = threading.Thread(target=client.start)
+        thread.daemon = True
+        thread.start()
+    return clients
+
+
+def start_sonarr_signalr():
+    return _start_clients_for_kind('sonarr', sonarr_signalr_client, _sonarr_signalr_clients, SonarrSignalrClient)
+
+
+def start_radarr_signalr():
+    return _start_clients_for_kind('radarr', radarr_signalr_client, _radarr_signalr_clients, RadarrSignalrClient)
+
+
+def restart_sonarr_signalr():
+    """Stop every Sonarr client and re-fan-out (used on settings/instance change)."""
+    if sonarr_signalr_client.connection and _signalr_connection_active(sonarr_signalr_client.connection):
+        sonarr_signalr_client.stop()
+    if settings.general.use_sonarr:
+        start_sonarr_signalr()
+
+
+def restart_radarr_signalr():
+    """Stop every Radarr client and re-fan-out (used on settings/instance change)."""
+    if radarr_signalr_client.connection and _signalr_connection_active(radarr_signalr_client.connection):
+        radarr_signalr_client.stop()
+    if settings.general.use_radarr:
+        start_radarr_signalr()
