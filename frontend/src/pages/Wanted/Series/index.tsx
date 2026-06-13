@@ -1,8 +1,8 @@
 import { FunctionComponent, useCallback, useMemo, useState } from "react";
 import { Link } from "react-router";
-import { Anchor, Badge, Checkbox, Group, Text } from "@mantine/core";
+import { Anchor, Badge, Checkbox, Group } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
-import { faSearch, faServer } from "@fortawesome/free-solid-svg-icons";
+import { faSearch } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import {
@@ -12,7 +12,7 @@ import {
   useSeriesAction,
 } from "@/apis/hooks";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
-import { AudioList } from "@/components/bazarr";
+import { AudioList, InstanceBadge } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
 import { WantedItem } from "@/components/forms/MassTranslateForm";
 import WantedView from "@/pages/views/WantedView";
@@ -139,26 +139,13 @@ const WantedSeriesView: FunctionComponent = () => {
             {
               id: "instance",
               header: "Instance",
-              cell: ({ row: { original } }) => {
-                const instanceId = original.arr_instance_id;
-                if (instanceId == null) {
-                  return (
-                    <Text size="sm" c="dimmed">
-                      –
-                    </Text>
-                  );
-                }
-                return (
-                  <Badge
-                    size="sm"
-                    variant="light"
-                    color={instanceId === instanceDefaultId ? "gray" : "grape"}
-                    leftSection={<FontAwesomeIcon icon={faServer} />}
-                  >
-                    {instanceNameById.get(instanceId) ?? `#${instanceId}`}
-                  </Badge>
-                );
-              },
+              cell: ({ row: { original } }) => (
+                <InstanceBadge
+                  instanceId={original.arr_instance_id}
+                  defaultId={instanceDefaultId}
+                  nameById={instanceNameById}
+                />
+              ),
             } as ColumnDef<Wanted.Episode>,
           ]
         : []),

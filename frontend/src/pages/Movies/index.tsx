@@ -8,7 +8,6 @@ import {
   Container,
   Group,
   Menu,
-  Text,
   Tooltip,
 } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
@@ -23,7 +22,6 @@ import {
   faLanguage,
   faLayerGroup,
   faMagnifyingGlass,
-  faServer,
   faSync,
   faToolbox,
   faUndo,
@@ -38,7 +36,7 @@ import { useInstanceName } from "@/apis/hooks/site";
 import { useUpgradableItems } from "@/apis/hooks/subtitles";
 import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
 import { Toolbox } from "@/components";
-import { AudioList } from "@/components/bazarr";
+import { AudioList, InstanceBadge } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
 import LanguageProfileName from "@/components/bazarr/LanguageProfile";
 import { BatchModConfirmModal } from "@/components/forms/BatchModConfirmForm";
@@ -234,26 +232,13 @@ const MovieView: FunctionComponent = () => {
             {
               id: "instance",
               header: "Instance",
-              cell: ({ row: { original } }) => {
-                const instanceId = original.arr_instance_id;
-                if (instanceId == null) {
-                  return (
-                    <Text size="sm" c="dimmed">
-                      –
-                    </Text>
-                  );
-                }
-                return (
-                  <Badge
-                    size="sm"
-                    variant="light"
-                    color={instanceId === instanceDefaultId ? "gray" : "grape"}
-                    leftSection={<FontAwesomeIcon icon={faServer} />}
-                  >
-                    {instanceNameById.get(instanceId) ?? `#${instanceId}`}
-                  </Badge>
-                );
-              },
+              cell: ({ row: { original } }) => (
+                <InstanceBadge
+                  instanceId={original.arr_instance_id}
+                  defaultId={instanceDefaultId}
+                  nameById={instanceNameById}
+                />
+              ),
             } as ColumnDef<Item.Movie>,
           ]
         : []),

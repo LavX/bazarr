@@ -3,13 +3,11 @@ import { Link } from "react-router";
 import {
   ActionIcon,
   Anchor,
-  Badge,
   Checkbox,
   Container,
   Group,
   Menu,
   Progress,
-  Text,
   Tooltip,
 } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
@@ -25,7 +23,6 @@ import {
   faLayerGroup,
   faMagnifyingGlass,
   faPlay,
-  faServer,
   faStop,
   faSync,
   faToolbox,
@@ -41,7 +38,7 @@ import { useInstanceName } from "@/apis/hooks/site";
 import { useUpgradableItems } from "@/apis/hooks/subtitles";
 import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
 import { Toolbox } from "@/components";
-import { AudioList } from "@/components/bazarr";
+import { AudioList, InstanceBadge } from "@/components/bazarr";
 import LanguageProfileName from "@/components/bazarr/LanguageProfile";
 import { BatchModConfirmModal } from "@/components/forms/BatchModConfirmForm";
 import { ChangeProfileModal } from "@/components/forms/ChangeProfileForm";
@@ -238,26 +235,13 @@ const SeriesView: FunctionComponent = () => {
             {
               id: "instance",
               header: "Instance",
-              cell: ({ row: { original } }) => {
-                const instanceId = original.arr_instance_id;
-                if (instanceId == null) {
-                  return (
-                    <Text size="sm" c="dimmed">
-                      –
-                    </Text>
-                  );
-                }
-                return (
-                  <Badge
-                    size="sm"
-                    variant="light"
-                    color={instanceId === instanceDefaultId ? "gray" : "grape"}
-                    leftSection={<FontAwesomeIcon icon={faServer} />}
-                  >
-                    {instanceNameById.get(instanceId) ?? `#${instanceId}`}
-                  </Badge>
-                );
-              },
+              cell: ({ row: { original } }) => (
+                <InstanceBadge
+                  instanceId={original.arr_instance_id}
+                  defaultId={instanceDefaultId}
+                  nameById={instanceNameById}
+                />
+              ),
             } as ColumnDef<Item.Series>,
           ]
         : []),
