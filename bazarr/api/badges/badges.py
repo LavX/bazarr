@@ -10,7 +10,7 @@ from app.database import get_exclusion_clause, TableEpisodes, TableShows, TableM
 from app.config import settings
 
 from app.get_providers import get_throttled_providers
-from app.signalr_client import sonarr_signalr_client, radarr_signalr_client
+from app.signalr_client import all_sonarr_signalr_connected, all_radarr_signalr_connected
 from app.announcements import get_all_announcements
 from utilities.health import get_health_issues
 
@@ -73,8 +73,8 @@ class Badges(Resource):
             "movies": missing_movies_count,
             "providers": throttled_providers,
             "status": health_issues,
-            'sonarr_signalr': live_str if sonarr_signalr_client.connected else "DOWN",
-            'radarr_signalr': live_str if radarr_signalr_client.connected else "DOWN",
+            'sonarr_signalr': live_str if all_sonarr_signalr_connected() else "DOWN",
+            'radarr_signalr': live_str if all_radarr_signalr_connected() else "DOWN",
             'announcements': len(get_all_announcements()),
         }
         return marshal(result, self.get_model)

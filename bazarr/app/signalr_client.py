@@ -20,7 +20,9 @@ from sonarr.sync.episodes import sync_one_episode_for_instance
 from sonarr.sync.series import update_one_series_for_instance
 from radarr.sync.movies import update_one_movie_for_instance
 from arr_instances.repository import ArrInstanceRepository
+from arr_instances import resolution
 from arr_instances.resolution import client_for_instance
+from apscheduler.jobstores.base import JobLookupError
 from app.database import TableShows, TableMovies, database, select
 from app.jobs_queue import jobs_queue  # noqa: F401
 
@@ -72,6 +74,43 @@ def _sonarr_signalr_core_support_state():
     return get_sonarr_info.supports_signalr_core(), version
 
 
+def _version_supports_signalr_core(version):
+    """True/False if ``version`` is a Sonarr v4+ string, None if unparseable.
+
+    Mirrors GetSonarrInfo.semver()/supports_signalr_core(): the major component
+    must be >= 4. Sonarr nightly/develop builds report e.g. "4.0.9.2421-develop"
+    so we read the leading digits of each of the first three dotted segments.
+    """
+    if not isinstance(version, str) or version in UNKNOWN_SONARR_VERSION_VALUES:
+        return None
+    split_version = version.split('.')
+    if len(split_version) < 3 or not all(split_version[i].isdigit() for i in range(3)):
+        return None
+    return int(split_version[0]) >= 4
+
+
+def _instance_sonarr_signalr_core_support_state(arr_instance_id):
+    """Per-instance counterpart to ``_sonarr_signalr_core_support_state`` (#156).
+
+    Probes THIS instance's ``/api/v3/system/status`` rather than the scalar
+    default ``get_sonarr_info``, so a secondary Sonarr decides whether to start
+    its live feed based on its own server's version. Returns ``(supports, version)``
+    where ``supports`` is None (retry) when the instance is unreachable, gone, or
+    reports an unparseable version.
+    """
+    try:
+        client = client_for_instance(database, arr_instance_id)
+        if client is None:
+            return None, "unknown"
+        version = client.get('/api/v3/system/status').json().get('version')
+    except Exception:
+        logging.debug('BAZARR cannot get Sonarr version for instance %s', arr_instance_id)
+        return None, "unknown"
+    if not version:
+        return None, "unknown"
+    return _version_supports_signalr_core(version), version
+
+
 class SonarrSignalrClient:
     def __init__(self, arr_instance_id=None):
         super(SonarrSignalrClient, self).__init__()
@@ -84,8 +123,16 @@ class SonarrSignalrClient:
         self.connection = None
         self.connected = False
 
+    def _support_state(self):
+        # The scalar/default client keeps probing the shared get_sonarr_info
+        # (byte-identical to the legacy path). A per-instance client probes ITS
+        # own server's status so it never gates on the default Sonarr (#156).
+        if self.arr_instance_id is None:
+            return _sonarr_signalr_core_support_state()
+        return _instance_sonarr_signalr_core_support_state(self.arr_instance_id)
+
     def start(self):
-        supports_signalr, sonarr_version = _sonarr_signalr_core_support_state()
+        supports_signalr, sonarr_version = self._support_state()
         if supports_signalr is None:
             logging.warning(
                 'BAZARR cannot confirm Sonarr version yet. '
@@ -93,7 +140,7 @@ class SonarrSignalrClient:
             )
         while supports_signalr is None:
             time.sleep(5)
-            supports_signalr, sonarr_version = _sonarr_signalr_core_support_state()
+            supports_signalr, sonarr_version = self._support_state()
 
         if not supports_signalr:
             logging.warning(
@@ -106,6 +153,9 @@ class SonarrSignalrClient:
             return
 
         self.configure()
+        if self.connection is None:
+            # configure() bailed (instance deleted/disabled); nothing to connect.
+            return
         logging.info('BAZARR trying to connect to Sonarr SignalR feed...')
         while not _signalr_connection_active(self.connection):
             try:
@@ -118,6 +168,8 @@ class SonarrSignalrClient:
 
     def stop(self):
         logging.info('BAZARR SignalR client for Sonarr is now disconnected.')
+        if self.connection is None:
+            return
         self.connection.stop()
 
     def restart(self):
@@ -142,7 +194,14 @@ class SonarrSignalrClient:
             # Match the scheduler fan-out: unsuffixed job for the single default
             # instance, per-instance job id when fanned out.
             taskid = "update_series" if self.arr_instance_id is None else f"update_series_{self.arr_instance_id}"
-            scheduler.execute_job_now(taskid=taskid)
+            try:
+                scheduler.execute_job_now(taskid=taskid)
+            except JobLookupError:
+                # A per-instance job can be unregistered when this client connects
+                # before the scheduler fan-out registered it (#156). Skip the
+                # immediate sync; the scheduled job will run once registered.
+                logging.warning('BAZARR SignalR connect could not trigger sync job %s yet '
+                                '(not registered).', taskid)
 
     def on_reconnect_handler(self):
         self.connected = False
@@ -157,8 +216,23 @@ class SonarrSignalrClient:
             self.apikey_sonarr = settings.sonarr.apikey
         else:
             client = client_for_instance(database, self.arr_instance_id)
+            if client is None:
+                # The instance was deleted/disabled between enumeration and now.
+                # Bail without building a connection so the daemon thread does not
+                # die on None.base_url() (#156).
+                logging.warning('BAZARR Sonarr instance %s is gone; not starting its '
+                                'SignalR feed.', self.arr_instance_id)
+                self.connected = False
+                return
             base_url = client.base_url()
             self.apikey_sonarr = client.api_key
+        # Tear down any prior connection before overwriting it so a stale
+        # signalrcore reconnect thread is not orphaned.
+        if self.connection is not None:
+            try:
+                self.stop()
+            except Exception:
+                pass
         self.connection = build_signalr_connection(
             f"{base_url}/signalr/messages?access_token={self.apikey_sonarr}",
             HEADERS,
@@ -181,6 +255,9 @@ class RadarrSignalrClient:
 
     def start(self):
         self.configure()
+        if self.connection is None:
+            # configure() bailed (instance deleted/disabled); nothing to connect.
+            return
         logging.info('BAZARR trying to connect to Radarr SignalR feed...')
         while not _signalr_connection_active(self.connection):
             try:
@@ -193,6 +270,8 @@ class RadarrSignalrClient:
 
     def stop(self):
         logging.info('BAZARR SignalR client for Radarr is now disconnected.')
+        if self.connection is None:
+            return
         self.connection.stop()
 
     def restart(self):
@@ -215,7 +294,11 @@ class RadarrSignalrClient:
         logging.info('BAZARR SignalR client for Radarr is connected and waiting for events.')
         if settings.radarr.movies_sync_on_live:
             taskid = "update_movies" if self.arr_instance_id is None else f"update_movies_{self.arr_instance_id}"
-            scheduler.execute_job_now(taskid=taskid)
+            try:
+                scheduler.execute_job_now(taskid=taskid)
+            except JobLookupError:
+                logging.warning('BAZARR SignalR connect could not trigger sync job %s yet '
+                                '(not registered).', taskid)
 
     def on_reconnect_handler(self):
         self.connected = False
@@ -228,8 +311,18 @@ class RadarrSignalrClient:
             self.apikey_radarr = settings.radarr.apikey
         else:
             client = client_for_instance(database, self.arr_instance_id)
+            if client is None:
+                logging.warning('BAZARR Radarr instance %s is gone; not starting its '
+                                'SignalR feed.', self.arr_instance_id)
+                self.connected = False
+                return
             base_url = client.base_url()
             self.apikey_radarr = client.api_key
+        if self.connection is not None:
+            try:
+                self.stop()
+            except Exception:
+                pass
         self.connection = build_signalr_connection(
             f"{base_url}/signalr/messages?access_token={self.apikey_radarr}",
             HEADERS,
@@ -265,8 +358,10 @@ def dispatcher(data):
                     series_year = data['body']['resource']['series']['year']
                 else:
                     series_metadata = database.execute(
-                        select(TableShows.title, TableShows.year)
-                        .where(TableShows.sonarrSeriesId == data['body']['resource']['seriesId'])) \
+                        resolution.scoped(
+                            select(TableShows.title, TableShows.year)
+                            .where(TableShows.sonarrSeriesId == data['body']['resource']['seriesId']),
+                            TableShows.arr_instance_id, arr_instance_id)) \
                         .first()
                     if series_metadata:
                         series_title = series_metadata.title
@@ -277,8 +372,10 @@ def dispatcher(data):
             elif topic == 'movie':
                 if action == 'deleted':
                     existing_movie_details = database.execute(
-                        select(TableMovies.title, TableMovies.year)
-                        .where(TableMovies.radarrId == media_id)) \
+                        resolution.scoped(
+                            select(TableMovies.title, TableMovies.year)
+                            .where(TableMovies.radarrId == media_id),
+                            TableMovies.arr_instance_id, arr_instance_id)) \
                         .first()
                     if existing_movie_details:
                         movie_title = existing_movie_details.title
@@ -434,6 +531,22 @@ _sonarr_signalr_clients = []
 _radarr_signalr_clients = []
 
 
+def all_sonarr_signalr_connected():
+    """True only when the scalar/default Sonarr client AND every per-instance
+    extra client report connected. In multi-instance mode the badge must read
+    LIVE only when every enabled feed is up, so a secondary instance whose feed
+    is DOWN is not masked by the singleton's state (#156).
+    """
+    return (sonarr_signalr_client.connected
+            and all(c.connected for c in _sonarr_signalr_clients))
+
+
+def all_radarr_signalr_connected():
+    """Radarr counterpart of :func:`all_sonarr_signalr_connected`."""
+    return (radarr_signalr_client.connected
+            and all(c.connected for c in _radarr_signalr_clients))
+
+
 def _start_clients_for_kind(kind, singleton, extra_list, client_cls):
     """Start one SignalR client per enabled instance of a kind.
 
@@ -445,11 +558,14 @@ def _start_clients_for_kind(kind, singleton, extra_list, client_cls):
     instances are picked up on (re)start, not live.
     """
     instances = _enabled_instances(kind)
-    # Stop any previously-started extras before re-fanning out.
+    # Stop EVERY previously-started extra before re-fanning out, regardless of
+    # transport state. A client mid-reconnect is not in an active state but its
+    # signalrcore auto-reconnect thread (max_attempts=None) keeps feeding
+    # receiveMessage events tagged with the old arr_instance_id forever unless we
+    # stop() it. stop() is None/already-stopped tolerant, so this is safe. (#156)
     for client in extra_list:
         try:
-            if client.connection and _signalr_connection_active(client.connection):
-                client.stop()
+            client.stop()
         except Exception:
             pass
     extra_list.clear()
