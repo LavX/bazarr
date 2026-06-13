@@ -2,8 +2,8 @@ import { http } from "msw";
 import { HttpResponse } from "msw";
 import server from "@/tests/mocks/node";
 import { renderTest, RenderTestCase } from "@/tests/render";
+import JellyfinSection from "./Jellyfin/JellyfinSection";
 import SettingsGeneralView from "./General";
-import SettingsJellyfinView from "./Jellyfin";
 import SettingsLanguagesView from "./Languages";
 import SettingsProvidersView from "./Providers";
 import SettingsSchedulerView from "./Scheduler";
@@ -58,7 +58,7 @@ const cases: RenderTestCase[] = [
   // TODO: Test Radarr Page
   {
     name: "jellyfin page",
-    ui: SettingsJellyfinView,
+    ui: JellyfinSection,
   },
   {
     name: "scheduler page",
