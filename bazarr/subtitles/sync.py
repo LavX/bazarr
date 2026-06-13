@@ -81,7 +81,8 @@ def sync_subtitles(video_path,
                    output_mode=None,
                    enabled_engines=None,
                    callback=None,
-                   track_job_progress=True):
+                   track_job_progress=True,
+                   arr_instance_id=None):
     if not settings.subsync.use_subsync and not force_sync:
         logging.debug('BAZARR automatic syncing is disabled in settings. Skipping sync routine.')
         return False
@@ -165,6 +166,7 @@ def sync_subtitles(video_path,
             'output_mode': output_mode,
             'enabled_engines': enabled_engines,
             'progress_callback': update_progress if track_job_progress else None,
+            'arr_instance_id': arr_instance_id,
         }
         sync_result = None
         try:

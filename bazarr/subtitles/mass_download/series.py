@@ -179,7 +179,8 @@ def episode_download_subtitles(no, job_id=None, job_sub_function=False, provider
                     store_subtitles(episode.path, path_mappings.path_replace(episode.path))
                     history_log(1, episode.sonarrSeriesId, episode.sonarrEpisodeId, result,
                                 arr_instance_id=arr_instance_id)
-                    send_notifications(episode.sonarrSeriesId, episode.sonarrEpisodeId, result.message)
+                    send_notifications(episode.sonarrSeriesId, episode.sonarrEpisodeId, result.message,
+                                       arr_instance_id=arr_instance_id)
                     downloaded_count += 1
         outcome_msg = (f"{downloaded_count} subtitle(s) downloaded"
                        if downloaded_count else "No subtitles found")
@@ -253,7 +254,8 @@ def episode_download_specific_subtitles(sonarr_series_id, sonarr_episode_id, lan
             if isinstance(result, tuple) and len(result):
                 result = result[0]
             history_log(1, sonarr_series_id, sonarr_episode_id, result, arr_instance_id=arr_instance_id)
-            send_notifications(sonarr_series_id, sonarr_episode_id, result.message)
+            send_notifications(sonarr_series_id, sonarr_episode_id, result.message,
+                               arr_instance_id=arr_instance_id)
             store_subtitles(result.path, episodePath)
             jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
                                            progress_message="Subtitle downloaded")

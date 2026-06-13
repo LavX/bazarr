@@ -11,6 +11,7 @@ from languages.get_languages import alpha2_from_alpha3, alpha2_from_language, al
 from app.database import TableShows, TableEpisodes, TableMovies, database, select
 from radarr.notify import notify_radarr
 from sonarr.notify import notify_sonarr
+from arr_instances.resolution import client_for_instance
 from plex.operations import plex_set_movie_added_date_now, plex_update_library, plex_set_episode_added_date_now, plex_refresh_item  # noqa: F401
 from jellyfin.operations import jellyfin_refresh_item
 from app.event_handler import event_stream
@@ -273,7 +274,8 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                            percent_score=percent_score,
                            sonarr_series_id=episode_metadata.sonarrSeriesId,
                            sonarr_episode_id=episode_metadata.sonarrEpisodeId,
-                           job_id=job_id)
+                           job_id=job_id,
+                           arr_instance_id=episode_metadata.arr_instance_id)
     else:
         movie_metadata = database.execute(
             select(TableMovies.radarrId, TableMovies.imdbId, TableMovies.tmdbId, TableMovies.arr_instance_id)
@@ -292,7 +294,8 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                            srt_lang=downloaded_language_code2,
                            percent_score=percent_score,
                            radarr_id=movie_metadata.radarrId,
-                           job_id=job_id)
+                           job_id=job_id,
+                           arr_instance_id=movie_metadata.arr_instance_id)
 
     if use_postprocessing is True:
         command = pp_replace(postprocessing_cmd, path, downloaded_path, downloaded_language, downloaded_language_code2,
@@ -318,7 +321,10 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
     if media_type == 'series':
         reversed_path = path_mappings.path_replace_reverse(path)
         reversed_subtitles_path = path_mappings.path_replace_reverse(downloaded_path)
-        notify_sonarr(episode_metadata.sonarrSeriesId)
+        # Route the rescan at the OWNING instance's Sonarr (#156); None owner =
+        # default server (legacy single-instance), unchanged.
+        notify_sonarr(episode_metadata.sonarrSeriesId,
+                      arr_client=client_for_instance(database, episode_metadata.arr_instance_id))
         event_stream(type='series', action='update', payload=episode_metadata.sonarrSeriesId)
         event_stream(type='episode-wanted', action='delete',
                      payload=episode_metadata.sonarrEpisodeId)
@@ -338,7 +344,8 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
     else:
         reversed_path = path_mappings.path_replace_reverse_movie(path)
         reversed_subtitles_path = path_mappings.path_replace_reverse_movie(downloaded_path)
-        notify_radarr(movie_metadata.radarrId)
+        notify_radarr(movie_metadata.radarrId,
+                      arr_client=client_for_instance(database, movie_metadata.arr_instance_id))
         event_stream(type='movie-wanted', action='delete', payload=movie_metadata.radarrId)
         if settings.general.use_plex is True:
             if settings.plex.set_movie_added is True:

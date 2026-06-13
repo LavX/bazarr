@@ -3,6 +3,8 @@
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
 
 from radarr.filesystem import browse_radarr_filesystem
+from app.database import database
+from arr_instances.resolution import client_for_instance
 
 from ..utils import authenticate
 
@@ -14,6 +16,8 @@ api_ns_files_radarr = Namespace('Files Browser for Radarr', description='Browse 
 class BrowseRadarrFS(Resource):
     get_request_parser = reqparse.RequestParser()
     get_request_parser.add_argument('path', type=str, default='', help='Path to browse')
+    get_request_parser.add_argument('instance_id', type=int, required=False,
+                                    help='Owning Radarr instance id to browse (#156)')
 
     get_response_model = api_ns_files_radarr.model('RadarrFileBrowserGetResponse', {
         'name': fields.String(),
@@ -28,9 +32,13 @@ class BrowseRadarrFS(Resource):
         """List Radarr file system content"""
         args = self.get_request_parser.parse_args()
         path = args.get('path')
+        # When an instance_id is given, browse THAT instance's Radarr (#156);
+        # otherwise the default-server behaviour is unchanged.
+        instance_id = args.get('instance_id')
+        arr_client = client_for_instance(database, instance_id) if instance_id is not None else None
         data = []
         try:
-            result = browse_radarr_filesystem(path)
+            result = browse_radarr_filesystem(path, arr_client=arr_client)
             if result is None:
                 raise ValueError
         except Exception:

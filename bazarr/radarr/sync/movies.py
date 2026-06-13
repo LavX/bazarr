@@ -481,7 +481,8 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False,
                                                    is_signalr=is_signalr)
             else:
                 if is_signalr and settings.general.notify_if_nothing_is_missing_for_signalr_event:
-                    send_notifications_movie(movie_id, "There are no missing subtitles in this movie.")
+                    send_notifications_movie(movie_id, "There are no missing subtitles in this movie.",
+                                             arr_instance_id=arr_instance_id)
                 logging.debug('BAZARR no missing subtitles for this movie: %s (%s)', movie["title"], movie["year"])
         else:
             logging.debug('BAZARR cannot find this file yet (Radarr may be slow to import movie between disks?). '

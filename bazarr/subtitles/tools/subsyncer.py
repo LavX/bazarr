@@ -24,6 +24,7 @@ from utilities.video_analyzer import subtitles_sync_references
 from app.config import settings
 from app.database import TableMovies, TableShows, database, select
 from app.get_args import args
+from arr_instances.resolution import scoped, default_instance_id
 
 
 ENGINE_LABELS = {
@@ -75,46 +76,84 @@ class SubSyncer:
             self.progress_callback(message, value, total)
 
     @staticmethod
-    def _original_language_name(sonarr_series_id, radarr_id):
-        """Read originalLanguage from the local DB. The column is populated by the regular
-        Sonarr/Radarr series/movies sync. Returns None if the row is missing or the column
-        hasn't been backfilled yet (next series/movies sync will populate it)."""
+    def _original_language_name(sonarr_series_id, radarr_id, arr_instance_id=None):
+        """Read originalLanguage from the local DB, scoped to the OWNING instance.
+
+        The column is populated by the regular Sonarr/Radarr series/movies sync.
+        Returns None if the row is missing or the column hasn't been backfilled
+        yet. ``arr_instance_id`` (#156) scopes the lookup; when it is None and
+        the upstream id collides across instances, the default instance is
+        preferred so a sibling instance's originalLanguage is never read."""
         try:
             if sonarr_series_id:
-                row = database.execute(
+                owner = SubSyncer._owner_for_upstream(
+                    TableShows.arr_instance_id, TableShows.sonarrSeriesId,
+                    int(sonarr_series_id), arr_instance_id, "sonarr")
+                row = database.execute(scoped(
                     select(TableShows.originalLanguage)
-                    .where(TableShows.sonarrSeriesId == int(sonarr_series_id))
-                ).first()
+                    .where(TableShows.sonarrSeriesId == int(sonarr_series_id)),
+                    TableShows.arr_instance_id, owner)).first()
                 return row.originalLanguage if row else None
             if radarr_id:
-                row = database.execute(
+                owner = SubSyncer._owner_for_upstream(
+                    TableMovies.arr_instance_id, TableMovies.radarrId,
+                    int(radarr_id), arr_instance_id, "radarr")
+                row = database.execute(scoped(
                     select(TableMovies.originalLanguage)
-                    .where(TableMovies.radarrId == int(radarr_id))
-                ).first()
+                    .where(TableMovies.radarrId == int(radarr_id)),
+                    TableMovies.arr_instance_id, owner)).first()
                 return row.originalLanguage if row else None
         except Exception:
             logging.exception('BAZARR could not retrieve originalLanguage from database.')
         return None
 
+    @staticmethod
+    def _owner_for_upstream(owner_col, upstream_col, upstream_value, arr_instance_id, kind):
+        """Resolve the owning arr_instance_id for an upstream id when the caller
+        didn't supply one. Returns ``arr_instance_id`` verbatim if given; on a
+        cross-instance collision prefers the default instance; otherwise returns
+        None (legacy unscoped, single match)."""
+        if arr_instance_id is not None:
+            return arr_instance_id
+        owners = [r[0] for r in database.execute(
+            select(owner_col).where(upstream_col == upstream_value)).all()]
+        distinct_owners = {o for o in owners}
+        if len(distinct_owners) <= 1:
+            return None  # single (or NULL) owner: legacy unscoped behaviour
+        default_id = default_instance_id(database, kind)
+        if default_id in distinct_owners:
+            logging.debug('BAZARR subsync: %s id %s collides across instances; using default instance %s',
+                          kind, upstream_value, default_id)
+            return default_id
+        return None
+
     @classmethod
-    def _audio_stream_for_original_language(cls, sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None):
+    def _audio_stream_for_original_language(cls, sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None,
+                                            arr_instance_id=None):
         """Return the ffmpeg audio stream specifier (e.g. 'a:1') matching the show/movie's
-        original language as reported by Sonarr/Radarr, or None if not found."""
+        original language as reported by Sonarr/Radarr, or None if not found.
+
+        ``arr_instance_id`` (#156) scopes both the originalLanguage lookup and
+        the audio-track enumeration to the OWNING instance so a colliding
+        upstream id can't read a sibling instance's metadata."""
         logging.debug(
             "BAZARR subsync: looking up original language "
-            "(sonarr_series_id=%s, sonarr_episode_id=%s, radarr_id=%s)",
+            "(sonarr_series_id=%s, sonarr_episode_id=%s, radarr_id=%s, arr_instance_id=%s)",
             sonarr_series_id,
             sonarr_episode_id,
             radarr_id,
+            arr_instance_id,
         )
-        target_name = cls._original_language_name(sonarr_series_id=sonarr_series_id, radarr_id=radarr_id)
+        target_name = cls._original_language_name(sonarr_series_id=sonarr_series_id, radarr_id=radarr_id,
+                                                  arr_instance_id=arr_instance_id)
         logging.debug("BAZARR subsync: original language reported by Sonarr/Radarr = %r", target_name)
         if not target_name:
             return None
         try:
             refs = subtitles_sync_references(subtitles_path='',
                                              sonarr_episode_id=sonarr_episode_id,
-                                             radarr_movie_id=radarr_id)
+                                             radarr_movie_id=radarr_id,
+                                             arr_instance_id=arr_instance_id)
         except Exception:
             logging.exception('BAZARR could not enumerate audio tracks for original-language matching.')
             return None
@@ -164,7 +203,8 @@ class SubSyncer:
         return self.ffmpeg_path
 
     def _build_ffsubsync_args(self, output_path, max_offset_seconds, no_fix_framerate, gss, reference=None,
-                              sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None, force_sync=False):
+                              sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None, force_sync=False,
+                              arr_instance_id=None):
         from ffsubsync.ffsubsync import make_parser
 
         ffmpeg_path = self._ensure_ffmpeg_path()
@@ -196,6 +236,7 @@ class SubSyncer:
                     sonarr_series_id=sonarr_series_id,
                     sonarr_episode_id=sonarr_episode_id,
                     radarr_id=radarr_id,
+                    arr_instance_id=arr_instance_id,
                 )
                 if matched:
                     stream_spec = matched
@@ -207,6 +248,7 @@ class SubSyncer:
                 sonarr_series_id=sonarr_series_id,
                 sonarr_episode_id=sonarr_episode_id,
                 radarr_id=radarr_id,
+                arr_instance_id=arr_instance_id,
             )
             if matched:
                 logging.debug("BAZARR subsync: using --reference-stream %s", matched)
@@ -222,7 +264,8 @@ class SubSyncer:
         return parser.parse_args(args=unparsed_args)
 
     def _run_ffsubsync_engine(self, output_path, max_offset_seconds, no_fix_framerate, gss, reference=None,
-                              sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None, force_sync=False):
+                              sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None, force_sync=False,
+                              arr_instance_id=None):
         from ffsubsync.ffsubsync import run
 
         self.args = self._build_ffsubsync_args(
@@ -235,6 +278,7 @@ class SubSyncer:
             sonarr_episode_id=sonarr_episode_id,
             radarr_id=radarr_id,
             force_sync=force_sync,
+            arr_instance_id=arr_instance_id,
         )
         return run(self.args)
 
@@ -296,7 +340,8 @@ class SubSyncer:
         }
 
     def _log_sync_history(self, success_result, output_mode, srt_lang, hi, forced,
-                          sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None):
+                          sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None,
+                          arr_instance_id=None):
         raw_result = success_result.raw_result if isinstance(success_result.raw_result, dict) else {}
         offset_seconds = raw_result.get('offset_seconds') or 0
         framerate_scale_factor = raw_result.get('framerate_scale_factor') or 0
@@ -322,14 +367,15 @@ class SubSyncer:
 
         if sonarr_episode_id:
             history_log(action=5, sonarr_series_id=sonarr_series_id, sonarr_episode_id=sonarr_episode_id,
-                        result=result)
+                        result=result, arr_instance_id=arr_instance_id)
         else:
-            history_log_movie(action=5, radarr_id=radarr_id, result=result)
+            history_log_movie(action=5, radarr_id=radarr_id, result=result,
+                              arr_instance_id=arr_instance_id)
 
     def sync(self, video_path, srt_path, srt_lang, hi, forced,
              max_offset_seconds, no_fix_framerate, gss, reference=None, sonarr_series_id=None, sonarr_episode_id=None,
              radarr_id=None, progress_callback=None, job_id=None, force_sync=False, output_mode=None,
-             enabled_engines=None, write_history=True):
+             enabled_engines=None, write_history=True, arr_instance_id=None):
         self.reference = video_path
         self.srtin = srt_path
         self.progress_callback = progress_callback
@@ -377,6 +423,7 @@ class SubSyncer:
                     sonarr_episode_id=sonarr_episode_id,
                     radarr_id=radarr_id,
                     force_sync=force_sync,
+                    arr_instance_id=arr_instance_id,
                 )
             else:
                 raw_result = self._run_external_engine(engine=engine, output_path=output_path, video_path=video_path)
@@ -412,6 +459,7 @@ class SubSyncer:
                     sonarr_series_id=sonarr_series_id,
                     sonarr_episode_id=sonarr_episode_id,
                     radarr_id=radarr_id,
+                    arr_instance_id=arr_instance_id,
                 )
 
         return self.sync_result

@@ -174,7 +174,8 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
                     # verbatim, and download history rows store DB-side paths
                     # via path_replace_reverse_movie. Embedded rows must match
                     # so path comparisons line up in path-mapped installs.
-                    _log_embedded_history_movie(movie.radarrId, embedded_languages, original_path)
+                    _log_embedded_history_movie(movie.radarrId, embedded_languages, original_path,
+                                                arr_instance_id=movie.arr_instance_id)
             else:
                 logging.debug(f"BAZARR haven't been able to update existing subtitles to DB: {actual_subtitles}")  # noqa: G004
     else:
@@ -185,7 +186,7 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
     return actual_subtitles
 
 
-def _log_embedded_history_movie(radarr_id, embedded_languages, reversed_path):
+def _log_embedded_history_movie(radarr_id, embedded_languages, reversed_path, arr_instance_id=None):
     """Record source-quality history entries for newly detected embedded subtitles.
 
     Why: Embedded subtitle tracks come from disc/streaming rips and are source
@@ -218,11 +219,16 @@ def _log_embedded_history_movie(radarr_id, embedded_languages, reversed_path):
             # Not atomic under AUTOCOMMIT. Concurrent indexing of the same movie
             # could produce duplicates, but this is rare in practice and consistent
             # with how other parts of Bazarr dedup history entries.
+            # Scope the dedup to the owning instance (#156): a radarrId shared
+            # across instances must not let one instance's embedded row suppress
+            # another's. No-op for the default/single-instance path.
             existing = database.execute(
-                select(TableHistoryMovie.id)
-                .where(TableHistoryMovie.radarrId == radarr_id)
-                .where(TableHistoryMovie.language == canonical)
-                .where(TableHistoryMovie.action == 7)).first()
+                scoped(
+                    select(TableHistoryMovie.id)
+                    .where(TableHistoryMovie.radarrId == radarr_id)
+                    .where(TableHistoryMovie.language == canonical)
+                    .where(TableHistoryMovie.action == 7),
+                    TableHistoryMovie.arr_instance_id, arr_instance_id)).first()
             if existing:
                 continue
 
@@ -237,7 +243,8 @@ def _log_embedded_history_movie(radarr_id, embedded_languages, reversed_path):
                 reversed_subtitles_path=None,
                 hearing_impaired=is_hi)
             history_log_movie(action=7, radarr_id=radarr_id, result=result,
-                              fake_provider="embedded", fake_score=score_out_of)
+                              fake_provider="embedded", fake_score=score_out_of,
+                              arr_instance_id=arr_instance_id)
     except Exception:
         logging.exception("BAZARR error writing embedded subtitle history for movie %s", radarr_id)
 

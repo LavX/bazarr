@@ -19,7 +19,7 @@ from utilities.path_mappings import path_mappings
 from radarr.history import history_log_movie
 from radarr.notify import notify_radarr
 from sonarr.history import history_log
-from arr_instances.resolution import scoped
+from arr_instances.resolution import scoped, client_for_instance
 from sonarr.notify import notify_sonarr
 from languages.custom_lang import CustomLanguage
 from app.database import (TableEpisodes, TableMovies, TableShows, get_profiles_list, get_audio_profile_languages,
@@ -174,18 +174,24 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
     if media_type == 'series':
         sync_subtitles(video_path=path, srt_path=subtitle_path, srt_lang=uploaded_language_code2, percent_score=100,
                        sonarr_series_id=episode_metadata.sonarrSeriesId, forced=forced, hi=hi,
-                       sonarr_episode_id=episode_metadata.sonarrEpisodeId, job_id=job_id)
+                       sonarr_episode_id=episode_metadata.sonarrEpisodeId, job_id=job_id,
+                       arr_instance_id=arr_instance_id)
         reversed_path = path_mappings.path_replace_reverse(path)
         reversed_subtitles_path = path_mappings.path_replace_reverse(subtitle_path)
-        notify_sonarr(episode_metadata.sonarrSeriesId)
+        # Route the rescan at the OWNING instance's server (#156). None owner =
+        # default server (legacy single-instance), unchanged.
+        notify_sonarr(episode_metadata.sonarrSeriesId,
+                      arr_client=client_for_instance(database, arr_instance_id))
         event_stream(type='series', action='update', payload=episode_metadata.sonarrSeriesId)
         event_stream(type='episode-wanted', action='delete', payload=episode_metadata.sonarrEpisodeId)
     else:
         sync_subtitles(video_path=path, srt_path=subtitle_path, srt_lang=uploaded_language_code2, percent_score=100,
-                       radarr_id=movie_metadata.radarrId, forced=forced, hi=hi, job_id=job_id)
+                       radarr_id=movie_metadata.radarrId, forced=forced, hi=hi, job_id=job_id,
+                       arr_instance_id=arr_instance_id)
         reversed_path = path_mappings.path_replace_reverse_movie(path)
         reversed_subtitles_path = path_mappings.path_replace_reverse_movie(subtitle_path)
-        notify_radarr(movie_metadata.radarrId)
+        notify_radarr(movie_metadata.radarrId,
+                      arr_client=client_for_instance(database, arr_instance_id))
         event_stream(type='movie', action='update', payload=movie_metadata.radarrId)
         event_stream(type='movie-wanted', action='delete', payload=movie_metadata.radarrId)
 
@@ -211,7 +217,8 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
             history_log(4, sonarrSeriesId, sonarrEpisodeId, result, fake_provider=provider,
                         fake_score=MAX_SCORES['episode'], arr_instance_id=arr_instance_id)
             if not settings.general.dont_notify_manual_actions:
-                send_notifications(sonarrSeriesId, sonarrEpisodeId, result.message)
+                send_notifications(sonarrSeriesId, sonarrEpisodeId, result.message,
+                                   arr_instance_id=arr_instance_id)
             store_subtitles(result.path, path)
             if settings.general.use_plex:
                 if settings.plex.update_series_library:
@@ -227,7 +234,7 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
             history_log_movie(4, radarrId, result, fake_provider=provider, fake_score=MAX_SCORES['movie'],
                               arr_instance_id=arr_instance_id)
             if not settings.general.dont_notify_manual_actions:
-                send_notifications_movie(radarrId, result.message)
+                send_notifications_movie(radarrId, result.message, arr_instance_id=arr_instance_id)
             store_subtitles_movie(result.path, path)
             if settings.general.use_plex:
                 if settings.plex.update_movie_library:

@@ -199,7 +199,8 @@ def _wanted_episode(episode, providers_list, job_id=None):
                         arr_instance_id=arr_instance_id)
             event_stream(type='series', action='update', payload=episode.sonarrSeriesId)
             event_stream(type='episode-wanted', action='delete', payload=episode.sonarrEpisodeId)
-            send_notifications(episode.sonarrSeriesId, episode.sonarrEpisodeId, result.message)
+            send_notifications(episode.sonarrSeriesId, episode.sonarrEpisodeId, result.message,
+                               arr_instance_id=arr_instance_id)
 
     if not found_any and providers_list:
         for language in languages_to_stamp:

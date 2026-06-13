@@ -191,7 +191,7 @@ def _wanted_movie(movie, providers_list, job_id=None):
             store_subtitles_movie(movie.path, path_mappings.path_replace_movie(movie.path))
             history_log_movie(1, movie.radarrId, result, arr_instance_id=arr_instance_id)
             event_stream(type='movie-wanted', action='delete', payload=movie.radarrId)
-            send_notifications_movie(movie.radarrId, result.message)
+            send_notifications_movie(movie.radarrId, result.message, arr_instance_id=arr_instance_id)
 
     if not found_any and providers_list:
         for language in languages_to_stamp:

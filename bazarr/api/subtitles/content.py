@@ -253,19 +253,16 @@ def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=N
     if entry is not None:
         subtitle_path = entry[1]
 
-        if media_type == 'episode':
-            subtitle_path = path_mappings.path_replace(subtitle_path)
-        else:
-            subtitle_path = path_mappings.path_replace_movie(subtitle_path)
+        # Apply the OWNING instance's per-instance path_mappings when configured
+        # (#156); falls back to the global mapping when the instance has none.
+        subtitle_path = path_mappings.path_replace_instance(
+            subtitle_path, row.arr_instance_id, media_type)
     else:
         # Language not in DB (not in the media's language profile, or indexer
         # hasn't run yet). Try to find the file on disk by constructing the
         # expected path from the video filename.
-        video_path = row.path
-        if media_type == 'episode':
-            video_path = path_mappings.path_replace(video_path)
-        else:
-            video_path = path_mappings.path_replace_movie(video_path)
+        video_path = path_mappings.path_replace_instance(
+            row.path, row.arr_instance_id, media_type)
 
         video_name = os.path.splitext(os.path.basename(video_path))[0]
         video_dir = os.path.dirname(video_path)
@@ -340,21 +337,25 @@ def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=N
     # dict population, so the return value is not flagged as user-controlled.
     subtitle_basename = os.path.basename(os.path.normpath(subtitle_path))
     if media_type == 'episode':
-        query = select(TableEpisodes.path).where(TableEpisodes.sonarrEpisodeId == media_id)
+        query = select(TableEpisodes.path, TableEpisodes.arr_instance_id).where(
+            TableEpisodes.sonarrEpisodeId == media_id)
         if arr_instance_id is not None:
             query = query.where(TableEpisodes.arr_instance_id == arr_instance_id)
         fresh_row = database.execute(query).first()
         if not fresh_row:
             return 'Media not found', 404
-        trusted_media_path = path_mappings.path_replace(fresh_row.path)
+        trusted_media_path = path_mappings.path_replace_instance(
+            fresh_row.path, fresh_row.arr_instance_id, 'episode')
     else:
-        query = select(TableMovies.path).where(TableMovies.radarrId == media_id)
+        query = select(TableMovies.path, TableMovies.arr_instance_id).where(
+            TableMovies.radarrId == media_id)
         if arr_instance_id is not None:
             query = query.where(TableMovies.arr_instance_id == arr_instance_id)
         fresh_row = database.execute(query).first()
         if not fresh_row:
             return 'Media not found', 404
-        trusted_media_path = path_mappings.path_replace_movie(fresh_row.path)
+        trusted_media_path = path_mappings.path_replace_instance(
+            fresh_row.path, fresh_row.arr_instance_id, 'movie')
 
     trusted_media_dir = os.path.realpath(os.path.dirname(trusted_media_path))
     trusted_target_dir = get_target_folder(trusted_media_path)
@@ -689,7 +690,17 @@ def _get_media_metadata(media_type, media_id, arr_instance_id=None):
             query = query.where(TableEpisodes.arr_instance_id == arr_instance_id)
         row = database.execute(query).first()
         if row:
-            series_query = select(TableShows.id, TableShows.title).where(TableShows.id == row.series_id)
+            # Mirror resolve_subtitle_path's fallback (#156): when the local
+            # series_id link is NULL (transient pre-INC4 row), look the show up
+            # by its upstream sonarrSeriesId scoped to the owning instance, so a
+            # NULL series_id no longer drops mediaTitle/mediaId.
+            series_query = select(TableShows.id, TableShows.title)
+            if row.series_id:
+                series_query = series_query.where(TableShows.id == row.series_id)
+            else:
+                series_query = series_query.where(TableShows.sonarrSeriesId == row.sonarrSeriesId)
+                if row.arr_instance_id is not None:
+                    series_query = series_query.where(TableShows.arr_instance_id == row.arr_instance_id)
             series_row = database.execute(series_query).first()
             return {
                 'mediaTitle': series_row.title if series_row else None,

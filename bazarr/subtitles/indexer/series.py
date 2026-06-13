@@ -174,7 +174,8 @@ def store_subtitles(original_path, reversed_path, use_cache=True):
                     # path_replace_reverse. Embedded rows must match so path
                     # comparisons line up in path-mapped installs.
                     _log_embedded_history(episode.sonarrSeriesId, episode.sonarrEpisodeId,
-                                          embedded_languages, original_path)
+                                          embedded_languages, original_path,
+                                          arr_instance_id=episode.arr_instance_id)
             else:
                 logging.debug(f"BAZARR haven't been able to update existing subtitles to DB: {actual_subtitles}")  # noqa: G004
     else:
@@ -185,7 +186,7 @@ def store_subtitles(original_path, reversed_path, use_cache=True):
     return actual_subtitles
 
 
-def _log_embedded_history(series_id, episode_id, embedded_languages, reversed_path):
+def _log_embedded_history(series_id, episode_id, embedded_languages, reversed_path, arr_instance_id=None):
     """Record source-quality history entries for newly detected embedded subtitles.
 
     Why: Embedded subtitle tracks come from disc/streaming rips and are source
@@ -217,11 +218,16 @@ def _log_embedded_history(series_id, episode_id, embedded_languages, reversed_pa
             # Not atomic under AUTOCOMMIT. Concurrent indexing of the same episode
             # could produce duplicates, but this is rare in practice and consistent
             # with how other parts of Bazarr dedup history entries.
+            # Scope the dedup to the owning instance (#156): a sonarrEpisodeId
+            # shared across instances must not let one instance's embedded row
+            # suppress another's. No-op for the default/single-instance path.
             existing = database.execute(
-                select(TableHistory.id)
-                .where(TableHistory.sonarrEpisodeId == episode_id)
-                .where(TableHistory.language == canonical)
-                .where(TableHistory.action == 7)).first()
+                scoped(
+                    select(TableHistory.id)
+                    .where(TableHistory.sonarrEpisodeId == episode_id)
+                    .where(TableHistory.language == canonical)
+                    .where(TableHistory.action == 7),
+                    TableHistory.arr_instance_id, arr_instance_id)).first()
             if existing:
                 continue
 
@@ -236,7 +242,8 @@ def _log_embedded_history(series_id, episode_id, embedded_languages, reversed_pa
                 reversed_subtitles_path=None,
                 hearing_impaired=is_hi)
             history_log(action=7, sonarr_series_id=series_id, sonarr_episode_id=episode_id,
-                        result=result, fake_provider="embedded", fake_score=score_out_of)
+                        result=result, fake_provider="embedded", fake_score=score_out_of,
+                        arr_instance_id=arr_instance_id)
     except Exception:
         logging.exception("BAZARR error writing embedded subtitle history for episode %s", episode_id)
 
@@ -244,6 +251,7 @@ def _log_embedded_history(series_id, episode_id, embedded_languages, reversed_pa
 def list_missing_subtitles(no=None, epno=None, arr_instance_id=None):
     stmt = select(TableShows.sonarrSeriesId,
                   TableEpisodes.sonarrEpisodeId,
+                  TableEpisodes.id,
                   TableEpisodes.subtitles,
                   TableEpisodes.failedAttempts,
                   TableShows.profileId,
@@ -384,7 +392,12 @@ def list_missing_subtitles(no=None, epno=None, arr_instance_id=None):
                    .where(TableEpisodes.sonarrEpisodeId == episode_subtitles.sonarrEpisodeId),
                    TableEpisodes.arr_instance_id, arr_instance_id))
 
-        event_stream(type='episode', payload=episode_subtitles.sonarrEpisodeId)
+        # Emit the LOCAL episode id (#156): the frontend caches episode detail
+        # by local id (QueryKeys.Episodes, <local id>), and in multi-instance the
+        # upstream sonarrEpisodeId is no longer unique, so emitting it would
+        # invalidate the wrong (or no) cached episode. local == upstream on a
+        # single-default install, so this is unchanged there.
+        event_stream(type='episode', payload=episode_subtitles.id)
         event_stream(type='episode-wanted', action='update', payload=episode_subtitles.sonarrEpisodeId)
     event_stream(type='badges')
 

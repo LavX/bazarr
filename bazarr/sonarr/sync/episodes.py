@@ -190,11 +190,11 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
 
                     # Parse episode data
                     if episode['id'] in current_episodes_in_db_row_as_dict:
-                        parsed_episode = episodeParser(episode)
+                        parsed_episode = episodeParser(episode, arr_instance_id=arr_instance_id)
                         if not set(parsed_episode.items()).issubset(set(current_episodes_in_db_row_as_dict[episode['id']].items())):
                             episodes_to_update.append(parsed_episode)
                     else:
-                        episodes_to_add.append(episodeParser(episode))
+                        episodes_to_add.append(episodeParser(episode, arr_instance_id=arr_instance_id))
     else:
         return
 
@@ -340,7 +340,8 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
                 else:
                     if is_signalr and settings.general.notify_if_nothing_is_missing_for_signalr_event:
                         send_notifications(series_id, episode['sonarrEpisodeId'],
-                                           "There are no missing subtitles in this episode.")
+                                           "There are no missing subtitles in this episode.",
+                                           arr_instance_id=arr_instance_id)
                     logging.debug('BAZARR no missing subtitles for this episode: %s', episode_title)
 
     # One coalesced socketio packet per series replaces what used to be
@@ -389,7 +390,7 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
                     get_episodesFiles_from_sonarr_api(apikey_sonarr=apikey_sonarr,
                                                       episode_file_id=episode_data['episodeFileId'],
                                                       arr_client=arr_client)
-            episode = episodeParser(episode_data)
+            episode = episodeParser(episode_data, arr_instance_id=arr_instance_id)
     except Exception:
         logging.exception('BAZARR cannot get episode returned by SignalR feed from Sonarr API.')
         return
@@ -486,7 +487,8 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
             else:
                 if is_signalr and settings.general.notify_if_nothing_is_missing_for_signalr_event:
                     send_notifications(episode["sonarrSeriesId"], episode_id,
-                                       "There are no missing subtitles in this episode.")
+                                       "There are no missing subtitles in this episode.",
+                                       arr_instance_id=arr_instance_id)
                 logging.debug('BAZARR no missing subtitles for this episode: %s', episode_full_title)
         else:
             logging.debug('BAZARR cannot find this file yet (Sonarr may be slow to import episode between disks?). '

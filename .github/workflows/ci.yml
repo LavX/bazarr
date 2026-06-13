@@ -192,6 +192,12 @@ jobs:
             tests/bazarr/test_series_identity_counts.py \
             tests/bazarr/test_system_searches.py \
             tests/bazarr/test_api_utils_images.py \
+            tests/bazarr/test_threading_scope.py \
+            tests/bazarr/test_blacklist_delete_scope.py \
+            tests/bazarr/test_content_metadata_scope.py \
+            tests/bazarr/test_episode_parser_scope.py \
+            tests/bazarr/test_files_browse_instance_scope.py \
+            tests/bazarr/test_path_mappings_instance.py \
             tests/bazarr/test_mass_operations.py ; do
             echo "::group::$f"
             pytest "$f" -p no:cacheprovider -q

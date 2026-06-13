@@ -111,7 +111,7 @@ def movies_download_subtitles(no, job_id=None, job_sub_function=False, arr_insta
                         result = result[0]
                     store_subtitles_movie(movie.path, moviePath)
                     history_log_movie(1, no, result, arr_instance_id=arr_instance_id)
-                    send_notifications_movie(no, result.message)
+                    send_notifications_movie(no, result.message, arr_instance_id=arr_instance_id)
                     downloaded_count += 1
         outcome_msg = (f"{downloaded_count} subtitle(s) downloaded"
                        if downloaded_count else "No subtitles found")
@@ -176,7 +176,7 @@ def movie_download_specific_subtitles(radarr_id, language, hi, forced, job_id=No
             if isinstance(result, tuple) and len(result):
                 result = result[0]
             history_log_movie(1, radarr_id, result, arr_instance_id=arr_instance_id)
-            send_notifications_movie(radarr_id, result.message)
+            send_notifications_movie(radarr_id, result.message, arr_instance_id=arr_instance_id)
             store_subtitles_movie(result.path, moviePath)
             jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
                                            progress_message="Subtitle downloaded")

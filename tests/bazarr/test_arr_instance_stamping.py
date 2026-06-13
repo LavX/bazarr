@@ -185,7 +185,7 @@ def test_episode_insert_inherits_parent_owner_and_local_id(schema_session, monke
     monkeypatch.setattr(ep_mod, "store_subtitles", _noop)
     monkeypatch.setattr(ep_mod, "event_stream", _noop)
     monkeypatch.setattr(ep_mod, "get_sonarr_info", _SonarrInfoStub())
-    monkeypatch.setattr(ep_mod, "episodeParser", lambda e: {
+    monkeypatch.setattr(ep_mod, "episodeParser", lambda e, **_kw: {
         "sonarrSeriesId": 5, "sonarrEpisodeId": 100, "path": "/tv/s/e", "season": 1,
         "episode": 1, "title": "E", "monitored": "True"})
 
@@ -213,7 +213,7 @@ def test_episode_insert_inherits_nondefault_owner(schema_session, monkeypatch):
     monkeypatch.setattr(ep_mod, "store_subtitles", _noop)
     monkeypatch.setattr(ep_mod, "event_stream", _noop)
     monkeypatch.setattr(ep_mod, "get_sonarr_info", _SonarrInfoStub())
-    monkeypatch.setattr(ep_mod, "episodeParser", lambda e: {
+    monkeypatch.setattr(ep_mod, "episodeParser", lambda e, **_kw: {
         "sonarrSeriesId": 5, "sonarrEpisodeId": 100, "path": "/tv/s/e", "season": 1,
         "episode": 1, "title": "E", "monitored": "True"})
 
@@ -394,7 +394,7 @@ def test_sync_episodes_passed_instance_id_wins(schema_session, monkeypatch):
     monkeypatch.setattr(ep_mod, "store_subtitles", _noop)
     monkeypatch.setattr(ep_mod, "event_stream", _noop)
     monkeypatch.setattr(ep_mod, "get_sonarr_info", _SonarrInfoStub())
-    monkeypatch.setattr(ep_mod, "episodeParser", lambda e: {
+    monkeypatch.setattr(ep_mod, "episodeParser", lambda e, **_kw: {
         "sonarrSeriesId": 5, "sonarrEpisodeId": 100, "path": "/tv/s/e", "season": 1,
         "episode": 1, "title": "E", "monitored": "True"})
 
@@ -691,7 +691,7 @@ def test_sync_episodes_delete_is_scoped_to_instance(schema_session, monkeypatch)
     monkeypatch.setattr(ep_mod, "store_subtitles", _noop)
     monkeypatch.setattr(ep_mod, "event_stream", _noop)
     monkeypatch.setattr(ep_mod, "get_sonarr_info", _SonarrInfoStub())
-    monkeypatch.setattr(ep_mod, "episodeParser", lambda e: {
+    monkeypatch.setattr(ep_mod, "episodeParser", lambda e, **_kw: {
         "sonarrSeriesId": 5, "sonarrEpisodeId": 200, "path": "/tv/s/e2", "season": 1,
         "episode": 2, "title": "E2", "monitored": "True"})
 
