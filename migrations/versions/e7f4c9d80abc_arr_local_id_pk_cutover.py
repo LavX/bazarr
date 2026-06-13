@@ -90,18 +90,21 @@ def _validate_owners(bind):
 # Step C+D: local id = upstream id, preserving the numeric space and every
 # relationship by value (shows.id=sonarrSeriesId, episodes.id=sonarrEpisodeId,
 # etc.). Only fills NULLs so it is idempotent.
+# camelCase identifiers are double-quoted so the same SQL runs on SQLite (which
+# is case-insensitive for unquoted ids) AND PostgreSQL (which folds unquoted ids
+# to lowercase and would otherwise raise "column does not exist").
 _BACKFILL_SQL = (
-    "UPDATE table_shows SET id = sonarrSeriesId WHERE id IS NULL",
-    "UPDATE table_episodes SET id = sonarrEpisodeId WHERE id IS NULL",
-    "UPDATE table_episodes SET series_id = sonarrSeriesId WHERE series_id IS NULL AND sonarrSeriesId IS NOT NULL",
-    "UPDATE table_movies SET id = radarrId WHERE id IS NULL",
+    'UPDATE table_shows SET id = "sonarrSeriesId" WHERE id IS NULL',
+    'UPDATE table_episodes SET id = "sonarrEpisodeId" WHERE id IS NULL',
+    'UPDATE table_episodes SET series_id = "sonarrSeriesId" WHERE series_id IS NULL AND "sonarrSeriesId" IS NOT NULL',
+    'UPDATE table_movies SET id = "radarrId" WHERE id IS NULL',
     "UPDATE table_shows_rootfolder SET upstream_rootfolder_id = id WHERE upstream_rootfolder_id IS NULL",
     "UPDATE table_shows_rootfolder SET local_rootfolder_id = id WHERE local_rootfolder_id IS NULL",
     "UPDATE table_movies_rootfolder SET upstream_rootfolder_id = id WHERE upstream_rootfolder_id IS NULL",
     "UPDATE table_movies_rootfolder SET local_rootfolder_id = id WHERE local_rootfolder_id IS NULL",
-    "UPDATE table_history SET series_id = sonarrSeriesId WHERE series_id IS NULL AND sonarrSeriesId IS NOT NULL",
-    "UPDATE table_history SET episode_id = sonarrEpisodeId WHERE episode_id IS NULL AND sonarrEpisodeId IS NOT NULL",
-    "UPDATE table_history_movie SET movie_id = radarrId WHERE movie_id IS NULL AND radarrId IS NOT NULL",
+    'UPDATE table_history SET series_id = "sonarrSeriesId" WHERE series_id IS NULL AND "sonarrSeriesId" IS NOT NULL',
+    'UPDATE table_history SET episode_id = "sonarrEpisodeId" WHERE episode_id IS NULL AND "sonarrEpisodeId" IS NOT NULL',
+    'UPDATE table_history_movie SET movie_id = "radarrId" WHERE movie_id IS NULL AND "radarrId" IS NOT NULL',
     "UPDATE table_blacklist SET series_id = sonarr_series_id WHERE series_id IS NULL AND sonarr_series_id IS NOT NULL",
     "UPDATE table_blacklist SET episode_id = sonarr_episode_id WHERE episode_id IS NULL AND sonarr_episode_id IS NOT NULL",
     "UPDATE table_blacklist_movie SET movie_id = radarr_id WHERE movie_id IS NULL AND radarr_id IS NOT NULL",
@@ -140,14 +143,15 @@ def _validate_pre_rebuild(bind):
     uniqueness collision exists (which would fail the rebuild's UNIQUE index)."""
     for table, col in _LOCAL_PK:
         nulls = bind.execute(
-            sa.text(f"SELECT COUNT(*) FROM {table} WHERE {col} IS NULL")).scalar()
+            sa.text(f'SELECT COUNT(*) FROM {table} WHERE "{col}" IS NULL')).scalar()
         if nulls:
             raise RuntimeError(
                 f"Phase 1e abort: {table}.{col} has {nulls} NULLs; cannot become the PK")
     for table, col in _SCOPED_UNIQUE:
+        # Postgres needs a name for the derived table; quote the camelCase column.
         dups = bind.execute(sa.text(
-            f"SELECT COUNT(*) FROM (SELECT 1 FROM {table} "
-            f"WHERE {col} IS NOT NULL GROUP BY arr_instance_id, {col} HAVING COUNT(*) > 1)"
+            f'SELECT COUNT(*) FROM (SELECT 1 FROM {table} '
+            f'WHERE "{col}" IS NOT NULL GROUP BY arr_instance_id, "{col}" HAVING COUNT(*) > 1) AS _d'
         )).scalar()
         if dups:
             raise RuntimeError(
@@ -274,6 +278,150 @@ def _rebuild_all(bind):
          'CREATE INDEX ix_blacklist_movie_instance_upstream ON table_blacklist_movie (arr_instance_id, radarr_id)'])
 
 
+# --------------------------------------------------------------------------- #
+# Native PostgreSQL path. Postgres has no rowid-alias trick and cannot rebuild a
+# table the SQLite way, but it CAN alter PKs/constraints in place. Per owned
+# table: drop every FK, swap the PK from the upstream id to the local id (with a
+# sequence so future bare inserts autoincrement), drop the now-wrong
+# single-column UNIQUE constraints/indexes, create the per-instance scoped UNIQUE
+# indexes + helper indexes, then re-add the FKs pointing at the new local PKs.
+# Constraint/index names are discovered dynamically (they vary across installs).
+# Mirrors _rebuild_all's index/FK set exactly (kept in sync by
+# test_arr_pg_cutover_migration which asserts both dialects reach the same shape).
+
+# Postgres reserves `language`/`timestamp`; quote those column refs.
+_PG_PROFILE_FK = ('FOREIGN KEY("profileId") REFERENCES table_languages_profiles'
+                  '("profileId") ON DELETE SET NULL')
+
+_PG_SPECS = (
+    ('table_shows', 'id', ('arr_instance_id',), ('sonarrSeriesId', 'path', 'tmdbId'),
+     ['CREATE UNIQUE INDEX ux_table_shows_instance_upstream_id ON table_shows (arr_instance_id, "sonarrSeriesId")',
+      'CREATE UNIQUE INDEX ux_table_shows_instance_path ON table_shows (arr_instance_id, path)',
+      'CREATE INDEX ix_table_shows_profileId ON table_shows ("profileId")'],
+     [_PG_PROFILE_FK]),
+    ('table_episodes', 'id', ('arr_instance_id',), ('sonarrEpisodeId',),
+     ['CREATE UNIQUE INDEX ux_table_episodes_instance_upstream_id ON table_episodes (arr_instance_id, "sonarrEpisodeId")',
+      'CREATE INDEX ix_table_episodes_episode_file_id ON table_episodes (episode_file_id)',
+      'CREATE INDEX ix_table_episodes_sonarrSeriesId ON table_episodes ("sonarrSeriesId")',
+      'CREATE INDEX ix_table_episodes_series_id ON table_episodes (series_id)'],
+     ['FOREIGN KEY("series_id") REFERENCES table_shows("id") ON DELETE CASCADE']),
+    ('table_movies', 'id', ('arr_instance_id',), ('radarrId', 'path', 'tmdbId'),
+     ['CREATE UNIQUE INDEX ux_table_movies_instance_upstream_id ON table_movies (arr_instance_id, "radarrId")',
+      'CREATE UNIQUE INDEX ux_table_movies_instance_path ON table_movies (arr_instance_id, path)',
+      'CREATE UNIQUE INDEX ux_table_movies_instance_tmdbid ON table_movies (arr_instance_id, "tmdbId")',
+      'CREATE INDEX ix_table_movies_profileId ON table_movies ("profileId")'],
+     [_PG_PROFILE_FK]),
+    ('table_shows_rootfolder', 'local_rootfolder_id',
+     ('arr_instance_id', 'upstream_rootfolder_id'), ('upstream_rootfolder_id',),
+     ['CREATE UNIQUE INDEX ux_shows_rootfolder_instance_upstream ON table_shows_rootfolder (arr_instance_id, upstream_rootfolder_id)'],
+     []),
+    ('table_movies_rootfolder', 'local_rootfolder_id',
+     ('arr_instance_id', 'upstream_rootfolder_id'), ('upstream_rootfolder_id',),
+     ['CREATE UNIQUE INDEX ux_movies_rootfolder_instance_upstream ON table_movies_rootfolder (arr_instance_id, upstream_rootfolder_id)'],
+     []),
+    ('table_history', 'id', ('arr_instance_id',), (),
+     ['CREATE INDEX ix_table_history_video_path_language_timestamp ON table_history (video_path, "language", "timestamp")',
+      'CREATE INDEX ix_table_history_action ON table_history (action)',
+      'CREATE INDEX ix_history_instance_upstream_series ON table_history (arr_instance_id, "sonarrSeriesId")',
+      'CREATE INDEX ix_history_instance_upstream_episode ON table_history (arr_instance_id, "sonarrEpisodeId")'],
+     ['FOREIGN KEY("series_id") REFERENCES table_shows("id") ON DELETE CASCADE',
+      'FOREIGN KEY("episode_id") REFERENCES table_episodes("id") ON DELETE CASCADE',
+      'FOREIGN KEY("upgradedFromId") REFERENCES table_history("id")']),
+    ('table_history_movie', 'id', ('arr_instance_id',), (),
+     ['CREATE INDEX ix_table_history_movie_video_path_language_timestamp ON table_history_movie (video_path, "language", "timestamp")',
+      'CREATE INDEX ix_table_history_movie_action ON table_history_movie (action)',
+      'CREATE INDEX ix_history_movie_instance_upstream ON table_history_movie (arr_instance_id, "radarrId")'],
+     ['FOREIGN KEY("movie_id") REFERENCES table_movies("id") ON DELETE CASCADE',
+      'FOREIGN KEY("upgradedFromId") REFERENCES table_history_movie("id")']),
+    ('table_blacklist', 'id', ('arr_instance_id',), (),
+     ['CREATE INDEX ix_table_blacklist_subs_id ON table_blacklist (subs_id)',
+      'CREATE INDEX ix_blacklist_instance_upstream_series ON table_blacklist (arr_instance_id, sonarr_series_id)',
+      'CREATE INDEX ix_blacklist_instance_upstream_episode ON table_blacklist (arr_instance_id, sonarr_episode_id)'],
+     ['FOREIGN KEY("series_id") REFERENCES table_shows("id") ON DELETE CASCADE',
+      'FOREIGN KEY("episode_id") REFERENCES table_episodes("id") ON DELETE CASCADE']),
+    ('table_blacklist_movie', 'id', ('arr_instance_id',), (),
+     ['CREATE INDEX ix_table_blacklist_movie_subs_id ON table_blacklist_movie (subs_id)',
+      'CREATE INDEX ix_blacklist_movie_instance_upstream ON table_blacklist_movie (arr_instance_id, radarr_id)'],
+     ['FOREIGN KEY("movie_id") REFERENCES table_movies("id") ON DELETE CASCADE']),
+)
+
+
+def _pg_drop_fks(bind, table):
+    for (name,) in bind.execute(sa.text(
+            f"SELECT conname FROM pg_constraint "
+            f"WHERE conrelid = '{table}'::regclass AND contype = 'f'")).fetchall():
+        bind.execute(sa.text(f'ALTER TABLE {table} DROP CONSTRAINT "{name}"'))
+
+
+def _pg_drop_pk(bind, table):
+    name = bind.execute(sa.text(
+        f"SELECT conname FROM pg_constraint "
+        f"WHERE conrelid = '{table}'::regclass AND contype = 'p'")).scalar()
+    if name:
+        bind.execute(sa.text(f'ALTER TABLE {table} DROP CONSTRAINT "{name}"'))
+
+
+def _pg_drop_single_col_uniques(bind, table, cols):
+    """Drop single-column UNIQUE constraints AND standalone unique indexes on any
+    column in ``cols`` (these enforced global uniqueness on an upstream id/path
+    that is now unique only per instance)."""
+    if not cols:
+        return
+    col_list = list(cols)
+    for name, attname in bind.execute(sa.text(f"""
+            SELECT con.conname, att.attname
+            FROM pg_constraint con
+            JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = con.conkey[1]
+            WHERE con.conrelid = '{table}'::regclass AND con.contype = 'u'
+              AND array_length(con.conkey, 1) = 1"""), ).fetchall():
+        if attname in cols:
+            bind.execute(sa.text(f'ALTER TABLE {table} DROP CONSTRAINT "{name}"'))
+    for (idxname,) in bind.execute(sa.text(f"""
+            SELECT c.relname FROM pg_index i
+            JOIN pg_class c ON c.oid = i.indexrelid
+            JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+            WHERE i.indrelid = '{table}'::regclass AND i.indisunique
+              AND i.indnatts = 1 AND NOT i.indisprimary
+              AND a.attname = ANY(:cols)
+              AND NOT EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.indexrelid)
+            """), {"cols": col_list}).fetchall():
+        bind.execute(sa.text(f'DROP INDEX "{idxname}"'))
+
+
+def _pg_set_local_pk(bind, table, pk_col):
+    bind.execute(sa.text(f'ALTER TABLE {table} ALTER COLUMN "{pk_col}" SET NOT NULL'))
+    bind.execute(sa.text(f'ALTER TABLE {table} ADD PRIMARY KEY ("{pk_col}")'))
+    # Sequence so a future bare INSERT auto-assigns MAX(id)+1, matching the
+    # SQLite rowid-alias behaviour the ORM relies on.
+    seq = f"{table}_{pk_col}_seq"
+    bind.execute(sa.text(f'CREATE SEQUENCE IF NOT EXISTS "{seq}" OWNED BY {table}."{pk_col}"'))
+    bind.execute(sa.text(
+        f'SELECT setval(\'{seq}\', COALESCE((SELECT MAX("{pk_col}") FROM {table}), 0) + 1, false)'))
+    bind.execute(sa.text(
+        f'ALTER TABLE {table} ALTER COLUMN "{pk_col}" SET DEFAULT nextval(\'{seq}\'::regclass)'))
+
+
+def _rebuild_all_postgres(bind):
+    # Phase 1: drop all FKs on owned tables so PKs can be swapped freely.
+    for spec in _PG_SPECS:
+        _pg_drop_fks(bind, spec[0])
+    # Phase 2: swap each PK to the local id, drop now-wrong single-col uniques,
+    # create scoped uniques + helper indexes.
+    for table, pk_col, not_null_cols, drop_unique_cols, index_ddls, _fks in _PG_SPECS:
+        _pg_drop_pk(bind, table)
+        _pg_drop_single_col_uniques(bind, table, set(drop_unique_cols))
+        for col in not_null_cols:
+            bind.execute(sa.text(f'ALTER TABLE {table} ALTER COLUMN "{col}" SET NOT NULL'))
+        _pg_set_local_pk(bind, table, pk_col)
+        for ddl in index_ddls:
+            bind.execute(sa.text(ddl))
+    # Phase 3: re-add FKs now that every parent has its new local PK. ADD
+    # CONSTRAINT validates existing rows, so a dangling reference aborts here.
+    for table, _pk, _nn, _du, _idx, fk_clauses in _PG_SPECS:
+        for clause in fk_clauses:
+            bind.execute(sa.text(f'ALTER TABLE {table} ADD {clause}'))
+
+
 def _validate_post_rebuild(bind, pre_counts):
     """Step H: abort (transaction rollback to d9a3b7c1e240) if a rebuild lost
     rows or left a dangling FK."""
@@ -283,11 +431,14 @@ def _validate_post_rebuild(bind, pre_counts):
             raise RuntimeError(
                 f"Phase 1e abort: {table} row count changed {before} -> {after} "
                 f"during rebuild (data loss)")
-    violations = bind.execute(sa.text("PRAGMA foreign_key_check")).fetchall()
-    if violations:
-        raise RuntimeError(
-            f"Phase 1e abort: foreign_key_check reported {len(violations)} "
-            f"violations after rebuild: {violations[:10]}")
+    if bind.dialect.name == "sqlite":
+        violations = bind.execute(sa.text("PRAGMA foreign_key_check")).fetchall()
+        if violations:
+            raise RuntimeError(
+                f"Phase 1e abort: foreign_key_check reported {len(violations)} "
+                f"violations after rebuild: {violations[:10]}")
+    # On Postgres the Phase-3 ADD CONSTRAINT calls already validated referential
+    # integrity against every existing row, so no separate FK sweep is needed.
 
 
 def upgrade():
@@ -296,6 +447,13 @@ def upgrade():
     if _already_cut_over(insp):
         logger.info("Phase 1e local-id PK cutover already applied; no-op")
         return
+
+    logger.warning(
+        "Phase 1e local-id PK cutover starting on %s: this is a ONE-WAY schema "
+        "change (downgrade() raises). Every step before the table rebuild is a "
+        "safe abort, but recovery from a failure during the rebuild is "
+        "restore-from-backup. Back up your database before upgrading.",
+        bind.dialect.name)
 
     _bootstrap_and_stamp(bind)        # Steps A+B
     _validate_owners(bind)            # Step E (ownership slice)
@@ -306,10 +464,13 @@ def upgrade():
         t: bind.execute(sa.text(f'SELECT COUNT(*) FROM "{t}"')).scalar()
         for t in _ALL_OWNED
     }
-    _rebuild_all(bind)                # Steps F+G (parents then children)
+    if bind.dialect.name == "postgresql":
+        _rebuild_all_postgres(bind)   # Steps F+G, native in-place ALTERs
+    else:
+        _rebuild_all(bind)            # Steps F+G (SQLite table rebuild)
     _validate_post_rebuild(bind, pre_counts)  # Step H (row parity + FK integrity)
 
-    logger.info("Phase 1e local-id PK cutover complete")
+    logger.info("Phase 1e local-id PK cutover complete (%s)", bind.dialect.name)
 
 
 def downgrade():

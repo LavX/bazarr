@@ -342,8 +342,14 @@ class TableEpisodes(Base):
     __tablename__ = 'table_episodes'
     # Phase 8 ORM PK flip (#156): local ``id`` PK; ``series_id`` is the local FK
     # to table_shows.id; the upstream sonarrEpisodeId is unique per instance.
+    # Index names match the Phase 1e cutover migration exactly, so a fresh
+    # create_all() install and an upgraded install have byte-identical schemas.
     __table_args__ = (
-        Index('ux_episodes_instance_upstream', 'arr_instance_id', 'sonarrEpisodeId', unique=True),
+        Index('ux_table_episodes_instance_upstream_id', 'arr_instance_id', 'sonarrEpisodeId', unique=True),
+        # series_id is the local FK to table_shows.id; the cutover migration
+        # indexes it but fresh installs missed it (sonarrSeriesId/episode_file_id
+        # are already indexed via index=True on their columns).
+        Index('ix_table_episodes_series_id', 'series_id'),
     )
 
     id = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -451,10 +457,11 @@ class TableMovies(Base):
     __tablename__ = 'table_movies'
     # Phase 8 ORM PK flip (#156): local ``id`` is the canonical PK; the upstream
     # radarrId, path and tmdbId are unique only within an instance.
+    # Index names match the Phase 1e cutover migration exactly (fresh==upgraded).
     __table_args__ = (
-        Index('ux_movies_instance_path', 'arr_instance_id', 'path', unique=True),
-        Index('ux_movies_instance_upstream', 'arr_instance_id', 'radarrId', unique=True),
-        Index('ux_movies_instance_tmdb', 'arr_instance_id', 'tmdbId', unique=True),
+        Index('ux_table_movies_instance_path', 'arr_instance_id', 'path', unique=True),
+        Index('ux_table_movies_instance_upstream_id', 'arr_instance_id', 'radarrId', unique=True),
+        Index('ux_table_movies_instance_tmdbid', 'arr_instance_id', 'tmdbId', unique=True),
     )
 
     id = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -550,9 +557,10 @@ class TableShows(Base):
     # Phase 8 ORM PK flip (#156): local ``id`` is the canonical PK (matches the
     # physical schema the cutover migration produced); the upstream
     # sonarrSeriesId and path are unique only within an instance.
+    # Index names match the Phase 1e cutover migration exactly (fresh==upgraded).
     __table_args__ = (
-        Index('ux_shows_instance_path', 'arr_instance_id', 'path', unique=True),
-        Index('ux_shows_instance_upstream', 'arr_instance_id', 'sonarrSeriesId', unique=True),
+        Index('ux_table_shows_instance_path', 'arr_instance_id', 'path', unique=True),
+        Index('ux_table_shows_instance_upstream_id', 'arr_instance_id', 'sonarrSeriesId', unique=True),
     )
 
     id = mapped_column(Integer, primary_key=True, autoincrement=True)
