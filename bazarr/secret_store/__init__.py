@@ -27,6 +27,7 @@ from .crypto import (
     encrypt_secret,
     get_master_key,
     is_encrypted,
+    persist_master_key,
 )
 from .migration import (
     decrypt_settings_dict,
@@ -61,4 +62,5 @@ __all__ = [
     "is_user_visible_secret",
     "is_user_visible_secret_list",
     "migrate_legacy_plex_encryption",
+    "persist_master_key",
 ]

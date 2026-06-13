@@ -71,6 +71,12 @@ class ArrInstancesList(Resource):
     @authenticate
     def post(self):
         args = _create_parser.parse_args()
+        # Persist the master key to config.yaml BEFORE the encrypted api_key is
+        # written: the repository flush commits immediately under AUTOCOMMIT, so
+        # a key generated only in memory here would be lost on restart and make
+        # the stored api_key undecryptable.
+        from secret_store import persist_master_key
+        persist_master_key()
         body, status = service.create_instance(database, args)
         if status < 400:
             database.commit()
@@ -87,6 +93,11 @@ class ArrInstanceItem(Resource):
     @authenticate
     def patch(self, instance_id):
         args = _update_parser.parse_args()
+        # See post(): persist the master key before a (possibly new) encrypted
+        # api_key is committed.
+        if args.get("api_key"):
+            from secret_store import persist_master_key
+            persist_master_key()
         body, status = service.update_instance(database, instance_id, args)
         if status < 400:
             database.commit()

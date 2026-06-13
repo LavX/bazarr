@@ -49,11 +49,43 @@ def _has_any_rows(session, tables):
     return False
 
 
+def _stamp_null_rows(session, tables, instance_id):
+    # Stamp via raw SQL keyed on the table name, not an ORM bulk update: the ORM
+    # update synchronizes the session by the model PK, which during the cutover
+    # migration is the still-NULL local id (the cutover populates it AFTER this
+    # bootstrap), leaving rows unstamped. Raw SQL is PK-agnostic and behaves
+    # identically at runtime (post-cutover). Table name is a trusted ORM constant.
+    stamped = 0
+    for model in tables:
+        result = session.execute(
+            text(f"UPDATE {model.__tablename__} "
+                 "SET arr_instance_id = :iid WHERE arr_instance_id IS NULL"),
+            {"iid": instance_id},
+        )
+        stamped += result.rowcount or 0
+    return stamped
+
+
 def _backfill_kind(session, repo, kind, scalar, use_flag, tables):
-    # Skip if ANY instance of this kind already exists (not just a default):
-    # once the user manages instances, a demoted/disabled instance must not be
-    # silently resurrected into a duplicate on the next startup.
-    if repo.list(kind=kind):
+    existing = repo.list(kind=kind)
+    if existing:
+        # An instance already exists - do NOT recreate it (a demoted/disabled
+        # instance must not be resurrected into a duplicate). But the create +
+        # stamp is not atomic and the create commits immediately under AUTOCOMMIT,
+        # so a crash between them leaves owned rows NULL forever if we just skip.
+        # Resume the stamp when this is still a single-instance kind (the backfill
+        # scenario), where stamping every orphaned row to the lone default is
+        # unambiguous. With 2+ instances a NULL row's owner is genuinely unknown,
+        # so leave it (scoped reads + the delete-guard handle it).
+        default = repo.get_default(kind)
+        if default is not None and len(existing) == 1:
+            stamped = _stamp_null_rows(session, tables, default.id)
+            if stamped:
+                logger.info(
+                    "Resumed %s backfill: stamped %s orphaned rows onto default id=%s",
+                    kind, stamped, default.id)
+            return {"created": False, "reason": "instance already exists",
+                    "stamped": stamped}
         return {"created": False, "reason": "instance already exists"}
     if not use_flag and not _has_any_rows(session, tables):
         return {"created": False, "reason": "nothing to own"}
@@ -72,21 +104,7 @@ def _backfill_kind(session, repo, kind, scalar, use_flag, tables):
         is_default=True,
     )
 
-    stamped = 0
-    for model in tables:
-        # Stamp via raw SQL keyed on the table name, not an ORM bulk update:
-        # the ORM update synchronizes the session by the model PK, which during
-        # the cutover migration is the still-NULL local id (the cutover
-        # populates it AFTER this bootstrap), leaving rows unstamped. Raw SQL is
-        # PK-agnostic and behaves identically at runtime (post-cutover).
-        # Table name is a trusted ORM constant, not user input.
-        result = session.execute(
-            text(f"UPDATE {model.__tablename__} "
-                 "SET arr_instance_id = :iid WHERE arr_instance_id IS NULL"),
-            {"iid": instance.id},
-        )
-        stamped += result.rowcount or 0
-
+    stamped = _stamp_null_rows(session, tables, instance.id)
     logger.info(
         "Backfilled default %s instance (id=%s); stamped %s existing rows",
         kind, instance.id, stamped,

@@ -92,6 +92,15 @@ def test_connection_for_instance(session, instance_id, args=None, http_get=None)
         value = args.get(key)
         return fallback if value is None else value
 
+    try:
+        api_key = decrypt_secret(row.api_key or "")
+    except ValueError:
+        # Master key rotated/changed: surface a clean structured error instead of
+        # a 500. The user must re-enter the key.
+        return {"ok": False, "error": "decrypt_failed",
+                "message": "Stored API key could not be decrypted (the master key "
+                           "changed). Re-enter the API key and save."}, 200
+
     client = ArrClientFactory().from_params(
         kind=row.kind,
         ip=args.get("ip") or row.ip,
@@ -99,7 +108,7 @@ def test_connection_for_instance(session, instance_id, args=None, http_get=None)
         base_url=args.get("base_url") or row.base_url or "/",
         ssl=bool(pick("ssl", row.ssl)),
         verify_ssl=bool(pick("verify_ssl", row.verify_ssl)),
-        api_key=decrypt_secret(row.api_key or ""),
+        api_key=api_key,
         http_timeout=pick("http_timeout", row.http_timeout) or 60,
         http_get=http_get,
     )

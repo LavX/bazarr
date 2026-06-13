@@ -99,6 +99,34 @@ def get_master_key(settings_obj=None) -> str:
     return key
 
 
+def persist_master_key(settings_obj=None) -> None:
+    """Ensure the master key exists AND is durable on disk before any secret
+    encrypted under it is committed.
+
+    The config.yaml path persists the key automatically (encrypt_settings_dict
+    writes general.secrets_encryption_key into the output). But arr_instances
+    API keys live in the DB and never trigger that path, so on a secret-less
+    install the key can exist only in memory at the moment an instance's key is
+    encrypted and committed. A restart would then regenerate a DIFFERENT key and
+    make the stored key permanently undecryptable. Call this BEFORE encrypting +
+    committing an arr_instances API key (the repository write commits
+    immediately under the AUTOCOMMIT engine).
+
+    Only writes config when the key was just generated, so the common path
+    (key already on disk) is a cheap no-op.
+    """
+    if settings_obj is None:
+        from app.config import settings as settings_obj
+
+    general = settings_obj.general
+    before = getattr(general, "secrets_encryption_key", "") or ""
+    get_master_key(settings_obj)
+    after = getattr(general, "secrets_encryption_key", "") or ""
+    if not before and after:
+        from app.config import write_config
+        write_config()
+
+
 def is_encrypted(value) -> bool:
     """True iff `value` is a string carrying the SECRET_MARKER_PREFIX.
 

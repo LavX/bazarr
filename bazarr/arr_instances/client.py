@@ -123,10 +123,22 @@ class ArrClientFactory:
     def from_row(self, row, *, http_get=None):
         from secret_store import decrypt_secret
 
+        try:
+            api_key = decrypt_secret(row.api_key or "")
+        except ValueError:
+            # The stored key can't be decrypted (master key rotated/changed).
+            # Build a client with no key - the call fails auth cleanly - rather
+            # than letting the exception crash the whole sync/SignalR fan-out.
+            import logging
+            logging.error(
+                "Cannot decrypt API key for %s instance id=%s (master key changed?); "
+                "re-enter the key in Settings.", row.kind, getattr(row, "id", "?"))
+            api_key = ""
+
         return ArrClient(
             kind=row.kind, ip=row.ip, port=row.port, base_url=row.base_url,
             ssl=bool(row.ssl), verify_ssl=bool(row.verify_ssl),
-            api_key=decrypt_secret(row.api_key or ""),
+            api_key=api_key,
             http_timeout=row.http_timeout, http_get=http_get,
         )
 
