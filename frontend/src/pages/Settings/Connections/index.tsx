@@ -16,6 +16,7 @@ import {
   faRotateRight,
   faServer,
   faTriangleExclamation,
+  faTv,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
@@ -26,6 +27,7 @@ import {
 } from "@/apis/hooks";
 import type { ArrInstance, ArrKind } from "@/apis/raw/arrInstances";
 import { Layout, Section } from "@/pages/Settings/components";
+import JellyfinSection from "@/pages/Settings/Jellyfin/JellyfinSection";
 import PlexSection from "@/pages/Settings/Plex/PlexSection";
 import RadarrSection from "@/pages/Settings/Radarr/RadarrSection";
 import SonarrSection from "@/pages/Settings/Sonarr/SonarrSection";
@@ -225,6 +227,12 @@ const SettingsConnectionsView: FunctionComponent = () => {
           >
             Plex
           </Tabs.Tab>
+          <Tabs.Tab
+            value="jellyfin"
+            leftSection={<FontAwesomeIcon icon={faTv} />}
+          >
+            Jellyfin
+          </Tabs.Tab>
         </Tabs.List>
 
         <Tabs.Panel value="sonarr">
@@ -253,6 +261,10 @@ const SettingsConnectionsView: FunctionComponent = () => {
 
         <Tabs.Panel value="plex">
           <PlexSection />
+        </Tabs.Panel>
+
+        <Tabs.Panel value="jellyfin">
+          <JellyfinSection />
         </Tabs.Panel>
       </Tabs>
 
