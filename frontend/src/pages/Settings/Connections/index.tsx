@@ -1,4 +1,5 @@
 import { FunctionComponent, ReactNode, useMemo, useState } from "react";
+import { useLocation, useNavigate } from "react-router";
 import {
   Alert,
   Button,
@@ -6,6 +7,7 @@ import {
   Modal,
   Skeleton,
   Stack,
+  Tabs,
   Text,
   ThemeIcon,
 } from "@mantine/core";
@@ -26,6 +28,7 @@ import { Layout, Section } from "@/pages/Settings/components";
 import InstanceCard from "./InstanceCard";
 import InstanceFormModal from "./InstanceFormModal";
 import { ARR_META } from "./meta";
+import { isConnectionTab, parseTabFromHash } from "./tabs";
 import styles from "./Connections.module.scss";
 
 interface KindSectionProps {
@@ -140,6 +143,15 @@ const SettingsConnectionsView: FunctionComponent = () => {
   const instances = useArrInstances();
   const deleteInstance = useDeleteArrInstance();
 
+  const location = useLocation();
+  const navigate = useNavigate();
+  const activeTab = parseTabFromHash(location.hash);
+  const handleTabChange = (value: string | null) => {
+    if (value && isConnectionTab(value)) {
+      navigate({ hash: value }, { replace: true });
+    }
+  };
+
   const [editor, setEditor] = useState<{
     kind: ArrKind;
     instance: ArrInstance | null;
@@ -188,27 +200,43 @@ const SettingsConnectionsView: FunctionComponent = () => {
   };
 
   return (
-    <Layout name="Instances">
-      <Text size="sm" c="dimmed" mt="md">
-        Run several Sonarr or Radarr servers? Register each one here. Every
-        instance keeps its own connection details and API key, and one per kind
-        is marked as the default.
-      </Text>
+    <Layout name="Connections">
+      <Tabs value={activeTab} onChange={handleTabChange} keepMounted={false}>
+        <Tabs.List mb="md">
+          <Tabs.Tab
+            value="sonarr"
+            leftSection={<FontAwesomeIcon icon={ARR_META.sonarr.icon} />}
+          >
+            Sonarr
+          </Tabs.Tab>
+          <Tabs.Tab
+            value="radarr"
+            leftSection={<FontAwesomeIcon icon={ARR_META.radarr.icon} />}
+          >
+            Radarr
+          </Tabs.Tab>
+        </Tabs.List>
 
-      <KindSection
-        kind="sonarr"
-        query={instances}
-        onAdd={openCreate}
-        onEdit={openEdit}
-        onDelete={openDelete}
-      />
-      <KindSection
-        kind="radarr"
-        query={instances}
-        onAdd={openCreate}
-        onEdit={openEdit}
-        onDelete={openDelete}
-      />
+        <Tabs.Panel value="sonarr">
+          <KindSection
+            kind="sonarr"
+            query={instances}
+            onAdd={openCreate}
+            onEdit={openEdit}
+            onDelete={openDelete}
+          />
+        </Tabs.Panel>
+
+        <Tabs.Panel value="radarr">
+          <KindSection
+            kind="radarr"
+            query={instances}
+            onAdd={openCreate}
+            onEdit={openEdit}
+            onDelete={openDelete}
+          />
+        </Tabs.Panel>
+      </Tabs>
 
       <InstanceFormModal
         opened={editorOpened}
