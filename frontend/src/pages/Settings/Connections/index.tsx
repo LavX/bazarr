@@ -26,7 +26,7 @@ import { Layout, Section } from "@/pages/Settings/components";
 import InstanceCard from "./InstanceCard";
 import InstanceFormModal from "./InstanceFormModal";
 import { ARR_META } from "./meta";
-import styles from "./ArrInstances.module.scss";
+import styles from "./Connections.module.scss";
 
 interface KindSectionProps {
   kind: ArrKind;
@@ -136,7 +136,7 @@ const KindSection: FunctionComponent<KindSectionProps> = ({
   );
 };
 
-const SettingsArrInstancesView: FunctionComponent = () => {
+const SettingsConnectionsView: FunctionComponent = () => {
   const instances = useArrInstances();
   const deleteInstance = useDeleteArrInstance();
 
@@ -270,4 +270,4 @@ const SettingsArrInstancesView: FunctionComponent = () => {
   );
 };
 
-export default SettingsArrInstancesView;
+export default SettingsConnectionsView;

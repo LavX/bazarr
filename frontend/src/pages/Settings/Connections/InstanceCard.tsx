@@ -31,7 +31,7 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useTestArrInstanceById, useUpdateArrInstance } from "@/apis/hooks";
 import type { ArrInstance } from "@/apis/raw/arrInstances";
 import { ARR_META, buildHostUrl } from "./meta";
-import styles from "./ArrInstances.module.scss";
+import styles from "./Connections.module.scss";
 
 interface TestStatus {
   tone: "ok" | "warn" | "fail";

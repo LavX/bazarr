@@ -32,7 +32,7 @@ import SeriesHistoryView from "@/pages/History/Series";
 import MovieView from "@/pages/Movies";
 import MovieDetailView from "@/pages/Movies/Details";
 import SeriesView from "@/pages/Series";
-import SettingsArrInstancesView from "@/pages/Settings/ArrInstances";
+import SettingsConnectionsView from "@/pages/Settings/Connections";
 import SettingsGeneralView from "@/pages/Settings/General";
 import SettingsJellyfinView from "@/pages/Settings/Jellyfin";
 import SettingsLanguagesView from "@/pages/Settings/Languages";
@@ -217,7 +217,7 @@ function useRoutes(): CustomRouteObject[] {
               {
                 path: "instances",
                 name: "Instances",
-                element: <SettingsArrInstancesView></SettingsArrInstancesView>,
+                element: <SettingsConnectionsView></SettingsConnectionsView>,
               },
               {
                 path: "plex",
