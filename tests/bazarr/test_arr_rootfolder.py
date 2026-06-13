@@ -102,6 +102,53 @@ def test_instance_lookup_ignores_other_instances_shows(schema_session, monkeypat
     assert rows == []
 
 
+def test_two_sonarr_instances_same_upstream_rootfolder_id_no_pk_collision(schema_session, monkeypatch):
+    # Rootfolder id=1 is the universal default in every Sonarr. Two instances
+    # both exposing it must each insert: local_rootfolder_id (the PK) is an
+    # autoincrement local id, upstream_rootfolder_id stays 1 scoped per instance.
+    from app.database import TableShows, TableShowsRootfolder
+    from sonarr import rootfolder
+
+    monkeypatch.setattr(rootfolder, "database", schema_session)
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=1, path="/tv/show", title="A", arr_instance_id=5))
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=1, path="/tv4k/show", title="B", arr_instance_id=8))
+
+    rootfolder.get_sonarr_rootfolder(
+        arr_instance_id=5, arr_client=_client([{"id": 1, "path": "/tv"}]))
+    rootfolder.get_sonarr_rootfolder(
+        arr_instance_id=8, arr_client=_client([{"id": 1, "path": "/tv4k"}]))
+
+    rows = schema_session.execute(
+        select(TableShowsRootfolder).order_by(TableShowsRootfolder.arr_instance_id)).scalars().all()
+    assert {r.arr_instance_id for r in rows} == {5, 8}
+    assert all(r.upstream_rootfolder_id == 1 for r in rows)
+    assert rows[0].local_rootfolder_id != rows[1].local_rootfolder_id
+
+
+def test_two_radarr_instances_same_upstream_rootfolder_id_no_pk_collision(schema_session, monkeypatch):
+    from app.database import TableMovies, TableMoviesRootfolder
+    from radarr import rootfolder
+
+    monkeypatch.setattr(rootfolder, "database", schema_session)
+    schema_session.execute(insert(TableMovies).values(
+        radarrId=1, path="/movies/m.mkv", title="A", tmdbId="1", arr_instance_id=5))
+    schema_session.execute(insert(TableMovies).values(
+        radarrId=1, path="/movies4k/m.mkv", title="B", tmdbId="2", arr_instance_id=8))
+
+    rootfolder.get_radarr_rootfolder(
+        arr_instance_id=5, arr_client=_client([{"id": 1, "path": "/movies"}], kind="radarr"))
+    rootfolder.get_radarr_rootfolder(
+        arr_instance_id=8, arr_client=_client([{"id": 1, "path": "/movies4k"}], kind="radarr"))
+
+    rows = schema_session.execute(
+        select(TableMoviesRootfolder).order_by(TableMoviesRootfolder.arr_instance_id)).scalars().all()
+    assert {r.arr_instance_id for r in rows} == {5, 8}
+    assert all(r.upstream_rootfolder_id == 1 for r in rows)
+    assert rows[0].local_rootfolder_id != rows[1].local_rootfolder_id
+
+
 def test_radarr_instance_path_stamps_rootfolder(schema_session, monkeypatch):
     from app.database import TableMovies, TableMoviesRootfolder
     from radarr import rootfolder

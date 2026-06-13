@@ -60,17 +60,28 @@ def stamp_owner(row, instance_id):
     return row
 
 
-def client_for_instance(session, instance_id, http_get=None):
+def client_for_instance(session, instance_id, http_get=None, enabled_only=True):
     """Build an :class:`ArrClient` for a saved instance (key decrypted at the
     repository boundary), or None when the instance no longer exists. The INC7
     fan-out + webhook/signalr entry points use this to route HTTP at one
     specific instance.
+
+    ``enabled_only`` (default True) returns None for a DISABLED instance so the
+    sync entry points honour their "skip disabled" contract instead of silently
+    syncing it. The pre-save connection test builds its client elsewhere
+    (``from_params``) and is unaffected; pass ``enabled_only=False`` to reach a
+    disabled instance deliberately.
     """
     from .client import ArrClientFactory
     from .repository import ArrInstanceRepository
 
-    return ArrClientFactory(ArrInstanceRepository(session)).for_instance(
-        instance_id, http_get=http_get)
+    repo = ArrInstanceRepository(session)
+    row = repo.get(instance_id)
+    if row is None:
+        return None
+    if enabled_only and not row.enabled:
+        return None
+    return ArrClientFactory(repo).from_row(row, http_get=http_get)
 
 
 def sonarr_series_owner(session, sonarr_series_id, arr_instance_id=None):

@@ -70,15 +70,18 @@ def get_radarr_rootfolder(arr_instance_id=None, arr_client=None):
                 stmt = stmt.where(TableMoviesRootfolder.arr_instance_id == arr_instance_id)
             database.execute(stmt)
         for item in rootfolder_to_insert:
-            # Stamp ownership + the upstream/local split on every insert (default
-            # path included) so new rootfolders are owned, closing the same
-            # NULL-accumulation gap INC4 closed for media. On a single default
-            # install local==upstream==id, so matching stays byte-identical.
+            # Stamp ownership + the upstream id on every insert (default path
+            # included) so new rootfolders are owned, closing the same
+            # NULL-accumulation gap INC4 closed for media. local_rootfolder_id is
+            # the autoincrement PK and MUST NOT be forced to the upstream id:
+            # rootfolder id=1 is the universal default in every Radarr, so two
+            # instances would collide on the PK and abort the second one's sync.
+            # Let it autoincrement; upstream_rootfolder_id (unique per instance)
+            # carries the server-side id.
             values = {'id': item['id'], 'path': item['path']}
             if owner is not None:
                 values.update(arr_instance_id=owner,
-                              upstream_rootfolder_id=item['id'],
-                              local_rootfolder_id=item['id'])
+                              upstream_rootfolder_id=item['id'])
             database.execute(insert(TableMoviesRootfolder).values(**values))
 
 

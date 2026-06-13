@@ -43,9 +43,13 @@ def get_language_profiles():
         select(TableLanguagesProfiles.profileId, TableLanguagesProfiles.name, TableLanguagesProfiles.tag)).all()
 
 
-def get_series_monitored_table():
+def get_series_monitored_table(arr_instance_id=None):
+    # Scope to the owning instance: two instances can share a sonarrSeriesId, so
+    # an unscoped lookup collapses colliding ids (last writer wins) and would
+    # hand sync_only_monitored_series another instance's monitored status.
     series_monitored = database.execute(
-        select(TableShows.sonarrSeriesId, TableShows.monitored))\
+        scoped(select(TableShows.sonarrSeriesId, TableShows.monitored),
+               TableShows.arr_instance_id, arr_instance_id))\
         .all()
     series_dict = dict((x, y) for x, y in series_monitored)
     return series_dict
@@ -95,8 +99,8 @@ def update_series(job_id=None, wait_for_completion=False, arr_instance_id=None, 
 
         series_monitored = None
         if settings.sonarr.sync_only_monitored_series:
-            # Get current series monitored status in DB
-            series_monitored = get_series_monitored_table()
+            # Get current series monitored status in DB, scoped to this instance
+            series_monitored = get_series_monitored_table(arr_instance_id=arr_instance_id)
 
         trace(f"Starting sync for {series_count} shows")
 

@@ -92,6 +92,25 @@ def test_factory_from_row_decrypts_key(schema_session):
     assert captured["headers"]["X-Api-Key"] == "radarr-secret"
 
 
+def test_client_for_instance_skips_disabled(schema_session):
+    # The single-item sync entry points guard `if arr_client is None` to "skip
+    # disabled" instances. client_for_instance must honour that contract and
+    # return None for a disabled instance, while the connection-test path
+    # (enabled_only=False) can still reach it.
+    from arr_instances.repository import ArrInstanceRepository
+    from arr_instances.resolution import client_for_instance
+
+    repo = ArrInstanceRepository(schema_session)
+    on = repo.create("sonarr", "On", api_key="K", enabled=True)
+    off = repo.create("sonarr", "Off", api_key="K", enabled=False)
+    schema_session.flush()
+
+    assert client_for_instance(schema_session, on.id) is not None
+    assert client_for_instance(schema_session, off.id) is None
+    assert client_for_instance(schema_session, off.id, enabled_only=False) is not None
+    assert client_for_instance(schema_session, 999999) is None
+
+
 def test_service_test_connection_invalid_kind_returns_400():
     from arr_instances import service
 

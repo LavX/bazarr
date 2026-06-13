@@ -39,6 +39,27 @@ def _mirror_client(http_get, api_key="KEY"):
         http_timeout=settings.sonarr.http_timeout, http_get=http_get)
 
 
+def test_get_series_monitored_table_is_instance_scoped(schema_session, monkeypatch):
+    # Two instances can hold the same sonarrSeriesId. The monitored lookup that
+    # drives sync_only_monitored_series must return THIS instance's monitored
+    # status, not whichever colliding row sorts first.
+    from sqlalchemy import insert
+
+    from app.database import TableShows
+    from sonarr.sync import series
+
+    monkeypatch.setattr(series, "database", schema_session)
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=1, path="/a", title="A", arr_instance_id=5, monitored="True"))
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=1, path="/b", title="B", arr_instance_id=8, monitored="False"))
+
+    assert series.get_series_monitored_table(arr_instance_id=5) == {1: "True"}
+    assert series.get_series_monitored_table(arr_instance_id=8) == {1: "False"}
+    # Unscoped (None) stays legacy: collapses to one key, no crash.
+    assert set(series.get_series_monitored_table().keys()) == {1}
+
+
 def test_get_series_legacy_path_is_unchanged(monkeypatch):
     from app.config import get_ssl_verify, settings
     from sonarr.info import sonarr_headers, url_api_sonarr
