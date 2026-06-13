@@ -14,6 +14,7 @@ import {
 import {
   faPlus,
   faRotateRight,
+  faServer,
   faTriangleExclamation,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
@@ -25,6 +26,7 @@ import {
 } from "@/apis/hooks";
 import type { ArrInstance, ArrKind } from "@/apis/raw/arrInstances";
 import { Layout, Section } from "@/pages/Settings/components";
+import PlexSection from "@/pages/Settings/Plex/PlexSection";
 import RadarrSection from "@/pages/Settings/Radarr/RadarrSection";
 import SonarrSection from "@/pages/Settings/Sonarr/SonarrSection";
 import InstanceCard from "./InstanceCard";
@@ -217,6 +219,12 @@ const SettingsConnectionsView: FunctionComponent = () => {
           >
             Radarr
           </Tabs.Tab>
+          <Tabs.Tab
+            value="plex"
+            leftSection={<FontAwesomeIcon icon={faServer} />}
+          >
+            Plex
+          </Tabs.Tab>
         </Tabs.List>
 
         <Tabs.Panel value="sonarr">
@@ -241,6 +249,10 @@ const SettingsConnectionsView: FunctionComponent = () => {
               onDelete={openDelete}
             />
           </RadarrSection>
+        </Tabs.Panel>
+
+        <Tabs.Panel value="plex">
+          <PlexSection />
         </Tabs.Panel>
       </Tabs>
 
