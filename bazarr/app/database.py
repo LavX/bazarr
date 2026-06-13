@@ -42,6 +42,12 @@ migrations_directory = os.path.join(os.path.dirname(os.path.dirname(os.path.dirn
 
 
 def configure_sqlite_connection(dbapi_connection, connection_record):
+    # This is registered on the global Engine class (only when the app itself
+    # runs on SQLite), so guard against firing PRAGMA on a non-SQLite connection
+    # that happens to exist in the same process (e.g. a Postgres engine in tests
+    # or tooling) - PRAGMA is invalid SQL on PostgreSQL.
+    if not isinstance(dbapi_connection, sqlite3.Connection):
+        return
     cursor = dbapi_connection.cursor()
     try:
         cursor.execute("PRAGMA journal_mode=WAL")

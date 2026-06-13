@@ -92,11 +92,37 @@ _PRECUTOVER_DDL = [
 ]
 
 
-def _seed_precutover(bind):
-    for ddl in _PRECUTOVER_DDL:
+def _seed_precutover(bind, full_instances=False):
+    # full_instances builds arr_instances with the COMPLETE ORM schema (so the
+    # real upgrade() -> _bootstrap_and_stamp -> repo.list, which selects every
+    # column, works); the default builds a minimal arr_instances for the
+    # direct-helper tests.
+    for ddl in (_PRECUTOVER_DDL[1:] if full_instances else _PRECUTOVER_DDL):
         bind.execute(sa.text(ddl))
-    bind.execute(sa.text("INSERT INTO arr_instances (id,kind,stable_key,name,is_default) "
-                         "VALUES (1,'sonarr','sonarr','Sonarr',1),(2,'radarr','radarr','Radarr',1)"))
+    if full_instances:
+        # Build the FULL arr_instances schema via raw SQL (matching the ORM /
+        # migration b7e1a9c4d230) rather than importing app.database here:
+        # importing it in SQLite test mode registers a global SQLite connect
+        # listener that would fire PRAGMA on the flask_migrate Postgres connection
+        # opened below. upgrade()'s own app.config import happens AFTER that
+        # connection is established, so it is harmless.
+        bind.execute(sa.text(
+            "CREATE TABLE arr_instances ("
+            " id serial PRIMARY KEY, kind text NOT NULL, stable_key text NOT NULL,"
+            " name text NOT NULL, enabled int NOT NULL DEFAULT 1, is_default int NOT NULL DEFAULT 0,"
+            " ip text NOT NULL DEFAULT '127.0.0.1', port int NOT NULL, base_url text NOT NULL DEFAULT '/',"
+            " ssl int NOT NULL DEFAULT 0, verify_ssl int NOT NULL DEFAULT 0, http_timeout int NOT NULL DEFAULT 60,"
+            " api_key text NOT NULL DEFAULT '', options text, path_mappings text, schedule text,"
+            " status text, last_error text, last_sync_at timestamp,"
+            " created_at timestamp NOT NULL, updated_at timestamp NOT NULL)"))
+        bind.execute(sa.text(
+            "INSERT INTO arr_instances (id,kind,stable_key,name,enabled,is_default,ip,port,"
+            "base_url,ssl,verify_ssl,http_timeout,api_key,created_at,updated_at) VALUES "
+            "(1,'sonarr','sonarr','Sonarr',1,1,'127.0.0.1',8989,'/',0,0,60,'',now(),now()),"
+            "(2,'radarr','radarr','Radarr',1,1,'127.0.0.1',7878,'/',0,0,60,'',now(),now())"))
+    else:
+        bind.execute(sa.text("INSERT INTO arr_instances (id,kind,stable_key,name,is_default) "
+                             "VALUES (1,'sonarr','sonarr','Sonarr',1),(2,'radarr','radarr','Radarr',1)"))
     bind.execute(sa.text('INSERT INTO table_languages_profiles ("profileId",name) VALUES (1,\'English\')'))
     # single-instance data, owner stamped, local ids NULL (pre-backfill)
     bind.execute(sa.text('INSERT INTO table_shows ("sonarrSeriesId",arr_instance_id,path,"tmdbId","profileId") '
@@ -193,3 +219,50 @@ def test_pg_cutover_is_idempotent_via_already_cut_over_guard(pg_bind):
     mod = _load_migration()
     with pg_bind.connect() as bind:
         assert mod._already_cut_over(sa.inspect(bind)) is True
+
+
+def _run_full_pg_upgrade(url):
+    """Run the REAL upgrade() entry point on Postgres via flask_migrate: stamp at
+    the pre-cutover head, then upgrade to the cutover so upgrade()'s dialect
+    branch + _bootstrap_and_stamp + _validate_owners + _rebuild_all_postgres all
+    execute (not just the inner helpers)."""
+    import flask_migrate
+    from flask import Flask
+    from flask_sqlalchemy import SQLAlchemy
+
+    from app.database import metadata, migrations_directory
+
+    app = Flask(__name__)
+    app.config["SQLALCHEMY_DATABASE_URI"] = url
+    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+    db = SQLAlchemy(app, metadata=metadata)
+    with app.app_context():
+        flask_migrate.Migrate(app, db)  # no render_as_batch: that is SQLite-only
+        flask_migrate.stamp(directory=migrations_directory, revision="d9a3b7c1e240")
+        flask_migrate.upgrade(directory=migrations_directory, revision="e7f4c9d80abc")
+        db.engine.dispose()
+
+
+def test_pg_full_upgrade_entrypoint_runs_bootstrap_and_dialect_branch(pg_bind):
+    # Exercises the actual upgrade() entry point on Postgres end-to-end: the
+    # postgresql dialect branch, _bootstrap_and_stamp (imports app.config +
+    # backfill), _validate_owners, and the PG rebuild - the slice the
+    # direct-helper tests skip.
+    with pg_bind.begin() as bind:
+        _seed_precutover(bind, full_instances=True)
+
+    _run_full_pg_upgrade(_PG_URL)
+
+    with pg_bind.connect() as bind:
+        # the cutover ran via upgrade(): PKs flipped to the local id
+        assert _pk_columns(bind, "table_shows") == ["id"]
+        assert _pk_columns(bind, "table_movies") == ["id"]
+        # _bootstrap_and_stamp + _validate_owners left no NULL owners
+        for t in ("table_shows", "table_episodes", "table_movies",
+                  "table_history", "table_blacklist"):
+            nulls = bind.execute(sa.text(
+                f"SELECT COUNT(*) FROM {t} WHERE arr_instance_id IS NULL")).scalar()
+            assert nulls == 0, f"{t} has unstamped rows after upgrade()"
+        # alembic recorded the cutover revision
+        rev = bind.execute(sa.text("SELECT version_num FROM alembic_version")).scalar()
+        assert rev == "e7f4c9d80abc"
