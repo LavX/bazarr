@@ -176,8 +176,11 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
                        sonarr_series_id=episode_metadata.sonarrSeriesId, forced=forced, hi=hi,
                        sonarr_episode_id=episode_metadata.sonarrEpisodeId, job_id=job_id,
                        arr_instance_id=arr_instance_id)
-        reversed_path = path_mappings.path_replace_reverse(path)
-        reversed_subtitles_path = path_mappings.path_replace_reverse(subtitle_path)
+        # Reverse-map through the owning instance's path_mappings (#156); None
+        # owner => global mapping (the default/single-instance path), unchanged.
+        reversed_path = path_mappings.path_replace_reverse_instance(path, arr_instance_id, "series")
+        reversed_subtitles_path = path_mappings.path_replace_reverse_instance(
+            subtitle_path, arr_instance_id, "series")
         # Route the rescan at the OWNING instance's server (#156). None owner =
         # default server (legacy single-instance), unchanged.
         notify_sonarr(episode_metadata.sonarrSeriesId,
@@ -188,8 +191,11 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
         sync_subtitles(video_path=path, srt_path=subtitle_path, srt_lang=uploaded_language_code2, percent_score=100,
                        radarr_id=movie_metadata.radarrId, forced=forced, hi=hi, job_id=job_id,
                        arr_instance_id=arr_instance_id)
-        reversed_path = path_mappings.path_replace_reverse_movie(path)
-        reversed_subtitles_path = path_mappings.path_replace_reverse_movie(subtitle_path)
+        # Reverse-map through the owning instance's path_mappings (#156); None
+        # owner => global mapping (the default/single-instance path), unchanged.
+        reversed_path = path_mappings.path_replace_reverse_instance(path, arr_instance_id, "movie")
+        reversed_subtitles_path = path_mappings.path_replace_reverse_instance(
+            subtitle_path, arr_instance_id, "movie")
         notify_radarr(movie_metadata.radarrId,
                       arr_client=client_for_instance(database, arr_instance_id, enabled_only=False))
         event_stream(type='movie', action='update', payload=movie_metadata.radarrId)

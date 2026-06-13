@@ -176,12 +176,26 @@ class PathMappings:
         return path
 
 
-# NOTE (#156): the per-instance path_mappings column is now honoured via
-# path_replace_instance / path_replace_reverse_instance, applied in
-# api/subtitles/content.py (subtitle path, video-path fallback, and the
-# re-anchor lookup). The many other path_replace* call sites across the
-# subtitle pipeline (processing/upload/delete/indexer/sync) still use the
-# GLOBAL mapping; migrating each to the per-instance variant requires threading
-# the owning arr_instance_id to every site and is tracked as follow-up work.
+# NOTE (#156): the per-instance path_mappings column is honoured via
+# path_replace_instance / path_replace_reverse_instance. Sites where the owning
+# arr_instance_id (or a media row carrying it) is readily in scope now use the
+# per-instance variants:
+#   * api/subtitles/content.py (subtitle path, video-path fallback, re-anchor lookup)
+#   * subtitles/indexer/series.py + movies.py (store_subtitles resolves the
+#     owner by path once, then reverses every indexed subtitle path per-instance)
+#   * subtitles/processing.py (post-lookup reversed_path / reversed_subtitles_path)
+#   * subtitles/upload.py (reversed_path / reversed_subtitles_path)
+#   * subtitles/tools/delete.py (pr/prr bound to the owner)
+#
+# A few call sites deliberately REMAIN on the GLOBAL mapping because they need
+# the path to LOOK UP the owner (chicken-and-egg) or no arr_instance_id is in
+# scope. These are tracked, not silently ignored:
+#   * subtitles/processing.py lines ~261/~282: the path-keyed media lookups
+#     (TableEpisodes/TableMovies WHERE path == path_replace_reverse(path)) run
+#     BEFORE the owner is known; they must use the global mapping to resolve the
+#     row, after which the per-instance reverse mapping applies (above).
+#   * scheduled full-scan / wanted / mass-download read paths that operate on a
+#     DB-side path and call path_replace(...) before any row context; threading
+#     the owner there follows when those orchestrators carry it end-to-end.
 # Prefer path_replace_instance wherever an arr_instance_id is readily available.
 path_mappings = PathMappings()

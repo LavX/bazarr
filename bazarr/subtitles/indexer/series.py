@@ -32,6 +32,22 @@ gc.enable()
 def store_subtitles(original_path, reversed_path, use_cache=True):
     logging.debug(f'BAZARR started subtitles indexing for this file: {reversed_path}')  # noqa: G004
     actual_subtitles = []
+    # Resolve the owning instance for this file up front (#156) so every
+    # path_replace* below honours the owning instance's per-instance
+    # path_mappings instead of the global singleton. A media row owned by a
+    # secondary instance with a different on-disk prefix would otherwise be
+    # read/written at the wrong path. owner_instance_id None => global mapping
+    # (the default/single-instance path), byte-identical to legacy behaviour.
+    owner_row = database.execute(
+        select(TableEpisodes.arr_instance_id)
+        .where(TableEpisodes.path == original_path)).first()
+    owner_instance_id = owner_row.arr_instance_id if owner_row else None
+
+    def _pr(p):
+        return path_mappings.path_replace_instance(p, owner_instance_id, "series")
+
+    def _prr(p):
+        return path_mappings.path_replace_reverse_instance(p, owner_instance_id, "series")
     # Languages of embedded subtitle tracks detected on this pass. Used after
     # indexing to record a source-quality history entry (action=7) per language.
     embedded_languages = []
@@ -91,8 +107,8 @@ def store_subtitles(original_path, reversed_path, use_cache=True):
                 previously_indexed_subtitles_to_exclude = [x for x in previously_indexed_subtitles
                                                            if len(x) == 3 and
                                                            x[1] and
-                                                           os.path.isfile(path_mappings.path_replace(x[1])) and
-                                                           os.stat(path_mappings.path_replace(x[1])).st_size == x[2]]
+                                                           os.path.isfile(_pr(x[1])) and
+                                                           os.stat(_pr(x[1])).st_size == x[2]]
 
             subtitles = search_external_subtitles(reversed_path, languages=get_language_set(),
                                                   only_one=settings.general.single_language)
@@ -133,7 +149,7 @@ def store_subtitles(original_path, reversed_path, use_cache=True):
 
                 custom = CustomLanguage.found_external(subtitle, subtitle_path)
                 if custom is not None:
-                    actual_subtitles.append([custom, path_mappings.path_replace_reverse(subtitle_path),
+                    actual_subtitles.append([custom, _prr(subtitle_path),
                                              subtitle_size])
 
                 elif str(language.basename) != 'und':
@@ -146,7 +162,7 @@ def store_subtitles(original_path, reversed_path, use_cache=True):
                     language_str = subtitle_language_with_sync_modifier(language_str, subtitle)
                     language_str = subtitle_language_with_combined_modifier(language_str, subtitle)
                     logging.debug(f"BAZARR external subtitles detected: {language_str}")  # noqa: G004
-                    actual_subtitles.append([language_str, path_mappings.path_replace_reverse(subtitle_path),
+                    actual_subtitles.append([language_str, _prr(subtitle_path),
                                              subtitle_size])
 
         database.execute(

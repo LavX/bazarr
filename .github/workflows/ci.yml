@@ -198,6 +198,7 @@ jobs:
             tests/bazarr/test_episode_parser_scope.py \
             tests/bazarr/test_files_browse_instance_scope.py \
             tests/bazarr/test_path_mappings_instance.py \
+            tests/bazarr/test_threading_followup.py \
             tests/bazarr/test_mass_operations.py ; do
             echo "::group::$f"
             pytest "$f" -p no:cacheprovider -q

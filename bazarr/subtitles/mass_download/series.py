@@ -201,7 +201,8 @@ def episode_download_specific_subtitles(sonarr_series_id, sonarr_episode_id, lan
 
     episodeInfo = database.execute(
         scoped(
-            select(TableEpisodes.path,
+            select(TableEpisodes.id,
+                   TableEpisodes.path,
                    TableEpisodes.sceneName,
                    TableEpisodes.audio_language,
                    TableEpisodes.season,
@@ -262,7 +263,10 @@ def episode_download_specific_subtitles(sonarr_series_id, sonarr_episode_id, lan
         else:
             jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
                                            progress_message="No subtitles found")
-            event_stream(type='episode', payload=sonarr_episode_id)
+            # Emit the LOCAL episode id (#156): the frontend caches episode
+            # detail by local id; the upstream sonarrEpisodeId is not unique
+            # across instances. episodeInfo was fetched scoped to the owner.
+            event_stream(type='episode', payload=episodeInfo.id)
             return '', 204
     except OSError:
         return 'Unable to save subtitles file. Permission or path mapping issue?', 409

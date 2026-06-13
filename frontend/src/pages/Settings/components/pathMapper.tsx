@@ -86,6 +86,10 @@ export const PathMappingTable: FunctionComponent<TableProps> = ({ type }) => {
         accessorKey: "from",
         cell: ({ row: { original, index } }) => {
           return (
+            // These are the GLOBAL (Phase-12-gated) path-mapping settings, so
+            // the browse intentionally targets the DEFAULT server (instanceId
+            // unset, #156). When a per-instance path-mapping UI lands, pass the
+            // selected instance id here so it browses that instance's server.
             <FileBrowser
               type={type}
               defaultValue={original.from}

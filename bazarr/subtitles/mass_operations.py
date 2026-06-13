@@ -429,6 +429,9 @@ def _process_subtitle_item(item, action, options, job_id):
             'force_sync': True,
             'job_id': job_id,
             'track_job_progress': False,
+            # Thread the per-item owning instance (#156) so the subsync
+            # original-language lookup hits the exact owner.
+            'arr_instance_id': item.get('arr_instance_id'),
         }
         if item.get('output_mode') is not None:
             sync_kwargs['output_mode'] = item.get('output_mode')

@@ -31,6 +31,11 @@ function extractPath(raw: string) {
 
 export type FileBrowserProps = Omit<AutocompleteProps, "data"> & {
   type: "sonarr" | "radarr" | "bazarr";
+  // instanceId (#156) routes the sonarr/radarr browse at the owning instance's
+  // server. Undefined => default server. The global (Phase-12-gated) path-
+  // mapping settings leave this unset; a per-instance path-mapping UI will pass
+  // the selected instance id when it lands.
+  instanceId?: number;
 };
 
 type FileTreeItem = {
@@ -41,6 +46,7 @@ type FileTreeItem = {
 export const FileBrowser: FunctionComponent<FileBrowserProps> = ({
   defaultValue,
   type,
+  instanceId,
   onChange,
   ...props
 }) => {
@@ -48,7 +54,7 @@ export const FileBrowser: FunctionComponent<FileBrowserProps> = ({
   const [value, setValue] = useState(defaultValue ?? "");
   const [path, setPath] = useState(() => extractPath(value));
 
-  const { data: tree } = useFileSystem(type, path, isShow);
+  const { data: tree } = useFileSystem(type, path, isShow, instanceId);
 
   const data = useMemo<FileTreeItem[]>(
     () => [

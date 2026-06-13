@@ -80,6 +80,7 @@ class TestProcessSubtitleItem:
             force_sync=True,
             job_id='test_job',
             track_job_progress=False,
+            arr_instance_id=None,
         )
 
     @patch('subtitles.mass_operations.subtitles_apply_mods')

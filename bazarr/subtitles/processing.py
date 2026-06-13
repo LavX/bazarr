@@ -319,8 +319,12 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                           f"threshold value: {pp_threshold}%")
 
     if media_type == 'series':
-        reversed_path = path_mappings.path_replace_reverse(path)
-        reversed_subtitles_path = path_mappings.path_replace_reverse(downloaded_path)
+        # Reverse-map through the owning instance's path_mappings (#156) now that
+        # the owner is known; None owner => global mapping, unchanged.
+        reversed_path = path_mappings.path_replace_reverse_instance(
+            path, episode_metadata.arr_instance_id, "series")
+        reversed_subtitles_path = path_mappings.path_replace_reverse_instance(
+            downloaded_path, episode_metadata.arr_instance_id, "series")
         # Route the rescan at the OWNING instance's Sonarr (#156); None owner =
         # default server (legacy single-instance), unchanged.
         notify_sonarr(episode_metadata.sonarrSeriesId,
@@ -342,8 +346,10 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                                       tvdb_id=episode_metadata.tvdbId)
 
     else:
-        reversed_path = path_mappings.path_replace_reverse_movie(path)
-        reversed_subtitles_path = path_mappings.path_replace_reverse_movie(downloaded_path)
+        reversed_path = path_mappings.path_replace_reverse_instance(
+            path, movie_metadata.arr_instance_id, "movie")
+        reversed_subtitles_path = path_mappings.path_replace_reverse_instance(
+            downloaded_path, movie_metadata.arr_instance_id, "movie")
         notify_radarr(movie_metadata.radarrId,
                       arr_client=client_for_instance(database, movie_metadata.arr_instance_id, enabled_only=False))
         event_stream(type='movie-wanted', action='delete', payload=movie_metadata.radarrId)

@@ -42,9 +42,16 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
         language_log += ':forced'
         language_string += ' forced'
 
+    # Honour the owning instance's per-instance path_mappings (#156): a
+    # secondary instance can have a different on-disk prefix, so the delete /
+    # re-index must resolve paths through that instance's mapping. arr_instance_id
+    # None => global mapping (the default/single-instance path), unchanged.
     if media_type == 'series':
-        pr = path_mappings.path_replace
-        prr = path_mappings.path_replace_reverse
+        def pr(p):
+            return path_mappings.path_replace_instance(p, arr_instance_id, "series")
+
+        def prr(p):
+            return path_mappings.path_replace_reverse_instance(p, arr_instance_id, "series")
 
         metadata = database.execute(scoped(
             select(TableEpisodes.season, TableEpisodes.episode, TableShows.imdbId, TableShows.tvdbId)
@@ -52,8 +59,11 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
             .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id),
             TableEpisodes.arr_instance_id, arr_instance_id)).first()
     else:
-        pr = path_mappings.path_replace_movie
-        prr = path_mappings.path_replace_reverse_movie
+        def pr(p):
+            return path_mappings.path_replace_instance(p, arr_instance_id, "movie")
+
+        def prr(p):
+            return path_mappings.path_replace_reverse_instance(p, arr_instance_id, "movie")
 
         metadata = database.execute(scoped(
             select(TableMovies.imdbId, TableMovies.tmdbId)

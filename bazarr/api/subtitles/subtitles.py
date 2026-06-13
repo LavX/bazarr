@@ -351,7 +351,8 @@ class Subtitles(Resource):
 
                 def postprocess_callback():
                     return postprocess_subtitles(
-                        subtitles_path, video_path, media_type, metadata, id
+                        subtitles_path, video_path, media_type, metadata, id,
+                        arr_instance_id=arr_instance_id
                     )
 
                 sync_subtitles(
@@ -382,6 +383,10 @@ class Subtitles(Resource):
                     radarr_id=id if media_type == "movie" else None,
                     force_sync=True,
                     callback=postprocess_callback,
+                    # Thread the owning instance (#156) so the subsync
+                    # original-language lookup reads the exact owner, not the
+                    # default-preferred instance on an upstream-id collision.
+                    arr_instance_id=arr_instance_id,
                 )
             except OSError:
                 return "Unable to edit subtitles file. Check logs.", 409
@@ -439,7 +444,8 @@ class Subtitles(Resource):
                     video_path=video_path,
                 )
                 postprocess_subtitles(
-                    subtitles_path, video_path, media_type, metadata, id
+                    subtitles_path, video_path, media_type, metadata, id,
+                    arr_instance_id=arr_instance_id
                 )
             except OSError:
                 return "Unable to edit subtitles file. Check logs.", 409
@@ -447,7 +453,7 @@ class Subtitles(Resource):
         return "", 204
 
 
-def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id):
+def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id, arr_instance_id=None):
     # apply chmod if required
     chmod = (
         int(settings.general.chmod, 8)
@@ -483,7 +489,11 @@ def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id):
     if media_type == "episode":
         store_subtitles(path_mappings.path_replace_reverse(video_path), video_path)
         event_stream(type="series", payload=metadata.sonarrSeriesId)
-        event_stream(type="episode", payload=id)
+        # Emit the LOCAL episode id (#156): `id` is the upstream sonarrEpisodeId
+        # (not unique across instances), but the frontend caches episode detail
+        # by local id. Resolve it scoped to the owning instance.
+        from utilities.media_ids import local_episode_id
+        event_stream(type="episode", payload=local_episode_id(id, arr_instance_id))
 
         if settings.general.use_plex and settings.plex.update_series_library:
             plex_refresh_item(

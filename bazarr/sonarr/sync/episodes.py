@@ -410,6 +410,15 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
 
     # Remove episode from DB
     if not episode and existing_episode:
+        # Resolve the LOCAL episode id BEFORE the row is deleted (#156): the
+        # frontend caches episode detail by local id, and the upstream
+        # sonarrEpisodeId is not unique across instances. Fall back to the
+        # upstream id if the row vanished. No-op scope for the default path.
+        local_id_row = database.execute(
+            scoped(select(TableEpisodes.id)
+                   .where(TableEpisodes.sonarrEpisodeId == episode_id),
+                   TableEpisodes.arr_instance_id, arr_instance_id)).first()
+        local_episode_id = local_id_row.id if local_id_row else int(episode_id)
         try:
             database.execute(
                 scoped(delete(TableEpisodes)
@@ -418,7 +427,7 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
         except IntegrityError as e:
             logging.error(f"BAZARR cannot delete episode {existing_episode.path} because of {e}")  # noqa: G004
         else:
-            event_stream(type='episode', action='delete', payload=int(episode_id))
+            event_stream(type='episode', action='delete', payload=local_episode_id)
             logging.debug(
                 'BAZARR deleted this episode from the database:%s', path_mappings.path_replace(existing_episode.path))
         return
@@ -439,7 +448,15 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
             logging.error(f"BAZARR cannot update episode {episode['path']} because of {e}")  # noqa: G004
         else:
             store_subtitles(episode['path'], path_mappings.path_replace(episode['path']))
-            event_stream(type='episode', action='update', payload=int(episode_id))
+            # Emit the LOCAL episode id (#156): the frontend caches episode
+            # detail by local id, and the upstream sonarrEpisodeId is not unique
+            # across instances. No-op scope for the default/single-instance path.
+            local_id_row = database.execute(
+                scoped(select(TableEpisodes.id)
+                       .where(TableEpisodes.sonarrEpisodeId == episode_id),
+                       TableEpisodes.arr_instance_id, arr_instance_id)).first()
+            event_stream(type='episode', action='update',
+                         payload=local_id_row.id if local_id_row else int(episode_id))
             logging.debug(
                 'BAZARR updated this episode into the database:%s', path_mappings.path_replace(episode["path"]))
 
@@ -457,7 +474,13 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
             logging.error(f"BAZARR cannot insert episode {episode['path']} because of {e}")  # noqa: G004
         else:
             store_subtitles(episode['path'], path_mappings.path_replace(episode['path']))
-            event_stream(type='episode', action='update', payload=int(episode_id))
+            # Emit the LOCAL episode id (#156): see the update branch above.
+            local_id_row = database.execute(
+                scoped(select(TableEpisodes.id)
+                       .where(TableEpisodes.sonarrEpisodeId == episode_id),
+                       TableEpisodes.arr_instance_id, arr_instance_id)).first()
+            event_stream(type='episode', action='update',
+                         payload=local_id_row.id if local_id_row else int(episode_id))
             logging.debug(
                 'BAZARR inserted this episode into the database:%s', path_mappings.path_replace(episode["path"]))
 
