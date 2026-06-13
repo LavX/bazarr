@@ -88,6 +88,23 @@ jobs:
         python-version: [ '3.12', '3.13', '3.14' ]
     name: Python ${{ matrix.python-version }} backend
 
+    # Postgres service so the native-PG local-id cutover migration test actually
+    # runs on CI (it skips when no Postgres is reachable) instead of silently
+    # passing vacuously.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: bazarr_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -150,6 +167,36 @@ jobs:
             tests/subliminal_patch/test_subsunacs.py \
             tests/subliminal_patch/test_filebot_refiner.py \
             -v --tb=short
+
+      - name: pytest cross-instance isolation guards (isolated per file)
+        # These seed colliding upstream ids across instances and assert no leak -
+        # the central invariant of the multiple-arr-instances feature. Several of
+        # them leak module/global state (sys.modules, config) when pytest collects
+        # them in ONE process, so each runs in its OWN pytest process. The PG
+        # cutover test needs a driver + the postgres service (env below).
+        env:
+          BAZARR_PG_TEST_URL: postgresql+psycopg://postgres:postgres@localhost:5432/bazarr_test
+        run: |
+          set -e
+          pip install "psycopg[binary]"
+          for f in \
+            tests/bazarr/test_arr_atomicity_secrets.py \
+            tests/bazarr/test_arr_pg_cutover_migration.py \
+            tests/bazarr/test_editor_instance_scope.py \
+            tests/bazarr/test_history_blacklist_scope.py \
+            tests/bazarr/test_local_id_actions.py \
+            tests/bazarr/test_navigation_local_ids.py \
+            tests/bazarr/test_provider_blacklist_instance_scope.py \
+            tests/bazarr/test_wanted_instance_scope.py \
+            tests/bazarr/test_movies_history_scoping.py \
+            tests/bazarr/test_series_identity_counts.py \
+            tests/bazarr/test_system_searches.py \
+            tests/bazarr/test_api_utils_images.py \
+            tests/bazarr/test_mass_operations.py ; do
+            echo "::group::$f"
+            pytest "$f" -p no:cacheprovider -q
+            echo "::endgroup::"
+          done
 
       - name: Unit Tests
         run: |

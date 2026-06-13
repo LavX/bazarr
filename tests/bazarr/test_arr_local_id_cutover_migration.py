@@ -12,6 +12,7 @@ blacklist volume). Never mutates the source - always works on a tmp copy.
 
 Spec: docs/superpowers/specs/2026-06-11-phase1e-cutover-design.md.
 """
+import importlib.util
 import os
 import shutil
 
@@ -301,3 +302,116 @@ def test_migrated_db_works_with_flipped_orm_models(legacy_db_at_head):
             assert s.get(TableMovies, new_row.id) is new_row
     finally:
         eng.dispose()
+
+
+# --------------------------------------------------------------------------- #
+# Synthetic, ALWAYS-RUNS coverage. The real-DB params above skip on CI (the dev
+# DBs are absent), so before this the file passed vacuously. These build the
+# pre-cutover schema by hand and exercise the actual cutover transformation
+# functions on a throwaway SQLite file, so the irreversible migration is gated
+# on every CI run (#156 review H5).
+
+_MIGRATION_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "migrations", "versions",
+    "e7f4c9d80abc_arr_local_id_pk_cutover.py")
+
+_SYNTH_OWNED = (
+    "table_shows", "table_episodes", "table_movies", "table_shows_rootfolder",
+    "table_movies_rootfolder", "table_history", "table_history_movie",
+    "table_blacklist", "table_blacklist_movie")
+
+_SYNTH_DDL = [
+    'CREATE TABLE arr_instances (id INTEGER PRIMARY KEY, kind text, stable_key text, name text, enabled int default 1, is_default int default 0)',
+    'CREATE TABLE table_languages_profiles ("profileId" INTEGER PRIMARY KEY, name text)',
+    'CREATE TABLE table_shows ("sonarrSeriesId" INTEGER PRIMARY KEY, id int, arr_instance_id int, path text UNIQUE, "tmdbId" text, "profileId" int)',
+    'CREATE TABLE table_episodes ("sonarrEpisodeId" INTEGER PRIMARY KEY, id int, arr_instance_id int, series_id int, "sonarrSeriesId" int, episode_file_id int)',
+    'CREATE TABLE table_movies ("radarrId" INTEGER PRIMARY KEY, id int, arr_instance_id int, path text, "tmdbId" text, "profileId" int)',
+    'CREATE TABLE table_shows_rootfolder (id INTEGER PRIMARY KEY, local_rootfolder_id int, upstream_rootfolder_id int, arr_instance_id int, path text, accessible int, error text)',
+    'CREATE TABLE table_movies_rootfolder (id INTEGER PRIMARY KEY, local_rootfolder_id int, upstream_rootfolder_id int, arr_instance_id int, path text, accessible int, error text)',
+    'CREATE TABLE table_history (id INTEGER PRIMARY KEY, arr_instance_id int, "sonarrSeriesId" int, "sonarrEpisodeId" int, series_id int, episode_id int, "upgradedFromId" int, video_path text, language text, "timestamp" int, action int, subs_id text)',
+    'CREATE TABLE table_history_movie (id INTEGER PRIMARY KEY, arr_instance_id int, "radarrId" int, movie_id int, "upgradedFromId" int, video_path text, language text, "timestamp" int, action int, subs_id text)',
+    'CREATE TABLE table_blacklist (id INTEGER PRIMARY KEY, arr_instance_id int, sonarr_series_id int, sonarr_episode_id int, series_id int, episode_id int, subs_id text)',
+    'CREATE TABLE table_blacklist_movie (id INTEGER PRIMARY KEY, arr_instance_id int, radarr_id int, movie_id int, subs_id text)',
+]
+
+
+def _load_cutover_module():
+    spec = importlib.util.spec_from_file_location("_p1e_cut", _MIGRATION_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.fixture
+def synthetic_sqlite(tmp_path):
+    """A throwaway SQLite DB with the pre-cutover schema + single-instance data,
+    owners stamped, local ids NULL."""
+    db = tmp_path / "synth.db"
+    eng = create_engine(f"sqlite:///{db}")
+    with eng.begin() as c:
+        c.execute(text("PRAGMA foreign_keys=OFF"))
+        for ddl in _SYNTH_DDL:
+            c.execute(text(ddl))
+        c.execute(text("INSERT INTO arr_instances (id,kind,stable_key,name,is_default) "
+                       "VALUES (1,'sonarr','sonarr','Sonarr',1),(2,'radarr','radarr','Radarr',1)"))
+        c.execute(text('INSERT INTO table_shows ("sonarrSeriesId",arr_instance_id,path) VALUES (10,1,\'/tv/a\'),(11,1,\'/tv/b\')'))
+        c.execute(text('INSERT INTO table_episodes ("sonarrEpisodeId",arr_instance_id,"sonarrSeriesId") VALUES (500,1,10),(501,1,11)'))
+        c.execute(text('INSERT INTO table_movies ("radarrId",arr_instance_id,path) VALUES (20,2,\'/mov/a.mkv\')'))
+        c.execute(text("INSERT INTO table_shows_rootfolder (id,arr_instance_id,path) VALUES (1,1,'/tv')"))
+        c.execute(text('INSERT INTO table_history (arr_instance_id,"sonarrSeriesId","sonarrEpisodeId",video_path,language,"timestamp",action) VALUES (1,10,500,\'/tv/a\',\'en\',1,1)'))
+    try:
+        yield eng
+    finally:
+        eng.dispose()
+
+
+def _run_sqlite_cutover(eng):
+    mod = _load_cutover_module()
+    with eng.begin() as c:
+        c.execute(text("PRAGMA foreign_keys=OFF"))
+        mod._backfill_local_ids(c)
+        mod._validate_pre_rebuild(c)
+        pre = {t: c.execute(text(f'SELECT COUNT(*) FROM "{t}"')).scalar() for t in _SYNTH_OWNED}
+        mod._rebuild_all(c)
+        mod._validate_post_rebuild(c, pre)
+    return pre
+
+
+def test_synthetic_sqlite_cutover_flips_pks_and_preserves_rows(synthetic_sqlite):
+    pre = _run_sqlite_cutover(synthetic_sqlite)
+    eng = synthetic_sqlite
+    assert _pk_columns_eng(eng, "table_shows") == ["id"]
+    assert _pk_columns_eng(eng, "table_episodes") == ["id"]
+    assert _pk_columns_eng(eng, "table_movies") == ["id"]
+    assert _pk_columns_eng(eng, "table_shows_rootfolder") == ["local_rootfolder_id"]
+    with eng.connect() as c:
+        for t in _SYNTH_OWNED:
+            assert c.execute(text(f'SELECT COUNT(*) FROM "{t}"')).scalar() == pre[t]
+        assert c.execute(text('SELECT id FROM table_shows WHERE "sonarrSeriesId"=10')).scalar() == 10
+
+
+def test_synthetic_sqlite_cutover_allows_colliding_upstream_id(synthetic_sqlite):
+    _run_sqlite_cutover(synthetic_sqlite)
+    eng = synthetic_sqlite
+    with eng.begin() as c:
+        c.execute(text("PRAGMA foreign_keys=ON"))
+        c.execute(text("INSERT INTO arr_instances (id,kind,stable_key,name) VALUES (8,'sonarr','sonarr-2','4K')"))
+        c.execute(text('INSERT INTO table_shows ("sonarrSeriesId",arr_instance_id,path) VALUES (10,8,\'/tv4k/a\')'))
+    with eng.connect() as c:
+        new_id = c.execute(text("SELECT id FROM table_shows WHERE arr_instance_id=8")).scalar()
+        assert new_id > 11  # autoincremented
+    with pytest.raises(IntegrityError):
+        with eng.begin() as c:
+            c.execute(text('INSERT INTO table_shows ("sonarrSeriesId",arr_instance_id,path) VALUES (10,8,\'/tv4k/dup\')'))
+
+
+def test_synthetic_sqlite_cutover_is_idempotent(synthetic_sqlite):
+    _run_sqlite_cutover(synthetic_sqlite)
+    mod = _load_cutover_module()
+    with synthetic_sqlite.connect() as c:
+        assert mod._already_cut_over(inspect(c)) is True
+
+
+def _pk_columns_eng(eng, table):
+    with eng.connect() as c:
+        return inspect(c).get_pk_constraint(table)["constrained_columns"]
