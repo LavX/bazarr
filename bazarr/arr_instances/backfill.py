@@ -74,16 +74,19 @@ def _backfill_kind(session, repo, kind, scalar, use_flag, tables):
         # stamp is not atomic and the create commits immediately under AUTOCOMMIT,
         # so a crash between them leaves owned rows NULL forever if we just skip.
         # Resume the stamp when this is still a single-instance kind (the backfill
-        # scenario), where stamping every orphaned row to the lone default is
-        # unambiguous. With 2+ instances a NULL row's owner is genuinely unknown,
+        # scenario), where stamping every orphaned row to the lone instance is
+        # unambiguous. Key on the single instance itself, NOT get_default: a
+        # partial crash (or the user disabling the only instance) can leave it
+        # non-default/disabled, and get_default would then return None and strand
+        # the orphans. With 2+ instances a NULL row's owner is genuinely unknown,
         # so leave it (scoped reads + the delete-guard handle it).
-        default = repo.get_default(kind)
-        if default is not None and len(existing) == 1:
-            stamped = _stamp_null_rows(session, tables, default.id)
+        if len(existing) == 1:
+            owner = existing[0]
+            stamped = _stamp_null_rows(session, tables, owner.id)
             if stamped:
                 logger.info(
-                    "Resumed %s backfill: stamped %s orphaned rows onto default id=%s",
-                    kind, stamped, default.id)
+                    "Resumed %s backfill: stamped %s orphaned rows onto instance id=%s",
+                    kind, stamped, owner.id)
             return {"created": False, "reason": "instance already exists",
                     "stamped": stamped}
         return {"created": False, "reason": "instance already exists"}

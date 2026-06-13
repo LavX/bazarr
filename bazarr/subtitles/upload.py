@@ -181,7 +181,7 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
         # Route the rescan at the OWNING instance's server (#156). None owner =
         # default server (legacy single-instance), unchanged.
         notify_sonarr(episode_metadata.sonarrSeriesId,
-                      arr_client=client_for_instance(database, arr_instance_id))
+                      arr_client=client_for_instance(database, arr_instance_id, enabled_only=False))
         event_stream(type='series', action='update', payload=episode_metadata.sonarrSeriesId)
         event_stream(type='episode-wanted', action='delete', payload=episode_metadata.sonarrEpisodeId)
     else:
@@ -191,7 +191,7 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
         reversed_path = path_mappings.path_replace_reverse_movie(path)
         reversed_subtitles_path = path_mappings.path_replace_reverse_movie(subtitle_path)
         notify_radarr(movie_metadata.radarrId,
-                      arr_client=client_for_instance(database, arr_instance_id))
+                      arr_client=client_for_instance(database, arr_instance_id, enabled_only=False))
         event_stream(type='movie', action='update', payload=movie_metadata.radarrId)
         event_stream(type='movie-wanted', action='delete', payload=movie_metadata.radarrId)
 

@@ -72,7 +72,7 @@ def blacklist_delete_movie(provider, subs_id, arr_instance_id=None):
     # resolves to a single owning instance (legacy single-default install).
     if arr_instance_id is None:
         owners = database.execute(
-            select(func.count(func.distinct(TableBlacklistMovie.arr_instance_id)))
+            select(func.count(func.distinct(func.coalesce(TableBlacklistMovie.arr_instance_id, -1))))
             .where((TableBlacklistMovie.provider == provider) & (TableBlacklistMovie.subs_id == subs_id))
         ).scalar()
         if owners and owners > 1:

@@ -35,7 +35,7 @@ class BrowseRadarrFS(Resource):
         # When an instance_id is given, browse THAT instance's Radarr (#156);
         # otherwise the default-server behaviour is unchanged.
         instance_id = args.get('instance_id')
-        arr_client = client_for_instance(database, instance_id) if instance_id is not None else None
+        arr_client = client_for_instance(database, instance_id, enabled_only=False) if instance_id is not None else None
         data = []
         try:
             result = browse_radarr_filesystem(path, arr_client=arr_client)

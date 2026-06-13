@@ -310,6 +310,11 @@ class TableCompatUsage(Base):
 
 class TableBlacklist(Base):
     __tablename__ = 'table_blacklist'
+    # Composite instance-scoped indexes match the Phase 1e cutover (fresh==upgraded).
+    __table_args__ = (
+        Index('ix_blacklist_instance_upstream_series', 'arr_instance_id', 'sonarr_series_id'),
+        Index('ix_blacklist_instance_upstream_episode', 'arr_instance_id', 'sonarr_episode_id'),
+    )
 
     # multi-instance additive columns (#156): nullable owner + local refs.
     arr_instance_id = mapped_column(Integer)
@@ -326,6 +331,10 @@ class TableBlacklist(Base):
 
 class TableBlacklistMovie(Base):
     __tablename__ = 'table_blacklist_movie'
+    # Composite instance-scoped index matches the Phase 1e cutover (fresh==upgraded).
+    __table_args__ = (
+        Index('ix_blacklist_movie_instance_upstream', 'arr_instance_id', 'radarr_id'),
+    )
 
     # multi-instance additive columns (#156): nullable owner + local ref.
     arr_instance_id = mapped_column(Integer)
@@ -385,9 +394,14 @@ class TableEpisodes(Base):
 
 class TableHistory(Base):
     __tablename__ = 'table_history'
+    # Index set matches the Phase 1e cutover migration (fresh==upgraded): the
+    # instance-scoped lookups use the composite (arr_instance_id, upstream id),
+    # not a bare single-column index, so query plans are identical either way.
     __table_args__ = (
         Index('ix_table_history_video_path_language_timestamp',
               'video_path', 'language', 'timestamp'),
+        Index('ix_history_instance_upstream_series', 'arr_instance_id', 'sonarrSeriesId'),
+        Index('ix_history_instance_upstream_episode', 'arr_instance_id', 'sonarrEpisodeId'),
     )
 
     # multi-instance additive columns (#156): nullable owner + local refs.
@@ -401,8 +415,10 @@ class TableHistory(Base):
     provider = mapped_column(Text)
     score = mapped_column(Integer)
     score_out_of = mapped_column(Integer, nullable=True)
-    sonarrEpisodeId = mapped_column(Integer, index=True)
-    sonarrSeriesId = mapped_column(Integer, index=True)
+    # Indexed via the composite ix_history_instance_upstream_* above (matching
+    # the cutover); no separate single-column index (the migration creates none).
+    sonarrEpisodeId = mapped_column(Integer)
+    sonarrSeriesId = mapped_column(Integer)
     subs_id = mapped_column(Text)
     subtitles_path = mapped_column(Text)
     timestamp = mapped_column(DateTime, nullable=False, default=datetime.now)
@@ -414,9 +430,11 @@ class TableHistory(Base):
 
 class TableHistoryMovie(Base):
     __tablename__ = 'table_history_movie'
+    # Index set matches the Phase 1e cutover migration (fresh==upgraded).
     __table_args__ = (
         Index('ix_table_history_movie_video_path_language_timestamp',
               'video_path', 'language', 'timestamp'),
+        Index('ix_history_movie_instance_upstream', 'arr_instance_id', 'radarrId'),
     )
 
     # multi-instance additive columns (#156): nullable owner + local ref.
@@ -427,7 +445,8 @@ class TableHistoryMovie(Base):
     description = mapped_column(Text, nullable=False)
     language = mapped_column(Text)
     provider = mapped_column(Text)
-    radarrId = mapped_column(Integer, index=True)
+    # Indexed via the composite ix_history_movie_instance_upstream above.
+    radarrId = mapped_column(Integer)
     score = mapped_column(Integer)
     score_out_of = mapped_column(Integer, nullable=True)
     subs_id = mapped_column(Text)

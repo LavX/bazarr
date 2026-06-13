@@ -324,7 +324,7 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         # Route the rescan at the OWNING instance's Sonarr (#156); None owner =
         # default server (legacy single-instance), unchanged.
         notify_sonarr(episode_metadata.sonarrSeriesId,
-                      arr_client=client_for_instance(database, episode_metadata.arr_instance_id))
+                      arr_client=client_for_instance(database, episode_metadata.arr_instance_id, enabled_only=False))
         event_stream(type='series', action='update', payload=episode_metadata.sonarrSeriesId)
         event_stream(type='episode-wanted', action='delete',
                      payload=episode_metadata.sonarrEpisodeId)
@@ -345,7 +345,7 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         reversed_path = path_mappings.path_replace_reverse_movie(path)
         reversed_subtitles_path = path_mappings.path_replace_reverse_movie(downloaded_path)
         notify_radarr(movie_metadata.radarrId,
-                      arr_client=client_for_instance(database, movie_metadata.arr_instance_id))
+                      arr_client=client_for_instance(database, movie_metadata.arr_instance_id, enabled_only=False))
         event_stream(type='movie-wanted', action='delete', payload=movie_metadata.radarrId)
         if settings.general.use_plex is True:
             if settings.plex.set_movie_added is True:

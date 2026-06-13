@@ -139,3 +139,26 @@ def test_episode_blacklist_delete_single_instance_legacy_unaffected(schema_sessi
     remaining = schema_session.execute(
         TableBlacklist.__table__.select()).fetchall()
     assert remaining == [], "legacy single-instance delete must still work"
+
+
+def test_movie_blacklist_delete_unscoped_refuses_mixed_null_owner(schema_session, monkeypatch):
+    # A legacy NULL-owner row AND an instance-owned row share the key. SQL
+    # COUNT(DISTINCT) ignores NULLs, so without a COALESCE the guard sees one
+    # owner and fans out the delete across both. The fix must treat NULL as its
+    # own distinct owner and refuse.
+    from radarr import blacklist
+
+    monkeypatch.setattr(blacklist, "database", schema_session)
+    monkeypatch.setattr(blacklist, "event_stream", lambda *a, **k: None)
+    schema_session.add(TableBlacklistMovie(
+        id=1, radarr_id=99, arr_instance_id=None, provider="p", subs_id="s",
+        language="en", timestamp=datetime(2026, 6, 12, 12, 0, 1)))
+    schema_session.add(TableBlacklistMovie(
+        id=2, radarr_id=99, arr_instance_id=5, provider="p", subs_id="s",
+        language="en", timestamp=datetime(2026, 6, 12, 12, 0, 2)))
+    schema_session.flush()
+
+    blacklist.blacklist_delete_movie(provider="p", subs_id="s", arr_instance_id=None)
+
+    remaining = schema_session.execute(TableBlacklistMovie.__table__.select()).fetchall()
+    assert len(remaining) == 2, "mixed NULL+owner duplicate must not be fanned-out deleted"

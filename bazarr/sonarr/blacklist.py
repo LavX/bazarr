@@ -76,8 +76,11 @@ def blacklist_delete(provider, subs_id, arr_instance_id=None):
     # proceed if the key resolves to a single owning instance (the legacy
     # single-default install, where every match shares one owner or NULL).
     if arr_instance_id is None:
+        # COALESCE so a NULL (legacy unowned) row counts as its own distinct
+        # owner: a mixed NULL + instance-owned duplicate is still a cross-instance
+        # set and must not be fanned-out deleted.
         owners = database.execute(
-            select(func.count(func.distinct(TableBlacklist.arr_instance_id)))
+            select(func.count(func.distinct(func.coalesce(TableBlacklist.arr_instance_id, -1))))
             .where((TableBlacklist.provider == provider) & (TableBlacklist.subs_id == subs_id))
         ).scalar()
         if owners and owners > 1:

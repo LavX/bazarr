@@ -83,7 +83,7 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
             # Route the rescan at the OWNING instance's Sonarr (#156); None
             # owner = default server (legacy single-instance), unchanged.
             notify_sonarr(sonarr_series_id,
-                          arr_client=client_for_instance(database, arr_instance_id))
+                          arr_client=client_for_instance(database, arr_instance_id, enabled_only=False))
             event_stream(type='series', action='update', payload=sonarr_series_id)
             event_stream(type='episode-wanted', action='update', payload=sonarr_episode_id)
 
@@ -114,7 +114,7 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
             history_log_movie(0, radarr_id, result, arr_instance_id=arr_instance_id)
             store_subtitles_movie(prr(media_path), media_path)
             notify_radarr(radarr_id,
-                          arr_client=client_for_instance(database, arr_instance_id))
+                          arr_client=client_for_instance(database, arr_instance_id, enabled_only=False))
             event_stream(type='movie-wanted', action='update', payload=radarr_id)
 
             if settings.general.use_plex and settings.plex.update_movie_library:

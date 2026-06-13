@@ -100,6 +100,28 @@ def test_backfill_resumes_stamping_after_partial_crash(schema_session):
     assert row.arr_instance_id == inst.id  # resumed and stamped
 
 
+def test_backfill_resumes_stamping_for_single_disabled_instance(schema_session):
+    # The lone instance left by a partial crash may be disabled (or the user
+    # disabled the only one). get_default() returns None for a disabled instance,
+    # so keying the resume on the single existing instance (not the default) is
+    # what stamps the orphaned rows.
+    from app.database import TableShows
+    from arr_instances.backfill import backfill_default_instances
+    from arr_instances.repository import ArrInstanceRepository
+
+    repo = ArrInstanceRepository(schema_session)
+    inst = repo.create("sonarr", "Sonarr", enabled=False)  # single, disabled
+    schema_session.flush()
+    assert repo.get_default("sonarr") is None
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=1, path="/tv/a", title="A"))  # owner left NULL
+
+    backfill_default_instances(schema_session, _settings_stub())
+
+    row = schema_session.execute(select(TableShows)).scalar_one()
+    assert row.arr_instance_id == inst.id  # resumed despite no enabled default
+
+
 # --------------------------------------------------------- H1 master-key persist
 def test_persist_master_key_generates_and_writes_when_empty(monkeypatch):
     import app.config as cfg

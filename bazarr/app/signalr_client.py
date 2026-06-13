@@ -139,6 +139,16 @@ class SonarrSignalrClient:
                 'Retrying before starting the Sonarr SignalR feed.'
             )
         while supports_signalr is None:
+            # Stop retrying if this per-instance client's instance was deleted or
+            # disabled: otherwise the version probe re-runs every 5s forever for a
+            # server that is gone (a transient-unreachable instance still resolves
+            # a client, so it keeps retrying as before).
+            if self.arr_instance_id is not None and \
+                    client_for_instance(database, self.arr_instance_id) is None:
+                logging.info('BAZARR Sonarr instance %s is gone or disabled; '
+                             'not starting its SignalR feed.', self.arr_instance_id)
+                self.connected = False
+                return
             time.sleep(5)
             supports_signalr, sonarr_version = self._support_state()
 
