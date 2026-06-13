@@ -25,6 +25,7 @@ import {
 } from "@/apis/hooks";
 import type { ArrInstance, ArrKind } from "@/apis/raw/arrInstances";
 import { Layout, Section } from "@/pages/Settings/components";
+import SonarrSection from "@/pages/Settings/Sonarr/SonarrSection";
 import InstanceCard from "./InstanceCard";
 import InstanceFormModal from "./InstanceFormModal";
 import { ARR_META } from "./meta";
@@ -218,13 +219,15 @@ const SettingsConnectionsView: FunctionComponent = () => {
         </Tabs.List>
 
         <Tabs.Panel value="sonarr">
-          <KindSection
-            kind="sonarr"
-            query={instances}
-            onAdd={openCreate}
-            onEdit={openEdit}
-            onDelete={openDelete}
-          />
+          <SonarrSection>
+            <KindSection
+              kind="sonarr"
+              query={instances}
+              onAdd={openCreate}
+              onEdit={openEdit}
+              onDelete={openDelete}
+            />
+          </SonarrSection>
         </Tabs.Panel>
 
         <Tabs.Panel value="radarr">

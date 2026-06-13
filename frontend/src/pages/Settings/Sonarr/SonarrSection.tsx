@@ -1,0 +1,114 @@
+import { FunctionComponent, ReactNode } from "react";
+import { Code } from "@mantine/core";
+import {
+  Check,
+  Chips,
+  CollapseBox,
+  Message,
+  MultiSelector,
+  PathMappingTable,
+  Section,
+  Slider,
+} from "@/pages/Settings/components";
+import { seriesEnabledKey } from "@/pages/Settings/keys";
+import { seriesTypeOptions } from "@/pages/Settings/options";
+
+interface Props {
+  // The instance cards, rendered between the master toggle and the gated
+  // options so they stay visible regardless of the "Use Sonarr" state.
+  children?: ReactNode;
+}
+
+// Sonarr controls for the Connections page: master enable toggle, the instance
+// cards (passed as children), then the global behavioural options and path
+// mappings gated behind the master toggle. Connection details (host/port/key)
+// live in the instance cards, so there is no Host section here.
+const SonarrSection: FunctionComponent<Props> = ({ children }) => {
+  return (
+    <>
+      <Section header="Use Sonarr">
+        <Check label="Enabled" settingKey={seriesEnabledKey}></Check>
+      </Section>
+
+      {children}
+
+      <CollapseBox settingKey={seriesEnabledKey}>
+        <Section header="Options">
+          <Check
+            label="Sync with Sonarr on live connection establishment"
+            settingKey="settings-sonarr-series_sync_on_live"
+          ></Check>
+          <Message>
+            When Bazarr connects or reconnects to Sonarr, run a series and
+            episodes synchronization to make sure that we're up-to-date.
+          </Message>
+          <Slider
+            label="Minimum Score For Episodes"
+            settingKey="settings-general-minimum_score"
+          ></Slider>
+          <Chips
+            label="Excluded Tags"
+            settingKey="settings-sonarr-excluded_tags"
+            sanitizeFn={(values: string[] | null) =>
+              values?.map((item) =>
+                item.replace(/[^a-z0-9_-]/gi, "").toLowerCase(),
+              )
+            }
+          ></Chips>
+          <Message>
+            Episodes from series with those tags (case sensitive) in Sonarr will
+            be excluded from automatic download of subtitles.
+          </Message>
+          <MultiSelector
+            label="Excluded Series Types"
+            placeholder="Select series types"
+            settingKey="settings-sonarr-excluded_series_types"
+            options={seriesTypeOptions}
+          ></MultiSelector>
+          <Message>
+            Episodes from series with those types in Sonarr will be excluded
+            from automatic download of subtitles.
+          </Message>
+          <Check
+            label="Download Only Monitored"
+            settingKey="settings-sonarr-only_monitored"
+          ></Check>
+          <Message>
+            Automatic download of subtitles will only happen for monitored
+            episodes in Sonarr.
+          </Message>
+          <Check
+            label="Defer searching of subtitles until scheduled task execution"
+            settingKey="settings-sonarr-defer_search_signalr"
+          ></Check>
+          <Message>
+            If enabled, this option will prevent Bazarr from searching subtitles
+            as soon as episodes are imported.
+          </Message>
+          <Message>
+            Search can be triggered using this command:
+            <Code>
+              {`curl -H "Content-Type: application/json" -H "X-API-KEY: ###############################" -X POST
+                -d '{ "eventType": "Download", "episodeFiles": [ { "id": "$sonarr_episodefile_id" } ] }'
+                http://localhost:6767/api/webhooks/sonarr
+              `}
+            </Code>
+          </Message>
+          <Check
+            label="Exclude season zero (extras)"
+            settingKey="settings-sonarr-exclude_season_zero"
+          ></Check>
+          <Message>
+            Episodes from season zero (extras) from automatic download of
+            subtitles.
+          </Message>
+        </Section>
+        <Section header="Path Mappings">
+          <PathMappingTable type="sonarr"></PathMappingTable>
+        </Section>
+      </CollapseBox>
+    </>
+  );
+};
+
+export default SonarrSection;
