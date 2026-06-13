@@ -257,7 +257,15 @@ const InstanceFormModal: FunctionComponent<Props> = ({
       if (typed.length) {
         body.api_key = typed;
       }
-      create.mutate(body, { onSuccess: onClose });
+      create.mutate(body, {
+        onSuccess: () => {
+          showNotification({
+            color: "green",
+            message: `Instance "${common.name}" added`,
+          });
+          onClose();
+        },
+      });
     }
   });
 

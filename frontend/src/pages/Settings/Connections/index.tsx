@@ -11,6 +11,7 @@ import {
   Text,
   ThemeIcon,
 } from "@mantine/core";
+import { showNotification } from "@mantine/notifications";
 import {
   faPlus,
   faRotateRight,
@@ -188,8 +189,15 @@ const SettingsConnectionsView: FunctionComponent = () => {
     if (!deleteTarget) {
       return;
     }
+    const removedName = deleteTarget.name;
     deleteInstance.mutate(deleteTarget.id, {
-      onSuccess: () => setDeleteOpened(false),
+      onSuccess: () => {
+        showNotification({
+          color: "green",
+          message: `Instance "${removedName}" removed`,
+        });
+        setDeleteOpened(false);
+      },
       onError: (error) => {
         if (isArrInstanceConflict(error)) {
           setConflictMessage(
