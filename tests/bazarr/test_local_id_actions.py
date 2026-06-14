@@ -265,3 +265,144 @@ def test_series_search_missing_action_passes_arr_instance_id(monkeypatch):
 
     assert response == ("", 204)
     assert captured == {"no": 1, "arr_instance_id": 3}
+
+
+# ---------------------------------------------------------------------------
+# F8 regression: manual-download POST must resolve by upstream id, not local id
+# ---------------------------------------------------------------------------
+
+def test_movie_manual_download_routes_by_upstream_id_not_local_id(schema_session, monkeypatch):
+    """Regression for F8: the POST handler received the upstream radarrId from the
+    frontend but looked up the row using TableMovies.id (local autoincrement).
+    When one movie's local id numerically equals another movie's radarrId the
+    download silently routed to the wrong movie.
+
+    Seed:
+      - Movie A: local id=10,  radarrId=99, instance=2  (the target)
+      - Movie B: local id=99,  radarrId=77, instance=3  (the red herring: local id 99 == target's radarrId)
+
+    The frontend POST sends radarrid=99, arr_instance_id=2.
+    Before the fix the handler resolved TableMovies.id==99, found Movie B, then
+    saw arr_instance_id mismatch (3 != 2) and returned 404.
+    After the fix it passes radarr_id=99, arr_instance_id=2 straight to the
+    downstream function which resolves by (radarrId, instance) and finds Movie A.
+    """
+    from api.providers import providers_movies
+    from app.database import TableMovies
+
+    captured = {}
+    monkeypatch.setattr(providers_movies, "database", schema_session)
+    monkeypatch.setattr(
+        providers_movies,
+        "movie_manually_download_specific_subtitle",
+        lambda radarr_id, arr_instance_id=None, **kwargs: captured.update(
+            radarr_id=radarr_id, arr_instance_id=arr_instance_id
+        ),
+    )
+
+    schema_session.add_all([
+        TableMovies(
+            id=10, radarrId=99, arr_instance_id=2,
+            path="/movies/target.mkv", title="Target", tmdbId="999",
+        ),
+        TableMovies(
+            id=99, radarrId=77, arr_instance_id=3,
+            path="/movies/decoy.mkv", title="Decoy", tmdbId="888",
+        ),
+    ])
+    schema_session.flush()
+
+    app = Flask(__name__)
+    with app.test_request_context(
+        "/api/providers/movies",
+        method="POST",
+        data={
+            "radarrid": "99",
+            "arr_instance_id": "2",
+            "hi": "False",
+            "forced": "False",
+            "original_format": "False",
+            "provider": "myprovider",
+            "subtitle": "sub123",
+        },
+    ):
+        response = providers_movies.ProviderMovies.post.__wrapped__(
+            providers_movies.ProviderMovies()
+        )
+
+    assert response == ("", 204), f"Expected 204, got {response}"
+    assert captured.get("radarr_id") == 99, f"Wrong radarr_id routed: {captured}"
+    assert captured.get("arr_instance_id") == 2, f"Wrong instance routed: {captured}"
+
+
+def test_episode_manual_download_routes_by_upstream_id_not_local_id(schema_session, monkeypatch):
+    """Regression for F8 (episodes): the POST handler received sonarrEpisodeId from
+    the frontend but looked up the row using TableEpisodes.id (local autoincrement).
+
+    Seed:
+      - Show A: local id=20, sonarrSeriesId=5, instance=2
+      - Episode A: local id=30, sonarrEpisodeId=88, sonarrSeriesId=5, instance=2  (target)
+      - Show B: local id=40, sonarrSeriesId=9, instance=3
+      - Episode B: local id=88, sonarrEpisodeId=55, sonarrSeriesId=9, instance=3  (decoy: local id 88 == target's upstream ep id)
+
+    Frontend sends episodeid=88, seriesid=5, arr_instance_id=2.
+    Before the fix: handler resolved TableEpisodes.id==88, found Episode B, saw
+    instance mismatch (3 != 2) and returned 404.
+    After the fix: passes sonarr_episode_id=88, arr_instance_id=2 to downstream
+    which resolves by (sonarrEpisodeId, instance) and finds Episode A.
+    """
+    from api.providers import providers_episodes
+    from app.database import TableEpisodes, TableShows
+
+    captured = {}
+    monkeypatch.setattr(providers_episodes, "database", schema_session)
+    monkeypatch.setattr(
+        providers_episodes,
+        "episode_manually_download_specific_subtitle",
+        lambda sonarr_series_id, sonarr_episode_id, arr_instance_id=None, **kwargs: captured.update(
+            sonarr_series_id=sonarr_series_id,
+            sonarr_episode_id=sonarr_episode_id,
+            arr_instance_id=arr_instance_id,
+        ),
+    )
+
+    schema_session.add_all([
+        TableShows(id=20, sonarrSeriesId=5, arr_instance_id=2, path="/series/a", title="ShowA"),
+        TableShows(id=40, sonarrSeriesId=9, arr_instance_id=3, path="/series/b", title="ShowB"),
+    ])
+    schema_session.flush()
+    schema_session.add_all([
+        TableEpisodes(
+            id=30, series_id=20, sonarrSeriesId=5, sonarrEpisodeId=88, arr_instance_id=2,
+            path="/series/a/s01e01.mkv", title="PilotA", season=1, episode=1,
+        ),
+        TableEpisodes(
+            id=88, series_id=40, sonarrSeriesId=9, sonarrEpisodeId=55, arr_instance_id=3,
+            path="/series/b/s01e01.mkv", title="PilotB", season=1, episode=1,
+        ),
+    ])
+    schema_session.flush()
+
+    app = Flask(__name__)
+    with app.test_request_context(
+        "/api/providers/episodes",
+        method="POST",
+        data={
+            "episodeid": "88",
+            "seriesid": "5",
+            "arr_instance_id": "2",
+            "hi": "False",
+            "forced": "False",
+            "original_format": "False",
+            "provider": "myprovider",
+            "subtitle": "sub456",
+        },
+    ):
+        response = providers_episodes.ProviderEpisodes.post.__wrapped__(
+            providers_episodes.ProviderEpisodes()
+        )
+
+    assert response == ("", 204), f"Expected 204, got {response}"
+    assert captured.get("sonarr_episode_id") == 88, f"Wrong episode_id routed: {captured}"
+    assert captured.get("sonarr_series_id") == 5, f"Wrong series_id routed: {captured}"
+    assert captured.get("arr_instance_id") == 2, f"Wrong instance routed: {captured}"

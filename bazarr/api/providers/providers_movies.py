@@ -112,21 +112,14 @@ class ProviderMovies(Resource):
     def post(self):
         """Manually download a movie subtitles"""
         args = self.post_request_parser.parse_args()
-        movie_id = args.get('radarrid')
+        # The frontend sends the upstream radarrId (not the local autoincrement
+        # id), so pass it directly to the downstream function which resolves the
+        # row by (radarrId, arr_instance_id). A local-id pre-lookup was causing
+        # collisions: when a different movie's local id happened to equal the
+        # requested upstream id the handler routed to the wrong row or 404'd
+        # on an instance mismatch. (#156 F8)
+        radarr_id = args.get('radarrid')
         arr_instance_id = args.get('arr_instance_id')
-        movie = database.execute(
-            select(TableMovies.radarrId, TableMovies.arr_instance_id)
-            .where(TableMovies.id == movie_id)
-        ).first()
-        if movie:
-            if arr_instance_id is not None and arr_instance_id != movie.arr_instance_id:
-                return 'Movie not found', 404
-            radarr_id = movie.radarrId
-            arr_instance_id = movie.arr_instance_id
-        else:
-            # Legacy API callers used upstream Radarr IDs here. Keep that path
-            # for clients not yet migrated to local ids.
-            radarr_id = movie_id
 
         movie_manually_download_specific_subtitle(radarr_id=radarr_id,
                                                   hi=args.get('hi').capitalize(),

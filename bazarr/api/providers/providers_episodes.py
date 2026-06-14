@@ -115,23 +115,15 @@ class ProviderEpisodes(Resource):
     def post(self):
         """Manually download an episode subtitles"""
         args = self.post_request_parser.parse_args()
+        # The frontend sends upstream sonarrSeriesId and sonarrEpisodeId (not
+        # local autoincrement ids), so pass them directly to the downstream
+        # function which resolves the row by (sonarrEpisodeId, arr_instance_id).
+        # A local-id pre-lookup was causing collisions: when a different episode's
+        # local id happened to equal the requested upstream episode id the handler
+        # routed to the wrong row or 404'd on an instance mismatch. (#156 F8)
         series_id = args.get('seriesid')
         episode_id = args.get('episodeid')
         arr_instance_id = args.get('arr_instance_id')
-        episode = database.execute(
-            select(
-                TableEpisodes.sonarrSeriesId,
-                TableEpisodes.sonarrEpisodeId,
-                TableEpisodes.arr_instance_id,
-            )
-            .where(TableEpisodes.id == episode_id)
-        ).first()
-        if episode:
-            if arr_instance_id is not None and arr_instance_id != episode.arr_instance_id:
-                return 'Episode not found', 404
-            series_id = episode.sonarrSeriesId
-            episode_id = episode.sonarrEpisodeId
-            arr_instance_id = episode.arr_instance_id
 
         episode_manually_download_specific_subtitle(sonarr_series_id=series_id,
                                                     sonarr_episode_id=episode_id,
