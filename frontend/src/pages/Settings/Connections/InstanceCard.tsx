@@ -30,7 +30,7 @@ import {
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useTestArrInstanceById, useUpdateArrInstance } from "@/apis/hooks";
 import type { ArrInstance } from "@/apis/raw/arrInstances";
-import { ARR_META, buildHostUrl } from "./meta";
+import { ARR_META, buildHostUrl, buildWebhookUrl } from "./meta";
 import styles from "./Connections.module.scss";
 
 interface TestStatus {
@@ -59,7 +59,7 @@ const InstanceCard: FunctionComponent<Props> = ({
   const host = buildHostUrl(instance);
   // Per-instance Connect webhook URL (#156): paste into this server's
   // Settings -> Connect (On Grab / On Import) so it triggers the right instance.
-  const webhookUrl = `${window.location.origin}/api/webhooks/${instance.kind}/${instance.stable_key}`;
+  const webhookUrl = buildWebhookUrl(instance);
 
   const runTest = () => {
     // Tests the saved instance with its stored key (decrypted server-side), so

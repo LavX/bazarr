@@ -3,7 +3,12 @@ import {
   faPlay,
   IconDefinition,
 } from "@fortawesome/free-solid-svg-icons";
-import type { ArrInstance, ArrKind } from "@/apis/raw/arrInstances";
+import type {
+  ArrInstance,
+  ArrInstanceCreate,
+  ArrKind,
+} from "@/apis/raw/arrInstances";
+import { Environment } from "@/utilities/env";
 
 interface ArrKindMeta {
   label: string;
@@ -41,4 +46,51 @@ export function normalizeBaseUrl(value: string) {
 
 export function stripLeadingSlash(value: string) {
   return value.replace(/^\/+/, "");
+}
+
+// Returns the per-instance webhook URL to display and copy. Uses the full
+// origin plus the configured Bazarr base URL so subpath deployments work.
+export function buildWebhookUrl(
+  instance: Pick<ArrInstance, "kind" | "stable_key">,
+  origin = window.location.origin,
+  baseUrl = Environment.baseUrl,
+): string {
+  return `${origin}${baseUrl}/api/webhooks/${instance.kind}/${instance.stable_key}`;
+}
+
+// Builds the body for an arr instance create request. Omits is_default when
+// the switch is off so the backend can auto-promote the first enabled instance.
+export function buildArrInstanceCreateBody(
+  kind: ArrKind,
+  fields: {
+    name: string;
+    ip: string;
+    port: number;
+    base_url: string;
+    ssl: boolean;
+    verify_ssl: boolean;
+    http_timeout: number;
+    enabled: boolean;
+    isDefault: boolean;
+    apiKey?: string;
+  },
+): ArrInstanceCreate {
+  const body: ArrInstanceCreate = {
+    kind,
+    name: fields.name,
+    ip: fields.ip,
+    port: fields.port,
+    base_url: fields.base_url,
+    ssl: fields.ssl,
+    verify_ssl: fields.verify_ssl,
+    http_timeout: fields.http_timeout,
+    enabled: fields.enabled,
+  };
+  if (fields.isDefault) {
+    body.is_default = true;
+  }
+  if (fields.apiKey) {
+    body.api_key = fields.apiKey;
+  }
+  return body;
 }

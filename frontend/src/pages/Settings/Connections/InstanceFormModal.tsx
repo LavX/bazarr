@@ -31,12 +31,16 @@ import {
 } from "@/apis/hooks";
 import type {
   ArrInstance,
-  ArrInstanceCreate,
   ArrInstanceTest,
   ArrInstanceUpdate,
   ArrKind,
 } from "@/apis/raw/arrInstances";
-import { ARR_META, normalizeBaseUrl, stripLeadingSlash } from "./meta";
+import {
+  ARR_META,
+  buildArrInstanceCreateBody,
+  normalizeBaseUrl,
+  stripLeadingSlash,
+} from "./meta";
 
 // How a stored API key is treated when editing. The key itself is never sent
 // to the browser, so the form only ever carries a brand new value.
@@ -225,11 +229,13 @@ const InstanceFormModal: FunctionComponent<Props> = ({
       verify_ssl: values.verifySsl,
       http_timeout: Number(values.httpTimeout),
       enabled: values.enabled,
-      is_default: values.isDefault,
     };
     const typed = values.apiKey.trim();
     if (instance) {
-      const body: ArrInstanceUpdate = { ...common };
+      const body: ArrInstanceUpdate = {
+        ...common,
+        is_default: values.isDefault,
+      };
       if (hasStoredKey) {
         if (keyMode === "replace" && typed.length) {
           body.api_key = typed;
@@ -253,10 +259,18 @@ const InstanceFormModal: FunctionComponent<Props> = ({
         },
       );
     } else {
-      const body: ArrInstanceCreate = { kind: values.kind, ...common };
-      if (typed.length) {
-        body.api_key = typed;
-      }
+      const body = buildArrInstanceCreateBody(values.kind, {
+        name: common.name,
+        ip: common.ip,
+        port: common.port,
+        base_url: common.base_url,
+        ssl: common.ssl,
+        verify_ssl: common.verify_ssl,
+        http_timeout: common.http_timeout,
+        enabled: common.enabled,
+        isDefault: values.isDefault,
+        apiKey: typed.length ? typed : undefined,
+      });
       create.mutate(body, {
         onSuccess: () => {
           showNotification({
