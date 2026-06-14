@@ -9,11 +9,90 @@ chain, and keeps the resources to thin parse/commit glue.
 The session is flushed but NOT committed here; the HTTP boundary owns the
 transaction and commits on success.
 """
+import logging
+
 from sqlalchemy.exc import IntegrityError
 
 from .repository import VALID_KINDS, ArrInstanceRepository, to_safe_dict
 
 _CONFLICT_MESSAGE = "An instance with these connection properties already exists."
+
+# Per-kind sync-job id prefix used by the scheduler fan-out (scheduler.py
+# __sonarr_update_task / __radarr_update_task register update_<noun>_<id>).
+_SYNC_JOB_PREFIX = {"sonarr": "update_series", "radarr": "update_movies"}
+
+
+def event_stream(*args, **kwargs):
+    """Lazy indirection to ``app.event_handler.event_stream``.
+
+    Defined at module scope (rather than imported) so this service stays
+    importable without the heavy Flask-SocketIO chain that event_handler pulls
+    in, while tests can still monkeypatch ``service.event_stream``.
+    """
+    from app.event_handler import event_stream as _event_stream
+    _event_stream(*args, **kwargs)
+
+
+def refresh_runtime(kind, instance_id=None, removed=False):
+    """Rebuild scheduler sync jobs and re-fan-out the affected kind's SignalR
+    feed after an instance create/update/delete (#156).
+
+    The Flask CRUD handlers call this AFTER the row is committed. Without it,
+    scheduled sync jobs and live SignalR fan-out keep using the OLD instance set
+    until a restart or an unrelated settings save (the same refresh save_settings
+    performs, scoped to the changed kind).
+
+    Caveats honored here:
+
+    * ``update_configurable_tasks`` only adds/replaces jobs (add_job
+      replace_existing=True); it never REMOVES one. On delete (and when an
+      instance is disabled) the orphaned per-instance ``update_series_<id>`` /
+      ``update_movies_<id>`` job must be removed explicitly, or the rebuild
+      leaves a stale job firing against a missing/disabled instance. Pass
+      ``removed=True`` to drop it; a non-existent job is ignored.
+    * Kind-scoped: a Sonarr change re-fans-out only the Sonarr SignalR feed and
+      never bounces Radarr (and vice versa).
+    * The whole refresh is best-effort: the row is already committed, so a
+      transient arr/SignalR failure during the restart must not fail the CRUD
+      API response. Mirrors the try/except guard in config.save_settings.
+    """
+    if kind not in VALID_KINDS:
+        return
+    try:
+        from app.scheduler import scheduler
+
+        # Drop the orphaned per-instance job BEFORE the rebuild: the rebuild only
+        # adds/replaces jobs, so a deleted/disabled instance's job would survive.
+        if removed and instance_id is not None:
+            from apscheduler.jobstores.base import JobLookupError
+            job_id = f"{_SYNC_JOB_PREFIX[kind]}_{instance_id}"
+            try:
+                scheduler.aps_scheduler.remove_job(job_id)
+            except JobLookupError:
+                # Already gone (never registered, or no_tasks mode) - fine.
+                pass
+
+        scheduler.update_configurable_tasks()
+
+        # Kind-scoped SignalR re-fan-out, guarded on its own so a transient arr
+        # connection failure during the restart cannot fail the committed CRUD
+        # request (mirrors config.save_settings ~1227-1230).
+        from app import signalr_client
+        try:
+            if kind == "sonarr":
+                signalr_client.restart_sonarr_signalr()
+            elif kind == "radarr":
+                signalr_client.restart_radarr_signalr()
+        except Exception:
+            logging.exception(
+                "BAZARR failed to restart %s SignalR after instance change", kind)
+
+        event_stream(type="task")
+    except Exception:
+        # Belt-and-suspenders: the row is committed; never let a refresh error
+        # surface as a failed CRUD response.
+        logging.exception(
+            "BAZARR failed to refresh runtime after %s instance change", kind)
 
 
 def _connection_arg_error(args):

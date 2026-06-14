@@ -125,7 +125,7 @@ class _FakeThread:
         return None
 
 
-def test_signalr_single_instance_keeps_scalar_path(monkeypatch):
+def test_signalr_single_instance_binds_to_lone_instance(monkeypatch):
     import app.signalr_client as sc
 
     monkeypatch.setattr(sc.threading, "Thread", _FakeThread)
@@ -136,7 +136,26 @@ def test_signalr_single_instance_keeps_scalar_path(monkeypatch):
     extras = []
     clients = sc._start_clients_for_kind("sonarr", singleton, extras, sc.SonarrSignalrClient)
 
-    # One enabled instance -> the singleton stays on the scalar/default path.
+    # One enabled instance -> the singleton binds to that instance's id so the
+    # live feed config, dispatch routing, and on-connect 'sync on live' all use
+    # the per-instance path that matches the scheduler's update_series_<id> job
+    # (the scalar config is stale now that the Host form is gone, #156).
+    assert singleton.arr_instance_id == 1
+    assert clients == [singleton]
+    assert extras == []
+
+
+def test_signalr_zero_instances_falls_back_to_scalar_path(monkeypatch):
+    import app.signalr_client as sc
+
+    monkeypatch.setattr(sc.threading, "Thread", _FakeThread)
+    monkeypatch.setattr(sc, "_enabled_instances", lambda kind: [])
+
+    singleton = sc.SonarrSignalrClient()
+    extras = []
+    clients = sc._start_clients_for_kind("sonarr", singleton, extras, sc.SonarrSignalrClient)
+
+    # No enabled instance -> the singleton falls back to the scalar/default path.
     assert singleton.arr_instance_id is None
     assert clients == [singleton]
     assert extras == []

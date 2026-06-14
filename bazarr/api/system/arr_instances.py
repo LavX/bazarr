@@ -80,6 +80,10 @@ class ArrInstancesList(Resource):
         body, status = service.create_instance(database, args)
         if status < 400:
             database.commit()
+            # Rebuild scheduler sync jobs + re-fan-out this kind's SignalR feed so
+            # the new instance is live without a restart (#156). Best-effort: the
+            # row is already committed.
+            service.refresh_runtime(body.get("kind"), instance_id=body.get("id"))
         return body, status
 
 
@@ -101,13 +105,24 @@ class ArrInstanceItem(Resource):
         body, status = service.update_instance(database, instance_id, args)
         if status < 400:
             database.commit()
+            # Rebuild jobs + re-fan-out this kind's SignalR (#156). A disabled
+            # instance's per-instance sync job is now orphaned, so remove it (the
+            # rebuild only adds/replaces jobs, never removes them).
+            service.refresh_runtime(
+                body.get("kind"), instance_id=body.get("id"),
+                removed=not body.get("enabled", True))
         return body, status
 
     @authenticate
     def delete(self, instance_id):
+        # Capture the kind before the row is gone so the post-delete refresh can
+        # scope to the right scheduler/SignalR feed and remove the orphaned job.
+        existing, _ = service.get_instance(database, instance_id)
+        kind = existing.get("kind") if isinstance(existing, dict) else None
         body, status = service.delete_instance(database, instance_id)
         if status < 400:
             database.commit()
+            service.refresh_runtime(kind, instance_id=instance_id, removed=True)
         return body, status
 
 

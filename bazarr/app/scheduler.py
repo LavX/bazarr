@@ -18,8 +18,8 @@ from dateutil import tz
 import logging
 
 from app.announcements import get_announcements_to_file
-from sonarr.sync.series import update_series, update_series_for_instance
-from radarr.sync.movies import update_movies, update_movies_for_instance
+from sonarr.sync.series import update_series_for_instance
+from radarr.sync.movies import update_movies_for_instance
 from arr_instances.repository import ArrInstanceRepository
 from subtitles.indexer.movies import movies_full_scan_subtitles
 from subtitles.indexer.series import series_full_scan_subtitles
@@ -242,39 +242,38 @@ class Scheduler:
     def __sonarr_update_task(self):
         if settings.general.use_sonarr:
             instances = ArrInstanceRepository(database).list('sonarr', enabled_only=True)
-            if len(instances) > 1:
-                # Multi-instance: one job per enabled instance. (Reachable only
-                # once the enablement gate allows a 2nd instance; with a single
-                # default instance the else-branch keeps today's exact job.)
-                for inst in instances:
-                    self.aps_scheduler.add_job(
-                        update_series_for_instance, 'interval', minutes=int(settings.sonarr.series_sync),
-                        max_instances=1, coalesce=True, misfire_grace_time=15,
-                        id=f'update_series_{inst.id}', name=f'Sync with Sonarr ({inst.name})',
-                        replace_existing=True,
-                        kwargs=dict(arr_instance_id=inst.id, wait_for_completion=True))
-            else:
+            # One per-instance job per ENABLED instance, including when there is
+            # exactly one. The lone instance is synced from its arr_instances row
+            # (via update_series_for_instance -> client_for_instance), NOT from the
+            # legacy scalar settings.sonarr.* that the removed Host form used to
+            # write: the Connections UI now writes host + key only to the
+            # arr_instances table, so the scalars diverge after the backfill and a
+            # scalar job would sync stale config (#156). The backfill guarantees an
+            # enabled Sonarr has at least one instance row, so dropping the scalar
+            # fallback never silently stops sync for a real install. Zero enabled
+            # instances -> register no sync job (the existing "nothing to sync"
+            # intent).
+            for inst in instances:
                 self.aps_scheduler.add_job(
-                    update_series, 'interval', minutes=int(settings.sonarr.series_sync), max_instances=1,
-                    coalesce=True, misfire_grace_time=15, id='update_series', name='Sync with Sonarr',
-                    replace_existing=True, kwargs=dict(wait_for_completion=True))
+                    update_series_for_instance, 'interval', minutes=int(settings.sonarr.series_sync),
+                    max_instances=1, coalesce=True, misfire_grace_time=15,
+                    id=f'update_series_{inst.id}', name=f'Sync with Sonarr ({inst.name})',
+                    replace_existing=True,
+                    kwargs=dict(arr_instance_id=inst.id, wait_for_completion=True))
 
     def __radarr_update_task(self):
         if settings.general.use_radarr:
             instances = ArrInstanceRepository(database).list('radarr', enabled_only=True)
-            if len(instances) > 1:
-                for inst in instances:
-                    self.aps_scheduler.add_job(
-                        update_movies_for_instance, 'interval', minutes=int(settings.radarr.movies_sync),
-                        max_instances=1, coalesce=True, misfire_grace_time=15,
-                        id=f'update_movies_{inst.id}', name=f'Sync with Radarr ({inst.name})',
-                        replace_existing=True,
-                        kwargs=dict(arr_instance_id=inst.id, wait_for_completion=True))
-            else:
+            # Radarr counterpart of __sonarr_update_task: one per-instance job per
+            # enabled instance (the lone instance included), no scalar fallback,
+            # no job when there are zero enabled instances (#156).
+            for inst in instances:
                 self.aps_scheduler.add_job(
-                    update_movies, 'interval', minutes=int(settings.radarr.movies_sync), max_instances=1,
-                    coalesce=True, misfire_grace_time=15, id='update_movies', name='Sync with Radarr',
-                    replace_existing=True, kwargs=dict(wait_for_completion=True))
+                    update_movies_for_instance, 'interval', minutes=int(settings.radarr.movies_sync),
+                    max_instances=1, coalesce=True, misfire_grace_time=15,
+                    id=f'update_movies_{inst.id}', name=f'Sync with Radarr ({inst.name})',
+                    replace_existing=True,
+                    kwargs=dict(arr_instance_id=inst.id, wait_for_completion=True))
 
     def __cache_cleanup_task(self):
         self.aps_scheduler.add_job(cache_maintenance, 'interval', hours=24, max_instances=1, coalesce=True,

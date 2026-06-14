@@ -560,12 +560,17 @@ def all_radarr_signalr_connected():
 def _start_clients_for_kind(kind, singleton, extra_list, client_cls):
     """Start one SignalR client per enabled instance of a kind.
 
-    A single enabled instance keeps the singleton on the scalar/default path
-    (arr_instance_id None) -> byte-identical to the legacy behaviour. With more
-    than one, the singleton handles the first instance and one extra client per
-    remaining instance, each tagged so the dispatcher scopes its events and
-    triggers that instance's update_*_<id> job. Like the scheduler fan-out, new
-    instances are picked up on (re)start, not live.
+    The singleton always binds to the FIRST enabled instance's id (including
+    when there is exactly one), so the live feed connects with that instance's
+    saved host/key, the dispatcher routes its events through the per-instance
+    path, and on-connect "sync on live" triggers that instance's
+    ``update_*_<id>`` scheduler job - which is the only sync job the scheduler
+    now registers (the scalar Host form was removed, so the scalar config is
+    stale, #156). With more than one instance, each remaining instance gets one
+    extra tagged client. Only when there are ZERO enabled instances does the
+    singleton fall back to the scalar/default path (arr_instance_id None); with
+    use_sonarr/use_radarr on and no instance row, there is nothing live to do.
+    Like the scheduler fan-out, new instances are picked up on (re)start.
     """
     instances = _enabled_instances(kind)
     # Stop EVERY previously-started extra before re-fanning out, regardless of
@@ -580,7 +585,7 @@ def _start_clients_for_kind(kind, singleton, extra_list, client_cls):
             pass
     extra_list.clear()
 
-    if len(instances) > 1:
+    if len(instances) >= 1:
         singleton.arr_instance_id = instances[0].id
         clients = [singleton] + [client_cls(inst.id) for inst in instances[1:]]
         extra_list.extend(clients[1:])
