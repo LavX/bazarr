@@ -87,7 +87,12 @@ def test_provider_episode_missing_recompute_keeps_instance_scope(schema_session,
     assert calls == [{"epno": 2, "arr_instance_id": 8}]
 
 
-def test_provider_movie_post_resolves_local_id_before_download(schema_session, monkeypatch):
+# F8 (#156): the manual-download POST passes the upstream radarrId straight to
+# the instance-scoped downloader; it must NOT resolve it as a local
+# TableMovies.id first. Here local id=801 collides with another row's
+# radarrId=801, so the old local-first lookup misrouted radarrid=801 to the
+# id=801 row (radarrId=1); now it routes by the upstream id as sent.
+def test_provider_movie_post_passes_upstream_id_not_local_id(schema_session, monkeypatch):
     from api.providers import providers_movies
     from app.database import TableMovies
 
@@ -124,6 +129,7 @@ def test_provider_movie_post_resolves_local_id_before_download(schema_session, m
         method="POST",
         data={
             "radarrid": "801",
+            "arr_instance_id": "7",
             "hi": "False",
             "forced": "False",
             "original_format": "False",
@@ -134,11 +140,14 @@ def test_provider_movie_post_resolves_local_id_before_download(schema_session, m
         response = providers_movies.ProviderMovies.post.__wrapped__(providers_movies.ProviderMovies())
 
     assert response == ("", 204)
-    assert calls[0]["radarr_id"] == 1
+    assert calls[0]["radarr_id"] == 801
     assert calls[0]["arr_instance_id"] == 7
 
 
-def test_provider_episode_post_resolves_local_id_before_download(schema_session, monkeypatch):
+# F8 (#156): same as the movie case for episodes. Local id=1001 collides with
+# another row's sonarrEpisodeId=1001; the POST must pass the upstream
+# series/episode ids through, not resolve the local id=1001 row first.
+def test_provider_episode_post_passes_upstream_id_not_local_id(schema_session, monkeypatch):
     from api.providers import providers_episodes
     from app.database import TableEpisodes, TableShows
 
@@ -187,6 +196,7 @@ def test_provider_episode_post_resolves_local_id_before_download(schema_session,
         data={
             "seriesid": "999",
             "episodeid": "1001",
+            "arr_instance_id": "8",
             "hi": "False",
             "forced": "False",
             "original_format": "False",
@@ -197,8 +207,8 @@ def test_provider_episode_post_resolves_local_id_before_download(schema_session,
         response = providers_episodes.ProviderEpisodes.post.__wrapped__(providers_episodes.ProviderEpisodes())
 
     assert response == ("", 204)
-    assert calls[0]["sonarr_series_id"] == 1
-    assert calls[0]["sonarr_episode_id"] == 2
+    assert calls[0]["sonarr_series_id"] == 999
+    assert calls[0]["sonarr_episode_id"] == 1001
     assert calls[0]["arr_instance_id"] == 8
 
 

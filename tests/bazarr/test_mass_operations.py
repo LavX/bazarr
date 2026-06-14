@@ -1208,7 +1208,6 @@ class TestCollectPerInstancePathMapping:
             "srt_path must use the per-instance mapping, not the global one"
 
         # Assert path_replace_instance was called with the row's arr_instance_id (7)
-        from unittest.mock import call as ucall
         calls = mock_path_map.path_replace_instance.call_args_list
         assert any(c.args[1] == 7 for c in calls), \
             "path_replace_instance must be called with the owning arr_instance_id=7"

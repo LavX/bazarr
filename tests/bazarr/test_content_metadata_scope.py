@@ -192,7 +192,7 @@ def test_refresh_media_subtitles_episode_uses_instance_mapping(monkeypatch):
     Regression for F4 (#156): the rescan after an editor save/promote used the
     global path_replace even though the subtitle was resolved per-instance.
     """
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import patch
     from api.subtitles import content
 
     metadata = {
@@ -250,7 +250,7 @@ def test_refresh_media_subtitles_movie_uses_instance_mapping(monkeypatch):
 def test_refresh_media_subtitles_none_instance_falls_back_to_global(monkeypatch):
     """When arrInstanceId is None (default/single-instance), path_replace_instance
     falls back to the global mapping -- the behavior must be unchanged."""
-    from unittest.mock import patch, call
+    from unittest.mock import patch
     from api.subtitles import content
 
     metadata = {
