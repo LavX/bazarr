@@ -512,12 +512,17 @@ def _apply_subtitle_chmod(path):
 
 def _refresh_media_subtitles(media_type, media_id, metadata):
     media_path = metadata.get('mediaPath', '')
+    # Use the owning instance's per-instance path_mappings when configured
+    # (#156). The instance id is stored in metadata['arrInstanceId'] by both
+    # resolve_subtitle_path and _get_media_metadata; falls back to global when
+    # None (default/single-instance setup).
+    arr_instance_id = metadata.get('arrInstanceId')
     if media_type == 'episode' and media_path:
-        store_subtitles(media_path, path_mappings.path_replace(media_path), use_cache=False)
+        store_subtitles(media_path, path_mappings.path_replace_instance(media_path, arr_instance_id, 'episode'), use_cache=False)
         event_stream(type='series', payload=metadata.get('mediaId'))
         event_stream(type='episode', payload=metadata.get('episodeId', media_id))
     elif media_type == 'movie' and media_path:
-        store_subtitles_movie(media_path, path_mappings.path_replace_movie(media_path), use_cache=False)
+        store_subtitles_movie(media_path, path_mappings.path_replace_instance(media_path, arr_instance_id, 'movie'), use_cache=False)
         event_stream(type='movie', payload=metadata.get('mediaId', media_id))
 
 
@@ -1047,10 +1052,9 @@ def _create_subtitle(media_type, media_id, arr_instance_id=None):
     if not row:
         return 'Media not found', 404
 
-    if media_type == 'episode':
-        video_path = path_mappings.path_replace(row.path)
-    else:
-        video_path = path_mappings.path_replace_movie(row.path)
+    # Apply the owning instance's per-instance path_mappings when configured
+    # (#156); falls back to the global mapping when the instance has none.
+    video_path = path_mappings.path_replace_instance(row.path, arr_instance_id, media_type)
 
     # Build the subtitle filename. `language` was already validated against
     # r'^[a-zA-Z]{2,3}$' above, `ext` comes from the FORMAT_TO_EXT whitelist,

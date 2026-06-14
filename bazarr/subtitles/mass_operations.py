@@ -231,7 +231,8 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
             continue
 
         subtitles = _parse_subtitles_column(ep.subtitles)
-        video_path = path_mappings.path_replace(ep.path)
+        # Apply the owning instance's per-instance path_mappings (#156).
+        video_path = path_mappings.path_replace_instance(ep.path, ep.arr_instance_id, 'episode')
 
         # For translate: check if target language already exists
         if action == 'translate' and target_lang:
@@ -254,7 +255,8 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
                 skipped += 1
                 continue
 
-            mapped_sub_path = path_mappings.path_replace(sub_path)
+            # Apply per-instance path_mappings to the stored subtitle path (#156).
+            mapped_sub_path = path_mappings.path_replace_instance(sub_path, ep.arr_instance_id, 'episode')
             if not os.path.isfile(mapped_sub_path):
                 skipped += 1
                 continue
@@ -271,7 +273,7 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
                 continue
 
             if action == 'sync' and not force_resync:
-                reversed_path = path_mappings.path_replace_reverse(mapped_sub_path)
+                reversed_path = path_mappings.path_replace_reverse_instance(mapped_sub_path, ep.arr_instance_id, 'episode')
                 if reversed_path in synced_paths:
                     skipped += 1
                     continue
@@ -339,7 +341,8 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
             continue
 
         subtitles = _parse_subtitles_column(movie.subtitles)
-        video_path = path_mappings.path_replace_movie(movie.path)
+        # Apply the owning instance's per-instance path_mappings (#156).
+        video_path = path_mappings.path_replace_instance(movie.path, movie.arr_instance_id, 'movie')
 
         # For translate: check if target language already exists
         if action == 'translate' and target_lang:
@@ -362,7 +365,8 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
                 skipped += 1
                 continue
 
-            mapped_sub_path = path_mappings.path_replace_movie(sub_path)
+            # Apply per-instance path_mappings to the stored subtitle path (#156).
+            mapped_sub_path = path_mappings.path_replace_instance(sub_path, movie.arr_instance_id, 'movie')
             if not os.path.isfile(mapped_sub_path):
                 skipped += 1
                 continue
@@ -379,7 +383,7 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
                 continue
 
             if action == 'sync' and not force_resync:
-                reversed_path = path_mappings.path_replace_reverse_movie(mapped_sub_path)
+                reversed_path = path_mappings.path_replace_reverse_instance(mapped_sub_path, movie.arr_instance_id, 'movie')
                 if reversed_path in synced_paths:
                     skipped += 1
                     continue

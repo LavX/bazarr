@@ -46,8 +46,13 @@ def _patch_collect_io(monkeypatch, mo, schema_session):
     the instance filter (which runs first) is what decides inclusion."""
     monkeypatch.setattr(mo, "database", schema_session)
     monkeypatch.setattr(mo, "is_sync_engine_output", lambda p: False)
+    # path_replace_instance / _reverse_instance are now the call sites; stub
+    # them as identity so the instance-filter tests focus on scoping, not
+    # path translation.
     monkeypatch.setattr(mo.path_mappings, "path_replace", lambda p: p)
     monkeypatch.setattr(mo.path_mappings, "path_replace_movie", lambda p: p)
+    monkeypatch.setattr(mo.path_mappings, "path_replace_instance", lambda p, *a, **kw: p)
+    monkeypatch.setattr(mo.path_mappings, "path_replace_reverse_instance", lambda p, *a, **kw: p)
     monkeypatch.setattr(os.path, "isfile", lambda p: True)
     # The real parser needs the app's languages_dict (loaded at startup, absent
     # in tests); the collect loop only consumes forced/hi from it.

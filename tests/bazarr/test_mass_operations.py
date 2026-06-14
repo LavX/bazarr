@@ -240,6 +240,8 @@ class TestCollectSubtitleItems:
         mock_settings.subsync.no_fix_framerate = True
         mock_path_map.path_replace.side_effect = lambda x: x
         mock_path_map.path_replace_reverse.side_effect = lambda x: x
+        mock_path_map.path_replace_instance.side_effect = lambda p, *a, **kw: p
+        mock_path_map.path_replace_reverse_instance.side_effect = lambda p, *a, **kw: p
         mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
 
         episode = self._make_episode()
@@ -269,6 +271,8 @@ class TestCollectSubtitleItems:
         mock_settings.subsync.no_fix_framerate = True
         mock_path_map.path_replace_movie.side_effect = lambda x: x
         mock_path_map.path_replace_reverse_movie.side_effect = lambda x: x
+        mock_path_map.path_replace_instance.side_effect = lambda p, *a, **kw: p
+        mock_path_map.path_replace_reverse_instance.side_effect = lambda p, *a, **kw: p
         mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
 
         movie = self._make_movie()
@@ -298,6 +302,8 @@ class TestCollectSubtitleItems:
         mock_settings.subsync.no_fix_framerate = True
         mock_path_map.path_replace_movie.side_effect = lambda x: x
         mock_path_map.path_replace_reverse_movie.side_effect = lambda x: x
+        mock_path_map.path_replace_instance.side_effect = lambda p, *a, **kw: p
+        mock_path_map.path_replace_reverse_instance.side_effect = lambda p, *a, **kw: p
         mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
 
         movie_a = self._make_movie(path="/movies/a.mkv", subtitles="[['en', '/subs/a.en.srt']]")
@@ -333,6 +339,8 @@ class TestCollectSubtitleItems:
         mock_settings.subsync.no_fix_framerate = True
         mock_path_map.path_replace.side_effect = lambda x: x
         mock_path_map.path_replace_reverse.side_effect = lambda x: x
+        mock_path_map.path_replace_instance.side_effect = lambda p, *a, **kw: p
+        mock_path_map.path_replace_reverse_instance.side_effect = lambda p, *a, **kw: p
         mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
 
         episode_a = self._make_episode(path="/series/a.mkv", subtitles="[['en', '/subs/a.en.srt']]")
@@ -456,6 +464,8 @@ class TestCollectSubtitleItems:
         mock_settings.subsync.no_fix_framerate = True
         mock_path_map.path_replace.side_effect = lambda x: x
         mock_path_map.path_replace_reverse.side_effect = lambda x: x
+        mock_path_map.path_replace_instance.side_effect = lambda p, *a, **kw: p
+        mock_path_map.path_replace_reverse_instance.side_effect = lambda p, *a, **kw: p
         mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
         mock_synced_ep.return_value = {'/subs/ep1.en.srt'}
 
@@ -484,6 +494,8 @@ class TestCollectSubtitleItems:
         mock_settings.subsync.no_fix_framerate = True
         mock_path_map.path_replace_movie.side_effect = lambda x: x
         mock_path_map.path_replace_reverse_movie.side_effect = lambda x: x
+        mock_path_map.path_replace_instance.side_effect = lambda p, *a, **kw: p
+        mock_path_map.path_replace_reverse_instance.side_effect = lambda p, *a, **kw: p
         mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
         mock_synced_mov.return_value = {'/subs/movie.en.srt'}
 
@@ -825,6 +837,8 @@ class TestForceResync:
         mock_settings.subsync.no_fix_framerate = True
         mock_path_map.path_replace.side_effect = lambda x: x
         mock_path_map.path_replace_reverse.side_effect = lambda x: x
+        mock_path_map.path_replace_instance.side_effect = lambda p, *a, **kw: p
+        mock_path_map.path_replace_reverse_instance.side_effect = lambda p, *a, **kw: p
         mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
 
         episode = self._make_episode(subtitles="[['en:sync-ffsubsync', '/subs/ep1.en.ffsubsync.srt']]")
@@ -1126,6 +1140,115 @@ class TestSchedulerIntegration:
         call_args = mock_jobs_queue.add_job_from_function.call_args
         assert 'Mass Sync' in call_args[0][0]
         assert call_args[1]['is_progress'] is True
+
+
+class TestCollectPerInstancePathMapping:
+    """F7 regression: _collect_episodes and _collect_movies must use
+    path_replace_instance, not the global path_replace / path_replace_movie.
+
+    Before the fix the collected video_path and srt_path were derived via the
+    global mapping even though ep.arr_instance_id / movie.arr_instance_id was
+    available on the row; per-instance path_mappings configured on the owning
+    instance were silently ignored.
+    """
+
+    def _make_episode(self, path='/remote/tv/ep.mkv',
+                      subtitles="[['en', '/remote/tv/ep.en.srt']]",
+                      arr_instance_id=7):
+        ep = MagicMock()
+        ep.sonarrEpisodeId = 1
+        ep.sonarrSeriesId = 10
+        ep.path = path
+        ep.subtitles = subtitles
+        ep.arr_instance_id = arr_instance_id
+        return ep
+
+    def _make_movie(self, path='/remote/movies/film.mkv',
+                    subtitles="[['en', '/remote/movies/film.en.srt']]",
+                    arr_instance_id=8):
+        movie = MagicMock()
+        movie.radarrId = 20
+        movie.path = path
+        movie.subtitles = subtitles
+        movie.arr_instance_id = arr_instance_id
+        return movie
+
+    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
+    @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
+    @patch('subtitles.mass_operations.path_mappings')
+    @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
+    @patch('subtitles.mass_operations._get_synced_movie_paths', return_value=set())
+    @patch('subtitles.mass_operations.database')
+    @patch('subtitles.mass_operations.settings')
+    def test_collect_episodes_calls_path_replace_instance_with_owner_id(
+            self, mock_settings, mock_db, mock_synced_mov, mock_synced_ep,
+            mock_path_map, mock_isfile, mock_lang):
+        """path_replace_instance must be called with the row's arr_instance_id."""
+        from subtitles.mass_operations import _collect_subtitle_items
+
+        mock_settings.subsync.max_offset_seconds = 60
+        mock_settings.subsync.gss = True
+        mock_settings.subsync.no_fix_framerate = True
+        mock_path_map.path_replace_instance.side_effect = lambda p, *a, **kw: p.replace('/remote', '/local')
+        mock_path_map.path_replace_reverse_instance.side_effect = lambda p, *a, **kw: p
+        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
+
+        episode = self._make_episode(arr_instance_id=7)
+        mock_db.execute.return_value.all.return_value = [episode]
+
+        items_list = [{'type': 'episode', 'sonarrEpisodeId': 1}]
+        items, skipped = _collect_subtitle_items(items_list, action='sync', options={})
+
+        assert skipped == 0
+        assert len(items) == 1
+        # Both video_path and srt_path must have gone through the per-instance mapping
+        assert items[0]['video_path'] == '/local/tv/ep.mkv', \
+            "video_path must use the per-instance mapping, not the global one"
+        assert items[0]['srt_path'] == '/local/tv/ep.en.srt', \
+            "srt_path must use the per-instance mapping, not the global one"
+
+        # Assert path_replace_instance was called with the row's arr_instance_id (7)
+        from unittest.mock import call as ucall
+        calls = mock_path_map.path_replace_instance.call_args_list
+        assert any(c.args[1] == 7 for c in calls), \
+            "path_replace_instance must be called with the owning arr_instance_id=7"
+
+    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
+    @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
+    @patch('subtitles.mass_operations.path_mappings')
+    @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
+    @patch('subtitles.mass_operations._get_synced_movie_paths', return_value=set())
+    @patch('subtitles.mass_operations.database')
+    @patch('subtitles.mass_operations.settings')
+    def test_collect_movies_calls_path_replace_instance_with_owner_id(
+            self, mock_settings, mock_db, mock_synced_mov, mock_synced_ep,
+            mock_path_map, mock_isfile, mock_lang):
+        """path_replace_instance must be called with the movie row's arr_instance_id."""
+        from subtitles.mass_operations import _collect_subtitle_items
+
+        mock_settings.subsync.max_offset_seconds = 60
+        mock_settings.subsync.gss = True
+        mock_settings.subsync.no_fix_framerate = True
+        mock_path_map.path_replace_instance.side_effect = lambda p, *a, **kw: p.replace('/remote', '/local')
+        mock_path_map.path_replace_reverse_instance.side_effect = lambda p, *a, **kw: p
+        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
+
+        movie = self._make_movie(arr_instance_id=8)
+        mock_db.execute.return_value.all.return_value = [movie]
+
+        items_list = [{'type': 'movie', 'radarrId': 20}]
+        items, skipped = _collect_subtitle_items(items_list, action='sync', options={})
+
+        assert skipped == 0
+        assert len(items) == 1
+        assert items[0]['video_path'] == '/local/movies/film.mkv', \
+            "video_path must use the per-instance mapping, not the global one"
+        assert items[0]['srt_path'] == '/local/movies/film.en.srt', \
+            "srt_path must use the per-instance mapping, not the global one"
+
+        calls = mock_path_map.path_replace_instance.call_args_list
+        assert any(c.args[1] == 8 for c in calls), \
+            "path_replace_instance must be called with the owning arr_instance_id=8"
 
 
 class TestMassBatchOperationProcessing:
