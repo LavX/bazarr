@@ -53,11 +53,15 @@ def test_series_substep_sync_does_not_track_parent_job_progress():
     meta = MagicMock(sonarrSeriesId=7, sonarrEpisodeId=70, imdbId="tt1", tvdbId=1, season=1, episode=13)
     sync_mock = _run("series", meta, job_id=42)
     assert sync_mock.call_args.kwargs.get("job_id") == 42
-    assert sync_mock.call_args.kwargs.get("track_job_progress") is False
+    # Sub-step must NOT own the parent job's progress (no value/max hijack)...
+    assert sync_mock.call_args.kwargs.get("owns_job_progress") is False
+    # ...but tracking stays on so cancellation checkpoints survive during sync.
+    assert sync_mock.call_args.kwargs.get("track_job_progress") is not False
 
 
 def test_movie_substep_sync_does_not_track_parent_job_progress():
     meta = MagicMock(radarrId=9, imdbId="tt2", tmdbId=2)
     sync_mock = _run("movie", meta, job_id=99)
     assert sync_mock.call_args.kwargs.get("job_id") == 99
-    assert sync_mock.call_args.kwargs.get("track_job_progress") is False
+    assert sync_mock.call_args.kwargs.get("owns_job_progress") is False
+    assert sync_mock.call_args.kwargs.get("track_job_progress") is not False

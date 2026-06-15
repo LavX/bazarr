@@ -63,6 +63,32 @@ def _index_keep_all_outputs(video_path, sonarr_series_id=None, sonarr_episode_id
         event_stream(type='movie', payload=radarr_id)
 
 
+def _report_progress(job_id, track_job_progress, owns_job_progress, message,
+                     value=None, total=None, name=None):
+    """Report sync progress to the jobs queue.
+
+    The job owner (a standalone sync job) updates the progress value/max and the
+    job name. A sub-step (an auto-sync running inside a download/wanted job)
+    sends a message-only update: it still passes through ``update_job_progress``
+    -- preserving the cancellation checkpoint that aborts the job when the user
+    presses Stop -- but never overwrites the parent job's value/max or name,
+    which previously produced >100% progress rings.
+    """
+    if not (job_id and track_job_progress):
+        return
+    if owns_job_progress:
+        progress = {'job_id': job_id, 'progress_message': message}
+        if value is not None:
+            progress['progress_value'] = value
+        if total is not None:
+            progress['progress_max'] = total
+        jobs_queue.update_job_progress(**progress)
+        if name is not None:
+            jobs_queue.update_job_name(job_id=job_id, new_job_name=name)
+    else:
+        jobs_queue.update_job_progress(job_id=job_id, progress_message=message)
+
+
 def sync_subtitles(video_path,
                    srt_path,
                    srt_lang,
@@ -81,20 +107,16 @@ def sync_subtitles(video_path,
                    output_mode=None,
                    enabled_engines=None,
                    callback=None,
-                   track_job_progress=True):
+                   track_job_progress=True,
+                   owns_job_progress=True):
     if not settings.subsync.use_subsync and not force_sync:
         logging.debug('BAZARR automatic syncing is disabled in settings. Skipping sync routine.')
         return False
 
     if is_sync_engine_output(srt_path):
         logging.debug('BAZARR generated sync output cannot be synchronized again. Skipping: %s', srt_path)
-        if job_id and track_job_progress:
-            jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Skipped sync for {srt_path}")
-            jobs_queue.update_job_progress(
-                job_id=job_id,
-                progress_value='max',
-                progress_message='Sync skipped',
-            )
+        _report_progress(job_id, track_job_progress, owns_job_progress, 'Sync skipped',
+                         value='max', name=f"Skipped sync for {srt_path}")
         return False
 
     if not job_id and track_job_progress:
@@ -107,33 +129,17 @@ def sync_subtitles(video_path,
 
     progress_total = _sync_progress_total(enabled_engines)
 
-    if job_id and track_job_progress:
-        jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Syncing {srt_path}")
-        jobs_queue.update_job_progress(
-            job_id=job_id,
-            progress_value=0,
-            progress_max=progress_total,
-            progress_message='Preparing synchronization',
-        )
+    def report(message, value=None, total=None, name=None):
+        _report_progress(job_id, track_job_progress, owns_job_progress, message, value, total, name)
+
+    report('Preparing synchronization', value=0, total=progress_total, name=f"Syncing {srt_path}")
 
     def update_progress(message, value, total):
-        if job_id and track_job_progress:
-            jobs_queue.update_job_progress(
-                job_id=job_id,
-                progress_value=value,
-                progress_max=total,
-                progress_message=message,
-            )
+        report(message, value=value, total=total)
 
     if forced:
         logging.debug('BAZARR cannot sync forced subtitles. Skipping sync routine.')
-        if job_id and track_job_progress:
-            jobs_queue.update_job_progress(
-                job_id=job_id,
-                progress_value='max',
-                progress_message='Sync skipped',
-            )
-            jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Skipped sync for {srt_path}")
+        report('Sync skipped', value='max', name=f"Skipped sync for {srt_path}")
         return False
 
     logging.debug(f'BAZARR automatic syncing is enabled in settings. We\'ll try to sync this '  # noqa: G004
@@ -192,26 +198,11 @@ def sync_subtitles(video_path,
                 progress_message = 'Sync skipped'
             else:
                 progress_message = 'Sync failed'
-            if job_id and track_job_progress:
-                jobs_queue.update_job_progress(
-                    job_id=job_id,
-                    progress_value='max',
-                    progress_message=progress_message,
-                )
-                jobs_queue.update_job_name(
-                    job_id=job_id,
-                    new_job_name=_sync_complete_job_name(srt_path, sync_result),
-                )
+            report(progress_message, value='max', name=_sync_complete_job_name(srt_path, sync_result))
             del subsync
             gc.collect()
 
     logging.debug(f"BAZARR subsync skipped because subtitles score isn't below this "  # noqa: G004
                   f"threshold value: {subsync_threshold}%")
-    if job_id and track_job_progress:
-        jobs_queue.update_job_progress(
-            job_id=job_id,
-            progress_value='max',
-            progress_message='Sync skipped',
-        )
-        jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Skipped sync for {srt_path}")
+    report('Sync skipped', value='max', name=f"Skipped sync for {srt_path}")
     return False
