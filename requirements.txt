@@ -42,7 +42,7 @@ json_tricks==3.17.3
 knowit==0.5.11
 lxml>=6.1.1  # XXE fix in iterparse / ETCompatXMLParser
 msgpack==1.1.2
-numpy>=2.0.0,<2.4.0  # cap excludes entire 2.4.x line: it raised the x86-64 baseline to v2, crashing pre-2009 CPUs (SIGILL on import). 2.4.0 itself is also yanked for an unrelated BC bug.
+numpy>=2.4.6,<2.5.0  # cap excludes entire 2.4.x line: it raised the x86-64 baseline to v2, crashing pre-2009 CPUs (SIGILL on import). 2.4.0 itself is also yanked for an unrelated BC bug.
 Pillow>=12.2.0 --only-binary=Pillow
 plexapi>=4.18.1
 py7zr==1.1.0
