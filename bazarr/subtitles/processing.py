@@ -275,7 +275,8 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                            sonarr_series_id=episode_metadata.sonarrSeriesId,
                            sonarr_episode_id=episode_metadata.sonarrEpisodeId,
                            job_id=job_id,
-                           arr_instance_id=episode_metadata.arr_instance_id)
+                           arr_instance_id=episode_metadata.arr_instance_id,
+                           owns_job_progress=False)
     else:
         movie_metadata = database.execute(
             select(TableMovies.radarrId, TableMovies.imdbId, TableMovies.tmdbId, TableMovies.arr_instance_id)
@@ -295,7 +296,8 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                            percent_score=percent_score,
                            radarr_id=movie_metadata.radarrId,
                            job_id=job_id,
-                           arr_instance_id=movie_metadata.arr_instance_id)
+                           arr_instance_id=movie_metadata.arr_instance_id,
+                           owns_job_progress=False)
 
     if use_postprocessing is True:
         command = pp_replace(postprocessing_cmd, path, downloaded_path, downloaded_language, downloaded_language_code2,
