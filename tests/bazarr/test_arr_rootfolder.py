@@ -1,0 +1,165 @@
+# coding=utf-8
+"""Phase 4 INC3 (#156): rootfolder sync stamps arr_instance_id and scopes its
+lookups/writes by it when an instance is supplied; the default (no-instance)
+path inserts unscoped exactly as before.
+"""
+from sqlalchemy import insert, select
+
+
+class _Resp:
+    def __init__(self, folders):
+        self._folders = folders
+
+    def json(self):
+        return self._folders
+
+
+def _client(folders, kind="sonarr"):
+    from app.config import get_ssl_verify, settings
+    from arr_instances.client import ArrClient
+
+    scalar = getattr(settings, kind)
+
+    def http_get(url, headers=None, timeout=None, verify=None):
+        return _Resp(folders)
+
+    return ArrClient(
+        kind=kind, ip=scalar.ip, port=scalar.port, base_url=scalar.base_url,
+        ssl=scalar.ssl, verify_ssl=get_ssl_verify(kind), api_key="K",
+        http_timeout=scalar.http_timeout, http_get=http_get)
+
+
+def test_default_path_without_default_instance_leaves_null(schema_session, monkeypatch):
+    # Pre-backfill install: no default instance exists -> ownership/split stay
+    # NULL (legacy behaviour, no literal owner forced).
+    from app.database import TableShows, TableShowsRootfolder
+    from sonarr import rootfolder
+
+    monkeypatch.setattr(rootfolder, "database", schema_session)
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=1, path="/tv/show", title="S"))
+
+    rootfolder.get_sonarr_rootfolder(arr_client=_client([{"id": 1, "path": "/tv"}]))
+
+    row = schema_session.execute(select(TableShowsRootfolder)).scalar_one()
+    assert row.id == 1 and row.path == "/tv"
+    assert row.arr_instance_id is None  # no default to resolve -> unowned
+
+
+def test_default_path_stamps_owner_when_default_instance_exists(schema_session, monkeypatch):
+    # INC0: a backfilled single-instance install resolves the default and stamps
+    # the rootfolder ownership + upstream/local split (closing the NULL gap).
+    from app.database import TableShows, TableShowsRootfolder
+    from arr_instances.repository import ArrInstanceRepository
+    from sonarr import rootfolder
+
+    monkeypatch.setattr(rootfolder, "database", schema_session)
+    inst = ArrInstanceRepository(schema_session).create("sonarr", "Sonarr")  # default
+    schema_session.flush()
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=1, path="/tv/show", title="S", arr_instance_id=inst.id))
+
+    rootfolder.get_sonarr_rootfolder(arr_client=_client([{"id": 1, "path": "/tv"}]))
+
+    row = schema_session.execute(select(TableShowsRootfolder)).scalar_one()
+    assert row.id == 1 and row.path == "/tv"
+    assert row.arr_instance_id == inst.id
+    assert row.upstream_rootfolder_id == 1 and row.local_rootfolder_id == 1
+
+
+def test_instance_path_stamps_rootfolder(schema_session, monkeypatch):
+    from app.database import TableShows, TableShowsRootfolder
+    from sonarr import rootfolder
+
+    monkeypatch.setattr(rootfolder, "database", schema_session)
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=1, path="/anime/show", title="S", arr_instance_id=5))
+
+    rootfolder.get_sonarr_rootfolder(
+        arr_instance_id=5, arr_client=_client([{"id": 1, "path": "/anime"}]))
+
+    row = schema_session.execute(select(TableShowsRootfolder)).scalar_one()
+    assert row.arr_instance_id == 5
+    assert row.upstream_rootfolder_id == 1
+    assert row.local_rootfolder_id == 1
+
+
+def test_instance_lookup_ignores_other_instances_shows(schema_session, monkeypatch):
+    from app.database import TableShows, TableShowsRootfolder
+    from sonarr import rootfolder
+
+    monkeypatch.setattr(rootfolder, "database", schema_session)
+    # only an instance-9 show exists under /other; instance 5 owns nothing there
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=2, path="/other/show", title="O", arr_instance_id=9))
+
+    rootfolder.get_sonarr_rootfolder(
+        arr_instance_id=5, arr_client=_client([{"id": 1, "path": "/other"}]))
+
+    rows = schema_session.execute(
+        select(TableShowsRootfolder).where(TableShowsRootfolder.arr_instance_id == 5)
+    ).scalars().all()
+    assert rows == []
+
+
+def test_two_sonarr_instances_same_upstream_rootfolder_id_no_pk_collision(schema_session, monkeypatch):
+    # Rootfolder id=1 is the universal default in every Sonarr. Two instances
+    # both exposing it must each insert: local_rootfolder_id (the PK) is an
+    # autoincrement local id, upstream_rootfolder_id stays 1 scoped per instance.
+    from app.database import TableShows, TableShowsRootfolder
+    from sonarr import rootfolder
+
+    monkeypatch.setattr(rootfolder, "database", schema_session)
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=1, path="/tv/show", title="A", arr_instance_id=5))
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=1, path="/tv4k/show", title="B", arr_instance_id=8))
+
+    rootfolder.get_sonarr_rootfolder(
+        arr_instance_id=5, arr_client=_client([{"id": 1, "path": "/tv"}]))
+    rootfolder.get_sonarr_rootfolder(
+        arr_instance_id=8, arr_client=_client([{"id": 1, "path": "/tv4k"}]))
+
+    rows = schema_session.execute(
+        select(TableShowsRootfolder).order_by(TableShowsRootfolder.arr_instance_id)).scalars().all()
+    assert {r.arr_instance_id for r in rows} == {5, 8}
+    assert all(r.upstream_rootfolder_id == 1 for r in rows)
+    assert rows[0].local_rootfolder_id != rows[1].local_rootfolder_id
+
+
+def test_two_radarr_instances_same_upstream_rootfolder_id_no_pk_collision(schema_session, monkeypatch):
+    from app.database import TableMovies, TableMoviesRootfolder
+    from radarr import rootfolder
+
+    monkeypatch.setattr(rootfolder, "database", schema_session)
+    schema_session.execute(insert(TableMovies).values(
+        radarrId=1, path="/movies/m.mkv", title="A", tmdbId="1", arr_instance_id=5))
+    schema_session.execute(insert(TableMovies).values(
+        radarrId=1, path="/movies4k/m.mkv", title="B", tmdbId="2", arr_instance_id=8))
+
+    rootfolder.get_radarr_rootfolder(
+        arr_instance_id=5, arr_client=_client([{"id": 1, "path": "/movies"}], kind="radarr"))
+    rootfolder.get_radarr_rootfolder(
+        arr_instance_id=8, arr_client=_client([{"id": 1, "path": "/movies4k"}], kind="radarr"))
+
+    rows = schema_session.execute(
+        select(TableMoviesRootfolder).order_by(TableMoviesRootfolder.arr_instance_id)).scalars().all()
+    assert {r.arr_instance_id for r in rows} == {5, 8}
+    assert all(r.upstream_rootfolder_id == 1 for r in rows)
+    assert rows[0].local_rootfolder_id != rows[1].local_rootfolder_id
+
+
+def test_radarr_instance_path_stamps_rootfolder(schema_session, monkeypatch):
+    from app.database import TableMovies, TableMoviesRootfolder
+    from radarr import rootfolder
+
+    monkeypatch.setattr(rootfolder, "database", schema_session)
+    schema_session.execute(insert(TableMovies).values(
+        radarrId=1, path="/4k/movie.mkv", title="M", tmdbId="1", arr_instance_id=8))
+
+    rootfolder.get_radarr_rootfolder(
+        arr_instance_id=8, arr_client=_client([{"id": 1, "path": "/4k"}], kind="radarr"))
+
+    row = schema_session.execute(select(TableMoviesRootfolder)).scalar_one()
+    assert row.arr_instance_id == 8
+    assert row.upstream_rootfolder_id == 1

@@ -63,12 +63,23 @@ _patches = {
     'app.config': MagicMock(),
     'app.database': MagicMock(),
     'app.event_handler': MagicMock(),
+    'app.get_providers': MagicMock(),
     'app.jobs_queue': MagicMock(),
+    'app.scheduler': MagicMock(),
+    'app.signalr_client': MagicMock(),
     'utilities.path_mappings': MagicMock(),
     'utilities.binaries': MagicMock(),
     'api.utils': _api_utils_mock,
     'api.swaggerui': MagicMock(),
+    'subliminal_patch': MagicMock(),
     'subliminal_patch.core': MagicMock(SUBTITLE_EXTENSIONS=['.srt', '.ass']),
+    'subliminal_patch.core_persistent': MagicMock(),
+    'subliminal_patch.exceptions': MagicMock(),
+    'subliminal_patch.extensions': MagicMock(),
+    'subliminal_patch.score': MagicMock(MAX_SCORES={'movie': 100, 'episode': 100}),
+    'subliminal_patch.subtitle': MagicMock(),
+    'subtitles.indexer.movies': MagicMock(),
+    'subtitles.manual': MagicMock(),
     'subtitles.upload': MagicMock(),
     'subtitles.mass_download': MagicMock(),
     'subtitles.mass_download.series': MagicMock(),
@@ -77,6 +88,7 @@ _patches = {
     'subtitles.tools.combine': MagicMock(),
     'subtitles.tools.combine.main': MagicMock(),
     'subtitles.indexer.series': MagicMock(),
+    'subtitles.upgrade': MagicMock(),
     'subtitles.wanted': MagicMock(),
     'sonarr.sync.series': MagicMock(),
     'sqlalchemy': MagicMock(),
@@ -152,6 +164,7 @@ def test_series_batch_combine(mock_paths, mock_combine, mock_list):
     resource = series_module.SeriesSubtitlesCombine()
     with patch.object(series_module, 'request') as mock_request:
         mock_request.get_json.return_value = {}
+        mock_request.args.get.return_value = 8
         body, status = resource.post(5)
     assert status == 200
     assert body['status'] == 'batch_complete'
@@ -159,6 +172,7 @@ def test_series_batch_combine(mock_paths, mock_combine, mock_list):
     assert body['skipped'] == 1
     assert body['failed'] == 0
     assert len(body['details']) == 3
+    mock_list.assert_called_once_with(5, arr_instance_id=8)
 
 
 @patch.object(series_module, '_list_series_episodes')
@@ -167,6 +181,7 @@ def test_series_combine_not_found(mock_list):
     resource = series_module.SeriesSubtitlesCombine()
     with patch.object(series_module, 'request') as mock_request:
         mock_request.get_json.return_value = {}
+        mock_request.args.get.return_value = None
         body, status = resource.post(5)
     assert status == 404
     assert body['status'] == 'not_found'

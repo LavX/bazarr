@@ -37,6 +37,7 @@ class BatchOperation(Resource):
         'sonarrSeriesId': fields.Integer(description='Sonarr Series ID'),
         'sonarrEpisodeId': fields.Integer(description='Sonarr Episode ID'),
         'radarrId': fields.Integer(description='Radarr Movie ID'),
+        'arr_instance_id': fields.Integer(description='Owning Sonarr/Radarr instance id (#156)'),
     })
 
     post_options_model = api_ns_batch.model('BatchOptions', {
@@ -87,7 +88,7 @@ class BatchOperation(Resource):
         if not items:
             return {'error': 'Empty items list'}, 400
 
-        VALID_ITEM_KEYS = {'type', 'sonarrSeriesId', 'sonarrEpisodeId', 'radarrId'}
+        VALID_ITEM_KEYS = {'type', 'sonarrSeriesId', 'sonarrEpisodeId', 'radarrId', 'arr_instance_id'}
         VALID_TYPES = {'episode', 'movie', 'series'}
 
         sanitized_items = []
@@ -149,9 +150,12 @@ def get_upgradable_media_ids():
     ).distinct().subquery()
 
     movie_results = database.execute(
-        select(TableHistoryMovie.radarrId)
+        select(TableHistoryMovie.radarrId, TableHistoryMovie.arr_instance_id)
         .distinct()
-        .join(TableMovies, TableHistoryMovie.radarrId == TableMovies.radarrId)
+        .join(TableMovies, onclause=and_(
+            TableHistoryMovie.radarrId == TableMovies.radarrId,
+            TableHistoryMovie.arr_instance_id == TableMovies.arr_instance_id,
+        ))
         .join(max_movie_ts, onclause=and_(
             TableHistoryMovie.video_path == max_movie_ts.c.video_path,
             TableHistoryMovie.language == max_movie_ts.c.language,
@@ -167,6 +171,10 @@ def get_upgradable_media_ids():
         ))
     ).all()
     movie_ids = [r.radarrId for r in movie_results]
+    movie_keys = [
+        {'radarrId': r.radarrId, 'arr_instance_id': r.arr_instance_id}
+        for r in movie_results
+    ]
 
     # Series: only consider the latest eligible history row per (video_path, language)
     max_episode_ts = select(
@@ -180,9 +188,12 @@ def get_upgradable_media_ids():
     ).distinct().subquery()
 
     series_results = database.execute(
-        select(TableHistory.sonarrSeriesId)
+        select(TableHistory.sonarrSeriesId, TableHistory.arr_instance_id)
         .distinct()
-        .join(TableEpisodes, TableHistory.sonarrEpisodeId == TableEpisodes.sonarrEpisodeId)
+        .join(TableEpisodes, onclause=and_(
+            TableHistory.sonarrEpisodeId == TableEpisodes.sonarrEpisodeId,
+            TableHistory.arr_instance_id == TableEpisodes.arr_instance_id,
+        ))
         .join(max_episode_ts, onclause=and_(
             TableHistory.video_path == max_episode_ts.c.video_path,
             TableHistory.language == max_episode_ts.c.language,
@@ -198,8 +209,12 @@ def get_upgradable_media_ids():
         ))
     ).all()
     series_ids = [r.sonarrSeriesId for r in series_results]
+    series_keys = [
+        {'sonarrSeriesId': r.sonarrSeriesId, 'arr_instance_id': r.arr_instance_id}
+        for r in series_results
+    ]
 
-    return {'movies': movie_ids, 'series': series_ids}
+    return {'movies': movie_ids, 'series': series_ids, 'movieKeys': movie_keys, 'seriesKeys': series_keys}
 
 
 @api_ns_batch.route('subtitles/upgradable')

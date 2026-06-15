@@ -134,15 +134,45 @@ def download_log():
     return send_file(get_log_file_path(), max_age=0, as_attachment=True)
 
 
+def _instance_image_url(kind, url):
+    """Build the (image_url, verify_ssl) for the cover proxy.
+
+    With an ``arr_instance_id`` query arg (#156) the cover is fetched from that
+    instance's Sonarr/Radarr (base url + decrypted key from its saved row);
+    without it the scalar/default path is used, byte-identical to before.
+    Returns (None, None) for an unknown/disabled instance.
+    """
+    from flask import request
+    arr_instance_id = request.args.get('arr_instance_id', type=int)
+    if arr_instance_id is None:
+        if kind == 'sonarr':
+            base = settings.sonarr.base_url
+            return f'{url_api_sonarr()}{url.lstrip(base)}?apikey={settings.sonarr.apikey}', get_ssl_verify('sonarr')
+        base = settings.radarr.base_url
+        return f'{url_api_radarr()}{url.lstrip(base)}?apikey={settings.radarr.apikey}', get_ssl_verify('radarr')
+
+    from arr_instances.resolution import client_for_instance
+    from app.database import database as _db
+    client = client_for_instance(_db, arr_instance_id)
+    if client is None or client.kind != kind:
+        return None, None
+    # Strip the instance's own base_url prefix from the stored path so it is not
+    # duplicated; then fetch from the instance's /api/v3 cover endpoint.
+    inst_base = (getattr(client, '_base_url_raw', '') or '').strip('/')
+    path = url[len(inst_base):].lstrip('/') if inst_base and url.startswith(inst_base) else url
+    return f'{client.base_url()}/api/v3/{path}?apikey={client.api_key}', client.verify_ssl
+
+
 @ui_bp.route('/images/series/<path:url>', methods=['GET'])
 @check_login
 def series_images(url):
     url = url.strip("/")
-    apikey = settings.sonarr.apikey
-    baseUrl = settings.sonarr.base_url
-    url_image = f'{url_api_sonarr()}{url.lstrip(baseUrl)}?apikey={apikey}'.replace('poster-250', 'poster-500')
+    url_image, verify = _instance_image_url('sonarr', url)
+    if url_image is None:
+        return '', 404
+    url_image = url_image.replace('poster-250', 'poster-500')
     try:
-        req = requests.get(url_image, stream=True, timeout=15, verify=get_ssl_verify('sonarr'), headers=HEADERS)
+        req = requests.get(url_image, stream=True, timeout=15, verify=verify, headers=HEADERS)
     except Exception:
         return '', 404
     else:
@@ -152,11 +182,12 @@ def series_images(url):
 @ui_bp.route('/images/movies/<path:url>', methods=['GET'])
 @check_login
 def movies_images(url):
-    apikey = settings.radarr.apikey
-    baseUrl = settings.radarr.base_url
-    url_image = f'{url_api_radarr()}{url.lstrip(baseUrl)}?apikey={apikey}'
+    url = url.strip("/")
+    url_image, verify = _instance_image_url('radarr', url)
+    if url_image is None:
+        return '', 404
     try:
-        req = requests.get(url_image, stream=True, timeout=15, verify=get_ssl_verify('radarr'), headers=HEADERS)
+        req = requests.get(url_image, stream=True, timeout=15, verify=verify, headers=HEADERS)
     except Exception:
         return '', 404
     else:
@@ -311,8 +342,7 @@ def _format_host_header(hostname, original_port, scheme):
     IPv6 literals MUST be bracketed in the Host header (`[::1]:8989`,
     not `::1:8989`) because the colon is otherwise ambiguous with the
     port separator. urlparse(...).hostname strips brackets, so we have
-    to put them back when emitting the header. Codex P2 from PR #95
-    review round 3.
+    to put them back when emitting the header.
 
     Port is included only when non-default for the scheme, matching the
     convention urllib3 follows when it generates Host headers itself.
@@ -339,7 +369,7 @@ def _build_request_url(base_parsed, status_path, resolved_ip, hostname, pin):
     in that case would replace the hostname with an IP literal in the
     URL, urllib3 would set SNI to the IP, the server's cert (issued for
     e.g. sonarr.example.com) would not match the IP, and TLS hostname
-    validation would fail every legitimate test. Codex P2.
+    validation would fail every legitimate test.
     """
     base_path = (base_parsed.path or '').rstrip('/')
     test_path = base_path + status_path
@@ -400,7 +430,7 @@ def proxy_service(service):
     # attacker who poisons DNS still cannot mint a valid cert for the
     # hostname. Pinning in that case would replace the hostname with
     # the IP literal in the URL, SNI would be set to the IP, and a
-    # legitimate cert installation would fail TLS validation. Codex P2.
+    # legitimate cert installation would fail TLS validation.
     pin_to_ip = not (base_parsed.scheme == 'https' and verify is True)
     # When pinning is off, dual-stack fallback is unnecessary: urllib3
     # already iterates DNS-resolved addresses internally during the
@@ -460,7 +490,7 @@ def proxy_service(service):
                 return dict(status=False, error='Wrong URL Base.',
                             code=result.status_code)
             else:
-                # Codex P2: result.raise_for_status() RAISES on 4xx/5xx
+                # result.raise_for_status() raises on 4xx/5xx
                 # rather than returning a value, so wrapping it in dict()
                 # made the route propagate an HTTPError to Flask and
                 # surface as 500 to the frontend. Return a structured

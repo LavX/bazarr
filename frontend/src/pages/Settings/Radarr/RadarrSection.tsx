@@ -1,55 +1,33 @@
-import { FunctionComponent } from "react";
+import { FunctionComponent, ReactNode } from "react";
 import { Code } from "@mantine/core";
 import {
   Check,
   Chips,
   CollapseBox,
-  Layout,
   Message,
-  Number,
-  Password,
   PathMappingTable,
   Section,
-  Selector,
   Slider,
-  Text,
-  URLTestButton,
 } from "@/pages/Settings/components";
 import { moviesEnabledKey } from "@/pages/Settings/keys";
-import { timeoutOptions } from "./options";
 
-const SettingsRadarrView: FunctionComponent = () => {
+interface Props {
+  children?: ReactNode;
+}
+
+// Radarr controls for the Connections page: master enable toggle, instance
+// cards (children), then global options and path mappings gated behind the
+// toggle. Host/port/key live in the instance cards.
+const RadarrSection: FunctionComponent<Props> = ({ children }) => {
   return (
-    <Layout name="Radarr">
+    <>
       <Section header="Use Radarr">
         <Check label="Enabled" settingKey={moviesEnabledKey}></Check>
       </Section>
+
+      {children}
+
       <CollapseBox settingKey={moviesEnabledKey}>
-        <Section header="Host">
-          <Text label="Address" settingKey="settings-radarr-ip"></Text>
-          <Message>Hostname or IPv4 Address</Message>
-          <Number label="Port" settingKey="settings-radarr-port"></Number>
-          <Text
-            label="Base URL"
-            leftSection="/"
-            settingKey="settings-radarr-base_url"
-            settingOptions={{
-              onLoaded: (s) => s.radarr.base_url?.slice(1) ?? "",
-              onSubmit: (v) => "/" + v,
-            }}
-          ></Text>
-          <Selector
-            label="HTTP Timeout"
-            options={timeoutOptions}
-            settingKey="settings-radarr-http_timeout"
-          ></Selector>
-          <Password
-            label="API Key"
-            settingKey="settings-radarr-apikey"
-          ></Password>
-          <Check label="SSL" settingKey="settings-radarr-ssl"></Check>
-          <URLTestButton category="radarr"></URLTestButton>
-        </Section>
         <Section header="Options">
           <Check
             label="Sync with Radarr on live connection establishment"
@@ -84,7 +62,6 @@ const SettingsRadarrView: FunctionComponent = () => {
             Automatic download of subtitles will only happen for monitored
             movies in Radarr.
           </Message>
-
           <Check
             label="Defer searching of subtitles until scheduled task execution"
             settingKey="settings-radarr-defer_search_signalr"
@@ -96,8 +73,8 @@ const SettingsRadarrView: FunctionComponent = () => {
           <Message>
             Search can be triggered using this command
             <Code>
-              {`curl -H "Content-Type: application/json" -H "X-API-KEY: ###############################" -X POST 
-                -d '{ "eventType": "Download", "movieFile": { "id": "$radarr_moviefile_id" } }' 
+              {`curl -H "Content-Type: application/json" -H "X-API-KEY: ###############################" -X POST
+                -d '{ "eventType": "Download", "movieFile": { "id": "$radarr_moviefile_id" } }'
                 http://localhost:6767/api/webhooks/radarr
               `}
             </Code>
@@ -107,8 +84,8 @@ const SettingsRadarrView: FunctionComponent = () => {
           <PathMappingTable type="radarr"></PathMappingTable>
         </Section>
       </CollapseBox>
-    </Layout>
+    </>
   );
 };
 
-export default SettingsRadarrView;
+export default RadarrSection;

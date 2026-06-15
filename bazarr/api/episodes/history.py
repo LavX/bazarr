@@ -20,11 +20,16 @@ class EpisodesHistory(Resource):
     get_request_parser = reqparse.RequestParser()
     get_request_parser.add_argument('start', type=int, required=False, default=0, help='Paging start integer')
     get_request_parser.add_argument('length', type=int, required=False, default=-1, help='Paging length integer')
+    get_request_parser.add_argument('id', type=int, required=False, help='Local episode ID')
     get_request_parser.add_argument('episodeid', type=int, required=False, help='Episode ID')
 
     get_language_model = api_ns_episodes_history.model('subtitles_language_model', subtitles_language_model)
 
     data_model = api_ns_episodes_history.model('history_episodes_data_model', {
+        'id': fields.Integer(),
+        'series_id': fields.Integer(),
+        # Owning instance (#156) so secondary actions (blacklist) can route.
+        'arr_instance_id': fields.Integer(),
         'seriesTitle': fields.String(),
         'monitored': fields.Boolean(),
         'episode_number': fields.String(),
@@ -60,17 +65,24 @@ class EpisodesHistory(Resource):
         args = self.get_request_parser.parse_args()
         start = args.get('start')
         length = args.get('length')
+        local_episode_id = args.get('id')
         episodeid = args.get('episodeid')
 
         blacklisted_subtitles = select(TableBlacklist.provider,
-                                       TableBlacklist.subs_id) \
+                                       TableBlacklist.subs_id,
+                                       TableBlacklist.arr_instance_id) \
             .subquery()
 
         query_conditions = [(TableEpisodes.title.is_not(None))]
-        if episodeid:
+        if local_episode_id:
+            query_conditions.append((TableEpisodes.id == local_episode_id))
+        elif episodeid:
             query_conditions.append((TableEpisodes.sonarrEpisodeId == episodeid))
 
-        stmt = select(TableHistory.id,
+        stmt = select(TableHistory.id.label('history_id'),
+                      TableEpisodes.id,
+                      TableShows.id.label('series_id'),
+                      TableHistory.arr_instance_id,
                       TableShows.title.label('seriesTitle'),
                       TableEpisodes.monitored,
                       TableEpisodes.season.concat('x').concat(TableEpisodes.episode).label('episode_number'),
@@ -96,16 +108,24 @@ class EpisodesHistory(Resource):
                       TableEpisodes.subtitles.label('external_subtitles'),
                       blacklisted_subtitles.c.subs_id.label('blacklisted')) \
             .select_from(TableHistory) \
-            .join(TableShows, onclause=TableHistory.sonarrSeriesId == TableShows.sonarrSeriesId) \
-            .join(TableEpisodes, onclause=TableHistory.sonarrEpisodeId == TableEpisodes.sonarrEpisodeId) \
-            .join(blacklisted_subtitles, onclause=TableHistory.subs_id == blacklisted_subtitles.c.subs_id,
+            .join(TableShows, onclause=TableHistory.series_id == TableShows.id) \
+            .join(TableEpisodes, onclause=TableHistory.episode_id == TableEpisodes.id) \
+            .join(blacklisted_subtitles,
+                  onclause=((TableHistory.subs_id == blacklisted_subtitles.c.subs_id) &
+                            (func.coalesce(TableHistory.provider, '') ==
+                             func.coalesce(blacklisted_subtitles.c.provider, '')) &
+                            (func.coalesce(TableHistory.arr_instance_id, -1) ==
+                             func.coalesce(blacklisted_subtitles.c.arr_instance_id, -1))),
                   isouter=True) \
             .where(reduce(operator.and_, query_conditions)) \
             .order_by(TableHistory.timestamp.desc())
         if length > 0:
             stmt = stmt.limit(length).offset(start)
         episode_history = [{
+            'history_id': x.history_id,
             'id': x.id,
+            'series_id': x.series_id,
+            'arr_instance_id': x.arr_instance_id,
             'seriesTitle': x.seriesTitle,
             'monitored': x.monitored,
             'episode_number': x.episode_number,
@@ -131,7 +151,7 @@ class EpisodesHistory(Resource):
             'blacklisted': bool(x.blacklisted),
         } for x in database.execute(stmt).all()]
 
-        upgradable_episodes_not_perfect = get_upgradable_episode_subtitles(history_id_list=[x['id'] for x in
+        upgradable_episodes_not_perfect = get_upgradable_episode_subtitles(history_id_list=[x['history_id'] for x in
                                                                                             episode_history])
 
         for item in episode_history:
@@ -141,8 +161,8 @@ class EpisodesHistory(Resource):
             item.update(postprocess(item))
 
             # Mark upgradable and get original_id
-            item.update({'original_id': upgradable_episodes_not_perfect.get(item['id'])})
-            item.update({'upgradable': item['id'] in upgradable_episodes_not_perfect.keys()})
+            item.update({'original_id': upgradable_episodes_not_perfect.get(item['history_id'])})
+            item.update({'upgradable': item['history_id'] in upgradable_episodes_not_perfect.keys()})
 
             # Mark not upgradable if video/subtitles file doesn't exist anymore or if language isn't desired anymore
             if item['upgradable']:
@@ -154,6 +174,7 @@ class EpisodesHistory(Resource):
             del item['video_path']
             del item['external_subtitles']
             del item['profileId']
+            del item['history_id']
 
             if item['score']:
                 item['score'] = f"{round((int(item['score']) * 100 / item['score_out_of']), 2)}%"
@@ -178,7 +199,7 @@ class EpisodesHistory(Resource):
             select(func.count())
             .select_from(TableHistory)
             .join(TableEpisodes)
-            .where(TableEpisodes.title.is_not(None))) \
+            .where(reduce(operator.and_, query_conditions))) \
             .scalar()
 
         return marshal({'data': episode_history, 'total': count}, self.get_response_model)

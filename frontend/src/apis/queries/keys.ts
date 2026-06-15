@@ -10,6 +10,7 @@ export enum QueryKeys {
   Providers = "providers",
   ProviderHub = "provider-hub",
   DistributionHub = "distribution-hub",
+  ArrInstances = "arr-instances",
   Languages = "languages",
   LanguagesProfiles = "languages-profiles",
   Blacklist = "blacklist",

@@ -11,7 +11,8 @@ import api from "@/apis/raw";
 
 function cacheSeries(client: QueryClient, series: Item.Series[]) {
   series.forEach((item) => {
-    client.setQueryData([QueryKeys.Series, item.sonarrSeriesId], item);
+    // Key by the canonical local id (#156); id == sonarrSeriesId single-instance.
+    client.setQueryData([QueryKeys.Series, item.id], item);
   });
 }
 

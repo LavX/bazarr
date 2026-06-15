@@ -21,6 +21,13 @@ interface Props {
   onComplete?: () => void;
 }
 
+function itemArrInstanceId(item: WantedItem) {
+  const snakeValue = (item as { arr_instance_id?: unknown }).arr_instance_id;
+  const camelValue = (item as { arrInstanceId?: unknown }).arrInstanceId;
+  const value = snakeValue ?? camelValue;
+  return typeof value === "number" ? value : undefined;
+}
+
 const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
   const modals = useModals();
   const { mutateAsync } = useCombineSubtitles();
@@ -70,16 +77,28 @@ const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
 
     for (const item of items) {
       let scope:
-        | { kind: "movie"; radarrId: number }
-        | { kind: "episode"; episodeId: number }
-        | { kind: "series"; seriesId: number };
+        | { kind: "movie"; radarrId: number; arrInstanceId?: number }
+        | { kind: "episode"; episodeId: number; arrInstanceId?: number }
+        | { kind: "series"; seriesId: number; arrInstanceId?: number };
 
       if (item.type === "movie") {
-        scope = { kind: "movie", radarrId: item.radarrId };
+        scope = {
+          kind: "movie",
+          radarrId: item.radarrId,
+          arrInstanceId: itemArrInstanceId(item),
+        };
       } else if (item.type === "series") {
-        scope = { kind: "series", seriesId: item.sonarrSeriesId };
+        scope = {
+          kind: "series",
+          seriesId: item.sonarrSeriesId,
+          arrInstanceId: itemArrInstanceId(item),
+        };
       } else {
-        scope = { kind: "episode", episodeId: item.sonarrEpisodeId };
+        scope = {
+          kind: "episode",
+          episodeId: item.sonarrEpisodeId,
+          arrInstanceId: itemArrInstanceId(item),
+        };
       }
 
       try {

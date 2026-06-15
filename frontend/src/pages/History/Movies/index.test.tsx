@@ -10,6 +10,7 @@ const mockMovieHistory = {
     {
       action: "download",
       title: "The Dark Knight (2008) [1080p.BluRay.x264.DTS-HD.MA.5.1]",
+      id: 901,
       radarrId: 1,
       language: { code2: "en", name: "English" },
       score: 0.95,
@@ -121,7 +122,7 @@ describe("History Movies", () => {
       const movieLink = screen.getByText(
         "The Dark Knight (2008) [1080p.BluRay.x264.DTS-HD.MA.5.1]",
       );
-      expect(movieLink).toHaveAttribute("href", "/movies/1");
+      expect(movieLink).toHaveAttribute("href", "/movies/901");
     });
   });
 });

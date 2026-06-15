@@ -164,6 +164,9 @@ interface Props {
   translationSources?: Subtitle[];
   mediaId?: number;
   mediaType?: "episode" | "movie";
+  // Owning Sonarr/Radarr instance id (#156) for the missing-subtitle translate
+  // path, which builds its ModifySubtitle form explicitly from mediaId/mediaType.
+  arrInstanceId?: number;
   /**
    * True when the selection refers to an embedded (in-container) track.
    * Only translate is meaningful; sync/mods/delete require a file on disk.
@@ -183,6 +186,7 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
   translationSources,
   mediaId,
   mediaType,
+  arrInstanceId,
   embeddedTrack = false,
 }) => {
   const { mutateAsync } = useSubtitleAction();
@@ -197,6 +201,8 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
           path: s.path,
           hi: s.hi,
           forced: s.forced,
+          // eslint-disable-next-line camelcase
+          arr_instance_id: s.arr_instance_id,
         };
         task.create(s.path, name, mutateAsync, { action, form });
       });
@@ -313,6 +319,8 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
                         from_forced: sourceIsEmbedded
                           ? toPython(source.forced)
                           : undefined,
+                        // eslint-disable-next-line camelcase
+                        arr_instance_id: arrInstanceId,
                       },
                     });
                   }}

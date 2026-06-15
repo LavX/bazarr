@@ -31,6 +31,7 @@ describe("Blacklist Series", () => {
         return HttpResponse.json({
           data: [
             {
+              id: 5600,
               seriesTitle: "Dragon Ball DAIMA",
               episode_number: "1x14",
               episodeTitle: "Taboo",
@@ -58,5 +59,8 @@ describe("Blacklist Series", () => {
     await waitFor(() => {
       expect(screen.getByText("animetosho")).toBeInTheDocument();
     });
+    expect(
+      screen.getByRole("link", { name: "Dragon Ball DAIMA" }),
+    ).toHaveAttribute("href", "/series/5600");
   });
 });

@@ -12,11 +12,13 @@ import RegionsPlugin from "wavesurfer.js/dist/plugins/regions.esm.js";
 // @ts-expect-error - wavesurfer.js moduleResolution mismatch
 import TimelinePlugin from "wavesurfer.js/dist/plugins/timeline.esm.js";
 import { Environment } from "@/utilities/env";
+import { appendArrInstanceParam } from "./editorScope";
 import type { Cue } from "./types";
 
 interface WaveformTimelineProps {
   mediaType?: string;
   mediaId?: number;
+  arrInstanceId?: number;
   cues: Cue[];
   selectedIndex: number;
   currentTimeMs?: number;
@@ -70,6 +72,7 @@ export function cueColor(index: number, selectedIndex: number): string {
 export default function WaveformTimeline({
   mediaType,
   mediaId,
+  arrInstanceId,
   cues,
   selectedIndex,
   onSelect,
@@ -91,7 +94,10 @@ export default function WaveformTimeline({
   const apiKey = Environment.apiKey ?? "";
   const peaksUrl =
     mediaType && mediaId
-      ? `${Environment.baseUrl}/api/editor/peaks?mediaType=${mediaType}&mediaId=${mediaId}&audioTrack=${audioTrack}&apikey=${encodeURIComponent(apiKey)}`
+      ? appendArrInstanceParam(
+          `${Environment.baseUrl}/api/editor/peaks?mediaType=${mediaType}&mediaId=${mediaId}&audioTrack=${audioTrack}&apikey=${encodeURIComponent(apiKey)}`,
+          arrInstanceId,
+        )
       : null;
 
   // Initialize wavesurfer once, load peaks separately

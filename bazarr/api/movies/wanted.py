@@ -26,6 +26,10 @@ class MoviesWanted(Resource):
 
     data_model = api_ns_movies_wanted.model('wanted_movies_data_model', {
         'audio_language': fields.Nested(get_audio_language_model),
+        # Canonical local id + owning instance (#156) so the per-row search
+        # routes to the correct Radarr instance. Upstream id kept for back-compat.
+        'id': fields.Integer(),
+        'arr_instance_id': fields.Integer(),
         'title': fields.String(),
         'missing_subtitles': fields.Nested(get_subtitles_language_model),
         'radarrId': fields.Integer(),
@@ -60,6 +64,8 @@ class MoviesWanted(Resource):
         wanted_condition = reduce(operator.and_, wanted_conditions)
 
         stmt = select(TableMovies.audio_language,
+                      TableMovies.id,
+                      TableMovies.arr_instance_id,
                       TableMovies.title,
                       TableMovies.missing_subtitles,
                       TableMovies.radarrId,
@@ -72,6 +78,8 @@ class MoviesWanted(Resource):
 
         results = [postprocess({
             'audio_language': x.audio_language,
+            'id': x.id,
+            'arr_instance_id': x.arr_instance_id,
             'title': x.title,
             'missing_subtitles': x.missing_subtitles,
             'radarrId': x.radarrId,

@@ -19,9 +19,11 @@ class MovieApi extends BaseApi {
     await this.delete("/blacklist", form, { all });
   }
 
-  async movies(radarrid?: number[]) {
+  async movies(ids?: number[]) {
+    // Fetch by the canonical local id (#156); the backend dual-accepts id[] and
+    // the legacy radarrid[]. id == radarrId on a single default instance.
     const response = await this.get<DataWrapperWithTotal<Item.Movie>>("", {
-      radarrid,
+      id: ids,
     });
     return response.data;
   }
@@ -35,7 +37,7 @@ class MovieApi extends BaseApi {
   }
 
   async modify(form: FormType.ModifyItem) {
-    await this.post("", { radarrid: form.id, profileid: form.profileid });
+    await this.post("", { id: form.id, profileid: form.profileid });
   }
 
   async wanted(params: Parameter.Range) {
@@ -64,10 +66,10 @@ class MovieApi extends BaseApi {
     return response;
   }
 
-  async historyBy(radarrid: number) {
+  async historyBy(id: number) {
     const response = await this.get<DataWrapperWithTotal<History.Movie>>(
       "/history",
-      { radarrid },
+      { id },
     );
     return response.data;
   }
@@ -76,16 +78,40 @@ class MovieApi extends BaseApi {
     await this.patch("", action);
   }
 
-  async downloadSubtitles(radarrid: number, form: FormType.Subtitle) {
-    await this.patch("/subtitles", form, { radarrid });
+  async downloadSubtitles(
+    radarrid: number,
+    form: FormType.Subtitle,
+    arrInstanceId?: number,
+  ) {
+    // arr_instance_id (#156) routes the search/download to the owning instance.
+    await this.patch("/subtitles", form, {
+      radarrid,
+      arr_instance_id: arrInstanceId,
+    });
   }
 
-  async uploadSubtitles(radarrid: number, form: FormType.UploadSubtitle) {
-    await this.post("/subtitles", form, { radarrid });
+  async uploadSubtitles(
+    radarrid: number,
+    form: FormType.UploadSubtitle,
+    arrInstanceId?: number,
+  ) {
+    // arr_instance_id (#156) scopes the action to the owning instance; the
+    // backend treats it as optional (None = legacy/single-instance).
+    await this.post("/subtitles", form, {
+      radarrid,
+      arr_instance_id: arrInstanceId,
+    });
   }
 
-  async deleteSubtitles(radarrid: number, form: FormType.DeleteSubtitle) {
-    await this.delete("/subtitles", form, { radarrid });
+  async deleteSubtitles(
+    radarrid: number,
+    form: FormType.DeleteSubtitle,
+    arrInstanceId?: number,
+  ) {
+    await this.delete("/subtitles", form, {
+      radarrid,
+      arr_instance_id: arrInstanceId,
+    });
   }
 }
 

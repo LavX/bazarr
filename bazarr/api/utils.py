@@ -7,6 +7,7 @@ import logging
 from functools import wraps
 from flask import request, abort
 from operator import itemgetter
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from app.config import settings, base_url
 from languages.get_languages import language_from_alpha2, alpha3_from_alpha2
@@ -16,6 +17,26 @@ from utilities.path_mappings import path_mappings
 None_Keys = ['null', 'undefined', '', None]
 
 False_Keys = ['False', 'false', '0']
+
+
+def image_proxy_path_with_instance(path, arr_instance_id):
+    if arr_instance_id is None:
+        return path
+
+    parsed = urlsplit(path)
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key != 'arr_instance_id'
+    ]
+    query.append(('arr_instance_id', str(arr_instance_id)))
+    return urlunsplit((
+        parsed.scheme,
+        parsed.netloc,
+        parsed.path,
+        urlencode(query),
+        parsed.fragment,
+    ))
 
 
 def _subtitle_language_details(language_code):
@@ -178,13 +199,23 @@ def postprocess(item):
         for i, subs in enumerate(item['external_subtitles']):
             item['external_subtitles'][i] = path_replace(subs)
 
-    # map poster and fanart to server proxy
+    # map poster and fanart to server proxy. Carry the owning instance (#156)
+    # so the proxy fetches the cover from THAT Sonarr/Radarr instead of the
+    # default one (a non-default instance's cover does not exist on the default
+    # server). No suffix when there is no owner -> byte-identical default path.
+    media = 'movies' if item.get('radarrId') else 'series'
+    arr_instance_id = item.get('arr_instance_id')
+
+    def _proxy_image(path):
+        if not path:
+            return None
+        path = image_proxy_path_with_instance(path, arr_instance_id)
+        return f"{base_url}/images/{media}{path}"
+
     if item.get('poster') is not None:
-        poster = item['poster']
-        item['poster'] = f"{base_url}/images/{'movies' if item.get('radarrId') else 'series'}{poster}" if poster else None
+        item['poster'] = _proxy_image(item['poster'])
 
     if item.get('fanart') is not None:
-        fanart = item['fanart']
-        item['fanart'] = f"{base_url}/images/{'movies' if item.get('radarrId') else 'series'}{fanart}" if fanart else None
+        item['fanart'] = _proxy_image(item['fanart'])
 
     return item

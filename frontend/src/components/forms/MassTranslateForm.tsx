@@ -133,6 +133,7 @@ export interface WantedEpisodeItem {
   type: "episode";
   sonarrSeriesId: number;
   sonarrEpisodeId: number;
+  arrInstanceId?: number;
   seriesTitle: string;
   episodeTitle: string;
 }
@@ -140,12 +141,14 @@ export interface WantedEpisodeItem {
 export interface WantedMovieItem {
   type: "movie";
   radarrId: number;
+  arrInstanceId?: number;
   title: string;
 }
 
 export interface WantedSeriesItem {
   type: "series";
   sonarrSeriesId: number;
+  arrInstanceId?: number;
   title: string;
 }
 
@@ -271,16 +274,19 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
           type: "episode" as const,
           sonarrSeriesId: item.sonarrSeriesId,
           sonarrEpisodeId: item.sonarrEpisodeId,
+          arr_instance_id: item.arrInstanceId,
         };
       } else if (item.type === "series") {
         return {
           type: "series" as const,
           sonarrSeriesId: item.sonarrSeriesId,
+          arr_instance_id: item.arrInstanceId,
         };
       } else {
         return {
           type: "movie" as const,
           radarrId: item.radarrId,
+          arr_instance_id: item.arrInstanceId,
         };
       }
     });

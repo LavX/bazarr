@@ -2418,6 +2418,74 @@ def test_hub_proxy_provider_search_and_download_uses_worker_payload():
     assert worker.requests[1][1]["config"] == provider_config
 
 
+def test_hub_proxy_uses_configured_worker_timeout_for_long_downloads():
+    from provider_hub.manifest import validate_manifest
+    from provider_hub.registry import _make_provider_class
+    from provider_hub.protocol import language_to_payload
+
+    class FakeWorker:
+        def __init__(self):
+            self.requests = []
+
+        def request(self, op, payload, timeout):
+            self.requests.append((op, timeout))
+            if op == "search":
+                return type(
+                    "Result",
+                    (),
+                    {
+                        "payload": {
+                            "candidates": [
+                                {
+                                    "provider": "embeddedsubtitles",
+                                    "id": "track-10",
+                                    "language": language_to_payload(Language("eng")),
+                                    "release_info": "English SRT Completos",
+                                    "matches": ["hash"],
+                                    "provider_payload": {
+                                        "provider": "embeddedsubtitles",
+                                        "schema": 1,
+                                        "path": "/media/movie.mkv",
+                                        "stream_index": 10,
+                                        "format": "srt",
+                                    },
+                                }
+                            ]
+                        },
+                        "events": [],
+                    },
+                )()
+            return type(
+                "Result",
+                (),
+                {
+                    "payload": {
+                        "content_b64": base64.b64encode(b"hello").decode("ascii"),
+                        "content_sha256": _sha256(b"hello"),
+                        "empty": False,
+                    },
+                    "events": [],
+                },
+            )()
+
+        def stop(self):
+            return None
+
+    worker = FakeWorker()
+    manifest = validate_manifest(_manifest(provider_id="embeddedsubtitles"), built_in_provider_ids=set())
+    provider = _make_provider_class(manifest, worker_client=worker)(
+        timeout=30,
+        timeout_seconds=600,
+    )
+    movie = Movie("/media/movie.mkv", "Example Movie", year=2026)
+    subtitle = provider.list_subtitles(movie, {Language("eng")})[0]
+
+    provider.download_subtitle(subtitle)
+
+    assert worker.requests[0] == ("search", 600)
+    assert worker.requests[1] == ("download", 600)
+
+
 def test_hub_proxy_download_invokes_select_archive_member():
     import io
     import zipfile

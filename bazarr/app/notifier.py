@@ -6,6 +6,7 @@ import re
 from urllib.parse import quote
 
 from .database import TableSettingsNotifier, TableEpisodes, TableShows, TableMovies, database, insert, delete, select
+from arr_instances.resolution import scoped
 
 
 # Notifier providers that accept `{bazarr_*}` placeholders in the URL and
@@ -77,7 +78,12 @@ def get_notifier_providers():
         .all()
 
 
-def send_notifications(sonarr_series_id, sonarr_episode_id, message):
+def send_notifications(sonarr_series_id, sonarr_episode_id, message, arr_instance_id=None):
+    # ``arr_instance_id`` (#156) scopes the media lookups to the OWNING instance.
+    # In multi-instance the upstream ids (sonarrSeriesId/sonarrEpisodeId) are no
+    # longer globally unique, so an unscoped lookup could expand the wrong
+    # instance's title/path into a custom-notifier URL. None = legacy unscoped
+    # path (single default instance), byte-identical to before.
     providers = get_notifier_providers()
     if not len(providers):
         return
@@ -91,8 +97,10 @@ def send_notifications(sonarr_series_id, sonarr_episode_id, message):
 
     if custom_notifier_used:
         series = database.execute(
-            select(TableShows)
-            .where(TableShows.sonarrSeriesId == sonarr_series_id))\
+            scoped(
+                select(TableShows)
+                .where(TableShows.sonarrSeriesId == sonarr_series_id),
+                TableShows.arr_instance_id, arr_instance_id))\
             .scalars()\
             .first()
         if not series:
@@ -100,8 +108,10 @@ def send_notifications(sonarr_series_id, sonarr_episode_id, message):
         series_title = series.title
         series_year = series.year
         episode = database.execute(
-            select(TableEpisodes)
-            .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id))\
+            scoped(
+                select(TableEpisodes)
+                .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id),
+                TableEpisodes.arr_instance_id, arr_instance_id))\
             .scalars()\
             .first()
         if not episode:
@@ -114,15 +124,19 @@ def send_notifications(sonarr_series_id, sonarr_episode_id, message):
         media_variables.update(_build_media_variables(episode, 'episode'))
     else:
         series_row = database.execute(
-            select(TableShows.title, TableShows.year)
-            .where(TableShows.sonarrSeriesId == sonarr_series_id))\
+            scoped(
+                select(TableShows.title, TableShows.year)
+                .where(TableShows.sonarrSeriesId == sonarr_series_id),
+                TableShows.arr_instance_id, arr_instance_id))\
             .first()
         if not series_row:
             return
         series_title, series_year = series_row
         episode_row = database.execute(
-            select(TableEpisodes.season, TableEpisodes.episode, TableEpisodes.title)
-            .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id))\
+            scoped(
+                select(TableEpisodes.season, TableEpisodes.episode, TableEpisodes.title)
+                .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id),
+                TableEpisodes.arr_instance_id, arr_instance_id))\
             .first()
         if not episode_row:
             return
@@ -147,7 +161,10 @@ def send_notifications(sonarr_series_id, sonarr_episode_id, message):
     )
 
 
-def send_notifications_movie(radarr_id, message):
+def send_notifications_movie(radarr_id, message, arr_instance_id=None):
+    # ``arr_instance_id`` (#156) scopes the lookup to the OWNING instance so a
+    # colliding radarrId under another instance never leaks its metadata into a
+    # custom-notifier URL. None = legacy unscoped path.
     providers = get_notifier_providers()
     if not len(providers):
         return
@@ -156,8 +173,10 @@ def send_notifications_movie(radarr_id, message):
 
     if custom_notifier_used:
         movie = database.execute(
-            select(TableMovies)
-            .where(TableMovies.radarrId == radarr_id))\
+            scoped(
+                select(TableMovies)
+                .where(TableMovies.radarrId == radarr_id),
+                TableMovies.arr_instance_id, arr_instance_id))\
             .scalars()\
             .first()
         if not movie:
@@ -167,8 +186,10 @@ def send_notifications_movie(radarr_id, message):
         media_variables = _build_media_variables(movie, 'movie')
     else:
         movie_row = database.execute(
-            select(TableMovies.title, TableMovies.year)
-            .where(TableMovies.radarrId == radarr_id))\
+            scoped(
+                select(TableMovies.title, TableMovies.year)
+                .where(TableMovies.radarrId == radarr_id),
+                TableMovies.arr_instance_id, arr_instance_id))\
             .first()
         if not movie_row:
             return

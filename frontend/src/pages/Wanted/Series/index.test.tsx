@@ -11,6 +11,8 @@ describe("Wanted Series", () => {
     const mockData = {
       data: [
         {
+          id: 101,
+          series_id: 201,
           sonarrSeriesId: 1,
           sonarrEpisodeId: 101,
           seriesTitle: "Breaking Bad",
@@ -44,6 +46,10 @@ describe("Wanted Series", () => {
     expect(screen.getByText("Episode")).toBeInTheDocument();
     expect(screen.getByText("Missing")).toBeInTheDocument();
     expect(screen.getByText("Breaking Bad")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Breaking Bad" })).toHaveAttribute(
+      "href",
+      "/series/201",
+    );
     expect(screen.getByText("S01E01")).toBeInTheDocument();
     expect(screen.getByText("Pilot")).toBeInTheDocument();
   });

@@ -2,8 +2,9 @@
 
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
 
+from arr_instances.resolution import scoped
 from app.database import TableMovies, database, update, select, func
-from radarr.sync.movies import update_one_movie
+from radarr.sync.movies import update_one_movie, update_one_movie_for_instance
 from subtitles.indexer.movies import list_missing_subtitles_movies, movies_scan_subtitles
 from app.event_handler import event_stream
 from subtitles.wanted import wanted_search_missing_subtitles_movies, wanted_scan_subtitles_movies
@@ -22,13 +23,19 @@ class Movies(Resource):
     get_request_parser.add_argument('start', type=int, required=False, default=0, help='Paging start integer')
     get_request_parser.add_argument('length', type=int, required=False, default=-1, help='Paging length integer')
     get_request_parser.add_argument('radarrid[]', type=int, action='append', required=False, default=[],
-                                    help='Movies IDs to get metadata for')
+                                    help='Upstream Radarr movie IDs (legacy; not unique across instances)')
+    get_request_parser.add_argument('id[]', type=int, action='append', required=False, default=[],
+                                    help='Canonical local movie IDs (#156; preferred, unique across instances)')
 
     get_subtitles_model = api_ns_movies.model('subtitles_model', subtitles_model)
     get_subtitles_language_model = api_ns_movies.model('subtitles_language_model', subtitles_language_model)
     get_audio_language_model = api_ns_movies.model('audio_language_model', audio_language_model)
 
     data_model = api_ns_movies.model('movies_data_model', {
+        # Canonical local id + owning instance (#156); additive, frontend
+        # migrates to id while radarrId stays for back-compat.
+        'id': fields.Integer(),
+        'arr_instance_id': fields.Integer(),
         'alternativeTitles': fields.List(fields.String),
         'audio_language': fields.Nested(get_audio_language_model),
         'fanart': fields.String(),
@@ -62,8 +69,11 @@ class Movies(Resource):
         start = args.get('start')
         length = args.get('length')
         radarrId = args.get('radarrid[]')
+        localId = args.get('id[]')
 
-        stmt = select(TableMovies.alternativeTitles,
+        stmt = select(TableMovies.id,
+                      TableMovies.arr_instance_id,
+                      TableMovies.alternativeTitles,
                       TableMovies.audio_language,
                       TableMovies.fanart,
                       TableMovies.imdbId,
@@ -82,13 +92,19 @@ class Movies(Resource):
                       )\
             .order_by(TableMovies.sortTitle)
 
-        if len(radarrId) != 0:
+        # Prefer the canonical local id (#156); fall back to the upstream id for
+        # back-compat (old bookmarks, the not-yet-migrated action layer).
+        if len(localId) != 0:
+            stmt = stmt.where(TableMovies.id.in_(localId))
+        elif len(radarrId) != 0:
             stmt = stmt.where(TableMovies.radarrId.in_(radarrId))
 
         if length > 0:
             stmt = stmt.limit(length).offset(start)
 
         results = [postprocess({
+            'id': x.id,
+            'arr_instance_id': x.arr_instance_id,
             'alternativeTitles': x.alternativeTitles,
             'audio_language': x.audio_language,
             'fanart': x.fanart,
@@ -117,6 +133,10 @@ class Movies(Resource):
     post_request_parser = reqparse.RequestParser()
     post_request_parser.add_argument('radarrid', type=int, action='append', required=False, default=[],
                                      help='Radarr movie(s) ID')
+    post_request_parser.add_argument('id', type=int, action='append', required=False, default=[],
+                                     help='Canonical local movie ID(s) (#156; preferred)')
+    post_request_parser.add_argument('arr_instance_id', type=int, action='append', required=False, default=[],
+                                     help='Owning Radarr instance id for legacy radarrid fallback (#156)')
     post_request_parser.add_argument('profileid', type=str, action='append', required=False, default=[],
                                      help='Languages profile(s) ID or "none"')
 
@@ -129,10 +149,12 @@ class Movies(Resource):
         """Update specific movies languages profile"""
         args = self.post_request_parser.parse_args()
         radarrIdList = args.get('radarrid')
+        localIdList = args.get('id')
+        arrInstanceIdList = args.get('arr_instance_id')
         profileIdList = args.get('profileid')
+        targetList = localIdList if localIdList else radarrIdList
 
-        for idx in range(len(radarrIdList)):
-            radarrId = radarrIdList[idx]
+        for idx in range(len(targetList)):
             profileId = profileIdList[idx]
 
             if profileId in None_Keys:
@@ -143,12 +165,49 @@ class Movies(Resource):
                 except Exception:
                     return 'Languages profile not found', 404
 
-            database.execute(
-                update(TableMovies)
-                .values(profileId=profileId)
-                .where(TableMovies.radarrId == radarrId))
+            if localIdList:
+                localId = targetList[idx]
+                movie = database.execute(
+                    select(TableMovies.radarrId, TableMovies.arr_instance_id)
+                    .where(TableMovies.id == localId))\
+                    .first()
+                if not movie:
+                    continue
+                database.execute(
+                    update(TableMovies)
+                    .values(profileId=profileId)
+                    .where(TableMovies.id == localId))
+                radarrId = movie.radarrId
+                arr_instance_id = movie.arr_instance_id
+            else:
+                radarrId = targetList[idx]
+                arr_instance_id = arrInstanceIdList[idx] if idx < len(arrInstanceIdList) else None
+                if arr_instance_id is None:
+                    matches = database.execute(
+                        select(TableMovies.id).where(TableMovies.radarrId == radarrId)
+                    ).all()
+                    if len(matches) > 1:
+                        return 'Ambiguous Radarr movie ID; pass id or arr_instance_id', 400
+                else:
+                    movie = database.execute(
+                        scoped(
+                            select(TableMovies.id).where(TableMovies.radarrId == radarrId),
+                            TableMovies.arr_instance_id,
+                            arr_instance_id,
+                        )
+                    ).first()
+                    if not movie:
+                        continue
+                database.execute(
+                    scoped(
+                        update(TableMovies)
+                        .values(profileId=profileId)
+                        .where(TableMovies.radarrId == radarrId),
+                        TableMovies.arr_instance_id,
+                        arr_instance_id,
+                    ))
 
-            list_missing_subtitles_movies(no=radarrId)
+            list_missing_subtitles_movies(no=radarrId, arr_instance_id=arr_instance_id)
 
             event_stream(type='movie', payload=radarrId)
             event_stream(type='movie-wanted', payload=radarrId)
@@ -158,6 +217,8 @@ class Movies(Resource):
 
     patch_request_parser = reqparse.RequestParser()
     patch_request_parser.add_argument('radarrid', type=int, required=False, help='Radarr movie ID')
+    patch_request_parser.add_argument('arr_instance_id', type=int, required=False,
+                                      help='Owning Radarr instance id (#156)')
     patch_request_parser.add_argument('action', type=str, required=False, help='Action to perform from ["scan-disk", '
                                                                                '"search-missing", "search-wanted", "sync"]')
 
@@ -171,13 +232,14 @@ class Movies(Resource):
         """Run actions on specific movies"""
         args = self.patch_request_parser.parse_args()
         radarrid = args.get('radarrid')
+        arr_instance_id = args.get('arr_instance_id')
         action = args.get('action')
         if action == "scan-disk":
-            movies_scan_subtitles(radarrid)
+            movies_scan_subtitles(radarrid, arr_instance_id=arr_instance_id)
             return '', 204
         elif action == "search-missing":
             try:
-                movies_download_subtitles(radarrid)
+                movies_download_subtitles(radarrid, arr_instance_id=arr_instance_id)
             except OSError:
                 return 'Movie file not found. Path mapping issue?', 500
             else:
@@ -189,7 +251,10 @@ class Movies(Resource):
             wanted_scan_subtitles_movies()
             return '', 204
         elif action == "sync":
-            update_one_movie(radarrid, 'updated', True)
+            if arr_instance_id is not None:
+                update_one_movie_for_instance(arr_instance_id, radarrid, 'updated', defer_search=True)
+            else:
+                update_one_movie(radarrid, 'updated', True)
             return '', 204
 
         return 'Unknown action', 400

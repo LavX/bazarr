@@ -19,7 +19,7 @@ type SearchResultItem = {
   value: string;
   label: string;
   link: string;
-  poster: string;
+  poster: string | null;
   type: string;
 };
 
@@ -32,21 +32,25 @@ function useSearch(query: string) {
       data?.map((v) => {
         const { link, label, poster, type, value } = (() => {
           if (v.sonarrSeriesId) {
+            // Route by the canonical local id (#156); fall back to the upstream
+            // id for safety. Equal on a single default instance.
+            const seriesId = v.id ?? v.sonarrSeriesId;
             return {
               poster: v.poster,
-              link: `/series/${v.sonarrSeriesId}`,
+              link: `/series/${seriesId}`,
               type: "show",
               label: `${v.title} (${v.year})`,
-              value: `s-${v.sonarrSeriesId}`,
+              value: `s-${seriesId}`,
             };
           }
 
           if (v.radarrId) {
+            const movieId = v.id ?? v.radarrId;
             return {
               poster: v.poster,
-              link: `/movies/${v.radarrId}`,
+              link: `/movies/${movieId}`,
               type: "movie",
-              value: `m-${v.radarrId}`,
+              value: `m-${movieId}`,
               label: `${v.title} (${v.year})`,
             };
           }

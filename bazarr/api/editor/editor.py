@@ -15,6 +15,7 @@ from urllib.parse import quote
 from flask import Response, request, send_file
 from flask_restx import Namespace, Resource
 
+from arr_instances.resolution import scoped
 from app.database import TableEpisodes, TableMovies, TableShows, database, select  # noqa: F401
 from app.get_args import args
 from utilities.path_mappings import path_mappings
@@ -66,15 +67,38 @@ _hls_encoder_processes_guard = threading.Lock()
 HLS_ENCODER_IDLE_TIMEOUT_SECONDS = 60
 
 
-def _resolve_video_path(media_type, media_id):
+def _optional_int(value, field_name):
+    if value in (None, ''):
+        return None
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return f'{field_name} must be an integer', 400
+
+
+def _request_arr_instance_id():
+    return _optional_int(request.args.get('arr_instance_id'), 'arr_instance_id')
+
+
+def _payload_arr_instance_id(data):
+    value = data.get('arrInstanceId')
+    if value in (None, ''):
+        value = data.get('arr_instance_id')
+    return _optional_int(value, 'arrInstanceId')
+
+
+def _resolve_video_path(media_type, media_id, arr_instance_id=None):
     """Look up the video file path from the database and apply path mappings.
 
     Returns the mapped file path on success, or a (message, status_code) tuple on failure.
     """
     if media_type == 'episode':
         row = database.execute(
-            select(TableEpisodes.path)
-            .where(TableEpisodes.sonarrEpisodeId == media_id)
+            scoped(
+                select(TableEpisodes.path).where(TableEpisodes.sonarrEpisodeId == media_id),
+                TableEpisodes.arr_instance_id,
+                arr_instance_id,
+            )
         ).first()
         if not row:
             return 'Episode not found', 404
@@ -82,8 +106,11 @@ def _resolve_video_path(media_type, media_id):
 
     elif media_type == 'movie':
         row = database.execute(
-            select(TableMovies.path)
-            .where(TableMovies.radarrId == media_id)
+            scoped(
+                select(TableMovies.path).where(TableMovies.radarrId == media_id),
+                TableMovies.arr_instance_id,
+                arr_instance_id,
+            )
         ).first()
         if not row:
             return 'Movie not found', 404
@@ -223,7 +250,11 @@ def _resolve_or_abort():
         return params
 
     media_type, media_id = params
-    result = _resolve_video_path(media_type, media_id)
+    arr_instance_id = _request_arr_instance_id()
+    if isinstance(arr_instance_id, tuple):
+        return arr_instance_id
+
+    result = _resolve_video_path(media_type, media_id, arr_instance_id=arr_instance_id)
     if isinstance(result, tuple):
         return result
 
@@ -234,7 +265,7 @@ def _resolve_or_abort():
     return (video_path,)
 
 
-def _hls_cache_dir(media_type, media_id, audio_track_idx, start_time_sec, mtime):
+def _hls_cache_dir(media_type, media_id, arr_instance_id, audio_track_idx, start_time_sec, mtime):
     """Stable cache dir per (media, audio track, start time, file mtime) tuple.
 
     start_time_sec lets callers spawn fresh sessions that begin somewhere other
@@ -248,7 +279,7 @@ def _hls_cache_dir(media_type, media_id, audio_track_idx, start_time_sec, mtime)
     (startSec + video.currentTime) would drift by up to ~999 ms.
     """
     raw = (
-        f"{HLS_CACHE_VERSION}:{media_type}:{media_id}:{audio_track_idx}:"
+        f"{HLS_CACHE_VERSION}:{media_type}:{media_id}:{arr_instance_id or ''}:{audio_track_idx}:"
         f"{start_time_sec:.3f}:{int(mtime)}"
     )
     key = hashlib.md5(raw.encode()).hexdigest()[:16]
@@ -579,7 +610,11 @@ class EditorHls(Resource):
         if start_time_sec < 0 or not (start_time_sec == start_time_sec):  # rejects NaN
             return 'startTime must be >= 0', 400
 
-        resolved = _resolve_video_path(media_type, media_id)
+        arr_instance_id = _request_arr_instance_id()
+        if isinstance(arr_instance_id, tuple):
+            return arr_instance_id
+
+        resolved = _resolve_video_path(media_type, media_id, arr_instance_id=arr_instance_id)
         if isinstance(resolved, tuple):
             return resolved
         video_path = resolved
@@ -591,7 +626,7 @@ class EditorHls(Resource):
         except OSError:
             return 'Video file not accessible', 404
 
-        cache_dir = _hls_cache_dir(media_type, media_id, audio_track, start_time_sec, mtime)
+        cache_dir = _hls_cache_dir(media_type, media_id, arr_instance_id, audio_track, start_time_sec, mtime)
 
         # Defense-in-depth: the filename regex above already blocks path
         # traversal, but we also normalise via realpath (resolves symlinks,
@@ -907,16 +942,25 @@ class EditorSubtitles(Resource):
             return params
 
         media_type, media_id = params
+        arr_instance_id = _request_arr_instance_id()
+        if isinstance(arr_instance_id, tuple):
+            return arr_instance_id
 
         if media_type == 'episode':
             row = database.execute(
-                select(TableEpisodes.subtitles)
-                .where(TableEpisodes.sonarrEpisodeId == media_id)
+                scoped(
+                    select(TableEpisodes.subtitles).where(TableEpisodes.sonarrEpisodeId == media_id),
+                    TableEpisodes.arr_instance_id,
+                    arr_instance_id,
+                )
             ).first()
         else:
             row = database.execute(
-                select(TableMovies.subtitles)
-                .where(TableMovies.radarrId == media_id)
+                scoped(
+                    select(TableMovies.subtitles).where(TableMovies.radarrId == media_id),
+                    TableMovies.arr_instance_id,
+                    arr_instance_id,
+                )
             ).first()
 
         if not row or not row.subtitles:
@@ -1100,7 +1144,11 @@ class EditorSync(Resource):
         except (ValueError, TypeError):
             return 'mediaId must be an integer', 400
 
-        video_path = _resolve_video_path(media_type, media_id)
+        arr_instance_id = _payload_arr_instance_id(data)
+        if isinstance(arr_instance_id, tuple):
+            return arr_instance_id
+
+        video_path = _resolve_video_path(media_type, media_id, arr_instance_id=arr_instance_id)
         if isinstance(video_path, tuple):
             return video_path
 

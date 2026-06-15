@@ -1,20 +1,19 @@
+import { FunctionComponent } from "react";
 import { Link } from "react-router";
 import { Box, Code, Paper, Text } from "@mantine/core";
-import {
-  Check,
-  CollapseBox,
-  Layout,
-  Section,
-} from "@/pages/Settings/components";
+import { Check, CollapseBox, Section } from "@/pages/Settings/components";
 import { plexEnabledKey } from "@/pages/Settings/keys";
 import AutopulseSelector from "./AutopulseSelector";
 import LibrarySelector from "./LibrarySelector";
 import PlexSettings from "./PlexSettings";
 import WebhookSelector from "./WebhookSelector";
 
-const SettingsPlexView = () => {
+// Plex Media Server configuration for the Connections page. This is the exact
+// body of the former /settings/plex page, minus the <Layout> wrapper (the
+// Connections page provides the single Layout + Save pill).
+const PlexSection: FunctionComponent = () => {
   return (
-    <Layout name="Interface">
+    <>
       <Section header="Use Plex Media Server">
         <Check label="Enabled" settingKey={plexEnabledKey} />
       </Section>
@@ -96,8 +95,8 @@ const SettingsPlexView = () => {
           />
         </Section>
       </CollapseBox>
-    </Layout>
+    </>
   );
 };
 
-export default SettingsPlexView;
+export default PlexSection;

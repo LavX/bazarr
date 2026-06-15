@@ -24,6 +24,17 @@ from .worker import ProviderWorkerClient, WorkerError, worker_command
 logger = logging.getLogger(__name__)
 
 _REGISTERED_PROVIDER_HUB_IDS: set[str] = set()
+_MAX_WORKER_REQUEST_TIMEOUT = 3600.0
+
+
+def _coerce_timeout(value):
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        return None
+    if timeout <= 0:
+        return None
+    return timeout
 
 
 class HubProxyProvider(Provider):
@@ -33,7 +44,7 @@ class HubProxyProvider(Provider):
     subtitle_class = None
 
     def __init__(self, timeout=30, worker_client=None, **config):
-        self.timeout = int(timeout)
+        self.timeout = _coerce_timeout(timeout) or 30.0
         self.worker_client = worker_client or getattr(self.__class__, "worker_client", None)
         self.config = config
 
@@ -67,27 +78,37 @@ class HubProxyProvider(Provider):
             return self.worker_client
         raise WorkerError("Provider Hub worker is not configured")
 
+    def _request_timeout(self):
+        timeout = self.timeout
+        for key in ("worker_timeout", "timeout_seconds", "timeout"):
+            configured = _coerce_timeout(self.config.get(key))
+            if configured is not None:
+                timeout = max(timeout, configured)
+        return min(timeout, _MAX_WORKER_REQUEST_TIMEOUT)
+
     def list_subtitles(self, video, languages):
+        timeout = self._request_timeout()
         request = {
             "provider": self.provider_name,
             "config": self.config,
             "video": video_to_payload(video),
             "languages": [language_to_payload(item) for item in languages],
         }
-        result = self._worker().request("search", request, timeout=self.timeout)
+        result = self._worker().request("search", request, timeout=timeout)
         return [
             candidate_from_worker(self.provider_name, item)
             for item in result.payload.get("candidates", [])
         ]
 
     def download_subtitle(self, subtitle):
+        timeout = self._request_timeout()
         request = {
             "provider": self.provider_name,
             "provider_payload": subtitle.provider_payload,
             "language": language_to_payload(subtitle.language),
             "config": self.config,
         }
-        result = self._worker().request("download", request, timeout=self.timeout)
+        result = self._worker().request("download", request, timeout=timeout)
 
         def _select_member_cb(members):
             response = self._worker().select_archive_member(
@@ -100,7 +121,7 @@ class HubProxyProvider(Provider):
                     "episode": getattr(subtitle, "episode", None),
                     "config": self.config,
                 },
-                timeout=self.timeout,
+                timeout=timeout,
             )
             return response.payload
 

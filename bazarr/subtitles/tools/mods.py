@@ -30,7 +30,7 @@ MOD_LABELS = {
 
 
 def apply_subtitle_mods(language, subtitle_path, mods, video_path,
-                         media_type=None, media_id=None, job_id=None):
+                         media_type=None, media_id=None, job_id=None, arr_instance_id=None):
     """Job-aware wrapper for subtitles_apply_mods.
 
     When called without a job_id, queues the work as a backend job and returns
@@ -80,13 +80,18 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
     if media_id and media_type:
         if media_type == 'episode':
             from app.database import TableEpisodes, database, select
+            from arr_instances.resolution import scoped
+            # Scope the lookup to the owning instance (#156): media_id is the
+            # upstream sonarrEpisodeId, not unique across instances. Emit the
+            # LOCAL episode id so the frontend invalidates the right cached row.
             metadata = database.execute(
-                select(TableEpisodes.sonarrSeriesId)
-                .where(TableEpisodes.sonarrEpisodeId == media_id)
+                scoped(select(TableEpisodes.id, TableEpisodes.sonarrSeriesId)
+                       .where(TableEpisodes.sonarrEpisodeId == media_id),
+                       TableEpisodes.arr_instance_id, arr_instance_id)
             ).first()
             if metadata:
                 event_stream(type='series', payload=metadata.sonarrSeriesId)
-            event_stream(type='episode', payload=media_id)
+            event_stream(type='episode', payload=metadata.id if metadata else media_id)
         else:
             event_stream(type='movie', payload=media_id)
 

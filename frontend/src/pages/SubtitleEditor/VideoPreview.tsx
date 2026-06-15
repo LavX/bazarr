@@ -19,6 +19,7 @@ import {
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import Hls, { type ErrorData } from "hls.js";
 import { Environment } from "@/utilities/env";
+import { appendArrInstanceParam } from "./editorScope";
 
 export interface VideoPreviewHandle {
   togglePlay(): void;
@@ -37,6 +38,7 @@ export interface AudioTrack {
 interface VideoPreviewProps {
   mediaType?: string;
   mediaId?: number;
+  arrInstanceId?: number;
   currentTimeMs: number;
   seekId?: number;
   currentSubtitleText?: string;
@@ -182,6 +184,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
     {
       mediaType,
       mediaId,
+      arrInstanceId,
       currentTimeMs,
       seekId,
       currentSubtitleText,
@@ -244,7 +247,10 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
     useEffect(() => {
       if (!hasMedia) return;
       let cancelled = false;
-      const infoUrl = `${Environment.baseUrl}/api/editor/info?mediaType=${mediaType}&mediaId=${mediaId}&apikey=${encodeURIComponent(apiKey)}`;
+      const infoUrl = appendArrInstanceParam(
+        `${Environment.baseUrl}/api/editor/info?mediaType=${mediaType}&mediaId=${mediaId}&apikey=${encodeURIComponent(apiKey)}`,
+        arrInstanceId,
+      );
       fetch(infoUrl)
         .then((r) => (r.ok ? r.json() : null))
         .then((data) => {
@@ -304,7 +310,14 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
       return () => {
         cancelled = true;
       };
-    }, [hasMedia, mediaType, mediaId, apiKey, onAudioTracksLoaded]);
+    }, [
+      hasMedia,
+      mediaType,
+      mediaId,
+      arrInstanceId,
+      apiKey,
+      onAudioTracksLoaded,
+    ]);
 
     // Media-change reset: fresh session at start of file. Bail out if the
     // session is already in the right state (initial mount with default props).
@@ -317,7 +330,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
       // swap. Audio-track changes are handled by their own effect below so
       // they can capture the current playback position.
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [mediaType, mediaId]);
+    }, [mediaType, mediaId, arrInstanceId]);
 
     // Audio-track change: spawn a new HLS session that begins at the user's
     // current position so they don't have to wait for ffmpeg to encode from
@@ -338,7 +351,10 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
     // URLs in the manifest. startSec is part of the path so segment URLs inherit
     // the same session.
     const hlsUrl = hasMedia
-      ? `${Environment.baseUrl}/api/editor/hls/${encodeURIComponent(mediaType)}/${mediaId}/${hlsSession.audioTrack}/${hlsSession.startSec.toFixed(3)}/playlist.m3u8`
+      ? appendArrInstanceParam(
+          `${Environment.baseUrl}/api/editor/hls/${encodeURIComponent(mediaType)}/${mediaId}/${hlsSession.audioTrack}/${hlsSession.startSec.toFixed(3)}/playlist.m3u8`,
+          arrInstanceId,
+        )
       : "";
 
     // Set up hls.js (or native HLS on Safari) on the video element. Re-runs when
@@ -379,7 +395,8 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
         // Safari / iOS native HLS: can't inject custom headers on segment
         // fetches, so the API key has to ride in the URL.
-        video.src = `${hlsUrl}?apikey=${encodeURIComponent(apiKey)}`;
+        const separator = hlsUrl.includes("?") ? "&" : "?";
+        video.src = `${hlsUrl}${separator}apikey=${encodeURIComponent(apiKey)}`;
       } else {
         setVideoError(true);
       }

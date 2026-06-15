@@ -12,6 +12,10 @@ export interface SubtitleContentResponse {
   lastModified: number;
   mediaTitle?: string;
   mediaId?: number;
+  mediaUpstreamId?: number;
+  episodeId?: number;
+  episodeUpstreamId?: number;
+  arrInstanceId?: number;
   episodeTitle?: string;
 }
 
@@ -33,6 +37,8 @@ export interface BatchItem {
   sonarrSeriesId?: number;
   sonarrEpisodeId?: number;
   radarrId?: number;
+  // Owning Sonarr/Radarr instance id (#156) so the batch routes per instance.
+  arr_instance_id?: number;
 }
 
 export interface BatchOptions {
@@ -76,6 +82,23 @@ export interface BatchResponse {
   job_id?: number;
 }
 
+interface UpgradableMovieKey {
+  radarrId: number;
+  arr_instance_id?: number | null;
+}
+
+interface UpgradableSeriesKey {
+  sonarrSeriesId: number;
+  arr_instance_id?: number | null;
+}
+
+export interface UpgradableResponse {
+  movies: number[];
+  series: number[];
+  movieKeys?: UpgradableMovieKey[];
+  seriesKeys?: UpgradableSeriesKey[];
+}
+
 class SubtitlesApi extends BaseApi {
   constructor() {
     super("/subtitles");
@@ -84,10 +107,12 @@ class SubtitlesApi extends BaseApi {
   async getRefTracksByEpisodeId(
     subtitlesPath: string,
     sonarrEpisodeId: number,
+    arrInstanceId?: number,
   ) {
     const response = await this.get<DataWrapper<Item.RefTracks>>("", {
       subtitlesPath,
       sonarrEpisodeId,
+      arr_instance_id: arrInstanceId,
     });
     return response.data;
   }
@@ -95,10 +120,12 @@ class SubtitlesApi extends BaseApi {
   async getRefTracksByMovieId(
     subtitlesPath: string,
     radarrMovieId?: number | undefined,
+    arrInstanceId?: number,
   ) {
     const response = await this.get<DataWrapper<Item.RefTracks>>("", {
       subtitlesPath,
       radarrMovieId,
+      arr_instance_id: arrInstanceId,
     });
     return response.data;
   }
@@ -127,17 +154,22 @@ class SubtitlesApi extends BaseApi {
     return response.data;
   }
 
-  async upgradable(): Promise<{ movies: number[]; series: number[] }> {
-    const response = await this.get<{ movies: number[]; series: number[] }>(
-      "/upgradable",
-    );
+  async upgradable(): Promise<UpgradableResponse> {
+    const response = await this.get<UpgradableResponse>("/upgradable");
     return response;
   }
 
-  async getContent(mediaType: string, mediaId: number, language: string) {
+  async getContent(
+    mediaType: string,
+    mediaId: number,
+    language: string,
+    arrInstanceId?: number,
+  ) {
     const base = mediaType === "episode" ? "episodes" : "movies";
     const url = `/${base}/${mediaId}/subtitles/${encodeURIComponent(language)}/content`;
-    const response = await client.axios.get<SubtitleContentResponse>(url);
+    const response = await client.axios.get<SubtitleContentResponse>(url, {
+      params: { arr_instance_id: arrInstanceId },
+    });
     return {
       data: response.data,
       etag: response.headers["etag"] as string | undefined,
@@ -151,6 +183,7 @@ class SubtitlesApi extends BaseApi {
     content: string,
     encoding: string,
     etag?: string,
+    arrInstanceId?: number,
   ) {
     const base = mediaType === "episode" ? "episodes" : "movies";
     const url = `/${base}/${mediaId}/subtitles/${encodeURIComponent(language)}/content`;
@@ -161,7 +194,7 @@ class SubtitlesApi extends BaseApi {
     const response = await client.axios.put(
       url,
       { content, encoding },
-      { headers },
+      { headers, params: { arr_instance_id: arrInstanceId } },
     );
     return { etag: response.headers["etag"] as string | undefined };
   }
@@ -171,6 +204,7 @@ class SubtitlesApi extends BaseApi {
     mediaId: number,
     targetLanguage: string,
     sourceLanguage: string,
+    arrInstanceId?: number,
   ) {
     const base = mediaType === "episode" ? "episodes" : "movies";
     const url = `/${base}/${mediaId}/subtitles/${encodeURIComponent(targetLanguage)}/promote`;
@@ -178,7 +212,7 @@ class SubtitlesApi extends BaseApi {
       sourceLanguage: string;
       targetLanguage: string;
       targetPath: string;
-    }>(url, { sourceLanguage });
+    }>(url, { sourceLanguage }, { params: { arr_instance_id: arrInstanceId } });
     return response.data;
   }
 
@@ -186,10 +220,13 @@ class SubtitlesApi extends BaseApi {
     mediaType: string,
     mediaId: number,
     language: string,
+    arrInstanceId?: number,
   ): Promise<SubtitleSyncStatus> {
     const base = mediaType === "episode" ? "episodes" : "movies";
     const url = `/${base}/${mediaId}/subtitles/${encodeURIComponent(language)}/sync-status`;
-    const response = await client.axios.get<SubtitleSyncStatus>(url);
+    const response = await client.axios.get<SubtitleSyncStatus>(url, {
+      params: { arr_instance_id: arrInstanceId },
+    });
     return response.data;
   }
 
@@ -201,19 +238,26 @@ class SubtitlesApi extends BaseApi {
     format: string,
     forced: boolean,
     hi: boolean,
+    arrInstanceId?: number,
   ) {
     const base = mediaType === "episode" ? "episodes" : "movies";
     const url = `/${base}/${mediaId}/subtitles`;
     const response = await client.axios.post<{
       path: string;
       language: string;
-    }>(url, {
-      content,
-      language,
-      format,
-      forced,
-      hi,
-    });
+    }>(
+      url,
+      {
+        content,
+        language,
+        format,
+        forced,
+        hi,
+      },
+      {
+        params: { arr_instance_id: arrInstanceId },
+      },
+    );
     return response.data;
   }
 

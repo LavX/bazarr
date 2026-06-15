@@ -13,6 +13,8 @@ describe("History Series", () => {
         return HttpResponse.json({
           data: [
             {
+              id: 4560,
+              series_id: 789,
               seriesTitle: "Breaking Bad",
               episode_number: "S05E07",
               episodeTitle: "Pilot",
@@ -44,5 +46,9 @@ describe("History Series", () => {
     });
 
     expect(screen.getByText("S05E07")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Breaking Bad" })).toHaveAttribute(
+      "href",
+      "/series/789",
+    );
   });
 });

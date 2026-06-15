@@ -14,6 +14,7 @@ from app.database import TableShows, TableLanguagesProfiles, database, insert, u
 from utilities.path_mappings import path_mappings
 from app.event_handler import event_stream
 from app.jobs_queue import jobs_queue
+from arr_instances.resolution import client_for_instance, default_instance_id, scoped, stamp_owner
 
 from .episodes import sync_episodes
 from .parser import seriesParser
@@ -42,26 +43,34 @@ def get_language_profiles():
         select(TableLanguagesProfiles.profileId, TableLanguagesProfiles.name, TableLanguagesProfiles.tag)).all()
 
 
-def get_series_monitored_table():
+def get_series_monitored_table(arr_instance_id=None):
+    # Scope to the owning instance: two instances can share a sonarrSeriesId, so
+    # an unscoped lookup collapses colliding ids (last writer wins) and would
+    # hand sync_only_monitored_series another instance's monitored status.
     series_monitored = database.execute(
-        select(TableShows.sonarrSeriesId, TableShows.monitored))\
+        scoped(select(TableShows.sonarrSeriesId, TableShows.monitored),
+               TableShows.arr_instance_id, arr_instance_id))\
         .all()
     series_dict = dict((x, y) for x, y in series_monitored)
     return series_dict
 
 
-def update_series(job_id=None, wait_for_completion=False):
+def update_series(job_id=None, wait_for_completion=False, arr_instance_id=None, arr_client=None):
+    # arr_instance_id/arr_client thread an instance identity through the sync.
+    # Both None = today's exact default-instance path (byte-identical): the leaf
+    # fetchers fall back to the scalar settings.sonarr path, and writes stamp the
+    # resolved default. A client routes HTTP through that instance instead.
     if not job_id:
         jobs_queue.add_job_from_function("Syncing series with Sonarr", is_progress=True,
                                          wait_for_completion=wait_for_completion)
         return
 
     # Update root folders and update their health status
-    check_sonarr_rootfolder()
+    check_sonarr_rootfolder(arr_instance_id=arr_instance_id, arr_client=arr_client)
 
     # Get shows data from Sonarr
     try:
-        series = get_series_from_sonarr_api(apikey_sonarr=settings.sonarr.apikey)
+        series = get_series_from_sonarr_api(apikey_sonarr=settings.sonarr.apikey, arr_client=arr_client)
     except Exception as e:
         logging.exception(f"BAZARR Error trying to get series from Sonarr: {e}")  # noqa: G004
         return
@@ -74,12 +83,14 @@ def update_series(job_id=None, wait_for_completion=False):
         # buttons) keep the lazy-fetch path inside update_one_series for
         # backwards compat.
         audio_profiles = get_profile_list()
-        tags_dict = get_tags()
+        tags_dict = get_tags(arr_client=arr_client)
         language_profiles = get_language_profiles()
 
-        # Get current shows in DB
+        # Get current shows in DB (scoped to this instance when instance-synced,
+        # so removed-series computation never sees another instance's shows).
         current_shows_db = set(database.execute(
-            select(TableShows.sonarrSeriesId)).scalars().all())
+            scoped(select(TableShows.sonarrSeriesId),
+                   TableShows.arr_instance_id, arr_instance_id)).scalars().all())
 
         current_shows_sonarr = set()
 
@@ -88,8 +99,8 @@ def update_series(job_id=None, wait_for_completion=False):
 
         series_monitored = None
         if settings.sonarr.sync_only_monitored_series:
-            # Get current series monitored status in DB
-            series_monitored = get_series_monitored_table()
+            # Get current series monitored status in DB, scoped to this instance
+            series_monitored = get_series_monitored_table(arr_instance_id=arr_instance_id)
 
         trace(f"Starting sync for {series_count} shows")
 
@@ -135,7 +146,8 @@ def update_series(job_id=None, wait_for_completion=False):
             episode_futures = {
                 show['id']: executor.submit(get_episodes_from_sonarr_api,
                                             apikey_sonarr=apikey_sonarr,
-                                            series_id=show['id'])
+                                            series_id=show['id'],
+                                            arr_client=arr_client)
                 for _, show in shows_to_process
             }
 
@@ -155,7 +167,8 @@ def update_series(job_id=None, wait_for_completion=False):
                                   audio_profiles=audio_profiles, tags_dict=tags_dict,
                                   language_profiles=language_profiles,
                                   existing_in_db=show['id'] in current_shows_db,
-                                  skip_episode_sync=True)
+                                  skip_episode_sync=True,
+                                  arr_instance_id=arr_instance_id, arr_client=arr_client)
 
                 try:
                     episodes_data = episode_futures[show['id']].result()
@@ -163,7 +176,8 @@ def update_series(job_id=None, wait_for_completion=False):
                     logging.exception(f"BAZARR error pre-fetching episodes for series {show['id']}")  # noqa: G004
                     episodes_data = None
 
-                sync_episodes(series_id=show['id'], episodes_data=episodes_data)
+                sync_episodes(series_id=show['id'], episodes_data=episodes_data,
+                              arr_instance_id=arr_instance_id, arr_client=arr_client)
 
         # Calculate series to remove from DB
         removed_series = current_shows_db - current_shows_sonarr
@@ -171,7 +185,8 @@ def update_series(job_id=None, wait_for_completion=False):
         for removed_series_id in removed_series:
             # Remove series from DB - we know it exists in DB (it came
             # from current_shows_db) so skip the existence SELECT.
-            update_one_series(removed_series_id, action='deleted', existing_in_db=True)
+            update_one_series(removed_series_id, action='deleted', existing_in_db=True,
+                              arr_instance_id=arr_instance_id, arr_client=arr_client)
 
         if settings.sonarr.sync_only_monitored_series:
             trace(f"skipped {skipped_count} unmonitored series out of {series_count}")
@@ -183,9 +198,40 @@ def update_series(job_id=None, wait_for_completion=False):
     gc.collect()
 
 
+def update_series_for_instance(arr_instance_id, job_id=None, wait_for_completion=False):
+    """Bulk-sync one Sonarr instance (scheduler fan-out entry).
+
+    Mirrors update_series's enqueue-then-run so only the int arr_instance_id
+    travels through the job queue (add_job_from_function captures this frame's
+    locals); the per-instance ArrClient is built on the real run, never queued.
+    A missing/disabled instance is skipped.
+    """
+    if not job_id:
+        jobs_queue.add_job_from_function(f"Syncing series with Sonarr (instance {arr_instance_id})",
+                                         is_progress=True, wait_for_completion=wait_for_completion)
+        return
+    arr_client = client_for_instance(database, arr_instance_id)
+    if arr_client is None:
+        logging.warning('BAZARR skipping Sonarr sync for unknown/disabled instance %s', arr_instance_id)
+        return
+    update_series(job_id=job_id, arr_instance_id=arr_instance_id, arr_client=arr_client)
+
+
+def update_one_series_for_instance(arr_instance_id, series_id, action, **kwargs):
+    """Single-series sync scoped to one instance (webhook/signalr entry)."""
+    arr_client = client_for_instance(database, arr_instance_id)
+    if arr_client is None:
+        logging.warning('BAZARR skipping Sonarr series %s for unknown instance %s',
+                        series_id, arr_instance_id)
+        return
+    update_one_series(series_id, action, arr_instance_id=arr_instance_id,
+                      arr_client=arr_client, **kwargs)
+
+
 def update_one_series(series_id, action, is_signalr=False, series_data=None,
                       audio_profiles=None, tags_dict=None, language_profiles=None,
-                      existing_in_db=None, skip_episode_sync=False):
+                      existing_in_db=None, skip_episode_sync=False,
+                      arr_instance_id=None, arr_client=None):
     """Update or delete one series in the DB.
 
     Optional injected arguments let the bulk `update_series()` caller
@@ -209,14 +255,16 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
     # row (the rest of this function only uses the boolean answer).
     if existing_in_db is None:
         existing_in_db = database.execute(
-            select(TableShows.sonarrSeriesId)
-            .where(TableShows.sonarrSeriesId == series_id)).scalar() is not None
+            scoped(select(TableShows.sonarrSeriesId)
+                   .where(TableShows.sonarrSeriesId == series_id),
+                   TableShows.arr_instance_id, arr_instance_id)).scalar() is not None
 
     # Delete series from DB
     if action == 'deleted' and existing_in_db:
         database.execute(
-            delete(TableShows)
-            .where(TableShows.sonarrSeriesId == int(series_id)))
+            scoped(delete(TableShows)
+                   .where(TableShows.sonarrSeriesId == int(series_id)),
+                   TableShows.arr_instance_id, arr_instance_id))
 
         event_stream(type='series', action='delete', payload=int(series_id))
         return
@@ -243,7 +291,8 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
     if series_data is None:
         try:
             series_data_list = get_series_from_sonarr_api(apikey_sonarr=settings.sonarr.apikey,
-                                                          sonarr_series_id=int(series_id))
+                                                          sonarr_series_id=int(series_id),
+                                                          arr_client=arr_client)
         except Exception:
             logging.exception(f'BAZARR cannot get series with ID {series_id} from Sonarr API.')  # noqa: G004
             return
@@ -253,6 +302,13 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
     else:
         series_payload = series_data
 
+    # Resolve the owning instance once: the explicit instance when this sync is
+    # instance-scoped, else the enabled default for the single-instance path.
+    # stamp_owner leaves the column unset when neither exists (pre-backfill),
+    # preserving legacy NULL behaviour.
+    instance_id = arr_instance_id if arr_instance_id is not None \
+        else default_instance_id(database, 'sonarr')
+
     if action == 'updated' and existing_in_db:
         # Update existing series in DB
         series = seriesParser(series_payload, action='update', tags_dict=tags_dict,
@@ -261,10 +317,12 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
                               audio_profiles=audio_profiles)
         try:
             series['updated_at_timestamp'] = datetime.now()
+            stamp_owner(series, instance_id)
             database.execute(
-                update(TableShows)
-                .values(series)
-                .where(TableShows.sonarrSeriesId == series['sonarrSeriesId']))
+                scoped(update(TableShows)
+                       .values(series)
+                       .where(TableShows.sonarrSeriesId == series['sonarrSeriesId']),
+                       TableShows.arr_instance_id, arr_instance_id))
         except IntegrityError as e:
             logging.error(f"BAZARR cannot update series {series['path']} because of {e}")  # noqa: G004
         else:
@@ -273,7 +331,8 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
                 # The one that gets there doesn't include the episodeChanged flag.
                 # The episodes are synced only when this function is called from the
                 # frontend sync button in the episodes' page.
-                sync_episodes(series_id=int(series_id))
+                sync_episodes(series_id=int(series_id),
+                              arr_instance_id=arr_instance_id, arr_client=arr_client)
             event_stream(type='series', action='update', payload=int(series_id))
             logging.debug(
                 'BAZARR updated this series into the database:%s', path_mappings.path_replace(series["path"]))
@@ -286,6 +345,7 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
 
         try:
             series['created_at_timestamp'] = datetime.now()
+            stamp_owner(series, instance_id)
             database.execute(
                 insert(TableShows)
                 .values(series))
@@ -297,7 +357,8 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
                 # bulk update_series() loop relies on this call to
                 # populate them. signalr callers get their own episode
                 # events from Sonarr and skip this path.
-                sync_episodes(series_id=int(series_id))
+                sync_episodes(series_id=int(series_id),
+                              arr_instance_id=arr_instance_id, arr_client=arr_client)
             event_stream(type='series', action='update', payload=int(series_id))
             logging.debug(
                 'BAZARR inserted this series into the database:%s', path_mappings.path_replace(series["path"]))

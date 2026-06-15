@@ -33,6 +33,11 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
     },
     {
       key: "series",
+      // Multi-instance note (#156): the per-id invalidation below targets the
+      // emitted payload id. The unconditional list-prefix invalidation
+      // ([QueryKeys.Series]) is the cross-instance-safe refresh: it invalidates
+      // every cached series detail regardless of id, so a non-default series'
+      // detail page is refreshed even when the payload carries an upstream id.
       update: (ids) => {
         LOG("info", "Invalidating series", ids);
         ids.forEach((id) => {
@@ -52,10 +57,16 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
             queryKey: [QueryKeys.Series, id],
           });
         });
+        void queryClient.invalidateQueries({
+          queryKey: [QueryKeys.Series],
+        });
       },
     },
     {
       key: "movie",
+      // Multi-instance note (#156): same as "series" - the list-prefix
+      // invalidation ([QueryKeys.Movies]) is the cross-instance-safe refresh
+      // that covers non-default movie detail pages regardless of the payload id.
       update: (ids) => {
         LOG("info", "Invalidating movies", ids);
         ids.forEach((id) => {
@@ -75,10 +86,18 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
             queryKey: [QueryKeys.Movies, id],
           });
         });
+        void queryClient.invalidateQueries({
+          queryKey: [QueryKeys.Movies],
+        });
       },
     },
     {
       key: "episode",
+      // Multi-instance note (#156): the backend now emits the LOCAL episode id
+      // here (subtitles/indexer/series.py), which is the id the episode cache is
+      // keyed by ([QueryKeys.Episodes, <local id>]). The getQueryData lookup
+      // below therefore resolves the right series_id for non-default instances;
+      // when the episode isn't cached we fall back to invalidating all series.
       update: (ids) => {
         // Currently invalidate episodes is impossible because we don't directly fetch episodes (we fetch episodes by series id)
         // So we need to invalidate series instead
@@ -91,7 +110,11 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
           ]);
           if (episode !== undefined) {
             void queryClient.invalidateQueries({
-              queryKey: [QueryKeys.Series, episode.sonarrSeriesId],
+              queryKey: [QueryKeys.Series, episode.series_id],
+            });
+          } else {
+            void queryClient.invalidateQueries({
+              queryKey: [QueryKeys.Series],
             });
           }
         });
@@ -105,7 +128,11 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
           ]);
           if (episode !== undefined) {
             void queryClient.invalidateQueries({
-              queryKey: [QueryKeys.Series, episode.sonarrSeriesId],
+              queryKey: [QueryKeys.Series, episode.series_id],
+            });
+          } else {
+            void queryClient.invalidateQueries({
+              queryKey: [QueryKeys.Series],
             });
           }
         });
@@ -116,12 +143,12 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       update: () => {
         // Find a better way to update wanted
         void queryClient.invalidateQueries({
-          queryKey: [QueryKeys.Episodes, QueryKeys.Wanted],
+          queryKey: [QueryKeys.Series, QueryKeys.Wanted],
         });
       },
       delete: () => {
         void queryClient.invalidateQueries({
-          queryKey: [QueryKeys.Episodes, QueryKeys.Wanted],
+          queryKey: [QueryKeys.Series, QueryKeys.Wanted],
         });
       },
     },
@@ -205,7 +232,7 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       key: "reset-episode-wanted",
       any: () => {
         void queryClient.invalidateQueries({
-          queryKey: [QueryKeys.Episodes, QueryKeys.Wanted],
+          queryKey: [QueryKeys.Series, QueryKeys.Wanted],
         });
       },
     },

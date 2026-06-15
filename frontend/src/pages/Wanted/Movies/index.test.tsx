@@ -11,6 +11,7 @@ describe("Wanted Movies", () => {
     const mockMovies = [
       {
         title: "The Shawshank Redemption",
+        id: 901,
         radarrId: 1,
         missing_subtitles: [
           {
@@ -39,7 +40,7 @@ describe("Wanted Movies", () => {
     const movieLink = screen.getByRole("link", {
       name: "The Shawshank Redemption",
     });
-    expect(movieLink).toHaveAttribute("href", "/movies/1");
+    expect(movieLink).toHaveAttribute("href", "/movies/901");
   });
 
   it("should render empty state when no wanted movies", async () => {

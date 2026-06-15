@@ -6,7 +6,13 @@ import {
   useRef,
   useState,
 } from "react";
-import { Link, useBlocker, useNavigate, useParams } from "react-router";
+import {
+  Link,
+  useBlocker,
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from "react-router";
 import {
   Alert,
   Anchor,
@@ -52,6 +58,7 @@ import {
   subtitleDocumentReducer,
 } from "./document";
 import EditableCueTable from "./EditableCueTable";
+import { buildEditorAutosaveKey, buildEditorSubtitlesUrl } from "./editorScope";
 import EditorToolbar from "./EditorToolbar";
 import JumpToCue from "./JumpToCue";
 import { detectFormat, getParser } from "./parsers";
@@ -80,8 +87,23 @@ export function getActiveCueText(cues: Cue[], playbackTimeMs: number) {
 
 export default function EditorPage() {
   const { mediaType, mediaId, language } = useParams();
+  const [searchParams] = useSearchParams();
+  const rawArrInstanceId = searchParams.get("arr_instance_id");
+  const arrInstanceId =
+    rawArrInstanceId === null ? undefined : Number(rawArrInstanceId);
+  const scopedArrInstanceId = Number.isNaN(arrInstanceId)
+    ? undefined
+    : arrInstanceId;
+  const editorSearch = searchParams.toString();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const editorPath = useCallback(
+    (targetLanguage: string) => {
+      const path = `/subtitles/edit/${mediaType}/${mediaId}/${encodeURIComponent(targetLanguage)}`;
+      return editorSearch ? `${path}?${editorSearch}` : path;
+    },
+    [editorSearch, mediaId, mediaType],
+  );
 
   // Fetch subtitle content
   const {
@@ -92,6 +114,7 @@ export default function EditorPage() {
     mediaType,
     mediaId ? Number(mediaId) : undefined,
     language,
+    scopedArrInstanceId,
   );
 
   const data = queryResult?.data;
@@ -147,10 +170,12 @@ export default function EditorPage() {
   }, [parseResult]);
 
   // Auto-save to localStorage on every change (debounced 2s)
-  const autoSaveKey =
-    mediaType && mediaId && language
-      ? `bazarr-editor-${mediaType}-${mediaId}-${language}`
-      : null;
+  const autoSaveKey = buildEditorAutosaveKey(
+    mediaType,
+    mediaId,
+    language,
+    scopedArrInstanceId,
+  );
 
   useEffect(() => {
     if (!autoSaveKey || docState.cues.length === 0) return;
@@ -282,7 +307,13 @@ export default function EditorPage() {
     if (!mediaType || !mediaId) return;
     const apiKey = Environment.apiKey ?? "";
     fetch(
-      `${Environment.baseUrl}/api/editor/subtitles?mediaType=${mediaType}&mediaId=${mediaId}&apikey=${encodeURIComponent(apiKey)}`,
+      buildEditorSubtitlesUrl(
+        Environment.baseUrl,
+        mediaType,
+        mediaId,
+        apiKey,
+        scopedArrInstanceId,
+      ),
     )
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
@@ -291,7 +322,7 @@ export default function EditorPage() {
       .catch(() => {
         /* ignored */
       });
-  }, [mediaType, mediaId]);
+  }, [mediaType, mediaId, scopedArrInstanceId]);
 
   const toggleBookmark = useCallback((cueId: string) => {
     setBookmarkedIds((prev) => {
@@ -455,6 +486,7 @@ export default function EditorPage() {
           format,
           forced: false,
           hi: false,
+          arrInstanceId: scopedArrInstanceId,
         },
         {
           onSuccess: () => {
@@ -476,6 +508,7 @@ export default function EditorPage() {
                 mediaType,
                 Number(mediaId),
                 language,
+                scopedArrInstanceId,
               ],
             });
             showNotification({
@@ -510,6 +543,7 @@ export default function EditorPage() {
           content: serialized,
           encoding,
           etag: etagRef.current || undefined,
+          arrInstanceId: scopedArrInstanceId,
         },
         {
           onSuccess: (result) => {
@@ -545,6 +579,7 @@ export default function EditorPage() {
                   content: serialized,
                   encoding,
                   etag: undefined,
+                  arrInstanceId: scopedArrInstanceId,
                 },
                 {
                   onSuccess: (result) => {
@@ -605,6 +640,7 @@ export default function EditorPage() {
     docState.cues,
     parseResult?.metadata,
     queryClient,
+    scopedArrInstanceId,
   ]);
 
   // Subtitle language switcher
@@ -617,12 +653,12 @@ export default function EditorPage() {
       if (docState.dirty) {
         setPendingLangSwitch(targetLang);
       } else {
-        navigate(`/subtitles/edit/${mediaType}/${mediaId}/${targetLang}`, {
+        navigate(editorPath(targetLang), {
           replace: true,
         });
       }
     },
-    [language, mediaType, mediaId, docState.dirty, navigate],
+    [language, docState.dirty, navigate, editorPath],
   );
 
   // Navigate after save completes (dirty becomes false while pendingLangSwitch is set)
@@ -632,12 +668,12 @@ export default function EditorPage() {
       const target = pendingSaveNavRef.current;
       pendingSaveNavRef.current = null;
       requestAnimationFrame(() => {
-        navigate(`/subtitles/edit/${mediaType}/${mediaId}/${target}`, {
+        navigate(editorPath(target), {
           replace: true,
         });
       });
     }
-  }, [docState.dirty, mediaType, mediaId, navigate]);
+  }, [docState.dirty, navigate, editorPath]);
 
   const handleSwitchSave = useCallback(() => {
     if (!pendingLangSwitch) return;
@@ -652,11 +688,11 @@ export default function EditorPage() {
     setPendingLangSwitch(null);
     // Defer navigation so React processes MARK_SAVED first (dirty=false), avoiding the blocker
     requestAnimationFrame(() => {
-      navigate(`/subtitles/edit/${mediaType}/${mediaId}/${pendingLangSwitch}`, {
+      navigate(editorPath(pendingLangSwitch), {
         replace: true,
       });
     });
-  }, [pendingLangSwitch, mediaType, mediaId, navigate]);
+  }, [pendingLangSwitch, navigate, editorPath]);
 
   // Save As handler (create new subtitle with different language)
   // State for overwrite confirmation
@@ -678,6 +714,7 @@ export default function EditorPage() {
           format,
           forced: false,
           hi: false,
+          arrInstanceId: scopedArrInstanceId,
         },
         {
           onSuccess: () => {
@@ -685,10 +722,7 @@ export default function EditorPage() {
             setSaveAsLang(null);
             dispatch({ type: "MARK_SAVED" });
             requestAnimationFrame(() => {
-              navigate(
-                `/subtitles/edit/${mediaType}/${mediaId}/${encodeURIComponent(targetLang)}`,
-                { replace: true },
-              );
+              navigate(editorPath(targetLang), { replace: true });
             });
           },
           onError: (err) => {
@@ -709,7 +743,16 @@ export default function EditorPage() {
         },
       );
     },
-    [mediaType, mediaId, format, buildParseResult, createMutation, navigate],
+    [
+      mediaType,
+      mediaId,
+      format,
+      buildParseResult,
+      createMutation,
+      navigate,
+      editorPath,
+      scopedArrInstanceId,
+    ],
   );
 
   const handleOverwrite = useCallback(() => {
@@ -722,6 +765,7 @@ export default function EditorPage() {
         language: lang,
         content,
         encoding,
+        arrInstanceId: scopedArrInstanceId,
       },
       {
         onSuccess: (result) => {
@@ -738,10 +782,7 @@ export default function EditorPage() {
             autoClose: 2000,
           });
           requestAnimationFrame(() => {
-            navigate(
-              `/subtitles/edit/${mediaType}/${mediaId}/${encodeURIComponent(lang)}`,
-              { replace: true },
-            );
+            navigate(editorPath(lang), { replace: true });
           });
         },
         onError: (err) => {
@@ -755,7 +796,16 @@ export default function EditorPage() {
         },
       },
     );
-  }, [overwriteConfirm, mediaType, mediaId, encoding, saveMutation, navigate]);
+  }, [
+    overwriteConfirm,
+    mediaType,
+    mediaId,
+    encoding,
+    saveMutation,
+    navigate,
+    editorPath,
+    scopedArrInstanceId,
+  ]);
 
   // Upload handler
   const handleUpload = useCallback(() => {
@@ -1116,6 +1166,7 @@ export default function EditorPage() {
           mediaType,
           Number(mediaId),
           lang,
+          scopedArrInstanceId,
         );
         if (result.data.exists === false || !result.data.content) {
           showNotification({
@@ -1149,7 +1200,7 @@ export default function EditorPage() {
         });
       }
     },
-    [mediaType, mediaId],
+    [mediaType, mediaId, scopedArrInstanceId],
   );
 
   // Import reference from file
@@ -1983,6 +2034,7 @@ export default function EditorPage() {
             selectedIndices={multiSelect}
             mediaType={mediaType}
             mediaId={mediaId ? Number(mediaId) : undefined}
+            arrInstanceId={scopedArrInstanceId}
             language={language}
             onApplyBatch={handleTimingApplyBatch}
             onGetContent={() => {
@@ -2193,6 +2245,7 @@ export default function EditorPage() {
             ref={videoPreviewRef}
             mediaType={mediaType}
             mediaId={mediaId ? Number(mediaId) : undefined}
+            arrInstanceId={scopedArrInstanceId}
             currentTimeMs={userSeekMs ?? 0}
             seekId={seekCounter}
             currentSubtitleText={activeSubtitleText}
@@ -2274,6 +2327,7 @@ export default function EditorPage() {
       <WaveformTimeline
         mediaType={mediaType}
         mediaId={mediaId ? Number(mediaId) : undefined}
+        arrInstanceId={scopedArrInstanceId}
         cues={docState.cues}
         selectedIndex={selectedIndex}
         currentTimeMs={playbackTimeMs}

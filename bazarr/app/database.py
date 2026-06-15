@@ -10,7 +10,7 @@ import flask_migrate
 from dogpile.cache import make_region
 from datetime import datetime
 
-from sqlalchemy import create_engine, inspect, DateTime, ForeignKey, Index, Integer, LargeBinary, Text, func, text, BigInteger
+from sqlalchemy import create_engine, inspect, CheckConstraint, DateTime, ForeignKey, Index, Integer, LargeBinary, Text, func, text, BigInteger
 # importing here to be indirectly imported in other modules later
 from sqlalchemy import update, delete, select, func  # noqa: F401, F811
 from sqlalchemy.orm import scoped_session, sessionmaker, mapped_column, close_all_sessions, declarative_base
@@ -42,6 +42,12 @@ migrations_directory = os.path.join(os.path.dirname(os.path.dirname(os.path.dirn
 
 
 def configure_sqlite_connection(dbapi_connection, connection_record):
+    # This is registered on the global Engine class (only when the app itself
+    # runs on SQLite), so guard against firing PRAGMA on a non-SQLite connection
+    # that happens to exist in the same process (e.g. a Postgres engine in tests
+    # or tooling) - PRAGMA is invalid SQL on PostgreSQL.
+    if not isinstance(dbapi_connection, sqlite3.Connection):
+        return
     cursor = dbapi_connection.cursor()
     try:
         cursor.execute("PRAGMA journal_mode=WAL")
@@ -211,6 +217,62 @@ class TableAnnouncements(Base):
     text = mapped_column(Text)
 
 
+class TableArrInstances(Base):
+    # Multiple Sonarr/Radarr instances (#156). One Bazarr+ install can connect
+    # to several named Sonarr/Radarr instances - e.g. split libraries: TV,
+    # anime, 4K. Bazarr local IDs are canonical; upstream Sonarr/Radarr IDs
+    # become per-instance metadata scoped by arr_instance_id on owned rows.
+    #
+    # api_key holds an ENCRYPTED payload (secret_store.crypto.encrypt_secret,
+    # 'enc:v1:' marker), encrypted/decrypted at the ArrInstanceRepository
+    # boundary: arr_instances lives outside config.yaml and does not inherit
+    # its Fernet-at-rest encryption.
+    __tablename__ = 'arr_instances'
+    __table_args__ = (
+        CheckConstraint("kind IN ('sonarr', 'radarr')", name='ck_arr_instances_kind'),
+        CheckConstraint("enabled IN (0, 1)", name='ck_arr_instances_enabled'),
+        CheckConstraint("is_default IN (0, 1)", name='ck_arr_instances_is_default'),
+        CheckConstraint("is_default = 0 OR enabled = 1", name='ck_arr_instances_default_enabled'),
+        Index('ux_arr_instances_kind_stable_key', 'kind', 'stable_key', unique=True),
+        # At most one enabled default per kind. Partial unique index so disabled
+        # or non-default rows never collide. SQLite and PostgreSQL both honour
+        # the WHERE predicate; backends without partial-index support fall back
+        # to repository/API-level enforcement.
+        Index('ux_arr_instances_default_kind', 'kind', unique=True,
+              sqlite_where=text('is_default = 1 AND enabled = 1'),
+              postgresql_where=text('is_default = 1 AND enabled = 1')),
+    )
+
+    id = mapped_column(Integer, primary_key=True)
+    kind = mapped_column(Text, nullable=False)
+    stable_key = mapped_column(Text, nullable=False)
+    name = mapped_column(Text, nullable=False)
+    enabled = mapped_column(Integer, nullable=False, default=1)
+    is_default = mapped_column(Integer, nullable=False, default=0)
+    # connection - mirrors the scalar settings.sonarr / settings.radarr fields
+    ip = mapped_column(Text, nullable=False, default='127.0.0.1')
+    port = mapped_column(Integer, nullable=False)
+    base_url = mapped_column(Text, nullable=False, default='/')
+    ssl = mapped_column(Integer, nullable=False, default=0)
+    verify_ssl = mapped_column(Integer, nullable=False, default=0)
+    http_timeout = mapped_column(Integer, nullable=False, default=60)
+    api_key = mapped_column(Text, nullable=False, default='')  # encrypted at rest
+    # per-instance JSON config blobs
+    options = mapped_column(Text)        # sync / exclusion options
+    path_mappings = mapped_column(Text)  # per-instance remote->local path map
+    schedule = mapped_column(Text)       # full_update / sync cadence
+    # runtime status
+    status = mapped_column(Text)
+    last_error = mapped_column(Text)
+    last_sync_at = mapped_column(DateTime)
+    # timestamps
+    created_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+    updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+    def to_dict(self):
+        return {column.name: getattr(self, column.name) for column in self.__table__.columns}
+
+
 class TableCompatApiKeys(Base):
     # Distribution Hub: named API keys for the OpenSubtitles-compat endpoint.
     # The full token is never stored - only its sha256 (key_hash) and an
@@ -254,30 +316,60 @@ class TableCompatUsage(Base):
 
 class TableBlacklist(Base):
     __tablename__ = 'table_blacklist'
+    # Composite instance-scoped indexes match the Phase 1e cutover (fresh==upgraded).
+    __table_args__ = (
+        Index('ix_blacklist_instance_upstream_series', 'arr_instance_id', 'sonarr_series_id'),
+        Index('ix_blacklist_instance_upstream_episode', 'arr_instance_id', 'sonarr_episode_id'),
+    )
 
+    # multi-instance additive columns (#156): nullable owner + local refs.
+    arr_instance_id = mapped_column(Integer)
+    series_id = mapped_column(Integer, ForeignKey('table_shows.id', ondelete='CASCADE'))
+    episode_id = mapped_column(Integer, ForeignKey('table_episodes.id', ondelete='CASCADE'))
     id = mapped_column(Integer, primary_key=True)
     language = mapped_column(Text)
     provider = mapped_column(Text)
-    sonarr_episode_id = mapped_column(Integer, ForeignKey('table_episodes.sonarrEpisodeId', ondelete='CASCADE'))
-    sonarr_series_id = mapped_column(Integer, ForeignKey('table_shows.sonarrSeriesId', ondelete='CASCADE'))
+    sonarr_episode_id = mapped_column(Integer)
+    sonarr_series_id = mapped_column(Integer)
     subs_id = mapped_column(Text, index=True)
     timestamp = mapped_column(DateTime, default=datetime.now)
 
 
 class TableBlacklistMovie(Base):
     __tablename__ = 'table_blacklist_movie'
+    # Composite instance-scoped index matches the Phase 1e cutover (fresh==upgraded).
+    __table_args__ = (
+        Index('ix_blacklist_movie_instance_upstream', 'arr_instance_id', 'radarr_id'),
+    )
 
+    # multi-instance additive columns (#156): nullable owner + local ref.
+    arr_instance_id = mapped_column(Integer)
+    movie_id = mapped_column(Integer, ForeignKey('table_movies.id', ondelete='CASCADE'))
     id = mapped_column(Integer, primary_key=True)
     language = mapped_column(Text)
     provider = mapped_column(Text)
-    radarr_id = mapped_column(Integer, ForeignKey('table_movies.radarrId', ondelete='CASCADE'))
+    radarr_id = mapped_column(Integer)
     subs_id = mapped_column(Text, index=True)
     timestamp = mapped_column(DateTime, default=datetime.now)
 
 
 class TableEpisodes(Base):
     __tablename__ = 'table_episodes'
+    # Phase 8 ORM PK flip (#156): local ``id`` PK; ``series_id`` is the local FK
+    # to table_shows.id; the upstream sonarrEpisodeId is unique per instance.
+    # Index names match the Phase 1e cutover migration exactly, so a fresh
+    # create_all() install and an upgraded install have byte-identical schemas.
+    __table_args__ = (
+        Index('ux_table_episodes_instance_upstream_id', 'arr_instance_id', 'sonarrEpisodeId', unique=True),
+        # series_id is the local FK to table_shows.id; the cutover migration
+        # indexes it but fresh installs missed it (sonarrSeriesId/episode_file_id
+        # are already indexed via index=True on their columns).
+        Index('ix_table_episodes_series_id', 'series_id'),
+    )
 
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    arr_instance_id = mapped_column(Integer)
+    series_id = mapped_column(Integer, ForeignKey('table_shows.id', ondelete='CASCADE'))
     absoluteEpisode = mapped_column(Integer)
     audio_codec = mapped_column(Text)
     audio_language = mapped_column(Text)
@@ -294,8 +386,8 @@ class TableEpisodes(Base):
     resolution = mapped_column(Text)
     sceneName = mapped_column(Text)
     season = mapped_column(Integer, nullable=False)
-    sonarrEpisodeId = mapped_column(Integer, primary_key=True)
-    sonarrSeriesId = mapped_column(Integer, ForeignKey('table_shows.sonarrSeriesId', ondelete='CASCADE'), index=True)
+    sonarrEpisodeId = mapped_column(Integer)
+    sonarrSeriesId = mapped_column(Integer, index=True)
     subtitles = mapped_column(Text)
     title = mapped_column(Text, nullable=False)
     tvdbId = mapped_column(Integer)
@@ -308,11 +400,20 @@ class TableEpisodes(Base):
 
 class TableHistory(Base):
     __tablename__ = 'table_history'
+    # Index set matches the Phase 1e cutover migration (fresh==upgraded): the
+    # instance-scoped lookups use the composite (arr_instance_id, upstream id),
+    # not a bare single-column index, so query plans are identical either way.
     __table_args__ = (
         Index('ix_table_history_video_path_language_timestamp',
               'video_path', 'language', 'timestamp'),
+        Index('ix_history_instance_upstream_series', 'arr_instance_id', 'sonarrSeriesId'),
+        Index('ix_history_instance_upstream_episode', 'arr_instance_id', 'sonarrEpisodeId'),
     )
 
+    # multi-instance additive columns (#156): nullable owner + local refs.
+    arr_instance_id = mapped_column(Integer)
+    series_id = mapped_column(Integer, ForeignKey('table_shows.id', ondelete='CASCADE'))
+    episode_id = mapped_column(Integer, ForeignKey('table_episodes.id', ondelete='CASCADE'))
     id = mapped_column(Integer, primary_key=True)
     action = mapped_column(Integer, nullable=False, index=True)
     description = mapped_column(Text, nullable=False)
@@ -320,8 +421,10 @@ class TableHistory(Base):
     provider = mapped_column(Text)
     score = mapped_column(Integer)
     score_out_of = mapped_column(Integer, nullable=True)
-    sonarrEpisodeId = mapped_column(Integer, ForeignKey('table_episodes.sonarrEpisodeId', ondelete='CASCADE'), index=True)
-    sonarrSeriesId = mapped_column(Integer, ForeignKey('table_shows.sonarrSeriesId', ondelete='CASCADE'), index=True)
+    # Indexed via the composite ix_history_instance_upstream_* above (matching
+    # the cutover); no separate single-column index (the migration creates none).
+    sonarrEpisodeId = mapped_column(Integer)
+    sonarrSeriesId = mapped_column(Integer)
     subs_id = mapped_column(Text)
     subtitles_path = mapped_column(Text)
     timestamp = mapped_column(DateTime, nullable=False, default=datetime.now)
@@ -333,17 +436,23 @@ class TableHistory(Base):
 
 class TableHistoryMovie(Base):
     __tablename__ = 'table_history_movie'
+    # Index set matches the Phase 1e cutover migration (fresh==upgraded).
     __table_args__ = (
         Index('ix_table_history_movie_video_path_language_timestamp',
               'video_path', 'language', 'timestamp'),
+        Index('ix_history_movie_instance_upstream', 'arr_instance_id', 'radarrId'),
     )
 
+    # multi-instance additive columns (#156): nullable owner + local ref.
+    arr_instance_id = mapped_column(Integer)
+    movie_id = mapped_column(Integer, ForeignKey('table_movies.id', ondelete='CASCADE'))
     id = mapped_column(Integer, primary_key=True)
     action = mapped_column(Integer, nullable=False, index=True)
     description = mapped_column(Text, nullable=False)
     language = mapped_column(Text)
     provider = mapped_column(Text)
-    radarrId = mapped_column(Integer, ForeignKey('table_movies.radarrId', ondelete='CASCADE'), index=True)
+    # Indexed via the composite ix_history_movie_instance_upstream above.
+    radarrId = mapped_column(Integer)
     score = mapped_column(Integer)
     score_out_of = mapped_column(Integer, nullable=True)
     subs_id = mapped_column(Text)
@@ -371,7 +480,17 @@ class TableLanguagesProfiles(Base):
 
 class TableMovies(Base):
     __tablename__ = 'table_movies'
+    # Phase 8 ORM PK flip (#156): local ``id`` is the canonical PK; the upstream
+    # radarrId, path and tmdbId are unique only within an instance.
+    # Index names match the Phase 1e cutover migration exactly (fresh==upgraded).
+    __table_args__ = (
+        Index('ux_table_movies_instance_path', 'arr_instance_id', 'path', unique=True),
+        Index('ux_table_movies_instance_upstream_id', 'arr_instance_id', 'radarrId', unique=True),
+        Index('ux_table_movies_instance_tmdbid', 'arr_instance_id', 'tmdbId', unique=True),
+    )
 
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    arr_instance_id = mapped_column(Integer)
     alternativeTitles = mapped_column(Text)
     audio_codec = mapped_column(Text)
     audio_language = mapped_column(Text)
@@ -387,17 +506,17 @@ class TableMovies(Base):
     movie_file_id = mapped_column(Integer)
     originalLanguage = mapped_column(Text)
     overview = mapped_column(Text)
-    path = mapped_column(Text, nullable=False, unique=True)
+    path = mapped_column(Text, nullable=False)
     poster = mapped_column(Text)
     profileId = mapped_column(Integer, ForeignKey('table_languages_profiles.profileId', ondelete='SET NULL'), index=True)
-    radarrId = mapped_column(Integer, primary_key=True)
+    radarrId = mapped_column(Integer)
     resolution = mapped_column(Text)
     sceneName = mapped_column(Text)
     sortTitle = mapped_column(Text)
     subtitles = mapped_column(Text)
     tags = mapped_column(Text)
     title = mapped_column(Text, nullable=False)
-    tmdbId = mapped_column(Text, nullable=False, unique=True)
+    tmdbId = mapped_column(Text, nullable=False)
     updated_at_timestamp = mapped_column(DateTime)
     video_codec = mapped_column(Text)
     year = mapped_column(Text)
@@ -408,10 +527,19 @@ class TableMovies(Base):
 
 class TableMoviesRootfolder(Base):
     __tablename__ = 'table_movies_rootfolder'
+    # Phase 8 ORM PK flip (#156): local_rootfolder_id is the canonical PK; the
+    # upstream rootfolder id is unique only within an instance.
+    __table_args__ = (
+        Index('ux_movies_rootfolder_instance_upstream',
+              'arr_instance_id', 'upstream_rootfolder_id', unique=True),
+    )
 
+    arr_instance_id = mapped_column(Integer)
+    upstream_rootfolder_id = mapped_column(Integer)
+    local_rootfolder_id = mapped_column(Integer, primary_key=True, autoincrement=True)
     accessible = mapped_column(Integer)
     error = mapped_column(Text)
-    id = mapped_column(Integer, primary_key=True)
+    id = mapped_column(Integer)
     path = mapped_column(Text)
 
 
@@ -451,7 +579,17 @@ class TableSettingsNotifier(Base):
 
 class TableShows(Base):
     __tablename__ = 'table_shows'
+    # Phase 8 ORM PK flip (#156): local ``id`` is the canonical PK (matches the
+    # physical schema the cutover migration produced); the upstream
+    # sonarrSeriesId and path are unique only within an instance.
+    # Index names match the Phase 1e cutover migration exactly (fresh==upgraded).
+    __table_args__ = (
+        Index('ux_table_shows_instance_path', 'arr_instance_id', 'path', unique=True),
+        Index('ux_table_shows_instance_upstream_id', 'arr_instance_id', 'sonarrSeriesId', unique=True),
+    )
 
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    arr_instance_id = mapped_column(Integer)
     tvdbId = mapped_column(Integer)
     alternativeTitles = mapped_column(Text)
     audio_language = mapped_column(Text)
@@ -463,11 +601,11 @@ class TableShows(Base):
     monitored = mapped_column(Text)
     originalLanguage = mapped_column(Text)
     overview = mapped_column(Text)
-    path = mapped_column(Text, nullable=False, unique=True)
+    path = mapped_column(Text, nullable=False)
     poster = mapped_column(Text)
     profileId = mapped_column(Integer, ForeignKey('table_languages_profiles.profileId', ondelete='SET NULL'), index=True)
     seriesType = mapped_column(Text)
-    sonarrSeriesId = mapped_column(Integer, primary_key=True)
+    sonarrSeriesId = mapped_column(Integer)
     sortTitle = mapped_column(Text)
     tags = mapped_column(Text)
     title = mapped_column(Text, nullable=False)
@@ -480,10 +618,19 @@ class TableShows(Base):
 
 class TableShowsRootfolder(Base):
     __tablename__ = 'table_shows_rootfolder'
+    # Phase 8 ORM PK flip (#156): local_rootfolder_id is the canonical PK; the
+    # upstream rootfolder id is unique only within an instance.
+    __table_args__ = (
+        Index('ux_shows_rootfolder_instance_upstream',
+              'arr_instance_id', 'upstream_rootfolder_id', unique=True),
+    )
 
+    arr_instance_id = mapped_column(Integer)
+    upstream_rootfolder_id = mapped_column(Integer)
+    local_rootfolder_id = mapped_column(Integer, primary_key=True, autoincrement=True)
     accessible = mapped_column(Integer)
     error = mapped_column(Text)
-    id = mapped_column(Integer, primary_key=True)
+    id = mapped_column(Integer)
     path = mapped_column(Text)
 
 
@@ -662,6 +809,19 @@ def migrate_db(app):
         database.execute(
             insert(System)
             .values(configured='0', updated='0'))
+
+    # Multiple Sonarr/Radarr instances (#156): represent the existing scalar
+    # Sonarr/Radarr config as the default arr_instances rows and stamp existing
+    # owned rows with their arr_instance_id. Idempotent and non-destructive;
+    # guarded so a backfill hiccup never blocks startup.
+    try:
+        from arr_instances.backfill import backfill_default_instances
+        backfill_default_instances(database, settings)
+        database.commit()
+    except Exception:
+        database.rollback()
+        logging.exception("Multi-instance default backfill failed; continuing startup")
+
     optimize_sqlite_database(engine)
 
     # Refresh the cached migration revision now that pending migrations have run. init_db()

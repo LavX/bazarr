@@ -32,15 +32,12 @@ import SeriesHistoryView from "@/pages/History/Series";
 import MovieView from "@/pages/Movies";
 import MovieDetailView from "@/pages/Movies/Details";
 import SeriesView from "@/pages/Series";
+import SettingsConnectionsView from "@/pages/Settings/Connections";
 import SettingsGeneralView from "@/pages/Settings/General";
-import SettingsJellyfinView from "@/pages/Settings/Jellyfin";
 import SettingsLanguagesView from "@/pages/Settings/Languages";
 import SettingsNotificationsView from "@/pages/Settings/Notifications";
-import SettingsPlexView from "@/pages/Settings/Plex";
 import SettingsProvidersView from "@/pages/Settings/Providers";
-import SettingsRadarrView from "@/pages/Settings/Radarr";
 import SettingsSchedulerView from "@/pages/Settings/Scheduler";
-import SettingsSonarrView from "@/pages/Settings/Sonarr";
 import SettingsSubtitlesView from "@/pages/Settings/Subtitles";
 import SettingsTranslatorView from "@/pages/Settings/Translator";
 import SettingsUIView from "@/pages/Settings/UI";
@@ -203,25 +200,36 @@ function useRoutes(): CustomRouteObject[] {
             path: "settings",
             children: [
               {
-                divider: "Connections",
+                path: "connections",
+                name: "Connections",
+                element: <SettingsConnectionsView></SettingsConnectionsView>,
+              },
+              {
                 path: "sonarr",
-                name: "Sonarr",
-                element: <SettingsSonarrView></SettingsSonarrView>,
+                hidden: true,
+                element: <Navigate to="/settings/connections#sonarr" replace />,
               },
               {
                 path: "radarr",
-                name: "Radarr",
-                element: <SettingsRadarrView></SettingsRadarrView>,
+                hidden: true,
+                element: <Navigate to="/settings/connections#radarr" replace />,
               },
               {
                 path: "plex",
-                name: "Plex",
-                element: <SettingsPlexView></SettingsPlexView>,
+                hidden: true,
+                element: <Navigate to="/settings/connections#plex" replace />,
               },
               {
                 path: "jellyfin",
-                name: "Jellyfin",
-                element: <SettingsJellyfinView></SettingsJellyfinView>,
+                hidden: true,
+                element: (
+                  <Navigate to="/settings/connections#jellyfin" replace />
+                ),
+              },
+              {
+                path: "instances",
+                hidden: true,
+                element: <Navigate to="/settings/connections" replace />,
               },
               {
                 divider: "Subtitles",

@@ -22,14 +22,59 @@ import {
 interface Props {
   seriesId: number;
   episodeId: number;
+  // Owning Sonarr instance for this episode (#156); scopes subtitle
+  // download/delete to the correct instance on multi-instance setups.
+  arrInstanceId?: number;
   missing?: boolean;
   subtitle: Subtitle;
   availableSubtitles?: Subtitle[];
 }
 
+export function buildEpisodeSubtitleToolSelections({
+  episodeId,
+  arrInstanceId,
+  missing,
+  subtitle,
+}: {
+  episodeId: number;
+  arrInstanceId?: number;
+  missing: boolean;
+  subtitle: Subtitle;
+}): FormType.ModifySubtitle[] {
+  if (missing) return [];
+
+  const isEmbedded = !subtitle.path;
+  return [
+    {
+      id: episodeId,
+      type: "episode",
+      path: isEmbedded ? "" : subtitle.path!,
+      language: subtitle.code2,
+      forced: toPython(subtitle.forced),
+      hi: toPython(subtitle.hi),
+      from_language: isEmbedded ? subtitle.code2 : undefined,
+      arr_instance_id: arrInstanceId,
+    },
+  ];
+}
+
+function subtitleEditorUrl(
+  action: "preview" | "edit",
+  mediaType: "episode",
+  mediaId: number,
+  language: string,
+  arrInstanceId?: number,
+) {
+  const path = `/subtitles/${action}/${mediaType}/${mediaId}/${encodeURIComponent(language)}`;
+  return arrInstanceId !== undefined
+    ? `${path}?arr_instance_id=${arrInstanceId}`
+    : path;
+}
+
 export const Subtitle: FunctionComponent<Props> = ({
   seriesId,
   episodeId,
+  arrInstanceId,
   missing = false,
   subtitle,
   availableSubtitles,
@@ -55,30 +100,13 @@ export const Subtitle: FunctionComponent<Props> = ({
   }, [isEmbedded, missing, opened]);
 
   const selections = useMemo<FormType.ModifySubtitle[]>(() => {
-    if (missing) return [];
-
-    return [
-      {
-        id: episodeId,
-        type: "episode",
-        // Embedded track: empty path signals extraction on the backend
-        path: subtitle.path ?? "",
-        language: subtitle.code2,
-        forced: toPython(subtitle.forced),
-        hi: toPython(subtitle.hi),
-        // Required by backend to identify which embedded track to extract
-        from_language: isEmbedded ? subtitle.code2 : undefined,
-      },
-    ];
-  }, [
-    episodeId,
-    subtitle.code2,
-    subtitle.path,
-    subtitle.forced,
-    subtitle.hi,
-    isEmbedded,
-    missing,
-  ]);
+    return buildEpisodeSubtitleToolSelections({
+      episodeId,
+      arrInstanceId,
+      missing,
+      subtitle,
+    });
+  }, [episodeId, arrInstanceId, missing, subtitle]);
 
   // Translation sources: all available subtitles (embedded + external).
   // For missing subs the menu shows "Translate from X" items.
@@ -142,21 +170,34 @@ export const Subtitle: FunctionComponent<Props> = ({
           onAction={async (action) => {
             if (action === "rebuild") {
               combine.mutate({
-                scope: { kind: "episode", episodeId },
+                scope: { kind: "episode", episodeId, arrInstanceId },
                 body: combineRequestForSubtitle(subtitle) ?? {},
               });
             } else if (action === "view") {
               navigate(
-                `/subtitles/preview/episode/${episodeId}/${encodeURIComponent(buildSubtitleLanguageKey(subtitle))}`,
+                subtitleEditorUrl(
+                  "preview",
+                  "episode",
+                  episodeId,
+                  buildSubtitleLanguageKey(subtitle),
+                  arrInstanceId,
+                ),
               );
             } else if (action === "edit") {
               navigate(
-                `/subtitles/edit/episode/${episodeId}/${encodeURIComponent(buildSubtitleLanguageKey(subtitle))}`,
+                subtitleEditorUrl(
+                  "edit",
+                  "episode",
+                  episodeId,
+                  buildSubtitleLanguageKey(subtitle),
+                  arrInstanceId,
+                ),
               );
             } else if (action === "delete" && subtitlePath) {
               await remove.mutateAsync({
                 seriesId,
                 episodeId,
+                arrInstanceId,
                 form: {
                   language: subtitle.code2,
                   hi: subtitle.hi,
@@ -195,19 +236,33 @@ export const Subtitle: FunctionComponent<Props> = ({
         canCompareSyncOutputs={canCompareSyncOutputs}
         mediaId={episodeId}
         mediaType="episode"
+        arrInstanceId={arrInstanceId}
         onAction={async (action) => {
           if (action === "view") {
             navigate(
-              `/subtitles/preview/episode/${episodeId}/${encodeURIComponent(buildSubtitleLanguageKey(subtitle))}`,
+              subtitleEditorUrl(
+                "preview",
+                "episode",
+                episodeId,
+                buildSubtitleLanguageKey(subtitle),
+                arrInstanceId,
+              ),
             );
           } else if (action === "edit") {
             navigate(
-              `/subtitles/edit/episode/${episodeId}/${encodeURIComponent(buildSubtitleLanguageKey(subtitle))}`,
+              subtitleEditorUrl(
+                "edit",
+                "episode",
+                episodeId,
+                buildSubtitleLanguageKey(subtitle),
+                arrInstanceId,
+              ),
             );
           } else if (action === "search") {
             await download.mutateAsync({
               seriesId,
               episodeId,
+              arrInstanceId,
               form: {
                 language: subtitle.code2,
                 hi: subtitle.hi,
@@ -220,6 +275,7 @@ export const Subtitle: FunctionComponent<Props> = ({
             await remove.mutateAsync({
               seriesId,
               episodeId,
+              arrInstanceId,
               form: {
                 language: subtitle.code2,
                 hi: subtitle.hi,

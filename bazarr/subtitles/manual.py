@@ -21,6 +21,7 @@ from app.jobs_queue import jobs_queue
 from app.notifier import send_notifications, send_notifications_movie
 from sonarr.history import history_log
 from radarr.history import history_log_movie
+from arr_instances.resolution import scoped
 from subtitles.indexer.series import store_subtitles
 from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.processing import ProcessSubtitlesResult  # noqa: F401
@@ -230,11 +231,11 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
 
 
 def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode_id, hi, forced, use_original_format,
-                                                selected_provider, subtitle, job_id=None):
+                                                selected_provider, subtitle, job_id=None, arr_instance_id=None):
     if not job_id:
         return jobs_queue.add_job_from_function("Manually downloading Subtitles",is_progress=False)
 
-    episodeInfo = database.execute(
+    episodeInfo = database.execute(scoped(
         select(
             TableEpisodes.audio_language,
             TableEpisodes.path,
@@ -245,7 +246,8 @@ def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode
             TableShows.title)
         .select_from(TableEpisodes)
         .join(TableShows)
-        .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id)) \
+        .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id),
+        TableEpisodes.arr_instance_id, arr_instance_id)) \
         .first()
 
     if not episodeInfo:
@@ -276,9 +278,10 @@ def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode
         if isinstance(result, str):
             return result, 500
         elif result:
-            history_log(2, sonarr_series_id, sonarr_episode_id, result)
+            history_log(2, sonarr_series_id, sonarr_episode_id, result, arr_instance_id=arr_instance_id)
             if not settings.general.dont_notify_manual_actions:
-                send_notifications(sonarr_series_id, sonarr_episode_id, result.message)
+                send_notifications(sonarr_series_id, sonarr_episode_id, result.message,
+                                   arr_instance_id=arr_instance_id)
             store_subtitles(result.path, episodePath)
             return '', 204
     finally:
@@ -288,17 +291,18 @@ def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode
 
 
 def movie_manually_download_specific_subtitle(radarr_id, hi, forced, use_original_format, selected_provider, subtitle,
-                                              job_id=None):
+                                              job_id=None, arr_instance_id=None):
     if not job_id:
         return jobs_queue.add_job_from_function("Manually downloading Subtitles", is_progress=False)
 
-    movieInfo = database.execute(
+    movieInfo = database.execute(scoped(
         select(TableMovies.title,
                TableMovies.year,
                TableMovies.path,
                TableMovies.sceneName,
                TableMovies.audio_language)
-        .where(TableMovies.radarrId == radarr_id)) \
+        .where(TableMovies.radarrId == radarr_id),
+        TableMovies.arr_instance_id, arr_instance_id)) \
         .first()
 
     if not movieInfo:
@@ -328,9 +332,9 @@ def movie_manually_download_specific_subtitle(radarr_id, hi, forced, use_origina
         if isinstance(result, str):
             return result, 500
         elif result:
-            history_log_movie(2, radarr_id, result)
+            history_log_movie(2, radarr_id, result, arr_instance_id=arr_instance_id)
             if not settings.general.dont_notify_manual_actions:
-                send_notifications_movie(radarr_id, result.message)
+                send_notifications_movie(radarr_id, result.message, arr_instance_id=arr_instance_id)
             store_subtitles_movie(result.path, moviePath)
             return '', 204
     finally:

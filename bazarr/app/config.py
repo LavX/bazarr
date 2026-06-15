@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import secrets
+import sys
 import threading
 import time
 from datetime import datetime
@@ -855,7 +856,11 @@ def _settings_value(parent, keys):
 
 def _active_provider_hub_provider_ids():
     try:
-        from provider_hub.state import active_installations
+        state_module = sys.modules.get("provider_hub.state")
+        if state_module is not None and hasattr(state_module, "active_installations"):
+            active_installations = state_module.active_installations
+        else:
+            from provider_hub.state import active_installations
         return {
             str(provider_id)
             for provider_id in (
@@ -1081,8 +1086,7 @@ def save_settings(settings_items):
             if active_provider_hub_provider_ids is None:
                 active_provider_hub_provider_ids = _active_provider_hub_provider_ids()
             if settings_keys[1] in active_provider_hub_provider_ids:
-                if value != _settings_value(settings, settings_keys[1:]):
-                    reset_compat_pool = True
+                reset_compat_pool = True
 
         if key in ('settings-compat_endpoint-fanout_max_workers',
                    'settings-compat_endpoint-max_concurrent_fanouts'):
@@ -1189,7 +1193,7 @@ def save_settings(settings_items):
         # ciphertext back into the live Dynaconf object, so without this
         # second pass downstream code would see `enc:v1:` strings for
         # API keys, auth credentials, provider passwords, and compat
-        # tokens until the next process restart. Codex P1.
+        # tokens until the next process restart.
         settings.reload()
         migrate_legacy_plex_encryption(settings)
         decrypt_settings_in_place(settings)
@@ -1218,16 +1222,17 @@ def save_settings(settings_items):
             event_stream(type='task')
 
         if sonarr_changed:
-            from .signalr_client import sonarr_signalr_client
+            # Restart every Sonarr SignalR client and re-fan-out (#156).
+            from .signalr_client import restart_sonarr_signalr
             try:
-                sonarr_signalr_client.restart()
+                restart_sonarr_signalr()
             except Exception:
                 pass
 
         if radarr_changed:
-            from .signalr_client import radarr_signalr_client
+            from .signalr_client import restart_radarr_signalr
             try:
-                radarr_signalr_client.restart()
+                restart_radarr_signalr()
             except Exception:
                 pass
 

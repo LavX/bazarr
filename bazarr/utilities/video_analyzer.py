@@ -6,6 +6,7 @@ import pickle
 
 from app.config import settings
 from app.database import TableEpisodes, TableMovies, database, update, select
+from arr_instances.resolution import scoped
 from languages.custom_lang import CustomLanguage
 from languages.get_languages import language_from_alpha2, language_from_alpha3, alpha3_from_alpha2
 from utilities.path_mappings import path_mappings
@@ -108,14 +109,17 @@ def embedded_audio_reader(file, file_size, episode_file_id=None, movie_file_id=N
     return audio_list
 
 
-def subtitles_sync_references(subtitles_path, sonarr_episode_id=None, radarr_movie_id=None):
+def subtitles_sync_references(subtitles_path, sonarr_episode_id=None, radarr_movie_id=None, arr_instance_id=None):
     references_dict = {'audio_tracks': [], 'embedded_subtitles_tracks': [], 'external_subtitles_tracks': []}
     data = None
 
     if sonarr_episode_id:
         media_data = database.execute(
-            select(TableEpisodes.path, TableEpisodes.file_size, TableEpisodes.episode_file_id, TableEpisodes.subtitles)
-            .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id)) \
+            scoped(
+                select(TableEpisodes.path, TableEpisodes.file_size, TableEpisodes.episode_file_id,
+                       TableEpisodes.subtitles)
+                .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id),
+                TableEpisodes.arr_instance_id, arr_instance_id)) \
             .first()
 
         if not media_data:
@@ -127,8 +131,10 @@ def subtitles_sync_references(subtitles_path, sonarr_episode_id=None, radarr_mov
                                     use_cache=True)
     elif radarr_movie_id:
         media_data = database.execute(
-            select(TableMovies.path, TableMovies.file_size, TableMovies.movie_file_id, TableMovies.subtitles)
-            .where(TableMovies.radarrId == radarr_movie_id)) \
+            scoped(
+                select(TableMovies.path, TableMovies.file_size, TableMovies.movie_file_id, TableMovies.subtitles)
+                .where(TableMovies.radarrId == radarr_movie_id),
+                TableMovies.arr_instance_id, arr_instance_id)) \
             .first()
 
         if not media_data:

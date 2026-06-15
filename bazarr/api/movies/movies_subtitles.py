@@ -9,6 +9,7 @@ from subliminal_patch.core import SUBTITLE_EXTENSIONS
 from werkzeug.datastructures import FileStorage
 
 from app.database import TableMovies, get_profile_id, database, select  # noqa: F401
+from arr_instances.resolution import scoped
 from utilities.path_mappings import path_mappings
 from subtitles.upload import manual_upload_subtitle
 from subtitles.mass_download.movies import movie_download_specific_subtitles
@@ -31,6 +32,8 @@ class MoviesSubtitles(Resource):
     patch_request_parser.add_argument('language', type=str, required=True, help='Language code2')
     patch_request_parser.add_argument('forced', type=str, required=True, help='Forced true/false as string')
     patch_request_parser.add_argument('hi', type=str, required=True, help='HI true/false as string')
+    patch_request_parser.add_argument('arr_instance_id', type=int, required=False,
+                                      help='Owning Sonarr/Radarr instance id (#156)')
 
     @authenticate
     @api_ns_movies_subtitles.doc(parser=patch_request_parser)
@@ -45,7 +48,8 @@ class MoviesSubtitles(Resource):
 
         movie_download_specific_subtitles(radarr_id=args.get('radarrid'), language=args.get('language'),
                                           hi=args.get('hi').capitalize(),
-                                          forced=args.get('forced').capitalize(), job_id=None)
+                                          forced=args.get('forced').capitalize(), job_id=None,
+                                          arr_instance_id=args.get('arr_instance_id'))
 
         return '', 204
 
@@ -57,6 +61,8 @@ class MoviesSubtitles(Resource):
     post_request_parser.add_argument('hi', type=str, required=True, help='HI true/false as string')
     post_request_parser.add_argument('file', type=FileStorage, location='files', required=True,
                                      help='Subtitles file as file upload object')
+    post_request_parser.add_argument('arr_instance_id', type=int, required=False,
+                                     help='Owning Sonarr/Radarr instance id (#156)')
 
     @authenticate
     @api_ns_movies_subtitles.doc(parser=post_request_parser)
@@ -77,9 +83,11 @@ class MoviesSubtitles(Resource):
             raise ValueError('A subtitle of an invalid format was uploaded.')
 
         radarrId = args.get('radarrid')
-        movieInfo = database.execute(
+        arr_instance_id = args.get('arr_instance_id')
+        movieInfo = database.execute(scoped(
             select(TableMovies.path, TableMovies.audio_language)
-            .where(TableMovies.radarrId == radarrId)) \
+            .where(TableMovies.radarrId == radarrId),
+            TableMovies.arr_instance_id, arr_instance_id)) \
             .first()
 
         if not movieInfo:
@@ -100,7 +108,8 @@ class MoviesSubtitles(Resource):
                                subtitle=subtitle_content,
                                filename=uploaded_file.filename,
                                audio_language=movieInfo.audio_language,
-                               radarrId=radarrId)
+                               radarrId=radarrId,
+                               arr_instance_id=arr_instance_id)
 
         return '', 204
 
@@ -111,6 +120,8 @@ class MoviesSubtitles(Resource):
     delete_request_parser.add_argument('forced', type=str, required=True, help='Forced true/false as string')
     delete_request_parser.add_argument('hi', type=str, required=True, help='HI true/false as string')
     delete_request_parser.add_argument('path', type=str, required=True, help='Path of the subtitles file')
+    delete_request_parser.add_argument('arr_instance_id', type=int, required=False,
+                                       help='Owning Sonarr/Radarr instance id (#156)')
 
     @authenticate
     @api_ns_movies_subtitles.doc(parser=delete_request_parser)
@@ -122,9 +133,11 @@ class MoviesSubtitles(Resource):
         """Delete a movie subtitles"""
         args = self.delete_request_parser.parse_args()
         radarrId = args.get('radarrid')
-        movieInfo = database.execute(
+        arr_instance_id = args.get('arr_instance_id')
+        movieInfo = database.execute(scoped(
             select(TableMovies.path)
-            .where(TableMovies.radarrId == radarrId)) \
+            .where(TableMovies.radarrId == radarrId),
+            TableMovies.arr_instance_id, arr_instance_id)) \
             .first()
 
         if not movieInfo:
@@ -145,7 +158,8 @@ class MoviesSubtitles(Resource):
                             hi=hi,
                             media_path=moviePath,
                             subtitles_path=subtitlesPath,
-                            radarr_id=radarrId):
+                            radarr_id=radarrId,
+                            arr_instance_id=arr_instance_id):
             return '', 204
         else:
             return 'Subtitles file not found or permission issue.', 500
@@ -164,8 +178,13 @@ class MoviesSubtitlesCombine(Resource):
         languages = payload.get('languages')
         format_ = payload.get('format')
 
+        arr_instance_id = request.args.get('arr_instance_id', type=int)
         row = database.execute(
-            select(TableMovies.path).where(TableMovies.radarrId == radarr_id)
+            scoped(
+                select(TableMovies.path).where(TableMovies.radarrId == radarr_id),
+                TableMovies.arr_instance_id,
+                arr_instance_id,
+            )
         ).first()
         if not row:
             return {'status': 'not_found'}, 404
@@ -189,4 +208,3 @@ class MoviesSubtitlesCombine(Resource):
         }
         http_status = 500 if result.status == 'failed' else 200
         return body, http_status
-

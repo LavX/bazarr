@@ -42,16 +42,20 @@ def _sync_progress_total(enabled_engines):
     return max(len(normalize_enabled_engines(configured_engines)), 1)
 
 
-def _index_keep_all_outputs(video_path, sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None):
+def _index_keep_all_outputs(video_path, sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None,
+                            arr_instance_id=None):
     if sonarr_episode_id:
         from app.event_handler import event_stream
         from subtitles.indexer.series import store_subtitles
+        from utilities.media_ids import local_episode_id
         from utilities.path_mappings import path_mappings
 
         store_subtitles(path_mappings.path_replace_reverse(video_path), video_path)
         if sonarr_series_id:
             event_stream(type='series', payload=sonarr_series_id)
-        event_stream(type='episode', payload=sonarr_episode_id)
+        # Emit the LOCAL episode id (#156): the frontend caches episode detail by
+        # local id; the upstream sonarrEpisodeId is not unique across instances.
+        event_stream(type='episode', payload=local_episode_id(sonarr_episode_id, arr_instance_id))
         return
 
     if radarr_id:
@@ -108,6 +112,7 @@ def sync_subtitles(video_path,
                    enabled_engines=None,
                    callback=None,
                    track_job_progress=True,
+                   arr_instance_id=None,
                    owns_job_progress=True):
     if not settings.subsync.use_subsync and not force_sync:
         logging.debug('BAZARR automatic syncing is disabled in settings. Skipping sync routine.')
@@ -171,6 +176,7 @@ def sync_subtitles(video_path,
             'output_mode': output_mode,
             'enabled_engines': enabled_engines,
             'progress_callback': update_progress if track_job_progress else None,
+            'arr_instance_id': arr_instance_id,
         }
         sync_result = None
         try:
@@ -184,6 +190,7 @@ def sync_subtitles(video_path,
                         sonarr_series_id=sonarr_series_id,
                         sonarr_episode_id=sonarr_episode_id,
                         radarr_id=radarr_id,
+                        arr_instance_id=arr_instance_id,
                     )
         except Exception:
             logging.exception(f'BAZARR an unhandled exception occurs during the synchronization process for this '  # noqa: G004

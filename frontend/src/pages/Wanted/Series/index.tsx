@@ -11,7 +11,8 @@ import {
   useEpisodeWantedPagination,
   useSeriesAction,
 } from "@/apis/hooks";
-import { AudioList } from "@/components/bazarr";
+import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
+import { AudioList, InstanceBadge } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
 import { WantedItem } from "@/components/forms/MassTranslateForm";
 import WantedView from "@/pages/views/WantedView";
@@ -34,6 +35,11 @@ const WantedSeriesView: FunctionComponent = () => {
     missingLanguage !== null;
 
   const { data: audioLangs = [] } = useAudioLanguages();
+  const {
+    multiInstance,
+    nameById: instanceNameById,
+    defaultId: instanceDefaultId,
+  } = useArrInstanceLabels("sonarr");
   const query = useEpisodeWantedPagination(hasActiveFilter);
 
   const langOptions = useMemo(
@@ -111,10 +117,10 @@ const WantedSeriesView: FunctionComponent = () => {
         accessorKey: "seriesTitle",
         cell: ({
           row: {
-            original: { sonarrSeriesId, seriesTitle },
+            original: { series_id: seriesId, seriesTitle },
           },
         }) => {
-          const target = `/series/${sonarrSeriesId}`;
+          const target = `/series/${seriesId}`;
           return (
             <Anchor
               className={`table-primary ${tableStyles.episodeTitle}`}
@@ -126,6 +132,23 @@ const WantedSeriesView: FunctionComponent = () => {
           );
         },
       },
+      // Owning Sonarr instance (#156), shown only with more than one Sonarr.
+      // Default instance gets a muted grey badge, others an accent badge.
+      ...(multiInstance
+        ? [
+            {
+              id: "instance",
+              header: "Instance",
+              cell: ({ row: { original } }) => (
+                <InstanceBadge
+                  instanceId={original.arr_instance_id}
+                  defaultId={instanceDefaultId}
+                  nameById={instanceNameById}
+                />
+              ),
+            } as ColumnDef<Wanted.Episode>,
+          ]
+        : []),
       {
         header: "Audio",
         accessorKey: "audio_language",
@@ -170,6 +193,7 @@ const WantedSeriesView: FunctionComponent = () => {
             original: {
               sonarrSeriesId,
               sonarrEpisodeId,
+              arr_instance_id: arrInstanceId,
               missing_subtitles: missingSubtitles,
             },
           },
@@ -189,6 +213,7 @@ const WantedSeriesView: FunctionComponent = () => {
                     await download.mutateAsync({
                       seriesId,
                       episodeId,
+                      arrInstanceId,
                       form: {
                         language: item.code2,
                         hi: item.hi,
@@ -205,7 +230,7 @@ const WantedSeriesView: FunctionComponent = () => {
         },
       },
     ],
-    [download],
+    [download, multiInstance, instanceNameById, instanceDefaultId],
   );
 
   const getWantedItem = useCallback((row: Wanted.Episode): WantedItem => {
@@ -213,6 +238,7 @@ const WantedSeriesView: FunctionComponent = () => {
       type: "episode",
       sonarrSeriesId: row.sonarrSeriesId,
       sonarrEpisodeId: row.sonarrEpisodeId,
+      arrInstanceId: row.arr_instance_id,
       seriesTitle: row.seriesTitle,
       episodeTitle: row.episodeTitle,
     };
