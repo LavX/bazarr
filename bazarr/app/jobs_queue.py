@@ -335,7 +335,10 @@ class JobsQueue:
         payload = {"job_id": job.job_id, "status": job.status}
         progress_max_updated = False
 
-        if progress_value:
+        # ``progress_value`` may legitimately be 0 (a reset at the start of a new
+        # phase). A truthiness check here silently dropped those resets, leaving a
+        # stale large value behind a freshly-set small max -> >100% progress rings.
+        if progress_value is not None:
             if progress_value == 'max':
                 progress_value = job.progress_max or 1
                 job.progress_value = job.progress_max = progress_value

@@ -67,6 +67,20 @@ export function toPython(value: boolean): PythonBoolean {
   return value ? "True" : "False";
 }
 
+// Convert a job's progress value/max into a percentage clamped to 0-100.
+// Defends the progress ring against backend value/max scale mismatches that
+// could otherwise render nonsensical figures (e.g. 5967%).
+export function progressPercent(value: number, max: number): number {
+  if (!max || max <= 0) {
+    return 0;
+  }
+  const percent = (value / max) * 100;
+  if (!Number.isFinite(percent) || percent < 0) {
+    return 0;
+  }
+  return Math.min(100, percent);
+}
+
 export * from "./env";
 export * from "./hooks";
 export * from "./validate";

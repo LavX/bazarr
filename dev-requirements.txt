@@ -1,8 +1,6 @@
 sympy
 vcrpy>=8.1.1
 pytest
-pytest-pep8
-pytest-flakes
 pytest-cov
 pytest-vcr
 pytest-mock
