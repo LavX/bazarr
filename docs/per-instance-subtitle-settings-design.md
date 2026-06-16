@@ -144,18 +144,27 @@ This list is the main thing to confirm in review.
 ## 5. Data model
 
 Store overrides under a single namespaced key inside the existing
-`arr_instances.options` JSON, so other future `options` uses do not collide:
+`arr_instances.options` JSON, so other future `options` uses do not collide.
+The keys are grouped by config section (`general`, `subsync`) so they line up
+one-to-one with the resolver's dotted keys (section 6): an override at
+`subtitle_settings.<section>.<key>` is read by
+`resolve_subtitle_setting(id, "<section>.<key>", default)`. Keeping the storage
+namespace identical to the dotted lookup key avoids the prefix mismatch that
+would otherwise make general-section overrides silently fall back to global.
 
 ```json
 {
   "subtitle_settings": {
-    "use_postprocessing": true,
-    "postprocessing_cmd": "/config/scripts/anime.sh \"{{subtitles}}\"",
-    "subzero_mods": ["remove_HI(keep_lyrics=1)", "common"],
+    "general": {
+      "use_postprocessing": true,
+      "postprocessing_cmd": "/config/scripts/anime.sh \"{{subtitles}}\"",
+      "subzero_mods": ["remove_HI(keep_lyrics=1)", "common"]
+    },
     "subsync": {
       "use_subsync": true,
       "subsync_threshold": 80,
-      "enabled_engines": ["ffsubsync"]
+      "enabled_engines": ["ffsubsync"],
+      "max_offset_seconds": 120
     }
   }
 }
@@ -186,9 +195,14 @@ def resolve_subtitle_setting(arr_instance_id, dotted_key, global_default):
     """
 ```
 
-Backed by a cached read of `arr_instances.options -> subtitle_settings`,
-invalidated on instance update (the instance repository already emits update
-events). Call sites change from, for example:
+Backed by a cached read of `arr_instances.options -> subtitle_settings`. There
+is no existing repository update event to subscribe to (`ArrInstanceRepository`
+mutates and flushes the row, and the CRUD resource only calls
+`service.refresh_runtime` / `event_stream(type="task")`), so the resolver must
+add explicit cache invalidation in the create, update and delete paths.
+Otherwise editing an instance's `subtitle_settings` while Bazarr is running
+keeps returning stale overrides until restart. Call sites change from, for
+example:
 
 ```python
 use_pp = settings.general.use_postprocessing
@@ -203,13 +217,35 @@ use_pp = resolve_subtitle_setting(arr_instance_id, "general.use_postprocessing",
 
 For subzero mods, `bazarr/subtitles/tools/mods.py::get_subzero_mods()` (added in
 https://github.com/LavX/bazarr/issues/225) becomes the single choke point:
-extend it to take `arr_instance_id` and resolve the per-instance mod list there,
-so download/manual/upload automatically pick up the per-instance value.
+extend it to take `arr_instance_id` and resolve the per-instance mod list there.
 
-Affected call sites (all already receive `arr_instance_id`):
-`bazarr/subtitles/processing.py`, `bazarr/subtitles/sync.py`,
-`bazarr/subtitles/download.py`, `bazarr/subtitles/manual.py`,
-`bazarr/subtitles/upload.py`, `bazarr/subtitles/mass_operations.py`.
+### Call-site changes required
+
+The instance id is NOT yet threaded everywhere a subtitle setting is read; each
+of these must be addressed or the override is silently dropped:
+
+- `bazarr/subtitles/download.py::generate_subtitles` has no instance parameter.
+  Add `arr_instance_id` to its signature and thread it from the wanted,
+  mass-download and upgrade callers, then resolve `subz_mods` there via
+  `get_subzero_mods(arr_instance_id)`. Without this, auto-downloads keep using
+  the global mods even though manual/upload honour the override.
+- `bazarr/subtitles/processing.py::process_subtitle` reads `use_postprocessing`
+  / `postprocessing_cmd` before its owner is loaded from the DB. Either pass the
+  owning `arr_instance_id` into `process_subtitle` or move the post-processing
+  reads to after the metadata lookup, so the resolver has an instance to use.
+- `bazarr/subtitles/sync.py::sync_subtitles` defaults `max_offset_seconds` to
+  `str(settings.subsync.max_offset_seconds)`, evaluated at import time. Change
+  the default to `None` and resolve it inside the function with
+  `arr_instance_id`; auto/manual callers usually omit the argument, so a
+  body-only resolver change would miss this override.
+- `bazarr/subtitles/tools/subsyncer.py::SubSyncer.sync` falls back to
+  `settings.subsync.enabled_engines` when its `enabled_engines` argument is
+  `None`. `sync_subtitles` must pass the resolved engine list (or `SubSyncer`
+  must resolve it with `arr_instance_id`), or engine overrides are dropped
+  inside the subsyncer.
+- `bazarr/subtitles/upload.py` and `bazarr/subtitles/mass_operations.py`
+  already carry `arr_instance_id` and only need the read sites swapped to the
+  resolver.
 
 ## 7. API
 
@@ -254,10 +290,12 @@ Settings > Connections, with a link.
 
 ## 10. Rollout
 
-1. Backend resolver + `options.subtitle_settings` read/validate/write, with
-   `arr_instance_id` plumbed into `get_subzero_mods()` and the
-   post-processing / subsync reads (behaviour identical while no overrides
-   exist).
+1. Backend resolver (with explicit cache invalidation in create/update/delete)
+   + `options.subtitle_settings` read/validate/write, including the call-site
+   changes in section 6 (`arr_instance_id` into `generate_subtitles` and its
+   callers, into `process_subtitle`, the `sync_subtitles` `max_offset_seconds`
+   default flip, and passing resolved `enabled_engines` to `SubSyncer.sync`).
+   Behaviour stays identical while no overrides exist.
 2. API surface for reading and writing `subtitle_settings`.
 3. Frontend override UI in the instance modal + the global-page note.
 4. Docs and release notes.
