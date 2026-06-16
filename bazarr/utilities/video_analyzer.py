@@ -21,10 +21,16 @@ from knowit.api import know, KnowitException
 # plain track. Mirror the title heuristic here so those tracks are stored as
 # forced. See https://github.com/LavX/bazarr/issues/162
 _FORCED_TITLE_RE = re.compile(r"\bforced\b", re.IGNORECASE)
+# Titles like "Non-Forced" / "Not Forced" / "Unforced" distinguish a full track
+# from the forced-only one and must NOT be treated as forced.
+_NEGATED_FORCED_RE = re.compile(r"\b(?:non|not|un)[\s-]*forced\b", re.IGNORECASE)
 
 
 def _title_is_forced(title):
-    return bool(_FORCED_TITLE_RE.search(title or ""))
+    text = title or ""
+    if _NEGATED_FORCED_RE.search(text):
+        return False
+    return bool(_FORCED_TITLE_RE.search(text))
 
 
 def _handle_alpha3(detected_language: dict):

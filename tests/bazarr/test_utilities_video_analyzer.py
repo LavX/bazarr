@@ -274,6 +274,10 @@ def test_embedded_audio_reader(mediainfo_data, video_file):
         ("English SDH", False),
         ("enforced", False),       # must not match inside another word
         ("Reinforced track", False),
+        ("Non-Forced", False),     # negated form, distinguishes the full track
+        ("Not Forced", False),
+        ("Unforced", False),
+        ("English Non-Forced", False),
     ],
 )
 def test_title_is_forced(title, expected):
