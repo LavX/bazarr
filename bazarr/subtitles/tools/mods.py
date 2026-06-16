@@ -8,11 +8,35 @@ from subliminal_patch.subtitle import Subtitle
 from subliminal_patch.core import get_subtitle_path
 from subzero.language import Language
 
-from app.config import settings
+from app.config import settings, get_array_from
 from app.jobs_queue import jobs_queue
 from languages.custom_lang import CustomLanguage
 from languages.get_languages import alpha3_from_alpha2
 from subtitles.indexer.utils import get_external_subtitles_path
+
+
+def has_remove_hi(mods):
+    """Whether the Remove HI mod is present, tolerating its parameterized form
+    (e.g. remove_HI(keep_lyrics=1)). See https://github.com/LavX/bazarr/issues/225
+    """
+    return any(m == 'remove_HI' or m.startswith('remove_HI(') for m in (mods or []))
+
+
+def with_keep_lyrics(mods):
+    """Rewrite the Remove HI mod to preserve song lyrics when the setting is on.
+
+    The preference is encoded as a subzero mod parameter so it travels through
+    the (settings-agnostic) subtitle modification pipeline.
+    See https://github.com/LavX/bazarr/issues/225
+    """
+    if not mods or not settings.general.subzero_mods_keep_lyrics:
+        return mods
+    return ['remove_HI(keep_lyrics=1)' if m == 'remove_HI' else m for m in mods]
+
+
+def get_subzero_mods():
+    """Configured subzero mods with the preserve-song-lyrics preference applied."""
+    return with_keep_lyrics(get_array_from(settings.general.subzero_mods))
 
 
 MOD_LABELS = {
@@ -102,6 +126,7 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
 
 
 def subtitles_apply_mods(language, subtitle_path, mods, video_path):
+    mods = with_keep_lyrics(mods)
     language = alpha3_from_alpha2(language)
     custom = CustomLanguage.from_value(language, "alpha3")
     if custom is None:
@@ -120,7 +145,7 @@ def subtitles_apply_mods(language, subtitle_path, mods, video_path):
 
     content = sub.get_modified_content(format=sub.format)
     if content:
-        if hasattr(sub, 'mods') and isinstance(sub.mods, list) and 'remove_HI' in sub.mods:
+        if hasattr(sub, 'mods') and isinstance(sub.mods, list) and has_remove_hi(sub.mods):
             # get the modded subtitles path if the subtitles are alongside the video
             modded_subtitles_path_if_alongside_video = get_subtitle_path(
                 video_path,

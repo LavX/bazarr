@@ -23,6 +23,20 @@ class FullBracketEntryProcessor(NReProcessor):
         return content
 
 
+class MusicEntryProcessor(NReProcessor):
+    """Removes lyric lines decorated with music symbols, unless the mod was asked
+    to keep them via the keep_lyrics arg (remove_HI(keep_lyrics=1)).
+
+    Song lyrics are legitimate subtitle content; the default Remove HI behaviour
+    strips them along with the music notes. See
+    https://github.com/LavX/bazarr/issues/225
+    """
+    def process(self, content, debug=False, keep_lyrics=None, **kwargs):
+        if keep_lyrics:
+            return content
+        return super(MusicEntryProcessor, self).process(content, debug=debug, **kwargs)
+
+
 class HearingImpaired(SubtitleTextModification):
     identifier = "remove_HI"
     description = "Remove Hearing Impaired tags"
@@ -112,9 +126,9 @@ class HearingImpaired(SubtitleTextModification):
         NReProcessor(re.compile(r'(?u)(^%(t)s[*#¶♫♪\s]*%(t)s[*#¶♫♪\s]+%(t)s[*#¶♫♪\s]*%(t)s$)' % {"t": TAG}),
                      "", name="HI_music_symbols_only"),
 
-        # remove music entries
-        NReProcessor(re.compile(r'(?ums)(^[-\s>~]*[*#¶♫♪]+\s*.+|.+\s*[*#¶♫♪]+\s*$|.+\s*[*#¶♫♪]+[)\]])'),
-                     "", name="HI_music", entry=True),
+        # remove music entries (song lyrics); skipped when keep_lyrics is set
+        MusicEntryProcessor(re.compile(r'(?ums)(^[-\s>~]*[*#¶♫♪]+\s*.+|.+\s*[*#¶♫♪]+\s*$|.+\s*[*#¶♫♪]+[)\]])'),
+                            "", name="HI_music", entry=True),
     ]
 
 

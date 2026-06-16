@@ -174,6 +174,7 @@ validators = [
     Validator('general.wanted_search_frequency_movie', must_exist=True, default=6, is_type_of=int,
               is_in=[6, 12, 24, 168, ONE_HUNDRED_YEARS_IN_HOURS]),
     Validator('general.subzero_mods', must_exist=True, default='', is_type_of=str),
+    Validator('general.subzero_mods_keep_lyrics', must_exist=True, default=False, is_type_of=bool),
     Validator('general.dont_notify_manual_actions', must_exist=True, default=False, is_type_of=bool),
     Validator('general.notify_if_nothing_is_missing_for_signalr_event', must_exist=True, default=False, is_type_of=bool),
     Validator('general.hi_extension', must_exist=True, default='hi', is_type_of=str, is_in=['hi', 'cc', 'sdh']),
