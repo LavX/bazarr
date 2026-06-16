@@ -15,6 +15,7 @@ import {
   isUpdateAvailable,
   parseGitHubUrl,
   parseManifest,
+  requiresAntiCaptcha,
   summarizeUpdates,
 } from "@/pages/Settings/Providers/hub/utils";
 
@@ -317,5 +318,77 @@ describe("getActionLabel", () => {
     expect(getActionLabel(undefined)).toBe("Unknown action");
     expect(getActionLabel(null)).toBe("Unknown action");
     expect(getActionLabel("")).toBe("Unknown action");
+  });
+});
+
+describe("requiresAntiCaptcha", () => {
+  it("returns false for missing/empty manifests", () => {
+    expect(requiresAntiCaptcha(null)).toBe(false);
+    expect(requiresAntiCaptcha(undefined)).toBe(false);
+    expect(requiresAntiCaptcha({})).toBe(false);
+    expect(requiresAntiCaptcha({ manifest: { provider_id: "x" } })).toBe(false);
+  });
+
+  it("detects a keyword in the description", () => {
+    expect(
+      requiresAntiCaptcha({
+        manifest: { description: "Needs FlareSolverr to pass Cloudflare." },
+      }),
+    ).toBe(true);
+  });
+
+  it("detects a keyword in the long description", () => {
+    expect(
+      requiresAntiCaptcha({
+        manifest: { long_description: "An anti-captcha provider is required." },
+      }),
+    ).toBe(true);
+  });
+
+  it("detects a keyword inside config_schema field descriptions", () => {
+    expect(
+      requiresAntiCaptcha({
+        manifest: {
+          config_schema: {
+            properties: {
+              cookies: {
+                description: "Use cookies when login is blocked by captcha.",
+              },
+            },
+          },
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it("honours an explicit requires_anti_captcha flag over the heuristic", () => {
+    expect(
+      requiresAntiCaptcha({
+        manifest: {
+          requires_anti_captcha: false,
+          description: "Mentions captcha but explicitly opts out.",
+        },
+      }),
+    ).toBe(false);
+    expect(
+      requiresAntiCaptcha({ manifest: { requires_anti_captcha: true } }),
+    ).toBe(true);
+  });
+
+  it("detects an entry in an explicit requires array", () => {
+    expect(
+      requiresAntiCaptcha({ manifest: { requires: ["flaresolverr"] } }),
+    ).toBe(true);
+  });
+
+  it("returns false when no captcha signal is present", () => {
+    expect(
+      requiresAntiCaptcha({
+        manifest: {
+          description: "A normal subtitle provider.",
+          config_schema: { properties: { api_key: { title: "API key" } } },
+        },
+      }),
+    ).toBe(false);
   });
 });

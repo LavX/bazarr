@@ -88,6 +88,50 @@ export function parseManifest(
   return null;
 }
 
+const ANTI_CAPTCHA_RE = /captcha|flaresolverr/i;
+
+/**
+ * Best-effort detection of whether a catalog provider needs an Anti-Captcha
+ * service or FlareSolverr to solve captchas. Catalog manifests do not yet carry
+ * a structured flag, so an explicit declaration is honoured when present and we
+ * otherwise scan the human-facing manifest text and config schema for the known
+ * keywords. See https://github.com/LavX/bazarr/issues/215
+ */
+export function requiresAntiCaptcha(
+  entry: ProviderHubCatalogEntry | LooseObject | null | undefined,
+): boolean {
+  const manifest = parseManifest(entry) as LooseObject | null;
+  if (!manifest) return false;
+
+  if (typeof manifest.requires_anti_captcha === "boolean") {
+    return manifest.requires_anti_captcha;
+  }
+  if (
+    Array.isArray(manifest.requires) &&
+    manifest.requires.some(
+      (r) => typeof r === "string" && ANTI_CAPTCHA_RE.test(r),
+    )
+  ) {
+    return true;
+  }
+
+  const haystacks: string[] = [];
+  if (typeof manifest.description === "string") {
+    haystacks.push(manifest.description);
+  }
+  if (typeof manifest.long_description === "string") {
+    haystacks.push(manifest.long_description);
+  }
+  if (manifest.config_schema) {
+    try {
+      haystacks.push(JSON.stringify(manifest.config_schema));
+    } catch {
+      // ignore a non-serializable schema
+    }
+  }
+  return haystacks.some((text) => ANTI_CAPTCHA_RE.test(text));
+}
+
 interface ParsedSemver {
   core: number[];
   prerelease: string[];

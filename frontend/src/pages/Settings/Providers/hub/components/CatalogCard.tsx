@@ -15,9 +15,13 @@ import type {
   ProviderHubCatalogEntry,
   ProviderHubInstallation,
 } from "@/apis/raw/providerHub";
+import { AntiCaptchaBadge } from "@/pages/Settings/Providers/hub/components/AntiCaptchaBadge";
 import { ProviderStatusBadge } from "@/pages/Settings/Providers/hub/components/StatusBadge";
 import { TrustBadge } from "@/pages/Settings/Providers/hub/components/TrustBadge";
-import { parseManifest } from "@/pages/Settings/Providers/hub/utils";
+import {
+  parseManifest,
+  requiresAntiCaptcha,
+} from "@/pages/Settings/Providers/hub/utils";
 import {
   AUTH_LABEL,
   detectAuthFromManifest,
@@ -286,6 +290,7 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
           ) : (
             <TrustBadge trusted={entry.trusted} />
           )}
+          {requiresAntiCaptcha(entry) && <AntiCaptchaBadge />}
         </Group>
         <div className={styles.hubCardAction}>{ctaButton}</div>
       </div>
