@@ -16,6 +16,7 @@ import {
   parseGitHubUrl,
   parseManifest,
   requiresAntiCaptcha,
+  requiresFlaresolverr,
   summarizeUpdates,
 } from "@/pages/Settings/Providers/hub/utils";
 
@@ -329,44 +330,47 @@ describe("requiresAntiCaptcha", () => {
     expect(requiresAntiCaptcha({ manifest: { provider_id: "x" } })).toBe(false);
   });
 
-  it("detects a keyword in the description", () => {
-    expect(
-      requiresAntiCaptcha({
-        manifest: { description: "Needs FlareSolverr to pass Cloudflare." },
-      }),
-    ).toBe(true);
-  });
-
-  it("detects a keyword in the long description", () => {
-    expect(
-      requiresAntiCaptcha({
-        manifest: { long_description: "An anti-captcha provider is required." },
-      }),
-    ).toBe(true);
-  });
-
-  it("detects a keyword inside config_schema field descriptions", () => {
+  it("detects a captcha-solver config field", () => {
     expect(
       requiresAntiCaptcha({
         manifest: {
           config_schema: {
-            properties: {
-              cookies: {
-                description: "Use cookies when login is blocked by captcha.",
-              },
-            },
+            properties: { captcha_solver_url: { title: "Captcha solver URL" } },
           },
         },
       }),
     ).toBe(true);
   });
 
-  it("honours an explicit requires_anti_captcha flag over the heuristic", () => {
+  it("does not treat a FlareSolverr-only provider as anti-captcha", () => {
+    expect(
+      requiresAntiCaptcha({
+        manifest: {
+          config_schema: {
+            properties: { flaresolverr_url: { title: "FlareSolverr URL" } },
+          },
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("ignores captcha mentions in description text without a config field", () => {
+    expect(
+      requiresAntiCaptcha({
+        manifest: {
+          description: "Use cookies when login is blocked by captcha.",
+          config_schema: { properties: { cookies: { secret: true } } },
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("honours an explicit requires_anti_captcha flag over field detection", () => {
     expect(
       requiresAntiCaptcha({
         manifest: {
           requires_anti_captcha: false,
-          description: "Mentions captcha but explicitly opts out.",
+          config_schema: { properties: { captcha_solver_url: {} } },
         },
       }),
     ).toBe(false);
@@ -374,21 +378,48 @@ describe("requiresAntiCaptcha", () => {
       requiresAntiCaptcha({ manifest: { requires_anti_captcha: true } }),
     ).toBe(true);
   });
+});
 
-  it("detects an entry in an explicit requires array", () => {
+describe("requiresFlaresolverr", () => {
+  it("returns false for missing/empty manifests", () => {
+    expect(requiresFlaresolverr(null)).toBe(false);
+    expect(requiresFlaresolverr(undefined)).toBe(false);
+    expect(requiresFlaresolverr({})).toBe(false);
+  });
+
+  it("detects a flaresolverr config field", () => {
     expect(
-      requiresAntiCaptcha({ manifest: { requires: ["flaresolverr"] } }),
+      requiresFlaresolverr({
+        manifest: {
+          config_schema: {
+            properties: { flaresolverr_url: { title: "FlareSolverr URL" } },
+          },
+        },
+      }),
     ).toBe(true);
   });
 
-  it("returns false when no captcha signal is present", () => {
+  it("does not treat a captcha-solver-only provider as FlareSolverr", () => {
     expect(
-      requiresAntiCaptcha({
+      requiresFlaresolverr({
         manifest: {
-          description: "A normal subtitle provider.",
-          config_schema: { properties: { api_key: { title: "API key" } } },
+          config_schema: { properties: { captcha_solver_url: {} } },
         },
       }),
     ).toBe(false);
+  });
+
+  it("honours an explicit requires_flaresolverr flag over field detection", () => {
+    expect(
+      requiresFlaresolverr({
+        manifest: {
+          requires_flaresolverr: false,
+          config_schema: { properties: { flaresolverr_url: {} } },
+        },
+      }),
+    ).toBe(false);
+    expect(
+      requiresFlaresolverr({ manifest: { requires_flaresolverr: true } }),
+    ).toBe(true);
   });
 });
