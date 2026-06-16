@@ -23,18 +23,40 @@ class FullBracketEntryProcessor(NReProcessor):
         return content
 
 
+_MUSIC_SYMBOLS_RE = re.compile(r'[*#¶♫♪]')
+_MUSIC_CUE_KEYWORDS_RE = re.compile(r'\b(?:music|instrumental|fanfare|jingle)\b', re.IGNORECASE)
+
+
+def _is_music_cue(text):
+    """Whether a music-note line describes a sound rather than carrying lyrics.
+
+    Used only when keep_lyrics is set: a music *cue* (an all-caps sound
+    description like "MUSIC", or a phrase such as "ominous music") is still
+    hearing-impaired content and should be removed, while genuine song lyrics
+    are preserved. See https://github.com/LavX/bazarr/issues/225
+    """
+    inner = _MUSIC_SYMBOLS_RE.sub('', text or '').strip(" \t->~[]()")
+    if not inner:
+        return True  # decoration only, no lyrics
+    letters = [c for c in inner if c.isalpha()]
+    if letters and all(c.isupper() for c in letters):
+        return True  # all-caps sound description
+    return bool(_MUSIC_CUE_KEYWORDS_RE.search(inner))
+
+
 class MusicEntryProcessor(NReProcessor):
     """Removes lyric lines decorated with music symbols, unless the mod was asked
     to keep them via the keep_lyrics arg (remove_HI(keep_lyrics=1)).
 
     Song lyrics are legitimate subtitle content; the default Remove HI behaviour
-    strips them along with the music notes. See
+    strips them along with the music notes. When keeping lyrics, music *cues*
+    (sound descriptions) are still removed. See
     https://github.com/LavX/bazarr/issues/225
     """
-    def process(self, content, debug=False, keep_lyrics=None, **kwargs):
-        if keep_lyrics:
+    def process(self, content, debug=False, keep_lyrics=None, entry=None, **kwargs):
+        if keep_lyrics and not _is_music_cue(content):
             return content
-        return super(MusicEntryProcessor, self).process(content, debug=debug, **kwargs)
+        return super(MusicEntryProcessor, self).process(content, debug=debug, entry=entry, **kwargs)
 
 
 class HearingImpaired(SubtitleTextModification):

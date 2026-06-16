@@ -24,9 +24,9 @@ SRT = (
 )
 
 
-def _modified(languages, mods):
+def _modified(languages, mods, srt=SRT):
     sub = Subtitle(languages["en"], mods=mods, original_format=True)
-    sub.content = SRT.encode("utf-8")
+    sub.content = srt.encode("utf-8")
     assert sub.is_valid()
     content = sub.get_modified_content(format="srt")
     return content.decode("utf-8") if content else ""
@@ -54,3 +54,19 @@ def test_keep_lyrics_still_drops_bare_music_symbol_lines(languages):
     out = _modified(languages, ["remove_HI(keep_lyrics=1)"])
     lines = [line.strip() for line in out.splitlines()]
     assert "♪♪" not in lines
+
+
+def test_keep_lyrics_still_drops_music_cue_descriptions(languages):
+    """Music *descriptions* (cues) are hearing-impaired content, not lyrics, so
+    they are removed even when lyrics are preserved. Regression for the Codex
+    review on https://github.com/LavX/bazarr/pull/229
+    """
+    srt = (
+        "1\n00:00:01,000 --> 00:00:02,000\n♪ MUSIC ♪\n\n"
+        "2\n00:00:03,000 --> 00:00:04,000\n♪ ominous music ♪\n\n"
+        "3\n00:00:05,000 --> 00:00:06,000\n♪ We are the champions my friend ♪\n"
+    )
+    out = _modified(languages, ["remove_HI(keep_lyrics=1)"], srt=srt)
+    assert "MUSIC" not in out                          # all-caps cue removed
+    assert "ominous music" not in out                  # lowercase music cue removed
+    assert "We are the champions my friend" in out     # genuine lyric preserved
