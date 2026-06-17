@@ -172,7 +172,8 @@ def episode_download_subtitles(no, job_id=None, job_sub_function=False, provider
                                              episode.profileId,
                                              check_if_still_required=True,
                                              job_id=job_id,
-                                             fallback_allowed=fallback_allowed):
+                                             fallback_allowed=fallback_allowed,
+                                             arr_instance_id=arr_instance_id):
                 if result:
                     if isinstance(result, tuple) and len(result):
                         result = result[0]
@@ -249,7 +250,7 @@ def episode_download_specific_subtitles(sonarr_series_id, sonarr_episode_id, lan
     try:
         result = list(generate_subtitles(episodePath, [(language, hi, forced)], audio_language, sceneName,
                                          title, 'series', profile_id=get_profile_id(episode_id=sonarr_episode_id),
-                                         job_id=job_id))
+                                         job_id=job_id, arr_instance_id=arr_instance_id))
         if isinstance(result, list) and len(result):
             result = result[0]
             if isinstance(result, tuple) and len(result):

@@ -189,7 +189,8 @@ def _wanted_episode(episode, providers_list, job_id=None):
                                      episode.profileId,
                                      check_if_still_required=True,
                                      job_id=job_id,
-                                     fallback_allowed=settings.general.use_whisper_fallback):
+                                     fallback_allowed=settings.general.use_whisper_fallback,
+                                     arr_instance_id=arr_instance_id):
         if result:
             found_any = True
             if isinstance(result, tuple) and len(result):

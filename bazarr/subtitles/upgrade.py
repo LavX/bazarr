@@ -163,7 +163,8 @@ def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, sonarr_serie
                                          is_upgrade=True,
                                          previous_subtitles_to_delete=path_mappings.path_replace(
                                              episode['subtitles_path']),
-                                         job_id=job_id))
+                                         job_id=job_id,
+                                         arr_instance_id=episode['arr_instance_id']))
 
         if result:
             if isinstance(result, list) and len(result):
@@ -306,7 +307,8 @@ def upgrade_movies_subtitles(job_id=None, radarr_ids=None, radarr_filters=None, 
                                          is_upgrade=True,
                                          previous_subtitles_to_delete=path_mappings.path_replace_movie(
                                              movie['subtitles_path']),
-                                         job_id=job_id))
+                                         job_id=job_id,
+                                         arr_instance_id=movie['arr_instance_id']))
         if result:
             if isinstance(result, list) and len(result):
                 result = result[0]

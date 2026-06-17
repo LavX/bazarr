@@ -108,7 +108,7 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
     from subtitles.tools.mods import get_subzero_mods
     sub = Subtitle(
         lang_obj,
-        mods=get_subzero_mods(),
+        mods=get_subzero_mods(arr_instance_id),
         original_format=use_original_format
     )
 

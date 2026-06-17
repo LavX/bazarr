@@ -25,7 +25,8 @@ from .processing import process_subtitle
 @update_pools
 def generate_subtitles(path, languages, audio_language, sceneName, title, media_type, profile_id,
                        forced_minimum_score=None, is_upgrade=False, check_if_still_required=False,
-                       previous_subtitles_to_delete=None, job_id=None, fallback_allowed=False):
+                       previous_subtitles_to_delete=None, job_id=None, fallback_allowed=False,
+                       arr_instance_id=None):
     if not languages:
         return None
 
@@ -59,7 +60,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
         min_score, max_score, scores = _get_scores(media_type, minimum_score_movie, minimum_score)
 
         from subtitles.tools.mods import get_subzero_mods
-        subz_mods = get_subzero_mods()
+        subz_mods = get_subzero_mods(arr_instance_id)
         saved_any = False
 
         if providers:
