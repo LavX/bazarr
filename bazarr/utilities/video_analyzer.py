@@ -20,10 +20,13 @@ from knowit.api import know, KnowitException
 # labels a track title="Forced" while leaving disposition.forced=0 is read as a
 # plain track. Mirror the title heuristic here so those tracks are stored as
 # forced. See https://github.com/LavX/bazarr/issues/162
-_FORCED_TITLE_RE = re.compile(r"\bforced\b", re.IGNORECASE)
-# Titles like "Non-Forced" / "Not Forced" / "Unforced" distinguish a full track
-# from the forced-only one and must NOT be treated as forced.
-_NEGATED_FORCED_RE = re.compile(r"\b(?:non|not|un)[\s-]*forced\b", re.IGNORECASE)
+# Match the word "forced" delimited by anything that is not a letter, so
+# space-, bracket-, dash- and underscore-separated titles ("English Forced",
+# "[Forced]", "English_Forced") all match, while "enforced"/"reinforced" do not.
+_FORCED_TITLE_RE = re.compile(r"(?<![a-z])forced(?![a-z])", re.IGNORECASE)
+# Titles like "Non-Forced" / "Not Forced" / "Non_Forced" / "Unforced" distinguish
+# a full track from the forced-only one and must NOT be treated as forced.
+_NEGATED_FORCED_RE = re.compile(r"(?<![a-z])(?:non|not|un)[\s_-]*forced(?![a-z])", re.IGNORECASE)
 
 
 def _title_is_forced(title):

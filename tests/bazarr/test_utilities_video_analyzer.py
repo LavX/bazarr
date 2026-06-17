@@ -278,6 +278,10 @@ def test_embedded_audio_reader(mediainfo_data, video_file):
         ("Not Forced", False),
         ("Unforced", False),
         ("English Non-Forced", False),
+        ("English_Forced", True),  # underscore-separated title
+        ("eng_forced", True),
+        ("Non_Forced", False),     # negated, underscore-separated
+        ("English_Non_Forced", False),
     ],
 )
 def test_title_is_forced(title, expected):
