@@ -5,6 +5,11 @@ import json
 
 import pytest
 
+from arr_instances.repository import ArrInstanceRepository
+from arr_instances.resolution import (
+    clear_subtitle_settings_cache,
+    resolve_subtitle_setting,
+)
 from arr_instances.subtitle_settings import (
     merge_subtitle_settings_into_options,
     read_subtitle_settings,
@@ -102,3 +107,52 @@ def test_merge_empty_blob_clears_key():
     options = merge_subtitle_settings_into_options(existing2, {})
     assert read_subtitle_settings(options) == {}
     assert json.loads(options) == {"keep": 1}
+
+
+def _make_instance(session, kind, name, port, blob=None):
+    options = merge_subtitle_settings_into_options(None, blob) if blob else None
+    row = ArrInstanceRepository(session).create(kind, name, port=port, options=options)
+    clear_subtitle_settings_cache()
+    return row
+
+
+def test_resolve_returns_override(schema_session):
+    row = _make_instance(schema_session, "sonarr", "Main", 8989,
+                         {"subsync": {"subsync_threshold": 80}})
+    assert resolve_subtitle_setting(
+        row.id, "subsync.subsync_threshold", 90, session=schema_session) == 80
+
+
+def test_resolve_missing_key_and_section_fall_back_to_global(schema_session):
+    row = _make_instance(schema_session, "sonarr", "Main", 8989,
+                         {"subsync": {"subsync_threshold": 80}})
+    # key absent within an overridden section
+    assert resolve_subtitle_setting(
+        row.id, "subsync.use_subsync", False, session=schema_session) is False
+    # section not overridden at all
+    assert resolve_subtitle_setting(
+        row.id, "general.use_postprocessing", True, session=schema_session) is True
+
+
+def test_resolve_none_instance_returns_global(schema_session):
+    assert resolve_subtitle_setting(
+        None, "subsync.subsync_threshold", 90, session=schema_session) == 90
+
+
+def test_resolve_instance_without_options_returns_global(schema_session):
+    row = _make_instance(schema_session, "radarr", "Movies", 7878)
+    assert resolve_subtitle_setting(
+        row.id, "subsync.subsync_threshold", 90, session=schema_session) == 90
+
+
+def test_resolve_reflects_change_after_cache_clear(schema_session):
+    row = _make_instance(schema_session, "sonarr", "S", 8989,
+                         {"subsync": {"subsync_threshold": 80}})
+    assert resolve_subtitle_setting(
+        row.id, "subsync.subsync_threshold", 90, session=schema_session) == 80
+    ArrInstanceRepository(schema_session).update(
+        row.id,
+        options=merge_subtitle_settings_into_options(None, {"subsync": {"subsync_threshold": 50}}))
+    clear_subtitle_settings_cache()
+    assert resolve_subtitle_setting(
+        row.id, "subsync.subsync_threshold", 90, session=schema_session) == 50

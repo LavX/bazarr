@@ -56,6 +56,12 @@ def refresh_runtime(kind, instance_id=None, removed=False):
       transient arr/SignalR failure during the restart must not fail the CRUD
       API response. Mirrors the try/except guard in config.save_settings.
     """
+    # Per-instance subtitle settings may have changed; drop the resolver cache
+    # so the next read reflects the edit (#227). Cheap and kind-agnostic, so do
+    # it before the kind guard returns.
+    from .resolution import clear_subtitle_settings_cache
+    clear_subtitle_settings_cache()
+
     if kind not in VALID_KINDS:
         return
     try:
