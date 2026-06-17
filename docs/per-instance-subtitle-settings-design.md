@@ -180,6 +180,14 @@ Rules:
   giving a no-op migration.
 - The default instance also inherits globals unless explicitly overridden, so
   the global Subtitles settings page keeps working unchanged.
+- Inherit vs override semantics are key-presence, not value: an absent key means
+  "follow the global value (and keep following it as the global changes)", while
+  a present key is a sticky override that holds even if the global later changes.
+  The UI's "Override" toggle therefore writes the key and "Inherit" deletes it;
+  setting an override to the value that happens to equal the current global is
+  still a recorded override (it will not track future global changes) until the
+  user toggles back to Inherit. The API must accept an explicit "clear this
+  override" (delete the key), distinct from "set it to X".
 
 ## 6. Resolution layer
 
@@ -243,13 +251,22 @@ of these must be addressed or the override is silently dropped:
   / `postprocessing_cmd` before its owner is loaded from the DB. Either pass the
   owning `arr_instance_id` into `process_subtitle` or move the post-processing
   reads to after the metadata lookup, so the resolver has an instance to use.
-- `bazarr/subtitles/sync.py::sync_subtitles` has TWO read sites, not one. (a)
-  Its early gate returns on `settings.subsync.use_subsync`, so the per-instance
-  `use_subsync` must be resolved there or auto-sync is enabled/disabled globally
-  regardless of the override. (b) `max_offset_seconds` defaults to
+  This applies to the whole group, not just those two keys:
+  `use_postprocessing_threshold` / `postprocessing_threshold` and their `_movie`
+  variants are read in the same path and must be resolved with the same owner.
+- `bazarr/subtitles/sync.py::sync_subtitles` has several read sites, not one.
+  (a) Its early gate returns on `settings.subsync.use_subsync`, so the
+  per-instance `use_subsync` must be resolved there or auto-sync is
+  enabled/disabled globally regardless of the override. (b) the threshold gate
+  reads `use_subsync_threshold` / `subsync_threshold` (and the `_movie`
+  variants); these must be resolved with the owner too, or the score gate uses
+  the global threshold. (c) `max_offset_seconds` defaults to
   `str(settings.subsync.max_offset_seconds)`, evaluated at import time; change
-  the default to `None` and resolve it inside the function, since auto/manual
-  callers usually omit the argument and a body-only change would miss it.
+  the default to `None` and resolve it inside the function. Note this default
+  flip is necessary but not sufficient: callers that DO pass `max_offset_seconds`
+  explicitly (e.g. the manual sync entry point) must pass the resolved
+  per-instance value rather than the global one, or they re-introduce the global
+  offset for those paths.
 - `bazarr/subtitles/tools/subsyncer.py::SubSyncer.sync` falls back to
   `settings.subsync.enabled_engines` when its `enabled_engines` argument is
   `None`. `sync_subtitles` must pass the resolved engine list (or `SubSyncer`
@@ -283,9 +300,16 @@ parsers only read connection fields, so both sides need extending:
 
 Validation cannot simply reuse the global validators: `bazarr/app/config.py`
 only type-checks `subsync.enabled_engines` as a list of strings (no enum
-membership check), so the per-instance API must add explicit enum validation for
-the engine list, plus the threshold range checks, rather than assuming a global
-enum validator exists.
+membership check), so the per-instance API must add explicit validation itself
+rather than assuming global validators exist:
+
+- `enabled_engines`: each entry is one of the known engine ids.
+- `max_offset_seconds`: one of the allowed values `[60, 120, 300, 600]` (the
+  global config offers these as fixed choices; the API must enforce membership,
+  not just "is an int").
+- thresholds (`subsync_threshold`, `postprocessing_threshold`, and the `_movie`
+  variants): integer within 0-100.
+- booleans (`use_*`) and `postprocessing_cmd` (string) type-checked.
 
 ## 8. Frontend
 
