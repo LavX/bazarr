@@ -89,3 +89,16 @@ def test_keep_lyrics_preserves_all_music_note_text_lines(languages):
     assert "HAPPY BIRTHDAY TO YOU" in out               # all-caps lyric kept
     assert "I can still hear the music playing" in out  # lyric mentioning music kept
     assert "We are the champions my friend" in out      # plain lyric kept
+
+
+def test_keep_lyrics_drops_symbol_line_within_multiline_event(languages):
+    """A symbol-only line sharing a multi-line cue with a lyric is dropped on its
+    own; the lyric line in the same cue must survive (not be dragged into the
+    entry-wide removal). Regression for the Codex review on
+    https://github.com/LavX/bazarr/pull/229
+    """
+    srt = "1\n00:00:01,000 --> 00:00:02,000\n♪ We are the champions ♪\n♪♪\n"
+    out = _modified(languages, ["remove_HI(keep_lyrics=1)"], srt=srt)
+    assert "We are the champions" in out                # lyric in the multi-line cue kept
+    lines = [line.strip() for line in out.splitlines()]
+    assert "♪♪" not in lines                            # symbol-only line dropped

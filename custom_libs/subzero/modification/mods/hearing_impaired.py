@@ -42,8 +42,12 @@ class MusicEntryProcessor(NReProcessor):
     See https://github.com/LavX/bazarr/issues/225
     """
     def process(self, content, debug=False, keep_lyrics=None, **kwargs):
-        if keep_lyrics and _HI_WORD_RE.search(content or ""):
-            return content
+        if keep_lyrics:
+            # Decide per line, not via the entry-wide HI_music regex: a
+            # symbol-only line inside a multi-line event would otherwise drag the
+            # whole event (the lyric line included) into removal. Keep lines that
+            # carry words (lyrics); drop pure symbol/dash/punctuation lines.
+            return content if _HI_WORD_RE.search(content or "") else ""
         return super(MusicEntryProcessor, self).process(content, debug=debug, **kwargs)
 
 
