@@ -14,11 +14,11 @@ import styles from "@/pages/Settings/Providers/hub/hub.module.scss";
  */
 export const AntiCaptchaBadge: FunctionComponent = () => {
   return (
-    <Tooltip label="Needs an external anti-captcha service to solve captchas">
+    <Tooltip label="Can use an anti-captcha service to solve captchas">
       <span
         className={clsx(styles.pill, styles["tone-warning"])}
         role="status"
-        aria-label="Needs an anti-captcha service"
+        aria-label="Can use an anti-captcha service"
       >
         <FontAwesomeIcon icon={faRobot} className={styles.pillIcon} />
         <span>Anti-Captcha</span>

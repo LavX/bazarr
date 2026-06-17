@@ -21,8 +21,8 @@ import { ProviderStatusBadge } from "@/pages/Settings/Providers/hub/components/S
 import { TrustBadge } from "@/pages/Settings/Providers/hub/components/TrustBadge";
 import {
   parseManifest,
-  requiresAntiCaptcha,
-  requiresFlaresolverr,
+  usesAntiCaptcha,
+  usesFlaresolverr,
 } from "@/pages/Settings/Providers/hub/utils";
 import {
   AUTH_LABEL,
@@ -292,8 +292,8 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
           ) : (
             <TrustBadge trusted={entry.trusted} />
           )}
-          {requiresAntiCaptcha(entry) && <AntiCaptchaBadge />}
-          {requiresFlaresolverr(entry) && <FlareSolverrBadge />}
+          {usesAntiCaptcha(entry) && <AntiCaptchaBadge />}
+          {usesFlaresolverr(entry) && <FlareSolverrBadge />}
         </Group>
         <div className={styles.hubCardAction}>{ctaButton}</div>
       </div>

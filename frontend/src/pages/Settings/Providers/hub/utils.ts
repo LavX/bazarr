@@ -97,14 +97,14 @@ function configSchemaHasFieldKey(manifest: LooseObject, re: RegExp): boolean {
   return Object.keys(props).some((key) => re.test(key));
 }
 
-function manifestRequiresCapability(
+function manifestHasCapability(
   entry: ProviderHubCatalogEntry | LooseObject | null | undefined,
   flagKey: string,
   fieldRe: RegExp,
 ): boolean {
   const manifest = parseManifest(entry) as LooseObject | null;
   if (!manifest) return false;
-  // An explicit catalog flag is authoritative.
+  // An explicit catalog capability flag is authoritative.
   if (typeof manifest[flagKey] === "boolean") {
     return manifest[flagKey] as boolean;
   }
@@ -115,37 +115,29 @@ function manifestRequiresCapability(
 }
 
 /**
- * Whether a catalog provider needs an external anti-captcha service to solve
+ * Whether a catalog provider can use an external anti-captcha service to solve
  * captchas (for example reCAPTCHA or image verification). Honours an explicit
- * `requires_anti_captcha` manifest flag, else detects a `captcha*` config field.
+ * `anti_captcha` manifest flag, else detects a `captcha*` config field.
  * Note: FlareSolverr is a Cloudflare bypass, not a captcha solver, and is
- * surfaced separately via requiresFlaresolverr.
+ * surfaced separately via usesFlaresolverr.
  * See https://github.com/LavX/bazarr/issues/215
  */
-export function requiresAntiCaptcha(
+export function usesAntiCaptcha(
   entry: ProviderHubCatalogEntry | LooseObject | null | undefined,
 ): boolean {
-  return manifestRequiresCapability(
-    entry,
-    "requires_anti_captcha",
-    CAPTCHA_FIELD_RE,
-  );
+  return manifestHasCapability(entry, "anti_captcha", CAPTCHA_FIELD_RE);
 }
 
 /**
  * Whether a catalog provider can use FlareSolverr to clear Cloudflare browser
- * challenges. Honours an explicit `requires_flaresolverr` manifest flag, else
- * detects a `flaresolverr*` config field.
+ * challenges. Honours an explicit `flaresolverr` manifest flag, else detects a
+ * `flaresolverr*` config field.
  * See https://github.com/LavX/bazarr/issues/215
  */
-export function requiresFlaresolverr(
+export function usesFlaresolverr(
   entry: ProviderHubCatalogEntry | LooseObject | null | undefined,
 ): boolean {
-  return manifestRequiresCapability(
-    entry,
-    "requires_flaresolverr",
-    FLARESOLVERR_FIELD_RE,
-  );
+  return manifestHasCapability(entry, "flaresolverr", FLARESOLVERR_FIELD_RE);
 }
 
 interface ParsedSemver {

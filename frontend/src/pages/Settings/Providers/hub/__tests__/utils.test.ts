@@ -15,9 +15,9 @@ import {
   isUpdateAvailable,
   parseGitHubUrl,
   parseManifest,
-  requiresAntiCaptcha,
-  requiresFlaresolverr,
   summarizeUpdates,
+  usesAntiCaptcha,
+  usesFlaresolverr,
 } from "@/pages/Settings/Providers/hub/utils";
 
 describe("parseManifest", () => {
@@ -322,17 +322,17 @@ describe("getActionLabel", () => {
   });
 });
 
-describe("requiresAntiCaptcha", () => {
+describe("usesAntiCaptcha", () => {
   it("returns false for missing/empty manifests", () => {
-    expect(requiresAntiCaptcha(null)).toBe(false);
-    expect(requiresAntiCaptcha(undefined)).toBe(false);
-    expect(requiresAntiCaptcha({})).toBe(false);
-    expect(requiresAntiCaptcha({ manifest: { provider_id: "x" } })).toBe(false);
+    expect(usesAntiCaptcha(null)).toBe(false);
+    expect(usesAntiCaptcha(undefined)).toBe(false);
+    expect(usesAntiCaptcha({})).toBe(false);
+    expect(usesAntiCaptcha({ manifest: { provider_id: "x" } })).toBe(false);
   });
 
   it("detects a captcha-solver config field", () => {
     expect(
-      requiresAntiCaptcha({
+      usesAntiCaptcha({
         manifest: {
           config_schema: {
             properties: { captcha_solver_url: { title: "Captcha solver URL" } },
@@ -344,7 +344,7 @@ describe("requiresAntiCaptcha", () => {
 
   it("does not treat a FlareSolverr-only provider as anti-captcha", () => {
     expect(
-      requiresAntiCaptcha({
+      usesAntiCaptcha({
         manifest: {
           config_schema: {
             properties: { flaresolverr_url: { title: "FlareSolverr URL" } },
@@ -356,7 +356,7 @@ describe("requiresAntiCaptcha", () => {
 
   it("ignores captcha mentions in description text without a config field", () => {
     expect(
-      requiresAntiCaptcha({
+      usesAntiCaptcha({
         manifest: {
           description: "Use cookies when login is blocked by captcha.",
           config_schema: { properties: { cookies: { secret: true } } },
@@ -365,31 +365,29 @@ describe("requiresAntiCaptcha", () => {
     ).toBe(false);
   });
 
-  it("honours an explicit requires_anti_captcha flag over field detection", () => {
+  it("honours an explicit anti_captcha flag over field detection", () => {
     expect(
-      requiresAntiCaptcha({
+      usesAntiCaptcha({
         manifest: {
-          requires_anti_captcha: false,
+          anti_captcha: false,
           config_schema: { properties: { captcha_solver_url: {} } },
         },
       }),
     ).toBe(false);
-    expect(
-      requiresAntiCaptcha({ manifest: { requires_anti_captcha: true } }),
-    ).toBe(true);
+    expect(usesAntiCaptcha({ manifest: { anti_captcha: true } })).toBe(true);
   });
 });
 
-describe("requiresFlaresolverr", () => {
+describe("usesFlaresolverr", () => {
   it("returns false for missing/empty manifests", () => {
-    expect(requiresFlaresolverr(null)).toBe(false);
-    expect(requiresFlaresolverr(undefined)).toBe(false);
-    expect(requiresFlaresolverr({})).toBe(false);
+    expect(usesFlaresolverr(null)).toBe(false);
+    expect(usesFlaresolverr(undefined)).toBe(false);
+    expect(usesFlaresolverr({})).toBe(false);
   });
 
   it("detects a flaresolverr config field", () => {
     expect(
-      requiresFlaresolverr({
+      usesFlaresolverr({
         manifest: {
           config_schema: {
             properties: { flaresolverr_url: { title: "FlareSolverr URL" } },
@@ -401,7 +399,7 @@ describe("requiresFlaresolverr", () => {
 
   it("does not treat a captcha-solver-only provider as FlareSolverr", () => {
     expect(
-      requiresFlaresolverr({
+      usesFlaresolverr({
         manifest: {
           config_schema: { properties: { captcha_solver_url: {} } },
         },
@@ -409,17 +407,15 @@ describe("requiresFlaresolverr", () => {
     ).toBe(false);
   });
 
-  it("honours an explicit requires_flaresolverr flag over field detection", () => {
+  it("honours an explicit flaresolverr flag over field detection", () => {
     expect(
-      requiresFlaresolverr({
+      usesFlaresolverr({
         manifest: {
-          requires_flaresolverr: false,
+          flaresolverr: false,
           config_schema: { properties: { flaresolverr_url: {} } },
         },
       }),
     ).toBe(false);
-    expect(
-      requiresFlaresolverr({ manifest: { requires_flaresolverr: true } }),
-    ).toBe(true);
+    expect(usesFlaresolverr({ manifest: { flaresolverr: true } })).toBe(true);
   });
 });
