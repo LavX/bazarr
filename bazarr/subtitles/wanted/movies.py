@@ -182,7 +182,8 @@ def _wanted_movie(movie, providers_list, job_id=None):
                                      movie.profileId,
                                      check_if_still_required=True,
                                      job_id=job_id,
-                                     fallback_allowed=settings.general.use_whisper_fallback):
+                                     fallback_allowed=settings.general.use_whisper_fallback,
+                                     arr_instance_id=arr_instance_id):
 
         if result:
             found_any = True

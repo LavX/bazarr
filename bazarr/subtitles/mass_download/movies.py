@@ -105,7 +105,8 @@ def movies_download_subtitles(no, job_id=None, job_sub_function=False, arr_insta
                                              'movie',
                                              movie.profileId,
                                              check_if_still_required=True,
-                                             job_id=job_id):
+                                             job_id=job_id,
+                                             arr_instance_id=arr_instance_id):
                 if result:
                     if isinstance(result, tuple) and len(result):
                         result = result[0]
@@ -170,7 +171,7 @@ def movie_download_specific_subtitles(radarr_id, language, hi, forced, job_id=No
     try:
         result = list(generate_subtitles(moviePath, [(language, hi, forced)], audio_language,
                                          sceneName, title, 'movie', profile_id=get_profile_id(movie_id=radarr_id),
-                                         job_id=job_id))
+                                         job_id=job_id, arr_instance_id=arr_instance_id))
         if isinstance(result, list) and len(result):
             result = result[0]
             if isinstance(result, tuple) and len(result):

@@ -22,21 +22,39 @@ def has_remove_hi(mods):
     return any(m == 'remove_HI' or m.startswith('remove_HI(') for m in (mods or []))
 
 
-def with_keep_lyrics(mods):
+def with_keep_lyrics(mods, arr_instance_id=None):
     """Rewrite the Remove HI mod to preserve song lyrics when the setting is on.
 
     The preference is encoded as a subzero mod parameter so it travels through
     the (settings-agnostic) subtitle modification pipeline.
     See https://github.com/LavX/bazarr/issues/225
+
+    When ``arr_instance_id`` is given the preserve-lyrics preference resolves
+    against that instance's per-instance override, falling back to the global
+    setting (#227). A None instance keeps the legacy global-only behaviour.
     """
-    if not mods or not settings.general.subzero_mods_keep_lyrics:
+    from arr_instances.resolution import resolve_subtitle_setting
+    keep_lyrics = resolve_subtitle_setting(
+        arr_instance_id, "general.subzero_mods_keep_lyrics",
+        settings.general.subzero_mods_keep_lyrics)
+    if not mods or not keep_lyrics:
         return mods
     return ['remove_HI(keep_lyrics=1)' if m == 'remove_HI' else m for m in mods]
 
 
-def get_subzero_mods():
-    """Configured subzero mods with the preserve-song-lyrics preference applied."""
-    return with_keep_lyrics(get_array_from(settings.general.subzero_mods))
+def get_subzero_mods(arr_instance_id=None):
+    """Configured subzero mods with the preserve-song-lyrics preference applied.
+
+    With ``arr_instance_id`` the configured mods + keep-lyrics preference resolve
+    against that instance's overrides (#227). The per-instance value is stored as
+    a list; the global value is a comma-separated string, so both shapes are
+    normalised here. A None instance preserves the legacy global behaviour.
+    """
+    from arr_instances.resolution import resolve_subtitle_setting
+    configured = resolve_subtitle_setting(
+        arr_instance_id, "general.subzero_mods", settings.general.subzero_mods)
+    mods = configured if isinstance(configured, list) else get_array_from(configured)
+    return with_keep_lyrics(mods, arr_instance_id)
 
 
 MOD_LABELS = {
