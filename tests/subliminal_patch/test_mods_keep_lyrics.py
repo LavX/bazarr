@@ -91,6 +91,21 @@ def test_keep_lyrics_preserves_all_music_note_text_lines(languages):
     assert "We are the champions my friend" in out      # plain lyric kept
 
 
+def test_keep_lyrics_leaves_non_music_letterless_lines(languages):
+    """Lines without a music symbol are outside this processor's scope and must
+    survive even when they have no letters (e.g. a year). Regression for the
+    Codex review on https://github.com/LavX/bazarr/pull/229
+    """
+    srt = (
+        "1\n00:00:01,000 --> 00:00:02,000\n1939\n\n"
+        "2\n00:00:03,000 --> 00:00:04,000\n♪♪\n"
+    )
+    out = _modified(languages, ["remove_HI(keep_lyrics=1)"], srt=srt)
+    assert "1939" in out                    # non-music letterless line kept
+    lines = [line.strip() for line in out.splitlines()]
+    assert "♪♪" not in lines                # music symbol-only line still dropped
+
+
 def test_keep_lyrics_drops_symbol_line_within_multiline_event(languages):
     """A symbol-only line sharing a multi-line cue with a lyric is dropped on its
     own; the lyric line in the same cue must survive (not be dragged into the

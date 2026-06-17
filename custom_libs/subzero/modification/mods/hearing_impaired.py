@@ -24,6 +24,7 @@ class FullBracketEntryProcessor(NReProcessor):
 
 
 _HI_WORD_RE = re.compile(r'[^\W\d_]', re.UNICODE)
+_MUSIC_SYMBOL_RE = re.compile(r'[*#¶♫♪]')
 
 
 class MusicEntryProcessor(NReProcessor):
@@ -31,23 +32,29 @@ class MusicEntryProcessor(NReProcessor):
     to keep them via the keep_lyrics arg (remove_HI(keep_lyrics=1)).
 
     Song lyrics are legitimate subtitle content; the default Remove HI behaviour
-    strips them along with the music notes. When keep_lyrics is set we preserve a
-    music-note line only if it carries actual words (any letter, incl. non-Latin
-    such as CJK). Lines that are just symbols/dashes/punctuation are still
-    dropped as decoration. A sung lyric and a descriptive cue (e.g. "MUSIC",
-    "ominous music") both have words and cannot be told apart reliably, so the
-    cue text is kept too: the whole point of the option is to never drop a real
-    lyric. Bracket-wrapped lines (e.g. "[music]") are descriptions by subtitle
-    convention and are removed earlier by HI_brackets, before this processor.
+    strips them along with the music notes. When keep_lyrics is set, this
+    processor only touches lines that actually bear a music symbol (its normal
+    scope): such a line is preserved if it carries words (any letter, incl.
+    non-Latin such as CJK) and dropped if it is only symbols/decoration. Lines
+    without a music symbol are returned untouched, so unrelated letter-free lines
+    (numbers, punctuation) are never collateral. A sung lyric and a descriptive
+    cue (e.g. "MUSIC", "ominous music") both have words and cannot be told apart
+    reliably, so the cue text is kept too: the point of the option is to never
+    drop a real lyric. Bracket-wrapped lines (e.g. "[music]") are descriptions by
+    subtitle convention and are removed earlier by HI_brackets.
     See https://github.com/LavX/bazarr/issues/225
     """
     def process(self, content, debug=False, keep_lyrics=None, **kwargs):
         if keep_lyrics:
-            # Decide per line, not via the entry-wide HI_music regex: a
-            # symbol-only line inside a multi-line event would otherwise drag the
-            # whole event (the lyric line included) into removal. Keep lines that
-            # carry words (lyrics); drop pure symbol/dash/punctuation lines.
-            return content if _HI_WORD_RE.search(content or "") else ""
+            text = content or ""
+            # Only music-note lines are in this processor's scope; leave anything
+            # else (it would not match the HI_music regex anyway) untouched.
+            if not _MUSIC_SYMBOL_RE.search(text):
+                return content
+            # Decide per line (not via the entry-wide regex) so a symbol-only
+            # line in a multi-line cue does not drag the lyric line with it:
+            # keep music-note lines with words, drop symbol-only decoration.
+            return content if _HI_WORD_RE.search(text) else ""
         return super(MusicEntryProcessor, self).process(content, debug=debug, **kwargs)
 
 
