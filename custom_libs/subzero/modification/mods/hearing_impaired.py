@@ -23,20 +23,26 @@ class FullBracketEntryProcessor(NReProcessor):
         return content
 
 
+_HI_WORD_RE = re.compile(r'[^\W\d_]', re.UNICODE)
+
+
 class MusicEntryProcessor(NReProcessor):
     """Removes music-note lines (the HI_music processor), unless the mod was asked
     to keep them via the keep_lyrics arg (remove_HI(keep_lyrics=1)).
 
     Song lyrics are legitimate subtitle content; the default Remove HI behaviour
-    strips them along with the music notes. When keep_lyrics is set we preserve
-    every music-note line: a sung lyric and a descriptive cue (e.g. "MUSIC",
-    "ominous music", or an all-caps line) cannot be told apart reliably, and the
-    whole point of the option is to never drop a real lyric. Bare music-symbol
-    lines with no text are still removed by the separate HI_music_symbols_only
-    processor. See https://github.com/LavX/bazarr/issues/225
+    strips them along with the music notes. When keep_lyrics is set we preserve a
+    music-note line only if it carries actual words (any letter, incl. non-Latin
+    such as CJK). Lines that are just symbols/dashes/punctuation are still
+    dropped as decoration. A sung lyric and a descriptive cue (e.g. "MUSIC",
+    "ominous music") both have words and cannot be told apart reliably, so the
+    cue text is kept too: the whole point of the option is to never drop a real
+    lyric. Bracket-wrapped lines (e.g. "[music]") are descriptions by subtitle
+    convention and are removed earlier by HI_brackets, before this processor.
+    See https://github.com/LavX/bazarr/issues/225
     """
     def process(self, content, debug=False, keep_lyrics=None, **kwargs):
-        if keep_lyrics:
+        if keep_lyrics and _HI_WORD_RE.search(content or ""):
             return content
         return super(MusicEntryProcessor, self).process(content, debug=debug, **kwargs)
 

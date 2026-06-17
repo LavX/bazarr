@@ -56,6 +56,23 @@ def test_keep_lyrics_still_drops_bare_music_symbol_lines(languages):
     assert "♪♪" not in lines
 
 
+def test_keep_lyrics_drops_decorated_symbol_only_lines(languages):
+    """Symbol-only lines decorated with dashes/spaces carry no words, so they are
+    still dropped while a real lyric in the same file is kept. Regression for the
+    Codex review on https://github.com/LavX/bazarr/pull/229
+    """
+    srt = (
+        "1\n00:00:01,000 --> 00:00:02,000\n- ♪♪\n\n"
+        "2\n00:00:03,000 --> 00:00:04,000\n> ♪ ♪\n\n"
+        "3\n00:00:05,000 --> 00:00:06,000\n♪ We are the champions ♪\n"
+    )
+    out = _modified(languages, ["remove_HI(keep_lyrics=1)"], srt=srt)
+    lines = [line.strip() for line in out.splitlines()]
+    assert "- ♪♪" not in lines              # decorated symbol-only line dropped
+    assert "> ♪ ♪" not in lines             # decorated symbol-only line dropped
+    assert "We are the champions" in out    # real lyric preserved
+
+
 def test_keep_lyrics_preserves_all_music_note_text_lines(languages):
     """A music-note line carrying text is preserved when keeping lyrics, even if
     it looks like a description: a sung lyric and a cue cannot be told apart
