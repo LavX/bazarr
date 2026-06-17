@@ -56,17 +56,19 @@ def test_keep_lyrics_still_drops_bare_music_symbol_lines(languages):
     assert "♪♪" not in lines
 
 
-def test_keep_lyrics_still_drops_music_cue_descriptions(languages):
-    """Music *descriptions* (cues) are hearing-impaired content, not lyrics, so
-    they are removed even when lyrics are preserved. Regression for the Codex
-    review on https://github.com/LavX/bazarr/pull/229
+def test_keep_lyrics_preserves_all_music_note_text_lines(languages):
+    """A music-note line carrying text is preserved when keeping lyrics, even if
+    it looks like a description: a sung lyric and a cue cannot be told apart
+    reliably, and over-removing was the bug being fixed (the heuristic dropped
+    all-caps lyrics like "HAPPY BIRTHDAY" and lyrics containing "music").
+    See the Codex review on https://github.com/LavX/bazarr/pull/229
     """
     srt = (
-        "1\n00:00:01,000 --> 00:00:02,000\n♪ MUSIC ♪\n\n"
-        "2\n00:00:03,000 --> 00:00:04,000\n♪ ominous music ♪\n\n"
+        "1\n00:00:01,000 --> 00:00:02,000\n♪ HAPPY BIRTHDAY TO YOU ♪\n\n"
+        "2\n00:00:03,000 --> 00:00:04,000\n♪ I can still hear the music playing ♪\n\n"
         "3\n00:00:05,000 --> 00:00:06,000\n♪ We are the champions my friend ♪\n"
     )
     out = _modified(languages, ["remove_HI(keep_lyrics=1)"], srt=srt)
-    assert "MUSIC" not in out                          # all-caps cue removed
-    assert "ominous music" not in out                  # lowercase music cue removed
-    assert "We are the champions my friend" in out     # genuine lyric preserved
+    assert "HAPPY BIRTHDAY TO YOU" in out               # all-caps lyric kept
+    assert "I can still hear the music playing" in out  # lyric mentioning music kept
+    assert "We are the champions my friend" in out      # plain lyric kept

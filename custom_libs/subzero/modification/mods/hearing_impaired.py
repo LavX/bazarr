@@ -23,40 +23,22 @@ class FullBracketEntryProcessor(NReProcessor):
         return content
 
 
-_MUSIC_SYMBOLS_RE = re.compile(r'[*#¶♫♪]')
-_MUSIC_CUE_KEYWORDS_RE = re.compile(r'\b(?:music|instrumental|fanfare|jingle)\b', re.IGNORECASE)
-
-
-def _is_music_cue(text):
-    """Whether a music-note line describes a sound rather than carrying lyrics.
-
-    Used only when keep_lyrics is set: a music *cue* (an all-caps sound
-    description like "MUSIC", or a phrase such as "ominous music") is still
-    hearing-impaired content and should be removed, while genuine song lyrics
-    are preserved. See https://github.com/LavX/bazarr/issues/225
-    """
-    inner = _MUSIC_SYMBOLS_RE.sub('', text or '').strip(" \t->~[]()")
-    if not inner:
-        return True  # decoration only, no lyrics
-    letters = [c for c in inner if c.isalpha()]
-    if letters and all(c.isupper() for c in letters):
-        return True  # all-caps sound description
-    return bool(_MUSIC_CUE_KEYWORDS_RE.search(inner))
-
-
 class MusicEntryProcessor(NReProcessor):
-    """Removes lyric lines decorated with music symbols, unless the mod was asked
+    """Removes music-note lines (the HI_music processor), unless the mod was asked
     to keep them via the keep_lyrics arg (remove_HI(keep_lyrics=1)).
 
     Song lyrics are legitimate subtitle content; the default Remove HI behaviour
-    strips them along with the music notes. When keeping lyrics, music *cues*
-    (sound descriptions) are still removed. See
-    https://github.com/LavX/bazarr/issues/225
+    strips them along with the music notes. When keep_lyrics is set we preserve
+    every music-note line: a sung lyric and a descriptive cue (e.g. "MUSIC",
+    "ominous music", or an all-caps line) cannot be told apart reliably, and the
+    whole point of the option is to never drop a real lyric. Bare music-symbol
+    lines with no text are still removed by the separate HI_music_symbols_only
+    processor. See https://github.com/LavX/bazarr/issues/225
     """
-    def process(self, content, debug=False, keep_lyrics=None, entry=None, **kwargs):
-        if keep_lyrics and not _is_music_cue(content):
+    def process(self, content, debug=False, keep_lyrics=None, **kwargs):
+        if keep_lyrics:
             return content
-        return super(MusicEntryProcessor, self).process(content, debug=debug, entry=entry, **kwargs)
+        return super(MusicEntryProcessor, self).process(content, debug=debug, **kwargs)
 
 
 class HearingImpaired(SubtitleTextModification):
