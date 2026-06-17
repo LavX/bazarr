@@ -12,7 +12,7 @@ from subliminal_patch.score import MAX_SCORES
 from pysubs2.formats import get_format_identifier
 
 from languages.get_languages import language_from_alpha3, alpha2_from_alpha3, alpha3_from_alpha2
-from app.config import settings, get_array_from
+from app.config import settings
 from utilities.helper import get_target_folder, force_unicode
 from utilities.post_processing import pp_replace, set_chmod
 from utilities.path_mappings import path_mappings
@@ -105,9 +105,10 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
     else:
         audio_language = {'name': '', 'code2': '', 'code3': ''}
 
+    from subtitles.tools.mods import get_subzero_mods
     sub = Subtitle(
         lang_obj,
-        mods=get_array_from(settings.general.subzero_mods),
+        mods=get_subzero_mods(),
         original_format=use_original_format
     )
 

@@ -11,7 +11,7 @@ from subzero.language import Language
 from subliminal_patch.core import save_subtitles
 from subliminal_patch.core_persistent import download_best_subtitles
 
-from app.config import settings, get_array_from
+from app.config import settings
 from app.database import TableEpisodes, TableMovies, database, select, get_profiles_list
 from utilities.path_mappings import path_mappings
 from utilities.helper import get_target_folder, force_unicode
@@ -58,7 +58,8 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
         minimum_score_movie = settings.general.minimum_score_movie
         min_score, max_score, scores = _get_scores(media_type, minimum_score_movie, minimum_score)
 
-        subz_mods = get_array_from(settings.general.subzero_mods)
+        from subtitles.tools.mods import get_subzero_mods
+        subz_mods = get_subzero_mods()
         saved_any = False
 
         if providers:

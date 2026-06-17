@@ -1354,7 +1354,7 @@ def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=Non
         # When the remove_HI mod is applied the saved file no longer carries HI cues, so clear
         # the HI flags as well, not just the filename tag. Downstream history/DB recording reads
         # these attributes; leaving them set records a stripped subtitle as hearing-impaired.
-        if subtitle.mods and 'remove_HI' in subtitle.mods:
+        if subtitle.mods and any(m == 'remove_HI' or m.startswith('remove_HI(') for m in subtitle.mods):
             if hasattr(subtitle, 'hearing_impaired'):
                 subtitle.hearing_impaired = False
             if hasattr(subtitle, 'language') and hasattr(subtitle.language, 'hi'):

@@ -68,6 +68,7 @@ declare namespace Settings {
     subfolder: string;
     subfolder_custom?: string;
     subzero_mods?: string[];
+    subzero_mods_keep_lyrics?: boolean;
     subzero_color_selection?: string;
     update_restart: boolean;
     upgrade_frequency: number;

@@ -366,6 +366,15 @@ const SettingsSubtitlesView: FunctionComponent = () => {
           hearing impaired people.
         </Message>
         <Check
+          label="Preserve Song Lyrics"
+          settingKey="settings-general-subzero_mods_keep_lyrics"
+        ></Check>
+        <Message>
+          When removing hearing impaired content, keep song lyrics that are
+          marked with music note symbols (♪, ♫). Only applies when Hearing
+          Impaired removal is enabled.
+        </Message>
+        <Check
           label="Remove Tags"
           settingOptions={{ onLoaded: SubzeroModification("remove_tags") }}
           settingKey="subzero-remove_tags"
