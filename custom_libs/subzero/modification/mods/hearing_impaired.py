@@ -27,6 +27,9 @@ class FullBracketEntryProcessor(NReProcessor):
 # as real content rather than pure decoration.
 _HI_CONTENT_RE = re.compile(r'[^\W_]', re.UNICODE)
 _MUSIC_SYMBOL_RE = re.compile(r'[*#¶♫♪]')
+# SSA/ASS override tags ({\i1}, {\an8}, {\c&H..&}, ...) carry letters/digits that
+# must not be mistaken for lyric content when testing a line.
+_OVERRIDE_TAG_RE = re.compile(r'\{[^}]*\}')
 
 
 class MusicEntryProcessor(NReProcessor):
@@ -57,8 +60,10 @@ class MusicEntryProcessor(NReProcessor):
             # Decide per line (not via the entry-wide regex) so a symbol-only
             # line in a multi-line cue does not drag the lyric line with it:
             # keep music-note lines with alphanumeric content, drop pure
-            # symbol/punctuation decoration.
-            return content if _HI_CONTENT_RE.search(text) else ""
+            # symbol/punctuation decoration. Strip override tags first so their
+            # letters/digits (e.g. {\i1}) are not counted as content.
+            stripped = _OVERRIDE_TAG_RE.sub('', text)
+            return content if _HI_CONTENT_RE.search(stripped) else ""
         return super(MusicEntryProcessor, self).process(content, debug=debug, **kwargs)
 
 

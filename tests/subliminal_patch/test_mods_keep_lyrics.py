@@ -106,6 +106,28 @@ def test_keep_lyrics_leaves_non_music_letterless_lines(languages):
     assert "♪♪" not in lines                # music symbol-only line still dropped
 
 
+def test_music_processor_strips_override_tags_for_content_check():
+    """SSA/ASS override tags ({\\i1}, {\\an8}, ...) must not count as lyric
+    content: a tag-wrapped decoration line is dropped, a tag-wrapped lyric is
+    kept, and a non-music line is left untouched. Regression for the Codex review
+    on https://github.com/LavX/bazarr/pull/229
+    """
+    import re as _re
+
+    from subzero.modification.mods.hearing_impaired import MusicEntryProcessor
+
+    proc = MusicEntryProcessor(_re.compile(r"x"), "", name="test", entry=True)
+    # tag-wrapped pure decoration -> dropped (tag chars must not read as content)
+    assert proc.process("{\\i1}♪♪{\\i0}", keep_lyrics=1) == ""
+    assert proc.process("{\\an8}{\\i1}♪ ♪{\\i0}", keep_lyrics=1) == ""
+    # tag-wrapped real lyric -> kept verbatim
+    assert (
+        proc.process("{\\i1}♪ HAPPY ♪{\\i0}", keep_lyrics=1) == "{\\i1}♪ HAPPY ♪{\\i0}"
+    )
+    # non-music line (no music symbol) -> untouched even though it has tags
+    assert proc.process("{\\i1}1939{\\i0}", keep_lyrics=1) == "{\\i1}1939{\\i0}"
+
+
 def test_keep_lyrics_preserves_numeric_music_lines(languages):
     """A music-note line whose content is numeric (e.g. a count-in) is real
     content, not pure decoration, so it is preserved. Regression for the Codex
