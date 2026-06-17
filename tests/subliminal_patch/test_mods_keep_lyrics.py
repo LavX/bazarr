@@ -106,6 +106,21 @@ def test_keep_lyrics_leaves_non_music_letterless_lines(languages):
     assert "♪♪" not in lines                # music symbol-only line still dropped
 
 
+def test_keep_lyrics_preserves_numeric_music_lines(languages):
+    """A music-note line whose content is numeric (e.g. a count-in) is real
+    content, not pure decoration, so it is preserved. Regression for the Codex
+    review on https://github.com/LavX/bazarr/pull/229
+    """
+    srt = (
+        "1\n00:00:01,000 --> 00:00:02,000\n♪ 1 2 3 4 ♪\n\n"
+        "2\n00:00:03,000 --> 00:00:04,000\n♪♪\n"
+    )
+    out = _modified(languages, ["remove_HI(keep_lyrics=1)"], srt=srt)
+    assert "1 2 3 4" in out                 # numeric music-note line kept
+    lines = [line.strip() for line in out.splitlines()]
+    assert "♪♪" not in lines                # pure decoration still dropped
+
+
 def test_keep_lyrics_drops_symbol_line_within_multiline_event(languages):
     """A symbol-only line sharing a multi-line cue with a lyric is dropped on its
     own; the lyric line in the same cue must survive (not be dragged into the

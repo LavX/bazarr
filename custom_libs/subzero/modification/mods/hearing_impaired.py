@@ -23,7 +23,9 @@ class FullBracketEntryProcessor(NReProcessor):
         return content
 
 
-_HI_WORD_RE = re.compile(r'[^\W\d_]', re.UNICODE)
+# Any alphanumeric content (letters incl. non-Latin/CJK, or digits) marks a line
+# as real content rather than pure decoration.
+_HI_CONTENT_RE = re.compile(r'[^\W_]', re.UNICODE)
 _MUSIC_SYMBOL_RE = re.compile(r'[*#¶♫♪]')
 
 
@@ -34,10 +36,11 @@ class MusicEntryProcessor(NReProcessor):
     Song lyrics are legitimate subtitle content; the default Remove HI behaviour
     strips them along with the music notes. When keep_lyrics is set, this
     processor only touches lines that actually bear a music symbol (its normal
-    scope): such a line is preserved if it carries words (any letter, incl.
-    non-Latin such as CJK) and dropped if it is only symbols/decoration. Lines
-    without a music symbol are returned untouched, so unrelated letter-free lines
-    (numbers, punctuation) are never collateral. A sung lyric and a descriptive
+    scope): such a line is preserved if it carries any alphanumeric content
+    (letters -- incl. non-Latin such as CJK -- or numbers, e.g. a count-in like
+    "1 2 3 4") and dropped only if it is purely symbols/punctuation decoration.
+    Lines without a music symbol are returned untouched, so unrelated content
+    (numbers, punctuation) is never collateral. A sung lyric and a descriptive
     cue (e.g. "MUSIC", "ominous music") both have words and cannot be told apart
     reliably, so the cue text is kept too: the point of the option is to never
     drop a real lyric. Bracket-wrapped lines (e.g. "[music]") are descriptions by
@@ -53,8 +56,9 @@ class MusicEntryProcessor(NReProcessor):
                 return content
             # Decide per line (not via the entry-wide regex) so a symbol-only
             # line in a multi-line cue does not drag the lyric line with it:
-            # keep music-note lines with words, drop symbol-only decoration.
-            return content if _HI_WORD_RE.search(text) else ""
+            # keep music-note lines with alphanumeric content, drop pure
+            # symbol/punctuation decoration.
+            return content if _HI_CONTENT_RE.search(text) else ""
         return super(MusicEntryProcessor, self).process(content, debug=debug, **kwargs)
 
 
