@@ -11,7 +11,7 @@ from app.event_handler import event_stream
 from arr_instances.resolution import scoped
 from utilities.path_mappings import path_mappings
 from utilities.binaries import get_binary
-from utilities.video_analyzer import parse_video_metadata, _handle_alpha3
+from utilities.video_analyzer import parse_video_metadata, _handle_alpha3, _title_is_forced
 from languages.get_languages import alpha3_from_alpha2
 from subtitles.indexer.series import store_subtitles
 from subtitles.indexer.movies import store_subtitles_movie
@@ -431,9 +431,14 @@ def extract_embedded_subtitle(
 
         track_alpha3 = _handle_alpha3(track)
         if track_alpha3 == target_alpha3:
+            # knowit only reports forced from the disposition flag, so apply the
+            # same title heuristic used at indexing time, otherwise a forced
+            # request would extract a regular track named "Forced".
+            # See https://github.com/LavX/bazarr/issues/162
+            track_forced = track.get("forced", False) or _title_is_forced(track.get("name", ""))
             if (
                 track.get("hearing_impaired", False) == hi
-                and track.get("forced", False) == forced
+                and track_forced == forced
             ):
                 exact_track = track_id
                 break

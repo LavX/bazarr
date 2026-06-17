@@ -3,6 +3,7 @@ import ast
 import logging
 import os
 import pickle
+import re
 
 from app.config import settings
 from app.database import TableEpisodes, TableMovies, database, update, select
@@ -12,6 +13,27 @@ from languages.get_languages import language_from_alpha2, language_from_alpha3, 
 from utilities.path_mappings import path_mappings
 
 from knowit.api import know, KnowitException
+
+
+# knowit derives a subtitle track's hearing-impaired flag from the track title
+# (via trakit) but has no equivalent rule for forced tracks, so an encode that
+# labels a track title="Forced" while leaving disposition.forced=0 is read as a
+# plain track. Mirror the title heuristic here so those tracks are stored as
+# forced. See https://github.com/LavX/bazarr/issues/162
+# Match the word "forced" delimited by anything that is not a letter, so
+# space-, bracket-, dash- and underscore-separated titles ("English Forced",
+# "[Forced]", "English_Forced") all match, while "enforced"/"reinforced" do not.
+_FORCED_TITLE_RE = re.compile(r"(?<![a-z])forced(?![a-z])", re.IGNORECASE)
+# Titles like "Non-Forced" / "Not Forced" / "Non_Forced" / "Unforced" distinguish
+# a full track from the forced-only one and must NOT be treated as forced.
+_NEGATED_FORCED_RE = re.compile(r"(?<![a-z])(?:non|not|un)[\s_-]*forced(?![a-z])", re.IGNORECASE)
+
+
+def _title_is_forced(title):
+    text = title or ""
+    if _NEGATED_FORCED_RE.search(text):
+        return False
+    return bool(_FORCED_TITLE_RE.search(text))
 
 
 def _handle_alpha3(detected_language: dict):
@@ -67,7 +89,7 @@ def embedded_subs_reader(file, file_size, episode_file_id=None, movie_file_id=No
             if not language:
                 continue
 
-            forced = detected_language.get("forced", False)
+            forced = detected_language.get("forced", False) or _title_is_forced(name)
             hearing_impaired = detected_language.get("hearing_impaired", False)
             codec = detected_language.get("format")  # or None
             subtitles_list.append([language, forced, hearing_impaired, codec])
@@ -187,7 +209,7 @@ def subtitles_sync_references(subtitles_path, sonarr_episode_id=None, radarr_mov
                     alpha3 = _handle_alpha3(detected_language)
                     language = language_from_alpha3(alpha3)
 
-                forced = detected_language.get("forced", False)
+                forced = detected_language.get("forced", False) or _title_is_forced(name)
                 hearing_impaired = detected_language.get("hearing_impaired", False)
 
                 references_dict['embedded_subtitles_tracks'].append(
