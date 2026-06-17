@@ -190,8 +190,14 @@ Add a small resolver next to the existing instance helpers
 def resolve_subtitle_setting(arr_instance_id, dotted_key, global_default):
     """Return the per-instance override for dotted_key, else the global value.
 
-    arr_instance_id None (single-instance / default path) always returns the
-    global value, so existing call sites are unaffected until an override is set.
+    dotted_key is "<section>.<key>" (e.g. "general.use_postprocessing") and maps
+    directly to subtitle_settings[<section>][<key>] in the instance options blob,
+    so the lookup namespace matches the stored namespace exactly (section 5).
+
+    Only a missing instance context (arr_instance_id is None) returns the global
+    value unconditionally. A real instance id -- including the default instance --
+    has its overrides resolved, so the default-instance overrides discussed in
+    section 11 are honoured rather than silently forced back to global.
     """
 ```
 
@@ -215,9 +221,13 @@ use_pp = resolve_subtitle_setting(arr_instance_id, "general.use_postprocessing",
                                   settings.general.use_postprocessing)
 ```
 
-For subzero mods, `bazarr/subtitles/tools/mods.py::get_subzero_mods()` (added in
-https://github.com/LavX/bazarr/issues/225) becomes the single choke point:
-extend it to take `arr_instance_id` and resolve the per-instance mod list there.
+For subzero mods, `bazarr/subtitles/tools/mods.py::get_subzero_mods()` becomes the
+single choke point: extend it to take `arr_instance_id` and resolve the
+per-instance mod list there. Dependency: `get_subzero_mods()` does not exist on
+`development` yet (today `mods.py` only exposes `apply_subtitle_mods` /
+`subtitles_apply_mods`); it is introduced by the preserve-song-lyrics work
+(https://github.com/LavX/bazarr/pull/229), so this design assumes that merges
+first, otherwise this work must add the helper itself.
 
 ### Call-site changes required
 
@@ -233,34 +243,49 @@ of these must be addressed or the override is silently dropped:
   / `postprocessing_cmd` before its owner is loaded from the DB. Either pass the
   owning `arr_instance_id` into `process_subtitle` or move the post-processing
   reads to after the metadata lookup, so the resolver has an instance to use.
-- `bazarr/subtitles/sync.py::sync_subtitles` defaults `max_offset_seconds` to
-  `str(settings.subsync.max_offset_seconds)`, evaluated at import time. Change
-  the default to `None` and resolve it inside the function with
-  `arr_instance_id`; auto/manual callers usually omit the argument, so a
-  body-only resolver change would miss this override.
+- `bazarr/subtitles/sync.py::sync_subtitles` has TWO read sites, not one. (a)
+  Its early gate returns on `settings.subsync.use_subsync`, so the per-instance
+  `use_subsync` must be resolved there or auto-sync is enabled/disabled globally
+  regardless of the override. (b) `max_offset_seconds` defaults to
+  `str(settings.subsync.max_offset_seconds)`, evaluated at import time; change
+  the default to `None` and resolve it inside the function, since auto/manual
+  callers usually omit the argument and a body-only change would miss it.
 - `bazarr/subtitles/tools/subsyncer.py::SubSyncer.sync` falls back to
   `settings.subsync.enabled_engines` when its `enabled_engines` argument is
   `None`. `sync_subtitles` must pass the resolved engine list (or `SubSyncer`
   must resolve it with `arr_instance_id`), or engine overrides are dropped
   inside the subsyncer.
-- `bazarr/subtitles/upload.py` and `bazarr/subtitles/mass_operations.py`
-  already carry `arr_instance_id` and only need the read sites swapped to the
-  resolver.
+- `bazarr/subtitles/manual.py` sets `subtitle.mods` from the global mods; its
+  `get_subzero_mods()` call must be passed `arr_instance_id` too, or manual
+  downloads keep using the global mod set.
+- `bazarr/subtitles/mass_operations.py::_collect_subtitle_items` reads
+  `max_offset_seconds`, `gss` and `no_fix_framerate` once, before the per-item
+  owning instance is known. A single `arr_instance_id` is not available at that
+  read site, so the resolution has to move to where each item's instance is
+  resolved (per item), not the batch-level collect.
+- `bazarr/subtitles/upload.py` already carries `arr_instance_id` and only needs
+  its read sites swapped to the resolver.
 
 ## 7. API
 
-Extend the existing instance endpoints rather than add new ones:
+Extend the existing instance endpoints rather than add new ones. Note the API
+does NOT expose `options` today: `to_safe_dict()` omits it and the create/update
+parsers only read connection fields, so both sides need extending:
 
-- `GET /api/.../arr-instances` already returns `options`; include the parsed
-  `subtitle_settings` (or expose a typed `subtitle_settings` field derived from
-  it) so the UI can render current overrides.
-- `PATCH`/create accepts a `subtitle_settings` object; the backend validates
-  each key against the allowed per-instance set (section 4) and writes only the
-  overridden keys into `options.subtitle_settings`. Unknown or
+- `GET /api/.../arr-instances`: extend `to_safe_dict()` to surface a typed
+  `subtitle_settings` field derived from `options` so the UI can render current
+  overrides (it is currently dropped).
+- `PATCH`/create: extend the request parsers to accept a `subtitle_settings`
+  object (they currently ignore everything outside the connection fields),
+  validate each key against the allowed per-instance set (section 4) and write
+  only the overridden keys into `options.subtitle_settings`. Unknown or
   not-allowed-per-instance keys are rejected.
 
-Validation reuses the same value constraints as the global validators in
-`bazarr/app/config.py` (ranges for thresholds, the engine enum, etc.).
+Validation cannot simply reuse the global validators: `bazarr/app/config.py`
+only type-checks `subsync.enabled_engines` as a list of strings (no enum
+membership check), so the per-instance API must add explicit enum validation for
+the engine list, plus the threshold range checks, rather than assuming a global
+enum validator exists.
 
 ## 8. Frontend
 
@@ -272,8 +297,13 @@ Settings" section to the instance modal:
   to Inherit, the control is disabled and shows the resolved global value for
   reference. When set to Override, the control is enabled and its value is
   written to `subtitle_settings`.
-- The section reuses the existing settings widgets (the same Check / Selector /
-  Slider / Text components used on the global Subtitles page) for consistency.
+- Note: the global Subtitles page's `Check` / `Selector` / `Slider` / `Text`
+  wrappers are bound to the global settings context (they call `useBaseInput`
+  and read/write the global settings store via `settingKey`), so they cannot be
+  dropped into the instance modal as plain form controls. The instance form
+  needs standalone Mantine controls (or a dedicated instance form context) that
+  read and write the instance's `subtitle_settings` object directly, styled to
+  match the global page.
 
 On the global Subtitles page
 (`frontend/src/pages/Settings/Subtitles/index.tsx`), add a short note that
@@ -312,8 +342,11 @@ set.
 - `subzero_mods` as a per-instance list interacts with the parameterized mod
   format (`color(name=...)`, `remove_HI(keep_lyrics=1)`); the resolver stores
   and returns the already-expanded list, so no extra parsing is needed.
-- Decide whether the default instance should be allowed to override (proposed:
-  yes, for symmetry, though in practice its overrides equal the globals).
+- The default instance MAY override: the resolver (section 6) honours overrides
+  for any real instance id and only falls back to global when there is no
+  instance context (`arr_instance_id is None`), so this no longer contradicts
+  the resolver contract. In practice a default-instance override is rarely
+  needed, but it is permitted rather than silently forced back to global.
 
 ## 12. Testing strategy
 
