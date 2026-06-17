@@ -109,3 +109,55 @@ def sonarr_series_owner(session, sonarr_series_id, arr_instance_id=None):
     if instance_id is None:
         instance_id = default_instance_id(session, "sonarr")
     return instance_id, parent.id
+
+
+# --- Per-instance subtitle settings resolution (#227) ----------------------
+# instance_id -> parsed subtitle_settings blob. Populated lazily and cleared by
+# service.refresh_runtime on any instance create/update/delete (there is no
+# repository update event to subscribe to), so an edited override never keeps
+# serving a stale value until restart.
+_subtitle_settings_cache = {}
+
+
+def clear_subtitle_settings_cache(arr_instance_id=None):
+    """Drop the cached subtitle_settings for one instance, or all of them."""
+    if arr_instance_id is None:
+        _subtitle_settings_cache.clear()
+    else:
+        _subtitle_settings_cache.pop(arr_instance_id, None)
+
+
+def _instance_subtitle_settings(arr_instance_id, session=None):
+    if arr_instance_id in _subtitle_settings_cache:
+        return _subtitle_settings_cache[arr_instance_id]
+    if session is None:
+        from app.database import database
+        session = database
+    from app.database import TableArrInstances
+    from .subtitle_settings import read_subtitle_settings
+    row = session.execute(
+        select(TableArrInstances.options).where(TableArrInstances.id == arr_instance_id)
+    ).first()
+    blob = read_subtitle_settings(row.options if row else None)
+    _subtitle_settings_cache[arr_instance_id] = blob
+    return blob
+
+
+def resolve_subtitle_setting(arr_instance_id, dotted_key, global_default, session=None):
+    """Return the per-instance override for ``dotted_key`` ("<section>.<key>"),
+    else ``global_default``.
+
+    A missing instance context (``arr_instance_id`` None) returns the global
+    value unconditionally, so existing single-instance / default call sites are
+    unaffected until an override is set. A real instance id (including the
+    default) resolves its overrides. ``dotted_key`` maps directly to
+    ``subtitle_settings[<section>][<key>]`` in the instance options blob.
+    """
+    if arr_instance_id is None:
+        return global_default
+    section, _, key = dotted_key.partition(".")
+    blob = _instance_subtitle_settings(arr_instance_id, session=session)
+    section_blob = blob.get(section)
+    if isinstance(section_blob, dict) and key in section_blob:
+        return section_blob[key]
+    return global_default

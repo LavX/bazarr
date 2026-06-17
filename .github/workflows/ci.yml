@@ -153,6 +153,7 @@ jobs:
             tests/bazarr/test_arr_ownership_columns.py \
             tests/bazarr/test_arr_instance_repository.py \
             tests/bazarr/test_arr_instances_api.py \
+            tests/bazarr/test_arr_subtitle_settings.py \
             tests/bazarr/test_arr_client.py \
             tests/bazarr/test_arr_backfill.py \
             tests/bazarr/test_arr_instance_stamping.py \

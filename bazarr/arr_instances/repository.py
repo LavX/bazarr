@@ -14,6 +14,8 @@ from sqlalchemy import select
 
 from app.database import TableArrInstances
 
+from .subtitle_settings import read_subtitle_settings
+
 VALID_KINDS = ("sonarr", "radarr")
 _DEFAULT_PORTS = {"sonarr": 8989, "radarr": 7878}
 _UNSET = object()
@@ -321,4 +323,5 @@ def to_safe_dict(row):
         "verify_ssl": bool(row.verify_ssl),
         "http_timeout": row.http_timeout,
         "api_key_set": bool(row.api_key),
+        "subtitle_settings": read_subtitle_settings(row.options),
     }

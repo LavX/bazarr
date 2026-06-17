@@ -14,6 +14,7 @@ import logging
 from sqlalchemy.exc import IntegrityError
 
 from .repository import VALID_KINDS, ArrInstanceRepository, to_safe_dict
+from .subtitle_settings import merge_subtitle_settings_into_options, validate_subtitle_settings
 
 _CONFLICT_MESSAGE = "An instance with these connection properties already exists."
 
@@ -56,6 +57,12 @@ def refresh_runtime(kind, instance_id=None, removed=False):
       transient arr/SignalR failure during the restart must not fail the CRUD
       API response. Mirrors the try/except guard in config.save_settings.
     """
+    # Per-instance subtitle settings may have changed; drop the resolver cache
+    # so the next read reflects the edit (#227). Cheap and kind-agnostic, so do
+    # it before the kind guard returns.
+    from .resolution import clear_subtitle_settings_cache
+    clear_subtitle_settings_cache()
+
     if kind not in VALID_KINDS:
         return
     try:
@@ -211,6 +218,11 @@ def create_instance(session, args):
     arg_error = _connection_arg_error(args)
     if arg_error:
         return {"error": "invalid", "message": arg_error}, 400
+    try:
+        ss_blob = validate_subtitle_settings(args.get("subtitle_settings"))
+    except ValueError as exc:
+        return {"error": "invalid", "message": str(exc)}, 400
+    options = merge_subtitle_settings_into_options(None, ss_blob)
     repo = ArrInstanceRepository(session)
     try:
         row = repo.create(
@@ -225,6 +237,7 @@ def create_instance(session, args):
             http_timeout=args.get("http_timeout") or 60,
             enabled=True if args.get("enabled") is None else bool(args.get("enabled")),
             is_default=args.get("is_default"),
+            options=options,
         )
     except ValueError as exc:
         return {"error": "invalid", "message": str(exc)}, 400
@@ -239,7 +252,8 @@ def update_instance(session, instance_id, args):
     if arg_error:
         return {"error": "invalid", "message": arg_error}, 400
     repo = ArrInstanceRepository(session)
-    if repo.get(instance_id) is None:
+    existing = repo.get(instance_id)
+    if existing is None:
         return {"error": "not_found"}, 404
 
     kwargs = {}
@@ -251,6 +265,13 @@ def update_instance(session, instance_id, args):
         kwargs["clear_api_key"] = True
     elif args.get("api_key") is not None:
         kwargs["api_key"] = args["api_key"]
+
+    if args.get("subtitle_settings") is not None:
+        try:
+            ss_blob = validate_subtitle_settings(args.get("subtitle_settings"))
+        except ValueError as exc:
+            return {"error": "invalid", "message": str(exc)}, 400
+        kwargs["options"] = merge_subtitle_settings_into_options(existing.options, ss_blob)
 
     try:
         row = repo.update(instance_id, **kwargs)
