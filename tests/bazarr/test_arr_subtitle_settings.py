@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from arr_instances import service
 from arr_instances.repository import ArrInstanceRepository
 from arr_instances.resolution import (
     clear_subtitle_settings_cache,
@@ -156,3 +157,46 @@ def test_resolve_reflects_change_after_cache_clear(schema_session):
     clear_subtitle_settings_cache()
     assert resolve_subtitle_setting(
         row.id, "subsync.subsync_threshold", 90, session=schema_session) == 50
+
+
+def test_service_create_exposes_subtitle_settings(schema_session):
+    body, status = service.create_instance(schema_session, {
+        "kind": "sonarr", "name": "Main", "ip": "127.0.0.1", "port": 8989,
+        "subtitle_settings": {"subsync": {"subsync_threshold": 80}},
+    })
+    assert status == 201, body
+    assert body["subtitle_settings"] == {"subsync": {"subsync_threshold": 80}}
+
+
+def test_service_create_rejects_invalid_subtitle_settings(schema_session):
+    body, status = service.create_instance(schema_session, {
+        "kind": "sonarr", "name": "Bad", "ip": "127.0.0.1", "port": 8989,
+        "subtitle_settings": {"subsync": {"max_offset_seconds": 99}},
+    })
+    assert status == 400
+
+
+def test_service_update_round_trips_and_clears_subtitle_settings(schema_session):
+    created, _ = service.create_instance(schema_session, {
+        "kind": "radarr", "name": "Movies", "ip": "127.0.0.1", "port": 7878,
+    })
+    iid = created["id"]
+    updated, status = service.update_instance(schema_session, iid, {
+        "subtitle_settings": {"general": {"use_postprocessing": True}},
+    })
+    assert status == 200, updated
+    assert updated["subtitle_settings"] == {"general": {"use_postprocessing": True}}
+    # clearing with an empty object drops the override
+    cleared, status2 = service.update_instance(schema_session, iid, {"subtitle_settings": {}})
+    assert status2 == 200
+    assert cleared["subtitle_settings"] == {}
+
+
+def test_service_update_rejects_invalid_subtitle_settings(schema_session):
+    created, _ = service.create_instance(schema_session, {
+        "kind": "radarr", "name": "M2", "ip": "127.0.0.1", "port": 7879,
+    })
+    body, status = service.update_instance(schema_session, created["id"], {
+        "subtitle_settings": {"general": {"postprocessing_threshold": 150}},
+    })
+    assert status == 400
