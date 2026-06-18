@@ -215,11 +215,30 @@ def _trigger_combine(video_path, media_type, radarr_id, series_id, episode_id):
         logging.exception("BAZARR error in _trigger_combine")
 
 
+def _postprocessing_config(media_type, arr_instance_id):
+    """Resolve the post-processing settings for a download, honouring the owning
+    instance's per-instance overrides (#227) with global fallback. The threshold
+    is coerced to int because the global value may be stored as a string."""
+    from arr_instances.resolution import resolve_subtitle_setting as _resolve
+    use_pp = _resolve(arr_instance_id, "general.use_postprocessing",
+                      settings.general.use_postprocessing)
+    cmd = _resolve(arr_instance_id, "general.postprocessing_cmd",
+                   settings.general.postprocessing_cmd)
+    if media_type == 'series':
+        use_threshold = _resolve(arr_instance_id, "general.use_postprocessing_threshold",
+                                 settings.general.use_postprocessing_threshold)
+        threshold = int(_resolve(arr_instance_id, "general.postprocessing_threshold",
+                                 settings.general.postprocessing_threshold))
+    else:
+        use_threshold = _resolve(arr_instance_id, "general.use_postprocessing_threshold_movie",
+                                 settings.general.use_postprocessing_threshold_movie)
+        threshold = int(_resolve(arr_instance_id, "general.postprocessing_threshold_movie",
+                                 settings.general.postprocessing_threshold_movie))
+    return use_pp, cmd, use_threshold, threshold
+
+
 def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_upgrade=False, is_manual=False,
                      job_id=None):
-    use_postprocessing = settings.general.use_postprocessing
-    postprocessing_cmd = settings.general.postprocessing_cmd
-
     downloaded_provider = subtitle.provider_name
     uploader = subtitle.uploader
     release_info = subtitle.release_info
@@ -264,6 +283,7 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
             return
         series_id = episode_metadata.sonarrSeriesId
         episode_id = episode_metadata.sonarrEpisodeId
+        owner_instance_id = episode_metadata.arr_instance_id
 
         if sync_checker(subtitle) is True:
             from .sync import sync_subtitles
@@ -286,6 +306,7 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
             return
         series_id = ""
         episode_id = movie_metadata.radarrId
+        owner_instance_id = movie_metadata.arr_instance_id
 
         if sync_checker(subtitle) is True:
             from .sync import sync_subtitles
@@ -299,18 +320,13 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                            arr_instance_id=movie_metadata.arr_instance_id,
                            owns_job_progress=False)
 
+    use_postprocessing, postprocessing_cmd, use_pp_threshold, pp_threshold = _postprocessing_config(
+        media_type, owner_instance_id)
     if use_postprocessing is True:
         command = pp_replace(postprocessing_cmd, path, downloaded_path, downloaded_language, downloaded_language_code2,
                              downloaded_language_code3, audio_language, audio_language_code2, audio_language_code3,
                              percent_score, subtitle_id, downloaded_provider, uploader, release_info, series_id,
                              episode_id)
-
-        if media_type == 'series':
-            use_pp_threshold = settings.general.use_postprocessing_threshold
-            pp_threshold = int(settings.general.postprocessing_threshold)
-        else:
-            use_pp_threshold = settings.general.use_postprocessing_threshold_movie
-            pp_threshold = int(settings.general.postprocessing_threshold_movie)
 
         if not use_pp_threshold or (use_pp_threshold and percent_score < pp_threshold):
             logging.debug(f"BAZARR Using post-processing command: {command}")  # noqa: G004
