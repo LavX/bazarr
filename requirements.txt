@@ -6,7 +6,7 @@ alembic==1.18.4
 apprise==1.11.0
 apscheduler==3.11.2
 babelfish==0.6.1
-beautifulsoup4==4.14.3
+beautifulsoup4==4.15.0
 cachetools>=7.1.4
 certifi==2026.5.20
 chardet==7.4.3
