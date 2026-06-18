@@ -89,7 +89,8 @@ class TestProcessSubtitleItem:
         item = self._make_item()
         result = _process_subtitle_item(item, 'remove_HI', {}, 'test_job')
         assert result is True
-        mock_mods.assert_called_once_with('en', '/subs/test.en.srt', ['remove_HI'], '/video/test.mkv')
+        mock_mods.assert_called_once_with('en', '/subs/test.en.srt', ['remove_HI'],
+                                          '/video/test.mkv', arr_instance_id=None)
 
     @patch('subtitles.mass_operations.subtitles_apply_mods')
     def test_mod_action_ocr_fixes(self, mock_mods):
@@ -97,7 +98,20 @@ class TestProcessSubtitleItem:
         item = self._make_item()
         result = _process_subtitle_item(item, 'OCR_fixes', {}, 'test_job')
         assert result is True
-        mock_mods.assert_called_once_with('en', '/subs/test.en.srt', ['OCR_fixes'], '/video/test.mkv')
+        mock_mods.assert_called_once_with('en', '/subs/test.en.srt', ['OCR_fixes'],
+                                          '/video/test.mkv', arr_instance_id=None)
+
+    @patch('subtitles.mass_operations.subtitles_apply_mods')
+    def test_mod_action_threads_owning_instance(self, mock_mods):
+        # The per-item owning instance must reach subtitles_apply_mods so the
+        # keep-lyrics preference resolves against that instance (#227).
+        from subtitles.mass_operations import _process_subtitle_item
+        item = self._make_item()
+        item['arr_instance_id'] = 7
+        result = _process_subtitle_item(item, 'remove_HI', {}, 'test_job')
+        assert result is True
+        mock_mods.assert_called_once_with('en', '/subs/test.en.srt', ['remove_HI'],
+                                          '/video/test.mkv', arr_instance_id=7)
 
     @patch('subtitles.tools.translate.main.translate_subtitles_file', return_value=True)
     def test_translate_action(self, mock_translate):
