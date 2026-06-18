@@ -34,6 +34,7 @@ import type {
   ArrInstanceTest,
   ArrInstanceUpdate,
   ArrKind,
+  ArrSubtitleSettings,
 } from "@/apis/raw/arrInstances";
 import {
   ARR_META,
@@ -41,6 +42,7 @@ import {
   normalizeBaseUrl,
   stripLeadingSlash,
 } from "./meta";
+import SubtitleSettingsOverrides from "./SubtitleSettingsOverrides";
 
 // How a stored API key is treated when editing. The key itself is never sent
 // to the browser, so the form only ever carries a brand new value.
@@ -58,6 +60,7 @@ interface FormValues {
   apiKey: string;
   enabled: boolean;
   isDefault: boolean;
+  subtitleSettings: ArrSubtitleSettings;
 }
 
 function initialValues(
@@ -77,6 +80,7 @@ function initialValues(
       apiKey: "",
       enabled: instance.enabled,
       isDefault: instance.is_default,
+      subtitleSettings: instance.subtitle_settings ?? {},
     };
   }
   return {
@@ -91,6 +95,7 @@ function initialValues(
     apiKey: "",
     enabled: true,
     isDefault: false,
+    subtitleSettings: {},
   };
 }
 
@@ -235,6 +240,9 @@ const InstanceFormModal: FunctionComponent<Props> = ({
       const body: ArrInstanceUpdate = {
         ...common,
         is_default: values.isDefault,
+        // Always sent so clearing every override (an empty object) removes the
+        // stored block server-side; an absent key would instead preserve it.
+        subtitle_settings: values.subtitleSettings,
       };
       if (hasStoredKey) {
         if (keyMode === "replace" && typed.length) {
@@ -270,6 +278,7 @@ const InstanceFormModal: FunctionComponent<Props> = ({
         enabled: common.enabled,
         isDefault: values.isDefault,
         apiKey: typed.length ? typed : undefined,
+        subtitleSettings: values.subtitleSettings,
       });
       create.mutate(body, {
         onSuccess: () => {
@@ -452,6 +461,13 @@ const InstanceFormModal: FunctionComponent<Props> = ({
               {...form.getInputProps("isDefault", { type: "checkbox" })}
             />
           </Group>
+
+          <Divider label="Subtitle settings (optional)" labelPosition="left" />
+
+          <SubtitleSettingsOverrides
+            value={form.values.subtitleSettings}
+            onChange={(next) => form.setFieldValue("subtitleSettings", next)}
+          />
 
           <Divider label="Connection check" labelPosition="left" />
 

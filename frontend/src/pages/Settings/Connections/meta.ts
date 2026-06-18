@@ -7,6 +7,7 @@ import type {
   ArrInstance,
   ArrInstanceCreate,
   ArrKind,
+  ArrSubtitleSettings,
 } from "@/apis/raw/arrInstances";
 import { Environment } from "@/utilities/env";
 
@@ -73,6 +74,7 @@ export function buildArrInstanceCreateBody(
     enabled: boolean;
     isDefault: boolean;
     apiKey?: string;
+    subtitleSettings?: ArrSubtitleSettings;
   },
 ): ArrInstanceCreate {
   const body: ArrInstanceCreate = {
@@ -91,6 +93,14 @@ export function buildArrInstanceCreateBody(
   }
   if (fields.apiKey) {
     body.api_key = fields.apiKey;
+  }
+  // Only sent when at least one override is set; an empty block is omitted so a
+  // new instance starts out fully inheriting the global settings.
+  if (
+    fields.subtitleSettings &&
+    Object.keys(fields.subtitleSettings).length > 0
+  ) {
+    body.subtitle_settings = fields.subtitleSettings;
   }
   return body;
 }

@@ -2,6 +2,35 @@ import BaseApi from "./base";
 
 export type ArrKind = "sonarr" | "radarr";
 
+// Per-instance subtitle setting overrides (#227). A present key overrides the
+// corresponding global setting for media owned by this instance; an absent key
+// inherits the global value. The shape mirrors the backend ALLOWED set.
+export interface ArrSubtitleSettingsGeneral {
+  use_postprocessing?: boolean;
+  postprocessing_cmd?: string;
+  use_postprocessing_threshold?: boolean;
+  postprocessing_threshold?: number;
+  use_postprocessing_threshold_movie?: boolean;
+  postprocessing_threshold_movie?: number;
+  subzero_mods?: string[];
+  subzero_mods_keep_lyrics?: boolean;
+}
+
+export interface ArrSubtitleSettingsSubsync {
+  use_subsync?: boolean;
+  use_subsync_threshold?: boolean;
+  subsync_threshold?: number;
+  use_subsync_movie_threshold?: boolean;
+  subsync_movie_threshold?: number;
+  enabled_engines?: string[];
+  max_offset_seconds?: number;
+}
+
+export interface ArrSubtitleSettings {
+  general?: ArrSubtitleSettingsGeneral;
+  subsync?: ArrSubtitleSettingsSubsync;
+}
+
 export interface ArrInstance {
   id: number;
   kind: ArrKind;
@@ -18,6 +47,7 @@ export interface ArrInstance {
   http_timeout: number;
   // The API never returns the key itself, only whether one is stored.
   api_key_set: boolean;
+  subtitle_settings?: ArrSubtitleSettings;
 }
 
 export interface ArrInstanceCreate {
@@ -32,6 +62,7 @@ export interface ArrInstanceCreate {
   http_timeout?: number;
   enabled?: boolean;
   is_default?: boolean;
+  subtitle_settings?: ArrSubtitleSettings;
 }
 
 export type ArrInstanceUpdate = Partial<{
@@ -47,6 +78,7 @@ export type ArrInstanceUpdate = Partial<{
   http_timeout: number;
   enabled: boolean;
   is_default: boolean;
+  subtitle_settings: ArrSubtitleSettings;
 }>;
 
 export interface ArrInstanceTest {
