@@ -13,7 +13,7 @@ chardet==7.4.3
 charset-normalizer==3.4.7
 click-option-group>=0.5.9
 cloudscraper<=1.2.58  # newer version dropped captcha v1 support
-cryptography>=48.0.0
+cryptography>=49.0.0
 deathbycaptcha-official==4.7.1
 deep-translator==1.11.4
 dnspython==2.8.0
