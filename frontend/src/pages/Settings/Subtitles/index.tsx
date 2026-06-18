@@ -1,6 +1,6 @@
 import React, { FunctionComponent } from "react";
 import { Link } from "react-router";
-import { Code, Space, Table, Text as MantineText } from "@mantine/core";
+import { Anchor, Code, Space, Table, Text as MantineText } from "@mantine/core";
 import {
   Check,
   CollapseBox,
@@ -133,6 +133,17 @@ const commandOptionElements: React.JSX.Element[] = commandOptions.map(
 const SettingsSubtitlesView: FunctionComponent = () => {
   return (
     <Layout name="Subtitles">
+      <Section header="Per-instance overrides">
+        <Message>
+          These settings apply to every Sonarr and Radarr instance by default.
+          To override post-processing, subtitle modifications, or
+          synchronization for a specific instance, edit that instance under{" "}
+          <Anchor component={Link} to="/settings/connections">
+            Settings &gt; Connections
+          </Anchor>
+          .
+        </Message>
+      </Section>
       <Section header="Subtitle File Options">
         <Selector
           label="Subtitle Folder"
