@@ -365,9 +365,12 @@ class Subtitles(Resource):
                     reference=args.get("reference")
                     if args.get("reference") not in empty_values
                     else video_path,
+                    # Fall back to None (not the global value) so an unset Max
+                    # Offset resolves the owning instance's per-instance override
+                    # inside sync_subtitles (#227), mirroring enabled_engines below.
                     max_offset_seconds=args.get("max_offset_seconds")
                     if args.get("max_offset_seconds") not in empty_values
-                    else str(settings.subsync.max_offset_seconds),
+                    else None,
                     no_fix_framerate=args.get("no_fix_framerate") == "True",
                     gss=args.get("gss") == "True",
                     output_mode=args.get("output_mode")
