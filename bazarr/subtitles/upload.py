@@ -47,8 +47,12 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
 
     single = settings.general.single_language
 
-    use_postprocessing = settings.general.use_postprocessing
-    postprocessing_cmd = settings.general.postprocessing_cmd
+    # Resolve post-processing against the owning instance (#227) so a per-instance
+    # override applies to manual uploads too, matching the download path. Manual
+    # uploads are not score-gated, so the threshold values are ignored here.
+    from subtitles.processing import _postprocessing_config
+    use_postprocessing, postprocessing_cmd, _, _ = _postprocessing_config(
+        media_type, arr_instance_id)
 
     chmod = int(settings.general.chmod, 8) if not sys.platform.startswith(
         'win') and settings.general.chmod_enabled else None
