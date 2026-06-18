@@ -94,7 +94,8 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
 
     try:
         subtitles_apply_mods(language=language, subtitle_path=subtitle_path,
-                             mods=mods, video_path=video_path)
+                             mods=mods, video_path=video_path,
+                             arr_instance_id=arr_instance_id)
     except Exception:
         jobs_queue.update_job_name(
             job_id=job_id,
@@ -143,8 +144,11 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
     )
 
 
-def subtitles_apply_mods(language, subtitle_path, mods, video_path):
-    mods = with_keep_lyrics(mods)
+def subtitles_apply_mods(language, subtitle_path, mods, video_path, arr_instance_id=None):
+    # The mod list is user-chosen here, so only the keep-lyrics preference is
+    # instance-relevant: resolve it against the media's owning instance (#227).
+    # A None owner keeps the legacy global-only behaviour (single-instance).
+    mods = with_keep_lyrics(mods, arr_instance_id)
     language = alpha3_from_alpha2(language)
     custom = CustomLanguage.from_value(language, "alpha3")
     if custom is None:

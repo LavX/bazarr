@@ -468,6 +468,8 @@ def _process_subtitle_item(item, action, options, job_id):
             item['srt_path'],
             [action],
             item['video_path'],
+            # Resolve keep-lyrics against the per-item owning instance (#227).
+            arr_instance_id=item.get('arr_instance_id'),
         )
         return True
     return False
