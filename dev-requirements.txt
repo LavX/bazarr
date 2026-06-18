@@ -5,5 +5,5 @@ pytest-cov
 pytest-vcr
 pytest-mock
 requests-mock
-ruff==0.15.15
+ruff==0.15.17
 setuptools
