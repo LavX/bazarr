@@ -45,64 +45,89 @@ def _keep(name):
     return _is_subtitle(base)
 
 
-def _collect(pairs):
-    """Apply the per-archive guards to an iterable of (name, content) pairs and
-    return [(basename, content), ...]. ``basename`` defuses zip-slip paths."""
+def _guarded(entries):
+    """Read subtitle entries lazily under the per-archive caps.
+
+    ``entries`` yields ``(name, declared_size, read)`` where ``read()`` returns
+    the member bytes. The declared (uncompressed) size is checked BEFORE the
+    member is inflated so a single bomb member cannot blow past the budget, and
+    the entry count is capped. Returns ``[(basename, content), ...]``;
+    ``basename`` defuses zip-slip paths.
+    """
     out = []
     total = 0
-    for name, content in pairs:
+    for name, declared_size, read in entries:
         if len(out) >= _MAX_ENTRIES:
             break
-        total += len(content)
+        total += declared_size or 0
         if total > _MAX_TOTAL_BYTES:
             raise ArchiveError("Archive expands beyond the allowed size limit.")
-        out.append((os.path.basename(name.replace('\\', '/')), content))
+        out.append((os.path.basename(name.replace('\\', '/')), read()))
     return out
+
+
+def _read_member(reader, info, label):
+    """Read one archive member, mapping any read failure (encrypted member,
+    CRC error, truncated data, ...) to ArchiveError instead of leaking the
+    backend library's own exception type."""
+    try:
+        return reader(info)
+    except ArchiveError:
+        raise
+    except Exception as e:
+        raise ArchiveError(f"Could not read {label} member: {e}") from e
 
 
 def _extract_zip(data):
     try:
-        with zipfile.ZipFile(BytesIO(data)) as zf:
-            return _collect(
-                (info.filename, zf.read(info))
-                for info in zf.infolist()
-                if not info.is_dir() and _keep(info.filename)
-            )
+        zf = zipfile.ZipFile(BytesIO(data))
     except zipfile.BadZipFile as e:
         raise ArchiveError(f"Not a valid zip archive: {e}") from e
+    with zf:
+        return _guarded(
+            (info.filename, info.file_size,
+             lambda info=info: _read_member(zf.read, info, "zip"))
+            for info in zf.infolist()
+            if not info.is_dir() and _keep(info.filename)
+        )
 
 
 def _extract_rar(data):
     import rarfile
     try:
-        with rarfile.RarFile(BytesIO(data)) as rf:
-            return _collect(
-                (info.filename, rf.read(info))
-                for info in rf.infolist()
-                if not info.is_dir() and _keep(info.filename)
-            )
+        rf = rarfile.RarFile(BytesIO(data))
     except rarfile.Error as e:
         raise ArchiveError(f"Could not read rar archive: {e}") from e
+    with rf:
+        return _guarded(
+            (info.filename, info.file_size,
+             lambda info=info: _read_member(rf.read, info, "rar"))
+            for info in rf.infolist()
+            if not info.is_dir() and _keep(info.filename)
+        )
 
 
 def _extract_7z(data):
     import py7zr
     from py7zr.io import BufferOverflow, BytesIOFactory
     # Extract into memory (never to disk) so a traversal member name cannot
-    # escape onto the filesystem; the factory also caps total memory.
+    # escape onto the filesystem; the factory caps total memory. Only the
+    # subtitle members are targeted so non-subtitle files are never inflated.
     factory = BytesIOFactory(_MAX_TOTAL_BYTES)
     try:
         with py7zr.SevenZipFile(BytesIO(data), 'r') as zf:
-            zf.extractall(factory=factory)
+            targets = [name for name in zf.getnames() if _keep(name)]
+            if not targets:
+                return []
+            zf.reset()
+            zf.extract(targets=targets, factory=factory)
     except BufferOverflow as e:
         raise ArchiveError("Archive expands beyond the allowed size limit.") from e
     except py7zr.exceptions.ArchiveError as e:
         raise ArchiveError(f"Could not read 7z archive: {e}") from e
-    return _collect(
-        (name, bio.read())
-        for name, bio in factory.products.items()
-        if _keep(name)
-    )
+    items = list(factory.products.items())[:_MAX_ENTRIES]
+    return [(os.path.basename(name.replace('\\', '/')), bio.read())
+            for name, bio in items]
 
 
 def extract_subtitles_from_archive(filename, data):

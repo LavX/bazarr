@@ -89,6 +89,15 @@ def test_sevenzip_keeps_only_subtitles():
     assert result == [("a.srt", b"alpha")]
 
 
+def test_zip_total_size_cap_raises(monkeypatch):
+    from subtitles.tools import archives
+
+    monkeypatch.setattr(archives, "_MAX_TOTAL_BYTES", 16)
+    data = _zip([("big.srt", b"x" * 64)])
+    with pytest.raises(ArchiveError):
+        extract_subtitles_from_archive("pack.zip", data)
+
+
 def test_corrupt_archive_raises_archive_error():
     with pytest.raises(ArchiveError):
         extract_subtitles_from_archive("pack.zip", b"this is not a zip")

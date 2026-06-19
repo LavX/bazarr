@@ -400,7 +400,13 @@ const MovieUploadForm: FunctionComponent<Props> = ({
         </Dropzone>
         <SimpleTable columns={columns} data={form.values.files}></SimpleTable>
         <Divider></Divider>
-        <Button type="submit">Upload</Button>
+        <Button
+          type="submit"
+          loading={processing}
+          disabled={processing || form.values.files.length === 0}
+        >
+          Upload
+        </Button>
       </Stack>
     </form>
   );

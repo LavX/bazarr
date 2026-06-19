@@ -48,7 +48,9 @@ class SubtitleArchive(Resource):
         if not is_archive(filename):
             return 'Unsupported archive type. Use .zip, .rar or .7z.', 400
 
-        data = uploaded.read()
+        # Read at most one byte past the cap so an oversized upload is rejected
+        # without buffering the whole thing into memory.
+        data = uploaded.read(MAX_ARCHIVE_SIZE + 1)
         if len(data) > MAX_ARCHIVE_SIZE:
             return 'Archive is too large.', 400
 
