@@ -98,6 +98,43 @@ def test_zip_total_size_cap_raises(monkeypatch):
         extract_subtitles_from_archive("pack.zip", data)
 
 
+def test_sevenzip_total_size_cap_raises(monkeypatch):
+    from subtitles.tools import archives
+
+    monkeypatch.setattr(archives, "_MAX_TOTAL_BYTES", 16)
+    data = _7z([("big.srt", b"x" * 64)])
+    with pytest.raises(ArchiveError):
+        extract_subtitles_from_archive("pack.7z", data)
+
+
+def test_zip_entry_cap_raises(monkeypatch):
+    from subtitles.tools import archives
+
+    monkeypatch.setattr(archives, "_MAX_ENTRIES", 1)
+    data = _zip([("a.srt", b"a"), ("b.srt", b"b")])
+    with pytest.raises(ArchiveError):
+        extract_subtitles_from_archive("pack.zip", data)
+
+
+def test_sevenzip_entry_cap_raises(monkeypatch):
+    from subtitles.tools import archives
+
+    monkeypatch.setattr(archives, "_MAX_ENTRIES", 1)
+    data = _7z([("a.srt", b"a"), ("b.srt", b"b")])
+    with pytest.raises(ArchiveError):
+        extract_subtitles_from_archive("pack.7z", data)
+
+
+def test_encrypted_sevenzip_raises_archive_error():
+    import py7zr
+
+    buf = BytesIO()
+    with py7zr.SevenZipFile(buf, "w", password="secret") as z:
+        z.writestr(b"hello", "a.srt")
+    with pytest.raises(ArchiveError):
+        extract_subtitles_from_archive("pack.7z", buf.getvalue())
+
+
 def test_corrupt_archive_raises_archive_error():
     with pytest.raises(ArchiveError):
         extract_subtitles_from_archive("pack.zip", b"this is not a zip")

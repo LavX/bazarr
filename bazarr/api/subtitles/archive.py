@@ -2,7 +2,7 @@
 
 import base64
 
-from flask import jsonify, make_response
+from flask import jsonify, make_response, request
 from flask_restx import Namespace, Resource, reqparse
 from werkzeug.datastructures import FileStorage
 
@@ -41,6 +41,11 @@ class SubtitleArchive(Resource):
         base64 so the frontend can rebuild them into the normal per-file upload
         flow, where the user assigns language/forced/HI per file.
         """
+        # Reject an oversized upload from the declared length before parse_args
+        # spools the whole multipart body to disk/memory.
+        if request.content_length and request.content_length > MAX_ARCHIVE_SIZE:
+            return 'Archive is too large.', 400
+
         args = self.post_request_parser.parse_args()
         uploaded = args.get('file')
         filename = uploaded.filename or ''

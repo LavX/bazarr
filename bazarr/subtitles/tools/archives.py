@@ -58,7 +58,8 @@ def _guarded(entries):
     total = 0
     for name, declared_size, read in entries:
         if len(out) >= _MAX_ENTRIES:
-            break
+            raise ArchiveError(
+                f"Archive contains more than {_MAX_ENTRIES} subtitle files.")
         total += declared_size or 0
         if total > _MAX_TOTAL_BYTES:
             raise ArchiveError("Archive expands beyond the allowed size limit.")
@@ -109,25 +110,39 @@ def _extract_rar(data):
 
 def _extract_7z(data):
     import py7zr
+    from py7zr.exceptions import ArchiveError as Py7zError
+    from py7zr.exceptions import PasswordRequired
     from py7zr.io import BufferOverflow, BytesIOFactory
     # Extract into memory (never to disk) so a traversal member name cannot
-    # escape onto the filesystem; the factory caps total memory. Only the
-    # subtitle members are targeted so non-subtitle files are never inflated.
+    # escape onto the filesystem. Only the subtitle members are targeted so
+    # non-subtitle files are never inflated. py7zr's BytesIOFactory limit is
+    # per-output-object, not cumulative, so enforce the entry and total-size
+    # budgets from the header BEFORE extracting anything.
     factory = BytesIOFactory(_MAX_TOTAL_BYTES)
     try:
         with py7zr.SevenZipFile(BytesIO(data), 'r') as zf:
-            targets = [name for name in zf.getnames() if _keep(name)]
-            if not targets:
+            members = [fi for fi in zf.list()
+                       if not fi.is_directory and _keep(fi.filename)]
+            if not members:
                 return []
+            if len(members) > _MAX_ENTRIES:
+                raise ArchiveError(
+                    f"Archive contains more than {_MAX_ENTRIES} subtitle files.")
+            if sum(fi.uncompressed or 0 for fi in members) > _MAX_TOTAL_BYTES:
+                raise ArchiveError(
+                    "Archive expands beyond the allowed size limit.")
             zf.reset()
-            zf.extract(targets=targets, factory=factory)
+            zf.extract(targets=[fi.filename for fi in members], factory=factory)
+    except ArchiveError:
+        raise
+    except PasswordRequired as e:
+        raise ArchiveError("Encrypted 7z archives are not supported.") from e
     except BufferOverflow as e:
         raise ArchiveError("Archive expands beyond the allowed size limit.") from e
-    except py7zr.exceptions.ArchiveError as e:
+    except Py7zError as e:
         raise ArchiveError(f"Could not read 7z archive: {e}") from e
-    items = list(factory.products.items())[:_MAX_ENTRIES]
     return [(os.path.basename(name.replace('\\', '/')), bio.read())
-            for name, bio in items]
+            for name, bio in factory.products.items()]
 
 
 def extract_subtitles_from_archive(filename, data):
