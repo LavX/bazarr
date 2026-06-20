@@ -99,9 +99,30 @@ export interface UpgradableResponse {
   seriesKeys?: UpgradableSeriesKey[];
 }
 
+export interface ArchiveExtractedFile {
+  name: string;
+  // base64-encoded file content
+  content: string;
+}
+
+export interface ArchiveExtractResponse {
+  files: ArchiveExtractedFile[];
+  count: number;
+}
+
 class SubtitlesApi extends BaseApi {
   constructor() {
     super("/subtitles");
+  }
+
+  // Upload a compressed archive (.zip/.rar/.7z) and get back the contained
+  // subtitle files (non-subtitle entries discarded) so they can be added to
+  // the manual-upload flow. See LavX/bazarr issue #233.
+  async extractArchive(file: File): Promise<ArchiveExtractResponse> {
+    const response = await this.post<ArchiveExtractResponse>("/archive", {
+      file,
+    });
+    return response.data;
   }
 
   async getRefTracksByEpisodeId(

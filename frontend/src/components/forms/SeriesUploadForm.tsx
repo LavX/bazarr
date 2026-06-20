@@ -1,4 +1,10 @@
-import React, { FunctionComponent, useEffect, useMemo } from "react";
+import React, {
+  FunctionComponent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import {
   Button,
   Divider,
@@ -7,7 +13,9 @@ import {
   Stack,
   Text,
 } from "@mantine/core";
+import { Dropzone } from "@mantine/dropzone";
 import { useForm } from "@mantine/form";
+import { showNotification } from "@mantine/notifications";
 import {
   faCheck,
   faCircleNotch,
@@ -23,12 +31,15 @@ import {
   useEpisodeSubtitleModification,
   useSubtitleInfos,
 } from "@/apis/hooks";
+import api from "@/apis/raw";
 import { subtitlesTypeOptions } from "@/components/forms/uploadFormSelectorTypes";
-import { Action, Selector } from "@/components/inputs";
+import { Action, DropContent, Selector } from "@/components/inputs";
 import SimpleTable from "@/components/tables/SimpleTable";
 import TextPopover from "@/components/TextPopover";
 import { useModals, withModal } from "@/modules/modals";
+import { notification } from "@/modules/task";
 import { useArrayAction, useSelectorOptions } from "@/utilities";
+import { expandArchives, isArchiveFile } from "@/utilities/archives";
 import FormUtils from "@/utilities/form";
 import {
   useLanguageProfileBy,
@@ -110,20 +121,27 @@ const SeriesUploadForm: FunctionComponent<Props> = ({
     [languages],
   );
 
+  const buildRow = useCallback(
+    (file: File): SubtitleFile => {
+      const row: SubtitleFile = {
+        file,
+        language: defaultLanguage,
+        forced: defaultLanguage?.forced ?? false,
+        hi: defaultLanguage?.hi ?? false,
+        episode: null,
+      };
+      return { ...row, validateResult: validator(row) };
+    },
+    [defaultLanguage],
+  );
+
+  const [processing, setProcessing] = useState(false);
+
   const form = useForm({
     initialValues: {
-      files: files
-        .map<SubtitleFile>((file) => ({
-          file,
-          language: defaultLanguage,
-          forced: defaultLanguage?.forced ?? false,
-          hi: defaultLanguage?.hi ?? false,
-          episode: null,
-        }))
-        .map<SubtitleFile>((file) => ({
-          ...file,
-          validateResult: validator(file),
-        })),
+      // Archives are expanded asynchronously on mount; start with the plain
+      // subtitle files so the common case renders instantly.
+      files: files.filter((file) => !isArchiveFile(file)).map(buildRow),
     },
     validate: {
       files: FormUtils.validation(
@@ -140,6 +158,49 @@ const SeriesUploadForm: FunctionComponent<Props> = ({
     },
   });
 
+  // Add dropped/selected files: archives (#233) are extracted on the backend
+  // and replaced by their subtitle entries; plain files pass through.
+  const addFiles = useCallback(
+    async (incoming: File[]) => {
+      if (incoming.length === 0) {
+        return;
+      }
+      if (incoming.some(isArchiveFile)) {
+        setProcessing(true);
+      }
+      const { files: expanded, errors } = await expandArchives(
+        incoming,
+        (file) => api.subtitles.extractArchive(file),
+      );
+      if (errors.length > 0) {
+        showNotification(
+          notification.warn(
+            "Could not extract some archives",
+            errors.join(", "),
+          ),
+        );
+      }
+      if (expanded.length > 0) {
+        form.setValues((values) => ({
+          ...values,
+          files: [...(values.files ?? []), ...expanded.map(buildRow)],
+        }));
+      }
+      setProcessing(false);
+    },
+    [form, buildRow],
+  );
+
+  // Expand any archives in the initially-provided files once on mount.
+  useEffect(() => {
+    const archives = files.filter(isArchiveFile);
+    if (archives.length > 0) {
+      void addFiles(archives);
+    }
+    // Only the initially-provided files matter here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const action = useArrayAction<SubtitleFile>((fn) => {
     form.setValues((values) => {
       const newFiles = fn(values.files ?? []);
@@ -150,7 +211,12 @@ const SeriesUploadForm: FunctionComponent<Props> = ({
     });
   });
 
-  const names = useMemo(() => files.map((v) => v.name), [files]);
+  // Derived from the live rows (not just the initial prop) so files added via
+  // the dropzone or extracted from an archive also get episode auto-matched.
+  const names = useMemo(
+    () => form.values.files.map((v) => v.file.name),
+    [form.values.files],
+  );
   const infos = useSubtitleInfos(names);
 
   // Auto assign episode if available
@@ -391,9 +457,22 @@ const SeriesUploadForm: FunctionComponent<Props> = ({
       })}
     >
       <Stack className="table-long-break">
+        <Dropzone
+          onDrop={(dropped) => void addFiles(dropped)}
+          loading={processing}
+          multiple
+        >
+          <DropContent></DropContent>
+        </Dropzone>
         <SimpleTable columns={columns} data={form.values.files}></SimpleTable>
         <Divider></Divider>
-        <Button type="submit">Upload</Button>
+        <Button
+          type="submit"
+          loading={processing}
+          disabled={processing || form.values.files.length === 0}
+        >
+          Upload
+        </Button>
       </Stack>
     </form>
   );

@@ -189,6 +189,9 @@ export function useSubtitleInfos(names: string[]) {
     queryKey: [QueryKeys.Subtitles, QueryKeys.Infos, names],
 
     queryFn: () => api.subtitles.info(names),
+    // Skip the request when there are no files yet (e.g. while an initial
+    // archive selection is still being extracted).
+    enabled: names.length > 0,
   });
 }
 
