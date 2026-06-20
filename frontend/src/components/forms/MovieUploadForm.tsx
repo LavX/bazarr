@@ -29,6 +29,7 @@ import { isString, uniqBy } from "lodash";
 import { useMovieSubtitleModification } from "@/apis/hooks";
 import api from "@/apis/raw";
 import { subtitlesTypeOptions } from "@/components/forms/uploadFormSelectorTypes";
+import { shouldAutoCloseUpload } from "@/components/forms/uploadHelpers";
 import { Action, DropContent, Selector } from "@/components/inputs";
 import SimpleTable from "@/components/tables/SimpleTable";
 import TextPopover from "@/components/TextPopover";
@@ -199,10 +200,10 @@ const MovieUploadForm: FunctionComponent<Props> = ({
   }, []);
 
   useEffect(() => {
-    if (ready && form.values.files.length <= 0) {
+    if (shouldAutoCloseUpload(ready, processing, form.values.files.length)) {
       modals.closeSelf();
     }
-  }, [ready, form.values.files.length, modals]);
+  }, [ready, processing, form.values.files.length, modals]);
 
   const action = useArrayAction<SubtitleFile>((fn) => {
     form.setValues((values) => {

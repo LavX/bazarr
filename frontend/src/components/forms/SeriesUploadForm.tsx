@@ -33,6 +33,7 @@ import {
 } from "@/apis/hooks";
 import api from "@/apis/raw";
 import { subtitlesTypeOptions } from "@/components/forms/uploadFormSelectorTypes";
+import { matchEpisode } from "@/components/forms/uploadHelpers";
 import { Action, DropContent, Selector } from "@/components/inputs";
 import SimpleTable from "@/components/tables/SimpleTable";
 import TextPopover from "@/components/TextPopover";
@@ -219,18 +220,19 @@ const SeriesUploadForm: FunctionComponent<Props> = ({
   );
   const infos = useSubtitleInfos(names);
 
-  // Auto assign episode if available
+  // Auto assign episode if available. Preserve a row that already has an
+  // episode (manually chosen, or matched earlier) so adding more files does not
+  // clobber the user's selection when this effect re-runs.
   useEffect(() => {
     if (infos.data !== undefined) {
+      const infoList = infos.data;
+      const episodeList = episodes.data ?? [];
       action.update((item) => {
-        const info = infos.data.find((v) => v.filename === item.file.name);
-        if (info) {
-          item.episode =
-            episodes.data?.find(
-              (v) => v.season === info.season && v.episode === info.episode,
-            ) ?? item.episode;
+        if (item.episode) {
+          return item;
         }
-        return item;
+        const matched = matchEpisode(item.file.name, infoList, episodeList);
+        return matched ? { ...item, episode: matched } : item;
       });
     }
   }, [action, episodes.data, infos.data]);
