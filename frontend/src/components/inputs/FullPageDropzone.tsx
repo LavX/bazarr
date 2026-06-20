@@ -1,12 +1,13 @@
 import {
   FunctionComponent,
-  ReactNode,
   RefObject,
   useEffect,
   useRef,
   useState,
 } from "react";
-import { Box, getDefaultZIndex } from "@mantine/core";
+import { Box, getDefaultZIndex, Group, Stack, Text } from "@mantine/core";
+import { faFileCirclePlus } from "@fortawesome/free-solid-svg-icons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 
 interface FullPageDropzoneProps {
   // Only listen while the page is ready to accept uploads (e.g. a language
@@ -15,12 +16,27 @@ interface FullPageDropzoneProps {
   onDrop: (files: File[]) => void;
   // Assigned a function that opens the native file picker, for a toolbar button.
   openRef?: RefObject<(() => void) | null>;
-  children: ReactNode;
 }
 
 function dragHasFiles(event: DragEvent): boolean {
   return Array.from(event.dataTransfer?.types ?? []).includes("Files");
 }
+
+// Self-contained overlay content. NOT Mantine's DropContent, which uses
+// Dropzone.Idle/Accept/Reject and therefore must live inside a <Dropzone>
+// context - rendering it here would crash with "Dropzone component was not
+// found in tree".
+const Overlay: FunctionComponent = () => (
+  <Group justify="center" gap="xl">
+    <FontAwesomeIcon icon={faFileCirclePlus} size="2x" />
+    <Stack gap={0}>
+      <Text size="lg">Upload Subtitles</Text>
+      <Text c="var(--bz-text-tertiary)" size="sm">
+        Drop subtitle files or a .zip / .rar / .7z archive to upload
+      </Text>
+    </Stack>
+  </Group>
+);
 
 // A reliable full-window file dropzone. Unlike Mantine's Dropzone.FullScreen -
 // whose overlay races the browser's native dragover/drop and lets the browser
@@ -32,7 +48,6 @@ export const FullPageDropzone: FunctionComponent<FullPageDropzoneProps> = ({
   active,
   onDrop,
   openRef,
-  children,
 }) => {
   const [visible, setVisible] = useState(false);
   const depth = useRef(0);
@@ -130,7 +145,7 @@ export const FullPageDropzone: FunctionComponent<FullPageDropzoneProps> = ({
             pointerEvents: "none",
           }}
         >
-          {children}
+          <Overlay />
         </Box>
       )}
     </>

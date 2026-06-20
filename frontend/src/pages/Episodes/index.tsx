@@ -47,7 +47,7 @@ import {
 } from "@/apis/hooks";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
 import { useInstanceName } from "@/apis/hooks/site";
-import { DropContent, FullPageDropzone, Toolbox } from "@/components";
+import { FullPageDropzone, Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import { CombineModal } from "@/components/forms/CombineForm";
 import { ItemEditModal } from "@/components/forms/ItemEditForm";
@@ -191,9 +191,7 @@ const SeriesEpisodesView: FunctionComponent = () => {
           openRef={openDropzone}
           active={profile !== undefined}
           onDrop={onDrop}
-        >
-          <DropContent></DropContent>
-        </FullPageDropzone>
+        />
         <Toolbox>
           <Group gap="xs">
             <Toolbox.Button

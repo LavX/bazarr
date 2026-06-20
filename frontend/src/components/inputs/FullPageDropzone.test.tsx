@@ -1,5 +1,4 @@
-import { act } from "@testing-library/react";
-import { screen } from "@testing-library/react";
+import { act, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { customRender } from "@/tests";
 import { FullPageDropzone } from "./FullPageDropzone";
@@ -14,25 +13,17 @@ function fileDragEvent(type: string, files: File[]) {
 
 describe("FullPageDropzone", () => {
   it("shows the overlay only while files are dragged over the window", () => {
-    customRender(
-      <FullPageDropzone active onDrop={() => {}}>
-        <div>DROP HERE</div>
-      </FullPageDropzone>,
-    );
-    expect(screen.queryByText("DROP HERE")).toBeNull();
+    customRender(<FullPageDropzone active onDrop={() => {}} />);
+    expect(screen.queryByText("Upload Subtitles")).toBeNull();
     act(() => {
       window.dispatchEvent(fileDragEvent("dragenter", []));
     });
-    expect(screen.getByText("DROP HERE")).not.toBeNull();
+    expect(screen.getByText("Upload Subtitles")).toBeInTheDocument();
   });
 
   it("calls onDrop with the dropped files and prevents the browser default", () => {
     const onDrop = vi.fn();
-    customRender(
-      <FullPageDropzone active onDrop={onDrop}>
-        <div>DROP HERE</div>
-      </FullPageDropzone>,
-    );
+    customRender(<FullPageDropzone active onDrop={onDrop} />);
     const file = new File(["x"], "a.zip", { type: "application/zip" });
     const event = fileDragEvent("drop", [file]);
     const prevented = vi.spyOn(event, "preventDefault");
@@ -48,11 +39,7 @@ describe("FullPageDropzone", () => {
 
   it("ignores drops when inactive", () => {
     const onDrop = vi.fn();
-    customRender(
-      <FullPageDropzone active={false} onDrop={onDrop}>
-        <div>DROP HERE</div>
-      </FullPageDropzone>,
-    );
+    customRender(<FullPageDropzone active={false} onDrop={onDrop} />);
     act(() => {
       window.dispatchEvent(fileDragEvent("drop", [new File(["x"], "a.zip")]));
     });
@@ -62,9 +49,7 @@ describe("FullPageDropzone", () => {
   it("exposes an open() through openRef for the toolbar Upload button", () => {
     const openRef: { current: (() => void) | null } = { current: null };
     customRender(
-      <FullPageDropzone active onDrop={() => {}} openRef={openRef}>
-        <div>DROP HERE</div>
-      </FullPageDropzone>,
+      <FullPageDropzone active onDrop={() => {}} openRef={openRef} />,
     );
     expect(typeof openRef.current).toBe("function");
   });

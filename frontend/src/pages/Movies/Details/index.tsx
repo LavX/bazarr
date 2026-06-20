@@ -39,7 +39,7 @@ import {
   useMovieModification,
 } from "@/apis/hooks/movies";
 import { useInstanceName } from "@/apis/hooks/site";
-import { Action, DropContent, FullPageDropzone, Toolbox } from "@/components";
+import { Action, FullPageDropzone, Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import { CombineModal } from "@/components/forms/CombineForm";
 import { ItemEditModal } from "@/components/forms/ItemEditForm";
@@ -176,9 +176,7 @@ const MovieDetailView: FunctionComponent = () => {
           openRef={openDropzone}
           active={profile !== undefined}
           onDrop={onDrop}
-        >
-          <DropContent></DropContent>
-        </FullPageDropzone>
+        />
         <Toolbox>
           <Group gap="xs">
             <Toolbox.Button
