@@ -9,7 +9,6 @@ import {
   Stack,
   Text,
 } from "@mantine/core";
-import { Dropzone } from "@mantine/dropzone";
 import { useDocumentTitle } from "@mantine/hooks";
 import { showNotification } from "@mantine/notifications";
 import {
@@ -40,7 +39,7 @@ import {
   useMovieModification,
 } from "@/apis/hooks/movies";
 import { useInstanceName } from "@/apis/hooks/site";
-import { Action, DropContent, Toolbox } from "@/components";
+import { Action, DropContent, FullPageDropzone, Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import { CombineModal } from "@/components/forms/CombineForm";
 import { ItemEditModal } from "@/components/forms/ItemEditForm";
@@ -173,13 +172,13 @@ const MovieDetailView: FunctionComponent = () => {
         </Breadcrumbs>
       </nav>
       <QueryOverlay result={movieQuery}>
-        <Dropzone.FullScreen
+        <FullPageDropzone
           openRef={openDropzone}
           active={profile !== undefined}
           onDrop={onDrop}
         >
           <DropContent></DropContent>
-        </Dropzone.FullScreen>
+        </FullPageDropzone>
         <Toolbox>
           <Group gap="xs">
             <Toolbox.Button

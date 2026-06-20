@@ -15,7 +15,6 @@ import {
   Stack,
   Text,
 } from "@mantine/core";
-import { Dropzone } from "@mantine/dropzone";
 import { useDocumentTitle } from "@mantine/hooks";
 import { showNotification } from "@mantine/notifications";
 import {
@@ -48,7 +47,7 @@ import {
 } from "@/apis/hooks";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
 import { useInstanceName } from "@/apis/hooks/site";
-import { DropContent, Toolbox } from "@/components";
+import { DropContent, FullPageDropzone, Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import { CombineModal } from "@/components/forms/CombineForm";
 import { ItemEditModal } from "@/components/forms/ItemEditForm";
@@ -188,13 +187,13 @@ const SeriesEpisodesView: FunctionComponent = () => {
         </Breadcrumbs>
       </nav>
       <QueryOverlay result={seriesQuery}>
-        <Dropzone.FullScreen
+        <FullPageDropzone
           openRef={openDropzone}
           active={profile !== undefined}
           onDrop={onDrop}
         >
           <DropContent></DropContent>
-        </Dropzone.FullScreen>
+        </FullPageDropzone>
         <Toolbox>
           <Group gap="xs">
             <Toolbox.Button
