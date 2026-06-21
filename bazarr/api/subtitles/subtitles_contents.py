@@ -5,6 +5,7 @@ import srt
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
 
 from ..utils import authenticate
+from utilities.security_guards import is_subtitle_path_extension
 
 
 api_ns_subtitle_contents = Namespace('Subtitle Contents', description='Retrieve contents of subtitle file')
@@ -42,14 +43,25 @@ class SubtitleNameContents(Resource):
         args = self.get_request_parser.parse_args()
         path = args.get('subtitlePath')
 
+        # Only read recognised subtitle files; refuse arbitrary paths (config,
+        # keys, db) so this endpoint cannot become a file-disclosure primitive
+        # (#GHSA). Subtitle paths always carry a subtitle extension.
+        if not is_subtitle_path_extension(path):
+            return "Unsupported or missing subtitle path", 400
+
         results = []
 
-        # Load the SRT content
-        with open(path, "r", encoding="utf-8") as f:
-            file_content = f.read()
+        # Load the SRT content. Never surface file contents on failure: srt
+        # embeds the raw (mis-parsed) text in SRTParseError, so swallow it.
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                file_content = f.read()
+            parsed = list(srt.parse(file_content))
+        except (OSError, ValueError, srt.SRTParseError):
+            return "Unable to read subtitle file", 422
 
         # Map contents
-        for sub in srt.parse(file_content):
+        for sub in parsed:
 
             start_total_seconds = int(sub.start.total_seconds())
             end_total_seconds = int(sub.end.total_seconds())
