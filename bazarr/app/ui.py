@@ -17,6 +17,7 @@ from sonarr.info import url_api_sonarr
 from radarr.info import url_api_radarr
 from utilities.helper import check_credentials
 from utilities.central import get_log_file_path
+from utilities.security_guards import api_key_matches
 
 from .config import settings, base_url, get_ssl_verify
 from .database import database, System
@@ -67,6 +68,16 @@ def check_login(actual_method):
                 return abort(401)
         return actual_method(*args, **kwargs)
     return wrapper
+
+
+def _require_proxy_api_key():
+    """The /test connection proxies forward a server-side request to a
+    user-supplied host (an SSRF surface). Require the global API key so they are
+    never reachable unauthenticated, independent of settings.auth.type (which is
+    None by default). The frontend already sends X-API-KEY on every request."""
+    provided = request.headers.get('X-API-KEY') or request.args.get('apikey')
+    if not api_key_matches(provided, settings.auth.apikey):
+        abort(401)
 
 
 @ui_bp.route('/', defaults={'path': ''})
@@ -197,11 +208,13 @@ def movies_images(url):
 @ui_bp.route('/system/backup/download/<path:filename>', methods=['GET'])
 @check_login
 def backup_download(filename):
-    fullpath = os.path.normpath(os.path.join(settings.backup.folder, filename))
-    if not fullpath.startswith(settings.backup.folder):
+    backup_folder = os.path.realpath(settings.backup.folder)
+    fullpath = os.path.realpath(os.path.join(backup_folder, filename))
+    # Trailing-separator containment so a sibling dir sharing the prefix
+    # (e.g. /config/backup-evil) cannot pass; realpath also defeats `..`/symlinks.
+    if fullpath != backup_folder and not fullpath.startswith(backup_folder + os.sep):
         return '', 404
-    else:
-        return send_file(fullpath, max_age=0, as_attachment=True)
+    return send_file(fullpath, max_age=0, as_attachment=True)
 
 
 @ui_bp.route('/api/swaggerui/static/<path:filename>', methods=['GET'])
@@ -400,6 +413,7 @@ def proxy_service(service):
 
     See LavX/bazarr#92 for the original report and rationale.
     """
+    _require_proxy_api_key()
     if service not in _TEST_SERVICES:
         return dict(status=False, error='unsupported service', code=0)
     config = _TEST_SERVICES[service]
@@ -511,6 +525,7 @@ def proxy_service(service):
 @ui_bp.route('/test/<protocol>/<path:url>', methods=['GET'])
 @check_login
 def proxy(protocol, url):
+    _require_proxy_api_key()
     if protocol.lower() not in ['http', 'https']:
         return dict(status=False, error='Unsupported protocol', code=0)
     url = f'{protocol}://{unquote(url)}'

@@ -10,6 +10,7 @@ from app.database import TableShows, TableEpisodes, TableMovies, database, selec
 from arr_instances.resolution import scoped
 from languages.get_languages import alpha3_from_alpha2
 from utilities.path_mappings import path_mappings
+from utilities.security_guards import subtitle_path_within_area
 from utilities.video_analyzer import subtitles_sync_references
 from subtitles.tools.subsyncer import SubSyncer  # noqa: F401
 from subtitles.tools.subsync_engines import is_sync_engine_output
@@ -227,6 +228,7 @@ class Subtitles(Resource):
 
         language = args.get("language")
         subtitles_path = args.get("path") or ""
+        user_supplied_path = bool(subtitles_path.strip())
         media_type = args.get("type")
         id = args.get("id")
         arr_instance_id = args.get("arr_instance_id")
@@ -345,6 +347,19 @@ class Subtitles(Resource):
                 return "Movie not found", 404
 
             video_path = path_mappings.path_replace_movie(metadata.path)
+
+        # Path-traversal containment (#GHSA): a user-supplied subtitle path must
+        # stay where Bazarr stores subtitles for this video (alongside it / a
+        # subfolder under it / the configured absolute custom folder). The
+        # embedded-track branch sets a server-generated path (user_supplied_path
+        # is False) and is intentionally exempt.
+        if user_supplied_path and not subtitle_path_within_area(
+            subtitles_path,
+            video_path,
+            subfolder_mode=settings.general.subfolder,
+            custom_subfolder=settings.general.subfolder_custom,
+        ):
+            return "Subtitle path is outside the media library.", 403
 
         if action == "sync":
             try:
