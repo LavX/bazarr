@@ -173,7 +173,6 @@ jobs:
             tests/bazarr/test_archive_extraction.py \
             tests/bazarr/test_security_guards.py \
             tests/bazarr/test_ui.py \
-            tests/bazarr/test_editor_api.py \
             tests/bazarr/test_utilities_video_analyzer.py \
             tests/bazarr/test_embedded_subtitle_extraction.py \
             tests/subliminal_patch/test_subliminal_rebase.py \
@@ -196,6 +195,7 @@ jobs:
           set -e
           pip install "psycopg[binary]"
           for f in \
+            tests/bazarr/test_editor_api.py \
             tests/bazarr/test_arr_atomicity_secrets.py \
             tests/bazarr/test_arr_pg_cutover_migration.py \
             tests/bazarr/test_editor_instance_scope.py \
