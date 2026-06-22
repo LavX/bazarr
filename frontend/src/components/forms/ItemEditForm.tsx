@@ -1,5 +1,13 @@
 import { FunctionComponent, useMemo } from "react";
-import { Button, Divider, Group, LoadingOverlay, Stack } from "@mantine/core";
+import {
+  Button,
+  Center,
+  Divider,
+  Group,
+  Loader,
+  LoadingOverlay,
+  Stack,
+} from "@mantine/core";
 import { useForm } from "@mantine/form";
 import { showNotification } from "@mantine/notifications";
 import { UseMutationResult } from "@tanstack/react-query";
@@ -16,25 +24,33 @@ interface Props {
   onCancel?: () => void;
 }
 
-const ItemEditForm: FunctionComponent<Props> = ({
+interface FormBodyProps extends Props {
+  profiles: Language.Profile[];
+  isFetching: boolean;
+}
+
+const ItemEditFormBody: FunctionComponent<FormBodyProps> = ({
   mutation,
   item,
   onComplete,
   onCancel,
+  profiles,
+  isFetching,
 }) => {
-  const { data, isFetching } = useLanguageProfiles();
   const { isPending, mutate } = mutation;
   const modals = useModals();
 
   const profileOptions = useSelectorOptions(
-    data ?? [],
+    profiles,
     (v) => v.name ?? "Unknown",
     (v) => v.profileId.toString() ?? "-1",
   );
 
+  // profiles is guaranteed loaded here, so the resolved profile is captured
+  // correctly when the form mounts (see the load gate in ItemEditForm).
   const profile = useMemo(
-    () => data?.find((v) => v.profileId === item?.profileId) ?? null,
-    [data, item?.profileId],
+    () => profiles.find((v) => v.profileId === item?.profileId) ?? null,
+    [profiles, item?.profileId],
   );
 
   const form = useForm({
@@ -121,6 +137,25 @@ const ItemEditForm: FunctionComponent<Props> = ({
         </Group>
       </Stack>
     </form>
+  );
+};
+
+const ItemEditForm: FunctionComponent<Props> = (props) => {
+  const { data, isFetching } = useLanguageProfiles();
+
+  // Gate the form on loaded profiles. If profiles are not cached yet, mounting
+  // the form would capture a null initial profile that is never synced once
+  // data arrives, so saving would clear the item profile (profileid: [null]).
+  if (data === undefined) {
+    return (
+      <Center my="xl">
+        <Loader />
+      </Center>
+    );
+  }
+
+  return (
+    <ItemEditFormBody {...props} profiles={data} isFetching={isFetching} />
   );
 };
 

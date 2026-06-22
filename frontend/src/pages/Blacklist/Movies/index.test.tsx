@@ -48,10 +48,11 @@ describe("Blacklist Movies", () => {
     await waitFor(() => {
       expect(screen.getByText("yifysubtitles")).toBeInTheDocument();
     });
-    expect(screen.getByRole("link", { name: "50" })).toHaveAttribute(
-      "href",
-      "/movies/5000",
-    );
+    expect(
+      screen.getByRole("link", {
+        name: "Batman vs Teenage Mutant Ninja Turtles",
+      }),
+    ).toHaveAttribute("href", "/movies/5000");
   });
 
   it("should render without blacklisted movies", async () => {

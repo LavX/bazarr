@@ -758,10 +758,15 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
     initialValues: {
       settings: {
         ...staged,
-        [`settings-general-provider_priorities-${info?.key}`]:
-          seededPriorities[info?.key ?? ""] ?? 100,
+        // Only seed the per-provider helper keys when a concrete provider is
+        // selected. When the drawer opens via "+ Add provider" info is null, so
+        // seeding here would create a literal "...-undefined" key that leaks
+        // into the saved settings (provider_priorities gains an "undefined"
+        // entry on the backend).
         ...(info?.key
           ? {
+              [`settings-general-provider_priorities-${info.key}`]:
+                seededPriorities[info.key] ?? 100,
               [`settings-general-provider_languages-${info.key}`]:
                 seededProviderLanguageExclusions[info.key] ?? [],
             }
@@ -841,7 +846,6 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
           changes[settingsKey] = [...enabledProviders, info.key];
         }
 
-        const priorityKey = `settings-general-provider_priorities-${info.key}`;
         const priorities = resolveProviderPriorities(values.settings, settings);
         if (isNewProvider) {
           const maxPriority = Object.values(priorities).reduce(
@@ -854,7 +858,6 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
         }
         changes["settings-general-provider_priorities"] =
           JSON.stringify(priorities);
-        delete changes[priorityKey];
 
         if (settingsKey === "settings-general-enabled_providers") {
           const languageKey = `settings-general-provider_languages-${info.key}`;
@@ -876,10 +879,23 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
           changes["settings-general-provider_languages"] = JSON.stringify(
             providerLanguageExclusions,
           );
-          delete changes[languageKey];
-        } else {
-          const languageKey = `settings-general-provider_languages-${info.key}`;
-          delete changes[languageKey];
+        }
+
+        // The per-provider priority/language helper keys are UI-local: their
+        // values have already been folded into the consolidated
+        // provider_priorities / provider_languages JSON above. Strip every
+        // remaining helper key (the selected provider's, any abandoned
+        // provider's from a prior "Change", and the "...-undefined" placeholder
+        // from "+ Add provider") so they never get POSTed and persisted. The
+        // backend splits "settings-general-provider_priorities-<x>" into 4
+        // segments and would otherwise write an "<x>" entry into the dict.
+        for (const changeKey of Object.keys(changes)) {
+          if (
+            changeKey.startsWith("settings-general-provider_priorities-") ||
+            changeKey.startsWith("settings-general-provider_languages-")
+          ) {
+            delete changes[changeKey];
+          }
         }
 
         // Apply submit hooks

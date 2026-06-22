@@ -378,12 +378,16 @@ describe("SUB serializer", () => {
     expect(output).not.toContain("\nLine two");
   });
 
-  it("preserves rawText when present", () => {
+  it("rebuilds from edited fields, ignoring stale rawText", () => {
     const rawLine = "{100}{200}Original text with|pipe";
     const cue = makeCue(4170, 8340, "Different text", rawLine);
     const result = makeResult("sub", [cue]);
     const output = serializer.serialize(result);
-    expect(output).toBe(rawLine);
+    // The edited timing/text must be honored, not the original rawText.
+    // 4170ms -> frame 100, 8340ms -> frame 200 at 23.976fps.
+    const startFrame = Math.round((4170 * FPS) / 1000);
+    const endFrame = Math.round((8340 * FPS) / 1000);
+    expect(output).toBe(`{${startFrame}}{${endFrame}}Different text`);
   });
 
   it("returns empty string for empty cues", () => {
@@ -544,12 +548,14 @@ describe("MPL serializer", () => {
     expect(output).toContain("Line one|Line two");
   });
 
-  it("preserves rawText when present", () => {
+  it("rebuilds from edited fields, ignoring stale rawText", () => {
     const rawLine = "[100][200]Original|text";
     const cue = makeCue(10000, 20000, "Different text", rawLine);
     const result = makeResult("mpl", [cue]);
     const output = serializer.serialize(result);
-    expect(output).toBe(rawLine);
+    // The edited timing/text must be honored, not the original rawText.
+    // 10000ms -> 100 ds, 20000ms -> 200 ds.
+    expect(output).toBe("[100][200]Different text");
   });
 
   it("returns empty string for empty cues", () => {

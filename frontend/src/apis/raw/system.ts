@@ -42,8 +42,21 @@ class SystemApi extends BaseApi {
     return response;
   }
 
-  async updateSettings(data: object) {
-    await this.post("/settings", data);
+  async updateSettings(data: LooseObject) {
+    // Convert cleared (null) values to the string "null" so the backend maps
+    // them to None and disables the corresponding setting (auth.type, proxy.type,
+    // anti_captcha_provider, subzero color). createFormdata() in base.ts skips
+    // null, which would otherwise leave the old value untouched on save. We send
+    // "null" (not "") because it is in the backend's empty_values and is coerced
+    // to None, whereas "" is preserved as-is and rejected by the is_in validators
+    // on those keys. This matches the pre-FormData-null-skip behavior. Leave
+    // undefined and all other values (including arrays) as-is.
+    const sanitized: LooseObject = {};
+    for (const key in data) {
+      const value = data[key];
+      sanitized[key] = value === null ? "null" : value;
+    }
+    await this.post("/settings", sanitized);
   }
 
   async languages(history = false) {

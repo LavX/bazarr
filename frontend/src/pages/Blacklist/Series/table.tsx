@@ -39,7 +39,15 @@ const Table: FunctionComponent<Props> = ({ blacklist }) => {
         accessorKey: "episode_number",
       },
       {
-        id: "episodeTitle",
+        header: "Title",
+        accessorKey: "episodeTitle",
+        cell: ({
+          row: {
+            original: { episodeTitle },
+          },
+        }) => {
+          return <Text className="table-no-wrap">{episodeTitle}</Text>;
+        },
       },
       {
         header: "Language",

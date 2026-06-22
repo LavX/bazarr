@@ -19,7 +19,6 @@ import {
   usePlexServerSelectionMutation,
   usePlexServersQuery,
 } from "@/apis/hooks/plex";
-import { useFormActions } from "@/pages/Settings/utilities/FormValues";
 import ConnectionsCard from "./ConnectionsCard";
 import styles from "@/pages/Settings/Plex/ServerSection.module.scss";
 
@@ -44,7 +43,6 @@ const ServerSection = () => {
   const { data: savedSelectedServer } = usePlexSelectedServerQuery({
     enabled: Boolean(authData?.valid && authData?.auth_method === "oauth"),
   });
-  const { setValue } = useFormActions();
 
   // Determine authentication status
   const isAuthenticated = Boolean(
@@ -79,9 +77,12 @@ const ServerSection = () => {
         ],
       });
       setIsSaved(true);
-      // Save to Bazarr settings
-      setValue(server.bestConnection.uri, "plex_server");
-      setValue(server.name, "plex_server_name");
+      // The selection is persisted server-side by the plex/select-server
+      // mutation above. Do NOT stage anything into the settings form here:
+      // these were unprefixed keys ("plex_server"/"plex_server_name") with no
+      // consumer, so the backend ignored them while they still inflated the
+      // unsaved-changes count and fired the leave-page prompt (including on the
+      // automatic single-server selection after OAuth).
     } catch {
       // Error is handled by the mutation hook
     } finally {

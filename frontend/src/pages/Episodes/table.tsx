@@ -118,7 +118,10 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
           ));
 
           return [...missing, ...subtitles];
-        }, [episode, seriesId]);
+          // onlyDesired/profileItems are captured from the parent; the row re-renders
+          // via the parent when they change, so they belong in the deps.
+          // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, [episode, seriesId, onlyDesired, profileItems]);
 
         return (
           <Group gap="xs" wrap="nowrap">

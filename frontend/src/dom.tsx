@@ -6,7 +6,7 @@ import { Router } from "./Router";
 const container = document.getElementById("root");
 
 if (container === null) {
-  Error("Cannot initialize app, root not found");
+  throw new Error("Cannot initialize app, root not found");
 } else {
   const root = createRoot(container);
   root.render(

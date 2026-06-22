@@ -1,4 +1,8 @@
-import { showNotification } from "@mantine/notifications";
+import {
+  hideNotification,
+  showNotification,
+  updateNotification,
+} from "@mantine/notifications";
 import { isArray, isEmpty, isNumber } from "lodash";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
@@ -29,6 +33,38 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
         msg
           .map((message) => notification.info("Notification", message))
           .forEach((data) => showNotification(data));
+      },
+    },
+    {
+      key: "progress",
+      update: (items) => {
+        items.forEach((item) => {
+          // Ensure the notification exists before updating it. showNotification
+          // is a no-op when a notification with this id is already displayed.
+          showNotification(notification.progress.pending(item.id, item.header));
+
+          if (item.value >= item.count) {
+            updateNotification(notification.progress.end(item.id, item.header));
+          } else {
+            updateNotification(
+              notification.progress.update(
+                item.id,
+                item.header,
+                item.name,
+                item.value,
+                item.count,
+              ),
+            );
+          }
+        });
+      },
+      delete: (ids) => {
+        // hide_progress fires when a job finishes or is cancelled. Give the
+        // user a moment to read the final state before closing.
+        setTimeout(
+          () => ids.forEach((id) => hideNotification(id)),
+          notification.PROGRESS_TIMEOUT,
+        );
       },
     },
     {
@@ -216,7 +252,7 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       key: "episode-history",
       any: () => {
         void queryClient.invalidateQueries({
-          queryKey: [QueryKeys.Episodes, QueryKeys.History],
+          queryKey: [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.History],
         });
       },
     },
@@ -224,7 +260,7 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       key: "episode-blacklist",
       any: () => {
         void queryClient.invalidateQueries({
-          queryKey: [QueryKeys.Episodes, QueryKeys.Blacklist],
+          queryKey: [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.Blacklist],
         });
       },
     },
