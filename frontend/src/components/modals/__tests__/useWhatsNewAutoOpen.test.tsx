@@ -14,11 +14,15 @@ describe("useWhatsNewAutoOpen", () => {
   it("does not auto-open while disabled (e.g. on the login screen)", async () => {
     customRender(<Harness enabled={false} />);
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(screen.queryByText("Distribution Hub")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Multiple Sonarr/Radarr instances"),
+    ).not.toBeInTheDocument();
   });
 
   it("auto-opens once enabled and the version is unseen", async () => {
     customRender(<Harness enabled />);
-    expect(await screen.findByText("Distribution Hub")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Multiple Sonarr/Radarr instances"),
+    ).toBeInTheDocument();
   });
 });
