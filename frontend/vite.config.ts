@@ -146,6 +146,18 @@ export default defineConfig(({ mode, command }) => {
       setupFiles: "./src/tests/setup.tsx",
       testTimeout: 20000,
       pool: "forks",
+      coverage: {
+        // No-regress floor for `vitest run --coverage` (enforced in CI). Set
+        // just below the baseline at the time it was added (~42% lines / 41%
+        // statements / 36% functions / 30% branches on the full src tree).
+        // Ratchet these UP as coverage grows; never lower them to make CI pass.
+        thresholds: {
+          lines: 40,
+          statements: 40,
+          functions: 35,
+          branches: 28,
+        },
+      },
     },
     server: {
       proxy: {
