@@ -381,3 +381,64 @@ def test_check_login_with_different_return_types():
 
             assert result == expected_value
             assert type(result) == expected_type  # noqa: E721
+
+
+# --- connection-test proxy API-key gate (SSRF hardening) ---------------------
+
+def test_proxy_route_requires_api_key(monkeypatch):
+    """The /test connection proxy must reject requests without the API key,
+    even when UI auth is disabled (the default), so it is never an
+    unauthenticated SSRF surface."""
+    from app import ui
+
+    monkeypatch.setattr(ui, "settings", SimpleNamespace(
+        auth=SimpleNamespace(type=None, apikey="secret-key")))
+    app = Flask(__name__)
+    app.register_blueprint(ui.ui_bp)
+    client = app.test_client()
+
+    # No key -> blocked before any outbound request happens.
+    assert client.get("/test/ftp/example.test/").status_code == 401
+
+    # Correct key -> passes the gate (ftp is then rejected downstream, no DNS).
+    resp = client.get("/test/ftp/example.test/", headers={"X-API-KEY": "secret-key"})
+    assert resp.status_code == 200
+    assert resp.get_json()["error"] == "Unsupported protocol"
+
+
+def test_proxy_route_rejects_wrong_api_key(monkeypatch):
+    from app import ui
+
+    monkeypatch.setattr(ui, "settings", SimpleNamespace(
+        auth=SimpleNamespace(type=None, apikey="secret-key")))
+    app = Flask(__name__)
+    app.register_blueprint(ui.ui_bp)
+    assert app.test_client().get(
+        "/test/ftp/x/", headers={"X-API-KEY": "wrong"}).status_code == 401
+
+
+# --- backup download containment (path-traversal hardening) ------------------
+
+def test_backup_download_rejects_sibling_prefix(monkeypatch, tmp_path):
+    """backup_download must not serve a sibling directory that merely shares the
+    backup-folder name prefix, while still serving a real backup."""
+    from app import ui
+
+    backup_dir = tmp_path / "backup"
+    backup_dir.mkdir()
+    (backup_dir / "bazarr_backup.zip").write_text("zip-bytes")
+    sibling = tmp_path / "backup-evil"
+    sibling.mkdir()
+    (sibling / "secret.txt").write_text("top-secret")
+
+    monkeypatch.setattr(ui, "settings", SimpleNamespace(
+        auth=SimpleNamespace(type=None),
+        backup=SimpleNamespace(folder=str(backup_dir))))
+    app = Flask(__name__)
+    app.register_blueprint(ui.ui_bp)
+
+    with app.test_request_context():
+        # sibling-prefix escape is refused
+        assert ui.backup_download("../backup-evil/secret.txt") == ('', 404)
+        # a genuine backup inside the folder is served
+        assert ui.backup_download("bazarr_backup.zip").status_code == 200
