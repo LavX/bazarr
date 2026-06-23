@@ -3,6 +3,7 @@
 import os
 import ipaddress
 import random
+import secrets
 import socket
 import requests
 import mimetypes
@@ -12,6 +13,8 @@ from flask import (request, abort, render_template, Response, session, send_file
 from functools import wraps
 from types import SimpleNamespace
 from urllib.parse import unquote, urlparse
+
+from itsdangerous import URLSafeSerializer, BadData
 
 from constants import HEADERS
 from literals import FILE_LOG
@@ -243,101 +246,157 @@ def movies_images(url):
 # approved exposing random library backdrops on the login screen).
 #
 # Safety: this is deliberately NOT an open image proxy. The list endpoint hands
-# out opaque tokens of the form "<kind>-<local id>". The stream endpoint only
-# resolves a token back to a URL when it maps to a known library row that still
-# has fanart; an attacker cannot supply an arbitrary URL, and anything that does
-# not parse to a known item returns 404. The arr API key is never sent to the
-# browser because the bytes are proxied server-side, exactly like series_images.
+# out signed, unguessable tokens for a small random sample. The stream endpoint
+# serves a token only when its signature verifies AND it maps to a known library
+# row that still has fanart; a tampered/forged/unsigned token returns 404, so a
+# client cannot enumerate the library or supply an arbitrary URL. The arr API key
+# is never sent to the browser because the bytes are proxied server-side, exactly
+# like series_images.
 
 # Cap how many backdrops the login screen rotates through.
 _BACKDROP_SAMPLE_CAP = 8
 
+# Backdrop tokens are signed with a per-process secret so the stream endpoint
+# only serves items we actually sampled. Without this the token was just
+# "<kind>-<row id>", which an unauthenticated client could enumerate
+# (series-1, series-2, ... movies-1, ...) to pull every library fanart and force
+# upstream Arr fetches. A fresh secret each process makes tokens unforgeable and
+# naturally short-lived: after a restart the login page simply refetches.
+_backdrop_serializer = URLSafeSerializer(secrets.token_hex(32), salt='login-backdrop')
+
+
+def _sign_backdrop(kind, item_id):
+    """Opaque, unforgeable token for one sampled backdrop."""
+    return _backdrop_serializer.dumps([kind, int(item_id)])
+
+
+def _unsign_backdrop(token):
+    """Verify a backdrop token. Returns (kind, id), or None for any tampering."""
+    try:
+        payload = _backdrop_serializer.loads(token)
+    except BadData:
+        return None
+    if not isinstance(payload, list) or len(payload) != 2:
+        return None
+    kind, item_id = payload
+    if kind not in ('series', 'movies') or not isinstance(item_id, int):
+        return None
+    return kind, item_id
+
+
+def _enabled_instance_ids():
+    """IDs of enabled Sonarr/Radarr instances (#156); empty set on any error.
+
+    Rows owned by a disabled instance can't be served (the stream path resolves
+    with enabled_only), so they must be kept out of the sample or the random cap
+    is spent on images that 404 and the login screen goes blank.
+    """
+    from .database import database, select, TableArrInstances
+    try:
+        rows = database.execute(
+            select(TableArrInstances.id).where(TableArrInstances.enabled == 1)
+        ).all()
+        return {r.id for r in rows}
+    except Exception:
+        return set()
+
 
 def _backdrop_candidates():
-    """Return library rows (series + movies) that have fanart.
+    """Random, capped sample of library rows (series + movies) with fanart.
 
-    Each row exposes ``id`` (local PK), ``fanart`` (relative arr path),
-    ``arr_instance_id`` (owning instance, #156) and ``kind`` ('series'/'movies').
-    Kept as a thin function so tests can stub the DB cleanly.
+    The random ordering and cap are pushed into SQL so a pre-auth hit never
+    materializes the whole library into Python. Only rows owned by an enabled
+    instance (or the scalar/default with a NULL instance id) are eligible. Each
+    row exposes ``id`` (local PK), ``fanart``, ``arr_instance_id`` (#156) and
+    ``kind``. Thin enough that tests can stub it cleanly.
     """
+    from sqlalchemy import func, or_
     from .database import database, select, TableShows, TableMovies
 
+    enabled = _enabled_instance_ids()
     candidates = []
-    try:
-        shows = database.execute(
-            select(TableShows.id, TableShows.fanart, TableShows.arr_instance_id)
-            .where(TableShows.fanart.isnot(None))
-            .where(TableShows.fanart != '')
-        ).all()
-        candidates += [
-            SimpleNamespace(id=r.id, fanart=r.fanart,
-                            arr_instance_id=r.arr_instance_id, kind='series')
-            for r in shows
-        ]
-    except Exception:
-        pass
-    try:
-        movies = database.execute(
-            select(TableMovies.id, TableMovies.fanart, TableMovies.arr_instance_id)
-            .where(TableMovies.fanart.isnot(None))
-            .where(TableMovies.fanart != '')
-        ).all()
-        candidates += [
-            SimpleNamespace(id=r.id, fanart=r.fanart,
-                            arr_instance_id=r.arr_instance_id, kind='movies')
-            for r in movies
-        ]
-    except Exception:
-        pass
+    for table, kind in ((TableShows, 'series'), (TableMovies, 'movies')):
+        try:
+            rows = database.execute(
+                select(table.id, table.fanart, table.arr_instance_id)
+                .where(table.fanart.isnot(None))
+                .where(table.fanart != '')
+                .where(or_(table.arr_instance_id.is_(None),
+                           table.arr_instance_id.in_(enabled)))
+                .order_by(func.random())
+                .limit(_BACKDROP_SAMPLE_CAP)
+            ).all()
+            candidates += [
+                SimpleNamespace(id=r.id, fanart=r.fanart,
+                                arr_instance_id=r.arr_instance_id, kind=kind)
+                for r in rows
+            ]
+        except Exception:
+            pass
     return candidates
 
 
-def _resolve_backdrop_token(token):
-    """Map an opaque "<kind>-<id>" token back to a known library candidate.
+def _fanart_for(kind, item_id):
+    """Fetch one specific library row's fanart by PK, or None.
 
-    Returns the candidate row or None. Never trusts the token beyond selecting a
-    known item: an unknown id, a bad kind, or a malformed token all yield None,
-    so the stream endpoint can only ever proxy fanart that the library owns.
+    The signed token already proves the item was issued by us, so the stream
+    endpoint looks it up directly (cheap, indexed) instead of re-sampling.
     """
-    if not token or '-' not in token:
-        return None
-    kind, _, raw_id = token.partition('-')
-    if kind not in ('series', 'movies'):
-        return None
+    from .database import database, select, TableShows, TableMovies
+    table = TableShows if kind == 'series' else TableMovies
     try:
-        item_id = int(raw_id)
-    except (TypeError, ValueError):
+        row = database.execute(
+            select(table.id, table.fanart, table.arr_instance_id)
+            .where(table.id == item_id)
+            .where(table.fanart.isnot(None))
+            .where(table.fanart != '')
+        ).first()
+    except Exception:
         return None
-    for candidate in _backdrop_candidates():
-        if candidate.kind == kind and candidate.id == item_id:
-            return candidate
-    return None
+    if row is None:
+        return None
+    return SimpleNamespace(id=row.id, fanart=row.fanart,
+                           arr_instance_id=row.arr_instance_id, kind=kind)
+
+
+def _resolve_backdrop_token(token):
+    """Map a signed token back to its library row, or None.
+
+    The signature is the trust boundary: a tampered, forged or unsigned token
+    never verifies, so the stream endpoint can only ever serve items we sampled.
+    """
+    parsed = _unsign_backdrop(token)
+    if parsed is None:
+        return None
+    kind, item_id = parsed
+    return _fanart_for(kind, item_id)
 
 
 @ui_bp.route('/system/backdrops', methods=['GET'])
 def login_backdrops():
-    """Random sample of library backdrop tokens for the login screen.
+    """Random sample of signed library backdrop tokens for the login screen.
 
-    Unauthenticated by design. Returns opaque token URLs only; the browser never
-    receives a raw arr URL or api key. Empty list when the library has no fanart
-    so the frontend can fall back to a plain gradient.
+    Unauthenticated by design. Returns opaque signed token URLs only; the browser
+    never receives a raw arr URL or api key. Empty list when the library has no
+    fanart so the frontend can fall back to a plain gradient.
     """
     candidates = _backdrop_candidates()
     if not candidates:
         return {'backdrops': []}
     sample = random.sample(candidates, min(_BACKDROP_SAMPLE_CAP, len(candidates)))
-    backdrops = [f'{base_url}/system/backdrop/{c.kind}-{c.id}' for c in sample]
+    backdrops = [f'{base_url}/system/backdrop/{_sign_backdrop(c.kind, c.id)}'
+                 for c in sample]
     return {'backdrops': backdrops}
 
 
 @ui_bp.route('/system/backdrop/<token>', methods=['GET'])
 def login_backdrop(token):
-    """Stream a single library backdrop by opaque token (unauthenticated).
+    """Stream a single library backdrop by signed token (unauthenticated).
 
-    Only tokens that resolve to a known library item with fanart are served;
-    everything else is a 404. The fanart bytes are fetched server-side through
-    the same instance-aware proxy as series_images/movies_images, so the arr api
-    key never leaves the server.
+    Only tokens that verify and resolve to a known library item with fanart are
+    served; everything else is a 404. The fanart bytes are fetched server-side
+    through the same instance-aware proxy as series_images/movies_images, so the
+    arr api key never leaves the server.
     """
     candidate = _resolve_backdrop_token(token)
     if candidate is None:

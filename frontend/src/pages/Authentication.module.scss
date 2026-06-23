@@ -11,10 +11,14 @@ $cream: #fff8e1;
   inset: 0;
   z-index: 0;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  // `safe` centering falls back to start-alignment when the card is taller than
+  // the viewport (mobile landscape, zoomed text), so the password field / Login
+  // button are never clipped off-screen; overflow-y lets the page scroll to them.
+  align-items: safe center;
+  justify-content: safe center;
   padding: 24px;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   background-color: $navy;
 }
 

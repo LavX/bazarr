@@ -95,8 +95,13 @@ def test_known_backdrop_token_streams_image(app, monkeypatch):
 
     captured = {}
 
-    rows = [_row("series", 42, "/MediaCover/42/fanart.jpg")]
-    monkeypatch.setattr(ui, "_backdrop_candidates", lambda: rows)
+    row = _row("series", 42, "/MediaCover/42/fanart.jpg")
+    # The signed token resolves to a specific row by PK (not a re-sample).
+    monkeypatch.setattr(
+        ui,
+        "_fanart_for",
+        lambda kind, item_id: row if (kind, item_id) == ("series", 42) else None,
+    )
 
     class UpstreamResponse:
         headers = {"content-type": "image/jpeg"}
@@ -121,7 +126,8 @@ def test_known_backdrop_token_streams_image(app, monkeypatch):
         ),
     )
 
-    response = app.test_client().get("/system/backdrop/series-42")
+    token = ui._sign_backdrop("series", 42)
+    response = app.test_client().get(f"/system/backdrop/{token}")
 
     assert response.status_code == 200
     assert response.data == b"fanart-bytes"
@@ -129,3 +135,48 @@ def test_known_backdrop_token_streams_image(app, monkeypatch):
     # The api key stayed server-side.
     assert "secret" in captured["url"]
     assert captured["chunk_size"] == 2048
+
+
+def test_guessable_unsigned_token_is_rejected(app, monkeypatch):
+    """The headline security fix: even when the item exists, a guessable
+    "<kind>-<id>" token (the old, enumerable scheme) must NOT resolve. Only
+    signed tokens we issued are served, so a client cannot enumerate the library.
+    """
+    from app import ui
+
+    # Item 42 genuinely exists, but the request uses the old guessable form.
+    monkeypatch.setattr(
+        ui, "_fanart_for",
+        lambda kind, item_id: _row("series", 42, "/MediaCover/42/fanart.jpg"),
+    )
+
+    response = app.test_client().get("/system/backdrop/series-42")
+
+    assert response.status_code == 404
+
+
+def test_signed_token_for_unknown_item_returns_404(app, monkeypatch):
+    from app import ui
+
+    # A validly signed token, but the row no longer exists / has no fanart.
+    monkeypatch.setattr(ui, "_fanart_for", lambda kind, item_id: None)
+
+    token = ui._sign_backdrop("movies", 999999)
+    response = app.test_client().get(f"/system/backdrop/{token}")
+
+    assert response.status_code == 404
+
+
+def test_tampered_signed_token_returns_404(app, monkeypatch):
+    from app import ui
+
+    monkeypatch.setattr(
+        ui, "_fanart_for",
+        lambda kind, item_id: _row("series", 7, "/MediaCover/7/fanart.jpg"),
+    )
+
+    token = ui._sign_backdrop("series", 7)
+    tampered = token[:-1] + ("A" if token[-1] != "A" else "B")
+    response = app.test_client().get(f"/system/backdrop/{tampered}")
+
+    assert response.status_code == 404

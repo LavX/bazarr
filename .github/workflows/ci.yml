@@ -172,6 +172,7 @@ jobs:
             tests/bazarr/test_subzero_keep_lyrics.py \
             tests/bazarr/test_archive_extraction.py \
             tests/bazarr/test_security_guards.py \
+            tests/bazarr/test_login_backdrops.py \
             tests/bazarr/test_ui.py \
             tests/bazarr/test_utilities_video_analyzer.py \
             tests/bazarr/test_embedded_subtitle_extraction.py \
