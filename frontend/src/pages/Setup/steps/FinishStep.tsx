@@ -9,15 +9,15 @@ import {
   ThemeIcon,
   Title,
 } from "@mantine/core";
-import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faCheck, faMinus } from "@fortawesome/free-solid-svg-icons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   useArrInstances,
   useLanguageProfiles,
   useSettingsMutation,
   useSystemSettings,
 } from "@/apis/hooks";
-import { useWizardStep } from "../useWizardStep";
+import { useWizardStep } from "@/pages/Setup/useWizardStep";
 import type { WizardStepProps } from "./types";
 
 interface SummaryLine {
