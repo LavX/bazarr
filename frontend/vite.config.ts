@@ -146,6 +146,30 @@ export default defineConfig(({ mode, command }) => {
       setupFiles: "./src/tests/setup.tsx",
       testTimeout: 20000,
       pool: "forks",
+      coverage: {
+        // Count the WHOLE src tree, not just files an executed test happens to
+        // import. Without an explicit `include`, vitest omits never-imported
+        // modules from the report, so brand-new untested code would not lower
+        // the "All files" totals and could slip under the floor. The glob makes
+        // such files show up at 0% and drag the percentages down as intended.
+        include: ["src/**/*.{ts,tsx}"],
+        exclude: [
+          "src/**/*.d.ts",
+          "src/**/__tests__/**",
+          "src/tests/**",
+          "src/**/*.{test,spec}.{ts,tsx}",
+        ],
+        // No-regress floor for `vitest run --coverage` (enforced in CI). Set
+        // just below the baseline at the time it was added, measured across the
+        // full src tree (untested files included).
+        // Ratchet these UP as coverage grows; never lower them to make CI pass.
+        thresholds: {
+          lines: 40,
+          statements: 40,
+          functions: 35,
+          branches: 28,
+        },
+      },
     },
     server: {
       proxy: {
