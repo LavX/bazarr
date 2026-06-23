@@ -1,8 +1,9 @@
+import ProvidersStep from "./providers/ProvidersStep";
 import ArrStep from "./ArrStep";
 import LanguagesStep from "./LanguagesStep";
 import MediaServerStep from "./MediaServerStep";
-import WelcomeStep from "./WelcomeStep";
 import type { WizardStepDef } from "./types";
+import WelcomeStep from "./WelcomeStep";
 
 /**
  * Ordered registry of onboarding steps. Phase 2 ships the Welcome step; Phase 3
@@ -37,6 +38,11 @@ export const ONBOARDING_STEPS: WizardStepDef[] = [
     key: "languages",
     label: "Languages",
     Component: LanguagesStep,
+  },
+  {
+    key: "providers",
+    label: "Providers",
+    Component: ProvidersStep,
   },
 ];
 
