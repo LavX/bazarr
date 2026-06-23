@@ -8,6 +8,7 @@ reproducible.
 
 | Version | Codename | Sketch |
 |--|--|--|
+| v2.5.0 | Murmuration | [`murmuration-v2.5.0.html`](murmuration-v2.5.0.html) |
 | v2.4.0 | Prism | [`prism-v2.4.0.html`](prism-v2.4.0.html) |
 | v2.3.1 | Keystone | [`keystone-v2.3.1.html`](keystone-v2.3.1.html) |
 | v2.3.0 | Keystone | [`keystone.html`](keystone.html) |
