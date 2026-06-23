@@ -1,11 +1,10 @@
 """
-Tests for the unauthenticated login-backdrop endpoints (cinematic login screen).
+Tests for the unauthenticated login-backdrop endpoint (cinematic login screen).
 
-The login page is rendered pre-auth, so the normal auth-gated /images/... proxy
-cannot supply library art. These endpoints expose a small, random sample of
-library backdrops WITHOUT auth, while remaining safe: only opaque tokens that map
-to a known library item resolve to an image; everything else is a 404, and the
-browser never sees an arr API key (the bytes are proxied server-side).
+The login page renders pre-auth, so it can't use the auth-gated /images/...
+library proxy. Instead it shows TMDB trending backdrops (public catalog art,
+never the user's library), like Overseerr/Jellyseerr. The TMDB key stays
+server-side; the browser only ever receives public image.tmdb.org URLs.
 """
 from types import SimpleNamespace
 
@@ -17,48 +16,37 @@ from flask import Flask
 def app(monkeypatch):
     from app import ui
 
-    # No auth configured: the endpoints must be reachable regardless.
+    # No auth configured: the endpoint must be reachable regardless.
     monkeypatch.setattr(
-        ui,
-        "settings",
-        SimpleNamespace(auth=SimpleNamespace(type=None)),
+        ui, "settings", SimpleNamespace(auth=SimpleNamespace(type=None))
     )
+    # Start every test from a cold cache so results don't leak between tests.
+    monkeypatch.setattr(ui, "_backdrop_cache", {"at": 0.0, "urls": []})
     flask_app = Flask(__name__)
     flask_app.register_blueprint(ui.ui_bp)
     return flask_app
 
 
-def _row(kind, item_id, fanart):
-    """Mimic a SQLAlchemy Row for a backdrop candidate."""
-    return SimpleNamespace(id=item_id, fanart=fanart, arr_instance_id=None, kind=kind)
+def _tmdb_response(results):
+    class Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"results": results}
+
+    return Resp()
 
 
-def test_backdrops_list_is_reachable_without_auth_and_capped(app, monkeypatch):
+def test_backdrops_empty_without_key(app, monkeypatch):
     from app import ui
 
-    # 20 candidate shows/movies with fanart; endpoint must cap the sample.
-    rows = [_row("series", i, f"/MediaCover/{i}/fanart.jpg") for i in range(20)]
-    monkeypatch.setattr(ui, "_backdrop_candidates", lambda: rows)
+    monkeypatch.setattr(ui, "_tmdb_api_key", lambda: "")
 
-    response = app.test_client().get("/system/backdrops")
+    def boom(*a, **k):
+        raise AssertionError("TMDB must not be called without a key")
 
-    assert response.status_code == 200
-    payload = response.get_json()
-    assert "backdrops" in payload
-    assert isinstance(payload["backdrops"], list)
-    # Capped to at most 8 entries.
-    assert 0 < len(payload["backdrops"]) <= 8
-    # Each entry is an opaque backdrop URL (no raw arr URL / api key leaked).
-    for url in payload["backdrops"]:
-        assert url.startswith("/system/backdrop/")
-        assert "apikey" not in url
-        assert "http" not in url
-
-
-def test_backdrops_list_empty_library_returns_empty(app, monkeypatch):
-    from app import ui
-
-    monkeypatch.setattr(ui, "_backdrop_candidates", lambda: [])
+    monkeypatch.setattr(ui.requests, "get", boom)
 
     response = app.test_client().get("/system/backdrops")
 
@@ -66,117 +54,73 @@ def test_backdrops_list_empty_library_returns_empty(app, monkeypatch):
     assert response.get_json() == {"backdrops": []}
 
 
-def test_unknown_backdrop_token_returns_404(app, monkeypatch):
+def test_backdrops_returns_capped_tmdb_urls(app, monkeypatch):
     from app import ui
 
-    # No library items at all -> any token is unknown.
-    monkeypatch.setattr(ui, "_backdrop_candidates", lambda: [])
+    monkeypatch.setattr(ui, "_tmdb_api_key", lambda: "testkey")
+    results = [{"backdrop_path": f"/img{i}.jpg"} for i in range(30)]
+    monkeypatch.setattr(ui.requests, "get", lambda *a, **k: _tmdb_response(results))
 
-    response = app.test_client().get("/system/backdrop/series-999999")
-
-    assert response.status_code == 404
-
-
-def test_malformed_backdrop_token_returns_404(app, monkeypatch):
-    from app import ui
-
-    monkeypatch.setattr(ui, "_backdrop_candidates", lambda: [])
-
-    # Garbage / malformed single-segment tokens must never resolve. The route
-    # uses a single-segment <token> converter, so a slash-bearing traversal
-    # attempt ("../../etc/passwd") cannot even reach this handler.
-    for token in ["garbage", "series-", "-5", "series-abc", "movies-1.5", "evil-1"]:
-        response = app.test_client().get(f"/system/backdrop/{token}")
-        assert response.status_code == 404, token
-
-
-def test_known_backdrop_token_streams_image(app, monkeypatch):
-    from app import ui
-
-    captured = {}
-
-    row = _row("series", 42, "/MediaCover/42/fanart.jpg")
-    # The signed token resolves to a specific row by PK (not a re-sample).
-    monkeypatch.setattr(
-        ui,
-        "_fanart_for",
-        lambda kind, item_id: row if (kind, item_id) == ("series", 42) else None,
-    )
-
-    class UpstreamResponse:
-        headers = {"content-type": "image/jpeg"}
-
-        def iter_content(self, chunk_size):
-            captured["chunk_size"] = chunk_size
-            yield b"fanart-bytes"
-
-    def fake_get(url, stream, timeout, verify, headers):
-        captured["url"] = url
-        return UpstreamResponse()
-
-    monkeypatch.setattr(ui.requests, "get", fake_get)
-    # The token resolves to a sonarr image; the instance-aware url builder keeps
-    # the api key server-side.
-    monkeypatch.setattr(
-        ui,
-        "_backdrop_image_url",
-        lambda kind, url, arr_instance_id: (
-            "https://sonarr.example/api/v3/MediaCover/42/fanart.jpg?apikey=secret",
-            True,
-        ),
-    )
-
-    token = ui._sign_backdrop("series", 42)
-    response = app.test_client().get(f"/system/backdrop/{token}")
+    response = app.test_client().get("/system/backdrops")
 
     assert response.status_code == 200
-    assert response.data == b"fanart-bytes"
-    assert response.content_type == "image/jpeg"
-    # The api key stayed server-side.
-    assert "secret" in captured["url"]
-    assert captured["chunk_size"] == 2048
+    urls = response.get_json()["backdrops"]
+    # Capped, and every entry is a public TMDB image URL (no key leaked).
+    assert 0 < len(urls) <= 12
+    for url in urls:
+        assert url.startswith("https://image.tmdb.org/t/p/")
+        assert "testkey" not in url
+        assert "api_key" not in url
 
 
-def test_guessable_unsigned_token_is_rejected(app, monkeypatch):
-    """The headline security fix: even when the item exists, a guessable
-    "<kind>-<id>" token (the old, enumerable scheme) must NOT resolve. Only
-    signed tokens we issued are served, so a client cannot enumerate the library.
-    """
+def test_backdrops_skip_results_without_backdrop(app, monkeypatch):
     from app import ui
 
-    # Item 42 genuinely exists, but the request uses the old guessable form.
-    monkeypatch.setattr(
-        ui, "_fanart_for",
-        lambda kind, item_id: _row("series", 42, "/MediaCover/42/fanart.jpg"),
-    )
+    monkeypatch.setattr(ui, "_tmdb_api_key", lambda: "testkey")
+    results = [
+        {"backdrop_path": "/good.jpg"},
+        {"title": "no backdrop here"},
+        {"backdrop_path": None},
+    ]
+    monkeypatch.setattr(ui.requests, "get", lambda *a, **k: _tmdb_response(results))
 
-    response = app.test_client().get("/system/backdrop/series-42")
+    urls = app.test_client().get("/system/backdrops").get_json()["backdrops"]
 
-    assert response.status_code == 404
+    assert urls == ["https://image.tmdb.org/t/p/original/good.jpg"]
 
 
-def test_signed_token_for_unknown_item_returns_404(app, monkeypatch):
+def test_backdrops_cached_between_requests(app, monkeypatch):
     from app import ui
 
-    # A validly signed token, but the row no longer exists / has no fanart.
-    monkeypatch.setattr(ui, "_fanart_for", lambda kind, item_id: None)
+    monkeypatch.setattr(ui, "_tmdb_api_key", lambda: "testkey")
+    calls = {"n": 0}
 
-    token = ui._sign_backdrop("movies", 999999)
-    response = app.test_client().get(f"/system/backdrop/{token}")
+    def counting_get(*a, **k):
+        calls["n"] += 1
+        return _tmdb_response([{"backdrop_path": "/a.jpg"}])
 
-    assert response.status_code == 404
+    monkeypatch.setattr(ui.requests, "get", counting_get)
+
+    client = app.test_client()
+    first = client.get("/system/backdrops").get_json()["backdrops"]
+    second = client.get("/system/backdrops").get_json()["backdrops"]
+
+    assert first == second == ["https://image.tmdb.org/t/p/original/a.jpg"]
+    # Cached: TMDB is hit only once across both requests.
+    assert calls["n"] == 1
 
 
-def test_tampered_signed_token_returns_404(app, monkeypatch):
+def test_backdrops_tmdb_error_returns_empty(app, monkeypatch):
     from app import ui
 
-    monkeypatch.setattr(
-        ui, "_fanart_for",
-        lambda kind, item_id: _row("series", 7, "/MediaCover/7/fanart.jpg"),
-    )
+    monkeypatch.setattr(ui, "_tmdb_api_key", lambda: "testkey")
 
-    token = ui._sign_backdrop("series", 7)
-    tampered = token[:-1] + ("A" if token[-1] != "A" else "B")
-    response = app.test_client().get(f"/system/backdrop/{tampered}")
+    def boom(*a, **k):
+        raise RuntimeError("network down")
 
-    assert response.status_code == 404
+    monkeypatch.setattr(ui.requests, "get", boom)
+
+    response = app.test_client().get("/system/backdrops")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"backdrops": []}

@@ -2,19 +2,15 @@
 
 import os
 import ipaddress
-import random
-import secrets
 import socket
+import time
 import requests
 import mimetypes
 
 from flask import (request, abort, render_template, Response, session, send_file, stream_with_context, Blueprint,
                    redirect)
 from functools import wraps
-from types import SimpleNamespace
 from urllib.parse import unquote, urlparse
-
-from itsdangerous import URLSafeSerializer, BadData
 
 from constants import HEADERS
 from literals import FILE_LOG
@@ -179,34 +175,6 @@ def _instance_image_url(kind, url):
     return f'{client.base_url()}/api/v3/{path}?apikey={client.api_key}', client.verify_ssl
 
 
-def _backdrop_image_url(kind, url, arr_instance_id):
-    """Instance-aware fanart URL for the pre-auth backdrop proxy.
-
-    Mirrors ``_instance_image_url`` but takes the owning instance explicitly
-    instead of reading ``request.args`` (the backdrop request carries only an
-    opaque token). Default instance -> scalar settings; otherwise the owning
-    Sonarr/Radarr instance's base url + decrypted key. Returns (None, None) for
-    an unknown/disabled instance.
-    """
-    if arr_instance_id is None:
-        if kind == 'sonarr':
-            base = settings.sonarr.base_url
-            return (f'{url_api_sonarr()}{url.lstrip(base)}?apikey={settings.sonarr.apikey}',
-                    get_ssl_verify('sonarr'))
-        base = settings.radarr.base_url
-        return (f'{url_api_radarr()}{url.lstrip(base)}?apikey={settings.radarr.apikey}',
-                get_ssl_verify('radarr'))
-
-    from arr_instances.resolution import client_for_instance
-    from app.database import database as _db
-    client = client_for_instance(_db, arr_instance_id)
-    if client is None or client.kind != kind:
-        return None, None
-    inst_base = (getattr(client, '_base_url_raw', '') or '').strip('/')
-    path = url[len(inst_base):].lstrip('/') if inst_base and url.startswith(inst_base) else url
-    return f'{client.base_url()}/api/v3/{path}?apikey={client.api_key}', client.verify_ssl
-
-
 @ui_bp.route('/images/series/<path:url>', methods=['GET'])
 @check_login
 def series_images(url):
@@ -240,180 +208,73 @@ def movies_images(url):
 
 # --- Cinematic login backdrops (pre-auth) --------------------------------
 #
-# The login page is rendered before authentication, so the auth-gated
-# /images/... proxy cannot supply library art. These two endpoints expose a
-# small random sample of library fanart WITHOUT @check_login (the user has
-# approved exposing random library backdrops on the login screen).
-#
-# Safety: this is deliberately NOT an open image proxy. The list endpoint hands
-# out signed, unguessable tokens for a small random sample. The stream endpoint
-# serves a token only when its signature verifies AND it maps to a known library
-# row that still has fanart; a tampered/forged/unsigned token returns 404, so a
-# client cannot enumerate the library or supply an arbitrary URL. The arr API key
-# is never sent to the browser because the bytes are proxied server-side, exactly
-# like series_images.
+# The login page renders before authentication, so it can't use the auth-gated
+# /images/... library proxy. Like Overseerr/Jellyseerr, we show TMDB trending
+# backdrops instead: public catalog art, never the user's own library, so there
+# is no private data on the pre-auth surface and no per-item proxying. The TMDB
+# key stays server-side; the browser only ever receives public image.tmdb.org
+# URLs, which it loads directly.
 
-# Cap how many backdrops the login screen rotates through.
-_BACKDROP_SAMPLE_CAP = 8
-
-# Backdrop tokens are signed with a per-process secret so the stream endpoint
-# only serves items we actually sampled. Without this the token was just
-# "<kind>-<row id>", which an unauthenticated client could enumerate
-# (series-1, series-2, ... movies-1, ...) to pull every library fanart and force
-# upstream Arr fetches. A fresh secret each process makes tokens unforgeable and
-# naturally short-lived: after a restart the login page simply refetches.
-_backdrop_serializer = URLSafeSerializer(secrets.token_hex(32), salt='login-backdrop')
+# Built-in read-only TMDB v3 API key (Overseerr/Jellyseerr ship one the same
+# way). Override at runtime with the BAZARR_TMDB_API_KEY environment variable.
+# Empty until provided; with no key the endpoint returns an empty list and the
+# login screen uses its gradient fallback.
+_TMDB_BUILTIN_API_KEY = ''
+_TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p/original'
+_TMDB_TRENDING_URL = 'https://api.themoviedb.org/3/trending/all/week'
+# How many backdrops the login screen rotates through, and how long the TMDB
+# response is cached so repeated pre-auth hits don't hammer the API.
+_BACKDROP_SAMPLE_CAP = 12
+_BACKDROP_CACHE_TTL = 6 * 3600
+_backdrop_cache = {'at': 0.0, 'urls': []}
 
 
-def _sign_backdrop(kind, item_id):
-    """Opaque, unforgeable token for one sampled backdrop."""
-    return _backdrop_serializer.dumps([kind, int(item_id)])
+def _tmdb_api_key():
+    """Resolve the TMDB key: env override first, then the built-in default."""
+    return os.environ.get('BAZARR_TMDB_API_KEY', '').strip() or _TMDB_BUILTIN_API_KEY
 
 
-def _unsign_backdrop(token):
-    """Verify a backdrop token. Returns (kind, id), or None for any tampering."""
-    try:
-        payload = _backdrop_serializer.loads(token)
-    except BadData:
-        return None
-    if not isinstance(payload, list) or len(payload) != 2:
-        return None
-    kind, item_id = payload
-    if kind not in ('series', 'movies') or not isinstance(item_id, int):
-        return None
-    return kind, item_id
+def _fetch_tmdb_backdrops():
+    """Trending backdrop image URLs from TMDB.
 
-
-def _enabled_instance_ids():
-    """IDs of enabled Sonarr/Radarr instances (#156); empty set on any error.
-
-    Rows owned by a disabled instance can't be served (the stream path resolves
-    with enabled_only), so they must be kept out of the sample or the random cap
-    is spent on images that 404 and the login screen goes blank.
+    Returns an empty list on any failure (no key, network error, unexpected
+    payload) so the caller degrades cleanly to the gradient fallback.
     """
-    from .database import database, select, TableArrInstances
+    key = _tmdb_api_key()
+    if not key:
+        return []
     try:
-        rows = database.execute(
-            select(TableArrInstances.id).where(TableArrInstances.enabled == 1)
-        ).all()
-        return {r.id for r in rows}
+        resp = requests.get(_TMDB_TRENDING_URL, params={'api_key': key},
+                            timeout=10, headers=HEADERS)
+        resp.raise_for_status()
+        results = resp.json().get('results', [])
     except Exception:
-        return set()
-
-
-def _backdrop_candidates():
-    """Random, capped sample of library rows (series + movies) with fanart.
-
-    The random ordering and cap are pushed into SQL so a pre-auth hit never
-    materializes the whole library into Python. Only rows owned by an enabled
-    instance (or the scalar/default with a NULL instance id) are eligible. Each
-    row exposes ``id`` (local PK), ``fanart``, ``arr_instance_id`` (#156) and
-    ``kind``. Thin enough that tests can stub it cleanly.
-    """
-    from sqlalchemy import func, or_
-    from .database import database, select, TableShows, TableMovies
-
-    enabled = _enabled_instance_ids()
-    candidates = []
-    for table, kind in ((TableShows, 'series'), (TableMovies, 'movies')):
-        try:
-            rows = database.execute(
-                select(table.id, table.fanart, table.arr_instance_id)
-                .where(table.fanart.isnot(None))
-                .where(table.fanart != '')
-                .where(or_(table.arr_instance_id.is_(None),
-                           table.arr_instance_id.in_(enabled)))
-                .order_by(func.random())
-                .limit(_BACKDROP_SAMPLE_CAP)
-            ).all()
-            candidates += [
-                SimpleNamespace(id=r.id, fanart=r.fanart,
-                                arr_instance_id=r.arr_instance_id, kind=kind)
-                for r in rows
-            ]
-        except Exception:
-            pass
-    return candidates
-
-
-def _fanart_for(kind, item_id):
-    """Fetch one specific library row's fanart by PK, or None.
-
-    The signed token already proves the item was issued by us, so the stream
-    endpoint looks it up directly (cheap, indexed) instead of re-sampling.
-    """
-    from .database import database, select, TableShows, TableMovies
-    table = TableShows if kind == 'series' else TableMovies
-    try:
-        row = database.execute(
-            select(table.id, table.fanart, table.arr_instance_id)
-            .where(table.id == item_id)
-            .where(table.fanart.isnot(None))
-            .where(table.fanart != '')
-        ).first()
-    except Exception:
-        return None
-    if row is None:
-        return None
-    return SimpleNamespace(id=row.id, fanart=row.fanart,
-                           arr_instance_id=row.arr_instance_id, kind=kind)
-
-
-def _resolve_backdrop_token(token):
-    """Map a signed token back to its library row, or None.
-
-    The signature is the trust boundary: a tampered, forged or unsigned token
-    never verifies, so the stream endpoint can only ever serve items we sampled.
-    """
-    parsed = _unsign_backdrop(token)
-    if parsed is None:
-        return None
-    kind, item_id = parsed
-    return _fanart_for(kind, item_id)
+        return []
+    urls = [f'{_TMDB_IMAGE_BASE}{r["backdrop_path"]}'
+            for r in results
+            if isinstance(r, dict) and r.get('backdrop_path')]
+    return urls[:_BACKDROP_SAMPLE_CAP]
 
 
 @ui_bp.route('/system/backdrops', methods=['GET'])
 def login_backdrops():
-    """Random sample of signed library backdrop tokens for the login screen.
+    """Trending TMDB backdrop URLs for the cinematic login screen.
 
-    Unauthenticated by design. Returns opaque signed token URLs only; the browser
-    never receives a raw arr URL or api key. Empty list when the library has no
-    fanart so the frontend can fall back to a plain gradient.
+    Unauthenticated by design, but safe: the response is public TMDB catalog art
+    (image.tmdb.org URLs), never the user's library, and the TMDB key stays
+    server-side. Cached for several hours so repeated login-page hits don't call
+    the TMDB API each time. Empty list (no key / failure) lets the frontend fall
+    back to a plain gradient.
     """
-    candidates = _backdrop_candidates()
-    if not candidates:
-        return {'backdrops': []}
-    sample = random.sample(candidates, min(_BACKDROP_SAMPLE_CAP, len(candidates)))
-    backdrops = [f'{base_url}/system/backdrop/{_sign_backdrop(c.kind, c.id)}'
-                 for c in sample]
-    return {'backdrops': backdrops}
-
-
-@ui_bp.route('/system/backdrop/<token>', methods=['GET'])
-def login_backdrop(token):
-    """Stream a single library backdrop by signed token (unauthenticated).
-
-    Only tokens that verify and resolve to a known library item with fanart are
-    served; everything else is a 404. The fanart bytes are fetched server-side
-    through the same instance-aware proxy as series_images/movies_images, so the
-    arr api key never leaves the server.
-    """
-    candidate = _resolve_backdrop_token(token)
-    if candidate is None:
-        return '', 404
-    kind = 'sonarr' if candidate.kind == 'series' else 'radarr'
-    path = (candidate.fanart or '').strip('/')
-    if not path:
-        return '', 404
-    url_image, verify = _backdrop_image_url(kind, path, candidate.arr_instance_id)
-    if url_image is None:
-        return '', 404
-    try:
-        req = requests.get(url_image, stream=True, timeout=15, verify=verify, headers=HEADERS)
-    except Exception:
-        return '', 404
-    return Response(stream_with_context(req.iter_content(2048)),
-                    content_type=req.headers.get('content-type', 'image/jpeg'))
+    now = time.monotonic()
+    cached = _backdrop_cache['urls']
+    if not cached or now - _backdrop_cache['at'] > _BACKDROP_CACHE_TTL:
+        fresh = _fetch_tmdb_backdrops()
+        if fresh:
+            _backdrop_cache['urls'] = fresh
+            _backdrop_cache['at'] = now
+            cached = fresh
+    return {'backdrops': cached}
 
 
 @ui_bp.route('/system/backup/download/<path:filename>', methods=['GET'])
