@@ -116,7 +116,7 @@ def test_py7zr_is_loaded_from_python_environment_not_custom_libs():
 
     assert not custom_py7zr_dir.exists()
     assert not py7zr_path.is_relative_to(custom_py7zr_dir)
-    assert "py7zr==1.1.0" in requirements
+    assert "py7zr==1.1.3" in requirements
     assert "py7zr" not in custom_versions
 
 

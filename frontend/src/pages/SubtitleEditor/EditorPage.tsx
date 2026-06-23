@@ -1416,7 +1416,7 @@ export default function EditorPage() {
     playbackTimeMs,
     referenceLanguage,
     language,
-    data?.mediaTitle,
+    data,
     mediaType,
   ]);
 

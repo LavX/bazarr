@@ -37,7 +37,7 @@ import {
   faWrench,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { Table as TableInstance } from "@tanstack/table-core/build/lib/types";
+import { Table as TableInstance } from "@tanstack/react-table";
 import {
   useEpisodesBySeriesId,
   useIsAnyActionRunning,

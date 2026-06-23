@@ -10,3 +10,7 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv;
 }
+
+// Package resolves via its exports map to a bare CSS file, which the bundler
+// resolver does not type as a side-effect import on its own.
+declare module "@fontsource-variable/geist";
