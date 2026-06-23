@@ -34,10 +34,11 @@ $cream: #fff8e1;
   inset: 0;
   background-size: cover;
   background-position: center;
-  // Blur + dark grade so the form stays readable over any image.
-  filter: blur(10px) brightness(0.5) saturate(1.1);
+  // Light blur + gentle grade so the image reads clearly (Seerr-style) while
+  // the glassmorphism card keeps the form legible on top.
+  filter: blur(4px) brightness(0.82) saturate(1.15);
   // Scale slightly up so the blur does not reveal hard edges.
-  transform: scale(1.08);
+  transform: scale(1.06);
   opacity: 0;
   transition: opacity 2s ease-in-out;
   will-change: opacity;
@@ -56,15 +57,15 @@ $cream: #fff8e1;
   background:
     radial-gradient(
       ellipse at 50% 40%,
-      rgba(18, 17, 37, 0.35) 0%,
-      rgba(18, 17, 37, 0.7) 55%,
-      rgba(18, 17, 37, 0.92) 100%
+      rgba(18, 17, 37, 0.12) 0%,
+      rgba(18, 17, 37, 0.45) 55%,
+      rgba(18, 17, 37, 0.82) 100%
     ),
     linear-gradient(
       180deg,
-      rgba(18, 17, 37, 0.55) 0%,
-      rgba(18, 17, 37, 0.4) 50%,
-      rgba(18, 17, 37, 0.75) 100%
+      rgba(18, 17, 37, 0.35) 0%,
+      rgba(18, 17, 37, 0.2) 50%,
+      rgba(18, 17, 37, 0.6) 100%
     );
 }
 
