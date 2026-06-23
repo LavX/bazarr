@@ -215,11 +215,12 @@ def movies_images(url):
 # key stays server-side; the browser only ever receives public image.tmdb.org
 # URLs, which it loads directly.
 
-# Built-in read-only TMDB v3 API key (Overseerr/Jellyseerr ship one the same
-# way). Override at runtime with the BAZARR_TMDB_API_KEY environment variable.
-# Empty until provided; with no key the endpoint returns an empty list and the
-# login screen uses its gradient fallback.
-_TMDB_BUILTIN_API_KEY = ''
+# Built-in read-only TMDB v3 API key. This is the shared public key used across
+# the Overseerr/Jellyseerr ecosystem - the same app-shipped service-key pattern
+# Bazarr already uses for TVDB v4. Override at runtime with BAZARR_TMDB_API_KEY
+# to point at a dedicated key. With no key the endpoint returns an empty list and
+# the login screen falls back to its gradient.
+_TMDB_BUILTIN_API_KEY = '431a8708161bcd1f1fbe7536137e61ed'
 _TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p/original'
 _TMDB_TRENDING_URL = 'https://api.themoviedb.org/3/trending/all/week'
 # How many backdrops the login screen rotates through, and how long the TMDB
