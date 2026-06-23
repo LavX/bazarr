@@ -142,7 +142,7 @@ RUNTIME_REQUIREMENTS = {
     "numpy": ("numpy", ">=2.0.0,<2.4.0"),
     "PIL": ("Pillow", ">=12.2.0"),
     "plexapi": ("plexapi", ">=4.16.1"),
-    "py7zr": ("py7zr", "==1.1.0"),
+    "py7zr": ("py7zr", "==1.1.3"),
     "pycountry": ("pycountry", "==26.2.16"),
     "pysrt": ("pysrt", "==1.1.2"),
     "pysubs2": ("pysubs2", "==1.8.0"),
