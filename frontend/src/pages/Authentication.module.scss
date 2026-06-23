@@ -1,0 +1,155 @@
+// Cinematic login screen: full-bleed, blurred, dark-graded library backdrops
+// behind a centered glassmorphism card. Atmospheric Dark palette.
+
+$navy: #121125;
+$amber: #e68a00;
+$amber-light: #ffb347;
+$cream: #fff8e1;
+
+.page {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  overflow: hidden;
+  background-color: $navy;
+}
+
+// Stack of cross-fading backdrop layers.
+.backdrops {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+}
+
+.backdrop {
+  position: absolute;
+  inset: 0;
+  background-size: cover;
+  background-position: center;
+  // Blur + dark grade so the form stays readable over any image.
+  filter: blur(10px) brightness(0.5) saturate(1.1);
+  // Scale slightly up so the blur does not reveal hard edges.
+  transform: scale(1.08);
+  opacity: 0;
+  transition: opacity 2s ease-in-out;
+  will-change: opacity;
+}
+
+.backdropActive {
+  opacity: 1;
+}
+
+// Dark gradient/vignette overlay on top of the backdrop image, always present
+// (also the fallback when no backdrops load).
+.overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background:
+    radial-gradient(
+      ellipse at 50% 40%,
+      rgba(18, 17, 37, 0.35) 0%,
+      rgba(18, 17, 37, 0.7) 55%,
+      rgba(18, 17, 37, 0.92) 100%
+    ),
+    linear-gradient(
+      180deg,
+      rgba(18, 17, 37, 0.55) 0%,
+      rgba(18, 17, 37, 0.4) 50%,
+      rgba(18, 17, 37, 0.75) 100%
+    );
+}
+
+// Amber ambient glow, matching the app's atmospheric accents.
+.glow {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      ellipse at 18% 12%,
+      rgba(230, 138, 0, 0.18) 0%,
+      transparent 45%
+    ),
+    radial-gradient(
+      ellipse at 82% 88%,
+      rgba(255, 179, 71, 0.12) 0%,
+      transparent 50%
+    );
+}
+
+.card {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  max-width: 380px;
+  padding: 36px 32px;
+  border-radius: 20px;
+  // Glassmorphism: semi-opaque dark bg + blur + subtle border.
+  background: rgba(26, 25, 48, 0.55);
+  backdrop-filter: blur(18px) saturate(1.2);
+  -webkit-backdrop-filter: blur(18px) saturate(1.2);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow:
+    0 20px 60px rgba(0, 0, 0, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  color: $cream;
+}
+
+.brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.logo {
+  width: 64px;
+  height: 64px;
+  object-fit: contain;
+  filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.5));
+}
+
+.wordmark {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: $cream;
+}
+
+// Amber "+" accent in the wordmark.
+.accent {
+  color: $amber-light;
+  text-shadow: 0 0 18px rgba(255, 179, 71, 0.5);
+}
+
+.subtitle {
+  font-size: 13px;
+  color: rgba(255, 248, 225, 0.6);
+  letter-spacing: 0.3px;
+}
+
+// Brand-tinted submit button overriding Mantine defaults.
+.submit {
+  background: linear-gradient(135deg, $amber 0%, $amber-light 100%);
+  border: none;
+  color: $navy;
+  font-weight: 700;
+
+  &:hover {
+    filter: brightness(1.08);
+  }
+}
+
+// Respect reduced-motion: disable the cross-fade transition. Auto-rotation is
+// also suppressed in the component when the media query matches.
+@media (prefers-reduced-motion: reduce) {
+  .backdrop {
+    transition: none;
+  }
+}

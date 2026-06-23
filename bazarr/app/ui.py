@@ -2,6 +2,7 @@
 
 import os
 import ipaddress
+import random
 import socket
 import requests
 import mimetypes
@@ -9,6 +10,7 @@ import mimetypes
 from flask import (request, abort, render_template, Response, session, send_file, stream_with_context, Blueprint,
                    redirect)
 from functools import wraps
+from types import SimpleNamespace
 from urllib.parse import unquote, urlparse
 
 from constants import HEADERS
@@ -174,6 +176,34 @@ def _instance_image_url(kind, url):
     return f'{client.base_url()}/api/v3/{path}?apikey={client.api_key}', client.verify_ssl
 
 
+def _backdrop_image_url(kind, url, arr_instance_id):
+    """Instance-aware fanart URL for the pre-auth backdrop proxy.
+
+    Mirrors ``_instance_image_url`` but takes the owning instance explicitly
+    instead of reading ``request.args`` (the backdrop request carries only an
+    opaque token). Default instance -> scalar settings; otherwise the owning
+    Sonarr/Radarr instance's base url + decrypted key. Returns (None, None) for
+    an unknown/disabled instance.
+    """
+    if arr_instance_id is None:
+        if kind == 'sonarr':
+            base = settings.sonarr.base_url
+            return (f'{url_api_sonarr()}{url.lstrip(base)}?apikey={settings.sonarr.apikey}',
+                    get_ssl_verify('sonarr'))
+        base = settings.radarr.base_url
+        return (f'{url_api_radarr()}{url.lstrip(base)}?apikey={settings.radarr.apikey}',
+                get_ssl_verify('radarr'))
+
+    from arr_instances.resolution import client_for_instance
+    from app.database import database as _db
+    client = client_for_instance(_db, arr_instance_id)
+    if client is None or client.kind != kind:
+        return None, None
+    inst_base = (getattr(client, '_base_url_raw', '') or '').strip('/')
+    path = url[len(inst_base):].lstrip('/') if inst_base and url.startswith(inst_base) else url
+    return f'{client.base_url()}/api/v3/{path}?apikey={client.api_key}', client.verify_ssl
+
+
 @ui_bp.route('/images/series/<path:url>', methods=['GET'])
 @check_login
 def series_images(url):
@@ -203,6 +233,128 @@ def movies_images(url):
         return '', 404
     else:
         return Response(stream_with_context(req.iter_content(2048)), content_type=req.headers['content-type'])
+
+
+# --- Cinematic login backdrops (pre-auth) --------------------------------
+#
+# The login page is rendered before authentication, so the auth-gated
+# /images/... proxy cannot supply library art. These two endpoints expose a
+# small random sample of library fanart WITHOUT @check_login (the user has
+# approved exposing random library backdrops on the login screen).
+#
+# Safety: this is deliberately NOT an open image proxy. The list endpoint hands
+# out opaque tokens of the form "<kind>-<local id>". The stream endpoint only
+# resolves a token back to a URL when it maps to a known library row that still
+# has fanart; an attacker cannot supply an arbitrary URL, and anything that does
+# not parse to a known item returns 404. The arr API key is never sent to the
+# browser because the bytes are proxied server-side, exactly like series_images.
+
+# Cap how many backdrops the login screen rotates through.
+_BACKDROP_SAMPLE_CAP = 8
+
+
+def _backdrop_candidates():
+    """Return library rows (series + movies) that have fanart.
+
+    Each row exposes ``id`` (local PK), ``fanart`` (relative arr path),
+    ``arr_instance_id`` (owning instance, #156) and ``kind`` ('series'/'movies').
+    Kept as a thin function so tests can stub the DB cleanly.
+    """
+    from .database import database, select, TableShows, TableMovies
+
+    candidates = []
+    try:
+        shows = database.execute(
+            select(TableShows.id, TableShows.fanart, TableShows.arr_instance_id)
+            .where(TableShows.fanart.isnot(None))
+            .where(TableShows.fanart != '')
+        ).all()
+        candidates += [
+            SimpleNamespace(id=r.id, fanart=r.fanart,
+                            arr_instance_id=r.arr_instance_id, kind='series')
+            for r in shows
+        ]
+    except Exception:
+        pass
+    try:
+        movies = database.execute(
+            select(TableMovies.id, TableMovies.fanart, TableMovies.arr_instance_id)
+            .where(TableMovies.fanart.isnot(None))
+            .where(TableMovies.fanart != '')
+        ).all()
+        candidates += [
+            SimpleNamespace(id=r.id, fanart=r.fanart,
+                            arr_instance_id=r.arr_instance_id, kind='movies')
+            for r in movies
+        ]
+    except Exception:
+        pass
+    return candidates
+
+
+def _resolve_backdrop_token(token):
+    """Map an opaque "<kind>-<id>" token back to a known library candidate.
+
+    Returns the candidate row or None. Never trusts the token beyond selecting a
+    known item: an unknown id, a bad kind, or a malformed token all yield None,
+    so the stream endpoint can only ever proxy fanart that the library owns.
+    """
+    if not token or '-' not in token:
+        return None
+    kind, _, raw_id = token.partition('-')
+    if kind not in ('series', 'movies'):
+        return None
+    try:
+        item_id = int(raw_id)
+    except (TypeError, ValueError):
+        return None
+    for candidate in _backdrop_candidates():
+        if candidate.kind == kind and candidate.id == item_id:
+            return candidate
+    return None
+
+
+@ui_bp.route('/system/backdrops', methods=['GET'])
+def login_backdrops():
+    """Random sample of library backdrop tokens for the login screen.
+
+    Unauthenticated by design. Returns opaque token URLs only; the browser never
+    receives a raw arr URL or api key. Empty list when the library has no fanart
+    so the frontend can fall back to a plain gradient.
+    """
+    candidates = _backdrop_candidates()
+    if not candidates:
+        return {'backdrops': []}
+    sample = random.sample(candidates, min(_BACKDROP_SAMPLE_CAP, len(candidates)))
+    backdrops = [f'{base_url}/system/backdrop/{c.kind}-{c.id}' for c in sample]
+    return {'backdrops': backdrops}
+
+
+@ui_bp.route('/system/backdrop/<token>', methods=['GET'])
+def login_backdrop(token):
+    """Stream a single library backdrop by opaque token (unauthenticated).
+
+    Only tokens that resolve to a known library item with fanart are served;
+    everything else is a 404. The fanart bytes are fetched server-side through
+    the same instance-aware proxy as series_images/movies_images, so the arr api
+    key never leaves the server.
+    """
+    candidate = _resolve_backdrop_token(token)
+    if candidate is None:
+        return '', 404
+    kind = 'sonarr' if candidate.kind == 'series' else 'radarr'
+    path = (candidate.fanart or '').strip('/')
+    if not path:
+        return '', 404
+    url_image, verify = _backdrop_image_url(kind, path, candidate.arr_instance_id)
+    if url_image is None:
+        return '', 404
+    try:
+        req = requests.get(url_image, stream=True, timeout=15, verify=verify, headers=HEADERS)
+    except Exception:
+        return '', 404
+    return Response(stream_with_context(req.iter_content(2048)),
+                    content_type=req.headers.get('content-type', 'image/jpeg'))
 
 
 @ui_bp.route('/system/backup/download/<path:filename>', methods=['GET'])
