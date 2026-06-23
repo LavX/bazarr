@@ -579,7 +579,6 @@ This fork is maintained by **LavX**. Explore more projects and services:
 
 Where Bazarr+ is heading. Plans shift, but the direction is steady.
 
-- **v2.5.0**: [multiple Radarr and Sonarr instances](https://github.com/LavX/bazarr/issues/156).
 - **v2.6.0**: universal providers and federation. Point Bazarr+ at any OpenSubtitles.com-compatible endpoint, including another Bazarr+ instance, and daisy-chain instances together over a loop-safe federation protocol.
 - **v3.0.0 "Subnet"**: peer-to-peer subtitle federation, a self-organizing mesh of Bazarr+ instances.
 
