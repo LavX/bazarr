@@ -3,6 +3,7 @@
 import os
 import ipaddress
 import socket
+import time
 import requests
 import mimetypes
 
@@ -203,6 +204,78 @@ def movies_images(url):
         return '', 404
     else:
         return Response(stream_with_context(req.iter_content(2048)), content_type=req.headers['content-type'])
+
+
+# --- Cinematic login backdrops (pre-auth) --------------------------------
+#
+# The login page renders before authentication, so it can't use the auth-gated
+# /images/... library proxy. Like Overseerr/Jellyseerr, we show TMDB trending
+# backdrops instead: public catalog art, never the user's own library, so there
+# is no private data on the pre-auth surface and no per-item proxying. The TMDB
+# key stays server-side; the browser only ever receives public image.tmdb.org
+# URLs, which it loads directly.
+
+# Built-in read-only TMDB v3 API key. This is the shared public key used across
+# the Overseerr/Jellyseerr ecosystem - the same app-shipped service-key pattern
+# Bazarr already uses for TVDB v4. Override at runtime with BAZARR_TMDB_API_KEY
+# to point at a dedicated key. With no key the endpoint returns an empty list and
+# the login screen falls back to its gradient.
+_TMDB_BUILTIN_API_KEY = '431a8708161bcd1f1fbe7536137e61ed'
+_TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p/original'
+_TMDB_TRENDING_URL = 'https://api.themoviedb.org/3/trending/all/week'
+# How many backdrops the login screen rotates through, and how long the TMDB
+# response is cached so repeated pre-auth hits don't hammer the API.
+_BACKDROP_SAMPLE_CAP = 12
+_BACKDROP_CACHE_TTL = 6 * 3600
+_backdrop_cache = {'at': 0.0, 'urls': []}
+
+
+def _tmdb_api_key():
+    """Resolve the TMDB key: env override first, then the built-in default."""
+    return os.environ.get('BAZARR_TMDB_API_KEY', '').strip() or _TMDB_BUILTIN_API_KEY
+
+
+def _fetch_tmdb_backdrops():
+    """Trending backdrop image URLs from TMDB.
+
+    Returns an empty list on any failure (no key, network error, unexpected
+    payload) so the caller degrades cleanly to the gradient fallback.
+    """
+    key = _tmdb_api_key()
+    if not key:
+        return []
+    try:
+        resp = requests.get(_TMDB_TRENDING_URL, params={'api_key': key},
+                            timeout=10, headers=HEADERS)
+        resp.raise_for_status()
+        results = resp.json().get('results', [])
+    except Exception:
+        return []
+    urls = [f'{_TMDB_IMAGE_BASE}{r["backdrop_path"]}'
+            for r in results
+            if isinstance(r, dict) and r.get('backdrop_path')]
+    return urls[:_BACKDROP_SAMPLE_CAP]
+
+
+@ui_bp.route('/system/backdrops', methods=['GET'])
+def login_backdrops():
+    """Trending TMDB backdrop URLs for the cinematic login screen.
+
+    Unauthenticated by design, but safe: the response is public TMDB catalog art
+    (image.tmdb.org URLs), never the user's library, and the TMDB key stays
+    server-side. Cached for several hours so repeated login-page hits don't call
+    the TMDB API each time. Empty list (no key / failure) lets the frontend fall
+    back to a plain gradient.
+    """
+    now = time.monotonic()
+    cached = _backdrop_cache['urls']
+    if not cached or now - _backdrop_cache['at'] > _BACKDROP_CACHE_TTL:
+        fresh = _fetch_tmdb_backdrops()
+        if fresh:
+            _backdrop_cache['urls'] = fresh
+            _backdrop_cache['at'] = now
+            cached = fresh
+    return {'backdrops': cached}
 
 
 @ui_bp.route('/system/backup/download/<path:filename>', methods=['GET'])
