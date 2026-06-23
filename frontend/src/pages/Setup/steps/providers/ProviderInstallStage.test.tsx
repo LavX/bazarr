@@ -120,8 +120,9 @@ describe("ProviderInstallStage", () => {
     await waitFor(() => {
       expect(restart).toHaveBeenCalled();
     });
+    expect(await screen.findByText(/restarting bazarr/i)).toBeInTheDocument();
     expect(
-      await screen.findByText(/restarting to finish installing providers/i),
+      screen.getByText(/finishing provider installation/i),
     ).toBeInTheDocument();
   });
 

@@ -1,16 +1,18 @@
-import { FC, useCallback, useEffect, useRef, useState } from "react";
+import { FC, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
-  Box,
   Button,
   Checkbox,
   Group,
   Loader,
-  Overlay,
+  ScrollArea,
   Stack,
   Text,
+  TextInput,
   Title,
 } from "@mantine/core";
+import { faMagnifyingGlass } from "@fortawesome/free-solid-svg-icons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   useProviderHubCatalog,
   useProviderHubInstall,
@@ -74,6 +76,7 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   const { restart } = useSystem();
 
   const [selected, setSelected] = useState<string[]>([]);
+  const [query, setQuery] = useState("");
   const [restarting, setRestarting] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -94,7 +97,26 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
         manifest,
       } satisfies CatalogChoice;
     })
-    .filter((choice): choice is CatalogChoice => choice !== null);
+    .filter((choice): choice is CatalogChoice => choice !== null)
+    // Hide internal smoketest providers (e.g. SmokeHub) from the first-run catalog.
+    .filter(
+      (choice) =>
+        !/smoketest/i.test(
+          `${choice.providerId} ${choice.name} ${choice.description ?? ""}`,
+        ),
+    );
+
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) {
+      return choices;
+    }
+    return choices.filter((choice) =>
+      `${choice.name} ${choice.description ?? ""}`.toLowerCase().includes(q),
+    );
+    // choices is rebuilt from catalog each render; filtering it is cheap.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [catalog, query]);
 
   const toggle = useCallback((providerId: string) => {
     setSelected((current) =>
@@ -166,23 +188,19 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
 
   if (restarting) {
     return (
-      <Box pos="relative" mih={240}>
-        <Overlay color="#000" backgroundOpacity={0.6} blur={2} />
-        <Stack
-          align="center"
-          justify="center"
-          gap="md"
-          mih={240}
-          pos="relative"
-          style={{ zIndex: 1 }}
-        >
-          <Loader />
-          <Text ta="center" fw={500}>
-            Bazarr+ is restarting to finish installing providers. This page will
-            reload automatically.
+      <Stack align="center" justify="center" gap="lg" mih={260} py="xl">
+        <Loader size="lg" />
+        <Stack gap={6} align="center">
+          <Title order={3}>Restarting Bazarr+</Title>
+          <Text ta="center" c="dimmed" maw={440}>
+            Finishing provider installation. This page reloads automatically
+            once Bazarr+ is back, usually within a minute.
           </Text>
         </Stack>
-      </Box>
+        <Button variant="subtle" onClick={() => redirectToSetup()}>
+          Taking too long? Reload now
+        </Button>
+      </Stack>
     );
   }
 
@@ -203,15 +221,36 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
         </Alert>
       ) : (
         <Stack gap="sm">
-          {choices.map((choice) => (
-            <Checkbox
-              key={choice.providerId}
-              label={choice.name}
-              description={choice.description}
-              checked={selected.includes(choice.providerId)}
-              onChange={() => toggle(choice.providerId)}
-            />
-          ))}
+          <TextInput
+            placeholder="Search providers"
+            leftSection={<FontAwesomeIcon icon={faMagnifyingGlass} />}
+            value={query}
+            onChange={(e) => setQuery(e.currentTarget.value)}
+          />
+          <ScrollArea.Autosize mah={320} type="auto" offsetScrollbars>
+            <Stack gap="sm" pr="sm">
+              {visible.length === 0 ? (
+                <Text c="dimmed" size="sm" py="md" ta="center">
+                  No providers match &ldquo;{query}&rdquo;.
+                </Text>
+              ) : (
+                visible.map((choice) => (
+                  <Checkbox
+                    key={choice.providerId}
+                    label={choice.name}
+                    description={choice.description}
+                    checked={selected.includes(choice.providerId)}
+                    onChange={() => toggle(choice.providerId)}
+                  />
+                ))
+              )}
+            </Stack>
+          </ScrollArea.Autosize>
+          {selected.length > 0 && (
+            <Text size="sm" c="dimmed">
+              {selected.length} selected
+            </Text>
+          )}
         </Stack>
       )}
 

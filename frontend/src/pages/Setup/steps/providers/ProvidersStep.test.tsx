@@ -76,6 +76,25 @@ describe("ProvidersStep", () => {
     ).toBeInTheDocument();
   });
 
+  it("does not latch the install catalog while the installed list is still loading", () => {
+    // Post-restart resume: the page reloads and the installed-providers query
+    // starts empty/loading. The stage must NOT latch to install here, or the
+    // user is wrongly dropped back on the catalog instead of resuming configure.
+    mockedProviders.mockReturnValue({
+      data: undefined,
+      isLoading: true,
+    } as unknown as ReturnType<typeof useProviderHubProviders>);
+
+    customRender(<ProvidersStep onNext={onNext} />);
+
+    expect(
+      screen.queryByRole("button", { name: /install & restart/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("checkbox", { name: /opensubtitles/i }),
+    ).not.toBeInTheDocument();
+  });
+
   it("renders the configure stage when a provider is already installed (resume)", () => {
     setProviders([
       {
