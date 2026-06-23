@@ -41,6 +41,7 @@ import SettingsSchedulerView from "@/pages/Settings/Scheduler";
 import SettingsSubtitlesView from "@/pages/Settings/Subtitles";
 import SettingsTranslatorView from "@/pages/Settings/Translator";
 import SettingsUIView from "@/pages/Settings/UI";
+import OnboardingWizardView from "@/pages/Setup/OnboardingWizard";
 import SystemAnnouncementsView from "@/pages/System/Announcements";
 import SystemBackupsView from "@/pages/System/Backups";
 import SystemLogsView from "@/pages/System/Logs";
@@ -360,6 +361,11 @@ function useRoutes(): CustomRouteObject[] {
         path: RouterNames.Auth,
         hidden: true,
         element: <Authentication></Authentication>,
+      },
+      {
+        path: "/setup",
+        hidden: true,
+        element: <OnboardingWizardView></OnboardingWizardView>,
       },
     ],
     [

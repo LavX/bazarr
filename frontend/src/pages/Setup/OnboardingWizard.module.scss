@@ -1,0 +1,127 @@
+// Self-contained full-screen onboarding shell. Uses the global --bz-* theme
+// tokens (defined in assets/_bazarr.scss) so it stays dark/light consistent
+// without depending on any other feature's styles.
+
+.root {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 16px;
+  overflow-y: auto;
+  background: radial-gradient(
+    120% 120% at 50% 0%,
+    var(--bz-surface-raised) 0%,
+    var(--bz-surface-ground) 60%
+  );
+  color: var(--bz-text-primary);
+}
+
+.shell {
+  width: 100%;
+  max-width: 720px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.brand {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.brandTitle {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--bz-text-tertiary);
+}
+
+.progress {
+  font-size: 13px;
+  color: var(--bz-text-secondary);
+}
+
+// Compact single-row progress rail: numbered dots joined by connectors. Labels
+// are intentionally omitted (the card heading names the current step) so eight
+// steps never wrap. The current step name also shows in the header.
+.rail {
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+.railNode {
+  display: flex;
+  align-items: center;
+  flex: 1 1 0;
+
+  &:last-child {
+    flex: 0 0 auto;
+  }
+}
+
+.dot {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
+  background: var(--bz-surface-raised);
+  color: var(--bz-text-tertiary);
+  border: 1px solid var(--bz-border-card);
+  transition:
+    background 0.2s ease,
+    color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.dotDone {
+  background: var(--mantine-primary-color-filled);
+  border-color: var(--mantine-primary-color-filled);
+  color: var(--mantine-color-white);
+}
+
+.dotActive {
+  background: var(--mantine-primary-color-filled);
+  border-color: var(--mantine-primary-color-filled);
+  color: var(--mantine-color-white);
+  box-shadow: 0 0 0 4px
+    color-mix(in srgb, var(--mantine-primary-color-filled) 22%, transparent);
+}
+
+.connector {
+  flex: 1 1 0;
+  height: 2px;
+  min-width: 12px;
+  margin: 0 8px;
+  background: var(--bz-border-card);
+  transition: background 0.2s ease;
+}
+
+.connectorDone {
+  background: var(--mantine-primary-color-filled);
+}
+
+.card {
+  background: var(--bz-surface-card);
+  border: 1px solid var(--bz-border-card);
+  border-radius: var(--bz-radius-xl);
+  box-shadow: var(--bz-shadow-float);
+  padding: 32px;
+}

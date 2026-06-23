@@ -50,6 +50,11 @@ export const whatsNew: Record<string, WhatsNewSlide[]> = {
       icon: faFileZipper,
     },
     {
+      title: "Guided first-run setup",
+      body: "Fresh installs get a step-by-step wizard: connect Sonarr and Radarr, add Plex or Jellyfin, pick languages, and install subtitle providers, with the provider restart handled and resumed for you. It is skippable and never appears once you are set up.",
+      icon: faWandMagicSparkles,
+    },
+    {
       title: "Hardened and polished",
       body: "SSRF and path-traversal fixes (local/LAN use is unaffected) plus 30+ frontend bug fixes, including a Subtitle Editor crash on plain-HTTP setups.",
       icon: faShieldHalved,

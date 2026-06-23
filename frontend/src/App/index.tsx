@@ -38,6 +38,7 @@ import NavbarProvider from "@/contexts/Navbar";
 import OnlineProvider from "@/contexts/Online";
 import { notification } from "@/modules/task";
 import CriticalError from "@/pages/errors/CriticalError";
+import { useOnboardingState } from "@/pages/Setup/useOnboardingState";
 import { RouterNames } from "@/Router/RouterNames";
 import { Environment } from "@/utilities";
 import { consumeRestartReloadPending } from "@/utilities/restart";
@@ -74,8 +75,16 @@ const App: FunctionComponent = () => {
   const settingsLoaded = settings.data !== undefined;
 
   // Show the "What's New" wizard once after upgrading, but only once authenticated and
-  // loaded (settingsLoaded) so it never appears over the login screen.
-  useWhatsNewAutoOpen(settingsLoaded);
+  // loaded (settingsLoaded) so it never appears over the login screen. Also suppress it
+  // while the first-run onboarding wizard is active (it renders at /setup): the modal is
+  // opened via the global modal manager during the transient "/" mount before the
+  // redirect, so it would otherwise stack on top of onboarding. useWhatsNewAutoOpen
+  // early-returns without marking the version seen when disabled, so it still appears the
+  // first time the user lands in-app after finishing or skipping setup. Gating on
+  // needsOnboarding (not setup_complete) keeps existing installs seeing What's New.
+  const { needsOnboarding, isLoading: onboardingLoading } =
+    useOnboardingState();
+  useWhatsNewAutoOpen(settingsLoaded && !onboardingLoading && !needsOnboarding);
 
   // Stream supervisor status via SSE during startup.
   // When backend reports "running", invalidate the settings cache to trigger

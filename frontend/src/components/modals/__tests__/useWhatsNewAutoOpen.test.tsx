@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { useWhatsNewAutoOpen } from "@/components/modals/useWhatsNewAutoOpen";
 import { getWhatsNewSlides, latestWhatsNewVersion } from "@/data/whatsNew";
 import { customRender, screen } from "@/tests";
-import { markWhatsNewSeen } from "@/utilities/whatsNew";
+import { getSeenWhatsNewVersion, markWhatsNewSeen } from "@/utilities/whatsNew";
 
 const Harness: FunctionComponent<{ enabled: boolean }> = ({ enabled }) => {
   useWhatsNewAutoOpen(enabled);
@@ -21,6 +21,16 @@ describe("useWhatsNewAutoOpen", () => {
     customRender(<Harness enabled={false} />);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(screen.queryByText(firstSlideTitle)).not.toBeInTheDocument();
+  });
+
+  // The onboarding wizard suppresses What's New by passing enabled=false while
+  // it is active. That suppression must NOT burn the once-per-version flag, or
+  // the user would never see What's New after finishing or skipping setup. So a
+  // disabled render must leave the version unseen, ready to open once enabled.
+  it("does not mark the version seen while disabled (so it still shows after onboarding)", async () => {
+    customRender(<Harness enabled={false} />);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(getSeenWhatsNewVersion()).not.toBe(latestWhatsNewVersion);
   });
 
   it("auto-opens once enabled and the version is unseen", async () => {
