@@ -1,5 +1,6 @@
 import ProvidersStep from "./providers/ProvidersStep";
 import ArrStep from "./ArrStep";
+import GeneralStep from "./GeneralStep";
 import LanguagesStep from "./LanguagesStep";
 import MediaServerStep from "./MediaServerStep";
 import type { WizardStepDef } from "./types";
@@ -43,6 +44,12 @@ export const ONBOARDING_STEPS: WizardStepDef[] = [
     key: "providers",
     label: "Providers",
     Component: ProvidersStep,
+  },
+  {
+    key: "general",
+    label: "General",
+    optional: true,
+    Component: GeneralStep,
   },
 ];
 
