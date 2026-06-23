@@ -28,9 +28,15 @@ const opensubtitles = {
     id: "opensubtitles",
     name: "OpenSubtitles",
     config_schema: {
+      required: ["username", "password"],
       properties: {
         username: { type: "string", title: "Username" },
         password: { type: "string", title: "Password", secret: true },
+        // Advanced, non-required option: first-run must hide it.
+        only_forced: {
+          type: "boolean",
+          title: "Only forced subtitles",
+        },
       },
     },
   },
@@ -72,8 +78,10 @@ describe("ProviderConfigureStage", () => {
       <ProviderConfigureStage onNext={onNext} onInstallMore={onInstallMore} />,
     );
 
-    // Enabling reveals the credential fields.
+    // Enabling reveals the required credential fields.
     await user.click(screen.getByRole("checkbox", { name: /opensubtitles/i }));
+    // Advanced, non-required options stay hidden on first run.
+    expect(screen.queryByText("Only forced subtitles")).not.toBeInTheDocument();
     await user.type(screen.getByLabelText("Username"), "alice");
     await user.type(screen.getByLabelText("Password"), "s3cret");
 

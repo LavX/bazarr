@@ -3,8 +3,10 @@ import {
   Anchor,
   Button,
   Checkbox,
+  Divider,
   Group,
   PasswordInput,
+  ScrollArea,
   Stack,
   Text,
   TextInput,
@@ -23,6 +25,16 @@ interface ConfigField {
   label: string;
   description?: string;
   type: FieldType;
+  required: boolean;
+}
+
+// First-run shows only the fields a provider actually needs to start working:
+// required fields plus secret credentials (username/password/api key). Advanced
+// toggles (forced-only, FPS, FlareSolverr, delays, AI-translation flags, ...)
+// stay hidden here and remain available later in Settings > Providers, so the
+// step does not become an overwhelming wall of inputs.
+function essentialFields(fields: ConfigField[]): ConfigField[] {
+  return fields.filter((field) => field.required || field.type === "password");
 }
 
 // Mirrors schemaToInputs() in Settings/Providers/index.tsx: turn a manifest's
@@ -49,6 +61,11 @@ function fieldsFromManifest(
       ? ((manifest as LooseObject).secret_fields as string[])
       : [],
   );
+  const requiredKeys = new Set(
+    Array.isArray((schema as LooseObject).required)
+      ? ((schema as LooseObject).required as string[])
+      : [],
+  );
 
   const fields: ConfigField[] = [];
   for (const [key, value] of Object.entries(properties)) {
@@ -59,16 +76,17 @@ function fieldsFromManifest(
     const label = typeof field.title === "string" ? field.title : key;
     const description =
       typeof field.description === "string" ? field.description : undefined;
+    const required = requiredKeys.has(key);
 
     if (secretFields.has(key) || field.secret === true) {
-      fields.push({ key, label, description, type: "password" });
+      fields.push({ key, label, description, type: "password", required });
       continue;
     }
     if (field.type === "boolean") {
-      fields.push({ key, label, description, type: "checkbox" });
+      fields.push({ key, label, description, type: "checkbox", required });
       continue;
     }
-    fields.push({ key, label, description, type: "text" });
+    fields.push({ key, label, description, type: "text", required });
   }
   return fields;
 }
@@ -165,41 +183,68 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
         </Text>
       </Stack>
 
-      <Stack gap="lg">
-        {installed.map((provider) => {
-          const providerId = provider.provider_id;
-          const isEnabled = enabled.includes(providerId);
-          const fields = fieldsFromManifest(provider.manifest);
-          return (
-            <Stack key={providerId} gap="sm">
-              <Checkbox
-                label={providerLabel(provider)}
-                checked={isEnabled}
-                onChange={() => toggleEnabled(providerId)}
-              />
-              {isEnabled &&
-                fields.map((field) => {
-                  const fieldValue = values[`${providerId}::${field.key}`];
-                  if (field.type === "checkbox") {
+      <ScrollArea.Autosize mah={380} type="auto" offsetScrollbars>
+        <Stack gap="md" pr="sm">
+          {installed.map((provider, index) => {
+            const providerId = provider.provider_id;
+            const isEnabled = enabled.includes(providerId);
+            const fields = essentialFields(
+              fieldsFromManifest(provider.manifest),
+            );
+            return (
+              <Stack key={providerId} gap="sm">
+                {index > 0 && <Divider />}
+                <Checkbox
+                  label={providerLabel(provider)}
+                  checked={isEnabled}
+                  onChange={() => toggleEnabled(providerId)}
+                />
+                {isEnabled && fields.length === 0 && (
+                  <Text size="sm" c="dimmed" pl="xl">
+                    No credentials needed.
+                  </Text>
+                )}
+                {isEnabled &&
+                  fields.map((field) => {
+                    const fieldValue = values[`${providerId}::${field.key}`];
+                    if (field.type === "checkbox") {
+                      return (
+                        <Checkbox
+                          key={field.key}
+                          label={field.label}
+                          description={field.description}
+                          checked={fieldValue === true}
+                          onChange={(event) =>
+                            setValue(
+                              providerId,
+                              field.key,
+                              event.currentTarget.checked,
+                            )
+                          }
+                        />
+                      );
+                    }
+                    if (field.type === "password") {
+                      return (
+                        <PasswordInput
+                          key={field.key}
+                          label={field.label}
+                          description={field.description}
+                          value={
+                            typeof fieldValue === "string" ? fieldValue : ""
+                          }
+                          onChange={(event) =>
+                            setValue(
+                              providerId,
+                              field.key,
+                              event.currentTarget.value,
+                            )
+                          }
+                        />
+                      );
+                    }
                     return (
-                      <Checkbox
-                        key={field.key}
-                        label={field.label}
-                        description={field.description}
-                        checked={fieldValue === true}
-                        onChange={(event) =>
-                          setValue(
-                            providerId,
-                            field.key,
-                            event.currentTarget.checked,
-                          )
-                        }
-                      />
-                    );
-                  }
-                  if (field.type === "password") {
-                    return (
-                      <PasswordInput
+                      <TextInput
                         key={field.key}
                         label={field.label}
                         description={field.description}
@@ -213,27 +258,16 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
                         }
                       />
                     );
-                  }
-                  return (
-                    <TextInput
-                      key={field.key}
-                      label={field.label}
-                      description={field.description}
-                      value={typeof fieldValue === "string" ? fieldValue : ""}
-                      onChange={(event) =>
-                        setValue(
-                          providerId,
-                          field.key,
-                          event.currentTarget.value,
-                        )
-                      }
-                    />
-                  );
-                })}
-            </Stack>
-          );
-        })}
-      </Stack>
+                  })}
+              </Stack>
+            );
+          })}
+        </Stack>
+      </ScrollArea.Autosize>
+
+      <Text size="xs" c="dimmed">
+        Advanced provider options are available later in Settings, Providers.
+      </Text>
 
       <Anchor component="button" type="button" onClick={onInstallMore}>
         Install more providers
