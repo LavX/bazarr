@@ -32,6 +32,7 @@ import SeriesHistoryView from "@/pages/History/Series";
 import MovieView from "@/pages/Movies";
 import MovieDetailView from "@/pages/Movies/Details";
 import SeriesView from "@/pages/Series";
+import OnboardingWizardView from "@/pages/Setup/OnboardingWizard";
 import SettingsConnectionsView from "@/pages/Settings/Connections";
 import SettingsGeneralView from "@/pages/Settings/General";
 import SettingsLanguagesView from "@/pages/Settings/Languages";
@@ -360,6 +361,11 @@ function useRoutes(): CustomRouteObject[] {
         path: RouterNames.Auth,
         hidden: true,
         element: <Authentication></Authentication>,
+      },
+      {
+        path: "/setup",
+        hidden: true,
+        element: <OnboardingWizardView></OnboardingWizardView>,
       },
     ],
     [

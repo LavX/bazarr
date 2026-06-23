@@ -2,6 +2,7 @@ import { renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useArrInstances } from "@/apis/hooks/arrInstances";
 import { useSystemSettings } from "@/apis/hooks/system";
+import type { ArrInstance } from "@/apis/raw/arrInstances";
 import { useOnboardingState } from "./useOnboardingState";
 
 // The hook is a pure derivation over two queries, so we mock the data hooks

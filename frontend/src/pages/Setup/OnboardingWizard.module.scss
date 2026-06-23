@@ -1,0 +1,62 @@
+// Self-contained full-screen onboarding shell. Uses the global --bz-* theme
+// tokens (defined in assets/_bazarr.scss) so it stays dark/light consistent
+// without depending on any other feature's styles.
+
+.root {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 16px;
+  overflow-y: auto;
+  background: radial-gradient(
+    120% 120% at 50% 0%,
+    var(--bz-surface-raised) 0%,
+    var(--bz-surface-ground) 60%
+  );
+  color: var(--bz-text-primary);
+}
+
+.shell {
+  width: 100%;
+  max-width: 720px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.brand {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.brandTitle {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--bz-text-tertiary);
+}
+
+.progress {
+  font-size: 13px;
+  color: var(--bz-text-secondary);
+}
+
+.card {
+  background: var(--bz-surface-card);
+  border: 1px solid var(--bz-border-card);
+  border-radius: var(--bz-radius-xl);
+  box-shadow: var(--bz-shadow-float);
+  padding: 32px;
+}
