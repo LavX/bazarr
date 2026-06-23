@@ -53,6 +53,71 @@
   color: var(--bz-text-secondary);
 }
 
+// Compact single-row progress rail: numbered dots joined by connectors. Labels
+// are intentionally omitted (the card heading names the current step) so eight
+// steps never wrap. The current step name also shows in the header.
+.rail {
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+.railNode {
+  display: flex;
+  align-items: center;
+  flex: 1 1 0;
+
+  &:last-child {
+    flex: 0 0 auto;
+  }
+}
+
+.dot {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
+  background: var(--bz-surface-raised);
+  color: var(--bz-text-tertiary);
+  border: 1px solid var(--bz-border-card);
+  transition:
+    background 0.2s ease,
+    color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.dotDone {
+  background: var(--mantine-primary-color-filled);
+  border-color: var(--mantine-primary-color-filled);
+  color: var(--mantine-color-white);
+}
+
+.dotActive {
+  background: var(--mantine-primary-color-filled);
+  border-color: var(--mantine-primary-color-filled);
+  color: var(--mantine-color-white);
+  box-shadow: 0 0 0 4px
+    color-mix(in srgb, var(--mantine-primary-color-filled) 22%, transparent);
+}
+
+.connector {
+  flex: 1 1 0;
+  height: 2px;
+  min-width: 12px;
+  margin: 0 8px;
+  background: var(--bz-border-card);
+  transition: background 0.2s ease;
+}
+
+.connectorDone {
+  background: var(--mantine-primary-color-filled);
+}
+
 .card {
   background: var(--bz-surface-card);
   border: 1px solid var(--bz-border-card);

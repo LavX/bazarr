@@ -1,6 +1,8 @@
 import { FunctionComponent } from "react";
 import { useNavigate } from "react-router";
-import { Box, Button, Group, Paper, Stepper, Text } from "@mantine/core";
+import { Box, Button, Group, Paper, Text } from "@mantine/core";
+import { faCheck } from "@fortawesome/free-solid-svg-icons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useSettingsMutation } from "@/apis/hooks";
 import { ONBOARDING_STEPS } from "./steps";
 import { useWizardStep } from "./useWizardStep";
@@ -41,7 +43,7 @@ const OnboardingWizardView: FunctionComponent = () => {
           <div className={styles.brand}>
             <span className={styles.brandTitle}>Bazarr+ Setup</span>
             <Text className={styles.progress}>
-              Step {activeIndex + 1} of {totalSteps}
+              Step {activeIndex + 1} of {totalSteps} &middot; {current.label}
             </Text>
           </div>
           <Group gap="sm">
@@ -51,11 +53,36 @@ const OnboardingWizardView: FunctionComponent = () => {
           </Group>
         </header>
 
-        <Stepper active={activeIndex} size="sm" allowNextStepsSelect={false}>
-          {ONBOARDING_STEPS.map((s) => (
-            <Stepper.Step key={s.key} label={s.label} />
-          ))}
-        </Stepper>
+        <div className={styles.rail} aria-hidden>
+          {ONBOARDING_STEPS.map((s, index) => {
+            const done = index < activeIndex;
+            const active = index === activeIndex;
+            const dotClass = [
+              styles.dot,
+              done ? styles.dotDone : "",
+              active ? styles.dotActive : "",
+            ]
+              .filter(Boolean)
+              .join(" ");
+            return (
+              <div key={s.key} className={styles.railNode}>
+                <span className={dotClass} title={s.label}>
+                  {done ? <FontAwesomeIcon icon={faCheck} /> : index + 1}
+                </span>
+                {index < totalSteps - 1 && (
+                  <span
+                    className={[
+                      styles.connector,
+                      done ? styles.connectorDone : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                  />
+                )}
+              </div>
+            );
+          })}
+        </div>
 
         <Paper className={styles.card}>
           <StepComponent

@@ -147,7 +147,6 @@ const ArrStep: FC<ArrStepProps> = ({ kind, required, onNext }) => {
       <Group gap="md" align="flex-start" wrap="nowrap">
         <TextInput
           label="Address"
-          description="Hostname or IPv4 address"
           placeholder="127.0.0.1"
           style={{ flex: 1 }}
           value={ip}
