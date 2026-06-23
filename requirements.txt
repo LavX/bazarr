@@ -45,7 +45,7 @@ msgpack==1.1.2
 numpy>=2.4.6,<2.5.0  # cap excludes entire 2.4.x line: it raised the x86-64 baseline to v2, crashing pre-2009 CPUs (SIGILL on import). 2.4.0 itself is also yanked for an unrelated BC bug.
 Pillow>=12.2.0 --only-binary=Pillow
 plexapi>=4.18.1
-py7zr==1.1.0
+py7zr==1.1.3  # GHSA-q6rc-2cgv-63h7 arbitrary-file-write fix (latest)
 pycountry==26.2.16
 PyJWT>=2.12.1  # CVE-2026-32597 fix for unknown crit headers
 pysrt==1.1.2
