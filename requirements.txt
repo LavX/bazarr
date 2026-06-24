@@ -1,14 +1,14 @@
 setuptools>=82.0.1
 
 # Bazarr runtime dependencies
-aiohttp>=3.13.5
+aiohttp>=3.14.1
 alembic==1.18.4
 apprise==1.11.0
 apscheduler==3.11.2
 babelfish==0.6.1
 beautifulsoup4==4.15.0
 cachetools>=7.1.4
-certifi==2026.5.20
+certifi==2026.6.17
 chardet==7.4.3
 charset-normalizer==3.4.7
 click-option-group>=0.5.9
@@ -41,13 +41,13 @@ itsdangerous==2.2.0
 json_tricks==3.17.3
 knowit==0.5.11
 lxml>=6.1.1  # XXE fix in iterparse / ETCompatXMLParser
-msgpack==1.1.2
+msgpack==1.1.2  # pinned by signalrcore==1.0.2 (its only allowed version); cannot bump to 1.2.1 without breaking signalrcore
 numpy>=2.4.6,<2.5.0  # cap excludes entire 2.4.x line: it raised the x86-64 baseline to v2, crashing pre-2009 CPUs (SIGILL on import). 2.4.0 itself is also yanked for an unrelated BC bug.
 Pillow>=12.2.0 --only-binary=Pillow
 plexapi>=4.18.1
 py7zr==1.1.3  # GHSA-q6rc-2cgv-63h7 arbitrary-file-write fix (latest)
 pycountry==26.2.16
-PyJWT>=2.12.1  # CVE-2026-32597 fix for unknown crit headers
+PyJWT>=2.13.0  # CVE-2026-32597 fix for unknown crit headers
 pysrt==1.1.2
 pysubs2==1.8.1
 python-dateutil==2.9.0
@@ -58,13 +58,13 @@ retry==0.9.2
 semver==3.0.4
 signalrcore==1.0.2
 six==1.17.0
-sqlalchemy==2.0.50
+sqlalchemy==2.0.51
 srt==3.5.3
 subliminal[rar]==2.6.0
 textdistance==4.6.3
 tld==0.13.2
 tomlkit>=0.15.0
-tzlocal==5.3.1
+tzlocal==5.4.3
 unidecode==1.4.0
 urllib3==2.7.0
 waitress==3.0.2

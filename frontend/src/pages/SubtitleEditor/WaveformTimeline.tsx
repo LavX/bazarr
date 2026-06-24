@@ -7,9 +7,7 @@ import {
   useState,
 } from "react";
 import WaveSurfer from "wavesurfer.js";
-// @ts-expect-error - wavesurfer.js moduleResolution mismatch
 import RegionsPlugin from "wavesurfer.js/dist/plugins/regions.esm.js";
-// @ts-expect-error - wavesurfer.js moduleResolution mismatch
 import TimelinePlugin from "wavesurfer.js/dist/plugins/timeline.esm.js";
 import { Environment } from "@/utilities/env";
 import { appendArrInstanceParam } from "./editorScope";

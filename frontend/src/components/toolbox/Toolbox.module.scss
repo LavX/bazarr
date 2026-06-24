@@ -12,7 +12,7 @@
     border: 1px solid var(--bz-border-card);
   }
 
-  @include mantine.smaller-than(sm) {
+  @include mantine.smaller-than(mantine.$mantine-breakpoint-sm) {
     overflow-x: auto;
     flex-wrap: nowrap !important;
     scrollbar-width: none;
