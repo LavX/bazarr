@@ -48,11 +48,11 @@ const Table: FunctionComponent<Props> = ({ logs }) => {
         }) => <FontAwesomeIcon icon={mapTypeToIcon(type)}></FontAwesomeIcon>,
       },
       {
-        Header: "Message",
+        header: "Message",
         accessorKey: "message",
       },
       {
-        Header: "Date",
+        header: "Date",
         accessorKey: "timestamp",
       },
       {

@@ -2418,6 +2418,74 @@ def test_hub_proxy_provider_search_and_download_uses_worker_payload():
     assert worker.requests[1][1]["config"] == provider_config
 
 
+def test_hub_proxy_uses_configured_worker_timeout_for_long_downloads():
+    from provider_hub.manifest import validate_manifest
+    from provider_hub.registry import _make_provider_class
+    from provider_hub.protocol import language_to_payload
+
+    class FakeWorker:
+        def __init__(self):
+            self.requests = []
+
+        def request(self, op, payload, timeout):
+            self.requests.append((op, timeout))
+            if op == "search":
+                return type(
+                    "Result",
+                    (),
+                    {
+                        "payload": {
+                            "candidates": [
+                                {
+                                    "provider": "embeddedsubtitles",
+                                    "id": "track-10",
+                                    "language": language_to_payload(Language("eng")),
+                                    "release_info": "English SRT Completos",
+                                    "matches": ["hash"],
+                                    "provider_payload": {
+                                        "provider": "embeddedsubtitles",
+                                        "schema": 1,
+                                        "path": "/media/movie.mkv",
+                                        "stream_index": 10,
+                                        "format": "srt",
+                                    },
+                                }
+                            ]
+                        },
+                        "events": [],
+                    },
+                )()
+            return type(
+                "Result",
+                (),
+                {
+                    "payload": {
+                        "content_b64": base64.b64encode(b"hello").decode("ascii"),
+                        "content_sha256": _sha256(b"hello"),
+                        "empty": False,
+                    },
+                    "events": [],
+                },
+            )()
+
+        def stop(self):
+            return None
+
+    worker = FakeWorker()
+    manifest = validate_manifest(_manifest(provider_id="embeddedsubtitles"), built_in_provider_ids=set())
+    provider = _make_provider_class(manifest, worker_client=worker)(
+        timeout=30,
+        timeout_seconds=600,
+    )
+    movie = Movie("/media/movie.mkv", "Example Movie", year=2026)
+    subtitle = provider.list_subtitles(movie, {Language("eng")})[0]
+
+    provider.download_subtitle(subtitle)
+
+    assert worker.requests[0] == ("search", 600)
+    assert worker.requests[1] == ("download", 600)
+
+
 def test_hub_proxy_download_invokes_select_archive_member():
     import io
     import zipfile
@@ -4068,3 +4136,102 @@ def test_get_matches_swallows_release_update_errors(monkeypatch):
     matches = candidate.get_matches(movie)
 
     assert matches == {"title", "year"}
+
+
+def test_candidate_display_metadata_cannot_clobber_engine_attributes():
+    # Mirrors the live embeddedsubtitles payload: its display dict carries a plain
+    # string "language" label. Worker-controlled display metadata must never replace
+    # host-derived engine state (language is a babelfish Language, matches a set):
+    # a clobbered language crashes every later .alpha3/.basename access in the pool.
+    from provider_hub.protocol import candidate_from_worker
+
+    candidate = candidate_from_worker(
+        provider_name="embeddedsubtitles",
+        payload={
+            "id": "track-2",
+            "language": {"alpha3": "eng"},
+            "release_info": "Example.Movie.2026.1080p.WEB-DL.x264-GROUP",
+            "matches": ["hash"],
+            "provider_payload": {"provider": "embeddedsubtitles", "stream": 2},
+            "display": {
+                "source": "embedded",
+                "codec": "subrip",
+                "stream": 2,
+                "language": "eng",
+                "default": False,
+                "matches": ["bogus"],
+                "provider_payload": {"hijacked": True},
+                "score": "9000",
+            },
+        },
+    )
+
+    assert isinstance(candidate.language, Language)
+    assert candidate.language.alpha3 == "eng"
+    assert candidate.matches == {"hash"}
+    assert candidate.provider_payload == {"provider": "embeddedsubtitles", "stream": 2}
+    assert candidate.score is None
+    # cosmetic keys still reach the subtitle for UI display
+    assert candidate.source == "embedded"
+    assert candidate.codec == "subrip"
+    assert candidate.stream == 2
+
+
+def test_candidate_display_reserved_and_private_keys_are_ignored():
+    # "id" collides with a read-only property: unguarded, it raises AttributeError and
+    # discards the provider's whole result set. Private names must not be injectable
+    # either (get_matches caches worker matches under _worker_matches).
+    from provider_hub.protocol import candidate_from_worker
+
+    candidate = candidate_from_worker(
+        provider_name="examplehub",
+        payload={
+            "id": "sub-1",
+            "language": {"alpha3": "eng"},
+            "provider_payload": {"provider": "examplehub"},
+            "display": {
+                "id": "spoofed",
+                "worker_id": "spoofed",
+                "_worker_matches": ["leak"],
+            },
+        },
+    )
+
+    assert candidate.id == "examplehub:sub-1"
+    assert candidate.worker_id == "sub-1"
+    assert getattr(candidate, "_worker_matches", None) is None
+
+
+def test_pool_drops_subtitles_whose_language_is_not_a_language_object(monkeypatch):
+    # One malformed subtitle (language degraded to a plain string) must be skipped at
+    # the pool boundary instead of poisoning the whole search: downstream scoring
+    # dereferences subtitle.language.alpha3/.basename and would abort every provider.
+    from subliminal_patch import extensions
+    from subliminal_patch.core import SZProviderPool
+    from subliminal_patch.subtitle import Subtitle as PatchedSubtitle
+
+    good = PatchedSubtitle(Language("eng"), subtitle_id="good-1")
+    bad = PatchedSubtitle(Language("eng"), subtitle_id="bad-1")
+    bad.language = "eng"  # simulate a provider handing back a degraded language
+
+    class FakeGuardProvider(object):
+        languages = {Language("eng")}
+
+        @classmethod
+        def check(cls, video):
+            return True
+
+        def list_subtitles(self, video, languages):
+            return [bad, good]
+
+    monkeypatch.setitem(extensions.provider_registry.providers, "fakeguard", FakeGuardProvider)
+
+    pool = SZProviderPool(providers=["fakeguard"])
+    pool.initialized_providers["fakeguard"] = FakeGuardProvider()
+
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    movie.fps = None
+
+    out = pool.list_subtitles_provider("fakeguard", movie, {Language("eng")})
+
+    assert out == [good]

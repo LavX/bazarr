@@ -213,7 +213,12 @@ const TranslationForm: FunctionComponent<Props> = ({
               selections.map((s) =>
                 mutateAsync({
                   action: "translate",
-                  form: { ...s, language: language.code2 },
+                  form: {
+                    ...s,
+                    language: language.code2,
+                    // eslint-disable-next-line camelcase
+                    arr_instance_id: s.arr_instance_id,
+                  },
                 }),
               ),
             );

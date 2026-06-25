@@ -31,11 +31,12 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import { uniqBy } from "lodash";
 import { useMovieModification, useMoviesPagination } from "@/apis/hooks";
+import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
 import { useInstanceName } from "@/apis/hooks/site";
 import { useUpgradableItems } from "@/apis/hooks/subtitles";
 import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
 import { Toolbox } from "@/components";
-import { AudioList } from "@/components/bazarr";
+import { AudioList, InstanceBadge } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
 import LanguageProfileName from "@/components/bazarr/LanguageProfile";
 import { BatchModConfirmModal } from "@/components/forms/BatchModConfirmForm";
@@ -52,6 +53,10 @@ import { useModals } from "@/modules/modals";
 import ItemView from "@/pages/views/ItemView";
 import { BuildKey, GetItemId } from "@/utilities";
 
+function upgradableKey(upstreamId: number, arrInstanceId?: number | null) {
+  return `${upstreamId}:${arrInstanceId ?? ""}`;
+}
+
 const MovieView: FunctionComponent = () => {
   const modifyMovie = useMovieModification();
   const modals = useModals();
@@ -59,12 +64,26 @@ const MovieView: FunctionComponent = () => {
   const [search, setSearch] = useState("");
   const [audioLanguages, setAudioLanguages] = useState<string[]>([]);
   const [excludeLanguages, setExcludeLanguages] = useState<string[]>([]);
+  const [instanceFilter, setInstanceFilter] = useState<string[]>([]);
+  const {
+    multiInstance,
+    nameById: instanceNameById,
+    defaultId: instanceDefaultId,
+    options: instanceOptions,
+  } = useArrInstanceLabels("radarr");
 
   const query = useMoviesPagination(true);
   const { data: upgradableData } = useUpgradableItems();
-  const upgradableMovieIds = useMemo(
-    () => new Set(upgradableData?.movies ?? []),
-    [upgradableData?.movies],
+  const upgradableMovieKeys = useMemo(
+    () =>
+      new Set(
+        upgradableData?.movieKeys?.map((item) =>
+          upgradableKey(item.radarrId, item.arr_instance_id),
+        ) ??
+          upgradableData?.movies.map((id) => upgradableKey(id)) ??
+          [],
+      ),
+    [upgradableData?.movieKeys, upgradableData?.movies],
   );
 
   const [selections, setSelections] = useState<Item.Movie[]>([]);
@@ -176,10 +195,10 @@ const MovieView: FunctionComponent = () => {
         id: "upgradable",
         cell: ({
           row: {
-            original: { radarrId },
+            original: { radarrId, arr_instance_id },
           },
         }) =>
-          upgradableMovieIds.has(radarrId) ? (
+          upgradableMovieKeys.has(upgradableKey(radarrId, arr_instance_id)) ? (
             <Tooltip label="Low match score, upgrading may find a better subtitle">
               <FontAwesomeIcon
                 icon={faCircleDown}
@@ -194,10 +213,10 @@ const MovieView: FunctionComponent = () => {
         accessorKey: "title",
         cell: ({
           row: {
-            original: { title, radarrId },
+            original: { title, id },
           },
         }) => {
-          const target = `/movies/${radarrId}`;
+          const target = `/movies/${id}`;
           return (
             <Anchor className="table-primary" component={Link} to={target}>
               {title}
@@ -205,6 +224,24 @@ const MovieView: FunctionComponent = () => {
           );
         },
       },
+      // Owning Radarr instance (#156). Only shown when more than one Radarr is
+      // configured. Every row is labeled: the default instance uses a muted
+      // grey badge and the other instances an accent badge so they stand out.
+      ...(multiInstance
+        ? [
+            {
+              id: "instance",
+              header: "Instance",
+              cell: ({ row: { original } }) => (
+                <InstanceBadge
+                  instanceId={original.arr_instance_id}
+                  defaultId={instanceDefaultId}
+                  nameById={instanceNameById}
+                />
+              ),
+            } as ColumnDef<Item.Movie>,
+          ]
+        : []),
       {
         header: "Audio",
         accessorKey: "audio_language",
@@ -262,11 +299,13 @@ const MovieView: FunctionComponent = () => {
           const batchItem: BatchItem = {
             type: "movie",
             radarrId: item.radarrId,
+            arr_instance_id: item.arr_instance_id ?? undefined,
           };
           const wantedItem: WantedItem = {
             type: "movie",
             radarrId: item.radarrId,
             title: item.title,
+            arrInstanceId: item.arr_instance_id ?? undefined,
           };
           return (
             <Menu shadow="md" width={220} position="bottom-end">
@@ -380,7 +419,14 @@ const MovieView: FunctionComponent = () => {
         },
       },
     ],
-    [modals, modifyMovie, upgradableMovieIds],
+    [
+      modals,
+      modifyMovie,
+      upgradableMovieKeys,
+      multiInstance,
+      instanceNameById,
+      instanceDefaultId,
+    ],
   );
 
   const selectionToolbar = useMemo(() => {
@@ -390,6 +436,7 @@ const MovieView: FunctionComponent = () => {
       selections.map((m) => ({
         type: "movie" as const,
         radarrId: m.radarrId,
+        arr_instance_id: m.arr_instance_id ?? undefined,
       }));
 
     const toWantedItems = (): WantedItem[] =>
@@ -397,6 +444,7 @@ const MovieView: FunctionComponent = () => {
         type: "movie" as const,
         radarrId: m.radarrId,
         title: m.title,
+        arrInstanceId: m.arr_instance_id ?? undefined,
       }));
 
     return (
@@ -516,6 +564,9 @@ const MovieView: FunctionComponent = () => {
         onAudioLanguagesChange={setAudioLanguages}
         excludeLanguages={excludeLanguages}
         onExcludeLanguagesChange={setExcludeLanguages}
+        instanceOptions={multiInstance ? instanceOptions : undefined}
+        instanceValues={instanceFilter}
+        onInstanceValuesChange={setInstanceFilter}
         enableRowSelection
         onSelectionChanged={setSelections}
         selectionToolbar={selectionToolbar}

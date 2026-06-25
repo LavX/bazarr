@@ -18,6 +18,7 @@ from .languages_profiles import api_ns_system_languages_profiles
 from .notifications import api_ns_system_notifications
 from .jobs import api_ns_system_jobs
 from .compat_admin import api_ns_compat_admin
+from .arr_instances import api_ns_system_arr_instances
 
 api_ns_list_system = [
     api_ns_system,
@@ -38,4 +39,5 @@ api_ns_list_system = [
     api_ns_system_tasks,
     api_ns_system_jobs,
     api_ns_compat_admin,
+    api_ns_system_arr_instances,
 ]

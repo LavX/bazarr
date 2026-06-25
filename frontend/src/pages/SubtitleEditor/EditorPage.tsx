@@ -6,7 +6,13 @@ import {
   useRef,
   useState,
 } from "react";
-import { Link, useBlocker, useNavigate, useParams } from "react-router";
+import {
+  Link,
+  useBlocker,
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from "react-router";
 import {
   Alert,
   Anchor,
@@ -35,6 +41,7 @@ import api from "@/apis/raw";
 import client from "@/apis/raw/client";
 import { Environment } from "@/utilities/env";
 import { isCombinedOutputLanguageKey } from "@/utilities/subtitles";
+import { cueId } from "./parsers/uuid";
 import DetailPane, { type DetailPaneHandle } from "./DetailPane";
 import {
   computeCueWarnings,
@@ -52,6 +59,7 @@ import {
   subtitleDocumentReducer,
 } from "./document";
 import EditableCueTable from "./EditableCueTable";
+import { buildEditorAutosaveKey, buildEditorSubtitlesUrl } from "./editorScope";
 import EditorToolbar from "./EditorToolbar";
 import JumpToCue from "./JumpToCue";
 import { detectFormat, getParser } from "./parsers";
@@ -67,6 +75,12 @@ import type { VideoPreviewHandle } from "./VideoPreview";
 import VideoPreview from "./VideoPreview";
 import WaveformTimeline from "./WaveformTimeline";
 
+// Escape regex special chars so a plain (non-regex) search treats "." etc.
+// as literal characters.
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export function findActiveCueIndex(cues: Cue[], playbackTimeMs: number) {
   return cues.findIndex(
     (cue) => playbackTimeMs >= cue.startMs && playbackTimeMs <= cue.endMs,
@@ -80,8 +94,23 @@ export function getActiveCueText(cues: Cue[], playbackTimeMs: number) {
 
 export default function EditorPage() {
   const { mediaType, mediaId, language } = useParams();
+  const [searchParams] = useSearchParams();
+  const rawArrInstanceId = searchParams.get("arr_instance_id");
+  const arrInstanceId =
+    rawArrInstanceId === null ? undefined : Number(rawArrInstanceId);
+  const scopedArrInstanceId = Number.isNaN(arrInstanceId)
+    ? undefined
+    : arrInstanceId;
+  const editorSearch = searchParams.toString();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const editorPath = useCallback(
+    (targetLanguage: string) => {
+      const path = `/subtitles/edit/${mediaType}/${mediaId}/${encodeURIComponent(targetLanguage)}`;
+      return editorSearch ? `${path}?${editorSearch}` : path;
+    },
+    [editorSearch, mediaId, mediaType],
+  );
 
   // Fetch subtitle content
   const {
@@ -92,6 +121,7 @@ export default function EditorPage() {
     mediaType,
     mediaId ? Number(mediaId) : undefined,
     language,
+    scopedArrInstanceId,
   );
 
   const data = queryResult?.data;
@@ -126,6 +156,9 @@ export default function EditorPage() {
 
   // Track whether we've loaded data into the reducer
   const loadedRef = useRef(false);
+  // Mirror loadedRef as state so effects that must run AFTER load completes
+  // (e.g. draft recovery) re-evaluate once the document is loaded.
+  const [loaded, setLoaded] = useState(false);
   const etagRef = useRef<string>("");
 
   // Reset when switching to a different subtitle
@@ -133,6 +166,7 @@ export default function EditorPage() {
   useEffect(() => {
     if (prevLangRef.current !== language) {
       loadedRef.current = false;
+      setLoaded(false);
       setCreatedSuccessfully(false);
       prevLangRef.current = language;
     }
@@ -143,17 +177,22 @@ export default function EditorPage() {
     if (parseResult && !loadedRef.current) {
       dispatch({ type: "LOAD", cues: parseResult.cues });
       loadedRef.current = true;
+      setLoaded(true);
     }
   }, [parseResult]);
 
   // Auto-save to localStorage on every change (debounced 2s)
-  const autoSaveKey =
-    mediaType && mediaId && language
-      ? `bazarr-editor-${mediaType}-${mediaId}-${language}`
-      : null;
+  const autoSaveKey = buildEditorAutosaveKey(
+    mediaType,
+    mediaId,
+    language,
+    scopedArrInstanceId,
+  );
 
   useEffect(() => {
-    if (!autoSaveKey || docState.cues.length === 0) return;
+    // Only persist a draft when there are actual unsaved edits, so opening an
+    // untouched file never writes a phantom draft to localStorage.
+    if (!autoSaveKey || docState.cues.length === 0 || !docState.dirty) return;
     const timer = setTimeout(() => {
       try {
         const serialized = getSerializer(format).serialize({
@@ -174,7 +213,13 @@ export default function EditorPage() {
       }
     }, 2000);
     return () => clearTimeout(timer);
-  }, [autoSaveKey, docState.cues, format, parseResult?.metadata]);
+  }, [
+    autoSaveKey,
+    docState.cues,
+    docState.dirty,
+    format,
+    parseResult?.metadata,
+  ]);
 
   // Auto-save recovery: check on load if there's a newer draft in localStorage
   const [recoveryAvailable, setRecoveryAvailable] = useState<{
@@ -185,7 +230,7 @@ export default function EditorPage() {
   } | null>(null);
 
   useEffect(() => {
-    if (!autoSaveKey || !loadedRef.current) return;
+    if (!autoSaveKey || !loaded) return;
     try {
       const raw = localStorage.getItem(autoSaveKey);
       if (!raw) return;
@@ -200,7 +245,7 @@ export default function EditorPage() {
     } catch {
       localStorage.removeItem(autoSaveKey!);
     }
-  }, [autoSaveKey]);
+  }, [autoSaveKey, loaded]);
 
   const handleRecoverDraft = useCallback(() => {
     if (!recoveryAvailable) return;
@@ -282,7 +327,13 @@ export default function EditorPage() {
     if (!mediaType || !mediaId) return;
     const apiKey = Environment.apiKey ?? "";
     fetch(
-      `${Environment.baseUrl}/api/editor/subtitles?mediaType=${mediaType}&mediaId=${mediaId}&apikey=${encodeURIComponent(apiKey)}`,
+      buildEditorSubtitlesUrl(
+        Environment.baseUrl,
+        mediaType,
+        mediaId,
+        apiKey,
+        scopedArrInstanceId,
+      ),
     )
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
@@ -291,7 +342,7 @@ export default function EditorPage() {
       .catch(() => {
         /* ignored */
       });
-  }, [mediaType, mediaId]);
+  }, [mediaType, mediaId, scopedArrInstanceId]);
 
   const toggleBookmark = useCallback((cueId: string) => {
     setBookmarkedIds((prev) => {
@@ -398,6 +449,12 @@ export default function EditorPage() {
   const [userSeekMs, setUserSeekMs] = useState<number | null>(null);
   const [seekCounter, setSeekCounter] = useState(0);
   const [playbackTimeMs, setPlaybackTimeMs] = useState(0);
+  // Mirror playbackTimeMs into a ref so callbacks (e.g. Add Cue) can read the
+  // current position without being recreated on every playback tick.
+  const playbackTimeMsRef = useRef(0);
+  useEffect(() => {
+    playbackTimeMsRef.current = playbackTimeMs;
+  }, [playbackTimeMs]);
   const [shouldFocusTextarea, setShouldFocusTextarea] = useState(false);
 
   // Build a ParseResult from current state for serialization
@@ -455,6 +512,7 @@ export default function EditorPage() {
           format,
           forced: false,
           hi: false,
+          arrInstanceId: scopedArrInstanceId,
         },
         {
           onSuccess: () => {
@@ -476,6 +534,7 @@ export default function EditorPage() {
                 mediaType,
                 Number(mediaId),
                 language,
+                scopedArrInstanceId,
               ],
             });
             showNotification({
@@ -510,6 +569,7 @@ export default function EditorPage() {
           content: serialized,
           encoding,
           etag: etagRef.current || undefined,
+          arrInstanceId: scopedArrInstanceId,
         },
         {
           onSuccess: (result) => {
@@ -545,6 +605,7 @@ export default function EditorPage() {
                   content: serialized,
                   encoding,
                   etag: undefined,
+                  arrInstanceId: scopedArrInstanceId,
                 },
                 {
                   onSuccess: (result) => {
@@ -605,6 +666,7 @@ export default function EditorPage() {
     docState.cues,
     parseResult?.metadata,
     queryClient,
+    scopedArrInstanceId,
   ]);
 
   // Subtitle language switcher
@@ -617,12 +679,12 @@ export default function EditorPage() {
       if (docState.dirty) {
         setPendingLangSwitch(targetLang);
       } else {
-        navigate(`/subtitles/edit/${mediaType}/${mediaId}/${targetLang}`, {
+        navigate(editorPath(targetLang), {
           replace: true,
         });
       }
     },
-    [language, mediaType, mediaId, docState.dirty, navigate],
+    [language, docState.dirty, navigate, editorPath],
   );
 
   // Navigate after save completes (dirty becomes false while pendingLangSwitch is set)
@@ -632,12 +694,12 @@ export default function EditorPage() {
       const target = pendingSaveNavRef.current;
       pendingSaveNavRef.current = null;
       requestAnimationFrame(() => {
-        navigate(`/subtitles/edit/${mediaType}/${mediaId}/${target}`, {
+        navigate(editorPath(target), {
           replace: true,
         });
       });
     }
-  }, [docState.dirty, mediaType, mediaId, navigate]);
+  }, [docState.dirty, navigate, editorPath]);
 
   const handleSwitchSave = useCallback(() => {
     if (!pendingLangSwitch) return;
@@ -652,11 +714,11 @@ export default function EditorPage() {
     setPendingLangSwitch(null);
     // Defer navigation so React processes MARK_SAVED first (dirty=false), avoiding the blocker
     requestAnimationFrame(() => {
-      navigate(`/subtitles/edit/${mediaType}/${mediaId}/${pendingLangSwitch}`, {
+      navigate(editorPath(pendingLangSwitch), {
         replace: true,
       });
     });
-  }, [pendingLangSwitch, mediaType, mediaId, navigate]);
+  }, [pendingLangSwitch, navigate, editorPath]);
 
   // Save As handler (create new subtitle with different language)
   // State for overwrite confirmation
@@ -678,6 +740,7 @@ export default function EditorPage() {
           format,
           forced: false,
           hi: false,
+          arrInstanceId: scopedArrInstanceId,
         },
         {
           onSuccess: () => {
@@ -685,10 +748,7 @@ export default function EditorPage() {
             setSaveAsLang(null);
             dispatch({ type: "MARK_SAVED" });
             requestAnimationFrame(() => {
-              navigate(
-                `/subtitles/edit/${mediaType}/${mediaId}/${encodeURIComponent(targetLang)}`,
-                { replace: true },
-              );
+              navigate(editorPath(targetLang), { replace: true });
             });
           },
           onError: (err) => {
@@ -709,7 +769,16 @@ export default function EditorPage() {
         },
       );
     },
-    [mediaType, mediaId, format, buildParseResult, createMutation, navigate],
+    [
+      mediaType,
+      mediaId,
+      format,
+      buildParseResult,
+      createMutation,
+      navigate,
+      editorPath,
+      scopedArrInstanceId,
+    ],
   );
 
   const handleOverwrite = useCallback(() => {
@@ -722,6 +791,7 @@ export default function EditorPage() {
         language: lang,
         content,
         encoding,
+        arrInstanceId: scopedArrInstanceId,
       },
       {
         onSuccess: (result) => {
@@ -738,10 +808,7 @@ export default function EditorPage() {
             autoClose: 2000,
           });
           requestAnimationFrame(() => {
-            navigate(
-              `/subtitles/edit/${mediaType}/${mediaId}/${encodeURIComponent(lang)}`,
-              { replace: true },
-            );
+            navigate(editorPath(lang), { replace: true });
           });
         },
         onError: (err) => {
@@ -755,7 +822,16 @@ export default function EditorPage() {
         },
       },
     );
-  }, [overwriteConfirm, mediaType, mediaId, encoding, saveMutation, navigate]);
+  }, [
+    overwriteConfirm,
+    mediaType,
+    mediaId,
+    encoding,
+    saveMutation,
+    navigate,
+    editorPath,
+    scopedArrInstanceId,
+  ]);
 
   // Upload handler
   const handleUpload = useCallback(() => {
@@ -840,7 +916,7 @@ export default function EditorPage() {
           setReferenceOpen((v) => !v);
           break;
         case "addCue": {
-          const currentPos = playbackTimeMs;
+          const currentPos = playbackTimeMsRef.current;
           const startMs =
             currentPos > 0
               ? currentPos
@@ -848,7 +924,7 @@ export default function EditorPage() {
                 ? docState.cues[Math.max(0, selectedIndex)].endMs + 100
                 : 0;
           const newCue: Cue = {
-            id: crypto.randomUUID(),
+            id: cueId(),
             startMs,
             endMs: startMs + 3000,
             text: "",
@@ -918,7 +994,6 @@ export default function EditorPage() {
         }
       }
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       handleSave,
       handleUpload,
@@ -967,24 +1042,40 @@ export default function EditorPage() {
   }, []);
 
   const handleSearchReplace = useCallback(
-    (cueIndex: number, oldText: string, newText: string) => {
+    (cueIndex: number, startChar: number, endChar: number, newText: string) => {
       const cue = docState.cues[cueIndex];
       if (!cue) return;
-      // Find exact first occurrence and splice at that offset
-      const pos = cue.text.indexOf(oldText);
-      if (pos === -1) return;
+      // Splice exactly at the highlighted offsets so the currently selected
+      // match is replaced, not just the first occurrence in the cue.
+      if (startChar < 0 || endChar > cue.text.length || startChar > endChar) {
+        return;
+      }
       const updatedText =
-        cue.text.slice(0, pos) + newText + cue.text.slice(pos + oldText.length);
+        cue.text.slice(0, startChar) + newText + cue.text.slice(endChar);
       dispatch({ type: "APPLY_OP", op: createEditText(cueIndex, updatedText) });
     },
     [docState.cues],
   );
 
   const handleSearchReplaceAll = useCallback(
-    (pattern: string, replacement: string) => {
+    (
+      pattern: string,
+      replacement: string,
+      caseSensitive: boolean,
+      isRegex: boolean,
+    ) => {
+      // Honor the case-sensitivity toggle ("g" vs "gi") and, for plain (non
+      // regex) search, escape special chars so "." etc. match literally.
+      const source = isRegex ? pattern : escapeRegExp(pattern);
+      const flags = caseSensitive ? "g" : "gi";
+      let regex: RegExp;
+      try {
+        regex = new RegExp(source, flags);
+      } catch {
+        return;
+      }
       // Batch all replacements into a single undoable operation
       const ops: ReturnType<typeof createEditText>[] = [];
-      const regex = new RegExp(pattern, "gi");
       for (let i = 0; i < docState.cues.length; i++) {
         const cue = docState.cues[i];
         regex.lastIndex = 0;
@@ -1070,7 +1161,7 @@ export default function EditorPage() {
         translations.forEach((text, idx) => {
           if (idx < referenceCueList.length) {
             newCues.push({
-              id: crypto.randomUUID(),
+              id: cueId(),
               startMs: referenceCueList[idx].startMs,
               endMs: referenceCueList[idx].endMs,
               text,
@@ -1116,6 +1207,7 @@ export default function EditorPage() {
           mediaType,
           Number(mediaId),
           lang,
+          scopedArrInstanceId,
         );
         if (result.data.exists === false || !result.data.content) {
           showNotification({
@@ -1149,7 +1241,7 @@ export default function EditorPage() {
         });
       }
     },
-    [mediaType, mediaId],
+    [mediaType, mediaId, scopedArrInstanceId],
   );
 
   // Import reference from file
@@ -1218,7 +1310,7 @@ export default function EditorPage() {
     } else {
       // Create new cue at reference timing
       const newCue: Cue = {
-        id: crypto.randomUUID(),
+        id: cueId(),
         startMs: refStartMs,
         endMs: refEndMs,
         text,
@@ -1262,7 +1354,7 @@ export default function EditorPage() {
       const overlaps = cue && cue.startMs < refEndMs && cue.endMs > refStartMs;
       if (!overlaps) {
         const newCue: Cue = {
-          id: crypto.randomUUID(),
+          id: cueId(),
           startMs: refStartMs,
           endMs: refEndMs,
           text: "",
@@ -1324,7 +1416,7 @@ export default function EditorPage() {
     playbackTimeMs,
     referenceLanguage,
     language,
-    data?.mediaTitle,
+    data,
     mediaType,
   ]);
 
@@ -1341,7 +1433,7 @@ export default function EditorPage() {
   const handleCreateFromGap = useCallback(
     (startMs: number, endMs: number, afterIndex: number) => {
       const newCue: Cue = {
-        id: crypto.randomUUID(),
+        id: cueId(),
         startMs,
         endMs,
         text: "",
@@ -1652,6 +1744,7 @@ export default function EditorPage() {
     if (isNewSubtitle && !loadedRef.current) {
       dispatch({ type: "LOAD", cues: [] });
       loadedRef.current = true;
+      setLoaded(true);
     }
   }, [isNewSubtitle]);
 
@@ -1983,6 +2076,7 @@ export default function EditorPage() {
             selectedIndices={multiSelect}
             mediaType={mediaType}
             mediaId={mediaId ? Number(mediaId) : undefined}
+            arrInstanceId={scopedArrInstanceId}
             language={language}
             onApplyBatch={handleTimingApplyBatch}
             onGetContent={() => {
@@ -2193,6 +2287,7 @@ export default function EditorPage() {
             ref={videoPreviewRef}
             mediaType={mediaType}
             mediaId={mediaId ? Number(mediaId) : undefined}
+            arrInstanceId={scopedArrInstanceId}
             currentTimeMs={userSeekMs ?? 0}
             seekId={seekCounter}
             currentSubtitleText={activeSubtitleText}
@@ -2274,6 +2369,7 @@ export default function EditorPage() {
       <WaveformTimeline
         mediaType={mediaType}
         mediaId={mediaId ? Number(mediaId) : undefined}
+        arrInstanceId={scopedArrInstanceId}
         cues={docState.cues}
         selectedIndex={selectedIndex}
         currentTimeMs={playbackTimeMs}

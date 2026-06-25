@@ -20,7 +20,6 @@ const SHORTCUTS: ShortcutCategory[] = [
     title: "File",
     entries: [
       { keys: ["Ctrl", "S"], description: "Save" },
-      { keys: ["Ctrl", "O"], description: "Upload file" },
       { keys: ["Ctrl", "F"], description: "Search / Replace" },
     ],
   },

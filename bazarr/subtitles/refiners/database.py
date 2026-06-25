@@ -33,6 +33,7 @@ def refine_from_db(path, video):
                    TableShows.imdbId,
                    TableEpisodes.sonarrSeriesId,
                    TableEpisodes.sonarrEpisodeId,
+                   TableEpisodes.arr_instance_id,
                    TableEpisodes.absoluteEpisode)
             .select_from(TableEpisodes)
             .join(TableShows)
@@ -68,6 +69,9 @@ def refine_from_db(path, video):
 
             video.sonarrSeriesId = data.sonarrSeriesId
             video.sonarrEpisodeId = data.sonarrEpisodeId
+            # Carry the owning instance so per-instance refiners (arr history)
+            # hit the right Sonarr; None on a pre-backfill/default install.
+            video.arr_instance_id = data.arr_instance_id
     elif isinstance(video, Movie):
         data = database.execute(
             select(TableMovies.title,
@@ -79,6 +83,7 @@ def refine_from_db(path, video):
                    TableMovies.audio_codec,
                    TableMovies.imdbId,
                    TableMovies.tmdbId,
+                   TableMovies.arr_instance_id,
                    TableMovies.radarrId)
             .where(TableMovies.path == path_mappings.path_replace_reverse_movie(path))) \
             .first()
@@ -111,5 +116,6 @@ def refine_from_db(path, video):
                     video.audio_codec = convert_to_guessit('audio_codec', data.audio_codec)
 
             video.radarrId = data.radarrId
+            video.arr_instance_id = data.arr_instance_id
 
     return video

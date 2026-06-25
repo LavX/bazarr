@@ -48,16 +48,22 @@ class ProviderEpisodes(Resource):
     def get(self):
         """Search manually for an episode subtitles"""
         args = self.get_request_parser.parse_args()
-        sonarrEpisodeId = args.get('episodeid')
+        # 'episodeid' is the canonical local episode id (globally unique across
+        # instances) that GetItemId and the browse endpoints use. Looking the row
+        # up by local id avoids the upstream-id collision between instances; on a
+        # single default instance local id == sonarrEpisodeId, so unchanged. (#156)
+        episode_id = args.get('episodeid')
         stmt = select(TableEpisodes.path,
                       TableEpisodes.sceneName,
+                      TableEpisodes.sonarrEpisodeId,
+                      TableEpisodes.arr_instance_id,
                       TableShows.title,
                       TableShows.profileId,
                       TableEpisodes.subtitles,
                       TableEpisodes.missing_subtitles) \
             .select_from(TableEpisodes) \
             .join(TableShows) \
-            .where(TableEpisodes.sonarrEpisodeId == sonarrEpisodeId)
+            .where(TableEpisodes.id == episode_id)
         episodeInfo = database.execute(stmt).first()
 
         if not episodeInfo:
@@ -68,7 +74,8 @@ class ProviderEpisodes(Resource):
             episodeInfo = database.execute(stmt).first()
         elif episodeInfo.missing_subtitles is None:
             # missing subtitles calculation for this episode is incomplete, we'll do it again
-            list_missing_subtitles(epno=sonarrEpisodeId)
+            list_missing_subtitles(epno=episodeInfo.sonarrEpisodeId,
+                                   arr_instance_id=episodeInfo.arr_instance_id)
             episodeInfo = database.execute(stmt).first()
 
         title = episodeInfo.title
@@ -96,6 +103,8 @@ class ProviderEpisodes(Resource):
                                      help='Use original subtitles format from ["True", "False"]')
     post_request_parser.add_argument('provider', type=str, required=True, help='Provider name')
     post_request_parser.add_argument('subtitle', type=str, required=True, help='Subtitle ID as returned by GET')
+    post_request_parser.add_argument('arr_instance_id', type=int, required=False,
+                                     help='Owning Sonarr instance id (#156); scopes the download to it')
 
     @authenticate
     @api_ns_providers_episodes.doc(parser=post_request_parser)
@@ -106,14 +115,24 @@ class ProviderEpisodes(Resource):
     def post(self):
         """Manually download an episode subtitles"""
         args = self.post_request_parser.parse_args()
+        # The frontend sends upstream sonarrSeriesId and sonarrEpisodeId (not
+        # local autoincrement ids), so pass them directly to the downstream
+        # function which resolves the row by (sonarrEpisodeId, arr_instance_id).
+        # A local-id pre-lookup was causing collisions: when a different episode's
+        # local id happened to equal the requested upstream episode id the handler
+        # routed to the wrong row or 404'd on an instance mismatch. (#156 F8)
+        series_id = args.get('seriesid')
+        episode_id = args.get('episodeid')
+        arr_instance_id = args.get('arr_instance_id')
 
-        episode_manually_download_specific_subtitle(sonarr_series_id=args.get('seriesid'),
-                                                    sonarr_episode_id=args.get('episodeid'),
+        episode_manually_download_specific_subtitle(sonarr_series_id=series_id,
+                                                    sonarr_episode_id=episode_id,
                                                     hi=args.get('hi').capitalize(),
                                                     forced=args.get('forced').capitalize(),
                                                     use_original_format=args.get('original_format').capitalize(),
                                                     selected_provider=args.get('provider'),
                                                     subtitle=args.get('subtitle'),
-                                                    job_id=None)
+                                                    job_id=None,
+                                                    arr_instance_id=arr_instance_id)
 
         return '', 204

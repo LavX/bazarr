@@ -5,8 +5,15 @@ class FilesApi extends BaseApi {
     super("/files");
   }
 
-  async browse(name: string, path?: string) {
-    const response = await this.get<FileTree[]>(name, { path });
+  async browse(name: string, path?: string, instanceId?: number) {
+    // instance_id (#156) routes the browse at the owning Sonarr/Radarr instance
+    // (backend: api/files/files_sonarr.py + files_radarr.py). Omitted => default
+    // server, byte-identical to the legacy single-instance behaviour.
+    const response = await this.get<FileTree[]>(name, {
+      path,
+      // eslint-disable-next-line camelcase -- backend API contract
+      instance_id: instanceId,
+    });
     return response;
   }
 
@@ -14,12 +21,12 @@ class FilesApi extends BaseApi {
     return this.browse("", path);
   }
 
-  async sonarr(path?: string) {
-    return this.browse("/sonarr", path);
+  async sonarr(path?: string, instanceId?: number) {
+    return this.browse("/sonarr", path, instanceId);
   }
 
-  async radarr(path?: string) {
-    return this.browse("/radarr", path);
+  async radarr(path?: string, instanceId?: number) {
+    return this.browse("/radarr", path, instanceId);
   }
 }
 

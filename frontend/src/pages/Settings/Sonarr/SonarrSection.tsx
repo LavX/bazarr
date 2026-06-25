@@ -1,57 +1,38 @@
-import { FunctionComponent } from "react";
+import { FunctionComponent, ReactNode } from "react";
 import { Code } from "@mantine/core";
 import {
   Check,
   Chips,
   CollapseBox,
-  Layout,
   Message,
   MultiSelector,
-  Number,
-  Password,
   PathMappingTable,
   Section,
-  Selector,
   Slider,
-  Text,
-  URLTestButton,
 } from "@/pages/Settings/components";
 import { seriesEnabledKey } from "@/pages/Settings/keys";
 import { seriesTypeOptions } from "@/pages/Settings/options";
-import { timeoutOptions } from "./options";
 
-const SettingsSonarrView: FunctionComponent = () => {
+interface Props {
+  // The instance cards, rendered between the master toggle and the gated
+  // options so they stay visible regardless of the "Use Sonarr" state.
+  children?: ReactNode;
+}
+
+// Sonarr controls for the Connections page: master enable toggle, the instance
+// cards (passed as children), then the global behavioural options and path
+// mappings gated behind the master toggle. Connection details (host/port/key)
+// live in the instance cards, so there is no Host section here.
+const SonarrSection: FunctionComponent<Props> = ({ children }) => {
   return (
-    <Layout name="Sonarr">
+    <>
       <Section header="Use Sonarr">
         <Check label="Enabled" settingKey={seriesEnabledKey}></Check>
       </Section>
+
+      {children}
+
       <CollapseBox settingKey={seriesEnabledKey}>
-        <Section header="Host">
-          <Text label="Address" settingKey="settings-sonarr-ip"></Text>
-          <Message>Hostname or IPv4 Address</Message>
-          <Number label="Port" settingKey="settings-sonarr-port"></Number>
-          <Text
-            label="Base URL"
-            leftSection="/"
-            settingKey="settings-sonarr-base_url"
-            settingOptions={{
-              onLoaded: (s) => s.sonarr.base_url?.slice(1) ?? "",
-              onSubmit: (v) => "/" + v,
-            }}
-          ></Text>
-          <Selector
-            label="HTTP Timeout"
-            options={timeoutOptions}
-            settingKey="settings-sonarr-http_timeout"
-          ></Selector>
-          <Password
-            label="API Key"
-            settingKey="settings-sonarr-apikey"
-          ></Password>
-          <Check label="SSL" settingKey="settings-sonarr-ssl"></Check>
-          <URLTestButton category="sonarr"></URLTestButton>
-        </Section>
         <Section header="Options">
           <Check
             label="Sync with Sonarr on live connection establishment"
@@ -107,8 +88,8 @@ const SettingsSonarrView: FunctionComponent = () => {
           <Message>
             Search can be triggered using this command:
             <Code>
-              {`curl -H "Content-Type: application/json" -H "X-API-KEY: ###############################" -X POST 
-                -d '{ "eventType": "Download", "episodeFiles": [ { "id": "$sonarr_episodefile_id" } ] }' 
+              {`curl -H "Content-Type: application/json" -H "X-API-KEY: ###############################" -X POST
+                -d '{ "eventType": "Download", "episodeFiles": [ { "id": "$sonarr_episodefile_id" } ] }'
                 http://localhost:6767/api/webhooks/sonarr
               `}
             </Code>
@@ -126,8 +107,8 @@ const SettingsSonarrView: FunctionComponent = () => {
           <PathMappingTable type="sonarr"></PathMappingTable>
         </Section>
       </CollapseBox>
-    </Layout>
+    </>
   );
 };
 
-export default SettingsSonarrView;
+export default SonarrSection;

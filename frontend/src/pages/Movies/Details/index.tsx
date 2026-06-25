@@ -9,7 +9,6 @@ import {
   Stack,
   Text,
 } from "@mantine/core";
-import { Dropzone } from "@mantine/dropzone";
 import { useDocumentTitle } from "@mantine/hooks";
 import { showNotification } from "@mantine/notifications";
 import {
@@ -20,6 +19,7 @@ import {
   faLayerGroup,
   faMagnifyingGlass,
   faSearch,
+  faServer,
   faSync,
   faToolbox,
   faWrench,
@@ -31,6 +31,7 @@ import {
   useIsMovieActionRunning,
   useMoviesProvider,
 } from "@/apis/hooks";
+import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
 import {
   useMovieAction,
   useMovieById,
@@ -38,7 +39,7 @@ import {
   useMovieModification,
 } from "@/apis/hooks/movies";
 import { useInstanceName } from "@/apis/hooks/site";
-import { Action, DropContent, Toolbox } from "@/components";
+import { Action, FullPageDropzone, Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import { CombineModal } from "@/components/forms/CombineForm";
 import { ItemEditModal } from "@/components/forms/ItemEditForm";
@@ -61,7 +62,20 @@ const MovieDetailView: FunctionComponent = () => {
   const id = Number.parseInt(param.id ?? "");
   const movieQuery = useMovieById(id);
   const { data: movie, isFetched } = movieQuery;
-  const { data: movieHistory } = useMovieHistory(movie?.radarrId);
+  const { data: movieHistory } = useMovieHistory(movie?.id);
+  const { multiInstance, nameById: instanceNameById } =
+    useArrInstanceLabels("radarr");
+  const overviewDetails =
+    multiInstance && movie?.arr_instance_id != null
+      ? [
+          {
+            icon: faServer,
+            text:
+              instanceNameById.get(movie.arr_instance_id) ??
+              `#${movie.arr_instance_id}`,
+          },
+        ]
+      : [];
 
   const profile = useLanguageProfileBy(movie?.profileId);
 
@@ -85,6 +99,8 @@ const MovieDetailView: FunctionComponent = () => {
 
       return downloadAsync({
         radarrId,
+        // Scope the download to the movie's owning instance (#156).
+        arrInstanceId: item.arr_instance_id,
         form: {
           language,
           hi,
@@ -156,13 +172,11 @@ const MovieDetailView: FunctionComponent = () => {
         </Breadcrumbs>
       </nav>
       <QueryOverlay result={movieQuery}>
-        <Dropzone.FullScreen
+        <FullPageDropzone
           openRef={openDropzone}
           active={profile !== undefined}
           onDrop={onDrop}
-        >
-          <DropContent></DropContent>
-        </Dropzone.FullScreen>
+        />
         <Toolbox>
           <Group gap="xs">
             <Toolbox.Button
@@ -172,7 +186,8 @@ const MovieDetailView: FunctionComponent = () => {
                 if (movie) {
                   await action({
                     action: "sync",
-                    radarrid: id,
+                    radarrid: movie.radarrId,
+                    arr_instance_id: movie.arr_instance_id,
                   });
                 }
               }}
@@ -186,7 +201,8 @@ const MovieDetailView: FunctionComponent = () => {
                 if (movie) {
                   task.create(movie.title, TaskGroup.ScanDisk, action, {
                     action: "scan-disk",
-                    radarrid: id,
+                    radarrid: movie.radarrId,
+                    arr_instance_id: movie.arr_instance_id,
                   });
                 }
               }}
@@ -201,7 +217,8 @@ const MovieDetailView: FunctionComponent = () => {
                 if (movie) {
                   await action({
                     action: "search-missing",
-                    radarrid: id,
+                    radarrid: movie.radarrId,
+                    arr_instance_id: movie.arr_instance_id,
                   });
                 }
               }}
@@ -229,7 +246,11 @@ const MovieDetailView: FunctionComponent = () => {
               onClick={() => {
                 if (movie) {
                   modals.openContextModal(CombineModal, {
-                    scope: { kind: "movie", radarrId: movie.radarrId },
+                    scope: {
+                      kind: "movie",
+                      radarrId: movie.radarrId,
+                      arrInstanceId: movie.arr_instance_id ?? undefined,
+                    },
                     availableLanguages: availableLangs,
                   });
                 }
@@ -300,7 +321,10 @@ const MovieDetailView: FunctionComponent = () => {
           </Group>
         </Toolbox>
         <Stack>
-          <ItemOverview item={movie ?? null} details={[]}></ItemOverview>
+          <ItemOverview
+            item={movie ?? null}
+            details={overviewDetails}
+          ></ItemOverview>
           <Table
             movie={movie ?? null}
             profile={profile}

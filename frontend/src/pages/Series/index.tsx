@@ -33,11 +33,12 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import { uniqBy } from "lodash";
 import { useSeriesModification, useSeriesPagination } from "@/apis/hooks";
+import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
 import { useInstanceName } from "@/apis/hooks/site";
 import { useUpgradableItems } from "@/apis/hooks/subtitles";
 import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
 import { Toolbox } from "@/components";
-import { AudioList } from "@/components/bazarr";
+import { AudioList, InstanceBadge } from "@/components/bazarr";
 import LanguageProfileName from "@/components/bazarr/LanguageProfile";
 import { BatchModConfirmModal } from "@/components/forms/BatchModConfirmForm";
 import { ChangeProfileModal } from "@/components/forms/ChangeProfileForm";
@@ -53,6 +54,10 @@ import { useModals } from "@/modules/modals";
 import ItemView from "@/pages/views/ItemView";
 import { GetItemId } from "@/utilities";
 
+function upgradableKey(upstreamId: number, arrInstanceId?: number | null) {
+  return `${upstreamId}:${arrInstanceId ?? ""}`;
+}
+
 const SeriesView: FunctionComponent = () => {
   const mutation = useSeriesModification();
   const modals = useModals();
@@ -60,12 +65,26 @@ const SeriesView: FunctionComponent = () => {
   const [search, setSearch] = useState("");
   const [audioLanguages, setAudioLanguages] = useState<string[]>([]);
   const [excludeLanguages, setExcludeLanguages] = useState<string[]>([]);
+  const [instanceFilter, setInstanceFilter] = useState<string[]>([]);
+  const {
+    multiInstance,
+    nameById: instanceNameById,
+    defaultId: instanceDefaultId,
+    options: instanceOptions,
+  } = useArrInstanceLabels("sonarr");
 
   const query = useSeriesPagination(true);
   const { data: upgradableData } = useUpgradableItems();
-  const upgradableSeriesIds = useMemo(
-    () => new Set(upgradableData?.series ?? []),
-    [upgradableData?.series],
+  const upgradableSeriesKeys = useMemo(
+    () =>
+      new Set(
+        upgradableData?.seriesKeys?.map((item) =>
+          upgradableKey(item.sonarrSeriesId, item.arr_instance_id),
+        ) ??
+          upgradableData?.series.map((id) => upgradableKey(id)) ??
+          [],
+      ),
+    [upgradableData?.seriesKeys, upgradableData?.series],
   );
 
   const [selections, setSelections] = useState<Item.Series[]>([]);
@@ -184,7 +203,9 @@ const SeriesView: FunctionComponent = () => {
       {
         id: "upgradable",
         cell: ({ row: { original } }) =>
-          upgradableSeriesIds.has(original.sonarrSeriesId) ? (
+          upgradableSeriesKeys.has(
+            upgradableKey(original.sonarrSeriesId, original.arr_instance_id),
+          ) ? (
             <Tooltip label="Low match score, upgrading may find a better subtitle">
               <FontAwesomeIcon
                 icon={faCircleDown}
@@ -198,7 +219,7 @@ const SeriesView: FunctionComponent = () => {
         header: "Name",
         accessorKey: "title",
         cell: ({ row: { original } }) => {
-          const target = `/series/${original.sonarrSeriesId}`;
+          const target = `/series/${original.id}`;
           return (
             <Anchor className="table-primary" component={Link} to={target}>
               {original.title}
@@ -206,6 +227,24 @@ const SeriesView: FunctionComponent = () => {
           );
         },
       },
+      // Owning Sonarr instance (#156). Only shown when more than one Sonarr is
+      // configured. Every row is labeled: the default instance uses a muted
+      // grey badge and the other instances an accent badge so they stand out.
+      ...(multiInstance
+        ? [
+            {
+              id: "instance",
+              header: "Instance",
+              cell: ({ row: { original } }) => (
+                <InstanceBadge
+                  instanceId={original.arr_instance_id}
+                  defaultId={instanceDefaultId}
+                  nameById={instanceNameById}
+                />
+              ),
+            } as ColumnDef<Item.Series>,
+          ]
+        : []),
       {
         header: "Audio",
         accessorKey: "audio_language",
@@ -287,11 +326,13 @@ const SeriesView: FunctionComponent = () => {
           const batchItem: BatchItem = {
             type: "series",
             sonarrSeriesId: original.sonarrSeriesId,
+            arr_instance_id: original.arr_instance_id ?? undefined,
           };
           const wantedItem: WantedItem = {
             type: "series",
             sonarrSeriesId: original.sonarrSeriesId,
             title: original.title,
+            arrInstanceId: original.arr_instance_id ?? undefined,
           };
           return (
             <Menu shadow="md" width={220} position="bottom-end">
@@ -405,7 +446,14 @@ const SeriesView: FunctionComponent = () => {
         },
       },
     ],
-    [mutation, modals, upgradableSeriesIds],
+    [
+      mutation,
+      modals,
+      upgradableSeriesKeys,
+      multiInstance,
+      instanceNameById,
+      instanceDefaultId,
+    ],
   );
 
   const selectionToolbar = useMemo(() => {
@@ -415,6 +463,7 @@ const SeriesView: FunctionComponent = () => {
       selections.map((s) => ({
         type: "series" as const,
         sonarrSeriesId: s.sonarrSeriesId,
+        arr_instance_id: s.arr_instance_id ?? undefined,
       }));
 
     const toWantedItems = (): WantedItem[] =>
@@ -422,6 +471,7 @@ const SeriesView: FunctionComponent = () => {
         type: "series" as const,
         sonarrSeriesId: s.sonarrSeriesId,
         title: s.title,
+        arrInstanceId: s.arr_instance_id ?? undefined,
       }));
 
     return (
@@ -541,6 +591,9 @@ const SeriesView: FunctionComponent = () => {
         onAudioLanguagesChange={setAudioLanguages}
         excludeLanguages={excludeLanguages}
         onExcludeLanguagesChange={setExcludeLanguages}
+        instanceOptions={multiInstance ? instanceOptions : undefined}
+        instanceValues={instanceFilter}
+        onInstanceValuesChange={setInstanceFilter}
         enableRowSelection
         onSelectionChanged={setSelections}
         selectionToolbar={selectionToolbar}

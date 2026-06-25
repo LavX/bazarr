@@ -8,7 +8,7 @@ import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 from flask import request
 from flask_restx import Resource, reqparse, abort
 import plexapi
@@ -33,6 +33,7 @@ def _validate_state_token(state: str, stored_state: str) -> bool:
     return _secrets.compare_digest(state, stored_state)
 from app.config import get_ssl_verify  # noqa: E402
 from app.config import settings, write_config  # noqa: E402
+from utilities.security_guards import is_trusted_plex_target  # noqa: E402
 from app.logger import logger  # noqa: E402
 from utilities.plex_utils import _get_library_locations  # noqa: E402
 from ..utils import authenticate  # noqa: E402
@@ -824,6 +825,27 @@ class PlexTestConnection(Resource):
     def post(self):
         args = self.post_request_parser.parse_args()
         uri = args.get('uri')
+
+        # SSRF / token-exfiltration guard (#GHSA): validate the destination
+        # BEFORE touching the token. The token must only be sent to the user's
+        # own Plex server or a Plex-owned domain, never to an arbitrary public
+        # host. Local/LAN/loopback targets stay allowed (the common case).
+        trusted_hosts = []
+        server_url = settings.plex.get('server_url') or ''
+        if server_url:
+            server_host = urlparse(
+                server_url if '://' in server_url else 'https://' + server_url
+            ).hostname
+            if server_host:
+                trusted_hosts.append(server_host)
+        plex_ip = settings.plex.get('ip') or ''
+        if plex_ip:
+            trusted_hosts.append(plex_ip)
+        if not is_trusted_plex_target(uri, trusted_hosts=trusted_hosts):
+            return {
+                'success': False,
+                'error': 'Refusing to send Plex credentials to an untrusted host'
+            }, 400
 
         decrypted_token = get_decrypted_token()
         if not decrypted_token:

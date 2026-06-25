@@ -3,6 +3,7 @@
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
 
 from app.database import TableMovies, TableBlacklistMovie, database, select
+from arr_instances.resolution import scoped
 from subtitles.tools.delete import delete_subtitles
 from radarr.blacklist import blacklist_log_movie, blacklist_delete_all_movie, blacklist_delete_movie
 from utilities.path_mappings import path_mappings
@@ -26,6 +27,9 @@ class MoviesBlacklist(Resource):
     get_language_model = api_ns_movies_blacklist.model('subtitles_language_model', subtitles_language_model)
 
     get_response_model = api_ns_movies_blacklist.model('MovieBlacklistGetResponse', {
+        'id': fields.Integer(),
+        # Owning instance (#156) so the remove action can route.
+        'arr_instance_id': fields.Integer(),
         'title': fields.String(),
         'radarrId': fields.Integer(),
         'provider': fields.String(),
@@ -44,9 +48,11 @@ class MoviesBlacklist(Resource):
         start = args.get('start')
         length = args.get('length')
 
-        data = database.execute(
-            select(TableMovies.title,
+        stmt = (
+            select(TableMovies.id,
+                   TableMovies.title,
                    TableMovies.radarrId,
+                   TableBlacklistMovie.arr_instance_id,
                    TableBlacklistMovie.provider,
                    TableBlacklistMovie.subs_id,
                    TableBlacklistMovie.language,
@@ -54,10 +60,15 @@ class MoviesBlacklist(Resource):
             .select_from(TableBlacklistMovie)
             .join(TableMovies)
             .order_by(TableBlacklistMovie.timestamp.desc()))
+        # Pagination must be applied to the statement, not the executed Result
+        # (a Result has no .limit()). Pre-existing bug: paginated requests 500'd.
         if length > 0:
-            data = data.limit(length).offset(start)
+            stmt = stmt.limit(length).offset(start)
+        data = database.execute(stmt)
 
         return marshal([postprocess({
+            'id': x.id,
+            'arr_instance_id': x.arr_instance_id,
             'title': x.title,
             'radarrId': x.radarrId,
             'provider': x.provider,
@@ -73,6 +84,8 @@ class MoviesBlacklist(Resource):
     post_request_parser.add_argument('subs_id', type=str, required=True, help='Subtitles ID')
     post_request_parser.add_argument('language', type=str, required=True, help='Subtitles language')
     post_request_parser.add_argument('subtitles_path', type=str, required=True, help='Subtitles file path')
+    post_request_parser.add_argument('arr_instance_id', type=int, required=False,
+                                     help='Owning Radarr instance id (#156)')
 
     @authenticate
     @api_ns_movies_blacklist.doc(parser=post_request_parser)
@@ -87,13 +100,16 @@ class MoviesBlacklist(Resource):
         provider = args.get('provider')
         subs_id = args.get('subs_id')
         language = args.get('language')
+        arr_instance_id = args.get('arr_instance_id')
         # TODO
         forced = False
         hi = False
 
         data = database.execute(
-            select(TableMovies.path)
-            .where(TableMovies.radarrId == radarr_id))\
+            scoped(
+                select(TableMovies.path)
+                .where(TableMovies.radarrId == radarr_id),
+                TableMovies.arr_instance_id, arr_instance_id))\
             .first()
 
         if not data:
@@ -105,15 +121,17 @@ class MoviesBlacklist(Resource):
         blacklist_log_movie(radarr_id=radarr_id,
                             provider=provider,
                             subs_id=subs_id,
-                            language=language)
+                            language=language,
+                            arr_instance_id=arr_instance_id)
         if delete_subtitles(media_type='movie',
                             language=language,
                             forced=forced,
                             hi=hi,
                             media_path=path_mappings.path_replace_movie(media_path),
                             subtitles_path=subtitles_path,
-                            radarr_id=radarr_id):
-            movies_download_subtitles(radarr_id)
+                            radarr_id=radarr_id,
+                            arr_instance_id=arr_instance_id):
+            movies_download_subtitles(radarr_id, arr_instance_id=arr_instance_id)
             event_stream(type='movie-history')
             return '', 200
         else:
@@ -123,6 +141,8 @@ class MoviesBlacklist(Resource):
     delete_request_parser.add_argument('all', type=str, required=False, help='Empty movies subtitles blacklist')
     delete_request_parser.add_argument('provider', type=str, required=False, help='Provider name')
     delete_request_parser.add_argument('subs_id', type=str, required=False, help='Subtitles ID')
+    delete_request_parser.add_argument('arr_instance_id', type=int, required=False,
+                                       help='Owning Radarr instance id (#156)')
 
     @authenticate
     @api_ns_movies_blacklist.doc(parser=delete_request_parser)
@@ -136,5 +156,6 @@ class MoviesBlacklist(Resource):
         else:
             provider = args.get('provider')
             subs_id = args.get('subs_id')
-            blacklist_delete_movie(provider=provider, subs_id=subs_id)
+            blacklist_delete_movie(provider=provider, subs_id=subs_id,
+                                   arr_instance_id=args.get('arr_instance_id'))
         return '', 200

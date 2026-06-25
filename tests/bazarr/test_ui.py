@@ -2,6 +2,7 @@
 Test for Bazarr UI functionality including authentication decorators.
 """
 import pytest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch  # noqa: F401
 from flask import Flask
 
@@ -48,6 +49,150 @@ def test_check_login_decorator_is_wrapper():
     assert decorated_function != original_function
     assert callable(decorated_function)
     assert decorated_function.__name__ == original_function.__name__
+
+
+def test_instance_image_url_rejects_wrong_instance_kind(monkeypatch):
+    """
+    A movie image request must not be allowed to route through a Sonarr instance
+    just because the caller supplied that instance id.
+    """
+    from app.ui import _instance_image_url
+    import arr_instances.resolution as resolution
+
+    class SonarrClient:
+        kind = "sonarr"
+        api_key = "key"
+        verify_ssl = False
+        _base_url_raw = "/"
+
+        def base_url(self):
+            return "http://sonarr.example:8989"
+
+    monkeypatch.setattr(
+        resolution,
+        "client_for_instance",
+        lambda session, instance_id: SonarrClient(),
+    )
+
+    app = Flask(__name__)
+    with app.test_request_context("/images/movies/MediaCover/1/poster.jpg?arr_instance_id=9"):
+        assert _instance_image_url("radarr", "MediaCover/1/poster.jpg") == (None, None)
+
+
+def test_instance_image_url_routes_matching_instance_kind(monkeypatch):
+    from app.ui import _instance_image_url
+    import arr_instances.resolution as resolution
+
+    class RadarrClient:
+        kind = "radarr"
+        api_key = "key"
+        verify_ssl = True
+        _base_url_raw = "/radarr"
+
+        def base_url(self):
+            return "https://radarr.example:7878/radarr"
+
+    monkeypatch.setattr(
+        resolution,
+        "client_for_instance",
+        lambda session, instance_id: RadarrClient(),
+    )
+
+    app = Flask(__name__)
+    with app.test_request_context("/images/movies/radarr/MediaCover/1/poster.jpg?arr_instance_id=9"):
+        assert _instance_image_url("radarr", "radarr/MediaCover/1/poster.jpg") == (
+            "https://radarr.example:7878/radarr/api/v3/MediaCover/1/poster.jpg?apikey=key",
+            True,
+        )
+
+
+def test_movie_image_route_returns_404_for_wrong_instance_kind(monkeypatch):
+    from app import ui
+    import arr_instances.resolution as resolution
+
+    class SonarrClient:
+        kind = "sonarr"
+        api_key = "key"
+        verify_ssl = False
+        _base_url_raw = "/"
+
+        def base_url(self):
+            return "http://sonarr.example:8989"
+
+    monkeypatch.setattr(ui, "settings", SimpleNamespace(auth=SimpleNamespace(type=None)))
+    monkeypatch.setattr(
+        resolution,
+        "client_for_instance",
+        lambda session, instance_id: SonarrClient(),
+    )
+
+    app = Flask(__name__)
+    app.register_blueprint(ui.ui_bp)
+
+    response = app.test_client().get(
+        "/images/movies/MediaCover/1/poster.jpg?arr_instance_id=9"
+    )
+
+    assert response.status_code == 404
+
+
+def test_movie_image_route_fetches_matching_instance(monkeypatch):
+    from app import ui
+    import arr_instances.resolution as resolution
+
+    captured = {}
+
+    class RadarrClient:
+        kind = "radarr"
+        api_key = "key"
+        verify_ssl = True
+        _base_url_raw = "/radarr"
+
+        def base_url(self):
+            return "https://radarr.example:7878/radarr"
+
+    class UpstreamResponse:
+        headers = {"content-type": "image/jpeg"}
+
+        def iter_content(self, chunk_size):
+            captured["chunk_size"] = chunk_size
+            yield b"image-bytes"
+
+    def fake_get(url, stream, timeout, verify, headers):
+        captured.update({
+            "url": url,
+            "stream": stream,
+            "timeout": timeout,
+            "verify": verify,
+            "headers": headers,
+        })
+        return UpstreamResponse()
+
+    monkeypatch.setattr(ui, "settings", SimpleNamespace(auth=SimpleNamespace(type=None)))
+    monkeypatch.setattr(ui.requests, "get", fake_get)
+    monkeypatch.setattr(
+        resolution,
+        "client_for_instance",
+        lambda session, instance_id: RadarrClient(),
+    )
+
+    app = Flask(__name__)
+    app.register_blueprint(ui.ui_bp)
+
+    response = app.test_client().get(
+        "/images/movies/radarr/MediaCover/1/poster.jpg?lastWrite=1&arr_instance_id=9"
+    )
+
+    assert response.status_code == 200
+    assert response.data == b"image-bytes"
+    assert response.content_type == "image/jpeg"
+    assert captured["url"] == (
+        "https://radarr.example:7878/radarr/api/v3/MediaCover/1/poster.jpg?apikey=key"
+    )
+    assert captured["stream"] is True
+    assert captured["timeout"] == 15
+    assert captured["verify"] is True
+    assert captured["chunk_size"] == 2048
 
 
 def test_check_login_no_authentication():
@@ -177,7 +322,7 @@ def test_check_login_form_auth_failure():
             result = decorated_function()  # noqa: F841
 
             # Should call abort
-            mock_abort.assert_called_once_with(401, message="Unauthorized")
+            mock_abort.assert_called_once_with(401)
 
 
 def test_check_login_preserves_function_arguments():
@@ -236,3 +381,64 @@ def test_check_login_with_different_return_types():
 
             assert result == expected_value
             assert type(result) == expected_type  # noqa: E721
+
+
+# --- connection-test proxy API-key gate (SSRF hardening) ---------------------
+
+def test_proxy_route_requires_api_key(monkeypatch):
+    """The /test connection proxy must reject requests without the API key,
+    even when UI auth is disabled (the default), so it is never an
+    unauthenticated SSRF surface."""
+    from app import ui
+
+    monkeypatch.setattr(ui, "settings", SimpleNamespace(
+        auth=SimpleNamespace(type=None, apikey="secret-key")))
+    app = Flask(__name__)
+    app.register_blueprint(ui.ui_bp)
+    client = app.test_client()
+
+    # No key -> blocked before any outbound request happens.
+    assert client.get("/test/ftp/example.test/").status_code == 401
+
+    # Correct key -> passes the gate (ftp is then rejected downstream, no DNS).
+    resp = client.get("/test/ftp/example.test/", headers={"X-API-KEY": "secret-key"})
+    assert resp.status_code == 200
+    assert resp.get_json()["error"] == "Unsupported protocol"
+
+
+def test_proxy_route_rejects_wrong_api_key(monkeypatch):
+    from app import ui
+
+    monkeypatch.setattr(ui, "settings", SimpleNamespace(
+        auth=SimpleNamespace(type=None, apikey="secret-key")))
+    app = Flask(__name__)
+    app.register_blueprint(ui.ui_bp)
+    assert app.test_client().get(
+        "/test/ftp/x/", headers={"X-API-KEY": "wrong"}).status_code == 401
+
+
+# --- backup download containment (path-traversal hardening) ------------------
+
+def test_backup_download_rejects_sibling_prefix(monkeypatch, tmp_path):
+    """backup_download must not serve a sibling directory that merely shares the
+    backup-folder name prefix, while still serving a real backup."""
+    from app import ui
+
+    backup_dir = tmp_path / "backup"
+    backup_dir.mkdir()
+    (backup_dir / "bazarr_backup.zip").write_text("zip-bytes")
+    sibling = tmp_path / "backup-evil"
+    sibling.mkdir()
+    (sibling / "secret.txt").write_text("top-secret")
+
+    monkeypatch.setattr(ui, "settings", SimpleNamespace(
+        auth=SimpleNamespace(type=None),
+        backup=SimpleNamespace(folder=str(backup_dir))))
+    app = Flask(__name__)
+    app.register_blueprint(ui.ui_bp)
+
+    with app.test_request_context():
+        # sibling-prefix escape is refused
+        assert ui.backup_download("../backup-evil/secret.txt") == ('', 404)
+        # a genuine backup inside the folder is served
+        assert ui.backup_download("bazarr_backup.zip").status_code == 200

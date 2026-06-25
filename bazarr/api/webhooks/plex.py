@@ -205,17 +205,20 @@ class WebHooksPlex(Resource):
                 logger.debug('BAZARR is unable to get series IMDB id.')
                 return 'IMDB series ID not found', 404
             else:
-                sonarrEpisodeId = database.execute(
-                    select(TableEpisodes.sonarrEpisodeId)
+                # Plex events are content-keyed (imdbId), which is non-unique
+                # across instances. Fan out to every instance that owns matching
+                # media (#156). On a single instance this is the same one row.
+                matching_episodes = database.execute(
+                    select(TableEpisodes.sonarrEpisodeId, TableEpisodes.arr_instance_id)
                     .select_from(TableEpisodes)
                     .join(TableShows)
                     .where(TableShows.imdbId == series_imdb_id,
                            TableEpisodes.season == season,
                            TableEpisodes.episode == episode)) \
-                    .first()
+                    .all()
 
-                if sonarrEpisodeId:
-                    episode_download_subtitles(no=sonarrEpisodeId.sonarrEpisodeId)
+                for ep in matching_episodes:
+                    episode_download_subtitles(no=ep.sonarrEpisodeId, arr_instance_id=ep.arr_instance_id)
         else:
             try:
                 movie_imdb_id = [x['imdb'] for x in ids if 'imdb' in x][0]
@@ -223,12 +226,13 @@ class WebHooksPlex(Resource):
                 logger.debug('BAZARR is unable to get movie IMDB id.')
                 return 'IMDB movie ID not found', 404
             else:
-                radarrId = database.execute(
-                    select(TableMovies.radarrId)
+                # Fan out to every instance owning a movie with this imdbId (#156).
+                matching_movies = database.execute(
+                    select(TableMovies.radarrId, TableMovies.arr_instance_id)
                     .where(TableMovies.imdbId == movie_imdb_id)) \
-                    .first()
+                    .all()
 
-                if radarrId:
-                    movies_download_subtitles(no=radarrId.radarrId)
+                for mv in matching_movies:
+                    movies_download_subtitles(no=mv.radarrId, arr_instance_id=mv.arr_instance_id)
 
         return '', 200

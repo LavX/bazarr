@@ -1,14 +1,33 @@
+import { FunctionComponent } from "react";
+import { useForm } from "@mantine/form";
 import { http } from "msw";
 import { HttpResponse } from "msw";
 import server from "@/tests/mocks/node";
 import { renderTest, RenderTestCase } from "@/tests/render";
+import JellyfinSection from "./Jellyfin/JellyfinSection";
+import { FormContext, type FormValues } from "./utilities/FormValues";
 import SettingsGeneralView from "./General";
-import SettingsJellyfinView from "./Jellyfin";
 import SettingsLanguagesView from "./Languages";
 import SettingsProvidersView from "./Providers";
 import SettingsSchedulerView from "./Scheduler";
 import SettingsSubtitlesView from "./Subtitles";
 import SettingsUIView from "./UI";
+
+// JellyfinSection normally renders inside the Connections page Layout, which
+// provides the settings FormContext. Rendered bare, its inputs call
+// useFormValues() with no context and throw (caught by the error boundary);
+// under React 19 concurrent rendering that surfaced as a flaky test failure.
+// Wrap it in a FormContext the way the app mounts it.
+const JellyfinWithForm: FunctionComponent = () => {
+  const form = useForm<FormValues>({
+    initialValues: { settings: {}, hooks: {} },
+  });
+  return (
+    <FormContext.Provider value={form}>
+      <JellyfinSection />
+    </FormContext.Provider>
+  );
+};
 
 const cases: RenderTestCase[] = [
   {
@@ -58,7 +77,7 @@ const cases: RenderTestCase[] = [
   // TODO: Test Radarr Page
   {
     name: "jellyfin page",
-    ui: SettingsJellyfinView,
+    ui: JellyfinWithForm,
   },
   {
     name: "scheduler page",

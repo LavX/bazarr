@@ -8,9 +8,10 @@ import subprocess
 from app.database import TableEpisodes, TableMovies, TableShows, database, select
 from app.jobs_queue import jobs_queue
 from app.event_handler import event_stream
+from arr_instances.resolution import scoped
 from utilities.path_mappings import path_mappings
 from utilities.binaries import get_binary
-from utilities.video_analyzer import parse_video_metadata, _handle_alpha3
+from utilities.video_analyzer import parse_video_metadata, _handle_alpha3, _title_is_forced
 from languages.get_languages import alpha3_from_alpha2
 from subtitles.indexer.series import store_subtitles
 from subtitles.indexer.movies import store_subtitles_movie
@@ -25,30 +26,37 @@ def process_episode_translation(
     """Process a single episode for translation in background"""
     sonarr_series_id = item.get("sonarrSeriesId")
     sonarr_episode_id = item.get("sonarrEpisodeId")
+    arr_instance_id = item.get("arr_instance_id")
 
     if not sonarr_series_id or not sonarr_episode_id:
         logger.error("Missing sonarrSeriesId or sonarrEpisodeId")
         return False
 
-    # Get episode info from database
+    # Get episode info from database, scoped to the owning instance (#156) so a
+    # sonarrEpisodeId shared across instances reads the right row and we can emit
+    # its LOCAL id to the frontend.
     episode = database.execute(
-        select(
-            TableEpisodes.path,
-            TableEpisodes.subtitles,
-            TableEpisodes.sonarrSeriesId,
-            TableEpisodes.title,
-            TableEpisodes.season,
-            TableEpisodes.episode,
-        ).where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id)
+        scoped(
+            select(
+                TableEpisodes.id,
+                TableEpisodes.path,
+                TableEpisodes.subtitles,
+                TableEpisodes.sonarrSeriesId,
+                TableEpisodes.title,
+                TableEpisodes.season,
+                TableEpisodes.episode,
+            ).where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id),
+            TableEpisodes.arr_instance_id, arr_instance_id)
     ).first()
 
     if not episode:
         logger.error(f"Episode {sonarr_episode_id} not found")  # noqa: G004
         return False
 
-    # Get series title
+    # Get series title (scoped to the owning instance, #156)
     show = database.execute(
-        select(TableShows.title).where(TableShows.sonarrSeriesId == sonarr_series_id)
+        scoped(select(TableShows.title).where(TableShows.sonarrSeriesId == sonarr_series_id),
+               TableShows.arr_instance_id, arr_instance_id)
     ).first()
     show_title = show.title if show else "Unknown"
 
@@ -100,9 +108,11 @@ def process_episode_translation(
         )
         # Re-index subtitles so Bazarr's DB knows about the new translated file
         store_subtitles(path_mappings.path_replace_reverse(video_path), video_path)
-        # Notify frontend to refresh series and episode views
+        # Notify frontend to refresh series and episode views. Emit the LOCAL
+        # episode id (#156): the frontend caches episode detail by local id and
+        # the upstream sonarrEpisodeId is not unique across instances.
         event_stream(type="series", payload=sonarr_series_id)
-        event_stream(type="episode", payload=sonarr_episode_id)
+        event_stream(type="episode", payload=episode.id)
         return True
     except Exception as e:
         logger.error(f"Translation failed for episode {sonarr_episode_id}: {e}")  # noqa: G004
@@ -421,9 +431,14 @@ def extract_embedded_subtitle(
 
         track_alpha3 = _handle_alpha3(track)
         if track_alpha3 == target_alpha3:
+            # knowit only reports forced from the disposition flag, so apply the
+            # same title heuristic used at indexing time, otherwise a forced
+            # request would extract a regular track named "Forced".
+            # See https://github.com/LavX/bazarr/issues/162
+            track_forced = track.get("forced", False) or _title_is_forced(track.get("name", ""))
             if (
                 track.get("hearing_impaired", False) == hi
-                and track.get("forced", False) == forced
+                and track_forced == forced
             ):
                 exact_track = track_id
                 break

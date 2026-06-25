@@ -24,6 +24,7 @@ from subtitles.utils import _get_scores
 from sonarr.history import history_log
 from app.jobs_queue import jobs_queue
 from subtitles.adaptive_searching import is_search_given_up
+from arr_instances.resolution import scoped
 
 gc.enable()
 
@@ -31,6 +32,22 @@ gc.enable()
 def store_subtitles(original_path, reversed_path, use_cache=True):
     logging.debug(f'BAZARR started subtitles indexing for this file: {reversed_path}')  # noqa: G004
     actual_subtitles = []
+    # Resolve the owning instance for this file up front (#156) so every
+    # path_replace* below honours the owning instance's per-instance
+    # path_mappings instead of the global singleton. A media row owned by a
+    # secondary instance with a different on-disk prefix would otherwise be
+    # read/written at the wrong path. owner_instance_id None => global mapping
+    # (the default/single-instance path), byte-identical to legacy behaviour.
+    owner_row = database.execute(
+        select(TableEpisodes.arr_instance_id)
+        .where(TableEpisodes.path == original_path)).first()
+    owner_instance_id = owner_row.arr_instance_id if owner_row else None
+
+    def _pr(p):
+        return path_mappings.path_replace_instance(p, owner_instance_id, "series")
+
+    def _prr(p):
+        return path_mappings.path_replace_reverse_instance(p, owner_instance_id, "series")
     # Languages of embedded subtitle tracks detected on this pass. Used after
     # indexing to record a source-quality history entry (action=7) per language.
     embedded_languages = []
@@ -90,8 +107,8 @@ def store_subtitles(original_path, reversed_path, use_cache=True):
                 previously_indexed_subtitles_to_exclude = [x for x in previously_indexed_subtitles
                                                            if len(x) == 3 and
                                                            x[1] and
-                                                           os.path.isfile(path_mappings.path_replace(x[1])) and
-                                                           os.stat(path_mappings.path_replace(x[1])).st_size == x[2]]
+                                                           os.path.isfile(_pr(x[1])) and
+                                                           os.stat(_pr(x[1])).st_size == x[2]]
 
             subtitles = search_external_subtitles(reversed_path, languages=get_language_set(),
                                                   only_one=settings.general.single_language)
@@ -132,7 +149,7 @@ def store_subtitles(original_path, reversed_path, use_cache=True):
 
                 custom = CustomLanguage.found_external(subtitle, subtitle_path)
                 if custom is not None:
-                    actual_subtitles.append([custom, path_mappings.path_replace_reverse(subtitle_path),
+                    actual_subtitles.append([custom, _prr(subtitle_path),
                                              subtitle_size])
 
                 elif str(language.basename) != 'und':
@@ -145,7 +162,7 @@ def store_subtitles(original_path, reversed_path, use_cache=True):
                     language_str = subtitle_language_with_sync_modifier(language_str, subtitle)
                     language_str = subtitle_language_with_combined_modifier(language_str, subtitle)
                     logging.debug(f"BAZARR external subtitles detected: {language_str}")  # noqa: G004
-                    actual_subtitles.append([language_str, path_mappings.path_replace_reverse(subtitle_path),
+                    actual_subtitles.append([language_str, _prr(subtitle_path),
                                              subtitle_size])
 
         database.execute(
@@ -153,14 +170,19 @@ def store_subtitles(original_path, reversed_path, use_cache=True):
             .values(subtitles=str(actual_subtitles))
             .where(TableEpisodes.path == original_path))
         matching_episodes = database.execute(
-            select(TableEpisodes.sonarrEpisodeId, TableEpisodes.sonarrSeriesId)
+            select(TableEpisodes.sonarrEpisodeId, TableEpisodes.sonarrSeriesId,
+                   TableEpisodes.arr_instance_id)
             .where(TableEpisodes.path == original_path))\
             .all()
 
         for episode in matching_episodes:
             if episode:
                 logging.debug(f"BAZARR storing those languages to DB: {actual_subtitles}")  # noqa: G004
-                list_missing_subtitles(epno=episode.sonarrEpisodeId)
+                # Scope the missing-subtitle recompute to the owning instance so
+                # an upstream id shared across instances can't recompute the
+                # wrong row (no-op for the default/single-instance path).
+                list_missing_subtitles(epno=episode.sonarrEpisodeId,
+                                       arr_instance_id=episode.arr_instance_id)
                 if embedded_languages:
                     # Pass the DB-side path (original_path), not the local
                     # filesystem path. history_log stores result.path verbatim,
@@ -168,7 +190,8 @@ def store_subtitles(original_path, reversed_path, use_cache=True):
                     # path_replace_reverse. Embedded rows must match so path
                     # comparisons line up in path-mapped installs.
                     _log_embedded_history(episode.sonarrSeriesId, episode.sonarrEpisodeId,
-                                          embedded_languages, original_path)
+                                          embedded_languages, original_path,
+                                          arr_instance_id=episode.arr_instance_id)
             else:
                 logging.debug(f"BAZARR haven't been able to update existing subtitles to DB: {actual_subtitles}")  # noqa: G004
     else:
@@ -179,7 +202,7 @@ def store_subtitles(original_path, reversed_path, use_cache=True):
     return actual_subtitles
 
 
-def _log_embedded_history(series_id, episode_id, embedded_languages, reversed_path):
+def _log_embedded_history(series_id, episode_id, embedded_languages, reversed_path, arr_instance_id=None):
     """Record source-quality history entries for newly detected embedded subtitles.
 
     Why: Embedded subtitle tracks come from disc/streaming rips and are source
@@ -211,11 +234,16 @@ def _log_embedded_history(series_id, episode_id, embedded_languages, reversed_pa
             # Not atomic under AUTOCOMMIT. Concurrent indexing of the same episode
             # could produce duplicates, but this is rare in practice and consistent
             # with how other parts of Bazarr dedup history entries.
+            # Scope the dedup to the owning instance (#156): a sonarrEpisodeId
+            # shared across instances must not let one instance's embedded row
+            # suppress another's. No-op for the default/single-instance path.
             existing = database.execute(
-                select(TableHistory.id)
-                .where(TableHistory.sonarrEpisodeId == episode_id)
-                .where(TableHistory.language == canonical)
-                .where(TableHistory.action == 7)).first()
+                scoped(
+                    select(TableHistory.id)
+                    .where(TableHistory.sonarrEpisodeId == episode_id)
+                    .where(TableHistory.language == canonical)
+                    .where(TableHistory.action == 7),
+                    TableHistory.arr_instance_id, arr_instance_id)).first()
             if existing:
                 continue
 
@@ -230,14 +258,16 @@ def _log_embedded_history(series_id, episode_id, embedded_languages, reversed_pa
                 reversed_subtitles_path=None,
                 hearing_impaired=is_hi)
             history_log(action=7, sonarr_series_id=series_id, sonarr_episode_id=episode_id,
-                        result=result, fake_provider="embedded", fake_score=score_out_of)
+                        result=result, fake_provider="embedded", fake_score=score_out_of,
+                        arr_instance_id=arr_instance_id)
     except Exception:
         logging.exception("BAZARR error writing embedded subtitle history for episode %s", episode_id)
 
 
-def list_missing_subtitles(no=None, epno=None):
+def list_missing_subtitles(no=None, epno=None, arr_instance_id=None):
     stmt = select(TableShows.sonarrSeriesId,
                   TableEpisodes.sonarrEpisodeId,
+                  TableEpisodes.id,
                   TableEpisodes.subtitles,
                   TableEpisodes.failedAttempts,
                   TableShows.profileId,
@@ -245,10 +275,16 @@ def list_missing_subtitles(no=None, epno=None):
         .select_from(TableEpisodes) \
         .join(TableShows)
 
+    # Scope to the owning instance when supplied so a shared upstream id resolves
+    # the right episode/series; a no-op for the default (single-instance) path.
     if epno is not None:
-        episodes_subtitles = database.execute(stmt.where(TableEpisodes.sonarrEpisodeId == epno)).all()
+        episodes_subtitles = database.execute(
+            scoped(stmt.where(TableEpisodes.sonarrEpisodeId == epno),
+                   TableEpisodes.arr_instance_id, arr_instance_id)).all()
     elif no is not None:
-        episodes_subtitles = database.execute(stmt.where(TableEpisodes.sonarrSeriesId == no)).all()
+        episodes_subtitles = database.execute(
+            scoped(stmt.where(TableEpisodes.sonarrSeriesId == no),
+                   TableEpisodes.arr_instance_id, arr_instance_id)).all()
     else:
         episodes_subtitles = database.execute(stmt).all()
 
@@ -367,11 +403,17 @@ def list_missing_subtitles(no=None, epno=None):
                 missing_subtitles_text = str(missing_subtitles_output_list)
 
         database.execute(
-            update(TableEpisodes)
-            .values(missing_subtitles=missing_subtitles_text)
-            .where(TableEpisodes.sonarrEpisodeId == episode_subtitles.sonarrEpisodeId))
+            scoped(update(TableEpisodes)
+                   .values(missing_subtitles=missing_subtitles_text)
+                   .where(TableEpisodes.sonarrEpisodeId == episode_subtitles.sonarrEpisodeId),
+                   TableEpisodes.arr_instance_id, arr_instance_id))
 
-        event_stream(type='episode', payload=episode_subtitles.sonarrEpisodeId)
+        # Emit the LOCAL episode id (#156): the frontend caches episode detail
+        # by local id (QueryKeys.Episodes, <local id>), and in multi-instance the
+        # upstream sonarrEpisodeId is no longer unique, so emitting it would
+        # invalidate the wrong (or no) cached episode. local == upstream on a
+        # single-default install, so this is unchanged there.
+        event_stream(type='episode', payload=episode_subtitles.id)
         event_stream(type='episode-wanted', action='update', payload=episode_subtitles.sonarrEpisodeId)
     event_stream(type='badges')
 
@@ -405,11 +447,13 @@ def series_full_scan_subtitles(job_id=None, use_cache=None, wait_for_completion=
     gc.collect()
 
 
-def series_scan_subtitles(no):
+def series_scan_subtitles(no, arr_instance_id=None):
     episodes = database.execute(
-        select(TableEpisodes.path)
-        .where(TableEpisodes.sonarrSeriesId == no)
-        .order_by(TableEpisodes.sonarrEpisodeId))\
+        scoped(
+            select(TableEpisodes.path)
+            .where(TableEpisodes.sonarrSeriesId == no)
+            .order_by(TableEpisodes.sonarrEpisodeId),
+            TableEpisodes.arr_instance_id, arr_instance_id))\
         .all()
 
     for episode in episodes:

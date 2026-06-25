@@ -23,6 +23,7 @@ describe("Blacklist Movies", () => {
           data: [
             {
               title: "Batman vs Teenage Mutant Ninja Turtles",
+              id: 5000,
               radarrId: 50,
               provider: "yifysubtitles",
               subs_id:
@@ -47,6 +48,11 @@ describe("Blacklist Movies", () => {
     await waitFor(() => {
       expect(screen.getByText("yifysubtitles")).toBeInTheDocument();
     });
+    expect(
+      screen.getByRole("link", {
+        name: "Batman vs Teenage Mutant Ninja Turtles",
+      }),
+    ).toHaveAttribute("href", "/movies/5000");
   });
 
   it("should render without blacklisted movies", async () => {

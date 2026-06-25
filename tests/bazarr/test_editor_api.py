@@ -9,11 +9,15 @@ calls so they run fast and without any external dependencies.
 import json
 import os
 import struct  # noqa: F401
+import sys
+import types
 from collections import namedtuple
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch, mock_open  # noqa: F401
 
 import pytest  # noqa: F401
+
+_SYS_BEFORE = dict(sys.modules)
 
 
 # ---------------------------------------------------------------------------
@@ -89,10 +93,20 @@ _patches = {
     'init': MagicMock(startTime=0),
 }
 
-import sys  # noqa: E402
 _preexisting_modules = {mod_name: sys.modules.get(mod_name) for mod_name in _patches}
 for mod_name, mock_obj in _patches.items():
-    sys.modules.setdefault(mod_name, mock_obj)
+    sys.modules[mod_name] = mock_obj
+
+def _ensure_pkg_stub(name, pkg_path):
+    mod = types.ModuleType(name)
+    mod.__path__ = pkg_path
+    mod.__package__ = name
+    sys.modules[name] = mod
+
+_bazarr_root = os.path.join(os.path.dirname(__file__), '../../bazarr')
+_ensure_pkg_stub('api', [os.path.join(_bazarr_root, 'api')])
+_ensure_pkg_stub('api.editor', [os.path.join(_bazarr_root, 'api', 'editor')])
+sys.modules.pop('api.editor.editor', None)
 
 # Now safe to import
 from api.editor.editor import (  # noqa: E402
@@ -109,9 +123,11 @@ from api.editor.editor import (  # noqa: E402
 # Re-import database and path_mappings as the module sees them
 from api.editor import editor as editor_module  # noqa: E402
 
-for _mod_name in ('app.config', 'app.database', 'utilities.path_mappings', 'utilities.binaries'):
-    if _preexisting_modules.get(_mod_name) is None and sys.modules.get(_mod_name) is _patches.get(_mod_name):
-        sys.modules.pop(_mod_name, None)
+for _k in list(sys.modules):
+    if _k not in _SYS_BEFORE:
+        del sys.modules[_k]
+for _k, _v in _SYS_BEFORE.items():
+    sys.modules[_k] = _v
 
 
 # ---------------------------------------------------------------------------

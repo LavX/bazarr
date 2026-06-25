@@ -258,3 +258,85 @@ def test_embedded_audio_reader(mediainfo_data, video_file):
     ):
         result = video_analyzer.embedded_audio_reader(video_file, 1e6)
         assert {"pob", "por"} == set(result)
+
+
+@pytest.mark.parametrize(
+    "title,expected",
+    [
+        ("Forced", True),
+        ("forced", True),
+        ("Forced Subtitles", True),
+        ("English Forced", True),
+        ("[Forced]", True),
+        ("English (Forced)", True),
+        ("", False),
+        ("English", False),
+        ("English SDH", False),
+        ("enforced", False),       # must not match inside another word
+        ("Reinforced track", False),
+        ("Non-Forced", False),     # negated form, distinguishes the full track
+        ("Not Forced", False),
+        ("Unforced", False),
+        ("English Non-Forced", False),
+        ("English_Forced", True),  # underscore-separated title
+        ("eng_forced", True),
+        ("Non_Forced", False),     # negated, underscore-separated
+        ("English_Non_Forced", False),
+    ],
+)
+def test_title_is_forced(title, expected):
+    assert video_analyzer._title_is_forced(title) is expected
+
+
+def test_embedded_subs_reader_forced_from_title(video_file):
+    """A track titled "Forced" with disposition.forced=0 must be stored as forced.
+
+    knowit detects hearing-impaired from the title (via trakit) but has no rule
+    that applies trakit's forced detection, so forced tracks that rely on the
+    title tag instead of disposition.forced are otherwise lost. See
+    https://github.com/LavX/bazarr/issues/162
+    """
+    from unittest.mock import patch
+
+    data = {
+        "subtitle": [
+            {"language": Language("eng"), "format": "SubRip", "forced": False,
+             "hearing_impaired": False, "name": "Forced"},
+            {"language": Language("eng"), "format": "SubRip", "forced": False,
+             "hearing_impaired": False, "name": ""},
+            {"language": Language("eng"), "format": "SubRip", "forced": False,
+             "hearing_impaired": True, "name": "SDH"},
+        ],
+        "audio": [],
+    }
+    with patch(
+        "utilities.video_analyzer.parse_video_metadata",
+        return_value={"mediainfo": data},
+    ), patch(
+        "utilities.video_analyzer.alpha3_from_alpha2", return_value=None
+    ):
+        result = video_analyzer.embedded_subs_reader(video_file, 1e6)
+        assert ["eng", True, False, "SubRip"] in result   # forced derived from title
+        assert ["eng", False, False, "SubRip"] in result  # plain track stays non-forced
+        assert ["eng", False, True, "SubRip"] in result   # hi untouched by the forced heuristic
+
+
+def test_embedded_subs_reader_disposition_forced_preserved(video_file):
+    """A track already flagged forced by disposition stays forced regardless of title."""
+    from unittest.mock import patch
+
+    data = {
+        "subtitle": [
+            {"language": Language("eng"), "format": "SubRip", "forced": True,
+             "hearing_impaired": False, "name": "English"},
+        ],
+        "audio": [],
+    }
+    with patch(
+        "utilities.video_analyzer.parse_video_metadata",
+        return_value={"mediainfo": data},
+    ), patch(
+        "utilities.video_analyzer.alpha3_from_alpha2", return_value=None
+    ):
+        result = video_analyzer.embedded_subs_reader(video_file, 1e6)
+        assert ["eng", True, False, "SubRip"] in result

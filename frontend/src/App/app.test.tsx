@@ -9,7 +9,7 @@ describe("App", () => {
   it("should render without crash", () => {
     server.use(
       http.get("/api/system/searches", () => {
-        return HttpResponse.json({});
+        return HttpResponse.json([]);
       }),
     );
 

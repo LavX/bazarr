@@ -24,7 +24,7 @@ const Action = forwardRef<HTMLButtonElement, ActionProps>(
   ({ icon, iconProps, label, tooltip, isLoading, size, ...props }, ref) => {
     return (
       <Tooltip openDelay={1500} {...tooltip} label={label}>
-        <ActionIcon aria-label={label} {...props} ref={ref}>
+        <ActionIcon aria-label={label} size={size} {...props} ref={ref}>
           {isLoading ? (
             <Loader size={size} />
           ) : (

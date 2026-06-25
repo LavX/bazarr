@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Bazarr+ v2.5.0 Murmuration Hero</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #121125; overflow: hidden; }
+  body { font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
+  canvas { display: block; position: absolute; top: 0; left: 0; }
+</style>
+</head>
+<body>
+<script>
+// Bazarr+ v2.5.0 Murmuration hero generator.
+// A starling murmuration: hundreds of agents stream through a noise + swirl
+// flow field and converge on a single luminous beacon. Many individuals moving
+// as one flock -> many Sonarr/Radarr instances acting as one Bazarr.
+// Brand palette only (cyan-pulse edges -> cream -> amber core) over the canonical
+// navy atmosphere, top-left "Bazarr+" block, and film grain. Drawn once.
+//
+// Query params: ?w=1920&h=1080 ; ?seed=250. No animation.
+
+const params = new URLSearchParams(location.search);
+const W = parseInt(params.get('w') || '1920', 10);
+const H = parseInt(params.get('h') || '1080', 10);
+const SEED = parseInt(params.get('seed') || '250', 10);
+const S = Math.min(W, H);
+
+const NAVY = '#121125';
+const AMBER = '#e68a00';
+const AMBER_BRIGHT = '#ffb347';
+const CREAM = '#fff8e1';
+const CYAN_PULSE = '#7fe9ff';
+
+// Flock ramp: cool cyan at the wispy edges -> cream -> warm amber in the dense
+// core. Brand colours only; no off-brand hues.
+const FLOCK_RAMP = [
+  [127, 233, 255], // cyan-pulse (edge)
+  [255, 248, 225], // cream
+  [255, 179, 71],  // amber-bright (core)
+];
+
+const canvas = document.createElement('canvas');
+canvas.width = W;
+canvas.height = H;
+document.body.appendChild(canvas);
+
+const ctx = canvas.getContext('2d');
+ctx.imageSmoothingEnabled = true;
+ctx.imageSmoothingQuality = 'high';
+
+const off = document.createElement('canvas');
+off.width = W;
+off.height = H;
+const octx = off.getContext('2d');
+octx.imageSmoothingEnabled = true;
+octx.imageSmoothingQuality = 'high';
+
+let rng = mulberry32(SEED);
+
+// --- Composition (fractions so everything scales to 2x renders) -------------
+// Swirl centre (the flock wraps around this) and the beacon it converges on.
+const C = { x: W * 0.60, y: H * 0.55 };
+const BEACON = { x: W * 0.83, y: H * 0.40 };
+// Soft text-clearing field: birds fade out smoothly as they near the top-left
+// title, so the flock thins gracefully with no hard rectangular cutout.
+const TEXT_ANCHOR = { x: W * 0.17, y: H * 0.225 };
+const TEXT_FADE_R = S * 0.30;
+
+const NF = 2.1 / S; // flow-field noise frequency
+
+drawHero();
+
+function drawHero() {
+  paintBackground(octx);
+  ctx.drawImage(off, 0, 0);
+  drawGroundReflection();
+  drawFlockGlow();
+  drawMurmuration();
+  drawBeacon();
+  drawText();
+  drawVignette();
+  drawFilmGrain();
+}
+
+// ---------------------------------------------------------------------------
+// Canonical Bazarr+ atmosphere (navy + 3 radial glows + fog + starfield).
+function paintBackground(c) {
+  c.fillStyle = NAVY;
+  c.fillRect(0, 0, W, H);
+
+  const base = c.createLinearGradient(0, 0, W, H);
+  base.addColorStop(0, '#0b0a1a');
+  base.addColorStop(0.5, NAVY);
+  base.addColorStop(1, '#181640');
+  c.fillStyle = base;
+  c.fillRect(0, 0, W, H);
+
+  radialFill(c, W * 0.15, H * 0.17, S * 0.70, [
+    ['rgba(230, 138, 0, 0.16)', 0],
+    ['rgba(255, 179, 71, 0.045)', 0.45],
+    ['rgba(230, 138, 0, 0)', 1],
+  ]);
+  radialFill(c, W * 0.90, H * 0.86, S * 0.80, [
+    ['rgba(127, 233, 255, 0.11)', 0],
+    ['rgba(90, 169, 255, 0.04)', 0.42],
+    ['rgba(127, 233, 255, 0)', 1],
+  ]);
+  radialFill(c, W * 0.55, H * 0.52, S * 0.92, [
+    ['rgba(124, 92, 255, 0.11)', 0],
+    ['rgba(124, 92, 255, 0.035)', 0.5],
+    ['rgba(124, 92, 255, 0)', 1],
+  ]);
+
+  c.save();
+  c.globalCompositeOperation = 'screen';
+  const fog = [
+    [W * 0.22, H * 0.30, S * 0.32, '#ffb347', 0.038],
+    [W * 0.72, H * 0.62, S * 0.38, '#7fe9ff', 0.034],
+    [W * 0.50, H * 0.84, S * 0.44, '#8a6bff', 0.038],
+  ];
+  for (const [x, y, r, col, a] of fog) {
+    c.filter = `blur(${bpx(0.05)})`;
+    gGlow(c, x, y, r, col, a);
+  }
+  c.filter = 'none';
+  c.restore();
+
+  // dusk starfield
+  c.save();
+  c.globalCompositeOperation = 'screen';
+  for (let i = 0; i < 260; i++) {
+    const x = rand(0, W);
+    const y = rand(0, H);
+    const r = rng() < 0.92 ? rand(0.35, 1.05) : rand(1.3, 1.9);
+    const a = rng() < 0.86 ? rand(0.05, 0.28) : rand(0.36, 0.62);
+    c.fillStyle = `rgba(255, 248, 225, ${a})`;
+    c.beginPath();
+    c.arc(x, y, r, 0, Math.PI * 2);
+    c.fill();
+  }
+  c.restore();
+}
+
+function drawGroundReflection() {
+  ctx.save();
+  const g = ctx.createLinearGradient(0, H * 0.80, 0, H);
+  g.addColorStop(0, 'rgba(124, 92, 255, 0)');
+  g.addColorStop(0.55, 'rgba(120, 150, 200, 0.04)');
+  g.addColorStop(1, 'rgba(150, 180, 220, 0.08)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, H * 0.80, W, H * 0.20);
+  ctx.restore();
+}
+
+// Soft luminous body so the dense core of the flock reads as one mass.
+function drawFlockGlow() {
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  ctx.filter = `blur(${bpx(0.06)})`;
+  gGlow(ctx, C.x + S * 0.04, C.y - S * 0.02, S * 0.40, '#ffce92', 0.05);
+  gGlow(ctx, C.x - S * 0.16, C.y + S * 0.10, S * 0.34, '#8fd0ff', 0.04);
+  gGlow(ctx, BEACON.x, BEACON.y, S * 0.30, '#fff3d0', 0.05);
+  ctx.filter = 'none';
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------------------
+// The murmuration: agents seeded across the field, each stepped through the
+// flow (noise meander + swirl around C + pull toward BEACON), dropping a bird
+// per step. Density emerges where streamlines converge.
+function drawMurmuration() {
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  const AGENTS = 560;
+  const STEP = S * 0.0065;
+
+  for (let a = 0; a < AGENTS; a++) {
+    // Seed mostly in the centre/right; sparse far-left so wisps trail off.
+    let x = rand(W * 0.26, W * 0.97);
+    let y = rand(H * 0.16, H * 0.93);
+
+    const steps = Math.floor(rand(18, 46));
+    for (let s = 0; s < steps; s++) {
+      const ang = flowAngle(x, y);
+      x += Math.cos(ang) * STEP;
+      y += Math.sin(ang) * STEP;
+      if (x < -W * 0.02 || x > W * 1.02 || y < -H * 0.02 || y > H * 1.02) break;
+      drawBird(x, y, ang, s / steps);
+    }
+  }
+
+  ctx.filter = 'none';
+  ctx.restore();
+}
+
+function drawBird(x, y, ang, t) {
+  // Core proximity drives colour (cyan edge -> amber core), size and brightness.
+  const dC = Math.min(1, dist({ x, y }, C) / (S * 0.52));
+  const w = clamp01(1 - dC); // 1 in the dense core
+  const [r, g, b] = flockColor(w);
+
+  const head = 0.30 + 0.70 * t;        // brighter toward the leading head
+  let alpha = clamp01(0.07 + 0.46 * head * (0.45 + 0.55 * w));
+  alpha *= textFade(x, y);             // thin out smoothly near the title
+  if (alpha < 0.012) return;           // drop invisible birds (no hard edge)
+  const size = S * (0.0015 + 0.0030 * w);
+
+  ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  ctx.lineWidth = S * (0.0006 + 0.0011 * w);
+
+  // Chevron: wing - head - wing, pointing along the flow.
+  const c = Math.cos(ang), s = Math.sin(ang);
+  const px = -s, py = c;
+  const back = -size * 0.75;
+  const ax = x + c * back + px * size, ay = y + s * back + py * size;
+  const bx = x + c * back - px * size, by = y + s * back - py * size;
+  ctx.beginPath();
+  ctx.moveTo(ax, ay);
+  ctx.lineTo(x, y);
+  ctx.lineTo(bx, by);
+  ctx.stroke();
+}
+
+// The single point the whole flock resolves toward: the "one" in many -> one.
+function drawBeacon() {
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  ctx.filter = `blur(${bpx(0.012)})`;
+  gGlow(ctx, BEACON.x, BEACON.y, S * 0.075, '#fff3d0', 0.34);
+  ctx.filter = `blur(${bpx(0.004)})`;
+  gGlow(ctx, BEACON.x, BEACON.y, S * 0.03, '#ffffff', 0.5);
+  ctx.filter = 'none';
+  gGlow(ctx, BEACON.x, BEACON.y, S * 0.012, '#ffffff', 0.85);
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------------------
+function flowAngle(x, y) {
+  const n = valueNoise(x * NF, y * NF);
+  const meander = n * Math.PI * 3.0;
+
+  const dx = x - C.x, dy = y - C.y;
+  const d = Math.hypot(dx, dy) || 1;
+  const swirl = Math.atan2(dy, dx) + Math.PI / 2; // tangential around C
+  const pull = Math.atan2(BEACON.y - y, BEACON.x - x);
+
+  // Swirl dominates near the centre; the beacon pull strengthens with distance
+  // so far birds stream inward while the core rotates as one body.
+  const swirlW = 0.55 * clamp01(1 - d / (S * 0.8)) + 0.18;
+  const pullW = 0.30 + 0.45 * clamp01(d / (S * 0.9));
+
+  const vx = Math.cos(meander) * 0.55 + Math.cos(swirl) * swirlW + Math.cos(pull) * pullW;
+  const vy = Math.sin(meander) * 0.55 + Math.sin(swirl) * swirlW + Math.sin(pull) * pullW;
+  return Math.atan2(vy, vx);
+}
+
+function valueNoise(x, y) {
+  const x0 = Math.floor(x), y0 = Math.floor(y);
+  const fx = smooth(x - x0), fy = smooth(y - y0);
+  const a = hash2(x0, y0), b = hash2(x0 + 1, y0);
+  const c = hash2(x0, y0 + 1), d = hash2(x0 + 1, y0 + 1);
+  return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
+}
+
+function hash2(ix, iy) {
+  let h = (Math.imul(ix, 374761393) + Math.imul(iy, 668265263)) ^ SEED;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+function flockColor(w) {
+  const n = FLOCK_RAMP.length - 1;
+  const x = clamp01(w) * n;
+  const i = Math.min(n - 1, Math.floor(x));
+  const f = x - i;
+  const a = FLOCK_RAMP[i], b = FLOCK_RAMP[i + 1];
+  return [
+    Math.round(a[0] + (b[0] - a[0]) * f),
+    Math.round(a[1] + (b[1] - a[1]) * f),
+    Math.round(a[2] + (b[2] - a[2]) * f),
+  ];
+}
+
+function textFade(x, y) {
+  // 0 over the title, ramping smoothly to 1 by TEXT_FADE_R. Slightly elliptical
+  // (wider than tall) to match the text block, with no visible edge.
+  const dx = (x - TEXT_ANCHOR.x) / 1.3;
+  const dy = y - TEXT_ANCHOR.y;
+  return smooth(clamp01(Math.hypot(dx, dy) / TEXT_FADE_R));
+}
+
+// ---------------------------------------------------------------------------
+function drawText() {
+  const padX = W * 0.085;
+  const baseY = H * 0.165;
+  const titleSize = Math.round(H * 0.086);
+
+  ctx.save();
+  ctx.fillStyle = CREAM;
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.72)';
+  ctx.shadowBlur = Math.round(H * 0.016);
+  ctx.textBaseline = 'top';
+  ctx.font = `800 ${titleSize}px -apple-system, "Segoe UI", system-ui, sans-serif`;
+  ctx.fillText('Bazarr', padX, baseY);
+
+  const baseW = ctx.measureText('Bazarr').width;
+  const plusSize = Math.round(titleSize * 0.72);
+  ctx.font = `900 ${plusSize}px -apple-system, "Segoe UI", system-ui, sans-serif`;
+  ctx.fillStyle = AMBER;
+  ctx.fillText('+', padX + baseW + Math.round(titleSize * 0.035), baseY - Math.round(titleSize * 0.045));
+  ctx.restore();
+
+  ctx.save();
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.74)';
+  ctx.shadowBlur = Math.round(H * 0.014);
+  ctx.textBaseline = 'top';
+  const subSize = Math.round(H * 0.037);
+  ctx.font = `500 ${subSize}px -apple-system, "Segoe UI", system-ui, sans-serif`;
+  ctx.fillStyle = 'rgba(255, 248, 225, 0.94)';
+  const subY = baseY + Math.round(H * 0.115);
+  ctx.fillText('V2.5.0 Released', padX, subY);
+
+  const codeY = subY + Math.round(subSize * 1.48);
+  ctx.fillStyle = 'rgba(255, 248, 225, 0.94)';
+  ctx.fillText('Codename: ', padX, codeY);
+  const cwidth = ctx.measureText('Codename: ').width;
+  ctx.fillStyle = AMBER;
+  ctx.font = `700 ${subSize}px -apple-system, "Segoe UI", system-ui, sans-serif`;
+  ctx.fillText('Murmuration', padX + cwidth, codeY);
+  ctx.restore();
+}
+
+function drawVignette() {
+  ctx.save();
+  const v = ctx.createRadialGradient(W * 0.5, H * 0.48, S * 0.33, W * 0.5, H * 0.5, S * 1.02);
+  v.addColorStop(0, 'rgba(0, 0, 0, 0)');
+  v.addColorStop(0.7, 'rgba(4, 3, 12, 0.16)');
+  v.addColorStop(1, 'rgba(4, 3, 12, 0.56)');
+  ctx.fillStyle = v;
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+}
+
+function drawFilmGrain() {
+  const tileSize = 256;
+  const tile = document.createElement('canvas');
+  tile.width = tileSize;
+  tile.height = tileSize;
+  const tctx = tile.getContext('2d');
+  const image = tctx.createImageData(tileSize, tileSize);
+  for (let y = 0; y < tileSize; y++) {
+    for (let x = 0; x < tileSize; x++) {
+      const v = Math.floor(rand(0, 255));
+      const i = (y * tileSize + x) * 4;
+      image.data[i] = v;
+      image.data[i + 1] = v;
+      image.data[i + 2] = v;
+      image.data[i + 3] = 255;
+    }
+  }
+  tctx.putImageData(image, 0, 0);
+
+  ctx.save();
+  ctx.globalAlpha = 0.046;
+  ctx.globalCompositeOperation = 'overlay';
+  ctx.fillStyle = ctx.createPattern(tile, 'repeat');
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+}
+
+// ---- helpers ----
+function lerpPt(a, b, t) { return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }; }
+function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+function clamp01(v) { return Math.max(0, Math.min(1, v)); }
+function smooth(t) { return t * t * (3 - 2 * t); }
+function bpx(k) { return (S * k).toFixed(2) + 'px'; }
+
+function radialFill(c, x, y, r, stops) {
+  const grad = c.createRadialGradient(x, y, 0, x, y, r);
+  for (const [color, stop] of stops) grad.addColorStop(stop, color);
+  c.fillStyle = grad;
+  c.fillRect(0, 0, W, H);
+}
+
+function gGlow(c, x, y, r, color, alpha) {
+  const grad = c.createRadialGradient(x, y, 0, x, y, r);
+  grad.addColorStop(0, withAlpha(color, alpha));
+  grad.addColorStop(1, withAlpha(color, 0));
+  c.fillStyle = grad;
+  c.beginPath();
+  c.arc(x, y, r, 0, Math.PI * 2);
+  c.fill();
+}
+
+function withAlpha(color, alpha) {
+  if (color[0] === '#') {
+    const h = color.replace('#', '');
+    const r = parseInt(h.substring(0, 2), 16);
+    const g = parseInt(h.substring(2, 4), 16);
+    const b = parseInt(h.substring(4, 6), 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+  const nums = color.replace(/rgba?\(|\)/g, '');
+  return `rgba(${nums}, ${alpha})`;
+}
+
+function rand(min, max) { return min + rng() * (max - min); }
+
+function mulberry32(seed) {
+  return function next() {
+    let t = (seed += 0x6d2b79f5);
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+</script>
+</body>
+</html>

@@ -49,14 +49,20 @@ class ProviderMovies(Resource):
     def get(self):
         """Search manually for a movie subtitles"""
         args = self.get_request_parser.parse_args()
-        radarrId = args.get('radarrid')
+        # 'radarrid' is the canonical local movie id (globally unique across
+        # instances) that GetItemId and the browse endpoints use. Looking the row
+        # up by local id avoids the upstream-id collision between instances; on a
+        # single default instance local id == radarrId, so unchanged. (#156)
+        movie_id = args.get('radarrid')
         stmt = select(TableMovies.title,
                       TableMovies.path,
+                      TableMovies.radarrId,
+                      TableMovies.arr_instance_id,
                       TableMovies.sceneName,
                       TableMovies.profileId,
                       TableMovies.subtitles,
                       TableMovies.missing_subtitles) \
-            .where(TableMovies.radarrId == radarrId)
+            .where(TableMovies.id == movie_id)
         movieInfo = database.execute(stmt).first()
 
         if not movieInfo:
@@ -67,7 +73,7 @@ class ProviderMovies(Resource):
             movieInfo = database.execute(stmt).first()
         elif movieInfo.missing_subtitles is None:
             # missing subtitles calculation for this movie is incomplete, we'll do it again
-            list_missing_subtitles_movies(no=radarrId)
+            list_missing_subtitles_movies(no=movieInfo.radarrId, arr_instance_id=movieInfo.arr_instance_id)
             movieInfo = database.execute(stmt).first()
 
         title = movieInfo.title
@@ -94,6 +100,8 @@ class ProviderMovies(Resource):
                                      help='Use original subtitles format from ["True", "False"]')
     post_request_parser.add_argument('provider', type=str, required=True, help='Provider name')
     post_request_parser.add_argument('subtitle', type=str, required=True, help='Subtitle ID as returned by GET')
+    post_request_parser.add_argument('arr_instance_id', type=int, required=False,
+                                     help='Owning Radarr instance id (#156); scopes the download to it')
 
     @authenticate
     @api_ns_providers_movies.doc(parser=post_request_parser)
@@ -104,13 +112,22 @@ class ProviderMovies(Resource):
     def post(self):
         """Manually download a movie subtitles"""
         args = self.post_request_parser.parse_args()
+        # The frontend sends the upstream radarrId (not the local autoincrement
+        # id), so pass it directly to the downstream function which resolves the
+        # row by (radarrId, arr_instance_id). A local-id pre-lookup was causing
+        # collisions: when a different movie's local id happened to equal the
+        # requested upstream id the handler routed to the wrong row or 404'd
+        # on an instance mismatch. (#156 F8)
+        radarr_id = args.get('radarrid')
+        arr_instance_id = args.get('arr_instance_id')
 
-        movie_manually_download_specific_subtitle(radarr_id=args.get('radarrid'),
+        movie_manually_download_specific_subtitle(radarr_id=radarr_id,
                                                   hi=args.get('hi').capitalize(),
                                                   forced=args.get('forced').capitalize(),
                                                   use_original_format=args.get('original_format').capitalize(),
                                                   selected_provider=args.get('provider'),
                                                   subtitle=args.get('subtitle'),
-                                                  job_id=None)
+                                                  job_id=None,
+                                                  arr_instance_id=arr_instance_id)
 
         return '', 204

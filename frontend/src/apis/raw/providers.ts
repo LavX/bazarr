@@ -24,8 +24,17 @@ class ProviderApi extends BaseApi {
     return response.data;
   }
 
-  async downloadMovieSubtitle(radarrid: number, form: FormType.ManualDownload) {
-    await this.post("/movies", form, { radarrid });
+  async downloadMovieSubtitle(
+    radarrid: number,
+    form: FormType.ManualDownload,
+    arrInstanceId?: number,
+  ) {
+    // arr_instance_id (#156) scopes the download to the owning instance; the
+    // backend treats it as optional (None = legacy/single-instance).
+    await this.post("/movies", form, {
+      radarrid,
+      arr_instance_id: arrInstanceId,
+    });
   }
 
   async episodes(episodeid: number) {
@@ -42,8 +51,13 @@ class ProviderApi extends BaseApi {
     seriesid: number,
     episodeid: number,
     form: FormType.ManualDownload,
+    arrInstanceId?: number,
   ) {
-    await this.post("/episodes", form, { seriesid, episodeid });
+    await this.post("/episodes", form, {
+      seriesid,
+      episodeid,
+      arr_instance_id: arrInstanceId,
+    });
   }
 }
 

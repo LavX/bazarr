@@ -10,6 +10,7 @@ from functools import reduce
 
 from utilities.path_mappings import path_mappings
 from subtitles.indexer.movies import store_subtitles_movie, list_missing_subtitles_movies
+from arr_instances.resolution import scoped
 from radarr.history import history_log_movie
 from app.notifier import send_notifications_movie
 from app.get_providers import get_providers
@@ -27,6 +28,7 @@ from .utils import _find_existing_subtitle_path
 
 
 def _wanted_movie(movie, providers_list, job_id=None):
+    arr_instance_id = getattr(movie, 'arr_instance_id', None)
     audio_language_list = get_audio_profile_languages(movie.audio_language)
     if len(audio_language_list) > 0:
         audio_language = audio_language_list[0]['name']
@@ -53,12 +55,16 @@ def _wanted_movie(movie, providers_list, job_id=None):
             if source_srt:
                 min_score = settings.translator.min_source_score
                 history = database.execute(
-                    select(TableHistoryMovie.score)
-                    .where(TableHistoryMovie.radarrId == movie.radarrId)
-                    .where(TableHistoryMovie.language.like(f"{translate_cfg['from']}%"))
-                    .where(TableHistoryMovie.score.is_not(None))
-                    .order_by(TableHistoryMovie.timestamp.desc())
-                    .limit(1)
+                    scoped(
+                        select(TableHistoryMovie.score)
+                        .where(TableHistoryMovie.radarrId == movie.radarrId)
+                        .where(TableHistoryMovie.language.like(f"{translate_cfg['from']}%"))
+                        .where(TableHistoryMovie.score.is_not(None))
+                        .order_by(TableHistoryMovie.timestamp.desc())
+                        .limit(1),
+                        TableHistoryMovie.arr_instance_id,
+                        arr_instance_id,
+                    )
                 ).first()
                 if history and history.score:
                     source_score_pct = round((history.score / MAX_SCORES['movie']) * 100, 1)
@@ -86,12 +92,16 @@ def _wanted_movie(movie, providers_list, job_id=None):
                     # checking only the history row would suppress the
                     # replacement forever.
                     already_translated = database.execute(
-                        select(TableHistoryMovie.subtitles_path)
-                        .where(TableHistoryMovie.radarrId == movie.radarrId)
-                        .where(TableHistoryMovie.language == language)
-                        .where(TableHistoryMovie.action == 6)
-                        .order_by(TableHistoryMovie.timestamp.desc())
-                        .limit(1)
+                        scoped(
+                            select(TableHistoryMovie.subtitles_path)
+                            .where(TableHistoryMovie.radarrId == movie.radarrId)
+                            .where(TableHistoryMovie.language == language)
+                            .where(TableHistoryMovie.action == 6)
+                            .order_by(TableHistoryMovie.timestamp.desc())
+                            .limit(1),
+                            TableHistoryMovie.arr_instance_id,
+                            arr_instance_id,
+                        )
                     ).first()
                     if already_translated and already_translated.subtitles_path:
                         local_subs_path = path_mappings.path_replace_movie(
@@ -103,9 +113,14 @@ def _wanted_movie(movie, providers_list, job_id=None):
                     # (imdbId/tmdbId for plex/jellyfin refresh). movie row
                     # only carries the subset selected for wanted scans.
                     metadata = database.execute(
-                        select(TableMovies.imdbId,
-                               TableMovies.tmdbId)
-                        .where(TableMovies.radarrId == movie.radarrId)
+                        scoped(
+                            select(TableMovies.imdbId,
+                                   TableMovies.tmdbId,
+                                   TableMovies.arr_instance_id)
+                            .where(TableMovies.radarrId == movie.radarrId),
+                            TableMovies.arr_instance_id,
+                            arr_instance_id,
+                        )
                     ).first()
                     try:
                         from subtitles.tools.translate.main import translate_subtitles_file
@@ -167,39 +182,45 @@ def _wanted_movie(movie, providers_list, job_id=None):
                                      movie.profileId,
                                      check_if_still_required=True,
                                      job_id=job_id,
-                                     fallback_allowed=settings.general.use_whisper_fallback):
+                                     fallback_allowed=settings.general.use_whisper_fallback,
+                                     arr_instance_id=arr_instance_id):
 
         if result:
             found_any = True
             if isinstance(result, tuple) and len(result):
                 result = result[0]
             store_subtitles_movie(movie.path, path_mappings.path_replace_movie(movie.path))
-            history_log_movie(1, movie.radarrId, result)
+            history_log_movie(1, movie.radarrId, result, arr_instance_id=arr_instance_id)
             event_stream(type='movie-wanted', action='delete', payload=movie.radarrId)
-            send_notifications_movie(movie.radarrId, result.message)
+            send_notifications_movie(movie.radarrId, result.message, arr_instance_id=arr_instance_id)
 
     if not found_any and providers_list:
         for language in languages_to_stamp:
             updated = updateFailedAttempts(
                 desired_language=language,
                 attempt_string=movie.failedAttempts)
-            database.execute(
+            stmt = scoped(
                 update(TableMovies)
                 .values(failedAttempts=updated)
-                .where(TableMovies.radarrId == movie.radarrId))
+                .where(TableMovies.radarrId == movie.radarrId),
+                TableMovies.arr_instance_id, arr_instance_id)
+            database.execute(stmt)
 
 
-def wanted_download_subtitles_movie(radarr_id, job_id=None):
-    stmt = select(TableMovies.path,
-                  TableMovies.missing_subtitles,
-                  TableMovies.radarrId,
-                  TableMovies.audio_language,
-                  TableMovies.sceneName,
-                  TableMovies.failedAttempts,
-                  TableMovies.title,
-                  TableMovies.profileId,
-                  TableMovies.subtitles) \
-        .where(TableMovies.radarrId == radarr_id)
+def wanted_download_subtitles_movie(radarr_id, job_id=None, arr_instance_id=None):
+    stmt = scoped(
+        select(TableMovies.path,
+               TableMovies.missing_subtitles,
+               TableMovies.radarrId,
+               TableMovies.arr_instance_id,
+               TableMovies.audio_language,
+               TableMovies.sceneName,
+               TableMovies.failedAttempts,
+               TableMovies.title,
+               TableMovies.profileId,
+               TableMovies.subtitles)
+        .where(TableMovies.radarrId == radarr_id),
+        TableMovies.arr_instance_id, arr_instance_id)
     movie = database.execute(stmt).first()
 
     if not movie:
@@ -211,7 +232,7 @@ def wanted_download_subtitles_movie(radarr_id, job_id=None):
         movie = database.execute(stmt).first()
     elif movie.missing_subtitles is None:
         # missing subtitles calculation for this movie is incomplete, we'll do it again
-        list_missing_subtitles_movies(no=radarr_id)
+        list_missing_subtitles_movies(no=radarr_id, arr_instance_id=arr_instance_id)
         movie = database.execute(stmt).first()
 
     providers_list = get_providers()
@@ -261,6 +282,7 @@ def wanted_search_missing_subtitles_movies(job_id=None, wait_for_completion=Fals
     conditions += get_exclusion_clause('movie')
     movies = database.execute(
         select(TableMovies.radarrId,
+               TableMovies.arr_instance_id,
                TableMovies.tags,
                TableMovies.monitored,
                TableMovies.title)
@@ -279,7 +301,8 @@ def wanted_search_missing_subtitles_movies(job_id=None, wait_for_completion=Fals
 
         providers = get_providers()
         if providers:
-            wanted_download_subtitles_movie(movie.radarrId, job_id=job_id)
+            wanted_download_subtitles_movie(movie.radarrId, job_id=job_id,
+                                            arr_instance_id=movie.arr_instance_id)
 
             # make sure to override the progress value updated by the subtitles synchronization
             jobs_queue.update_job_progress(job_id=job_id, progress_value=i, progress_max=count_movies)

@@ -44,6 +44,10 @@ window.ResizeObserver = ResizeObserver;
 
 window.scrollTo = () => {};
 
+// jsdom does not implement scrollIntoView; Mantine's Select schedules a
+// scroll-to-selected on open, which otherwise throws as an uncaught timer.
+window.HTMLElement.prototype.scrollIntoView = () => {};
+
 beforeAll(() => {
   server.listen({ onUnhandledRequest: "error" });
 });

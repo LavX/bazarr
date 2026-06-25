@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
 import { useSearchParams } from "react-router";
 import { UsePaginationQueryResult } from "@/apis/queries/hooks";
 import SimpleTable, { SimpleTableProps } from "@/components/tables/SimpleTable";
@@ -26,12 +26,10 @@ export default function QueryPageTable<T extends object>(props: Props<T>) {
       isPageLoading,
       fetchAll,
     },
-    controls: { gotoPage },
+    controls: { gotoPage, setPageSize },
   } = query;
 
   const [searchParams, setSearchParams] = useSearchParams();
-  const [localPageSize, setLocalPageSize] = useState<number | null>(null);
-  const effectivePageSize = localPageSize ?? pageSize;
 
   useEffect(() => {
     ScrollToTop();
@@ -43,37 +41,46 @@ export default function QueryPageTable<T extends object>(props: Props<T>) {
     return data.data.filter(dataFilter);
   }, [data.data, dataFilter]);
 
-  // When fetchAll: always paginate client-side (slice the filtered/full data)
-  // When normal: show server-provided page data (optionally filtered within page)
+  // When fetchAll: always paginate client-side (slice the filtered/full data).
+  // When normal: the hook already fetched exactly one page of `pageSize`, so
+  // show it as-is (no extra slicing that would hide rows).
   const displayData = useMemo(() => {
     if (fetchAll) {
-      const start = page * effectivePageSize;
-      return filteredData.slice(start, start + effectivePageSize);
-    }
-    // In server-paginated mode, slice to effectivePageSize if smaller than fetched
-    if (localPageSize !== null && localPageSize < filteredData.length) {
-      return filteredData.slice(0, localPageSize);
+      const start = page * pageSize;
+      return filteredData.slice(start, start + pageSize);
     }
     return filteredData;
-  }, [fetchAll, filteredData, page, effectivePageSize, localPageSize]);
+  }, [fetchAll, filteredData, page, pageSize]);
 
-  // Calculate counts based on mode
+  // Calculate counts based on mode. In both modes the page count is derived
+  // from the same `pageSize` the hook uses for fetching/clamping.
   const effectiveTotalCount = fetchAll ? filteredData.length : serverTotalCount;
   const effectivePageCount = fetchAll
-    ? Math.ceil(filteredData.length / effectivePageSize)
+    ? Math.ceil(filteredData.length / pageSize)
     : serverPageCount;
+
+  // In fetchAll mode the hook clamps against the unfiltered server count, so
+  // tightening a client-side filter can shrink the filtered result below
+  // page * pageSize and leave us on an empty, out-of-range page. Clamp to the
+  // last valid filtered page (or page 0 when the filter matches nothing).
+  useEffect(() => {
+    if (!fetchAll) return;
+    if (page >= effectivePageCount && page > 0) {
+      gotoPage(Math.max(0, effectivePageCount - 1));
+    }
+  }, [fetchAll, page, effectivePageCount, gotoPage]);
 
   return (
     <LoadingProvider value={isPageLoading}>
       <SimpleTable
         {...remain}
         data={displayData}
-        key={`page-${page}-${effectivePageSize}`}
+        key={`page-${page}-${pageSize}`}
       ></SimpleTable>
       <PageControl
         count={effectivePageCount}
         index={page}
-        size={effectivePageSize}
+        size={pageSize}
         total={effectiveTotalCount}
         goto={(page) => {
           searchParams.set("page", (page + 1).toString());
@@ -82,7 +89,7 @@ export default function QueryPageTable<T extends object>(props: Props<T>) {
 
           gotoPage(page);
         }}
-        onPageSizeChange={setLocalPageSize}
+        onPageSizeChange={setPageSize}
       ></PageControl>
     </LoadingProvider>
   );

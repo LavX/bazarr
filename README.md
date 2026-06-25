@@ -55,6 +55,10 @@ Bazarr+ uses its own versioning starting at v2.0.0, unrelated to upstream versio
 
 | Feature | Upstream Bazarr | Bazarr+ |
 |---------|-----------------|---------|
+| **Multiple Sonarr/Radarr instances** | One Sonarr + one Radarr only | Register any number of Sonarr and Radarr servers and manage them as a single library. Every sync, search, manual search, download, upgrade, blacklist, history, wanted, scan-disk and mass-edit action stays scoped to the instance that owns each item, so colliding upstream IDs across servers never cross-contaminate. Webhooks, SignalR, the cover-image proxy, root folders, path mappings and Plex updates all resolve per instance. First-class PostgreSQL. |
+| **Per-instance subtitle settings** | Not available | Each instance can override how subtitles are produced (Subzero mods, custom post-processing, sync engines, keep-lyrics); settings resolve against the media's owning instance rather than a single global default. |
+| **Compressed-archive uploads** | Not available | Drop a `.zip`, `.rar` or `.7z` of subtitles into the upload modal. Archives are expanded in memory (zip-slip-safe, with entry and size caps) and fed into the normal upload flow, with reliable drag-and-drop across the whole show/movie page. |
+| **First-run setup wizard** | None (a fresh install lands on the settings page with no guidance) | A guided, skippable wizard walks a new install through Sonarr, Radarr, optional Plex/Jellyfin, a language profile, and installing plus enabling subtitle providers. It handles the restart that installing providers requires and resumes where you left off, then finishes with a few general basics. Existing installs are never interrupted. |
 | **Provider Hub (catalog plugins)** | Not available | Marketplace for installable subtitle provider plugins. Catalog sources, trust labels, staged activation, worker validation, isolated environments, activity log. Catalog plugins can replace shipped built-ins, and enabled built-ins can opt in to auto-install from the official catalog on startup (off by default). Local `.zip` package installs supported. |
 | **Distribution Hub (multi-tenant subtitle API)** | Not available | Multi-tenant control plane for the OpenSubtitles-compatible API. Named API keys, editable tiers, per-window metering and rate limits, per-key provider scoping. Two first-party clients: [Jellyfin plugin](https://github.com/LavX/jellyfin-plugin-bazarr-plus) and [VLSub Bazarr+](https://github.com/LavX/vlsub-bazarr-plus). |
 | **Combined subtitles (bilingual / trilingual)** | Not available | Composes existing on-disk subtitles into a single bilingual or trilingual SRT or ASS file, per language profile or on demand. Pure composition, never triggers translation. |
@@ -118,6 +122,9 @@ cd bazarr
 
 # Install Python dependencies
 pip install -r requirements.txt
+# signalrcore over-pins the vulnerable msgpack==1.1.2, so install it with
+# --no-deps (its only runtime dep is msgpack, pinned to 1.2.1 above)
+pip install --no-deps signalrcore==1.0.2
 
 # Build the frontend
 cd frontend && npm ci && npm run build && cd ..
@@ -156,6 +163,29 @@ python3 docker/supervisor.py --config ./data --port 6767
 
 <details>
 <summary><strong>Feature Details</strong></summary>
+
+### Multiple Sonarr/Radarr Instances
+The OpenSubtitles era of Bazarr+ assumed one Sonarr and one Radarr. Bazarr+ removes that assumption: register multiple Sonarr and Radarr servers in a single Bazarr+ and treat them as one library, while every action stays scoped to the instance that actually owns each item. Single-instance setups keep working exactly as before; multi-instance is purely additive.
+
+- **Owned, not guessed**: items are addressed by their owning instance, not by an upstream id that two servers might both use, so colliding IDs across servers never cross-contaminate
+- **Scoped end to end**: sync, search, manual search, download, upgrade, blacklist (add and remove), history, wanted, scan-disk and mass-edit all route to the correct instance
+- **Per-instance routing for the whole stack**: webhooks for Sonarr, Radarr and Plex resolve per instance (with a configurable webhook URL per instance), SignalR maintains a client per server on its own connection, and the cover-image proxy, root folders and path mappings are each resolved against the owning instance
+- **Plex fanout**: Plex library updates can fan out to every configured server
+- **One Connections page**: Sonarr, Radarr, Plex and Jellyfin live together under a single tabbed Settings > Connections page, mirroring the Subtitle Hub layout
+- **First-class PostgreSQL**: the schema, backfill, and a native Postgres cutover path are all covered and tested
+
+### Per-Instance Subtitle Settings
+Each instance can override how subtitles are produced, and Bazarr+ resolves the right settings against the media's owning instance rather than a single global default. Overrides cover Subzero modifications threaded through the download path, custom post-processing on downloads and on manual uploads, audio synchronization (subsync) engines and options, and the keep-lyrics behavior honored in the apply-mods action. A dedicated per-instance Subtitle settings UI exposes all of it.
+
+### Compressed-Archive Subtitle Uploads
+Drop a `.zip`, `.rar` or `.7z` of subtitles into the upload modal and Bazarr+ expands it in memory (zip-slip-safe, with entry and size caps) before feeding the contents into the normal upload flow. Drag-and-drop is reliable inside the upload modal and across the whole show/movie page: manual episode picks are preserved and the modal no longer closes mid-extraction.
+
+### First-Run Setup Wizard
+A fresh install used to drop you on the General settings page with no direction. Now a guided, full-screen wizard at `/setup` walks a new user through the whole stack: connect Sonarr and Radarr (with a live connection test), optionally add Plex or Jellyfin, pick languages and create a language profile, install and enable at least one subtitle provider, and confirm a few general basics. It is fully skippable, and it never auto-triggers for an install that already has any configuration.
+
+- **Survives the provider restart**: installing providers stages new code that needs a restart to load. The wizard restarts Bazarr+, shows a clear status with a manual reload escape hatch, waits for the backend to come back, and resumes on the provider configure step.
+- **Just the essentials**: the configure step shows only the credentials a provider needs to start working; the full set of advanced options stays in Settings > Providers.
+- **Out of your way**: it marks setup complete on finish or skip, so it never appears again, and the upgrade "What's New" dialog stays out of the wizard's way.
 
 ### Provider Hub
 Bazarr+ turns subtitle providers into installable plugins. Provider Hub lives under Settings > Providers and adds Marketplace, Updates, Sources, My Providers, and Activity views to the provider settings area.
@@ -579,7 +609,6 @@ This fork is maintained by **LavX**. Explore more projects and services:
 
 Where Bazarr+ is heading. Plans shift, but the direction is steady.
 
-- **v2.5.0**: [multiple Radarr and Sonarr instances](https://github.com/LavX/bazarr/issues/156).
 - **v2.6.0**: universal providers and federation. Point Bazarr+ at any OpenSubtitles.com-compatible endpoint, including another Bazarr+ instance, and daisy-chain instances together over a loop-safe federation protocol.
 - **v3.0.0 "Subnet"**: peer-to-peer subtitle federation, a self-organizing mesh of Bazarr+ instances.
 

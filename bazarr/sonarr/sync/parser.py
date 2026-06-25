@@ -6,6 +6,7 @@ from dateutil import parser
 
 from app.config import settings
 from app.database import TableShows, database, select
+from arr_instances.resolution import scoped
 from constants import MINIMUM_VIDEO_SIZE
 from languages.get_languages import audio_language_from_name
 from utilities.path_mappings import path_mappings
@@ -90,7 +91,7 @@ def seriesParser(show, action, tags_dict, language_profiles, serie_default_profi
     return parsed_series
 
 
-def episodeParser(episode):
+def episodeParser(episode, arr_instance_id=None):
     if 'hasFile' in episode:
         if episode['hasFile'] is True:
             if 'episodeFile' in episode:
@@ -125,9 +126,15 @@ def episodeParser(episode):
                                     if isinstance(item, dict) and 'name' in item:
                                         audio_language.append(audio_language_from_name(item['name']))
                         else:
-                            audio_language = database.execute(
+                            # Scope the series audio_language fallback to the
+                            # owning instance (#156): seriesId is no longer
+                            # globally unique, so an unscoped lookup could read a
+                            # sibling instance's series. No-op for the default
+                            # path (arr_instance_id None).
+                            audio_language = database.execute(scoped(
                                 select(TableShows.audio_language)
-                                .where(TableShows.sonarrSeriesId == episode['seriesId']))\
+                                .where(TableShows.sonarrSeriesId == episode['seriesId']),
+                                TableShows.arr_instance_id, arr_instance_id))\
                                 .first().audio_language
 
                     if 'mediaInfo' in episode['episodeFile']:

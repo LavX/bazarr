@@ -11,9 +11,9 @@ export const subSerializer: SubtitleSerializer = {
   serialize(result: ParseResult): string {
     return result.cues
       .map((cue) => {
-        if (cue.rawText) {
-          return cue.rawText;
-        }
+        // A MicroDVD line is fully determined by start/end/text, so always
+        // rebuild from the cue's current fields. Returning rawText verbatim
+        // would discard any edits made to timing or text.
         const startFrame = msToFrame(cue.startMs);
         const endFrame = msToFrame(cue.endMs);
         const text = cue.text.replace(/\n/g, "|");

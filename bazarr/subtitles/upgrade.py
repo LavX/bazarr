@@ -37,7 +37,8 @@ def upgrade_subtitles(wait_for_completion=False):
     logging.info('BAZARR Finished searching for Subtitles to upgrade. Check History for more information.')
 
 
-def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, wait_for_completion=False):
+def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, sonarr_series_filters=None,
+                               wait_for_completion=False):
     if not job_id:
         jobs_queue.add_job_from_function("Trying to upgrade episodes subtitles", is_progress=True,
                                          wait_for_completion=wait_for_completion)
@@ -57,15 +58,25 @@ def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, wait_for_com
                TableHistory.score,
                TableHistory.sonarrEpisodeId,
                TableHistory.sonarrSeriesId,
+               TableHistory.arr_instance_id,
                TableHistory.subtitles_path,
                TableEpisodes.path,
                TableShows.profileId,
                TableEpisodes.subtitles.label('external_subtitles')) \
         .select_from(TableHistory) \
-        .join(TableShows, onclause=TableHistory.sonarrSeriesId == TableShows.sonarrSeriesId) \
-        .join(TableEpisodes, onclause=TableHistory.sonarrEpisodeId == TableEpisodes.sonarrEpisodeId)
+        .join(TableShows, onclause=and_(TableHistory.sonarrSeriesId == TableShows.sonarrSeriesId,
+                                  TableHistory.arr_instance_id == TableShows.arr_instance_id)) \
+        .join(TableEpisodes, onclause=and_(TableHistory.sonarrEpisodeId == TableEpisodes.sonarrEpisodeId,
+                                     TableHistory.arr_instance_id == TableEpisodes.arr_instance_id))
 
-    if sonarr_series_ids:
+    if sonarr_series_filters:
+        query = query.where(or_(*[
+            and_(TableHistory.sonarrSeriesId == series_id,
+                 TableHistory.arr_instance_id == arr_instance_id)
+            if arr_instance_id is not None else TableHistory.sonarrSeriesId == series_id
+            for series_id, arr_instance_id in sonarr_series_filters
+        ]))
+    elif sonarr_series_ids:
         query = query.where(TableHistory.sonarrSeriesId.in_(sonarr_series_ids))
 
     episodes_data = [{
@@ -81,6 +92,7 @@ def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, wait_for_com
         'score': x.score,
         'sonarrEpisodeId': x.sonarrEpisodeId,
         'sonarrSeriesId': x.sonarrSeriesId,
+        'arr_instance_id': x.arr_instance_id,
         'subtitles_path': x.subtitles_path,
         'path': x.path,
         'profileId': x.profileId,
@@ -151,7 +163,8 @@ def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, wait_for_com
                                          is_upgrade=True,
                                          previous_subtitles_to_delete=path_mappings.path_replace(
                                              episode['subtitles_path']),
-                                         job_id=job_id))
+                                         job_id=job_id,
+                                         arr_instance_id=episode['arr_instance_id']))
 
         if result:
             if isinstance(result, list) and len(result):
@@ -160,13 +173,15 @@ def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, wait_for_com
                 result = result[0]
             store_subtitles(episode['video_path'], path_mappings.path_replace(episode['video_path']))
             history_log(3, episode['sonarrSeriesId'], episode['sonarrEpisodeId'], result,
-                        upgraded_from_id=episode['original_id'])
-            send_notifications(episode['sonarrSeriesId'], episode['sonarrEpisodeId'], result.message)
+                        upgraded_from_id=episode['original_id'],
+                        arr_instance_id=episode['arr_instance_id'])
+            send_notifications(episode['sonarrSeriesId'], episode['sonarrEpisodeId'], result.message,
+                               arr_instance_id=episode['arr_instance_id'])
             event_stream(type="episode-history")
     jobs_queue.update_job_name(job_id=job_id, new_job_name='Tried to upgrade episodes subtitles')
 
 
-def upgrade_movies_subtitles(job_id=None, radarr_ids=None, wait_for_completion=False):
+def upgrade_movies_subtitles(job_id=None, radarr_ids=None, radarr_filters=None, wait_for_completion=False):
     if not job_id:
         jobs_queue.add_job_from_function("Trying to upgrade movies subtitles", is_progress=True,
                                          wait_for_completion=wait_for_completion)
@@ -182,14 +197,23 @@ def upgrade_movies_subtitles(job_id=None, radarr_ids=None, wait_for_completion=F
                TableMovies.sceneName,
                TableHistoryMovie.score,
                TableHistoryMovie.radarrId,
+               TableHistoryMovie.arr_instance_id,
                TableHistoryMovie.subtitles_path,
                TableMovies.path,
                TableMovies.profileId,
                TableMovies.subtitles.label('external_subtitles')) \
         .select_from(TableHistoryMovie) \
-        .join(TableMovies, onclause=TableHistoryMovie.radarrId == TableMovies.radarrId)
+        .join(TableMovies, onclause=and_(TableHistoryMovie.radarrId == TableMovies.radarrId,
+                                  TableHistoryMovie.arr_instance_id == TableMovies.arr_instance_id))
 
-    if radarr_ids:
+    if radarr_filters:
+        query = query.where(or_(*[
+            and_(TableHistoryMovie.radarrId == radarr_id,
+                 TableHistoryMovie.arr_instance_id == arr_instance_id)
+            if arr_instance_id is not None else TableHistoryMovie.radarrId == radarr_id
+            for radarr_id, arr_instance_id in radarr_filters
+        ]))
+    elif radarr_ids:
         query = query.where(TableHistoryMovie.radarrId.in_(radarr_ids))
 
     all_rows = database.execute(query).all()
@@ -214,6 +238,7 @@ def upgrade_movies_subtitles(job_id=None, radarr_ids=None, wait_for_completion=F
             'sceneName': x.sceneName,
             'score': x.score,
             'radarrId': x.radarrId,
+            'arr_instance_id': x.arr_instance_id,
             'path': x.path,
             'profileId': x.profileId,
             'subtitles_path': x.subtitles_path,
@@ -282,7 +307,8 @@ def upgrade_movies_subtitles(job_id=None, radarr_ids=None, wait_for_completion=F
                                          is_upgrade=True,
                                          previous_subtitles_to_delete=path_mappings.path_replace_movie(
                                              movie['subtitles_path']),
-                                         job_id=job_id))
+                                         job_id=job_id,
+                                         arr_instance_id=movie['arr_instance_id']))
         if result:
             if isinstance(result, list) and len(result):
                 result = result[0]
@@ -290,8 +316,10 @@ def upgrade_movies_subtitles(job_id=None, radarr_ids=None, wait_for_completion=F
                 result = result[0]
             store_subtitles_movie(movie['video_path'],
                                   path_mappings.path_replace_movie(movie['video_path']))
-            history_log_movie(3, movie['radarrId'], result, upgraded_from_id=movie['original_id'])
-            send_notifications_movie(movie['radarrId'], result.message)
+            history_log_movie(3, movie['radarrId'], result, upgraded_from_id=movie['original_id'],
+                              arr_instance_id=movie['arr_instance_id'])
+            send_notifications_movie(movie['radarrId'], result.message,
+                                     arr_instance_id=movie['arr_instance_id'])
             event_stream(type="movie-history")
     jobs_queue.update_job_name(job_id=job_id, new_job_name='Tried to upgrade movies subtitles')
 
@@ -362,11 +390,18 @@ def get_upgradable_episode_subtitles(history_id_list=None):
 
     logging.debug("Determining upgradable episode subtitles")
     minimum_timestamp, query_actions = get_queries_condition_parameters()
+    # Group the latest-timestamp pick by arr_instance_id too: in multi-instance
+    # the same video_path can be shared across instances (shared library), and
+    # an unscoped (video_path, language) grouping would let one instance's
+    # newer row shadow another instance's distinct upgrade candidate. NULL owner
+    # (legacy single-instance) groups together exactly as before.
     max_id_timestamp = select(TableHistory.video_path,
                               TableHistory.language,
+                              TableHistory.arr_instance_id,
                               func.max(TableHistory.timestamp).label('timestamp')) \
         .where(TableHistory.action.in_(query_actions)) \
-        .group_by(TableHistory.video_path, TableHistory.language) \
+        .group_by(TableHistory.video_path, TableHistory.language,
+                  TableHistory.arr_instance_id) \
         .distinct() \
         .subquery()
 
@@ -384,11 +419,15 @@ def get_upgradable_episode_subtitles(history_id_list=None):
                TableHistory.language,
                TableHistory.upgradedFromId)
         .select_from(TableHistory)
-        .join(TableShows, onclause=TableHistory.sonarrSeriesId == TableShows.sonarrSeriesId)
-        .join(TableEpisodes, onclause=TableHistory.sonarrEpisodeId == TableEpisodes.sonarrEpisodeId)
-        .join(max_id_timestamp, onclause=and_(TableHistory.video_path == max_id_timestamp.c.video_path,
-                                              TableHistory.language == max_id_timestamp.c.language,
-                                              max_id_timestamp.c.timestamp == TableHistory.timestamp))
+        .join(TableShows, onclause=and_(TableHistory.sonarrSeriesId == TableShows.sonarrSeriesId,
+                                  TableHistory.arr_instance_id == TableShows.arr_instance_id))
+        .join(TableEpisodes, onclause=and_(TableHistory.sonarrEpisodeId == TableEpisodes.sonarrEpisodeId,
+                                     TableHistory.arr_instance_id == TableEpisodes.arr_instance_id))
+        .join(max_id_timestamp, onclause=and_(
+            TableHistory.video_path == max_id_timestamp.c.video_path,
+            TableHistory.language == max_id_timestamp.c.language,
+            TableHistory.arr_instance_id.is_not_distinct_from(max_id_timestamp.c.arr_instance_id),
+            max_id_timestamp.c.timestamp == TableHistory.timestamp))
         .where(reduce(operator.and_, upgradable_episodes_conditions))
         .order_by(TableHistory.timestamp.desc())) \
         .all()
@@ -430,11 +469,16 @@ def get_upgradable_movies_subtitles(history_id_list=None):
 
     logging.debug("Determining upgradable movie subtitles")
     minimum_timestamp, query_actions = get_queries_condition_parameters()
+    # Group by arr_instance_id too (see the episode path): a shared library
+    # video_path under two instances must keep each instance's distinct latest
+    # candidate. NULL owner (legacy) groups exactly as before.
     max_id_timestamp = select(TableHistoryMovie.video_path,
                               TableHistoryMovie.language,
+                              TableHistoryMovie.arr_instance_id,
                               func.max(TableHistoryMovie.timestamp).label('timestamp')) \
         .where(TableHistoryMovie.action.in_(query_actions)) \
-        .group_by(TableHistoryMovie.video_path, TableHistoryMovie.language) \
+        .group_by(TableHistoryMovie.video_path, TableHistoryMovie.language,
+                  TableHistoryMovie.arr_instance_id) \
         .distinct() \
         .subquery()
 
@@ -452,10 +496,13 @@ def get_upgradable_movies_subtitles(history_id_list=None):
                TableHistoryMovie.language,
                TableHistoryMovie.upgradedFromId)
         .select_from(TableHistoryMovie)
-        .join(TableMovies, onclause=TableHistoryMovie.radarrId == TableMovies.radarrId)
-        .join(max_id_timestamp, onclause=and_(TableHistoryMovie.video_path == max_id_timestamp.c.video_path,
-                                              TableHistoryMovie.language == max_id_timestamp.c.language,
-                                              max_id_timestamp.c.timestamp == TableHistoryMovie.timestamp))
+        .join(TableMovies, onclause=and_(TableHistoryMovie.radarrId == TableMovies.radarrId,
+                                  TableHistoryMovie.arr_instance_id == TableMovies.arr_instance_id))
+        .join(max_id_timestamp, onclause=and_(
+            TableHistoryMovie.video_path == max_id_timestamp.c.video_path,
+            TableHistoryMovie.language == max_id_timestamp.c.language,
+            TableHistoryMovie.arr_instance_id.is_not_distinct_from(max_id_timestamp.c.arr_instance_id),
+            max_id_timestamp.c.timestamp == TableHistoryMovie.timestamp))
         .where(reduce(operator.and_, upgradable_movies_conditions))
         .order_by(TableHistoryMovie.timestamp.desc())) \
         .all()

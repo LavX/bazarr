@@ -1,21 +1,10 @@
 import React, { FunctionComponent, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
-import {
-  Badge,
-  Button,
-  Group,
-  Menu,
-  Text,
-  TextProps,
-  Tooltip,
-} from "@mantine/core";
+import { Badge, Group, Text, TextProps, Tooltip } from "@mantine/core";
 import {
   faEllipsis,
-  faEye,
   faQuestionCircle,
-  faRotateRight,
   faSpinner,
-  faTrash,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
@@ -81,6 +70,43 @@ function isSubtitleTrack(path: string | undefined | null) {
 
 function isSubtitleMissing(path: string | undefined | null) {
   return path === missingText;
+}
+
+export function buildMovieSubtitleToolSelections(
+  movie: Item.Movie | null,
+  subtitle: Subtitle,
+): FormType.ModifySubtitle[] {
+  const { code2, path, hi, forced } = subtitle;
+  if (isSubtitleMissing(path) || movie === null) {
+    return [];
+  }
+
+  const isEmbedded = isSubtitleTrack(path);
+  return [
+    {
+      type: "movie",
+      path: isEmbedded ? "" : path!,
+      id: movie.radarrId,
+      language: code2,
+      forced: toPython(forced),
+      hi: toPython(hi),
+      from_language: isEmbedded ? code2 : undefined,
+      arr_instance_id: movie.arr_instance_id,
+    },
+  ];
+}
+
+function subtitleEditorUrl(
+  action: "preview" | "edit",
+  mediaType: "movie",
+  mediaId: number,
+  language: string,
+  arrInstanceId?: number | null,
+) {
+  const path = `/subtitles/${action}/${mediaType}/${mediaId}/${encodeURIComponent(language)}`;
+  return arrInstanceId != null
+    ? `${path}?arr_instance_id=${arrInstanceId}`
+    : path;
 }
 
 const SyncEngineBadge: FunctionComponent<{ subtitle: Subtitle }> = ({
@@ -166,8 +192,9 @@ const ActiveSyncIcon: FunctionComponent<{ label: string }> = ({ label }) => (
 const SubtitleStatusCell: FunctionComponent<{
   actions: Set<number> | undefined;
   mediaId: number | undefined;
+  arrInstanceId?: number | null;
   subtitle: Subtitle;
-}> = ({ actions, mediaId, subtitle }) => {
+}> = ({ actions, mediaId, arrInstanceId, subtitle }) => {
   const languageKey = buildSubtitleLanguageKey(subtitle);
   const canCheckSyncStatus =
     !!subtitle.path &&
@@ -179,6 +206,7 @@ const SubtitleStatusCell: FunctionComponent<{
     mediaId,
     languageKey,
     canCheckSyncStatus,
+    arrInstanceId ?? undefined,
   );
   const presentation = syncStatus.data
     ? getSubtitleSyncStatusPresentation(syncStatus.data)
@@ -254,7 +282,12 @@ function buildEmbeddedScoreKey(sub: {
   return sub.code2;
 }
 
-const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
+const Table: FunctionComponent<Props> = ({
+  movie,
+  profile,
+  history,
+  disabled,
+}) => {
   const onlyDesired = useShowOnlyDesired();
   const [compareSelection, setCompareSelection] = useState<{
     original: Subtitle;
@@ -318,25 +351,8 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
     const { code2, path, hi, forced } = item;
 
     const selections = useMemo(() => {
-      const list: FormType.ModifySubtitle[] = [];
-
-      if (!isSubtitleMissing(path) && movie !== null) {
-        list.push({
-          type: "movie",
-          // Embedded track: path is null/empty, pass empty string so backend
-          // treats it as an embedded extraction request (translate only).
-          path: isSubtitleTrack(path) ? "" : path!,
-          id: movie.radarrId,
-          language: code2,
-          forced: toPython(forced),
-          hi: toPython(hi),
-          // Carry the source language so backend can extract the right track
-          from_language: isSubtitleTrack(path) ? code2 : undefined,
-        });
-      }
-
-      return list;
-    }, [code2, path, forced, hi]);
+      return buildMovieSubtitleToolSelections(movie, item);
+    }, [item, movie]);
 
     if (movie === null) {
       return null;
@@ -362,20 +378,37 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
           onAction={async (action) => {
             if (action === "rebuild") {
               combine.mutate({
-                scope: { kind: "movie", radarrId },
+                scope: {
+                  kind: "movie",
+                  radarrId,
+                  arrInstanceId: movie.arr_instance_id ?? undefined,
+                },
                 body: combineRequestForSubtitle(item) ?? {},
               });
             } else if (action === "view") {
               navigate(
-                `/subtitles/preview/movie/${radarrId}/${encodeURIComponent(buildSubtitleLanguageKey(item))}`,
+                subtitleEditorUrl(
+                  "preview",
+                  "movie",
+                  radarrId,
+                  buildSubtitleLanguageKey(item),
+                  movie.arr_instance_id,
+                ),
               );
             } else if (action === "edit") {
               navigate(
-                `/subtitles/edit/movie/${radarrId}/${encodeURIComponent(buildSubtitleLanguageKey(item))}`,
+                subtitleEditorUrl(
+                  "edit",
+                  "movie",
+                  radarrId,
+                  buildSubtitleLanguageKey(item),
+                  movie.arr_instance_id,
+                ),
               );
             } else if (action === "delete" && path) {
               await remove.mutateAsync({
                 radarrId,
+                arrInstanceId: movie.arr_instance_id,
                 form: {
                   language: code2,
                   forced,
@@ -386,7 +419,11 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
             }
           }}
         >
-          <Action label="Combined Subtitle Actions" icon={faEllipsis} />
+          <Action
+            label="Combined Subtitle Actions"
+            icon={faEllipsis}
+            disabled={disabled}
+          />
         </SubtitleToolsMenu>
       );
     }
@@ -399,14 +436,22 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
           translationSources={availableSources}
           mediaId={radarrId}
           mediaType="movie"
+          arrInstanceId={movie.arr_instance_id}
           onAction={async (action) => {
             if (action === "edit") {
               navigate(
-                `/subtitles/edit/movie/${radarrId}/${encodeURIComponent(buildSubtitleLanguageKey(item))}`,
+                subtitleEditorUrl(
+                  "edit",
+                  "movie",
+                  radarrId,
+                  buildSubtitleLanguageKey(item),
+                  movie.arr_instance_id,
+                ),
               );
             } else if (action === "search") {
               await download.mutateAsync({
                 radarrId,
+                arrInstanceId: movie.arr_instance_id,
                 form: {
                   language: code2,
                   forced,
@@ -416,7 +461,11 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
             }
           }}
         >
-          <Action label="Subtitle Actions" icon={faEllipsis}></Action>
+          <Action
+            label="Subtitle Actions"
+            icon={faEllipsis}
+            disabled={disabled}
+          ></Action>
         </SubtitleToolsMenu>
       );
     }
@@ -430,17 +479,30 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
         onAction={async (action) => {
           if (action === "view") {
             navigate(
-              `/subtitles/preview/movie/${radarrId}/${encodeURIComponent(buildSubtitleLanguageKey(item))}`,
+              subtitleEditorUrl(
+                "preview",
+                "movie",
+                radarrId,
+                buildSubtitleLanguageKey(item),
+                movie.arr_instance_id,
+              ),
             );
           } else if (action === "edit") {
             navigate(
-              `/subtitles/edit/movie/${radarrId}/${encodeURIComponent(buildSubtitleLanguageKey(item))}`,
+              subtitleEditorUrl(
+                "edit",
+                "movie",
+                radarrId,
+                buildSubtitleLanguageKey(item),
+                movie.arr_instance_id,
+              ),
             );
           } else if (action === "compare-sync") {
             setCompareSelection({ original: item, outputs: syncOutputs });
           } else if (action === "delete" && path) {
             await remove.mutateAsync({
               radarrId,
+              arrInstanceId: movie.arr_instance_id,
               form: {
                 language: code2,
                 forced,
@@ -451,7 +513,11 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
           }
         }}
       >
-        <Action label="Subtitle Actions" icon={faEllipsis}></Action>
+        <Action
+          label="Subtitle Actions"
+          icon={faEllipsis}
+          disabled={disabled}
+        ></Action>
       </SubtitleToolsMenu>
     );
   });
@@ -540,6 +606,7 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
             <SubtitleStatusCell
               actions={actions}
               mediaId={movie?.radarrId}
+              arrInstanceId={movie?.arr_instance_id}
               subtitle={original}
             />
           );
@@ -552,7 +619,14 @@ const Table: FunctionComponent<Props> = ({ movie, profile, history }) => {
         },
       },
     ],
-    [CodeCell, historyMap, embeddedScoreMap, movie?.radarrId, statusMap],
+    [
+      CodeCell,
+      historyMap,
+      embeddedScoreMap,
+      movie?.radarrId,
+      movie?.arr_instance_id,
+      statusMap,
+    ],
   );
 
   const data: Subtitle[] = useMemo(() => {

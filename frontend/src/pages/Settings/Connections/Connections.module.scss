@@ -1,0 +1,118 @@
+.card {
+  position: relative;
+  border-radius: var(--bz-radius-lg);
+  border: 1px solid var(--bz-border-card);
+  background: var(--bz-surface-card);
+  padding: var(--mantine-spacing-md);
+  transition:
+    background var(--bz-duration-normal) var(--bz-ease-standard),
+    border-color var(--bz-duration-normal) var(--bz-ease-standard),
+    box-shadow var(--bz-duration-normal) var(--bz-ease-standard),
+    transform var(--bz-duration-normal) var(--bz-ease-standard);
+
+  &:hover {
+    background: var(--bz-surface-card-hover);
+    border-color: var(--bz-border-hover);
+    box-shadow: var(--bz-shadow-float);
+    transform: translateY(-1px);
+  }
+}
+
+// The default instance carries a brand-colored rail and a tinted border so it
+// reads at a glance without shouting.
+.card[data-default] {
+  border-color: color-mix(
+    in srgb,
+    var(--mantine-color-brand-5) 35%,
+    var(--bz-border-card)
+  );
+
+  &::before {
+    content: "";
+    position: absolute;
+    top: 10px;
+    bottom: 10px;
+    left: -1px;
+    width: 3px;
+    border-radius: 0 3px 3px 0;
+    background: linear-gradient(
+      180deg,
+      var(--mantine-color-brand-4),
+      var(--mantine-color-brand-6)
+    );
+  }
+}
+
+.card[data-disabled] .dimmable {
+  opacity: 0.55;
+}
+
+.testResult {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  margin-top: 2px;
+  padding: 3px 10px;
+  border-radius: var(--bz-radius-sm);
+  animation: result-enter var(--bz-duration-normal) var(--bz-ease-enter);
+
+  &[data-tone="ok"] {
+    color: var(--mantine-color-green-light-color);
+    background: var(--mantine-color-green-light);
+  }
+
+  &[data-tone="warn"] {
+    color: var(--mantine-color-yellow-light-color);
+    background: var(--mantine-color-yellow-light);
+  }
+
+  &[data-tone="fail"] {
+    color: var(--mantine-color-red-light-color);
+    background: var(--mantine-color-red-light);
+  }
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--mantine-spacing-xs);
+  padding: calc(var(--mantine-spacing-xl) * 1.4) var(--mantine-spacing-lg);
+  border: 1px dashed var(--bz-border-card);
+  border-radius: var(--bz-radius-lg);
+  background: color-mix(in srgb, var(--bz-surface-card) 50%, transparent);
+  text-align: center;
+  transition: border-color var(--bz-duration-normal) var(--bz-ease-standard);
+
+  &:hover {
+    border-color: var(--bz-border-hover);
+  }
+}
+
+@keyframes result-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card,
+  .empty {
+    transition: none;
+  }
+
+  .card:hover {
+    transform: none;
+  }
+
+  .testResult {
+    animation: none;
+  }
+}

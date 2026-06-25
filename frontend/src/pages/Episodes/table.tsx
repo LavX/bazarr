@@ -62,6 +62,9 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
         return mutateAsync({
           seriesId,
           episodeId,
+          // Scope the download to the episode's owning instance (#156); the
+          // backend dual-uses the upstream ids + this to disambiguate.
+          arrInstanceId: item.arr_instance_id,
           form: {
             language,
             hi,
@@ -89,6 +92,7 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
               key={BuildKey(idx, val.code2, "missing")}
               seriesId={seriesId}
               episodeId={episodeId}
+              arrInstanceId={episode.arr_instance_id}
               subtitle={val}
               availableSubtitles={episode.subtitles}
             ></Subtitle>
@@ -107,13 +111,17 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
               key={BuildKey(idx, val.code2, "valid")}
               seriesId={seriesId}
               episodeId={episodeId}
+              arrInstanceId={episode.arr_instance_id}
               subtitle={val}
               availableSubtitles={episode.subtitles}
             ></Subtitle>
           ));
 
           return [...missing, ...subtitles];
-        }, [episode, seriesId]);
+          // onlyDesired/profileItems are captured from the parent; the row re-renders
+          // via the parent when they change, so they belong in the deps.
+          // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, [episode, seriesId, onlyDesired, profileItems]);
 
         return (
           <Group gap="xs" wrap="nowrap">
@@ -237,6 +245,8 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
                       scope: {
                         kind: "episode",
                         episodeId: row.original.sonarrEpisodeId,
+                        arrInstanceId:
+                          row.original.arr_instance_id ?? undefined,
                       },
                       availableLanguages: episodeAvailableLangs,
                     });

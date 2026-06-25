@@ -42,7 +42,13 @@ const ExternalWebhookSelector: FunctionComponent = () => {
         downloaded.
         <br />
         For Autopulse auto-configuration with Plex OAuth, see the{" "}
-        <Text component={Link} to="/settings/plex" fw={500} c="blue" td="none">
+        <Text
+          component={Link}
+          to="/settings/connections#plex"
+          fw={500}
+          c="blue"
+          td="none"
+        >
           Plex settings section
         </Text>
         .

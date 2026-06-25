@@ -16,6 +16,8 @@ import {
   parseGitHubUrl,
   parseManifest,
   summarizeUpdates,
+  usesAntiCaptcha,
+  usesFlaresolverr,
 } from "@/pages/Settings/Providers/hub/utils";
 
 describe("parseManifest", () => {
@@ -317,5 +319,103 @@ describe("getActionLabel", () => {
     expect(getActionLabel(undefined)).toBe("Unknown action");
     expect(getActionLabel(null)).toBe("Unknown action");
     expect(getActionLabel("")).toBe("Unknown action");
+  });
+});
+
+describe("usesAntiCaptcha", () => {
+  it("returns false for missing/empty manifests", () => {
+    expect(usesAntiCaptcha(null)).toBe(false);
+    expect(usesAntiCaptcha(undefined)).toBe(false);
+    expect(usesAntiCaptcha({})).toBe(false);
+    expect(usesAntiCaptcha({ manifest: { provider_id: "x" } })).toBe(false);
+  });
+
+  it("detects a captcha-solver config field", () => {
+    expect(
+      usesAntiCaptcha({
+        manifest: {
+          config_schema: {
+            properties: { captcha_solver_url: { title: "Captcha solver URL" } },
+          },
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it("does not treat a FlareSolverr-only provider as anti-captcha", () => {
+    expect(
+      usesAntiCaptcha({
+        manifest: {
+          config_schema: {
+            properties: { flaresolverr_url: { title: "FlareSolverr URL" } },
+          },
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("ignores captcha mentions in description text without a config field", () => {
+    expect(
+      usesAntiCaptcha({
+        manifest: {
+          description: "Use cookies when login is blocked by captcha.",
+          config_schema: { properties: { cookies: { secret: true } } },
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("honours an explicit anti_captcha flag over field detection", () => {
+    expect(
+      usesAntiCaptcha({
+        manifest: {
+          anti_captcha: false,
+          config_schema: { properties: { captcha_solver_url: {} } },
+        },
+      }),
+    ).toBe(false);
+    expect(usesAntiCaptcha({ manifest: { anti_captcha: true } })).toBe(true);
+  });
+});
+
+describe("usesFlaresolverr", () => {
+  it("returns false for missing/empty manifests", () => {
+    expect(usesFlaresolverr(null)).toBe(false);
+    expect(usesFlaresolverr(undefined)).toBe(false);
+    expect(usesFlaresolverr({})).toBe(false);
+  });
+
+  it("detects a flaresolverr config field", () => {
+    expect(
+      usesFlaresolverr({
+        manifest: {
+          config_schema: {
+            properties: { flaresolverr_url: { title: "FlareSolverr URL" } },
+          },
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it("does not treat a captcha-solver-only provider as FlareSolverr", () => {
+    expect(
+      usesFlaresolverr({
+        manifest: {
+          config_schema: { properties: { captcha_solver_url: {} } },
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("honours an explicit flaresolverr flag over field detection", () => {
+    expect(
+      usesFlaresolverr({
+        manifest: {
+          flaresolverr: false,
+          config_schema: { properties: { flaresolverr_url: {} } },
+        },
+      }),
+    ).toBe(false);
+    expect(usesFlaresolverr({ manifest: { flaresolverr: true } })).toBe(true);
   });
 });

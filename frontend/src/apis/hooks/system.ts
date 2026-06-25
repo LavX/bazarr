@@ -21,17 +21,20 @@ export function useFileSystem(
   type: "bazarr" | "sonarr" | "radarr",
   path: string,
   enabled: boolean,
+  // instanceId (#156) routes a sonarr/radarr browse at the owning instance's
+  // server. Undefined => default server (the legacy single-instance behaviour).
+  instanceId?: number,
 ) {
   return useQuery({
-    queryKey: [QueryKeys.FileSystem, type, path],
+    queryKey: [QueryKeys.FileSystem, type, path, instanceId],
 
     queryFn: () => {
       if (type === "bazarr") {
         return api.files.bazarr(path);
       } else if (type === "radarr") {
-        return api.files.radarr(path);
+        return api.files.radarr(path, instanceId);
       } else if (type === "sonarr") {
-        return api.files.sonarr(path);
+        return api.files.sonarr(path, instanceId);
       }
 
       return [];

@@ -11,6 +11,7 @@ from functools import reduce
 
 from utilities.path_mappings import path_mappings
 from subtitles.indexer.series import store_subtitles, list_missing_subtitles
+from arr_instances.resolution import scoped
 from sonarr.history import history_log
 from app.notifier import send_notifications
 from app.get_providers import get_providers
@@ -28,6 +29,7 @@ from .utils import _find_existing_subtitle_path
 
 
 def _wanted_episode(episode, providers_list, job_id=None):
+    arr_instance_id = getattr(episode, 'arr_instance_id', None)
     audio_language_list = get_audio_profile_languages(episode.audio_language)
     if len(audio_language_list) > 0:
         audio_language = audio_language_list[0]['name']
@@ -54,12 +56,16 @@ def _wanted_episode(episode, providers_list, job_id=None):
             if source_srt:
                 min_score = settings.translator.min_source_score
                 history = database.execute(
-                    select(TableHistory.score)
-                    .where(TableHistory.sonarrEpisodeId == episode.sonarrEpisodeId)
-                    .where(TableHistory.language.like(f"{translate_cfg['from']}%"))
-                    .where(TableHistory.score.is_not(None))
-                    .order_by(TableHistory.timestamp.desc())
-                    .limit(1)
+                    scoped(
+                        select(TableHistory.score)
+                        .where(TableHistory.sonarrEpisodeId == episode.sonarrEpisodeId)
+                        .where(TableHistory.language.like(f"{translate_cfg['from']}%"))
+                        .where(TableHistory.score.is_not(None))
+                        .order_by(TableHistory.timestamp.desc())
+                        .limit(1),
+                        TableHistory.arr_instance_id,
+                        arr_instance_id,
+                    )
                 ).first()
                 if history and history.score:
                     source_score_pct = round((history.score / MAX_SCORES['episode']) * 100, 1)
@@ -87,12 +93,16 @@ def _wanted_episode(episode, providers_list, job_id=None):
                     # checking only the history row would suppress the
                     # replacement forever.
                     already_translated = database.execute(
-                        select(TableHistory.subtitles_path)
-                        .where(TableHistory.sonarrEpisodeId == episode.sonarrEpisodeId)
-                        .where(TableHistory.language == language)
-                        .where(TableHistory.action == 6)
-                        .order_by(TableHistory.timestamp.desc())
-                        .limit(1)
+                        scoped(
+                            select(TableHistory.subtitles_path)
+                            .where(TableHistory.sonarrEpisodeId == episode.sonarrEpisodeId)
+                            .where(TableHistory.language == language)
+                            .where(TableHistory.action == 6)
+                            .order_by(TableHistory.timestamp.desc())
+                            .limit(1),
+                            TableHistory.arr_instance_id,
+                            arr_instance_id,
+                        )
                     ).first()
                     if already_translated and already_translated.subtitles_path:
                         local_subs_path = path_mappings.path_replace(
@@ -104,14 +114,19 @@ def _wanted_episode(episode, providers_list, job_id=None):
                     # (imdbId/tvdbId for plex/jellyfin refresh). episode_details
                     # only carries the subset selected for wanted scans.
                     metadata = database.execute(
-                        select(TableEpisodes.sonarrSeriesId,
-                               TableEpisodes.season,
-                               TableEpisodes.episode,
-                               TableShows.imdbId,
-                               TableShows.tvdbId)
-                        .select_from(TableEpisodes)
-                        .join(TableShows)
-                        .where(TableEpisodes.sonarrEpisodeId == episode.sonarrEpisodeId)
+                        scoped(
+                            select(TableEpisodes.sonarrSeriesId,
+                                   TableEpisodes.season,
+                                   TableEpisodes.episode,
+                                   TableShows.imdbId,
+                                   TableShows.tvdbId,
+                                   TableEpisodes.arr_instance_id)
+                            .select_from(TableEpisodes)
+                            .join(TableShows, TableShows.id == TableEpisodes.series_id)
+                            .where(TableEpisodes.sonarrEpisodeId == episode.sonarrEpisodeId),
+                            TableEpisodes.arr_instance_id,
+                            arr_instance_id,
+                        )
                     ).first()
                     try:
                         from subtitles.tools.translate.main import translate_subtitles_file
@@ -174,43 +189,51 @@ def _wanted_episode(episode, providers_list, job_id=None):
                                      episode.profileId,
                                      check_if_still_required=True,
                                      job_id=job_id,
-                                     fallback_allowed=settings.general.use_whisper_fallback):
+                                     fallback_allowed=settings.general.use_whisper_fallback,
+                                     arr_instance_id=arr_instance_id):
         if result:
             found_any = True
             if isinstance(result, tuple) and len(result):
                 result = result[0]
             store_subtitles(episode.path, path_mappings.path_replace(episode.path))
-            history_log(1, episode.sonarrSeriesId, episode.sonarrEpisodeId, result)
+            history_log(1, episode.sonarrSeriesId, episode.sonarrEpisodeId, result,
+                        arr_instance_id=arr_instance_id)
             event_stream(type='series', action='update', payload=episode.sonarrSeriesId)
             event_stream(type='episode-wanted', action='delete', payload=episode.sonarrEpisodeId)
-            send_notifications(episode.sonarrSeriesId, episode.sonarrEpisodeId, result.message)
+            send_notifications(episode.sonarrSeriesId, episode.sonarrEpisodeId, result.message,
+                               arr_instance_id=arr_instance_id)
 
     if not found_any and providers_list:
         for language in languages_to_stamp:
             updated = updateFailedAttempts(
                 desired_language=language,
                 attempt_string=episode.failedAttempts)
-            database.execute(
+            stmt = scoped(
                 update(TableEpisodes)
                 .values(failedAttempts=updated)
                 .where(TableEpisodes.sonarrEpisodeId ==
-                       episode.sonarrEpisodeId))
+                       episode.sonarrEpisodeId),
+                TableEpisodes.arr_instance_id, arr_instance_id)
+            database.execute(stmt)
 
 
-def wanted_download_subtitles(sonarr_episode_id, job_id=None):
-    stmt = select(TableEpisodes.path,
-                  TableEpisodes.missing_subtitles,
-                  TableEpisodes.sonarrEpisodeId,
-                  TableEpisodes.sonarrSeriesId,
-                  TableEpisodes.audio_language,
-                  TableEpisodes.sceneName,
-                  TableEpisodes.failedAttempts,
-                  TableShows.title,
-                  TableShows.profileId,
-                  TableEpisodes.subtitles) \
-        .select_from(TableEpisodes) \
-        .join(TableShows) \
-        .where((TableEpisodes.sonarrEpisodeId == sonarr_episode_id))
+def wanted_download_subtitles(sonarr_episode_id, job_id=None, arr_instance_id=None):
+    stmt = scoped(
+        select(TableEpisodes.path,
+               TableEpisodes.missing_subtitles,
+               TableEpisodes.sonarrEpisodeId,
+               TableEpisodes.sonarrSeriesId,
+               TableEpisodes.arr_instance_id,
+               TableEpisodes.audio_language,
+               TableEpisodes.sceneName,
+               TableEpisodes.failedAttempts,
+               TableShows.title,
+               TableShows.profileId,
+               TableEpisodes.subtitles)
+        .select_from(TableEpisodes)
+        .join(TableShows)
+        .where((TableEpisodes.sonarrEpisodeId == sonarr_episode_id)),
+        TableEpisodes.arr_instance_id, arr_instance_id)
     episode_details = database.execute(stmt).first()
 
     if not episode_details:
@@ -222,7 +245,7 @@ def wanted_download_subtitles(sonarr_episode_id, job_id=None):
         episode_details = database.execute(stmt).first()
     elif episode_details.missing_subtitles is None:
         # missing subtitles calculation for this episode is incomplete, we'll do it again
-        list_missing_subtitles(epno=sonarr_episode_id)
+        list_missing_subtitles(epno=sonarr_episode_id, arr_instance_id=arr_instance_id)
         episode_details = database.execute(stmt).first()
 
     providers_list = get_providers()
@@ -281,6 +304,7 @@ def wanted_search_missing_subtitles_series(job_id=None, wait_for_completion=Fals
     episodes = database.execute(
         select(TableEpisodes.sonarrSeriesId,
                TableEpisodes.sonarrEpisodeId,
+               TableEpisodes.arr_instance_id,
                TableShows.tags,
                TableEpisodes.monitored,
                TableShows.title,
@@ -307,7 +331,8 @@ def wanted_search_missing_subtitles_series(job_id=None, wait_for_completion=Fals
 
         providers = get_providers()
         if providers:
-            wanted_download_subtitles(episode.sonarrEpisodeId, job_id=job_id)
+            wanted_download_subtitles(episode.sonarrEpisodeId, job_id=job_id,
+                                      arr_instance_id=episode.arr_instance_id)
 
             # make sure to override the progress value updated by the subtitles synchronization
             jobs_queue.update_job_progress(job_id=job_id, progress_value=i, progress_max=count_episodes)

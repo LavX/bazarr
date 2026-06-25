@@ -6,21 +6,22 @@ import logging
 
 from app.config import settings, get_ssl_verify
 from app.database import TableShowsRootfolder, TableShows, database, insert, update, delete, select
+from arr_instances.resolution import default_instance_id
 from utilities.path_mappings import path_mappings
 from sonarr.http_session import sonarr_session
 from sonarr.info import sonarr_headers, url_api_sonarr
 
 
-def get_sonarr_rootfolder():
+def get_sonarr_rootfolder(arr_instance_id=None, arr_client=None):
     apikey_sonarr = settings.sonarr.apikey
     sonarr_rootfolder = []
 
-    # Get root folder data from Sonarr
-    url_sonarr_api_rootfolder = f"{url_api_sonarr()}rootfolder"
-
     try:
-        rootfolder = sonarr_session().get(url_sonarr_api_rootfolder, timeout=int(settings.sonarr.http_timeout), verify=get_ssl_verify('sonarr'),
-                                          headers=sonarr_headers(apikey_sonarr))
+        if arr_client is not None:
+            rootfolder = arr_client.get("/api/v3/rootfolder")
+        else:
+            rootfolder = sonarr_session().get(f"{url_api_sonarr()}rootfolder", timeout=int(settings.sonarr.http_timeout),
+                                              verify=get_ssl_verify('sonarr'), headers=sonarr_headers(apikey_sonarr))
     except requests.exceptions.ConnectionError:
         logging.exception("BAZARR Error trying to get rootfolder from Sonarr. Connection Error.")
         return []
@@ -31,14 +32,25 @@ def get_sonarr_rootfolder():
         logging.exception("BAZARR Error trying to get rootfolder from Sonarr.")
         return []
     else:
+        # Resolve the owning instance: the explicit one when instance-scoped,
+        # else the enabled default. owner=None on a pre-backfill install leaves
+        # the ownership/split columns NULL (legacy behaviour).
+        owner = arr_instance_id if arr_instance_id is not None \
+            else default_instance_id(database, 'sonarr')
+
+        # Scope the existing-shows lookup and the rootfolder table to the owning
+        # instance when one is supplied; with no instance, the statements are
+        # unscoped exactly as before (default-instance behaviour unchanged).
+        shows_paths_stmt = select(TableShows.path)
+        db_rootfolder_stmt = select(TableShowsRootfolder.id, TableShowsRootfolder.path)
+        if arr_instance_id is not None:
+            shows_paths_stmt = shows_paths_stmt.where(TableShows.arr_instance_id == arr_instance_id)
+            db_rootfolder_stmt = db_rootfolder_stmt.where(TableShowsRootfolder.arr_instance_id == arr_instance_id)
+
         for folder in rootfolder.json():
-            if any(item.path.startswith(folder['path']) for item in database.execute(
-                    select(TableShows.path))
-                    .all()):
+            if any(item.path.startswith(folder['path']) for item in database.execute(shows_paths_stmt).all()):
                 sonarr_rootfolder.append({'id': folder['id'], 'path': folder['path']})  # noqa: PERF401
-        db_rootfolder = database.execute(
-            select(TableShowsRootfolder.id, TableShowsRootfolder.path))\
-            .all()
+        db_rootfolder = database.execute(db_rootfolder_stmt).all()
         rootfolder_to_remove = [x for x in db_rootfolder if not
                                 next((item for item in sonarr_rootfolder if item['id'] == x.id), False)]
         rootfolder_to_update = [x for x in sonarr_rootfolder if
@@ -47,25 +59,44 @@ def get_sonarr_rootfolder():
                                 next((item for item in db_rootfolder if item.id == x['id']), False)]
 
         for item in rootfolder_to_remove:
-            database.execute(
-                delete(TableShowsRootfolder)
-                .where(TableShowsRootfolder.id == item.id))
+            stmt = delete(TableShowsRootfolder).where(TableShowsRootfolder.id == item.id)
+            if arr_instance_id is not None:
+                stmt = stmt.where(TableShowsRootfolder.arr_instance_id == arr_instance_id)
+            database.execute(stmt)
         for item in rootfolder_to_update:
-            database.execute(
-                update(TableShowsRootfolder)
-                .values(path=item['path'])
-                .where(TableShowsRootfolder.id == item['id']))
+            stmt = (update(TableShowsRootfolder).values(path=item['path'])
+                    .where(TableShowsRootfolder.id == item['id']))
+            if arr_instance_id is not None:
+                stmt = stmt.where(TableShowsRootfolder.arr_instance_id == arr_instance_id)
+            database.execute(stmt)
         for item in rootfolder_to_insert:
-            database.execute(
-                insert(TableShowsRootfolder)
-                .values(id=item['id'], path=item['path']))
+            # Stamp ownership + the upstream id on every insert (default path
+            # included) so new rootfolders are owned, closing the same
+            # NULL-accumulation gap INC4 closed for media. local_rootfolder_id is
+            # the autoincrement PK and MUST NOT be forced to the upstream id:
+            # rootfolder id=1 is the universal default in every Sonarr, so two
+            # instances would collide on the PK and abort the second one's sync.
+            # Let it autoincrement; upstream_rootfolder_id (unique per instance)
+            # carries the server-side id.
+            values = {'id': item['id'], 'path': item['path']}
+            if owner is not None:
+                values.update(arr_instance_id=owner,
+                              upstream_rootfolder_id=item['id'])
+            database.execute(insert(TableShowsRootfolder).values(**values))
 
 
-def check_sonarr_rootfolder():
-    get_sonarr_rootfolder()
-    rootfolder = database.execute(
-        select(TableShowsRootfolder.id, TableShowsRootfolder.path))\
-        .all()
+def check_sonarr_rootfolder(arr_instance_id=None, arr_client=None):
+    # Route the rootfolder fetch + ownership through the same instance the sync
+    # is running for. With no instance/client this is today's default-instance
+    # path (scalar settings + unscoped), byte-identical. (#156)
+    get_sonarr_rootfolder(arr_instance_id=arr_instance_id, arr_client=arr_client)
+    # Only re-check the rootfolders owned by this instance: the accessibility
+    # update keys on the upstream rootfolder id, which collides across instances,
+    # so an unscoped write would clobber another instance's rows.
+    rootfolder_stmt = select(TableShowsRootfolder.id, TableShowsRootfolder.path)
+    if arr_instance_id is not None:
+        rootfolder_stmt = rootfolder_stmt.where(TableShowsRootfolder.arr_instance_id == arr_instance_id)
+    rootfolder = database.execute(rootfolder_stmt).all()
     for item in rootfolder:
         root_path = item.path
         if not root_path.endswith(('/', '\\')):
@@ -73,36 +104,27 @@ def check_sonarr_rootfolder():
                 root_path += '/'
             else:
                 root_path += '\\'
-        if not os.path.isdir(path_mappings.path_replace(root_path)):
-            database.execute(
-                update(TableShowsRootfolder)
-                .values(accessible=0, error='This Sonarr root directory does not seem to be accessible by Bazarr. '
-                                            'Please check path mapping or if directory/drive is online.')
-                .where(TableShowsRootfolder.id == item.id))
+        mapped_path = path_mappings.path_replace(root_path)
+        if not os.path.isdir(mapped_path):
+            accessible, error = 0, ('This Sonarr root directory does not seem to be accessible by Bazarr. '
+                                    'Please check path mapping or if directory/drive is online.')
+        # Try os.access() first (fast, no disk I/O); fall back to an actual write
+        # test only if os.access() fails (e.g. NFS mounts).
+        elif os.access(mapped_path, os.W_OK):
+            accessible, error = 1, ''
         else:
-            # Try os.access() first (fast, no disk I/O)
-            # Fall back to write test only if os.access() fails (e.g., NFS mounts)
-            mapped_path = path_mappings.path_replace(root_path)
-            if os.access(mapped_path, os.W_OK):
-                # Path is writable according to os.access()
-                database.execute(
-                    update(TableShowsRootfolder)
-                    .values(accessible=1, error='')
-                    .where(TableShowsRootfolder.id == item.id))
+            try:
+                test_file = os.path.join(mapped_path, '.bazarr_write_test')
+                with open(test_file, 'w') as f:
+                    f.write('test')
+                os.remove(test_file)
+            except Exception as e:
+                accessible, error = 0, f"There's an issue with this Sonarr root directory: {repr(e)}"
             else:
-                # os.access() failed, try actual write test (needed for NFS)
-                try:
-                    test_file = os.path.join(mapped_path, '.bazarr_write_test')
-                    with open(test_file, 'w') as f:
-                        f.write('test')
-                    os.remove(test_file)
-                except Exception as e:
-                    database.execute(
-                        update(TableShowsRootfolder)
-                        .values(accessible=0, error=f"There's an issue with this Sonarr root directory: {repr(e)}")
-                        .where(TableShowsRootfolder.id == item.id))
-                else:
-                    database.execute(
-                        update(TableShowsRootfolder)
-                        .values(accessible=1, error='')
-                        .where(TableShowsRootfolder.id == item.id))
+                accessible, error = 1, ''
+        stmt = (update(TableShowsRootfolder)
+                .values(accessible=accessible, error=error)
+                .where(TableShowsRootfolder.id == item.id))
+        if arr_instance_id is not None:
+            stmt = stmt.where(TableShowsRootfolder.arr_instance_id == arr_instance_id)
+        database.execute(stmt)

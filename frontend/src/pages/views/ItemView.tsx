@@ -19,6 +19,7 @@ import {
   faEraser,
   faFilter,
   faSearch,
+  faServer,
   faTimes,
   faVolumeUp,
   faVolumeXmark,
@@ -38,6 +39,11 @@ interface Props<T extends Item.Base = Item.Base> {
   onAudioLanguagesChange?: (values: string[]) => void;
   excludeLanguages?: string[];
   onExcludeLanguagesChange?: (values: string[]) => void;
+  // Instance filter (#156): options are this kind's instances; values are the
+  // selected arr_instance_ids (as strings). Only wired when >1 instance exists.
+  instanceOptions?: { value: string; label: string }[];
+  instanceValues?: string[];
+  onInstanceValuesChange?: (values: string[]) => void;
   enableRowSelection?: boolean;
   onSelectionChanged?: (selections: T[]) => void;
   selectionToolbar?: ReactNode;
@@ -53,11 +59,18 @@ function ItemView<T extends Item.Base>({
   onAudioLanguagesChange,
   excludeLanguages = [],
   onExcludeLanguagesChange,
+  instanceOptions,
+  instanceValues = [],
+  onInstanceValuesChange,
   enableRowSelection,
   onSelectionChanged,
   selectionToolbar,
   profileToolbar,
 }: Props<T>) {
+  const showInstanceFilter =
+    onInstanceValuesChange !== undefined &&
+    instanceOptions !== undefined &&
+    instanceOptions.length > 1;
   const { data: audioLangs = [] } = useAudioLanguages();
   const [filtersOpen, setFiltersOpen] = useState(false);
 
@@ -92,15 +105,22 @@ function ItemView<T extends Item.Base>({
           return false;
         }
       }
+      if (instanceValues.length > 0) {
+        const owner = (item as { arr_instance_id?: number }).arr_instance_id;
+        if (owner == null || !instanceValues.includes(String(owner))) {
+          return false;
+        }
+      }
       return true;
     },
-    [searchValue, audioLanguages, excludeLanguages],
+    [searchValue, audioLanguages, excludeLanguages, instanceValues],
   );
 
   const hasActiveFilter =
     searchValue.length > 0 ||
     audioLanguages.length > 0 ||
-    excludeLanguages.length > 0;
+    excludeLanguages.length > 0 ||
+    instanceValues.length > 0;
 
   // Compute active filter count (excluding search which is always visible)
   const activeFilterCount = useMemo(() => {
@@ -108,8 +128,9 @@ function ItemView<T extends Item.Base>({
     if (audioLanguages.length > 0) count++;
     if (excludeLanguages.length > 0) count++;
     if (searchValue.length > 0) count++;
+    if (instanceValues.length > 0) count++;
     return count;
-  }, [audioLanguages, excludeLanguages, searchValue]);
+  }, [audioLanguages, excludeLanguages, searchValue, instanceValues]);
 
   const activeFilterChips = useMemo(() => {
     const chips: {
@@ -152,26 +173,48 @@ function ItemView<T extends Item.Base>({
       });
     }
 
+    if (instanceValues.length > 0 && onInstanceValuesChange) {
+      const names = instanceValues
+        .map((id) => instanceOptions?.find((o) => o.value === id)?.label ?? id)
+        .join(", ");
+      chips.push({
+        key: "instance",
+        label: `Instance: ${names}`,
+        color: "grape",
+        onRemove: () => onInstanceValuesChange([]),
+      });
+    }
+
     return chips;
   }, [
     searchValue,
     audioLanguages,
     excludeLanguages,
+    instanceValues,
+    instanceOptions,
     langOptions,
     onSearchChange,
     onAudioLanguagesChange,
     onExcludeLanguagesChange,
+    onInstanceValuesChange,
   ]);
 
   const clearAllFilters = useCallback(() => {
     onSearchChange?.("");
     onAudioLanguagesChange?.([]);
     onExcludeLanguagesChange?.([]);
-  }, [onSearchChange, onAudioLanguagesChange, onExcludeLanguagesChange]);
+    onInstanceValuesChange?.([]);
+  }, [
+    onSearchChange,
+    onAudioLanguagesChange,
+    onExcludeLanguagesChange,
+    onInstanceValuesChange,
+  ]);
 
   const hasAnyFilterControl =
     onAudioLanguagesChange !== undefined ||
-    onExcludeLanguagesChange !== undefined;
+    onExcludeLanguagesChange !== undefined ||
+    showInstanceFilter;
 
   return (
     <Stack gap={0}>
@@ -314,7 +357,11 @@ function ItemView<T extends Item.Base>({
                   </Text>
                 </Group>
                 <MultiSelect
-                  placeholder="Select languages to include..."
+                  placeholder={
+                    audioLanguages.length > 0
+                      ? undefined
+                      : "Select languages to include..."
+                  }
                   data={langOptions}
                   value={audioLanguages}
                   onChange={onAudioLanguagesChange}
@@ -344,7 +391,11 @@ function ItemView<T extends Item.Base>({
                     </Text>
                   </Group>
                   <MultiSelect
-                    placeholder="Select languages to exclude..."
+                    placeholder={
+                      excludeLanguages.length > 0
+                        ? undefined
+                        : "Select languages to exclude..."
+                    }
                     data={langOptions}
                     value={excludeLanguages}
                     onChange={onExcludeLanguagesChange}
@@ -360,6 +411,34 @@ function ItemView<T extends Item.Base>({
                   />
                 </Box>
               )}
+            {showInstanceFilter && (
+              <Box style={{ flex: "1 1 200px", maxWidth: 280 }}>
+                <Group gap={6} mb={4}>
+                  <FontAwesomeIcon icon={faServer} size="xs" opacity={0.6} />
+                  <Text size="xs" fw={500} c="var(--bz-text-tertiary)">
+                    Instance
+                  </Text>
+                </Group>
+                <MultiSelect
+                  placeholder={
+                    instanceValues.length > 0
+                      ? undefined
+                      : "Filter by instance..."
+                  }
+                  data={instanceOptions}
+                  value={instanceValues}
+                  onChange={onInstanceValuesChange}
+                  clearable
+                  size="sm"
+                  maxDropdownHeight={250}
+                  styles={{
+                    input: {
+                      minHeight: 36,
+                    },
+                  }}
+                />
+              </Box>
+            )}
           </Group>
         </Paper>
       </Collapse>

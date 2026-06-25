@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Link, useParams } from "react-router";
+import { Link, useParams, useSearchParams } from "react-router";
 import {
   Alert,
   Anchor,
@@ -24,6 +24,10 @@ function formatFileSize(bytes: number): string {
 
 export default function SubtitleEditor() {
   const { mediaType, mediaId, language } = useParams();
+  const [searchParams] = useSearchParams();
+  const rawArrInstanceId = searchParams.get("arr_instance_id");
+  const arrInstanceId =
+    rawArrInstanceId === null ? undefined : Number(rawArrInstanceId);
 
   const {
     data: rawData,
@@ -33,6 +37,7 @@ export default function SubtitleEditor() {
     mediaType,
     mediaId ? Number(mediaId) : undefined,
     language,
+    Number.isNaN(arrInstanceId) ? undefined : arrInstanceId,
   );
 
   const data = rawData?.data;

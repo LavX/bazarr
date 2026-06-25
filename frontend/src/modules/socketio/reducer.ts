@@ -1,4 +1,8 @@
-import { showNotification } from "@mantine/notifications";
+import {
+  hideNotification,
+  showNotification,
+  updateNotification,
+} from "@mantine/notifications";
 import { isArray, isEmpty, isNumber } from "lodash";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
@@ -32,7 +36,44 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       },
     },
     {
+      key: "progress",
+      update: (items) => {
+        items.forEach((item) => {
+          // Ensure the notification exists before updating it. showNotification
+          // is a no-op when a notification with this id is already displayed.
+          showNotification(notification.progress.pending(item.id, item.header));
+
+          if (item.value >= item.count) {
+            updateNotification(notification.progress.end(item.id, item.header));
+          } else {
+            updateNotification(
+              notification.progress.update(
+                item.id,
+                item.header,
+                item.name,
+                item.value,
+                item.count,
+              ),
+            );
+          }
+        });
+      },
+      delete: (ids) => {
+        // hide_progress fires when a job finishes or is cancelled. Give the
+        // user a moment to read the final state before closing.
+        setTimeout(
+          () => ids.forEach((id) => hideNotification(id)),
+          notification.PROGRESS_TIMEOUT,
+        );
+      },
+    },
+    {
       key: "series",
+      // Multi-instance note (#156): the per-id invalidation below targets the
+      // emitted payload id. The unconditional list-prefix invalidation
+      // ([QueryKeys.Series]) is the cross-instance-safe refresh: it invalidates
+      // every cached series detail regardless of id, so a non-default series'
+      // detail page is refreshed even when the payload carries an upstream id.
       update: (ids) => {
         LOG("info", "Invalidating series", ids);
         ids.forEach((id) => {
@@ -52,10 +93,16 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
             queryKey: [QueryKeys.Series, id],
           });
         });
+        void queryClient.invalidateQueries({
+          queryKey: [QueryKeys.Series],
+        });
       },
     },
     {
       key: "movie",
+      // Multi-instance note (#156): same as "series" - the list-prefix
+      // invalidation ([QueryKeys.Movies]) is the cross-instance-safe refresh
+      // that covers non-default movie detail pages regardless of the payload id.
       update: (ids) => {
         LOG("info", "Invalidating movies", ids);
         ids.forEach((id) => {
@@ -75,10 +122,18 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
             queryKey: [QueryKeys.Movies, id],
           });
         });
+        void queryClient.invalidateQueries({
+          queryKey: [QueryKeys.Movies],
+        });
       },
     },
     {
       key: "episode",
+      // Multi-instance note (#156): the backend now emits the LOCAL episode id
+      // here (subtitles/indexer/series.py), which is the id the episode cache is
+      // keyed by ([QueryKeys.Episodes, <local id>]). The getQueryData lookup
+      // below therefore resolves the right series_id for non-default instances;
+      // when the episode isn't cached we fall back to invalidating all series.
       update: (ids) => {
         // Currently invalidate episodes is impossible because we don't directly fetch episodes (we fetch episodes by series id)
         // So we need to invalidate series instead
@@ -91,7 +146,11 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
           ]);
           if (episode !== undefined) {
             void queryClient.invalidateQueries({
-              queryKey: [QueryKeys.Series, episode.sonarrSeriesId],
+              queryKey: [QueryKeys.Series, episode.series_id],
+            });
+          } else {
+            void queryClient.invalidateQueries({
+              queryKey: [QueryKeys.Series],
             });
           }
         });
@@ -105,7 +164,11 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
           ]);
           if (episode !== undefined) {
             void queryClient.invalidateQueries({
-              queryKey: [QueryKeys.Series, episode.sonarrSeriesId],
+              queryKey: [QueryKeys.Series, episode.series_id],
+            });
+          } else {
+            void queryClient.invalidateQueries({
+              queryKey: [QueryKeys.Series],
             });
           }
         });
@@ -116,12 +179,12 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       update: () => {
         // Find a better way to update wanted
         void queryClient.invalidateQueries({
-          queryKey: [QueryKeys.Episodes, QueryKeys.Wanted],
+          queryKey: [QueryKeys.Series, QueryKeys.Wanted],
         });
       },
       delete: () => {
         void queryClient.invalidateQueries({
-          queryKey: [QueryKeys.Episodes, QueryKeys.Wanted],
+          queryKey: [QueryKeys.Series, QueryKeys.Wanted],
         });
       },
     },
@@ -189,7 +252,7 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       key: "episode-history",
       any: () => {
         void queryClient.invalidateQueries({
-          queryKey: [QueryKeys.Episodes, QueryKeys.History],
+          queryKey: [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.History],
         });
       },
     },
@@ -197,7 +260,7 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       key: "episode-blacklist",
       any: () => {
         void queryClient.invalidateQueries({
-          queryKey: [QueryKeys.Episodes, QueryKeys.Blacklist],
+          queryKey: [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.Blacklist],
         });
       },
     },
@@ -205,7 +268,7 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       key: "reset-episode-wanted",
       any: () => {
         void queryClient.invalidateQueries({
-          queryKey: [QueryKeys.Episodes, QueryKeys.Wanted],
+          queryKey: [QueryKeys.Series, QueryKeys.Wanted],
         });
       },
     },

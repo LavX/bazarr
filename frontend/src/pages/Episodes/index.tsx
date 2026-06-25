@@ -15,7 +15,6 @@ import {
   Stack,
   Text,
 } from "@mantine/core";
-import { Dropzone } from "@mantine/dropzone";
 import { useDocumentTitle } from "@mantine/hooks";
 import { showNotification } from "@mantine/notifications";
 import {
@@ -31,13 +30,14 @@ import {
   faLayerGroup,
   faPlay,
   faSearch,
+  faServer,
   faStop,
   faSync,
   faTriangleExclamation,
   faWrench,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { Table as TableInstance } from "@tanstack/table-core/build/lib/types";
+import { Table as TableInstance } from "@tanstack/react-table";
 import {
   useEpisodesBySeriesId,
   useIsAnyActionRunning,
@@ -45,8 +45,9 @@ import {
   useSeriesById,
   useSeriesModification,
 } from "@/apis/hooks";
+import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
 import { useInstanceName } from "@/apis/hooks/site";
-import { DropContent, Toolbox } from "@/components";
+import { FullPageDropzone, Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import { CombineModal } from "@/components/forms/CombineForm";
 import { ItemEditModal } from "@/components/forms/ItemEditForm";
@@ -69,6 +70,8 @@ const SeriesEpisodesView: FunctionComponent = () => {
 
   const seriesQuery = useSeriesById(id);
   const episodesQuery = useEpisodesBySeriesId(id);
+  const { multiInstance, nameById: instanceNameById } =
+    useArrInstanceLabels("sonarr");
 
   const { data: episodes } = episodesQuery;
   const { data: series, isFetched } = seriesQuery;
@@ -80,6 +83,16 @@ const SeriesEpisodesView: FunctionComponent = () => {
 
   const details = useMemo(
     () => [
+      ...(multiInstance && series?.arr_instance_id != null
+        ? [
+            {
+              icon: faServer,
+              text:
+                instanceNameById.get(series.arr_instance_id) ??
+                `#${series.arr_instance_id}`,
+            },
+          ]
+        : []),
       {
         icon: faHdd,
         text: `${series?.episodeFileCount} files`,
@@ -101,7 +114,7 @@ const SeriesEpisodesView: FunctionComponent = () => {
         text: series?.seriesType ?? "",
       },
     ],
-    [series],
+    [series, multiInstance, instanceNameById],
   );
 
   const modals = useModals();
@@ -174,13 +187,11 @@ const SeriesEpisodesView: FunctionComponent = () => {
         </Breadcrumbs>
       </nav>
       <QueryOverlay result={seriesQuery}>
-        <Dropzone.FullScreen
+        <FullPageDropzone
           openRef={openDropzone}
           active={profile !== undefined}
           onDrop={onDrop}
-        >
-          <DropContent></DropContent>
-        </Dropzone.FullScreen>
+        />
         <Toolbox>
           <Group gap="xs">
             <Toolbox.Button
@@ -190,7 +201,8 @@ const SeriesEpisodesView: FunctionComponent = () => {
                 if (series) {
                   await action({
                     action: "sync",
-                    seriesid: id,
+                    seriesid: series.sonarrSeriesId,
+                    arr_instance_id: series.arr_instance_id,
                   });
                 }
               }}
@@ -203,7 +215,8 @@ const SeriesEpisodesView: FunctionComponent = () => {
                 if (series) {
                   await action({
                     action: "search-missing",
-                    seriesid: id,
+                    seriesid: series.sonarrSeriesId,
+                    arr_instance_id: series.arr_instance_id,
                   });
                 }
               }}
@@ -226,6 +239,7 @@ const SeriesEpisodesView: FunctionComponent = () => {
                     scope: {
                       kind: "series",
                       seriesId: series.sonarrSeriesId,
+                      arrInstanceId: series.arr_instance_id ?? undefined,
                     },
                     availableLanguages: seriesAvailableLangs,
                   });
@@ -293,7 +307,8 @@ const SeriesEpisodesView: FunctionComponent = () => {
                     if (series) {
                       task.create(series.title, TaskGroup.ScanDisk, action, {
                         action: "scan-disk",
-                        seriesid: id,
+                        seriesid: series.sonarrSeriesId,
+                        arr_instance_id: series.arr_instance_id,
                       });
                     }
                   }}

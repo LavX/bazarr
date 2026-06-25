@@ -11,7 +11,9 @@ import api from "@/apis/raw";
 
 const cacheMovies = (client: QueryClient, movies: Item.Movie[]) => {
   movies.forEach((item) => {
-    client.setQueryData([QueryKeys.Movies, item.radarrId], item);
+    // Key by the canonical local id (#156) so a detail fetch by local id hits
+    // the list-populated cache. id == radarrId on a single default instance.
+    client.setQueryData([QueryKeys.Movies, item.id], item);
   });
 };
 
@@ -150,13 +152,13 @@ export function useMovieHistoryPagination() {
   );
 }
 
-export function useMovieHistory(radarrId?: number) {
+export function useMovieHistory(movieId?: number) {
   return useQuery({
-    queryKey: [QueryKeys.Movies, QueryKeys.History, radarrId],
+    queryKey: [QueryKeys.Movies, QueryKeys.History, movieId],
 
     queryFn: () => {
-      if (radarrId) {
-        return api.movies.historyBy(radarrId);
+      if (movieId) {
+        return api.movies.historyBy(movieId);
       }
 
       return [];

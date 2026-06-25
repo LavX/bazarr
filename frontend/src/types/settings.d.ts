@@ -54,6 +54,9 @@ declare namespace Settings {
     movie_default_profile?: number;
     serie_default_enabled: boolean;
     serie_default_profile?: number;
+    // First-run onboarding flag (#onboarding-wizard). True once the wizard is
+    // finished or skipped; gates the /setup redirect for fresh installs.
+    setup_complete?: boolean;
     path_mappings: [string, string][];
     path_mappings_movie: [string, string][];
     page_size: number;
@@ -68,11 +71,14 @@ declare namespace Settings {
     subfolder: string;
     subfolder_custom?: string;
     subzero_mods?: string[];
+    subzero_mods_keep_lyrics?: boolean;
     subzero_color_selection?: string;
     update_restart: boolean;
     upgrade_frequency: number;
     upgrade_manual: boolean;
     use_embedded_subs: boolean;
+    use_jellyfin?: boolean;
+    use_plex?: boolean;
     use_postprocessing: boolean;
     use_postprocessing_threshold: boolean;
     use_postprocessing_threshold_movie: boolean;

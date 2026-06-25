@@ -34,7 +34,8 @@ COPY requirements.txt postgres-requirements.txt ./
 # Use pip cache mount to avoid re-downloading packages across builds
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --prefix=/install --ignore-installed "setuptools>=82.0.1" \
-    && pip install --prefix=/install -r requirements.txt -r postgres-requirements.txt
+    && pip install --prefix=/install -r requirements.txt -r postgres-requirements.txt \
+    && pip install --prefix=/install --no-deps signalrcore==1.0.2
 
 # =============================================================================
 # Stage 2: Build ALASS CLI

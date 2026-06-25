@@ -11,6 +11,7 @@ from languages.get_languages import alpha2_from_alpha3, alpha2_from_language, al
 from app.database import TableShows, TableEpisodes, TableMovies, database, select
 from radarr.notify import notify_radarr
 from sonarr.notify import notify_sonarr
+from arr_instances.resolution import client_for_instance
 from plex.operations import plex_set_movie_added_date_now, plex_update_library, plex_set_episode_added_date_now, plex_refresh_item  # noqa: F401
 from jellyfin.operations import jellyfin_refresh_item
 from app.event_handler import event_stream
@@ -44,7 +45,7 @@ class ProcessSubtitlesResult:
 
 def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_type,
                               series_id=None, episode_id=None, radarr_id=None,
-                              source_score_percent=None, forced=False):
+                              source_score_percent=None, forced=False, arr_instance_id=None):
     """
     After a subtitle is downloaded, check if any profile language is configured to
     auto-translate from the just-downloaded language. If so, queue translation.
@@ -79,12 +80,58 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
             )
             return
 
+        # Fetch the episode/movie row that postprocess_subtitles dereferences
+        # for plex/jellyfin refresh (sonarrSeriesId, imdbId, season, episode,
+        # tvdbId for episodes; imdbId, tmdbId for movies). Passing None here
+        # crashed the translation job during post-processing.
+        translation_metadata = None
+        profile_id = None
         if media_type == 'series' and episode_id:
-            profile_id = get_profile_id(episode_id=episode_id)
+            metadata_query = (
+                select(TableEpisodes.sonarrSeriesId,
+                       TableEpisodes.season,
+                       TableEpisodes.episode,
+                       TableShows.imdbId,
+                       TableShows.tvdbId,
+                       TableShows.profileId)
+                .select_from(TableEpisodes)
+                .join(TableShows, TableShows.id == TableEpisodes.series_id)
+                .where(TableEpisodes.sonarrEpisodeId == episode_id)
+            )
+            if arr_instance_id is not None:
+                metadata_query = metadata_query.where(TableEpisodes.arr_instance_id == arr_instance_id)
+            translation_metadata = database.execute(metadata_query).first()
+            if translation_metadata:
+                profile_id = translation_metadata.profileId
         elif media_type == 'series' and series_id:
-            profile_id = get_profile_id(series_id=series_id)
-        else:
-            profile_id = get_profile_id(movie_id=radarr_id)
+            profile_query = select(TableShows.profileId).where(TableShows.sonarrSeriesId == series_id)
+            if arr_instance_id is not None:
+                profile_query = profile_query.where(TableShows.arr_instance_id == arr_instance_id)
+            profile_data = database.execute(profile_query).first()
+            if profile_data:
+                profile_id = profile_data.profileId
+        elif media_type in ('movie', 'movies') and radarr_id:
+            metadata_query = (
+                select(TableMovies.imdbId,
+                       TableMovies.tmdbId,
+                       TableMovies.profileId)
+                .where(TableMovies.radarrId == radarr_id)
+            )
+            if arr_instance_id is not None:
+                metadata_query = metadata_query.where(TableMovies.arr_instance_id == arr_instance_id)
+            translation_metadata = database.execute(metadata_query).first()
+            if translation_metadata:
+                profile_id = translation_metadata.profileId
+
+        if not profile_id:
+            if arr_instance_id is not None:
+                return
+            if media_type == 'series' and episode_id:
+                profile_id = get_profile_id(episode_id=episode_id)
+            elif media_type == 'series' and series_id:
+                profile_id = get_profile_id(series_id=series_id)
+            else:
+                profile_id = get_profile_id(movie_id=radarr_id)
 
         if not profile_id:
             return
@@ -92,29 +139,6 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
         profile = get_profiles_list(profile_id=profile_id)
         if not profile:
             return
-
-        # Fetch the episode/movie row that postprocess_subtitles dereferences
-        # for plex/jellyfin refresh (sonarrSeriesId, imdbId, season, episode,
-        # tvdbId for episodes; imdbId, tmdbId for movies). Passing None here
-        # crashed the translation job during post-processing.
-        translation_metadata = None
-        if media_type == 'series' and episode_id:
-            translation_metadata = database.execute(
-                select(TableEpisodes.sonarrSeriesId,
-                       TableEpisodes.season,
-                       TableEpisodes.episode,
-                       TableShows.imdbId,
-                       TableShows.tvdbId)
-                .select_from(TableEpisodes)
-                .join(TableShows)
-                .where(TableEpisodes.sonarrEpisodeId == episode_id)
-            ).first()
-        elif media_type == 'movies' and radarr_id:
-            translation_metadata = database.execute(
-                select(TableMovies.imdbId,
-                       TableMovies.tmdbId)
-                .where(TableMovies.radarrId == radarr_id)
-            ).first()
 
         # Hoisted out of the loop: check_missing_languages is independent of the
         # profile item being considered, so calling it once per profile item
@@ -191,11 +215,30 @@ def _trigger_combine(video_path, media_type, radarr_id, series_id, episode_id):
         logging.exception("BAZARR error in _trigger_combine")
 
 
+def _postprocessing_config(media_type, arr_instance_id):
+    """Resolve the post-processing settings for a download, honouring the owning
+    instance's per-instance overrides (#227) with global fallback. The threshold
+    is coerced to int because the global value may be stored as a string."""
+    from arr_instances.resolution import resolve_subtitle_setting as _resolve
+    use_pp = _resolve(arr_instance_id, "general.use_postprocessing",
+                      settings.general.use_postprocessing)
+    cmd = _resolve(arr_instance_id, "general.postprocessing_cmd",
+                   settings.general.postprocessing_cmd)
+    if media_type == 'series':
+        use_threshold = _resolve(arr_instance_id, "general.use_postprocessing_threshold",
+                                 settings.general.use_postprocessing_threshold)
+        threshold = int(_resolve(arr_instance_id, "general.postprocessing_threshold",
+                                 settings.general.postprocessing_threshold))
+    else:
+        use_threshold = _resolve(arr_instance_id, "general.use_postprocessing_threshold_movie",
+                                 settings.general.use_postprocessing_threshold_movie)
+        threshold = int(_resolve(arr_instance_id, "general.postprocessing_threshold_movie",
+                                 settings.general.postprocessing_threshold_movie))
+    return use_pp, cmd, use_threshold, threshold
+
+
 def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_upgrade=False, is_manual=False,
                      job_id=None):
-    use_postprocessing = settings.general.use_postprocessing
-    postprocessing_cmd = settings.general.postprocessing_cmd
-
     downloaded_provider = subtitle.provider_name
     uploader = subtitle.uploader
     release_info = subtitle.release_info
@@ -231,7 +274,8 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
     if media_type == 'series':
         episode_metadata = database.execute(
             select(TableShows.imdbId, TableShows.tvdbId, TableEpisodes.sonarrSeriesId,
-                   TableEpisodes.sonarrEpisodeId, TableEpisodes.season, TableEpisodes.episode)
+                   TableEpisodes.sonarrEpisodeId, TableEpisodes.season, TableEpisodes.episode,
+                   TableEpisodes.arr_instance_id)
                 .join(TableShows)\
                 .where(TableEpisodes.path == path_mappings.path_replace_reverse(path)))\
             .first()
@@ -239,6 +283,7 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
             return
         series_id = episode_metadata.sonarrSeriesId
         episode_id = episode_metadata.sonarrEpisodeId
+        owner_instance_id = episode_metadata.arr_instance_id
 
         if sync_checker(subtitle) is True:
             from .sync import sync_subtitles
@@ -249,16 +294,19 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                            percent_score=percent_score,
                            sonarr_series_id=episode_metadata.sonarrSeriesId,
                            sonarr_episode_id=episode_metadata.sonarrEpisodeId,
-                           job_id=job_id)
+                           job_id=job_id,
+                           arr_instance_id=episode_metadata.arr_instance_id,
+                           owns_job_progress=False)
     else:
         movie_metadata = database.execute(
-            select(TableMovies.radarrId, TableMovies.imdbId, TableMovies.tmdbId)
+            select(TableMovies.radarrId, TableMovies.imdbId, TableMovies.tmdbId, TableMovies.arr_instance_id)
                 .where(TableMovies.path == path_mappings.path_replace_reverse_movie(path)))\
             .first()
         if not movie_metadata:
             return
         series_id = ""
         episode_id = movie_metadata.radarrId
+        owner_instance_id = movie_metadata.arr_instance_id
 
         if sync_checker(subtitle) is True:
             from .sync import sync_subtitles
@@ -268,20 +316,17 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                            srt_lang=downloaded_language_code2,
                            percent_score=percent_score,
                            radarr_id=movie_metadata.radarrId,
-                           job_id=job_id)
+                           job_id=job_id,
+                           arr_instance_id=movie_metadata.arr_instance_id,
+                           owns_job_progress=False)
 
+    use_postprocessing, postprocessing_cmd, use_pp_threshold, pp_threshold = _postprocessing_config(
+        media_type, owner_instance_id)
     if use_postprocessing is True:
         command = pp_replace(postprocessing_cmd, path, downloaded_path, downloaded_language, downloaded_language_code2,
                              downloaded_language_code3, audio_language, audio_language_code2, audio_language_code3,
                              percent_score, subtitle_id, downloaded_provider, uploader, release_info, series_id,
                              episode_id)
-
-        if media_type == 'series':
-            use_pp_threshold = settings.general.use_postprocessing_threshold
-            pp_threshold = int(settings.general.postprocessing_threshold)
-        else:
-            use_pp_threshold = settings.general.use_postprocessing_threshold_movie
-            pp_threshold = int(settings.general.postprocessing_threshold_movie)
 
         if not use_pp_threshold or (use_pp_threshold and percent_score < pp_threshold):
             logging.debug(f"BAZARR Using post-processing command: {command}")  # noqa: G004
@@ -292,9 +337,16 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                           f"threshold value: {pp_threshold}%")
 
     if media_type == 'series':
-        reversed_path = path_mappings.path_replace_reverse(path)
-        reversed_subtitles_path = path_mappings.path_replace_reverse(downloaded_path)
-        notify_sonarr(episode_metadata.sonarrSeriesId)
+        # Reverse-map through the owning instance's path_mappings (#156) now that
+        # the owner is known; None owner => global mapping, unchanged.
+        reversed_path = path_mappings.path_replace_reverse_instance(
+            path, episode_metadata.arr_instance_id, "series")
+        reversed_subtitles_path = path_mappings.path_replace_reverse_instance(
+            downloaded_path, episode_metadata.arr_instance_id, "series")
+        # Route the rescan at the OWNING instance's Sonarr (#156); None owner =
+        # default server (legacy single-instance), unchanged.
+        notify_sonarr(episode_metadata.sonarrSeriesId,
+                      arr_client=client_for_instance(database, episode_metadata.arr_instance_id, enabled_only=False))
         event_stream(type='series', action='update', payload=episode_metadata.sonarrSeriesId)
         event_stream(type='episode-wanted', action='delete',
                      payload=episode_metadata.sonarrEpisodeId)
@@ -312,9 +364,12 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                                       tvdb_id=episode_metadata.tvdbId)
 
     else:
-        reversed_path = path_mappings.path_replace_reverse_movie(path)
-        reversed_subtitles_path = path_mappings.path_replace_reverse_movie(downloaded_path)
-        notify_radarr(movie_metadata.radarrId)
+        reversed_path = path_mappings.path_replace_reverse_instance(
+            path, movie_metadata.arr_instance_id, "movie")
+        reversed_subtitles_path = path_mappings.path_replace_reverse_instance(
+            downloaded_path, movie_metadata.arr_instance_id, "movie")
+        notify_radarr(movie_metadata.radarrId,
+                      arr_client=client_for_instance(database, movie_metadata.arr_instance_id, enabled_only=False))
         event_stream(type='movie-wanted', action='delete', payload=movie_metadata.radarrId)
         if settings.general.use_plex is True:
             if settings.plex.set_movie_added is True:
@@ -346,6 +401,8 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         radarr_id=movie_metadata.radarrId if media_type != 'series' else None,
         source_score_percent=percent_score,
         forced=subtitle.language.forced,
+        arr_instance_id=(episode_metadata.arr_instance_id if media_type == 'series'
+                         else movie_metadata.arr_instance_id),
     )
 
     # Combined subtitle: if the profile defines a combine rule and all sources

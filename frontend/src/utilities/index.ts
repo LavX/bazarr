@@ -12,7 +12,11 @@ export function toggleState(
 }
 
 export function GetItemId<T extends object>(item: T): number | undefined {
-  if (isMovie(item)) {
+  // Prefer the canonical local id (#156); fall back to the upstream id for any
+  // partially-typed payload. On a single default instance they are equal.
+  if ("id" in item && typeof (item as { id?: number }).id === "number") {
+    return (item as { id: number }).id;
+  } else if (isMovie(item)) {
     return item.radarrId;
   } else if (isEpisode(item)) {
     return item.sonarrEpisodeId;
@@ -65,6 +69,20 @@ export function fromPython(value: PythonBoolean | undefined): boolean {
 
 export function toPython(value: boolean): PythonBoolean {
   return value ? "True" : "False";
+}
+
+// Convert a job's progress value/max into a percentage clamped to 0-100.
+// Defends the progress ring against backend value/max scale mismatches that
+// could otherwise render nonsensical figures (e.g. 5967%).
+export function progressPercent(value: number, max: number): number {
+  if (!max || max <= 0) {
+    return 0;
+  }
+  const percent = (value / max) * 100;
+  if (!Number.isFinite(percent) || percent < 0) {
+    return 0;
+  }
+  return Math.min(100, percent);
 }
 
 export * from "./env";

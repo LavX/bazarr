@@ -50,7 +50,7 @@ from app.notifier import update_notifier  # noqa: E402
 from provider_hub.service import activate_staged_installations  # noqa: E402
 from languages.get_languages import load_language_in_db  # noqa: E402
 from app.jobs_queue import jobs_queue  # noqa: E402
-from app.signalr_client import sonarr_signalr_client, radarr_signalr_client  # noqa: E402
+from app.signalr_client import start_sonarr_signalr, start_radarr_signalr  # noqa: E402
 from app.server import webserver, app  # noqa: E402
 from app.announcements import get_announcements_to_file  # noqa: E402
 from utilities.central import stop_bazarr  # noqa: E402
@@ -90,14 +90,12 @@ jobs_queue_thread.start()
 logging.info("Interactive jobs queue started and waiting for tasks")
 
 if not args.no_signalr:
+    # Fan out one SignalR client per enabled instance (#156); a single default
+    # instance keeps the legacy scalar client (byte-identical).
     if settings.general.use_sonarr:
-        sonarr_signalr_thread = Thread(target=sonarr_signalr_client.start)
-        sonarr_signalr_thread.daemon = True
-        sonarr_signalr_thread.start()
+        start_sonarr_signalr()
     if settings.general.use_radarr:
-        radarr_signalr_thread = Thread(target=radarr_signalr_client.start)
-        radarr_signalr_thread.daemon = True
-        radarr_signalr_thread.start()
+        start_radarr_signalr()
 
 
 if __name__ == "__main__":

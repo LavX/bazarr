@@ -12,13 +12,14 @@ from subliminal_patch.score import MAX_SCORES
 from pysubs2.formats import get_format_identifier
 
 from languages.get_languages import language_from_alpha3, alpha2_from_alpha3, alpha3_from_alpha2
-from app.config import settings, get_array_from
+from app.config import settings
 from utilities.helper import get_target_folder, force_unicode
 from utilities.post_processing import pp_replace, set_chmod
 from utilities.path_mappings import path_mappings
 from radarr.history import history_log_movie
 from radarr.notify import notify_radarr
 from sonarr.history import history_log
+from arr_instances.resolution import scoped, client_for_instance
 from sonarr.notify import notify_sonarr
 from languages.custom_lang import CustomLanguage
 from app.database import (TableEpisodes, TableMovies, TableShows, get_profiles_list, get_audio_profile_languages,
@@ -38,7 +39,7 @@ from jellyfin.operations import jellyfin_refresh_item
 
 
 def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, filename, audio_language, job_id=None,
-                           sonarrSeriesId=None, sonarrEpisodeId=None, radarrId=None):
+                           sonarrSeriesId=None, sonarrEpisodeId=None, radarrId=None, arr_instance_id=None):
     if not job_id:
         return jobs_queue.add_job_from_function(f"Uploading {filename}", is_progress=False)
 
@@ -46,8 +47,12 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
 
     single = settings.general.single_language
 
-    use_postprocessing = settings.general.use_postprocessing
-    postprocessing_cmd = settings.general.postprocessing_cmd
+    # Resolve post-processing against the owning instance (#227) so a per-instance
+    # override applies to manual uploads too, matching the download path. Manual
+    # uploads are not score-gated, so the threshold values are ignored here.
+    from subtitles.processing import _postprocessing_config
+    use_postprocessing, postprocessing_cmd, _, _ = _postprocessing_config(
+        media_type, arr_instance_id)
 
     chmod = int(settings.general.chmod, 8) if not sys.platform.startswith(
         'win') and settings.general.chmod_enabled else None
@@ -67,7 +72,7 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
         lang_obj = Language.rebuild(lang_obj, forced=True)
 
     if media_type == 'series':
-        episode_metadata = database.execute(
+        episode_metadata = database.execute(scoped(
             select(TableEpisodes.sonarrSeriesId,
                    TableEpisodes.sonarrEpisodeId,
                    TableEpisodes.season,
@@ -77,7 +82,8 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
                    TableShows.tvdbId)
             .select_from(TableEpisodes)
             .join(TableShows)
-            .where(TableEpisodes.sonarrEpisodeId == sonarrEpisodeId)) \
+            .where(TableEpisodes.sonarrEpisodeId == sonarrEpisodeId),
+            TableEpisodes.arr_instance_id, arr_instance_id)) \
             .first()
 
         if episode_metadata:
@@ -85,10 +91,11 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
         else:
             return
     else:
-        movie_metadata = database.execute(
+        movie_metadata = database.execute(scoped(
             select(TableMovies.radarrId, TableMovies.profileId,
                    TableMovies.imdbId, TableMovies.tmdbId)
-            .where(TableMovies.radarrId == radarrId)) \
+            .where(TableMovies.radarrId == radarrId),
+            TableMovies.arr_instance_id, arr_instance_id)) \
             .first()
 
         if movie_metadata:
@@ -102,9 +109,10 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
     else:
         audio_language = {'name': '', 'code2': '', 'code3': ''}
 
+    from subtitles.tools.mods import get_subzero_mods
     sub = Subtitle(
         lang_obj,
-        mods=get_array_from(settings.general.subzero_mods),
+        mods=get_subzero_mods(arr_instance_id),
         original_format=use_original_format
     )
 
@@ -171,18 +179,30 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
     if media_type == 'series':
         sync_subtitles(video_path=path, srt_path=subtitle_path, srt_lang=uploaded_language_code2, percent_score=100,
                        sonarr_series_id=episode_metadata.sonarrSeriesId, forced=forced, hi=hi,
-                       sonarr_episode_id=episode_metadata.sonarrEpisodeId, job_id=job_id)
-        reversed_path = path_mappings.path_replace_reverse(path)
-        reversed_subtitles_path = path_mappings.path_replace_reverse(subtitle_path)
-        notify_sonarr(episode_metadata.sonarrSeriesId)
+                       sonarr_episode_id=episode_metadata.sonarrEpisodeId, job_id=job_id,
+                       arr_instance_id=arr_instance_id)
+        # Reverse-map through the owning instance's path_mappings (#156); None
+        # owner => global mapping (the default/single-instance path), unchanged.
+        reversed_path = path_mappings.path_replace_reverse_instance(path, arr_instance_id, "series")
+        reversed_subtitles_path = path_mappings.path_replace_reverse_instance(
+            subtitle_path, arr_instance_id, "series")
+        # Route the rescan at the OWNING instance's server (#156). None owner =
+        # default server (legacy single-instance), unchanged.
+        notify_sonarr(episode_metadata.sonarrSeriesId,
+                      arr_client=client_for_instance(database, arr_instance_id, enabled_only=False))
         event_stream(type='series', action='update', payload=episode_metadata.sonarrSeriesId)
         event_stream(type='episode-wanted', action='delete', payload=episode_metadata.sonarrEpisodeId)
     else:
         sync_subtitles(video_path=path, srt_path=subtitle_path, srt_lang=uploaded_language_code2, percent_score=100,
-                       radarr_id=movie_metadata.radarrId, forced=forced, hi=hi, job_id=job_id)
-        reversed_path = path_mappings.path_replace_reverse_movie(path)
-        reversed_subtitles_path = path_mappings.path_replace_reverse_movie(subtitle_path)
-        notify_radarr(movie_metadata.radarrId)
+                       radarr_id=movie_metadata.radarrId, forced=forced, hi=hi, job_id=job_id,
+                       arr_instance_id=arr_instance_id)
+        # Reverse-map through the owning instance's path_mappings (#156); None
+        # owner => global mapping (the default/single-instance path), unchanged.
+        reversed_path = path_mappings.path_replace_reverse_instance(path, arr_instance_id, "movie")
+        reversed_subtitles_path = path_mappings.path_replace_reverse_instance(
+            subtitle_path, arr_instance_id, "movie")
+        notify_radarr(movie_metadata.radarrId,
+                      arr_client=client_for_instance(database, arr_instance_id, enabled_only=False))
         event_stream(type='movie', action='update', payload=movie_metadata.radarrId)
         event_stream(type='movie-wanted', action='delete', payload=movie_metadata.radarrId)
 
@@ -206,9 +226,10 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
         provider = "manual"
         if media_type == 'series':
             history_log(4, sonarrSeriesId, sonarrEpisodeId, result, fake_provider=provider,
-                        fake_score=MAX_SCORES['episode'])
+                        fake_score=MAX_SCORES['episode'], arr_instance_id=arr_instance_id)
             if not settings.general.dont_notify_manual_actions:
-                send_notifications(sonarrSeriesId, sonarrEpisodeId, result.message)
+                send_notifications(sonarrSeriesId, sonarrEpisodeId, result.message,
+                                   arr_instance_id=arr_instance_id)
             store_subtitles(result.path, path)
             if settings.general.use_plex:
                 if settings.plex.update_series_library:
@@ -221,9 +242,10 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
                                       season=episode_metadata.season, episode=episode_metadata.episode,
                                       tvdb_id=episode_metadata.tvdbId)
         else:
-            history_log_movie(4, radarrId, result, fake_provider=provider, fake_score=MAX_SCORES['movie'])
+            history_log_movie(4, radarrId, result, fake_provider=provider, fake_score=MAX_SCORES['movie'],
+                              arr_instance_id=arr_instance_id)
             if not settings.general.dont_notify_manual_actions:
-                send_notifications_movie(radarrId, result.message)
+                send_notifications_movie(radarrId, result.message, arr_instance_id=arr_instance_id)
             store_subtitles_movie(result.path, path)
             if settings.general.use_plex:
                 if settings.plex.update_movie_library:

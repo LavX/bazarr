@@ -26,6 +26,11 @@ class EpisodesWanted(Resource):
 
     data_model = api_ns_episodes_wanted.model('wanted_episodes_data_model', {
         'audio_language': fields.Nested(get_audio_language_model),
+        # Canonical local ids + owning instance (#156) so the per-row search
+        # routes to the correct Sonarr instance. Upstream ids kept for back-compat.
+        'id': fields.Integer(),
+        'series_id': fields.Integer(),
+        'arr_instance_id': fields.Integer(),
         'seriesTitle': fields.String(),
         'episode_number': fields.String(),
         'episodeTitle': fields.String(),
@@ -64,6 +69,9 @@ class EpisodesWanted(Resource):
         wanted_condition = reduce(operator.and_, wanted_conditions)
 
         stmt = select(TableEpisodes.audio_language,
+                      TableEpisodes.id,
+                      TableEpisodes.series_id,
+                      TableEpisodes.arr_instance_id,
                       TableShows.title.label('seriesTitle'),
                       TableEpisodes.season.concat('x').concat(TableEpisodes.episode).label('episode_number'),
                       TableEpisodes.title.label('episodeTitle'),
@@ -82,6 +90,9 @@ class EpisodesWanted(Resource):
 
         results = [postprocess({
             'audio_language': x.audio_language,
+            'id': x.id,
+            'series_id': x.series_id,
+            'arr_instance_id': x.arr_instance_id,
             'seriesTitle': x.seriesTitle,
             'episode_number': x.episode_number,
             'episodeTitle': x.episodeTitle,

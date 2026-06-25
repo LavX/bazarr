@@ -12,7 +12,7 @@ from subliminal_patch.core_persistent import list_all_subtitles, download_subtit
 from subliminal_patch.score import compute_score, DEFAULT_SCORES
 
 from languages.get_languages import alpha3_from_alpha2
-from app.config import settings, get_array_from
+from app.config import settings
 from utilities.helper import get_target_folder, force_unicode
 from utilities.path_mappings import path_mappings
 from app.database import (database, get_profiles_list, select, TableEpisodes, TableShows, get_audio_profile_languages,
@@ -21,6 +21,7 @@ from app.jobs_queue import jobs_queue
 from app.notifier import send_notifications, send_notifications_movie
 from sonarr.history import history_log
 from radarr.history import history_log_movie
+from arr_instances.resolution import scoped
 from subtitles.indexer.series import store_subtitles
 from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.processing import ProcessSubtitlesResult  # noqa: F401
@@ -151,7 +152,7 @@ def manual_search(path, profile_id, providers, sceneName, title, media_type):
 
 @update_pools
 def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provider, sceneName, title, media_type,
-                             use_original_format, profile_id, job_id=None):
+                             use_original_format, profile_id, job_id=None, arr_instance_id=None):
     logging.debug(f'BAZARR Manually downloading Subtitles for this file: {path}')  # noqa: G004
 
     if settings.general.utf8_encode:
@@ -174,7 +175,8 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
     if use_original_format in (1, "1", "True", True):
         subtitle.use_original_format = True
 
-    subtitle.mods = get_array_from(settings.general.subzero_mods)
+    from subtitles.tools.mods import get_subzero_mods
+    subtitle.mods = get_subzero_mods(arr_instance_id)
     video = get_video(force_unicode(path), title, sceneName, providers={provider}, media_type=media_type)
     if video:
         try:
@@ -230,11 +232,11 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
 
 
 def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode_id, hi, forced, use_original_format,
-                                                selected_provider, subtitle, job_id=None):
+                                                selected_provider, subtitle, job_id=None, arr_instance_id=None):
     if not job_id:
         return jobs_queue.add_job_from_function("Manually downloading Subtitles",is_progress=False)
 
-    episodeInfo = database.execute(
+    episodeInfo = database.execute(scoped(
         select(
             TableEpisodes.audio_language,
             TableEpisodes.path,
@@ -245,7 +247,8 @@ def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode
             TableShows.title)
         .select_from(TableEpisodes)
         .join(TableShows)
-        .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id)) \
+        .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id),
+        TableEpisodes.arr_instance_id, arr_instance_id)) \
         .first()
 
     if not episodeInfo:
@@ -267,7 +270,8 @@ def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode
     try:
         result = manual_download_subtitle(episodePath, audio_language, hi, forced, subtitle, selected_provider,
                                           sceneName, title, 'series', use_original_format,
-                                          profile_id=get_profile_id(episode_id=sonarr_episode_id), job_id=job_id)
+                                          profile_id=get_profile_id(episode_id=sonarr_episode_id), job_id=job_id,
+                                          arr_instance_id=arr_instance_id)
     except OSError:
         return 'Unable to save subtitles file', 500
     else:
@@ -276,9 +280,10 @@ def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode
         if isinstance(result, str):
             return result, 500
         elif result:
-            history_log(2, sonarr_series_id, sonarr_episode_id, result)
+            history_log(2, sonarr_series_id, sonarr_episode_id, result, arr_instance_id=arr_instance_id)
             if not settings.general.dont_notify_manual_actions:
-                send_notifications(sonarr_series_id, sonarr_episode_id, result.message)
+                send_notifications(sonarr_series_id, sonarr_episode_id, result.message,
+                                   arr_instance_id=arr_instance_id)
             store_subtitles(result.path, episodePath)
             return '', 204
     finally:
@@ -288,17 +293,18 @@ def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode
 
 
 def movie_manually_download_specific_subtitle(radarr_id, hi, forced, use_original_format, selected_provider, subtitle,
-                                              job_id=None):
+                                              job_id=None, arr_instance_id=None):
     if not job_id:
         return jobs_queue.add_job_from_function("Manually downloading Subtitles", is_progress=False)
 
-    movieInfo = database.execute(
+    movieInfo = database.execute(scoped(
         select(TableMovies.title,
                TableMovies.year,
                TableMovies.path,
                TableMovies.sceneName,
                TableMovies.audio_language)
-        .where(TableMovies.radarrId == radarr_id)) \
+        .where(TableMovies.radarrId == radarr_id),
+        TableMovies.arr_instance_id, arr_instance_id)) \
         .first()
 
     if not movieInfo:
@@ -319,7 +325,8 @@ def movie_manually_download_specific_subtitle(radarr_id, hi, forced, use_origina
     try:
         result = manual_download_subtitle(moviePath, audio_language, hi, forced, subtitle, selected_provider,
                                           sceneName, title, 'movie', use_original_format,
-                                          profile_id=get_profile_id(movie_id=radarr_id), job_id=job_id)
+                                          profile_id=get_profile_id(movie_id=radarr_id), job_id=job_id,
+                                          arr_instance_id=arr_instance_id)
     except OSError:
         return 'Unable to save subtitles file', 500
     else:
@@ -328,9 +335,9 @@ def movie_manually_download_specific_subtitle(radarr_id, hi, forced, use_origina
         if isinstance(result, str):
             return result, 500
         elif result:
-            history_log_movie(2, radarr_id, result)
+            history_log_movie(2, radarr_id, result, arr_instance_id=arr_instance_id)
             if not settings.general.dont_notify_manual_actions:
-                send_notifications_movie(radarr_id, result.message)
+                send_notifications_movie(radarr_id, result.message, arr_instance_id=arr_instance_id)
             store_subtitles_movie(result.path, moviePath)
             return '', 204
     finally:

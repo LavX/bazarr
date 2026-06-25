@@ -43,6 +43,16 @@ def _parse_subtitles_column(subtitles_raw):
         return []
 
 
+def _add_instance_filter(mapping, upstream_id, arr_instance_id):
+    mapping.setdefault(upstream_id, set()).add(arr_instance_id)
+
+
+def _instance_filter_matches(row_instance_id, requested_instances):
+    if not requested_instances or None in requested_instances:
+        return True
+    return row_instance_id in requested_instances
+
+
 def _get_synced_episode_paths():
     """Get set of subtitle paths that have been synced (action=5) from episode history."""
     results = database.execute(
@@ -84,6 +94,13 @@ def _collect_subtitle_items(items, action, options):
     series_ids = []
     episode_ids = []
     movie_ids = []
+    # Per-item owning instance (#156): maps an upstream id to the arr_instance_id
+    # values the caller requested, so colliding ids under different instances can
+    # be handled in the same batch. None entries (legacy/single-instance) impose
+    # no filter -> byte-identical.
+    series_instance = {}
+    episode_instance = {}
+    movie_instance = {}
 
     if items is None:
         # Entire library mode
@@ -91,18 +108,22 @@ def _collect_subtitle_items(items, action, options):
     else:
         for item in items:
             item_type = item.get('type')
+            inst = item.get('arr_instance_id')
             if item_type == 'series':
                 sid = item.get('sonarrSeriesId')
                 if sid is not None:
                     series_ids.append(sid)
+                    _add_instance_filter(series_instance, sid, inst)
             elif item_type == 'episode':
                 eid = item.get('sonarrEpisodeId')
                 if eid is not None:
                     episode_ids.append(eid)
+                    _add_instance_filter(episode_instance, eid, inst)
             elif item_type == 'movie':
                 rid = item.get('radarrId')
                 if rid is not None:
                     movie_ids.append(rid)
+                    _add_instance_filter(movie_instance, rid, inst)
 
     all_items = []
     total_skipped = 0
@@ -124,6 +145,8 @@ def _collect_subtitle_items(items, action, options):
             enabled_engines=enabled_engines,
             target_lang=target_lang,
             source_lang=source_lang,
+            episode_instance=episode_instance,
+            series_instance=series_instance,
         )
         all_items.extend(ep_items)
         total_skipped += ep_skipped
@@ -142,6 +165,7 @@ def _collect_subtitle_items(items, action, options):
             enabled_engines=enabled_engines,
             target_lang=target_lang,
             source_lang=source_lang,
+            movie_instance=movie_instance,
         )
         all_items.extend(mov_items)
         total_skipped += mov_skipped
@@ -151,11 +175,15 @@ def _collect_subtitle_items(items, action, options):
 
 def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
                       force_resync=False, max_offset='60', gss=True, no_fix_framerate=True,
-                      output_mode=None, enabled_engines=None, target_lang=None, source_lang=None):
+                      output_mode=None, enabled_engines=None, target_lang=None, source_lang=None,
+                      episode_instance=None, series_instance=None):
     """Collect episode subtitles from the database."""
+    episode_instance = episode_instance or {}
+    series_instance = series_instance or {}
     columns = [
         TableEpisodes.sonarrEpisodeId,
         TableEpisodes.sonarrSeriesId,
+        TableEpisodes.arr_instance_id,
         TableEpisodes.path,
         TableEpisodes.subtitles,
     ]
@@ -192,8 +220,19 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
     skipped = 0
 
     for ep in episodes:
+        # Drop a row whose owner differs from the instance the caller asked for
+        # (#156); a requested instance of None imposes no filter (byte-identical).
+        req_instances = set()
+        if ep.sonarrEpisodeId in episode_instance:
+            req_instances.update(episode_instance[ep.sonarrEpisodeId])
+        if ep.sonarrSeriesId in series_instance:
+            req_instances.update(series_instance[ep.sonarrSeriesId])
+        if not _instance_filter_matches(ep.arr_instance_id, req_instances):
+            continue
+
         subtitles = _parse_subtitles_column(ep.subtitles)
-        video_path = path_mappings.path_replace(ep.path)
+        # Apply the owning instance's per-instance path_mappings (#156).
+        video_path = path_mappings.path_replace_instance(ep.path, ep.arr_instance_id, 'episode')
 
         # For translate: check if target language already exists
         if action == 'translate' and target_lang:
@@ -216,7 +255,8 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
                 skipped += 1
                 continue
 
-            mapped_sub_path = path_mappings.path_replace(sub_path)
+            # Apply per-instance path_mappings to the stored subtitle path (#156).
+            mapped_sub_path = path_mappings.path_replace_instance(sub_path, ep.arr_instance_id, 'episode')
             if not os.path.isfile(mapped_sub_path):
                 skipped += 1
                 continue
@@ -233,7 +273,7 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
                 continue
 
             if action == 'sync' and not force_resync:
-                reversed_path = path_mappings.path_replace_reverse(mapped_sub_path)
+                reversed_path = path_mappings.path_replace_reverse_instance(mapped_sub_path, ep.arr_instance_id, 'episode')
                 if reversed_path in synced_paths:
                     skipped += 1
                     continue
@@ -247,6 +287,7 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
                 'sonarr_series_id': ep.sonarrSeriesId,
                 'sonarr_episode_id': ep.sonarrEpisodeId,
                 'radarr_id': None,
+                'arr_instance_id': ep.arr_instance_id,
                 'max_offset_seconds': max_offset,
                 'no_fix_framerate': no_fix_framerate,
                 'gss': gss,
@@ -262,10 +303,13 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
 
 def _collect_movies(movie_ids=None, action='sync', force_resync=False,
                     max_offset='60', gss=True, no_fix_framerate=True,
-                    output_mode=None, enabled_engines=None, target_lang=None, source_lang=None):
+                    output_mode=None, enabled_engines=None, target_lang=None, source_lang=None,
+                    movie_instance=None):
     """Collect movie subtitles from the database."""
+    movie_instance = movie_instance or {}
     columns = [
         TableMovies.radarrId,
+        TableMovies.arr_instance_id,
         TableMovies.path,
         TableMovies.subtitles,
     ]
@@ -290,8 +334,15 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
     skipped = 0
 
     for movie in movies:
+        # Drop a row whose owner differs from the requested instance (#156);
+        # a requested instance of None imposes no filter (byte-identical).
+        req_instances = movie_instance.get(movie.radarrId)
+        if not _instance_filter_matches(movie.arr_instance_id, req_instances):
+            continue
+
         subtitles = _parse_subtitles_column(movie.subtitles)
-        video_path = path_mappings.path_replace_movie(movie.path)
+        # Apply the owning instance's per-instance path_mappings (#156).
+        video_path = path_mappings.path_replace_instance(movie.path, movie.arr_instance_id, 'movie')
 
         # For translate: check if target language already exists
         if action == 'translate' and target_lang:
@@ -314,7 +365,8 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
                 skipped += 1
                 continue
 
-            mapped_sub_path = path_mappings.path_replace_movie(sub_path)
+            # Apply per-instance path_mappings to the stored subtitle path (#156).
+            mapped_sub_path = path_mappings.path_replace_instance(sub_path, movie.arr_instance_id, 'movie')
             if not os.path.isfile(mapped_sub_path):
                 skipped += 1
                 continue
@@ -331,7 +383,7 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
                 continue
 
             if action == 'sync' and not force_resync:
-                reversed_path = path_mappings.path_replace_reverse_movie(mapped_sub_path)
+                reversed_path = path_mappings.path_replace_reverse_instance(mapped_sub_path, movie.arr_instance_id, 'movie')
                 if reversed_path in synced_paths:
                     skipped += 1
                     continue
@@ -345,6 +397,7 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
                 'sonarr_series_id': None,
                 'sonarr_episode_id': None,
                 'radarr_id': movie.radarrId,
+                'arr_instance_id': movie.arr_instance_id,
                 'max_offset_seconds': max_offset,
                 'no_fix_framerate': no_fix_framerate,
                 'gss': gss,
@@ -380,6 +433,9 @@ def _process_subtitle_item(item, action, options, job_id):
             'force_sync': True,
             'job_id': job_id,
             'track_job_progress': False,
+            # Thread the per-item owning instance (#156) so the subsync
+            # original-language lookup hits the exact owner.
+            'arr_instance_id': item.get('arr_instance_id'),
         }
         if item.get('output_mode') is not None:
             sync_kwargs['output_mode'] = item.get('output_mode')
@@ -412,6 +468,8 @@ def _process_subtitle_item(item, action, options, job_id):
             item['srt_path'],
             [action],
             item['video_path'],
+            # Resolve keep-lyrics against the per-item owning instance (#227).
+            arr_instance_id=item.get('arr_instance_id'),
         )
         return True
     return False
@@ -433,16 +491,16 @@ def _process_media_action(items, action, job_id):
     errors = []
 
     if action == 'upgrade':
-        sonarr_series_ids = [i.get('sonarrSeriesId') for i in items
-                             if i.get('type') in ('series', 'episode') and i.get('sonarrSeriesId')]
-        radarr_ids = [i.get('radarrId') for i in items
-                      if i.get('type') == 'movie' and i.get('radarrId')]
+        sonarr_series_filters = [(i.get('sonarrSeriesId'), i.get('arr_instance_id')) for i in items
+                                 if i.get('type') in ('series', 'episode') and i.get('sonarrSeriesId')]
+        radarr_filters = [(i.get('radarrId'), i.get('arr_instance_id')) for i in items
+                          if i.get('type') == 'movie' and i.get('radarrId')]
         try:
-            if sonarr_series_ids:
-                upgrade_episodes_subtitles(job_id=job_id, sonarr_series_ids=sonarr_series_ids)
-            if radarr_ids:
-                upgrade_movies_subtitles(job_id=job_id, radarr_ids=radarr_ids)
-            queued = len(sonarr_series_ids) + len(radarr_ids)
+            if sonarr_series_filters:
+                upgrade_episodes_subtitles(job_id=job_id, sonarr_series_filters=sonarr_series_filters)
+            if radarr_filters:
+                upgrade_movies_subtitles(job_id=job_id, radarr_filters=radarr_filters)
+            queued = len(sonarr_series_filters) + len(radarr_filters)
         except Exception as e:
             logger.error(f'Error during upgrade: {e}')  # noqa: G004
             errors.append(str(e))
@@ -465,13 +523,21 @@ def _process_media_action(items, action, job_id):
                     if not series_id:
                         skipped += 1
                         continue
-                    series_scan_subtitles(series_id)
+                    arr_instance_id = item.get('arr_instance_id')
+                    if arr_instance_id is None:
+                        series_scan_subtitles(series_id)
+                    else:
+                        series_scan_subtitles(series_id, arr_instance_id=arr_instance_id)
                 elif item_type == 'movie':
                     radarr_id = item.get('radarrId')
                     if not radarr_id:
                         skipped += 1
                         continue
-                    movies_scan_subtitles(radarr_id)
+                    arr_instance_id = item.get('arr_instance_id')
+                    if arr_instance_id is None:
+                        movies_scan_subtitles(radarr_id)
+                    else:
+                        movies_scan_subtitles(radarr_id, arr_instance_id=arr_instance_id)
                 else:
                     skipped += 1
                     continue
@@ -481,13 +547,13 @@ def _process_media_action(items, action, job_id):
                     if not series_id:
                         skipped += 1
                         continue
-                    series_download_subtitles(series_id)
+                    series_download_subtitles(series_id, arr_instance_id=item.get('arr_instance_id'))
                 elif item_type == 'movie':
                     radarr_id = item.get('radarrId')
                     if not radarr_id:
                         skipped += 1
                         continue
-                    movies_download_subtitles(radarr_id)
+                    movies_download_subtitles(radarr_id, arr_instance_id=item.get('arr_instance_id'))
                 else:
                     skipped += 1
                     continue

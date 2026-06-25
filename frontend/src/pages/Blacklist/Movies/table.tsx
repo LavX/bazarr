@@ -23,13 +23,13 @@ const Table: FunctionComponent<Props> = ({ blacklist }) => {
         accessorKey: "title",
         cell: ({
           row: {
-            original: { radarrId },
+            original: { id, title },
           },
         }) => {
-          const target = `/movies/${radarrId}`;
+          const target = `/movies/${id}`;
           return (
             <Anchor className="table-primary" component={Link} to={target}>
-              {radarrId}
+              {title}
             </Anchor>
           );
         },
@@ -76,7 +76,8 @@ const Table: FunctionComponent<Props> = ({ blacklist }) => {
         id: "subs_id",
         cell: ({
           row: {
-            original: { subs_id: subsId, provider },
+            // eslint-disable-next-line camelcase
+            original: { subs_id: subsId, provider, arr_instance_id },
           },
         }) => {
           return (
@@ -90,6 +91,8 @@ const Table: FunctionComponent<Props> = ({ blacklist }) => {
                   provider: provider,
                   // eslint-disable-next-line camelcase
                   subs_id: subsId,
+                  // eslint-disable-next-line camelcase
+                  arr_instance_id,
                 },
               })}
             ></MutateAction>

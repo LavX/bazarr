@@ -3,6 +3,7 @@
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
 
 from app.database import TableEpisodes, TableShows, TableBlacklist, database, select
+from arr_instances.resolution import scoped
 from subtitles.tools.delete import delete_subtitles
 from sonarr.blacklist import blacklist_log, blacklist_delete_all, blacklist_delete
 from utilities.path_mappings import path_mappings
@@ -26,6 +27,9 @@ class EpisodesBlacklist(Resource):
     get_language_model = api_ns_episodes_blacklist.model('subtitles_language_model', subtitles_language_model)
 
     get_response_model = api_ns_episodes_blacklist.model('EpisodeBlacklistGetResponse', {
+        'id': fields.Integer(),
+        # Owning instance (#156) so the remove action can route.
+        'arr_instance_id': fields.Integer(),
         'seriesTitle': fields.String(),
         'episode_number': fields.String(),
         'episodeTitle': fields.String(),
@@ -46,22 +50,26 @@ class EpisodesBlacklist(Resource):
         start = args.get('start')
         length = args.get('length')
 
-        stmt = select(TableShows.title.label('seriesTitle'),
+        stmt = select(TableShows.id,
+                      TableShows.title.label('seriesTitle'),
                       TableEpisodes.season.concat('x').concat(TableEpisodes.episode).label('episode_number'),
                       TableEpisodes.title.label('episodeTitle'),
                       TableEpisodes.sonarrSeriesId,
+                      TableBlacklist.arr_instance_id,
                       TableBlacklist.provider,
                       TableBlacklist.subs_id,
                       TableBlacklist.language,
                       TableBlacklist.timestamp) \
             .select_from(TableBlacklist) \
-            .join(TableShows, onclause=TableBlacklist.sonarr_series_id == TableShows.sonarrSeriesId) \
-            .join(TableEpisodes, onclause=TableBlacklist.sonarr_episode_id == TableEpisodes.sonarrEpisodeId) \
+            .join(TableShows, onclause=TableBlacklist.series_id == TableShows.id) \
+            .join(TableEpisodes, onclause=TableBlacklist.episode_id == TableEpisodes.id) \
             .order_by(TableBlacklist.timestamp.desc())
         if length > 0:
             stmt = stmt.limit(length).offset(start)
 
         return marshal([postprocess({
+            'id': x.id,
+            'arr_instance_id': x.arr_instance_id,
             'seriesTitle': x.seriesTitle,
             'episode_number': x.episode_number,
             'episodeTitle': x.episodeTitle,
@@ -80,6 +88,8 @@ class EpisodesBlacklist(Resource):
     post_request_parser.add_argument('subs_id', type=str, required=True, help='Subtitles ID')
     post_request_parser.add_argument('language', type=str, required=True, help='Subtitles language')
     post_request_parser.add_argument('subtitles_path', type=str, required=True, help='Subtitles file path')
+    post_request_parser.add_argument('arr_instance_id', type=int, required=False,
+                                     help='Owning Sonarr instance id (#156)')
 
     @authenticate
     @api_ns_episodes_blacklist.doc(parser=post_request_parser)
@@ -95,10 +105,13 @@ class EpisodesBlacklist(Resource):
         provider = args.get('provider')
         subs_id = args.get('subs_id')
         language = args.get('language')
+        arr_instance_id = args.get('arr_instance_id')
 
         episodeInfo = database.execute(
-            select(TableEpisodes.path)
-            .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id)) \
+            scoped(
+                select(TableEpisodes.path)
+                .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id),
+                TableEpisodes.arr_instance_id, arr_instance_id)) \
             .first()
 
         if not episodeInfo:
@@ -111,7 +124,8 @@ class EpisodesBlacklist(Resource):
                       sonarr_episode_id=sonarr_episode_id,
                       provider=provider,
                       subs_id=subs_id,
-                      language=language)
+                      language=language,
+                      arr_instance_id=arr_instance_id)
         if delete_subtitles(media_type='series',
                             language=language,
                             forced=False,
@@ -119,8 +133,9 @@ class EpisodesBlacklist(Resource):
                             media_path=path_mappings.path_replace(media_path),
                             subtitles_path=subtitles_path,
                             sonarr_series_id=sonarr_series_id,
-                            sonarr_episode_id=sonarr_episode_id):
-            episode_download_subtitles(no=sonarr_episode_id)
+                            sonarr_episode_id=sonarr_episode_id,
+                            arr_instance_id=arr_instance_id):
+            episode_download_subtitles(no=sonarr_episode_id, arr_instance_id=arr_instance_id)
             event_stream(type='episode-history')
             return '', 200
         else:
@@ -130,6 +145,8 @@ class EpisodesBlacklist(Resource):
     delete_request_parser.add_argument('all', type=str, required=False, help='Empty episodes subtitles blacklist')
     delete_request_parser.add_argument('provider', type=str, required=False, help='Provider name')
     delete_request_parser.add_argument('subs_id', type=str, required=False, help='Subtitles ID')
+    delete_request_parser.add_argument('arr_instance_id', type=int, required=False,
+                                       help='Owning Sonarr instance id (#156)')
 
     @authenticate
     @api_ns_episodes_blacklist.doc(parser=delete_request_parser)
@@ -143,5 +160,6 @@ class EpisodesBlacklist(Resource):
         else:
             provider = args.get('provider')
             subs_id = args.get('subs_id')
-            blacklist_delete(provider=provider, subs_id=subs_id)
+            blacklist_delete(provider=provider, subs_id=subs_id,
+                             arr_instance_id=args.get('arr_instance_id'))
         return '', 204

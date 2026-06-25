@@ -57,10 +57,16 @@ export const ProviderTestButton: FunctionComponent<{
 
   const click = useCallback(() => {
     if (testUrl !== null) {
-      const urlWithoutProtocol = new URL(testUrl).host;
+      // Preserve the configured scheme and any reverse-proxy base path. The
+      // backend tester supports https and base paths like /whisper, so forcing
+      // http and dropping the path produced false-negative "test failed"
+      // results for https endpoints or hosts behind a sub-path proxy.
+      const parsed = new URL(testUrl);
+      const protocol = parsed.protocol.replace(/:$/, "") || "http";
+      const hostWithPath = `${parsed.host}${parsed.pathname}`;
 
       api.utils
-        .providerUrlTest(category, "http", urlWithoutProtocol)
+        .providerUrlTest(category, protocol, hostWithPath)
         .then((result) => {
           if (result.status) {
             setTitle(`${result.version}`);

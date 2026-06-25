@@ -25,6 +25,7 @@ from subtitles.utils import _get_scores
 from radarr.history import history_log_movie
 from app.jobs_queue import jobs_queue
 from subtitles.adaptive_searching import is_search_given_up
+from arr_instances.resolution import scoped
 
 gc.enable()
 
@@ -32,6 +33,20 @@ gc.enable()
 def store_subtitles_movie(original_path, reversed_path, use_cache=True):
     logging.debug(f'BAZARR started subtitles indexing for this file: {reversed_path}')  # noqa: G004
     actual_subtitles = []
+    # Resolve the owning instance for this file up front (#156) so every
+    # path_replace* below honours the owning instance's per-instance
+    # path_mappings instead of the global singleton. owner_instance_id None =>
+    # global mapping (the default/single-instance path), byte-identical to legacy.
+    owner_row = database.execute(
+        select(TableMovies.arr_instance_id)
+        .where(TableMovies.path == original_path)).first()
+    owner_instance_id = owner_row.arr_instance_id if owner_row else None
+
+    def _pr(p):
+        return path_mappings.path_replace_instance(p, owner_instance_id, "movie")
+
+    def _prr(p):
+        return path_mappings.path_replace_reverse_instance(p, owner_instance_id, "movie")
     # Languages of embedded subtitle tracks detected on this pass. Used after
     # indexing to record a source-quality history entry (action=7) per language.
     embedded_languages = []
@@ -92,8 +107,8 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
                 previously_indexed_subtitles_to_exclude = [x for x in previously_indexed_subtitles
                                                            if len(x) == 3 and
                                                            x[1] and
-                                                           os.path.isfile(path_mappings.path_replace(x[1])) and
-                                                           os.stat(path_mappings.path_replace(x[1])).st_size == x[2]]
+                                                           os.path.isfile(_pr(x[1])) and
+                                                           os.stat(_pr(x[1])).st_size == x[2]]
 
             subtitles = search_external_subtitles(reversed_path, languages=get_language_set(),
                                                   only_one=settings.general.single_language)
@@ -135,7 +150,7 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
                 custom = CustomLanguage.found_external(subtitle, subtitle_path)
 
                 if custom is not None:
-                    actual_subtitles.append([custom, path_mappings.path_replace_reverse_movie(subtitle_path),
+                    actual_subtitles.append([custom, _prr(subtitle_path),
                                              subtitle_size])
 
                 elif str(language.basename) != 'und':
@@ -148,7 +163,7 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
                     language_str = subtitle_language_with_sync_modifier(language_str, subtitle)
                     language_str = subtitle_language_with_combined_modifier(language_str, subtitle)
                     logging.debug(f"BAZARR external subtitles detected: {language_str}")  # noqa: G004
-                    actual_subtitles.append([language_str, path_mappings.path_replace_reverse_movie(subtitle_path),
+                    actual_subtitles.append([language_str, _prr(subtitle_path),
                                              subtitle_size])
 
         database.execute(
@@ -156,21 +171,25 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
             .values(subtitles=str(actual_subtitles))
             .where(TableMovies.path == original_path))
         matching_movies = database.execute(
-            select(TableMovies.radarrId)
+            select(TableMovies.radarrId, TableMovies.arr_instance_id)
             .where(TableMovies.path == original_path))\
             .all()
 
         for movie in matching_movies:
             if movie:
                 logging.debug(f"BAZARR storing those languages to DB: {actual_subtitles}")  # noqa: G004
-                list_missing_subtitles_movies(no=movie.radarrId)
+                # Scope the missing-subtitle recompute to the owning instance
+                # (no-op for the default/single-instance path).
+                list_missing_subtitles_movies(no=movie.radarrId,
+                                              arr_instance_id=movie.arr_instance_id)
                 if embedded_languages:
                     # Pass the DB-side path (original_path), not the local
                     # filesystem path. history_log_movie stores result.path
                     # verbatim, and download history rows store DB-side paths
                     # via path_replace_reverse_movie. Embedded rows must match
                     # so path comparisons line up in path-mapped installs.
-                    _log_embedded_history_movie(movie.radarrId, embedded_languages, original_path)
+                    _log_embedded_history_movie(movie.radarrId, embedded_languages, original_path,
+                                                arr_instance_id=movie.arr_instance_id)
             else:
                 logging.debug(f"BAZARR haven't been able to update existing subtitles to DB: {actual_subtitles}")  # noqa: G004
     else:
@@ -181,7 +200,7 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
     return actual_subtitles
 
 
-def _log_embedded_history_movie(radarr_id, embedded_languages, reversed_path):
+def _log_embedded_history_movie(radarr_id, embedded_languages, reversed_path, arr_instance_id=None):
     """Record source-quality history entries for newly detected embedded subtitles.
 
     Why: Embedded subtitle tracks come from disc/streaming rips and are source
@@ -214,11 +233,16 @@ def _log_embedded_history_movie(radarr_id, embedded_languages, reversed_path):
             # Not atomic under AUTOCOMMIT. Concurrent indexing of the same movie
             # could produce duplicates, but this is rare in practice and consistent
             # with how other parts of Bazarr dedup history entries.
+            # Scope the dedup to the owning instance (#156): a radarrId shared
+            # across instances must not let one instance's embedded row suppress
+            # another's. No-op for the default/single-instance path.
             existing = database.execute(
-                select(TableHistoryMovie.id)
-                .where(TableHistoryMovie.radarrId == radarr_id)
-                .where(TableHistoryMovie.language == canonical)
-                .where(TableHistoryMovie.action == 7)).first()
+                scoped(
+                    select(TableHistoryMovie.id)
+                    .where(TableHistoryMovie.radarrId == radarr_id)
+                    .where(TableHistoryMovie.language == canonical)
+                    .where(TableHistoryMovie.action == 7),
+                    TableHistoryMovie.arr_instance_id, arr_instance_id)).first()
             if existing:
                 continue
 
@@ -233,20 +257,24 @@ def _log_embedded_history_movie(radarr_id, embedded_languages, reversed_path):
                 reversed_subtitles_path=None,
                 hearing_impaired=is_hi)
             history_log_movie(action=7, radarr_id=radarr_id, result=result,
-                              fake_provider="embedded", fake_score=score_out_of)
+                              fake_provider="embedded", fake_score=score_out_of,
+                              arr_instance_id=arr_instance_id)
     except Exception:
         logging.exception("BAZARR error writing embedded subtitle history for movie %s", radarr_id)
 
 
-def list_missing_subtitles_movies(no=None):
+def list_missing_subtitles_movies(no=None, arr_instance_id=None):
     stmt = select(TableMovies.radarrId,
                   TableMovies.subtitles,
                   TableMovies.failedAttempts,
                   TableMovies.profileId,
                   TableMovies.audio_language)
 
+    # Scope to the owning instance when supplied (no-op for the default path).
     if no:
-        movies_subtitles = database.execute(stmt.where(TableMovies.radarrId == no)).all()
+        movies_subtitles = database.execute(
+            scoped(stmt.where(TableMovies.radarrId == no),
+                   TableMovies.arr_instance_id, arr_instance_id)).all()
     else:
         movies_subtitles = database.execute(stmt).all()
 
@@ -363,9 +391,10 @@ def list_missing_subtitles_movies(no=None):
                 missing_subtitles_text = str(missing_subtitles_output_list)
 
         database.execute(
-            update(TableMovies)
-            .values(missing_subtitles=missing_subtitles_text)
-            .where(TableMovies.radarrId == movie_subtitles.radarrId))
+            scoped(update(TableMovies)
+                   .values(missing_subtitles=missing_subtitles_text)
+                   .where(TableMovies.radarrId == movie_subtitles.radarrId),
+                   TableMovies.arr_instance_id, arr_instance_id))
 
         event_stream(type='movie', payload=movie_subtitles.radarrId)
         event_stream(type='movie-wanted', action='update', payload=movie_subtitles.radarrId)
@@ -397,11 +426,13 @@ def movies_full_scan_subtitles(job_id=None, use_cache=None, wait_for_completion=
     gc.collect()
 
 
-def movies_scan_subtitles(no):
+def movies_scan_subtitles(no, arr_instance_id=None):
     movies = database.execute(
-        select(TableMovies.path)
-        .where(TableMovies.radarrId == no)
-        .order_by(TableMovies.radarrId)) \
+        scoped(
+            select(TableMovies.path)
+            .where(TableMovies.radarrId == no)
+            .order_by(TableMovies.radarrId),
+            TableMovies.arr_instance_id, arr_instance_id)) \
         .all()
 
     for movie in movies:

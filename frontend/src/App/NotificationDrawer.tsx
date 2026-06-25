@@ -33,6 +33,7 @@ import { startCase } from "lodash";
 import { debounce } from "lodash";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
+import { progressPercent } from "@/utilities";
 import classes from "./NotificationDrawer.module.css";
 
 interface NotificationDrawerProps {
@@ -278,11 +279,10 @@ const NotificationDrawer: FunctionComponent<NotificationDrawerProps> = ({
                                               job.progress_max == 0 &&
                                               job.progress_value == 0
                                                 ? 100
-                                                : job.progress_max > 0
-                                                  ? (job.progress_value /
-                                                      job.progress_max) *
-                                                    100
-                                                  : 0,
+                                                : progressPercent(
+                                                    job.progress_value,
+                                                    job.progress_max,
+                                                  ),
                                             color:
                                               status === "completed"
                                                 ? "green"
@@ -310,13 +310,12 @@ const NotificationDrawer: FunctionComponent<NotificationDrawerProps> = ({
                                             job.progress_max == 0 &&
                                             job.progress_value == 0
                                               ? 100
-                                              : job.progress_max > 0
-                                                ? Math.round(
-                                                    (job.progress_value /
-                                                      job.progress_max) *
-                                                      100,
-                                                  )
-                                                : 0}
+                                              : Math.round(
+                                                  progressPercent(
+                                                    job.progress_value,
+                                                    job.progress_max,
+                                                  ),
+                                                )}
                                             %
                                           </Text>
                                         }

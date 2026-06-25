@@ -1,4 +1,10 @@
-import React, { FunctionComponent, useEffect, useMemo } from "react";
+import React, {
+  FunctionComponent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import {
   Button,
   Divider,
@@ -7,7 +13,9 @@ import {
   Stack,
   Text,
 } from "@mantine/core";
+import { Dropzone } from "@mantine/dropzone";
 import { useForm } from "@mantine/form";
+import { showNotification } from "@mantine/notifications";
 import {
   faCheck,
   faCircleNotch,
@@ -19,12 +27,16 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import { isString, uniqBy } from "lodash";
 import { useMovieSubtitleModification } from "@/apis/hooks";
+import api from "@/apis/raw";
 import { subtitlesTypeOptions } from "@/components/forms/uploadFormSelectorTypes";
-import { Action, Selector } from "@/components/inputs";
+import { shouldAutoCloseUpload } from "@/components/forms/uploadHelpers";
+import { Action, DropContent, Selector } from "@/components/inputs";
 import SimpleTable from "@/components/tables/SimpleTable";
 import TextPopover from "@/components/TextPopover";
 import { useModals, withModal } from "@/modules/modals";
+import { notification } from "@/modules/task";
 import { useArrayAction, useSelectorOptions } from "@/utilities";
+import { expandArchives, isArchiveFile } from "@/utilities/archives";
 import FormUtils from "@/utilities/form";
 import {
   useLanguageProfileBy,
@@ -98,19 +110,27 @@ const MovieUploadForm: FunctionComponent<Props> = ({
     [languages],
   );
 
+  const buildRow = useCallback(
+    (file: File): SubtitleFile => {
+      const row: SubtitleFile = {
+        file,
+        language: defaultLanguage,
+        forced: defaultLanguage?.forced ?? false,
+        hi: defaultLanguage?.hi ?? false,
+      };
+      return { ...row, validateResult: validator(movie, row) };
+    },
+    [defaultLanguage, movie],
+  );
+
+  const [processing, setProcessing] = useState(false);
+  const [ready, setReady] = useState(false);
+
   const form = useForm({
     initialValues: {
-      files: files
-        .map<SubtitleFile>((file) => ({
-          file,
-          language: defaultLanguage,
-          forced: defaultLanguage?.forced ?? false,
-          hi: defaultLanguage?.hi ?? false,
-        }))
-        .map<SubtitleFile>((v) => ({
-          ...v,
-          validateResult: validator(movie, v),
-        })),
+      // Archives are expanded asynchronously on mount; start with the plain
+      // subtitle files so the common case renders instantly.
+      files: files.filter((file) => !isArchiveFile(file)).map(buildRow),
     },
     validate: {
       files: FormUtils.validation((values: SubtitleFile[]) => {
@@ -126,11 +146,64 @@ const MovieUploadForm: FunctionComponent<Props> = ({
     },
   });
 
+  // Add dropped/selected files: archives (#233) are extracted on the backend
+  // and replaced by their subtitle entries; plain files pass through.
+  const addFiles = useCallback(
+    async (incoming: File[]) => {
+      if (incoming.length === 0) {
+        return;
+      }
+      if (incoming.some(isArchiveFile)) {
+        setProcessing(true);
+      }
+      const { files: expanded, errors } = await expandArchives(
+        incoming,
+        (file) => api.subtitles.extractArchive(file),
+      );
+      if (errors.length > 0) {
+        showNotification(
+          notification.warn(
+            "Could not extract some archives",
+            errors.join(", "),
+          ),
+        );
+      }
+      if (expanded.length > 0) {
+        form.setValues((values) => ({
+          ...values,
+          files: [...(values.files ?? []), ...expanded.map(buildRow)],
+        }));
+      }
+      setProcessing(false);
+    },
+    [form, buildRow],
+  );
+
+  // Expand any archives in the initially-provided files once on mount, then
+  // arm the empty-close guard below.
   useEffect(() => {
-    if (form.values.files.length <= 0) {
+    let cancelled = false;
+    const archives = files.filter(isArchiveFile);
+    void (async () => {
+      if (archives.length > 0) {
+        await addFiles(archives);
+      }
+      if (!cancelled) {
+        setReady(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Only the initially-provided files matter here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (shouldAutoCloseUpload(ready, processing, form.values.files.length)) {
       modals.closeSelf();
     }
-  }, [form.values.files.length, modals]);
+  }, [ready, processing, form.values.files.length, modals]);
 
   const action = useArrayAction<SubtitleFile>((fn) => {
     form.setValues((values) => {
@@ -309,6 +382,7 @@ const MovieUploadForm: FunctionComponent<Props> = ({
 
           upload.mutate({
             radarrId,
+            arrInstanceId: movie.arr_instance_id,
             form: { file, language: language.code2, hi, forced },
           });
         }
@@ -318,9 +392,22 @@ const MovieUploadForm: FunctionComponent<Props> = ({
       })}
     >
       <Stack className="table-long-break">
+        <Dropzone
+          onDrop={(dropped) => void addFiles(dropped)}
+          loading={processing}
+          multiple
+        >
+          <DropContent></DropContent>
+        </Dropzone>
         <SimpleTable columns={columns} data={form.values.files}></SimpleTable>
         <Divider></Divider>
-        <Button type="submit">Upload</Button>
+        <Button
+          type="submit"
+          loading={processing}
+          disabled={processing || form.values.files.length === 0}
+        >
+          Upload
+        </Button>
       </Stack>
     </form>
   );

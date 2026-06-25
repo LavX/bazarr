@@ -3,9 +3,9 @@ import { QueryKeys } from "@/apis/queries/keys";
 import client from "@/apis/raw/client";
 
 type Scope =
-  | { kind: "movie"; radarrId: number }
-  | { kind: "episode"; episodeId: number }
-  | { kind: "series"; seriesId: number };
+  | { kind: "movie"; radarrId: number; arrInstanceId?: number }
+  | { kind: "episode"; episodeId: number; arrInstanceId?: number }
+  | { kind: "series"; seriesId: number; arrInstanceId?: number };
 
 function buildPath(scope: Scope): string {
   switch (scope.kind) {
@@ -26,6 +26,7 @@ export function useCombineSubtitles() {
       const response = await client.axios.post<Api.CombineResult>(
         buildPath(scope),
         body,
+        { params: { arr_instance_id: scope.arrInstanceId } },
       );
       return response.data;
     },
@@ -35,6 +36,7 @@ export function useCombineSubtitles() {
           void qc.invalidateQueries({
             queryKey: [QueryKeys.Movies, variables.scope.radarrId],
           });
+          void qc.invalidateQueries({ queryKey: [QueryKeys.Movies] });
           break;
         case "episode":
           // The single-episode cache is keyed [Episodes, episodeId], but the
@@ -52,6 +54,7 @@ export function useCombineSubtitles() {
           void qc.invalidateQueries({
             queryKey: [QueryKeys.Series, variables.scope.seriesId],
           });
+          void qc.invalidateQueries({ queryKey: [QueryKeys.Series] });
           break;
       }
     },

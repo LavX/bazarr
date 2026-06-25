@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import secrets
+import sys
 import threading
 import time
 from datetime import datetime
@@ -120,6 +121,9 @@ validators = [
     Validator('general.use_radarr', must_exist=True, default=False, is_type_of=bool),
     Validator('general.use_plex', must_exist=True, default=False, is_type_of=bool),
     Validator('general.use_jellyfin', must_exist=True, default=False, is_type_of=bool),
+    # Set True once the first-run onboarding wizard is completed or skipped, so it
+    # never auto-triggers again. Defaults False on a fresh install.
+    Validator('general.setup_complete', must_exist=True, default=False, is_type_of=bool),
     Validator('general.path_mappings_movie', must_exist=True, default=[], is_type_of=list),
     Validator('general.serie_tag_enabled', must_exist=True, default=False, is_type_of=bool),
     Validator('general.movie_tag_enabled', must_exist=True, default=False, is_type_of=bool),
@@ -173,6 +177,7 @@ validators = [
     Validator('general.wanted_search_frequency_movie', must_exist=True, default=6, is_type_of=int,
               is_in=[6, 12, 24, 168, ONE_HUNDRED_YEARS_IN_HOURS]),
     Validator('general.subzero_mods', must_exist=True, default='', is_type_of=str),
+    Validator('general.subzero_mods_keep_lyrics', must_exist=True, default=False, is_type_of=bool),
     Validator('general.dont_notify_manual_actions', must_exist=True, default=False, is_type_of=bool),
     Validator('general.notify_if_nothing_is_missing_for_signalr_event', must_exist=True, default=False, is_type_of=bool),
     Validator('general.hi_extension', must_exist=True, default='hi', is_type_of=str, is_in=['hi', 'cc', 'sdh']),
@@ -724,6 +729,7 @@ array_keys = ['excluded_tags',
               'excluded_series_types',
               'enabled_providers',
               'enabled_integrations',
+              'enabled_engines',
               'gemini_keys',
               'path_mappings',
               'path_mappings_movie',
@@ -855,7 +861,11 @@ def _settings_value(parent, keys):
 
 def _active_provider_hub_provider_ids():
     try:
-        from provider_hub.state import active_installations
+        state_module = sys.modules.get("provider_hub.state")
+        if state_module is not None and hasattr(state_module, "active_installations"):
+            active_installations = state_module.active_installations
+        else:
+            from provider_hub.state import active_installations
         return {
             str(provider_id)
             for provider_id in (
@@ -1081,8 +1091,7 @@ def save_settings(settings_items):
             if active_provider_hub_provider_ids is None:
                 active_provider_hub_provider_ids = _active_provider_hub_provider_ids()
             if settings_keys[1] in active_provider_hub_provider_ids:
-                if value != _settings_value(settings, settings_keys[1:]):
-                    reset_compat_pool = True
+                reset_compat_pool = True
 
         if key in ('settings-compat_endpoint-fanout_max_workers',
                    'settings-compat_endpoint-max_concurrent_fanouts'):
@@ -1189,7 +1198,7 @@ def save_settings(settings_items):
         # ciphertext back into the live Dynaconf object, so without this
         # second pass downstream code would see `enc:v1:` strings for
         # API keys, auth credentials, provider passwords, and compat
-        # tokens until the next process restart. Codex P1.
+        # tokens until the next process restart.
         settings.reload()
         migrate_legacy_plex_encryption(settings)
         decrypt_settings_in_place(settings)
@@ -1218,16 +1227,17 @@ def save_settings(settings_items):
             event_stream(type='task')
 
         if sonarr_changed:
-            from .signalr_client import sonarr_signalr_client
+            # Restart every Sonarr SignalR client and re-fan-out (#156).
+            from .signalr_client import restart_sonarr_signalr
             try:
-                sonarr_signalr_client.restart()
+                restart_sonarr_signalr()
             except Exception:
                 pass
 
         if radarr_changed:
-            from .signalr_client import radarr_signalr_client
+            from .signalr_client import restart_radarr_signalr
             try:
-                radarr_signalr_client.restart()
+                restart_radarr_signalr()
             except Exception:
                 pass
 

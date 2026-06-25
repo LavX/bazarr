@@ -900,3 +900,63 @@ def test_path_mapped_install_extraction_location(monkeypatch, tmp_path):
         f"ffmpeg should receive the FS (mapped) path '{fs_path}', "
         f"got '{ffmpeg_video_arg}'"
     )
+
+
+def test_forced_track_selected_by_title(tmp_path):
+    """A forced request selects the track titled "Forced" even when its
+    disposition.forced flag is unset.
+
+    Why: knowit only reports forced from the disposition flag, so without the
+    title heuristic the extractor fell back to the first language-only track and
+    extracted the regular subtitle for a forced request. Regression for the
+    Codex review on https://github.com/LavX/bazarr/pull/228
+    """
+    from subtitles.tools.translate.batch import extract_embedded_subtitle
+
+    metadata = {
+        "ffprobe": {
+            "subtitle": [
+                {"format": "subrip", "language": "eng"},                    # index 0, regular
+                {"format": "subrip", "language": "eng", "name": "Forced"},   # index 1, forced by title
+            ]
+        }
+    }
+    media_row = MagicMock(movie_file_id=1, file_size=1024)
+    captured = {}
+
+    def fake_ffmpeg(cmd, **kwargs):
+        captured["cmd"] = cmd
+        out_path = cmd[-1]
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with open(out_path, "w") as f:
+            f.write("1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+        result = MagicMock()
+        result.returncode = 0
+        return result
+
+    with (
+        patch("subtitles.tools.translate.batch.database") as mock_db,
+        patch(
+            "subtitles.tools.translate.batch.parse_video_metadata",
+            return_value=metadata,
+        ),
+        patch("subtitles.tools.translate.batch._handle_alpha3", return_value="eng"),
+        patch("subtitles.tools.translate.batch.alpha3_from_alpha2", return_value="eng"),
+        patch(
+            "subtitles.tools.translate.batch.get_binary", return_value="/usr/bin/ffmpeg"
+        ),
+        patch("app.get_args.args") as mock_args,
+        patch("subprocess.run", side_effect=fake_ffmpeg),
+    ):
+        mock_db.execute.return_value.first.return_value = media_row
+        mock_args.config_dir = str(tmp_path)
+
+        result = extract_embedded_subtitle(
+            "/fake/movie.mkv", "en", "movie", forced=True
+        )
+
+    assert result is not None
+    assert "0:s:1" in captured["cmd"], (
+        f"forced request should map the title-forced track (index 1), "
+        f"got cmd: {captured['cmd']}"
+    )

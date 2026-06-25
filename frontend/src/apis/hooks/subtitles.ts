@@ -15,19 +15,26 @@ export function useSubtitleAction() {
       api.subtitles.modify(param.action, param.form),
 
     onSuccess: (_, param) => {
-      client.invalidateQueries({
-        queryKey: [QueryKeys.History],
-      });
-
       // TODO: Query less
       const { type, id } = param.form;
       if (type === "episode") {
+        // id is the sonarrEpisodeId here, not a series id. Invalidate the
+        // individual episode cache and the Series root so the episode list,
+        // wanted, blacklist and episode history all refresh.
         client.invalidateQueries({
-          queryKey: [QueryKeys.Series, id],
+          queryKey: [QueryKeys.Episodes, id],
+        });
+        client.invalidateQueries({
+          queryKey: [QueryKeys.Series],
         });
       } else {
         client.invalidateQueries({
           queryKey: [QueryKeys.Movies, id],
+        });
+        // Movie history lives under [Movies, History] and is not covered by
+        // the per-movie invalidation above.
+        client.invalidateQueries({
+          queryKey: [QueryKeys.Movies, QueryKeys.History],
         });
       }
     },
@@ -40,6 +47,8 @@ export function useEpisodeSubtitleModification() {
   interface Param<T> {
     seriesId: number;
     episodeId: number;
+    // Owning Sonarr instance id (#156) so the action routes to the right server.
+    arrInstanceId?: number;
     form: T;
   }
 
@@ -51,11 +60,15 @@ export function useEpisodeSubtitleModification() {
         param.seriesId,
         param.episodeId,
         param.form,
+        param.arrInstanceId,
       ),
 
     onSuccess: (_, param) => {
       client.invalidateQueries({
         queryKey: [QueryKeys.Series, param.seriesId],
+      });
+      client.invalidateQueries({
+        queryKey: [QueryKeys.Series],
       });
     },
   });
@@ -64,11 +77,19 @@ export function useEpisodeSubtitleModification() {
     mutationKey: [QueryKeys.Subtitles, QueryKeys.Episodes],
 
     mutationFn: (param: Param<FormType.DeleteSubtitle>) =>
-      api.episodes.deleteSubtitles(param.seriesId, param.episodeId, param.form),
+      api.episodes.deleteSubtitles(
+        param.seriesId,
+        param.episodeId,
+        param.form,
+        param.arrInstanceId,
+      ),
 
     onSuccess: (_, param) => {
       client.invalidateQueries({
         queryKey: [QueryKeys.Series, param.seriesId],
+      });
+      client.invalidateQueries({
+        queryKey: [QueryKeys.Series],
       });
     },
   });
@@ -77,11 +98,19 @@ export function useEpisodeSubtitleModification() {
     mutationKey: [QueryKeys.Subtitles, QueryKeys.Episodes],
 
     mutationFn: (param: Param<FormType.UploadSubtitle>) =>
-      api.episodes.uploadSubtitles(param.seriesId, param.episodeId, param.form),
+      api.episodes.uploadSubtitles(
+        param.seriesId,
+        param.episodeId,
+        param.form,
+        param.arrInstanceId,
+      ),
 
     onSuccess: (_, { seriesId }) => {
       client.invalidateQueries({
         queryKey: [QueryKeys.Series, seriesId],
+      });
+      client.invalidateQueries({
+        queryKey: [QueryKeys.Series],
       });
     },
   });
@@ -94,6 +123,8 @@ export function useMovieSubtitleModification() {
 
   interface Param<T> {
     radarrId: number;
+    // Owning Radarr instance id (#156) so the action routes to the right server.
+    arrInstanceId?: number;
     form: T;
   }
 
@@ -101,11 +132,18 @@ export function useMovieSubtitleModification() {
     mutationKey: [QueryKeys.Subtitles, QueryKeys.Movies],
 
     mutationFn: (param: Param<FormType.Subtitle>) =>
-      api.movies.downloadSubtitles(param.radarrId, param.form),
+      api.movies.downloadSubtitles(
+        param.radarrId,
+        param.form,
+        param.arrInstanceId,
+      ),
 
     onSuccess: (_, param) => {
       client.invalidateQueries({
         queryKey: [QueryKeys.Movies, param.radarrId],
+      });
+      client.invalidateQueries({
+        queryKey: [QueryKeys.Movies],
       });
     },
   });
@@ -114,11 +152,18 @@ export function useMovieSubtitleModification() {
     mutationKey: [QueryKeys.Subtitles, QueryKeys.Movies],
 
     mutationFn: (param: Param<FormType.DeleteSubtitle>) =>
-      api.movies.deleteSubtitles(param.radarrId, param.form),
+      api.movies.deleteSubtitles(
+        param.radarrId,
+        param.form,
+        param.arrInstanceId,
+      ),
 
     onSuccess: (_, param) => {
       client.invalidateQueries({
         queryKey: [QueryKeys.Movies, param.radarrId],
+      });
+      client.invalidateQueries({
+        queryKey: [QueryKeys.Movies],
       });
     },
   });
@@ -127,11 +172,18 @@ export function useMovieSubtitleModification() {
     mutationKey: [QueryKeys.Subtitles, QueryKeys.Movies],
 
     mutationFn: (param: Param<FormType.UploadSubtitle>) =>
-      api.movies.uploadSubtitles(param.radarrId, param.form),
+      api.movies.uploadSubtitles(
+        param.radarrId,
+        param.form,
+        param.arrInstanceId,
+      ),
 
     onSuccess: (_, { radarrId }) => {
       client.invalidateQueries({
         queryKey: [QueryKeys.Movies, radarrId],
+      });
+      client.invalidateQueries({
+        queryKey: [QueryKeys.Movies],
       });
     },
   });
@@ -144,6 +196,9 @@ export function useSubtitleInfos(names: string[]) {
     queryKey: [QueryKeys.Subtitles, QueryKeys.Infos, names],
 
     queryFn: () => api.subtitles.info(names),
+    // Skip the request when there are no files yet (e.g. while an initial
+    // archive selection is still being extracted).
+    enabled: names.length > 0,
   });
 }
 
@@ -160,6 +215,7 @@ export function useSubtitleSyncStatus(
   mediaId: number | undefined,
   language: string,
   enabled: boolean,
+  arrInstanceId?: number,
 ) {
   return useQuery({
     queryKey: [
@@ -168,8 +224,10 @@ export function useSubtitleSyncStatus(
       mediaType,
       mediaId,
       language,
+      arrInstanceId,
     ],
-    queryFn: () => api.subtitles.getSyncStatus(mediaType, mediaId!, language),
+    queryFn: () =>
+      api.subtitles.getSyncStatus(mediaType, mediaId!, language, arrInstanceId),
     enabled: enabled && mediaId !== undefined,
     refetchOnWindowFocus: false,
     refetchInterval: (query) => {
@@ -183,6 +241,7 @@ export function useRefTracksByEpisodeId(
   subtitlesPath: string,
   sonarrEpisodeId: number,
   isEpisode: boolean,
+  arrInstanceId?: number,
 ) {
   return useQuery({
     queryKey: [
@@ -190,9 +249,14 @@ export function useRefTracksByEpisodeId(
       sonarrEpisodeId,
       QueryKeys.Subtitles,
       subtitlesPath,
+      arrInstanceId,
     ],
     queryFn: () =>
-      api.subtitles.getRefTracksByEpisodeId(subtitlesPath, sonarrEpisodeId),
+      api.subtitles.getRefTracksByEpisodeId(
+        subtitlesPath,
+        sonarrEpisodeId,
+        arrInstanceId,
+      ),
     enabled: isEpisode,
   });
 }
@@ -201,6 +265,7 @@ export function useRefTracksByMovieId(
   subtitlesPath: string,
   radarrMovieId: number,
   isMovie: boolean,
+  arrInstanceId?: number,
 ) {
   return useQuery({
     queryKey: [
@@ -208,9 +273,14 @@ export function useRefTracksByMovieId(
       radarrMovieId,
       QueryKeys.Subtitles,
       subtitlesPath,
+      arrInstanceId,
     ],
     queryFn: () =>
-      api.subtitles.getRefTracksByMovieId(subtitlesPath, radarrMovieId),
+      api.subtitles.getRefTracksByMovieId(
+        subtitlesPath,
+        radarrMovieId,
+        arrInstanceId,
+      ),
     enabled: isMovie,
   });
 }
@@ -239,8 +309,10 @@ export function useBatchAction() {
       void client.invalidateQueries({
         queryKey: [QueryKeys.Movies],
       });
+      // Episode/movie history live under the Series/Movies roots above. The
+      // only history query not covered is the System history stats.
       void client.invalidateQueries({
-        queryKey: [QueryKeys.History],
+        queryKey: [QueryKeys.System, QueryKeys.History],
       });
       void client.invalidateQueries({
         queryKey: [QueryKeys.Translator],
@@ -253,14 +325,27 @@ export function useSubtitleContent(
   mediaType: string | undefined,
   mediaId: number | undefined,
   language: string | undefined,
+  arrInstanceId?: number,
 ) {
   return useQuery({
-    queryKey: [QueryKeys.Subtitles, "content", mediaType, mediaId, language],
+    queryKey: [
+      QueryKeys.Subtitles,
+      "content",
+      mediaType,
+      mediaId,
+      language,
+      arrInstanceId,
+    ],
     queryFn: () => {
       if (!mediaType || mediaId === undefined || !language) {
         throw new Error("Missing parameters");
       }
-      return api.subtitles.getContent(mediaType, mediaId, language);
+      return api.subtitles.getContent(
+        mediaType,
+        mediaId,
+        language,
+        arrInstanceId,
+      );
     },
     enabled: !!mediaType && mediaId !== undefined && !!language,
     staleTime: 5 * 60 * 1000,
@@ -289,6 +374,7 @@ export function useSubtitleSave() {
       content: string;
       encoding: string;
       etag?: string;
+      arrInstanceId?: number;
     }) =>
       api.subtitles.saveContent(
         params.mediaType,
@@ -297,6 +383,7 @@ export function useSubtitleSave() {
         params.content,
         params.encoding,
         params.etag,
+        params.arrInstanceId,
       ),
     onSuccess: () => {
       // Do NOT invalidate the content query here. The editor already has
@@ -316,12 +403,14 @@ export function usePromoteSyncSubtitle() {
       mediaId: number;
       targetLanguage: string;
       sourceLanguage: string;
+      arrInstanceId?: number;
     }) =>
       api.subtitles.promoteSyncOutput(
         params.mediaType,
         params.mediaId,
         params.targetLanguage,
         params.sourceLanguage,
+        params.arrInstanceId,
       ),
     onSuccess: (_, params) => {
       if (params.mediaType === "episode") {
@@ -329,7 +418,11 @@ export function usePromoteSyncSubtitle() {
       } else {
         client.invalidateQueries({ queryKey: [QueryKeys.Movies] });
       }
-      client.invalidateQueries({ queryKey: [QueryKeys.History] });
+      // Episode/movie history live under the Series/Movies roots above; only
+      // the System history stats need a separate invalidation.
+      client.invalidateQueries({
+        queryKey: [QueryKeys.System, QueryKeys.History],
+      });
       client.invalidateQueries({
         queryKey: [
           QueryKeys.Subtitles,
@@ -337,6 +430,7 @@ export function usePromoteSyncSubtitle() {
           params.mediaType,
           params.mediaId,
           params.targetLanguage,
+          params.arrInstanceId,
         ],
       });
     },
@@ -355,6 +449,7 @@ export function useSubtitleCreate() {
       format: string;
       forced: boolean;
       hi: boolean;
+      arrInstanceId?: number;
     }) =>
       api.subtitles.createSubtitle(
         params.mediaType,
@@ -364,6 +459,7 @@ export function useSubtitleCreate() {
         params.format,
         params.forced,
         params.hi,
+        params.arrInstanceId,
       ),
     onSuccess: (_, params) => {
       if (params.mediaType === "episode") {

@@ -88,6 +88,58 @@ export function parseManifest(
   return null;
 }
 
+const CAPTCHA_FIELD_RE = /captcha/i;
+const FLARESOLVERR_FIELD_RE = /flaresolverr/i;
+
+function configSchemaHasFieldKey(manifest: LooseObject, re: RegExp): boolean {
+  const props = (manifest.config_schema as LooseObject | undefined)?.properties;
+  if (!props || typeof props !== "object") return false;
+  return Object.keys(props).some((key) => re.test(key));
+}
+
+function manifestHasCapability(
+  entry: ProviderHubCatalogEntry | LooseObject | null | undefined,
+  flagKey: string,
+  fieldRe: RegExp,
+): boolean {
+  const manifest = parseManifest(entry) as LooseObject | null;
+  if (!manifest) return false;
+  // An explicit catalog capability flag is authoritative.
+  if (typeof manifest[flagKey] === "boolean") {
+    return manifest[flagKey] as boolean;
+  }
+  // Otherwise fall back to the objective signal: the provider exposes a config
+  // field for it. Field keys (not description text) avoid false positives such
+  // as a provider whose description merely says "no captcha required".
+  return configSchemaHasFieldKey(manifest, fieldRe);
+}
+
+/**
+ * Whether a catalog provider can use an external anti-captcha service to solve
+ * captchas (for example reCAPTCHA or image verification). Honours an explicit
+ * `anti_captcha` manifest flag, else detects a `captcha*` config field.
+ * Note: FlareSolverr is a Cloudflare bypass, not a captcha solver, and is
+ * surfaced separately via usesFlaresolverr.
+ * See https://github.com/LavX/bazarr/issues/215
+ */
+export function usesAntiCaptcha(
+  entry: ProviderHubCatalogEntry | LooseObject | null | undefined,
+): boolean {
+  return manifestHasCapability(entry, "anti_captcha", CAPTCHA_FIELD_RE);
+}
+
+/**
+ * Whether a catalog provider can use FlareSolverr to clear Cloudflare browser
+ * challenges. Honours an explicit `flaresolverr` manifest flag, else detects a
+ * `flaresolverr*` config field.
+ * See https://github.com/LavX/bazarr/issues/215
+ */
+export function usesFlaresolverr(
+  entry: ProviderHubCatalogEntry | LooseObject | null | undefined,
+): boolean {
+  return manifestHasCapability(entry, "flaresolverr", FLARESOLVERR_FIELD_RE);
+}
+
 interface ParsedSemver {
   core: number[];
   prerelease: string[];

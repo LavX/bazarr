@@ -126,7 +126,7 @@ export default function EditorToolbar({
               )}
             </div>
           </Tooltip>
-          <Tooltip label="Upload (Ctrl+O)" position="bottom" withArrow>
+          <Tooltip label="Upload" position="bottom" withArrow>
             <ActionIcon
               size="sm"
               variant="subtle"
@@ -305,11 +305,7 @@ export default function EditorToolbar({
               <FontAwesomeIcon icon={faBook} />
             </ActionIcon>
           </Tooltip>
-          <Tooltip
-            label="AI Translate (Ctrl+Shift+T)"
-            position="bottom"
-            withArrow
-          >
+          <Tooltip label="AI Translate (Alt+T)" position="bottom" withArrow>
             <ActionIcon
               size="sm"
               variant="subtle"

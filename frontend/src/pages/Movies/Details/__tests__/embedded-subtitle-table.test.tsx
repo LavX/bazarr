@@ -28,6 +28,7 @@ import server from "@/tests/mocks/node";
 
 function makeMovie(subtitles: Subtitle[]): Item.Movie {
   return {
+    id: 1,
     radarrId: 1,
     title: "Test Movie",
     path: "/movies/test.mkv",
@@ -48,6 +49,7 @@ function makeMovie(subtitles: Subtitle[]): Item.Movie {
 
 function makeHistoryEntry(overrides: Partial<History.Movie>): History.Movie {
   return {
+    id: 1,
     radarrId: 1,
     title: "Test Movie",
     action: 1,

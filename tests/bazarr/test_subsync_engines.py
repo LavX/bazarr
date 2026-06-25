@@ -624,6 +624,7 @@ def test_sync_subtitles_indexes_keep_all_outputs_without_callback(mocker):
         sonarr_series_id=10,
         sonarr_episode_id=20,
         radarr_id=None,
+        arr_instance_id=None,
     )
 
 

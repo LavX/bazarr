@@ -8,11 +8,53 @@ from subliminal_patch.subtitle import Subtitle
 from subliminal_patch.core import get_subtitle_path
 from subzero.language import Language
 
-from app.config import settings
+from app.config import settings, get_array_from
 from app.jobs_queue import jobs_queue
 from languages.custom_lang import CustomLanguage
 from languages.get_languages import alpha3_from_alpha2
 from subtitles.indexer.utils import get_external_subtitles_path
+
+
+def has_remove_hi(mods):
+    """Whether the Remove HI mod is present, tolerating its parameterized form
+    (e.g. remove_HI(keep_lyrics=1)). See https://github.com/LavX/bazarr/issues/225
+    """
+    return any(m == 'remove_HI' or m.startswith('remove_HI(') for m in (mods or []))
+
+
+def with_keep_lyrics(mods, arr_instance_id=None):
+    """Rewrite the Remove HI mod to preserve song lyrics when the setting is on.
+
+    The preference is encoded as a subzero mod parameter so it travels through
+    the (settings-agnostic) subtitle modification pipeline.
+    See https://github.com/LavX/bazarr/issues/225
+
+    When ``arr_instance_id`` is given the preserve-lyrics preference resolves
+    against that instance's per-instance override, falling back to the global
+    setting (#227). A None instance keeps the legacy global-only behaviour.
+    """
+    from arr_instances.resolution import resolve_subtitle_setting
+    keep_lyrics = resolve_subtitle_setting(
+        arr_instance_id, "general.subzero_mods_keep_lyrics",
+        settings.general.subzero_mods_keep_lyrics)
+    if not mods or not keep_lyrics:
+        return mods
+    return ['remove_HI(keep_lyrics=1)' if m == 'remove_HI' else m for m in mods]
+
+
+def get_subzero_mods(arr_instance_id=None):
+    """Configured subzero mods with the preserve-song-lyrics preference applied.
+
+    With ``arr_instance_id`` the configured mods + keep-lyrics preference resolve
+    against that instance's overrides (#227). The per-instance value is stored as
+    a list; the global value is a comma-separated string, so both shapes are
+    normalised here. A None instance preserves the legacy global behaviour.
+    """
+    from arr_instances.resolution import resolve_subtitle_setting
+    configured = resolve_subtitle_setting(
+        arr_instance_id, "general.subzero_mods", settings.general.subzero_mods)
+    mods = configured if isinstance(configured, list) else get_array_from(configured)
+    return with_keep_lyrics(mods, arr_instance_id)
 
 
 MOD_LABELS = {
@@ -30,7 +72,7 @@ MOD_LABELS = {
 
 
 def apply_subtitle_mods(language, subtitle_path, mods, video_path,
-                         media_type=None, media_id=None, job_id=None):
+                         media_type=None, media_id=None, job_id=None, arr_instance_id=None):
     """Job-aware wrapper for subtitles_apply_mods.
 
     When called without a job_id, queues the work as a backend job and returns
@@ -52,7 +94,8 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
 
     try:
         subtitles_apply_mods(language=language, subtitle_path=subtitle_path,
-                             mods=mods, video_path=video_path)
+                             mods=mods, video_path=video_path,
+                             arr_instance_id=arr_instance_id)
     except Exception:
         jobs_queue.update_job_name(
             job_id=job_id,
@@ -80,13 +123,18 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
     if media_id and media_type:
         if media_type == 'episode':
             from app.database import TableEpisodes, database, select
+            from arr_instances.resolution import scoped
+            # Scope the lookup to the owning instance (#156): media_id is the
+            # upstream sonarrEpisodeId, not unique across instances. Emit the
+            # LOCAL episode id so the frontend invalidates the right cached row.
             metadata = database.execute(
-                select(TableEpisodes.sonarrSeriesId)
-                .where(TableEpisodes.sonarrEpisodeId == media_id)
+                scoped(select(TableEpisodes.id, TableEpisodes.sonarrSeriesId)
+                       .where(TableEpisodes.sonarrEpisodeId == media_id),
+                       TableEpisodes.arr_instance_id, arr_instance_id)
             ).first()
             if metadata:
                 event_stream(type='series', payload=metadata.sonarrSeriesId)
-            event_stream(type='episode', payload=media_id)
+            event_stream(type='episode', payload=metadata.id if metadata else media_id)
         else:
             event_stream(type='movie', payload=media_id)
 
@@ -96,7 +144,11 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
     )
 
 
-def subtitles_apply_mods(language, subtitle_path, mods, video_path):
+def subtitles_apply_mods(language, subtitle_path, mods, video_path, arr_instance_id=None):
+    # The mod list is user-chosen here, so only the keep-lyrics preference is
+    # instance-relevant: resolve it against the media's owning instance (#227).
+    # A None owner keeps the legacy global-only behaviour (single-instance).
+    mods = with_keep_lyrics(mods, arr_instance_id)
     language = alpha3_from_alpha2(language)
     custom = CustomLanguage.from_value(language, "alpha3")
     if custom is None:
@@ -115,7 +167,7 @@ def subtitles_apply_mods(language, subtitle_path, mods, video_path):
 
     content = sub.get_modified_content(format=sub.format)
     if content:
-        if hasattr(sub, 'mods') and isinstance(sub.mods, list) and 'remove_HI' in sub.mods:
+        if hasattr(sub, 'mods') and isinstance(sub.mods, list) and has_remove_hi(sub.mods):
             # get the modded subtitles path if the subtitles are alongside the video
             modded_subtitles_path_if_alongside_video = get_subtitle_path(
                 video_path,
