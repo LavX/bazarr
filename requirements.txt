@@ -41,7 +41,7 @@ itsdangerous==2.2.0
 json_tricks==3.17.3
 knowit==0.5.11
 lxml>=6.1.1  # XXE fix in iterparse / ETCompatXMLParser
-msgpack==1.1.2  # pinned by signalrcore==1.0.2 (its only allowed version); cannot bump to 1.2.1 without breaking signalrcore
+msgpack==1.2.1  # GHSA-6v7p-g79w-8964 fix. signalrcore 1.0.2 over-pins msgpack==1.1.2 in its metadata, so it is installed with --no-deps (see Dockerfile, .github/workflows/ci.yml, bazarr/app/requirements.py). Bazarr forces the JSON SignalR protocol, so msgpack's MessagePack path is never used, and 1.2.1 is runtime-compatible with signalrcore 1.0.2 (verified).
 numpy>=2.4.6,<2.5.0  # cap excludes entire 2.4.x line: it raised the x86-64 baseline to v2, crashing pre-2009 CPUs (SIGILL on import). 2.4.0 itself is also yanked for an unrelated BC bug.
 Pillow>=12.2.0 --only-binary=Pillow
 plexapi>=4.18.1
@@ -56,7 +56,11 @@ rarfile==4.2
 requests==2.34.2
 retry==0.9.2
 semver==3.0.4
-signalrcore==1.0.2
+# signalrcore==1.0.2 is installed with --no-deps (Dockerfile, ci.yml,
+# bazarr/app/requirements.py). Its metadata hard-pins the vulnerable
+# msgpack==1.1.2 (GHSA-6v7p-g79w-8964), but its only runtime dep is msgpack,
+# which we pin above at 1.2.1. Keeping it out of the normal resolve avoids the
+# ResolutionImpossible conflict and keeps Dependabot off the transitive pin.
 six==1.17.0
 sqlalchemy==2.0.51
 srt==3.5.3

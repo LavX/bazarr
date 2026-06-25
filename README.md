@@ -122,6 +122,9 @@ cd bazarr
 
 # Install Python dependencies
 pip install -r requirements.txt
+# signalrcore over-pins the vulnerable msgpack==1.1.2, so install it with
+# --no-deps (its only runtime dep is msgpack, pinned to 1.2.1 above)
+pip install --no-deps signalrcore==1.0.2
 
 # Build the frontend
 cd frontend && npm ci && npm run build && cd ..
