@@ -126,7 +126,11 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ffmpeg
 
       - name: Install Python dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          # signalrcore over-pins msgpack==1.1.2 (GHSA-6v7p-g79w-8964); install it
+          # with --no-deps so our msgpack==1.2.1 from requirements.txt wins.
+          pip install --no-deps signalrcore==1.0.2
 
       - name: Install dev dependencies
         run: pip install -r dev-requirements.txt

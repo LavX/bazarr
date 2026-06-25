@@ -138,7 +138,7 @@ RUNTIME_REQUIREMENTS = {
     "json_tricks": ("json_tricks", "==3.17.3"),
     "knowit": ("knowit", "==0.5.11"),
     "lxml": ("lxml", ">=6.1.0"),
-    "msgpack": ("msgpack", "==1.1.2"),
+    "msgpack": ("msgpack", "==1.2.1"),  # signalrcore over-pins ==1.1.2; we install signalrcore --no-deps
     "numpy": ("numpy", ">=2.0.0,<2.4.0"),
     "PIL": ("Pillow", ">=12.2.0"),
     "plexapi": ("plexapi", ">=4.16.1"),
@@ -298,8 +298,29 @@ def install_requirements(missing_modules=None):
     if not is_virtualenv():
         pip_command.insert(4, "--user")
 
+    # signalrcore is kept out of requirements.txt because its metadata hard-pins
+    # the vulnerable msgpack==1.1.2 (GHSA-6v7p-g79w-8964), which the resolver
+    # would force over our msgpack==1.2.1. Its only runtime dep is msgpack, so we
+    # install it with --no-deps. Version comes from RUNTIME_REQUIREMENTS so there
+    # is a single source of truth.
+    sc_dist, sc_spec = RUNTIME_REQUIREMENTS["signalrcore"]
+    signalrcore_command = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "-qq",
+        "--disable-pip-version-check",
+        "--no-deps",
+        f"{sc_dist}{sc_spec}",
+    ]
+    if not is_virtualenv():
+        signalrcore_command.insert(4, "--user")
+
     try:
         subprocess.check_output(pip_command, stderr=subprocess.STDOUT)
+        subprocess.check_output(signalrcore_command, stderr=subprocess.STDOUT)
     except subprocess.CalledProcessError as e:
         logging.exception("BAZARR requirements.txt installation result: %s", e.stdout)
         os._exit(EXIT_REQUIREMENTS_ERROR)
