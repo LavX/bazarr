@@ -189,37 +189,42 @@ if not hasattr(settings.general, 'provider_priorities') or not settings.general.
 
 
 def init_binaries():
+    # RAR archives are extracted with p7zip's 7z, matching the Dockerfile
+    # (installs p7zip-full; no unrar/unar package or self-download). 7z is tried
+    # first. unar/unrar remain only as a best-effort fallback for environments
+    # that already have them on PATH; they are no longer in binaries.json, so
+    # get_binary never attempts a (read-only, failing) self-download for them.
     try:
-        exe = get_binary("unar")
-        rarfile.UNAR_TOOL = exe
+        exe = get_binary("7z")
         rarfile.UNRAR_TOOL = None
-        rarfile.SEVENZIP_TOOL = None
-        rarfile.tool_setup(unrar=False, unar=True, bsdtar=False, sevenzip=False, force=True)
+        rarfile.UNAR_TOOL = None
+        rarfile.SEVENZIP_TOOL = exe
+        rarfile.tool_setup(unrar=False, unar=False, bsdtar=False, sevenzip=True, force=True)
     except (BinaryNotFound, rarfile.RarCannotExec):
         try:
-            exe = get_binary("unrar")
-            rarfile.UNRAR_TOOL = exe
-            rarfile.UNAR_TOOL = None
+            exe = get_binary("unar")
+            rarfile.UNAR_TOOL = exe
+            rarfile.UNRAR_TOOL = None
             rarfile.SEVENZIP_TOOL = None
-            rarfile.tool_setup(unrar=True, unar=False, bsdtar=False, sevenzip=False, force=True)
+            rarfile.tool_setup(unrar=False, unar=True, bsdtar=False, sevenzip=False, force=True)
         except (BinaryNotFound, rarfile.RarCannotExec):
             try:
-                exe = get_binary("7z")
-                rarfile.UNRAR_TOOL = None
+                exe = get_binary("unrar")
+                rarfile.UNRAR_TOOL = exe
                 rarfile.UNAR_TOOL = None
-                rarfile.SEVENZIP_TOOL = "7z"
-                rarfile.tool_setup(unrar=False, unar=False, bsdtar=False, sevenzip=True, force=True)
+                rarfile.SEVENZIP_TOOL = None
+                rarfile.tool_setup(unrar=True, unar=False, bsdtar=False, sevenzip=False, force=True)
             except (BinaryNotFound, rarfile.RarCannotExec):
-                logging.exception("BAZARR requires a rar archive extraction utilities (unrar, unar, 7zip) and it can't be found.")
+                logging.exception("BAZARR requires a rar archive extraction utility (7z, unar, or unrar) and none could be found.")
                 raise BinaryNotFound
             else:
-                logging.debug("Using 7zip from: %s", exe)
+                logging.debug("Using UnRAR from: %s", exe)
                 return exe
         else:
-            logging.debug("Using UnRAR from: %s", exe)
+            logging.debug("Using unar from: %s", exe)
             return exe
     else:
-        logging.debug("Using unar from: %s", exe)
+        logging.debug("Using 7zip from: %s", exe)
         return exe
 
 

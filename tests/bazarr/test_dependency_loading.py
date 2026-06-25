@@ -132,6 +132,24 @@ def test_msgpack_is_not_bundled_and_can_follow_signalrcore_dependency():
     assert not msgpack_path.is_relative_to(libs_dir)
 
 
+def test_binaries_json_does_not_self_download_rar_tools():
+    # RAR archives are extracted via p7zip's 7z (Dockerfile installs p7zip-full,
+    # no unrar/unar package). Listing unrar/unar here makes init_binaries try to
+    # download them into the read-only /app/bazarr/bin dir at startup
+    # (PermissionError) before falling back to 7z, so they must stay out.
+    import json
+
+    repo_root = Path(__file__).resolve().parents[2]
+    binaries = json.loads(
+        (repo_root / "bazarr" / "utilities" / "binaries.json").read_text()
+    )
+    names = {entry["name"].lower() for entry in binaries}
+
+    assert "unrar" not in names
+    assert "unrar.exe" not in names
+    assert "unar" not in names
+
+
 def test_third_party_libs_directory_is_not_part_of_runtime_or_tests():
     repo_root = Path(__file__).resolve().parents[2]
 
