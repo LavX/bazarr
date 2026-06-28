@@ -557,10 +557,17 @@ def create_static_handler(config_dir: str, backend: BackendManager | None = None
     ALLOWED_ASSETS: "dict[str, str]" = _build_static_allowlist(static_root)
     _config = _read_bazarr_config(config_dir)
     _startup_base_url = _config.get("baseUrl", "/") or "/"
+    _base_prefix = _startup_base_url.strip("/")  # e.g. "bazarr", or "" when not set
 
     async def static_handler(request: web.Request) -> web.StreamResponse:
         """Serve static frontend files, fallback to index.html for SPA routing."""
         path = request.path.lstrip("/")
+
+        # When base_url is set (e.g. /bazarr), the browser resolves ./assets/...
+        # relative to <base href="/bazarr/"> and requests /bazarr/assets/....
+        # Strip the prefix before the allowlist lookup so the file is found.
+        if _base_prefix and path.startswith(_base_prefix + "/"):
+            path = path[len(_base_prefix) + 1:]
 
         # Dict .get() with a tainted key returns a value sourced from the trusted
         # dict population. No taint flows from `path` into `safe_path`.
