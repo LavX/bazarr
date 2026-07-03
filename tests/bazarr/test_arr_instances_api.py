@@ -131,6 +131,59 @@ def test_update_rejects_invalid_port(schema_session):
     assert status == 400
 
 
+# ---------------------------------- scalar config mirroring (#276 onboarding)
+
+def test_create_default_mirrors_connection_into_scalar_config(schema_session, monkeypatch):
+    """A default instance created via the API (onboarding wizard / Connections
+    page) must mirror its host/port/key into the scalar settings.<kind>.* config.
+
+    Without this the single-instance compat paths (health check, get_<kind>_info
+    version probe, scheduler/SignalR fall-back) keep targeting the default
+    127.0.0.1:8989 because the wizard never populated the scalar config, spamming
+    connection-refused errors even though the per-instance sync works (#276).
+    """
+    from app import config as app_config
+    from arr_instances import service
+
+    monkeypatch.setattr(app_config, "write_config", lambda: None)
+    settings = app_config.settings
+    original = (settings.sonarr.ip, settings.sonarr.port, settings.sonarr.apikey)
+    try:
+        created, status = service.create_instance(
+            schema_session,
+            {"kind": "sonarr", "name": "Main", "ip": "10.9.8.7", "port": 9999,
+             "api_key": "real-key", "is_default": True},
+        )
+        assert status == 201
+
+        # The mirror is a post-commit side effect the resource boundary triggers
+        # via refresh_runtime; exercise the kind-scoped helper directly.
+        service.mirror_scalar_config_from_default(schema_session, "sonarr")
+
+        assert settings.sonarr.ip == "10.9.8.7"
+        assert int(settings.sonarr.port) == 9999
+        assert settings.sonarr.apikey == "real-key"
+    finally:
+        settings.sonarr.ip, settings.sonarr.port, settings.sonarr.apikey = original
+
+
+def test_mirror_scalar_config_noop_without_default(schema_session, monkeypatch):
+    """No default instance -> the scalar config is left untouched (no crash)."""
+    from app import config as app_config
+    from arr_instances import service
+
+    wrote = []
+    monkeypatch.setattr(app_config, "write_config", lambda: wrote.append(True))
+    settings = app_config.settings
+    original_ip = settings.radarr.ip
+    try:
+        service.mirror_scalar_config_from_default(schema_session, "radarr")
+        assert settings.radarr.ip == original_ip
+        assert wrote == []  # nothing to mirror, no write
+    finally:
+        settings.radarr.ip = original_ip
+
+
 def test_test_connection_rejects_invalid_port():
     from arr_instances import service
 

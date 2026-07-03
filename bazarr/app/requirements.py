@@ -114,7 +114,7 @@ RUNTIME_REQUIREMENTS = {
     "deep_translator": ("deep-translator", "==1.11.4"),
     "dns": ("dnspython", "==2.8.0"),
     "dogpile": ("dogpile.cache", "==1.5.0"),
-    "dynaconf": ("dynaconf", "==3.2.13"),
+    "dynaconf": ("dynaconf", "==3.3.2"),
     "emoji": ("emoji", "==2.15.0"),
     "enzyme": ("enzyme", "==0.5.2"),
     "fcache": ("fcache", "==0.6.0"),

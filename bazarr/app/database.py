@@ -822,6 +822,21 @@ def migrate_db(app):
         database.rollback()
         logging.exception("Multi-instance default backfill failed; continuing startup")
 
+    # Heal installs whose default instance was created directly via the API
+    # (onboarding wizard / Connections page) rather than backfilled from the
+    # scalar config: their scalar settings.<kind>.* never got populated, so the
+    # single-instance compat paths poll the default 127.0.0.1:8989 / :7878 and
+    # spam connection-refused errors (#276). Mirror the default instance back
+    # into the scalar config. Idempotent (write_config short-circuits when the
+    # config is unchanged, e.g. for backfilled installs) and guarded so a hiccup
+    # never blocks startup.
+    try:
+        from arr_instances.service import mirror_scalar_config_from_default
+        for _kind in ("sonarr", "radarr"):
+            mirror_scalar_config_from_default(database, _kind)
+    except Exception:
+        logging.exception("Scalar-config reconcile from default instances failed; continuing startup")
+
     optimize_sqlite_database(engine)
 
     # Refresh the cached migration revision now that pending migrations have run. init_db()

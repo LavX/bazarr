@@ -228,7 +228,7 @@ const SystemStatusView: FunctionComponent = () => {
             </Label>
           </Row>
           <Row title="Community">
-            <Label icon={faDiscord} link="https://discord.gg/WSVzzaDg">
+            <Label icon={faDiscord} link="https://discord.gg/fpp5JXmB8f">
               Bazarr+ on Discord
             </Label>
           </Row>

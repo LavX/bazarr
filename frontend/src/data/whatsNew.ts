@@ -28,9 +28,27 @@ export interface WhatsNewSlide {
  * cutting a release. Kept as an explicit token so the wizard never has to parse the
  * fork's `version + YYMMDD` runtime string.
  */
-export const latestWhatsNewVersion = "2.5.0";
+export const latestWhatsNewVersion = "2.5.1";
 
 export const whatsNew: Record<string, WhatsNewSlide[]> = {
+  "2.5.1": [
+    {
+      title: "Cleaner multi-server first-run",
+      body: "A fresh setup no longer spams connection-refused errors at the default 8989/7878 ports while your real Sonarr/Radarr work. Existing setups self-heal automatically on this upgrade, no action needed.",
+      icon: faServer,
+      cta: { label: "Open Connections", to: "/settings/connections" },
+    },
+    {
+      title: "Reverse-proxy subpath fixed",
+      body: "Running Bazarr+ behind a reverse proxy on a subpath (base_url, e.g. /bazarr) no longer shows a blank page. Static assets now load correctly under the configured prefix.",
+      icon: faTowerBroadcast,
+    },
+    {
+      title: "Dependency & security maintenance",
+      body: "A round of dependency and security updates across the stack (dynaconf, pillow, apscheduler, numpy, alembic, cloudscraper and more), with no known vulnerabilities outstanding.",
+      icon: faShieldHalved,
+    },
+  ],
   "2.5.0": [
     {
       title: "Multiple Sonarr/Radarr instances",

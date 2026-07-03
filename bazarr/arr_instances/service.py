@@ -34,6 +34,59 @@ def event_stream(*args, **kwargs):
     _event_stream(*args, **kwargs)
 
 
+def mirror_scalar_config_from_default(session, kind):
+    """Mirror the default instance's connection details into the scalar
+    ``settings.<kind>.*`` config so the single-instance compat paths target the
+    real server (#276).
+
+    Several legacy paths (the health-check rootfolder validation, the shared
+    ``get_<kind>_info`` version probe via ``url_<kind>()``, and the SignalR /
+    scheduler fall-back) read the scalar config whenever there is exactly ONE
+    instance of a kind, on the documented assumption that the scalar config
+    equals the default instance. That holds for installs upgraded via
+    ``backfill`` (which built the instance FROM the scalar config), but NOT for
+    instances created directly through the API (the onboarding wizard and the
+    Connections page), which never populated the scalar config. Those installs
+    then poll the default ``127.0.0.1:8989`` / ``:7878`` and spam
+    connection-refused errors even though the per-instance sync works fine.
+    Re-establish the invariant by copying the default instance back into the
+    scalar config after every create/update.
+
+    Best-effort and called only AFTER the row is committed, so a failure here
+    must never fail the CRUD request (the caller guards it).
+    """
+    if kind not in ("sonarr", "radarr"):
+        return
+    repo = ArrInstanceRepository(session)
+    default = repo.get_default(kind)
+    if default is None:
+        return
+    from app.config import settings, write_config
+    section = getattr(settings, kind)
+    before = (section.ip, section.port, section.base_url, bool(section.ssl),
+              bool(section.verify_ssl), int(section.http_timeout or 60), section.apikey)
+    section.ip = default.ip or "127.0.0.1"
+    if default.port:
+        section.port = int(default.port)
+    section.base_url = default.base_url or "/"
+    section.ssl = bool(default.ssl)
+    section.verify_ssl = bool(default.verify_ssl)
+    section.http_timeout = int(default.http_timeout or 60)
+    api_key = repo.get_decrypted_api_key(default.id)
+    if api_key is not None:
+        section.apikey = api_key
+    after = (section.ip, section.port, section.base_url, bool(section.ssl),
+             bool(section.verify_ssl), int(section.http_timeout or 60), section.apikey)
+    # Only persist when something actually changed: on the steady-state boot the
+    # scalar config already matches the default instance, and an unconditional
+    # write_config() would rewrite config.yaml on every startup for nothing.
+    if before != after:
+        logging.info(
+            "Mirrored default %s instance (%s:%s) into the scalar config (#276)",
+            kind, section.ip, section.port)
+        write_config()
+
+
 def refresh_runtime(kind, instance_id=None, removed=False):
     """Rebuild scheduler sync jobs and re-fan-out the affected kind's SignalR
     feed after an instance create/update/delete (#156).
@@ -65,6 +118,17 @@ def refresh_runtime(kind, instance_id=None, removed=False):
 
     if kind not in VALID_KINDS:
         return
+
+    # Keep the scalar settings.<kind>.* config mirroring the default instance so
+    # the single-instance compat paths (health check, get_<kind>_info version
+    # probe, scheduler/SignalR fall-back) target the real server, not the default
+    # 127.0.0.1:8989 / :7878 (#276). Best-effort, like the SignalR restart below.
+    try:
+        from app.database import database
+        mirror_scalar_config_from_default(database, kind)
+    except Exception:
+        logging.exception("Failed to mirror scalar config from default %s instance", kind)
+
     try:
         from app.scheduler import scheduler
 
