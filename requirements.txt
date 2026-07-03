@@ -18,7 +18,7 @@ deathbycaptcha-official==4.7.1
 deep-translator==1.11.4
 dnspython==2.8.0
 dogpile.cache==1.5.0
-dynaconf==3.2.13
+dynaconf==3.3.2
 emoji==2.15.0
 enzyme==0.5.2
 fcache==0.6.0
