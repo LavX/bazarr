@@ -2345,10 +2345,15 @@ def test_bundle_tree_verification_rejects_bundle_hash_mismatch(tmp_path):
         verify_bundle_tree(manifest, tmp_path)
 
 
-def test_hub_proxy_provider_search_and_download_uses_worker_payload():
+def test_hub_proxy_provider_search_and_download_uses_worker_payload(monkeypatch):
+    from provider_hub import registry as registry_module
     from provider_hub.manifest import validate_manifest
     from provider_hub.registry import _make_provider_class
     from provider_hub.protocol import language_to_payload
+
+    # Pin the global default so the timeout assertion below is a concrete value
+    # (an explicit timeout=9 is below the 120s floor -> raised to 120).
+    monkeypatch.setattr(registry_module, "_global_worker_timeout", lambda: 120.0)
 
     class FakeWorker:
         def __init__(self):
@@ -2412,7 +2417,9 @@ def test_hub_proxy_provider_search_and_download_uses_worker_payload():
     provider.download_subtitle(subtitles[0])
     assert subtitles[0].content == b"hello"
     assert worker.requests[0][0] == "search"
-    assert worker.requests[0][2] == 9
+    # The worker request carries the host-side deadline from _request_timeout();
+    # an explicit timeout (9) below the global default floor is raised to 120.
+    assert worker.requests[0][2] == 120.0
     assert worker.requests[0][1]["config"] == provider_config
     assert worker.requests[1][0] == "download"
     assert worker.requests[1][1]["config"] == provider_config
@@ -2482,8 +2489,10 @@ def test_hub_proxy_uses_configured_worker_timeout_for_long_downloads():
 
     provider.download_subtitle(subtitle)
 
-    assert worker.requests[0] == ("search", 600)
-    assert worker.requests[1] == ("download", 600)
+    # 600s configured + 30s host margin so the worker's own timeout fires first.
+    assert provider._request_timeout() == 630.0
+    assert worker.requests[0] == ("search", 630.0)
+    assert worker.requests[1] == ("download", 630.0)
 
 
 def test_hub_proxy_download_invokes_select_archive_member():
