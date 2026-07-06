@@ -263,6 +263,19 @@ const SettingsGeneralView: FunctionComponent = () => {
           Installing or replacing providers manually from the Provider Hub
           Marketplace always works regardless of this setting.
         </Message>
+        <Number
+          label="Default worker timeout (seconds)"
+          settingKey="settings-general-provider_hub_worker_timeout"
+          min={30}
+          max={86400}
+          step={30}
+        ></Number>
+        <Message>
+          Fallback time limit for a Provider Hub plugin to answer a search or
+          download before Bazarr gives up. Plugins that define their own
+          timeouts (for example WhisperAI's transcription timeout) override
+          this. Default 120 seconds.
+        </Message>
       </Section>
       <Section header="Proxy">
         <Selector
