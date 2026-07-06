@@ -271,10 +271,10 @@ const SettingsGeneralView: FunctionComponent = () => {
           step={30}
         ></Number>
         <Message>
-          Fallback time limit for a Provider Hub plugin to answer a search or
-          download before Bazarr gives up. Plugins that define their own
-          timeouts (for example WhisperAI's transcription timeout) override
-          this. Default 120 seconds.
+          Minimum time a Provider Hub plugin is given to answer a search or
+          download before Bazarr gives up. Plugins that declare a longer timeout
+          (for example WhisperAI's transcription timeout) raise the deadline
+          above this value. Default 120 seconds.
         </Message>
       </Section>
       <Section header="Proxy">

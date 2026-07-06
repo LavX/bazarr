@@ -49,8 +49,9 @@ def test_global_default_is_a_floor(monkeypatch):
 def test_declared_timeout_clamped_to_cap(monkeypatch):
     _pin_global(monkeypatch, 120)
     # A plugin timeout above the cap is clamped to _MAX_WORKER_REQUEST_TIMEOUT
-    # BEFORE the margin is added, so the margin survives (host wall outlives the
-    # worker's own timeout rather than racing it).
+    # before the margin is added, so the host wall is cap + margin. Defensive
+    # only: the setting validator and plugin manifests already bound configured
+    # values to the cap, so a value this high should not reach here in practice.
     provider = HubProxyProvider(endpoint="http://x", transcription_timeout_seconds=90000)
     assert provider._request_timeout() == registry._MAX_WORKER_REQUEST_TIMEOUT + 30.0
 
