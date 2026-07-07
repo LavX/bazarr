@@ -24,7 +24,9 @@ from .worker import ProviderWorkerClient, WorkerError, worker_command
 logger = logging.getLogger(__name__)
 
 _REGISTERED_PROVIDER_HUB_IDS: set[str] = set()
-_MAX_WORKER_REQUEST_TIMEOUT = 3600.0
+_MAX_WORKER_REQUEST_TIMEOUT = 86400.0
+_HOST_TIMEOUT_MARGIN_SECONDS = 30.0
+_DEFAULT_GLOBAL_WORKER_TIMEOUT = 120.0
 
 
 def _coerce_timeout(value):
@@ -37,14 +39,30 @@ def _coerce_timeout(value):
     return timeout
 
 
+def _global_worker_timeout():
+    """Backstop host-side worker deadline from settings, with a defensive fallback.
+
+    Runs host-side, so app.config is importable. Falls back to the built-in
+    default if settings are unavailable or the value is missing/invalid."""
+    try:
+        from app.config import settings
+        value = _coerce_timeout(getattr(settings.general, "provider_hub_worker_timeout", None))
+    except Exception:
+        return _DEFAULT_GLOBAL_WORKER_TIMEOUT
+    return value or _DEFAULT_GLOBAL_WORKER_TIMEOUT
+
+
 class HubProxyProvider(Provider):
     provider_name = "providerhub"
     languages = set()
     video_types = (Episode, Movie)
     subtitle_class = None
 
-    def __init__(self, timeout=30, worker_client=None, **config):
-        self.timeout = _coerce_timeout(timeout) or 30.0
+    def __init__(self, timeout=None, worker_client=None, **config):
+        # An explicit per-instance timeout override is optional; when absent the
+        # global default backstop (see _request_timeout) applies instead of a
+        # hardcoded value.
+        self.timeout = _coerce_timeout(timeout)
         self.worker_client = worker_client or getattr(self.__class__, "worker_client", None)
         self.config = config
 
@@ -79,12 +97,37 @@ class HubProxyProvider(Provider):
         raise WorkerError("Provider Hub worker is not configured")
 
     def _request_timeout(self):
-        timeout = self.timeout
+        # The host deadline must never fire before the worker's own per-operation
+        # timeout, or a long transcription is killed regardless of the user's
+        # settings (issue: WhisperAI and 30 second worker timeout). Derive the
+        # deadline from every timeout the plugin config declares. A margin is
+        # added on top so a single-operation worker reaches its own timeout and
+        # returns a clean error before the host read-wall kills the subprocess.
+        # (A multi-phase worker, e.g. whisper's extract-then-transcribe, can
+        # still exceed the host wall; each phase is bounded by the worker's own
+        # per-phase timeout, so this is an accepted limitation, not a hard-kill
+        # regression of the 30s bug.) The plugin-declared value is clamped to the
+        # maximum BEFORE the margin is added so the margin survives at the cap,
+        # then floored by the global default backstop.
+        declared = []
+        explicit = _coerce_timeout(self.timeout)
+        if explicit is not None:
+            declared.append(explicit)
         for key in ("worker_timeout", "timeout_seconds", "timeout"):
-            configured = _coerce_timeout(self.config.get(key))
-            if configured is not None:
-                timeout = max(timeout, configured)
-        return min(timeout, _MAX_WORKER_REQUEST_TIMEOUT)
+            value = _coerce_timeout(self.config.get(key))
+            if value is not None:
+                declared.append(value)
+        for key, raw in self.config.items():
+            if key.endswith("_timeout_seconds"):
+                value = _coerce_timeout(raw)
+                if value is not None:
+                    declared.append(value)
+
+        global_default = _global_worker_timeout()
+        if not declared:
+            return global_default
+        base = min(max(declared), _MAX_WORKER_REQUEST_TIMEOUT)
+        return max(base + _HOST_TIMEOUT_MARGIN_SECONDS, global_default)
 
     def list_subtitles(self, video, languages):
         timeout = self._request_timeout()

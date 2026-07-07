@@ -28,9 +28,23 @@ export interface WhatsNewSlide {
  * cutting a release. Kept as an explicit token so the wizard never has to parse the
  * fork's `version + YYMMDD` runtime string.
  */
-export const latestWhatsNewVersion = "2.5.1";
+export const latestWhatsNewVersion = "2.5.2";
 
 export const whatsNew: Record<string, WhatsNewSlide[]> = {
+  "2.5.2": [
+    {
+      title: "WhisperAI timeouts no longer cut off at 30 seconds",
+      body: "WhisperAI transcriptions used to be killed after 30 seconds no matter what response or transcription timeouts you set. Your configured timeouts now drive how long the provider is given, so long jobs run to completion.",
+      icon: faWandMagicSparkles,
+      cta: { label: "Open Providers", to: "/settings/providers" },
+    },
+    {
+      title: "Configurable Provider Hub worker timeout",
+      body: "A new Default worker timeout setting under General > Provider Hub sets the fallback deadline for Hub plugins that do not define their own. Plugins like WhisperAI that declare a longer timeout raise it above this value.",
+      icon: faSliders,
+      cta: { label: "Open General settings", to: "/settings/general" },
+    },
+  ],
   "2.5.1": [
     {
       title: "Cleaner multi-server first-run",
