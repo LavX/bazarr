@@ -10,7 +10,7 @@ beautifulsoup4==4.15.0
 cachetools>=7.1.4
 certifi==2026.6.17
 chardet==7.4.3
-charset-normalizer==3.4.7
+charset-normalizer==3.4.9
 click-option-group>=0.5.9
 cloudscraper<=1.2.71  # newer version dropped captcha v1 support
 cryptography>=49.0.0
