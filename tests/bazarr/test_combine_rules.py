@@ -147,3 +147,65 @@ def test_skips_chained_modifier_sync_outputs(tmp_path):
         languages=["en", "hu"],
     )
     assert result is None
+
+
+def test_maps_zh_tw_filename_to_zt_code(tmp_path):
+    """Bazarr writes Traditional Chinese as .zh-TW.srt; profiles request zt."""
+    base = make_video_dir(tmp_path, [
+        "Movie.mkv",
+        "Movie.en.srt",
+        "Movie.zh-TW.srt",
+    ])
+    result = resolve_source_paths(
+        video_path=str(base / "Movie.mkv"),
+        languages=["zt", "en"],
+    )
+    assert result is not None
+    assert result.primary == str(base / "Movie.zh-TW.srt")
+    assert result.secondaries == [str(base / "Movie.en.srt")]
+
+
+def test_maps_lowercase_zh_tw_and_zht_aliases(tmp_path):
+    base = make_video_dir(tmp_path, [
+        "Movie.mkv",
+        "Movie.en.srt",
+        "Movie.zh-tw.srt",
+    ])
+    result = resolve_source_paths(
+        video_path=str(base / "Movie.mkv"),
+        languages=["zt", "en"],
+    )
+    assert result is not None
+    assert result.primary == str(base / "Movie.zh-tw.srt")
+
+
+def test_maps_pt_br_filename_to_pb_code(tmp_path):
+    """Same hyphen-tag bug class as zh-TW (Brazilian Portuguese)."""
+    base = make_video_dir(tmp_path, [
+        "Movie.mkv",
+        "Movie.en.srt",
+        "Movie.pt-BR.srt",
+    ])
+    result = resolve_source_paths(
+        video_path=str(base / "Movie.mkv"),
+        languages=["pb", "en"],
+    )
+    assert result is not None
+    assert result.primary == str(base / "Movie.pt-BR.srt")
+    assert result.secondaries == [str(base / "Movie.en.srt")]
+
+
+def test_still_skips_combined_when_custom_lang_present(tmp_path):
+    base = make_video_dir(tmp_path, [
+        "Movie.mkv",
+        "Movie.en.srt",
+        "Movie.zh-TW.srt",
+        "Movie.zt.combined-en.srt",
+        "Movie.en.combined-zt.srt",
+    ])
+    result = resolve_source_paths(
+        video_path=str(base / "Movie.mkv"),
+        languages=["zt", "en"],
+    )
+    assert result.primary == str(base / "Movie.zh-TW.srt")
+    assert result.secondaries == [str(base / "Movie.en.srt")]
