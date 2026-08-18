@@ -581,45 +581,69 @@ class LegendasdivxProvider(Provider):
     def _get_subtitle_from_archive(self, archive, subtitle):
         # some files have a non subtitle with .txt extension
         _tmp = list(SUBTITLE_EXTENSIONS)
-        _tmp.remove('.txt')
+        if '.txt' in _tmp:
+            _tmp.remove('.txt')
         _subtitle_extensions = tuple(_tmp)
-        _max_score = 0
+        _max_score = -1
+        _max_name = None
         _scores = get_scores(subtitle.video)
 
+        candidate_files = []
         for name in archive.namelist():
-            # discard hidden files
-            if os.path.split(name)[-1].startswith('.'):
+            # discard hidden files and directories
+            if os.path.split(name)[-1].startswith('.') or name.endswith('/'):
                 continue
 
             # discard non-subtitle files
             if not name.lower().endswith(_subtitle_extensions):
                 continue
 
+            candidate_files.append(name)
+
+        if not candidate_files:
+            logger.error("Legendasdivx.pt :: No subtitle file found in archive")
+            return None
+
+        # If archive contains only 1 subtitle file, return it directly
+        if len(candidate_files) == 1:
+            logger.debug("Legendasdivx.pt :: Only 1 subtitle in archive, returning: %s", candidate_files[0])
+            return archive.read(candidate_files[0])
+
+        for name in candidate_files:
             _guess = guessit(name)
             if isinstance(subtitle.video, Episode):
-                if all(key in _guess for key in ('season', 'episode')):
-                    logger.debug("Legendasdivx.pt :: guessing %s", name)
-                    logger.debug("Legendasdivx.pt :: subtitle S%sE%s video S%sE%s", _guess['season'], _guess['episode'],
-                                 subtitle.video.season, subtitle.video.episode)
+                ep = _guess.get('episode')
+                season = _guess.get('season')
 
-                    if subtitle.video.episode != _guess['episode'] or subtitle.video.season != _guess['season']:
-                        logger.debug('Legendasdivx.pt :: subtitle does not match video, skipping')
+                # Check episode number
+                if ep is not None:
+                    if isinstance(ep, list):
+                        if subtitle.video.episode not in ep:
+                            continue
+                    elif ep != subtitle.video.episode:
                         continue
-                else:
-                    logger.debug('Legendasdivx.pt :: no "season" and/or "episode" on "_guess" , skipping')
-                    continue
+
+                # Check season number if present in filename
+                if season is not None:
+                    if isinstance(season, list):
+                        if subtitle.video.season not in season:
+                            continue
+                    elif season != subtitle.video.season:
+                        continue
+
             matches = set()
             matches |= guess_matches(subtitle.video, _guess)
-            logger.debug('Legendasdivx.pt :: sub matches: %s', matches)
             _score = sum((_scores.get(match, 0) for match in matches))
+            if isinstance(subtitle.video, Episode) and _guess.get('episode') == subtitle.video.episode:
+                _score += 10
+
             if _score > _max_score:
                 _max_name = name
                 _max_score = _score
-                logger.debug("Legendasdivx.pt :: new max: %s %s", name, _score)
+                logger.debug("Legendasdivx.pt :: candidate %s scored %s", name, _score)
 
-        if _max_score > 0:
-            logger.debug("Legendasdivx.pt :: returning from archive: %s scored %s", _max_name, _max_score)
+        if _max_name:
+            logger.debug("Legendasdivx.pt :: returning from archive: %s (score %s)", _max_name, _max_score)
             return archive.read(_max_name)
 
-        logger.error("Legendasdivx.pt :: No subtitle found on compressed file. Max score was 0")
-        return None
+        return archive.read(candidate_files[0])
