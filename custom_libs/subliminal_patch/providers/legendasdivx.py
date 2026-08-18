@@ -29,6 +29,63 @@ from dogpile.cache.api import NO_VALUE
 
 logger = logging.getLogger(__name__)
 
+def clean_release_line(text):
+    # Separate glued keywords like versãoThe or releaseThe
+    text = re.sub(r"(vers[aã]o|release|filme)([A-Z0-9])", r"\1 \2", text, flags=re.I)
+    # Strip common Portuguese subtitle upload prefixes
+    prefix_pattern = (
+        r"^(legendas?\s*(anteriormente\s*)?(enviadas?\s*(por|pelo)?\s*[\w\d_]+\s*)?"
+        r"|sincronizadas?|ressincronizadas?|sinc|sync|traduzidas?|ripadas?|ajustad[ao]s?|ajustei\s*(a\s*)?sincronia)?"
+        r"\s*(de\s*raiz\s*)?(para\s*(a|o|as|os)?\s*)?(vers[aã]o|release[s]?|filme|nomes?)?\s*[:\-–]?\s*"
+    )
+    return re.sub(prefix_pattern, "", text, flags=re.I).strip().strip("*").strip("`").strip()
+
+
+def extract_release_info(title, year, desc):
+    default_name = f"{title} ({year})" if year and title else (title or "")
+    if not desc or desc.strip().lower() in (
+        "não há descrição disponível",
+        "nao ha descricao disponivel",
+        "n/a",
+        "none",
+        "",
+    ):
+        return default_name
+
+    lines = [line.strip().strip("*").strip("`") for line in desc.splitlines() if line.strip()]
+    candidates = []
+    release_re = re.compile(
+        r"(2160p|1080p|720p|480p|4k|bluray|blu-ray|bdrip|brrip|web-dl|webdl|web-rip|webrip|web|dvdrip|dvd|hdtv|x264|x265|hevc|h\.264|h\.265|xvid|divx|remastered|proper|internal|repack)",
+        re.I,
+    )
+
+    for line in lines:
+        cleaned = clean_release_line(line)
+        if release_re.search(cleaned):
+            match = re.search(
+                r"([\w\.\-_]+(?:2160p|1080p|720p|480p|4k|bluray|blu-ray|bdrip|brrip|web-dl|webdl|dvdrip|dvd|x264|x265|hevc|xvid|divx)[\w\.\-_]*)",
+                cleaned,
+                re.I,
+            )
+            if match and len(match.group(1)) > 10:
+                candidates.append(match.group(1).strip("."))
+            else:
+                candidates.append(cleaned)
+        elif title and title.lower() in cleaned.lower() and len(cleaned) > len(title):
+            candidates.append(cleaned)
+
+    if candidates:
+        return candidates[0]
+
+    first_meaningful = [
+        candidate for candidate in lines
+        if len(candidate) > 3 and not candidate.lower().startswith(("cumps", "enjoy", "obrigado", "avisem", "não se", "duração:", "duracao:"))
+    ]
+    if first_meaningful and len(first_meaningful[0]) <= 80:
+        return f"{default_name} - {first_meaningful[0]}" if default_name else first_meaningful[0]
+
+    return default_name
+
 
 class LegendasdivxSubtitle(Subtitle):
     """Legendasdivx Subtitle."""
@@ -39,15 +96,16 @@ class LegendasdivxSubtitle(Subtitle):
         self.page_link = data['link']
         self.hits = data['hits']
         self.exact_match = data['exact_match']
+        self.title = data.get('title', '')
+        self.year = data.get('year')
         self.description = data['description']
         self.video = video
         self.sub_frame_rate = data['frame_rate']
         self.uploader = data['uploader']
         self.wrong_fps = False
         self.skip_wrong_fps = skip_wrong_fps
-        self.release_info = self.description
+        self.release_info = data.get('release_info') or self.description
         self.matches = set()
-
     @property
     def id(self):
         try:
@@ -77,53 +135,49 @@ class LegendasdivxSubtitle(Subtitle):
 
         description = sanitize(self.description)
 
-        video_filename = video.name
-        video_filename = os.path.basename(video_filename)
-        video_filename, _ = os.path.splitext(video_filename)
-        video_filename = sanitize_release_group(video_filename)
+        # Match title
+        if video.title:
+            for movie_name in [video.title] + getattr(video, 'alternative_titles', []):
+                if sanitize(movie_name) == sanitize(self.title) or sanitize(movie_name) in description:
+                    self.matches.update(['title'])
 
-        if sanitize(video_filename) in description:
-            self.matches.update(['title'])
-            # relying people won' use just S01E01 for the file name
-            if isinstance(video, Episode):
-                self.matches.update(['series'])
-                self.matches.update(['season'])
-                self.matches.update(['episode'])
-
-        # can match both movies and series
-        if video.year and '{:04d}'.format(video.year) in description:
-            self.matches.update(['year'])
+        # Match year
+        if video.year:
+            if self.year and video.year == self.year:
+                self.matches.update(['year'])
+            elif '{:04d}'.format(video.year) in description:
+                self.matches.update(['year'])
 
         type_ = "movie" if isinstance(video, Movie) else "episode"
-        # match movie title (include alternative movie names)
-        if type_ == "movie":
-            if video.title:
-                for movie_name in [video.title] + video.alternative_titles:
-                    if sanitize(movie_name) in description:
-                        self.matches.update(['title'])
 
+        if isinstance(video, Movie):
+            if video.imdb_id:
+                self.matches.update(['imdb_id'])
         else:
-            if video.title and sanitize(video.title) in description:
-                self.matches.update(['title'])
             if video.series:
-                for series_name in [video.series] + video.alternative_series:
-                    if sanitize(series_name) in description:
+                for series_name in [video.series] + getattr(video, 'alternative_series', []):
+                    if sanitize(series_name) == sanitize(self.title) or sanitize(series_name) in description:
                         self.matches.update(['series'])
+            if video.series_imdb_id:
+                self.matches.update(['series', 'series_imdb_id', 'season', 'episode'])
             if video.season and 's{:02d}'.format(video.season) in description:
                 self.matches.update(['season'])
             if video.episode and 'e{:02d}'.format(video.episode) in description:
                 self.matches.update(['episode'])
-            # All the search is already based on the series_imdb_id when present in the video and controlled via the
-            # the legendasdivx backend it, so if there is a result, it matches, either inside of a pack or a specific
-            # series and episode, so we can assume the season and episode matches.
-            if video.series_imdb_id:
-                self.matches.update(['series', 'series_imdb_id', 'season', 'episode'])
 
-        # release_group
-        if video.release_group and sanitize_release_group(video.release_group) in sanitize_release_group(description):
+        # release_group matching
+        if video.release_group and sanitize_release_group(video.release_group) in sanitize_release_group(self.description):
             self.matches.update(['release_group'])
 
-        self.matches |= guess_matches(video, guessit(description, {"type": type_}))
+        # Guess matches from release_info
+        if self.release_info:
+            self.matches |= guess_matches(video, guessit(self.release_info, {"type": type_}))
+
+        # Also guess matches across description candidate lines
+        for line in self.description.splitlines():
+            cleaned_line = clean_release_line(line)
+            if len(cleaned_line) > 5 and cleaned_line != self.release_info:
+                self.matches |= guess_matches(video, guessit(cleaned_line, {"type": type_}))
 
         return self.matches
 
@@ -265,9 +319,24 @@ class LegendasdivxProvider(Provider):
                 logger.debug("Legendasdivx.pt :: Couldn't find download link. Trying next...")
                 continue
 
-            # get subtitle uploader
+            # get title and year from sub_header
+            title = ''
+            year = None
             sub_header = _subbox.find("div", {"class": "sub_header"})
-            uploader = sub_header.find("a").text if sub_header else 'anonymous'
+            if sub_header:
+                title_elem = sub_header.find("b")
+                if title_elem:
+                    title = title_elem.get_text().strip()
+                header_text = sub_header.get_text()
+                year_match = re.search(r'\((\d{4})\)', header_text)
+                if year_match:
+                    try:
+                        year = int(year_match.group(1))
+                    except ValueError:
+                        pass
+
+            uploader = sub_header.find("a").text if sub_header and sub_header.find("a") else 'anonymous'
+            release_info = extract_release_info(title, year, description)
 
             exact_match = False
             if video.name.lower() in description.lower():
@@ -278,6 +347,9 @@ class LegendasdivxProvider(Provider):
                     'hits': hits,
                     'uploader': uploader,
                     'frame_rate': frame_rate,
+                    'title': title,
+                    'year': year,
+                    'release_info': release_info,
                     'description': description
                     }
             subtitles.append(

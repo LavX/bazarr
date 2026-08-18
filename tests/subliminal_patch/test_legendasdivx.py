@@ -1,9 +1,10 @@
 import brotli
+from guessit import guessit
 import pytest
 from subliminal.cache import region
 from subliminal.exceptions import AuthenticationError, ConfigurationError
 from subliminal.video import Movie
-from subliminal_patch.providers.legendasdivx import LegendasdivxProvider, LegendasdivxSubtitle
+from subliminal_patch.providers.legendasdivx import LegendasdivxProvider, LegendasdivxSubtitle, extract_release_info
 from subzero.language import Language
 
 
@@ -27,6 +28,9 @@ SEARCH_PAGE_HTML = b"""<!DOCTYPE html>
 <body>
 <div class="pager_bar">(1 encontradas)</div>
 <div class="sub_box">
+    <div class="sub_header">
+        <b>The Matrix</b> (1999) - Enviada por: <a href="profile.php?u=100">UploaderName</a>
+    </div>
     <table>
         <tr>
             <th>Idioma:</th>
@@ -37,10 +41,7 @@ SEARCH_PAGE_HTML = b"""<!DOCTYPE html>
             <td>23.976</td>
         </tr>
     </table>
-    <td class="td_desc brd_up">The Matrix 1999 1080p BluRay x264-SPARKS</td>
-    <div class="sub_header">
-        <a href="profile.php?mode=viewprofile&u=100">UploaderName</a>
-    </div>
+    <td class="td_desc brd_up">Sincronizadas para a release: The.Matrix.1999.1080p.BluRay.x264-SPARKS</td>
     <div class="sub_footer">
         <a class="sub_download" href="?name=Downloads&d_op=getit&lid=12345">Download</a>
     </div>
@@ -53,6 +54,20 @@ SEARCH_PAGE_HTML = b"""<!DOCTYPE html>
 def configure_cache():
     region.configure("dogpile.cache.memory", replace_existing_backend=True)
     region.delete("legendasdivx_cookies2")
+
+
+def test_extract_release_info():
+    # 1. Strip sync/upload prefixes and keep clean release
+    desc1 = "Legendas anteriormente enviadas pelo cristiano170, ressincronizadas por mim para a(s) release(s):\n\n**The.Truman.Show.1998.720p.BluRay.x264-SEPTiC**"
+    assert extract_release_info("The Truman Show", 1998, desc1) == "The.Truman.Show.1998.720p.BluRay.x264-SEPTiC"
+
+    # 2. Handle empty or 'Não há descrição disponível'
+    desc2 = "Não há descrição disponível"
+    assert extract_release_info("The Truman Show", 1998, desc2) == "The Truman Show (1998)"
+
+    # 3. Handle version label prefix
+    desc3 = "Sincronizadas para a versão: The.Truman.Show.1998.DVDRip.XviD.AC3-DEViSE"
+    assert extract_release_info("The Truman Show", 1998, desc3) == "The.Truman.Show.1998.DVDRip.XviD.AC3-DEViSE"
 
 
 def test_legendasdivx_config_error():
@@ -75,24 +90,10 @@ def test_legendasdivx_login_failure(requests_mock):
         headers={"Content-Encoding": "br"},
     )
 
-    provider = LegendasdivxProvider("wronguser", "wrongpass")
-    # Simulate failed authentication cookie
-    def set_failed_cookie(r, **kw):
-        provider.session.cookies.set("phpbb3_2z8zs_u", "1")
-
-    provider.initialize = lambda: (setattr(provider, "session", provider.session if hasattr(provider, "session") else None), LegendasdivxProvider.initialize(provider))
-    # Hook into session creation
     orig_init = LegendasdivxProvider.initialize
 
-    def wrapped_init(self):
-        orig_init(self)
-
-    # Directly run initialize with response hook
     with pytest.raises(AuthenticationError):
         provider = LegendasdivxProvider("wronguser", "wrongpass")
-        # Run initialize
-        provider.session = provider.__class__.__dict__["initialize"]
-        # Or simply call provider.initialize() where response returns no valid session
         orig_init(provider)
 
 
@@ -113,8 +114,6 @@ def test_legendasdivx_login_success(requests_mock):
     )
 
     provider = LegendasdivxProvider("gooduser", "goodpass")
-    # Initialize will create session and login
-    # We patch session creation to attach response hook that sets cookies
     orig_login = provider.login
 
     def login_with_cookies():
@@ -148,13 +147,10 @@ def test_legendasdivx_query_movie(requests_mock):
         headers={"Content-Encoding": "br"},
     )
 
-    movie = Movie(
-        name="The.Matrix.1999.1080p.mkv",
-        title="The Matrix",
-        year=1999,
-        imdb_id="tt0133093",
-        fps=23.976,
-    )
+    filename = "The.Matrix.1999.1080p.BluRay.x264-SPARKS.mkv"
+    movie = Movie.fromguess(filename, guessit(filename))
+    movie.imdb_id = "tt0133093"
+    movie.fps = 23.976
 
     provider = LegendasdivxProvider("gooduser", "goodpass", skip_wrong_fps=False)
     provider.initialize()
@@ -164,4 +160,13 @@ def test_legendasdivx_query_movie(requests_mock):
     sub = subtitles[0]
     assert isinstance(sub, LegendasdivxSubtitle)
     assert sub.hits == 42
-    assert "12345" in sub.id or "tt0133093" in sub.id
+    assert sub.title == "The Matrix"
+    assert sub.year == 1999
+    assert sub.release_info == "The.Matrix.1999.1080p.BluRay.x264-SPARKS"
+    matches = sub.get_matches(movie)
+    assert "title" in matches
+    assert "year" in matches
+    assert "imdb_id" in matches
+    assert "video_codec" in matches
+    assert "resolution" in matches
+    assert "release_group" in matches
