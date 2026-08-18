@@ -399,6 +399,8 @@ class LegendasdivxProvider(Provider):
                             else:
                                 if searches_count >= self.SAFE_SEARCH_LIMIT:
                                     searchLimitReached = True
+            except (AuthenticationError, ConfigurationError, IPAddressBlocked, TooManyRequests, SearchLimitReached):
+                raise
             except HTTPError as e:
                 if "bloqueado" in res.text.lower():
                     logger.error("LegendasDivx.pt :: Your IP is blocked on this server.")
@@ -455,6 +457,8 @@ class LegendasdivxProvider(Provider):
             sleep(1)
             res = self.session.get(subtitle.page_link)
             res.raise_for_status()
+        except (AuthenticationError, ConfigurationError, IPAddressBlocked, TooManyRequests, DownloadLimitExceeded):
+            raise
         except HTTPError as e:
             if "bloqueado" in res.text.lower():
                 logger.error("LegendasDivx.pt :: Your IP is blocked on this server.")
