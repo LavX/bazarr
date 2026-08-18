@@ -180,7 +180,7 @@ class LegendasdivxProvider(Provider):
             res.raise_for_status()
             bsoup = ParserBeautifulSoup(res.content, ['lxml'])
 
-            _allinputs = bsoup.findAll('input')
+            _allinputs = bsoup.find_all('input')
             data = {}
             # necessary to set 'sid' for POST request
             for field in _allinputs:
@@ -193,17 +193,24 @@ class LegendasdivxProvider(Provider):
             res = self.session.post(self.loginpage, data)
             res.raise_for_status()
             # make sure we're logged in
-            logger.debug('Legendasdivx.pt :: Logged in successfully: PHPSESSID: %s',
-                         self.session.cookies.get_dict()['PHPSESSID'])
+            uid = self.session.cookies.get('phpbb3_2z8zs_u')
+            session_id = self.session.cookies.get('PHPSESSID') or self.session.cookies.get('phpbb3_2z8zs_sid')
+            if uid == '1' or not session_id:
+                logger.error("Legendasdivx.pt :: Couldn't get session ID, check your credentials")
+                raise AuthenticationError("Legendasdivx.pt :: Couldn't get session ID, check your credentials")
+
+            logger.debug('Legendasdivx.pt :: Logged in successfully: session: %s', session_id)
             cj = self.session.cookies.copy()
             store_cks = ("PHPSESSID", "phpbb3_2z8zs_sid", "phpbb3_2z8zs_k", "phpbb3_2z8zs_u", "lang")
-            for cn in iter(self.session.cookies.keys()):
+            for cn in list(self.session.cookies.keys()):
                 if cn not in store_cks:
                     del cj[cn]
             # store session cookies on cache
             logger.debug("Legendasdivx.pt :: Storing legendasdivx session cookies: %r", cj)
             region.set("legendasdivx_cookies2", cj)
 
+        except (AuthenticationError, ConfigurationError, IPAddressBlocked, TooManyRequests):
+            raise
         except KeyError:
             logger.error("Legendasdivx.pt :: Couldn't get session ID, check your credentials")
             raise AuthenticationError("Legendasdivx.pt :: Couldn't get session ID, check your credentials")
@@ -220,17 +227,16 @@ class LegendasdivxProvider(Provider):
         except Exception as e:
             logger.error("LegendasDivx.pt :: Uncaught error: %r", e)
             raise ServiceUnavailable("LegendasDivx.pt :: Uncaught error: %r", e)
-
     def _process_page(self, video, bsoup):
 
         subtitles = []
 
-        _allsubs = bsoup.findAll("div", {"class": "sub_box"})
+        _allsubs = bsoup.find_all("div", {"class": "sub_box"})
 
         for _subbox in _allsubs:
 
             hits = 0
-            for th in _subbox.findAll("th"):
+            for th in _subbox.find_all("th"):
                 if th.text == 'Hits:':
                     hits = int(th.find_next("td").text)
                 if th.text == 'Idioma:':
