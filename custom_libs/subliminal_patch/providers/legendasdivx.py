@@ -4,6 +4,9 @@ import io
 import os
 import re
 import zipfile
+import tempfile
+import subprocess
+import shutil
 from time import sleep
 from urllib.parse import quote
 from urllib.parse import parse_qs
@@ -555,13 +558,15 @@ class LegendasdivxProvider(Provider):
             raise DownloadLimitExceeded("Legendasdivx.pt :: Daily download limit reached!")
 
         archive = self._get_archive(res.content)
-        # extract the subtitle
         if archive:
-            subtitle_content = self._get_subtitle_from_archive(archive, subtitle)
-            if subtitle_content:
-                subtitle.content = fix_line_ending(subtitle_content)
-                subtitle.normalize()
-                return subtitle
+            subtitle_content = self._get_subtitle_from_archive(archive, res.content, subtitle)
+        else:
+            subtitle_content = self._extract_via_cli(res.content)
+
+        if subtitle_content:
+            subtitle.content = fix_line_ending(subtitle_content)
+            subtitle.normalize()
+            return subtitle
         return
 
     def _get_archive(self, content):
@@ -578,7 +583,60 @@ class LegendasdivxProvider(Provider):
             return None
         return archive
 
-    def _get_subtitle_from_archive(self, archive, subtitle):
+    def _read_from_archive(self, archive, content, target_name):
+        try:
+            return archive.read(target_name)
+        except Exception as e:
+            logger.warning("Legendasdivx.pt :: Direct archive.read failed (%s), attempting CLI extraction fallback", e)
+            return self._extract_via_cli(content, target_name)
+
+    def _extract_via_cli(self, content, target_name=None):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            tmparc = os.path.join(tmpdir, "archive.rar")
+            with open(tmparc, "wb") as f:
+                f.write(content)
+
+            extracted = False
+            for tool, cmd in [
+                ("unar", ["unar", "-o", tmpdir, "-f", tmparc]),
+                ("7z", ["7z", "x", "-y", f"-o{tmpdir}", tmparc]),
+                ("unrar", ["unrar", "x", "-y", tmparc, tmpdir]),
+            ]:
+                if shutil.which(tool):
+                    p = subprocess.run(cmd, capture_output=True)
+                    if p.returncode == 0:
+                        extracted = True
+                        break
+
+            if extracted:
+                _tmp = list(SUBTITLE_EXTENSIONS)
+                if ".txt" in _tmp:
+                    _tmp.remove(".txt")
+                _subtitle_extensions = tuple(_tmp)
+
+                target_base = os.path.split(target_name)[-1].lower() if target_name else None
+                found_files = []
+                for root, _, files in os.walk(tmpdir):
+                    for f in files:
+                        if f != "archive.rar" and f.lower().endswith(_subtitle_extensions):
+                            full_path = os.path.join(root, f)
+                            if target_base and f.lower() == target_base:
+                                with open(full_path, "rb") as sf:
+                                    return sf.read()
+                            found_files.append(full_path)
+
+                if found_files:
+                    with open(found_files[0], "rb") as sf:
+                        return sf.read()
+        except Exception as err:
+            logger.error("Legendasdivx.pt :: CLI extraction fallback failed: %s", err)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        return None
+
+    def _get_subtitle_from_archive(self, archive, content, subtitle):
         # some files have a non subtitle with .txt extension
         _tmp = list(SUBTITLE_EXTENSIONS)
         if '.txt' in _tmp:
@@ -602,12 +660,12 @@ class LegendasdivxProvider(Provider):
 
         if not candidate_files:
             logger.error("Legendasdivx.pt :: No subtitle file found in archive")
-            return None
+            return self._extract_via_cli(content)
 
         # If archive contains only 1 subtitle file, return it directly
         if len(candidate_files) == 1:
             logger.debug("Legendasdivx.pt :: Only 1 subtitle in archive, returning: %s", candidate_files[0])
-            return archive.read(candidate_files[0])
+            return self._read_from_archive(archive, content, candidate_files[0])
 
         for name in candidate_files:
             _guess = guessit(name)
@@ -644,6 +702,6 @@ class LegendasdivxProvider(Provider):
 
         if _max_name:
             logger.debug("Legendasdivx.pt :: returning from archive: %s (score %s)", _max_name, _max_score)
-            return archive.read(_max_name)
+            return self._read_from_archive(archive, content, _max_name)
 
-        return archive.read(candidate_files[0])
+        return self._read_from_archive(archive, content, candidate_files[0])
