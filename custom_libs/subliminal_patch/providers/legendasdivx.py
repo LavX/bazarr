@@ -34,9 +34,9 @@ def clean_release_line(text):
     text = re.sub(r"(vers[aã]o|release|filme)([A-Z0-9])", r"\1 \2", text, flags=re.I)
     # Strip common Portuguese subtitle upload prefixes
     prefix_pattern = (
-        r"^(legendas?\s*(anteriormente\s*)?(enviadas?\s*(por|pelo)?\s*[\w\d_]+\s*)?"
-        r"|sincronizadas?|ressincronizadas?|sinc|sync|traduzidas?|ripadas?|ajustad[ao]s?|ajustei\s*(a\s*)?sincronia)?"
-        r"\s*(de\s*raiz\s*)?(para\s*(a|o|as|os)?\s*)?(vers[aã]o|release[s]?|filme|nomes?)?\s*[:\-–]?\s*"
+        r"^(legendas?\s*(anteriormente\s*)?(enviadas?\s*(por|pelo|do)?\s*[\w\d_]+\s*)?"
+        r"|sincronizadas?|ressincronizadas?|sinc|sync|traduzidas?|ripadas?\s*(por\s*mim)?|ajustad[ao]s?|ajustei\s*(a\s*)?sincronia)?"
+        r"\s*(do\s*dvd\.?|de\s*raiz\s*)?(para\s*(a|o|as|os)?\s*)?(vers[aã]o|release[s]?|filme|nomes?)?\s*[:\-–]?\s*"
     )
     return re.sub(prefix_pattern, "", text, flags=re.I).strip().strip("*").strip("`").strip()
 
@@ -58,9 +58,15 @@ def extract_release_info(title, year, desc):
         r"(2160p|1080p|720p|480p|4k|bluray|blu-ray|bdrip|brrip|web-dl|webdl|web-rip|webrip|web|dvdrip|dvd|hdtv|x264|x265|hevc|h\.264|h\.265|xvid|divx|remastered|proper|internal|repack)",
         re.I,
     )
+    conversational_re = re.compile(
+        r"^(legenda[s]?|ripada[s]?|enviada[s]?|postada[s]?|corrigido[s]?|feita[s]?|fiz\s|peguei\s|são\s|sao\s|não\s|nao\s|avisem|cumps|enjoy|obrigado|duração|duracao)",
+        re.I,
+    )
 
     for line in lines:
         cleaned = clean_release_line(line)
+        if not cleaned:
+            continue
         if release_re.search(cleaned):
             match = re.search(
                 r"([\w\.\-_]+(?:2160p|1080p|720p|480p|4k|bluray|blu-ray|bdrip|brrip|web-dl|webdl|dvdrip|dvd|x264|x265|hevc|xvid|divx)[\w\.\-_]*)",
@@ -69,20 +75,22 @@ def extract_release_info(title, year, desc):
             )
             if match and len(match.group(1)) > 10:
                 candidates.append(match.group(1).strip("."))
-            else:
+            elif not conversational_re.search(cleaned) and len(cleaned) > 5:
                 candidates.append(cleaned)
-        elif title and title.lower() in cleaned.lower() and len(cleaned) > len(title):
+        elif title and title.lower() in cleaned.lower() and len(cleaned) > len(title) and not conversational_re.search(cleaned):
             candidates.append(cleaned)
 
     if candidates:
-        return candidates[0]
+        def candidate_quality(cand):
+            score = len(cand)
+            if title and title.lower() in cand.lower():
+                score += 100
+            if "." in cand or "-" in cand:
+                score += 50
+            return score
 
-    first_meaningful = [
-        candidate for candidate in lines
-        if len(candidate) > 3 and not candidate.lower().startswith(("cumps", "enjoy", "obrigado", "avisem", "não se", "duração:", "duracao:"))
-    ]
-    if first_meaningful and len(first_meaningful[0]) <= 80:
-        return f"{default_name} - {first_meaningful[0]}" if default_name else first_meaningful[0]
+        best = max(candidates, key=candidate_quality)
+        return best
 
     return default_name
 
