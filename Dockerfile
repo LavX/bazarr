@@ -74,7 +74,7 @@ LABEL org.opencontainers.image.title="Bazarr+" \
       org.opencontainers.image.licenses="GPL-3.0"
 
 # Install runtime dependencies. RAR archives from subtitle providers are
-# extracted via p7zip's 7z binary, so no non-free repo or unrar package needed.
+# extracted via unar (from Debian main) or unrar.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
@@ -84,6 +84,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libpq5 \
     mediainfo \
     p7zip-full \
+    unar \
     bash \
     gosu \
     curl \
