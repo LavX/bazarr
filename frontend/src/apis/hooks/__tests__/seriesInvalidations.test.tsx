@@ -18,6 +18,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useEpisodeAddBlacklist } from "@/apis/hooks/episodes";
+import { useMovieAddBlacklist } from "@/apis/hooks/movies";
 import { useEpisodeSubtitleModification } from "@/apis/hooks/subtitles";
 import { QueryKeys } from "@/apis/queries/keys";
 
@@ -29,12 +30,16 @@ vi.mock("@/apis/raw", () => ({
       deleteSubtitles: vi.fn().mockResolvedValue(undefined),
       uploadSubtitles: vi.fn().mockResolvedValue(undefined),
     },
+    movies: {
+      addBlacklist: vi.fn().mockResolvedValue(undefined),
+    },
   },
 }));
 
 /** The upstream id used by every fixture. If a key is built from it, that key
  * cannot match a series cache entry, which is keyed on the local id. */
 const UPSTREAM_SERIES_ID = 559;
+const UPSTREAM_MOVIE_ID = 77;
 
 function makeClientAndWrapper() {
   const client = new QueryClient({
@@ -161,5 +166,57 @@ describe("useEpisodeSubtitleModification", () => {
     const keys = capturedKeys(spy);
     expect(keys).toContainEqual([QueryKeys.Series]);
     expect(keys).not.toContainEqual([QueryKeys.Series, UPSTREAM_SERIES_ID]);
+  });
+});
+
+describe("useMovieAddBlacklist", () => {
+  let spy: ReturnType<typeof vi.spyOn>;
+  let wrapper: ReturnType<typeof makeClientAndWrapper>["wrapper"];
+
+  beforeEach(() => {
+    ({ spy, wrapper } = makeClientAndWrapper());
+  });
+
+  it("refreshes the movie views, so a blacklisted subtitle disappears without a manual reload", async () => {
+    const { result } = renderHook(() => useMovieAddBlacklist(), { wrapper });
+
+    result.current.mutate({
+      id: UPSTREAM_MOVIE_ID,
+      form: {
+        provider: "x",
+        subs_id: "y",
+        language: "en",
+        subtitles_path: "/p",
+      },
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    const keys = capturedKeys(spy);
+    expect(keys).toContainEqual([QueryKeys.Movies, QueryKeys.Blacklist]);
+    // Movies are cached under the local id. Without a prefix invalidation the
+    // detail page kept showing the subtitle, exactly as the episode hook did.
+    expect(keys).toContainEqual([QueryKeys.Movies]);
+  });
+
+  it("does not build a key from the upstream movie id", async () => {
+    const { result } = renderHook(() => useMovieAddBlacklist(), { wrapper });
+
+    result.current.mutate({
+      id: UPSTREAM_MOVIE_ID,
+      form: {
+        provider: "x",
+        subs_id: "y",
+        language: "en",
+        subtitles_path: "/p",
+      },
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(capturedKeys(spy)).not.toContainEqual([
+      QueryKeys.Movies,
+      UPSTREAM_MOVIE_ID,
+    ]);
   });
 });

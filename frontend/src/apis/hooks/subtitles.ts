@@ -18,9 +18,12 @@ export function useSubtitleAction() {
       // TODO: Query less
       const { type, id } = param.form;
       if (type === "episode") {
-        // id is the sonarrEpisodeId here, not a series id. Invalidate the
-        // individual episode cache and the Series root so the episode list,
-        // wanted, blacklist and episode history all refresh.
+        // id is the sonarrEpisodeId, the upstream id. Keep it: the ref-track
+        // query is keyed [Episodes, sonarrEpisodeId, Subtitles, ...], so this
+        // prefix-matches and refreshes it, and those queries are active exactly
+        // when this mutation fires. It does NOT reach the [Episodes, localId]
+        // entries primed by cacheEpisodes, which are read directly rather than
+        // through a query, so nothing there needs invalidating.
         client.invalidateQueries({
           queryKey: [QueryKeys.Episodes, id],
         });
