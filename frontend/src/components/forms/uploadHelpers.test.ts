@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   assignEpisodes,
+  episodeBelongsToSeries,
   matchEpisode,
   shouldAutoCloseUpload,
 } from "./uploadHelpers";
@@ -65,5 +66,27 @@ describe("shouldAutoCloseUpload", () => {
 
   it("does not close while rows remain", () => {
     expect(shouldAutoCloseUpload(true, false, 2)).toBe(false);
+  });
+});
+
+describe("episodeBelongsToSeries", () => {
+  const episodes = [ep(1, 1, 11), ep(1, 2, 12)];
+
+  it("accepts an episode present in the series' episode list", () => {
+    expect(episodeBelongsToSeries(episodes[0], episodes)).toBe(true);
+  });
+
+  it("rejects an episode from a different series", () => {
+    // Same season and episode numbers, different upstream episode id: this is
+    // exactly the shape a wrong-series lookup produces.
+    expect(episodeBelongsToSeries(ep(1, 1, 99), episodes)).toBe(false);
+  });
+
+  it("rejects any episode when the series has no episodes loaded", () => {
+    expect(episodeBelongsToSeries(episodes[0], [])).toBe(false);
+  });
+
+  it("treats a null episode as not belonging", () => {
+    expect(episodeBelongsToSeries(null, episodes)).toBe(false);
   });
 });

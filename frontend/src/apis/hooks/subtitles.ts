@@ -105,10 +105,11 @@ export function useEpisodeSubtitleModification() {
         param.arrInstanceId,
       ),
 
-    onSuccess: (_, { seriesId }) => {
-      client.invalidateQueries({
-        queryKey: [QueryKeys.Series, seriesId],
-      });
+    onSuccess: () => {
+      // Invalidate by prefix. A previous targeted invalidation keyed on the
+      // upstream seriesId never matched, because series queries are cached
+      // under the LOCAL id; it was redundant as well as wrong, since this
+      // prefix already covers every series query.
       client.invalidateQueries({
         queryKey: [QueryKeys.Series],
       });
