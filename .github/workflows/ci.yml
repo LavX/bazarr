@@ -194,9 +194,14 @@ jobs:
         # These existed but were never collected by CI, so their assertions protected
         # nothing. Backfilled wholesale; test_ci_guard_list.py fails if a new test file
         # is added without being enumerated here or excluded with a reason.
-        # Kept separate from the subliminal_patch step below: co-collecting the two
-        # trees makes tests/subliminal_patch/test_utils.py fail on state left behind by
-        # a file in this group.
+        # Kept separate from the subliminal_patch step below, and this is a
+        # WORKAROUND, not a structural choice. Co-collecting the two trees makes
+        # tests/subliminal_patch/test_utils.py fail, and that failure is real: any
+        # file here that imports the app runs init_binaries(), which globally
+        # points rarfile at 7z exactly as production does, and the 7z in the image
+        # cannot decode RAR. So the co-collected run was detecting the shipped RAR
+        # bug, and this split hides it. Remove the split once RAR extraction is
+        # fixed in the image.
         run: |
           pytest \
             tests/bazarr/test_app_notifier.py \
@@ -245,19 +250,16 @@ jobs:
             -v --tb=short
 
       - name: pytest previously unguarded subliminal_patch suites
-        # Separate process from the bazarr step above on purpose, see the note there.
+        # Separate process from the bazarr step above. See the note there: this
+        # masks a real product bug and should not outlive it.
         run: |
           pytest \
             tests/subliminal_patch/test_animetosho.py \
             tests/subliminal_patch/test_core_persistent.py \
-            tests/subliminal_patch/test_gestdown.py \
             tests/subliminal_patch/test_opensubtitles_scraper.py \
-            tests/subliminal_patch/test_prijevodi.py \
             tests/subliminal_patch/test_score.py \
             tests/subliminal_patch/test_subdl_anime_mode.py \
             tests/subliminal_patch/test_subtitle.py \
-            tests/subliminal_patch/test_supersubtitles.py \
-            tests/subliminal_patch/test_titlovi.py \
             tests/subliminal_patch/test_utils.py \
             -v --tb=short
 

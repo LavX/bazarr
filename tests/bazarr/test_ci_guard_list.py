@@ -43,6 +43,12 @@ EXCLUDED = {
     "tests/subliminal_patch/test_subf2m.py": "live network call to the provider",
     "tests/subliminal_patch/test_subtitrarinoi.py": "live network call to the provider",
     "tests/subliminal_patch/test_core.py": "live network call plus environment-dependent guessit fixtures",
+    "tests/subliminal_patch/test_gestdown.py": (
+        "five of its cases call api.gestdown.info for real, so a provider "
+        "outage would turn every pull request in the repo red. The offline "
+        "cases in it are worth keeping; splitting them out would let this file "
+        "be enumerated."
+    ),
     # Currently failing for reasons that are not network flakiness. Each needs a
     # fix, not an exemption; the reason names what is wrong so it cannot be
     # forgotten again.
@@ -55,6 +61,22 @@ EXCLUDED = {
         "asserts the SQLite maintenance pragmas are issued and observes none. "
         "Either the pragmas regressed or the test is stale; needs triage."
     ),
+    # These three replay recorded HTTP, so they are deterministic, and they fail
+    # for a real reason: CFSession's request override calls a cloudscraper method
+    # that no longer exists in the version the image actually installs, so every
+    # request through it raises AttributeError. Tracked separately; excluded here
+    # only so the guard-list backfill is not blocked by an unrelated product bug.
+    "tests/subliminal_patch/test_prijevodi.py": (
+        "CFSession request override calls a cloudscraper method missing in the "
+        "installed version; every request raises AttributeError. Product bug, "
+        "tracked separately."
+    ),
+    "tests/subliminal_patch/test_supersubtitles.py": (
+        "same CFSession AttributeError as test_prijevodi.py"
+    ),
+    "tests/subliminal_patch/test_titlovi.py": (
+        "same CFSession AttributeError as test_prijevodi.py"
+    ),
     "tests/subliminal_patch/test_video.py": (
         "Video.fromguess drops attributes the test expects, the same class of "
         "defect as the movie-edition scoring bug. Needs triage alongside it."
@@ -62,20 +84,49 @@ EXCLUDED = {
 }
 
 
+def _workflow_runnable_text() -> str:
+    """Workflow text with comments stripped.
+
+    Scraping the raw YAML counts a path mentioned in a comment, or commented
+    out, as enumerated. That is the exact rot this guard exists to prevent: drop
+    a file from the run list, leave the comment behind, and the guard stays green
+    while the file stops running.
+    """
+    return "\n".join(re.sub(r"#.*$", "", line) for line in WORKFLOW.read_text().splitlines())
+
+
 def _enumerated_paths() -> set:
-    """Every tests/... path named anywhere in the workflow."""
-    return set(re.findall(r"tests/[\w./-]+\.py", WORKFLOW.read_text()))
+    """Every tests/... path actually named in a runnable part of the workflow."""
+    return set(re.findall(r"tests/[\w./-]+\.py", _workflow_runnable_text()))
 
 
 def _all_test_files() -> set:
+    """Both default pytest filename patterns, not just the common one.
+
+    pytest collects *_test.py as well, and nothing in this repo narrows
+    python_files. A file named that way would otherwise get no CI coverage and
+    no complaint from this guard.
+    """
     return {
         str(path.relative_to(REPO_ROOT))
-        for path in (REPO_ROOT / "tests").rglob("test_*.py")
+        for pattern in ("test_*.py", "*_test.py")
+        for path in (REPO_ROOT / "tests").rglob(pattern)
     }
 
 
 def test_workflow_exists():
     assert WORKFLOW.is_file(), f"CI workflow not found at {WORKFLOW}"
+
+
+@pytest.mark.parametrize("directory", DIRECTORY_RUNS)
+def test_directory_runs_are_still_in_the_workflow(directory):
+    """Files under these directories are covered only because CI runs the whole
+    directory. If that step is deleted, they would silently stop running while
+    this guard still counted them as covered."""
+    assert directory in _workflow_runnable_text(), (
+        f"CI no longer runs {directory} wholesale, so the files under it are "
+        "not covered. Enumerate them or restore the directory run."
+    )
 
 
 def test_every_test_file_runs_in_ci_or_is_excluded():
