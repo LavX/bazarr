@@ -96,8 +96,27 @@ def _workflow_runnable_text() -> str:
 
 
 def _enumerated_paths() -> set:
-    """Every tests/... path actually named in a runnable part of the workflow."""
-    return set(re.findall(r"tests/[\w./-]+\.py", _workflow_runnable_text()))
+    """Every tests/... path actually handed to pytest.
+
+    Scanning the whole workflow, even with comments stripped, still counts a path
+    that merely appears somewhere: in an echo, an environment variable, or a
+    disabled line. Only paths inside a pytest invocation, or inside the shell
+    list that a pytest loop iterates, mean the file is collected.
+
+    A command's argument list continues while lines end in a backslash, which is
+    how the workflow spells these multi-line invocations.
+    """
+    paths = set()
+    in_command = False
+    for line in _workflow_runnable_text().splitlines():
+        stripped = line.strip()
+        if "pytest" in stripped or stripped.startswith("for f in"):
+            in_command = True
+        if in_command:
+            paths.update(re.findall(r"tests/[\w./-]+\.py", stripped))
+            if not stripped.endswith("\\"):
+                in_command = False
+    return paths
 
 
 def _all_test_files() -> set:
