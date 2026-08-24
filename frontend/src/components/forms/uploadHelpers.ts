@@ -42,3 +42,21 @@ export function shouldAutoCloseUpload(
 ): boolean {
   return ready && !processing && fileCount <= 0;
 }
+
+// True when the chosen episode is one the opened series actually owns.
+//
+// Defence in depth. While the episode list is fetched with the correct series
+// identifier this can never be false, but an identifier regression previously
+// let another series' episode be auto-selected and uploaded with no warning,
+// because submission only ever rejected an unset episode. Comparing on the
+// upstream episode id rather than season/episode numbers matters: two series
+// both have a season 1 episode 1.
+export function episodeBelongsToSeries(
+  episode: Item.Episode | null,
+  episodes: Item.Episode[],
+): boolean {
+  if (episode === null) {
+    return false;
+  }
+  return episodes.some((v) => v.sonarrEpisodeId === episode.sonarrEpisodeId);
+}
