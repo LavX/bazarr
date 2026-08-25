@@ -215,3 +215,59 @@ class TestProfileFor:
         _profile_for("movies", sonarr_series_id=None,
                      sonarr_episode_id=None, radarr_id=42)
         mock_pid.assert_called_once_with(movie_id=42)
+
+
+class TestCustomLanguageRoundTrip:
+    """A combined artifact built for a custom language must be rebuildable.
+
+    The indexer stores such an artifact's language through CustomLanguage, so
+    the DB row reads "zh-TW:combined-en" and the API hands the UI code2
+    "zh-TW". Rebuild posts that value straight back, so the entry point has to
+    accept it or every custom-language combined file is a dead end.
+    """
+
+    @patch("subtitles.tools.combine.main._post_write")
+    def test_rebuild_accepts_the_code_the_api_hands_back(
+        self, mock_post_write, tmp_path,
+    ):
+        video = tmp_path / "Movie.mkv"
+        video.write_text("")
+        shutil.copy(os.path.join(FIXTURES, "en_hu_sibling_en.srt"),
+                    tmp_path / "Movie.en.srt")
+        shutil.copy(os.path.join(FIXTURES, "en_hu_sibling_hu.srt"),
+                    tmp_path / "Movie.zh-TW.srt")
+
+        built = try_combine_for_video(
+            video_path=str(video), media_type="movies", radarr_id=42,
+            languages=["zt", "en"], format="srt",
+        )
+        assert built.status == "built", built.error
+        assert os.path.basename(built.path) == "Movie.zt.combined-en.srt"
+
+        from subtitles.indexer.utils import _get_lang_from_str
+        from subtitles.tools.combine.naming import parse_combined_filename
+        info = parse_combined_filename(built.path)
+        indexed_code2 = str(_get_lang_from_str(info.primary))
+        assert indexed_code2 == "zh-TW"
+
+        rebuilt = try_combine_for_video(
+            video_path=str(video), media_type="movies", radarr_id=42,
+            languages=[indexed_code2] + info.secondaries, format="srt",
+        )
+        assert rebuilt.status == "built", rebuilt.error
+        assert rebuilt.path == built.path
+
+    @patch("subtitles.tools.combine.main._post_write")
+    def test_normalized_codes_still_reject_duplicates(
+        self, mock_post_write, tmp_path,
+    ):
+        # "zh-TW" and "zt" are the same language; asking for both must fail the
+        # distinctness check rather than produce Movie.zt.combined-zt.srt.
+        video = tmp_path / "Movie.mkv"
+        video.write_text("")
+        result = try_combine_for_video(
+            video_path=str(video), media_type="movies", radarr_id=42,
+            languages=["zh-TW", "zt"], format="srt",
+        )
+        assert result.status == "failed"
+        assert "distinct" in result.error
