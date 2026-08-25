@@ -10,6 +10,7 @@ from utilities.binaries import get_binary
 from radarr.history import history_log_movie
 from sonarr.history import history_log
 from subtitles.processing import ProcessSubtitlesResult
+from subtitles.tools import alass_ffprobe_shim
 from subtitles.tools.subsync_engines import (
     DEFAULT_ENABLED_ENGINES,
     OUTPUT_MODE_OVERWRITE,
@@ -302,6 +303,7 @@ class SubSyncer:
                 capture_output=True,
                 text=True,
                 timeout=1800,
+                env=self._alass_environment() if engine == 'alass' else None,
             )
         except subprocess.CalledProcessError as exc:
             details = (getattr(exc, 'stderr', None) or getattr(exc, 'stdout', None) or str(exc)).strip()
@@ -313,6 +315,27 @@ class SubSyncer:
             'stderr': completed.stderr,
             'returncode': completed.returncode,
         }
+
+    def _alass_environment(self):
+        """Environment for alass, pointing its ffprobe at our shim.
+
+        alass probes the reference video itself and cannot parse the output for
+        a stream whose codec ffprobe could not identify, which any MKV with an
+        application/octet-stream attachment produces. It honours
+        ALASS_FFPROBE_PATH, so the shim goes in there rather than in a patched
+        build. If either half is unavailable the environment is left alone and
+        alass runs exactly as it did before.
+        """
+        environment = dict(os.environ)
+
+        ffprobe_exe = get_binary('ffprobe')
+        launcher = alass_ffprobe_shim.ensure_launcher()
+        if not ffprobe_exe or not launcher:
+            return environment
+
+        environment[alass_ffprobe_shim.REAL_FFPROBE_ENV] = ffprobe_exe
+        environment['ALASS_FFPROBE_PATH'] = launcher
+        return environment
 
     def _run_autosubsync_engine(self, output_path, video_path):
         reference = self.reference if self.reference and os.path.isfile(self.reference) else video_path
