@@ -26,6 +26,12 @@ logger = logging.getLogger(__name__)
 
 _MatchingSub = namedtuple("_MatchingSub", ("file", "priority", "context"))
 
+# Extensions the codebase calls a subtitle but which a scene archive also uses for
+# something else. A release-info text file sits next to the subtitle in the same
+# archive, and the movie selector takes the first match and stops, so an ambiguous
+# member is only ever considered when the archive holds nothing better.
+AMBIGUOUS_SUBTITLE_EXTENSIONS = (".txt",)
+
 # The conservative default for the built-in providers. Callers that want the whole
 # canonical set pass subliminal_patch.core.SUBTITLE_EXTENSIONS explicitly rather
 # than growing their own copy of it.
@@ -62,8 +68,19 @@ def list_subtitle_members(archive, extensions=DEFAULT_ARCHIVE_EXTENSIONS):
     picks from both come from here, so the two can never disagree about a given
     archive the way they did when each filtered for itself.
 
+    Members whose extension is ambiguous are dropped while an unambiguous one is
+    present, and returned only when they are all there is.
     """
-    return [name for name in archive.namelist() if is_subtitle_member(name, extensions)]
+    unambiguous = []
+    ambiguous = []
+    for name in archive.namelist():
+        if not is_subtitle_member(name, extensions):
+            continue
+        if os.path.splitext(name)[1].lower() in AMBIGUOUS_SUBTITLE_EXTENSIONS:
+            ambiguous.append(name)
+        else:
+            unambiguous.append(name)
+    return unambiguous or ambiguous
 
 
 def _archive_member_names(archive):

@@ -4,19 +4,24 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+import os
 
 from typing import Any
 
 from subzero.language import Language
 from subliminal.video import Episode, Movie
+from subliminal_patch.core import SUBTITLE_EXTENSIONS
 from subliminal_patch.subtitle import Subtitle
 
 logger = logging.getLogger(__name__)
 
-# What counts as a subtitle member of a provider archive. One list, read by both the
-# member listing a plugin language-pins from and the selector that picks among them:
-# the two used to filter for themselves and disagree about the same archive.
-ARCHIVE_MEMBER_EXTENSIONS = (".srt", ".sub", ".ssa", ".ass", ".vtt")
+# What counts as a subtitle member of a provider archive. There is exactly one such
+# list in the codebase and this is a reference to it, not a copy: the hub used to
+# accept five of the eight and reject the MicroDVD .txt members several ex-Yugoslav
+# providers ship, throttling the provider on every attempt. Ambiguity in .txt is
+# handled by the selector (see utils.AMBIGUOUS_SUBTITLE_EXTENSIONS), not by
+# narrowing the list here.
+ARCHIVE_MEMBER_EXTENSIONS = SUBTITLE_EXTENSIONS
 
 
 class WorkerProtocolError(ValueError):
@@ -251,13 +256,52 @@ def candidate_from_worker(provider_name: str, payload: dict[str, Any]) -> HubWor
     return subtitle
 
 
-_SUBTITLE_FORMATS = {"srt": "srt", "ass": "ass", "ssa": "ass", "vtt": "vtt", "sub": "microdvd"}
+# Every extension ARCHIVE_MEMBER_EXTENSIONS admits maps to a pysubs2 format
+# identifier. An extension missing here resolves to nothing and the caller falls
+# back to "srt", which writes the member's bytes into a file claiming to be SubRip.
+_SUBTITLE_FORMATS = {
+    "srt": "srt",
+    "ass": "ass",
+    "ssa": "ass",
+    "vtt": "vtt",
+    "sub": "microdvd",
+    "smi": "sami",
+    "mpl": "mpl2",
+    # A .txt member is whatever the uploader put in it: MicroDVD on the ex-Yugoslav
+    # providers, TMP elsewhere. The extension is only the fallback; the content
+    # decides. See _format_from_member.
+    "txt": "tmp",
+}
+
+# Extensions whose format the name does not settle, so the bytes are sniffed instead.
+_AMBIGUOUS_FORMAT_EXTENSIONS = frozenset({"txt"})
 
 
-def _format_from_member(name: str | None) -> str | None:
+def _sniffed_format(content: bytes | None) -> str | None:
+    """The subtitle format pysubs2 reads out of ``content``, or None.
+
+    Best effort by design: an undetectable member falls back to its extension
+    rather than failing the download.
+    """
+    if not content:
+        return None
+    try:
+        from pysubs2.formats import autodetect_format
+
+        return autodetect_format(content.decode("utf-8", "replace"))
+    except Exception:
+        return None
+
+
+def _format_from_member(name: str | None, content: bytes | None = None) -> str | None:
     if not name or "." not in name:
         return None
-    return _SUBTITLE_FORMATS.get(name.rsplit(".", 1)[-1].lower())
+    extension = name.rsplit(".", 1)[-1].lower()
+    if extension in _AMBIGUOUS_FORMAT_EXTENSIONS:
+        sniffed = _sniffed_format(content)
+        if sniffed:
+            return sniffed
+    return _SUBTITLE_FORMATS.get(extension)
 
 
 def worker_download_to_content(
@@ -335,6 +379,33 @@ def _list_archive_members(archive):
     return list_subtitle_members(archive, ARCHIVE_MEMBER_EXTENSIONS)
 
 
+def _is_safe_extracted_file(full_path: str, safe_root: str) -> bool:
+    """Reject anything that is not a regular file inside the extraction directory.
+
+    An archive member is attacker-controlled: a hostile provider can ship a symlink
+    named like a subtitle and pointed at any file this process can read. os.walk()
+    does not descend into symlinked directories, but a symlinked file still shows up
+    in ``files`` and opening it reads the link target, so the subtitle Bazarr writes
+    next to the video would be the host's own config.
+    """
+    if os.path.islink(full_path):
+        logger.warning("provider_hub: skipping symlink member in archive: %s", full_path)
+        return False
+
+    real_path = os.path.realpath(full_path)
+    if real_path != safe_root and not real_path.startswith(safe_root + os.sep):
+        logger.warning(
+            "provider_hub: skipping archive member escaping the temp directory: %s", full_path
+        )
+        return False
+
+    if not os.path.isfile(real_path):
+        logger.warning("provider_hub: skipping non-regular archive member: %s", full_path)
+        return False
+
+    return True
+
+
 _SEVEN_ZIP_MAGIC = b"7z\xbc\xaf\x27\x1c"
 
 
@@ -366,6 +437,7 @@ class _SevenZipArchive:
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
+            safe_root = os.path.realpath(tmp)
             with self._open() as archive:
                 archive.extract(path=tmp, targets=[name])
             # py7zr preserves the archived file's mode, which can drop the owner read
@@ -378,6 +450,8 @@ class _SevenZipArchive:
                         pass
                 for filename in files:
                     path = os.path.join(root, filename)
+                    if not _is_safe_extracted_file(path, safe_root):
+                        continue
                     try:
                         os.chmod(path, 0o600)
                     except OSError:  # pragma: no cover
@@ -478,11 +552,17 @@ def _worker_archive_to_content(
         chosen = payload.get("filename") or ""
 
     subtitle.content = content
-    # Prefer the chosen member's actual extension over a worker-supplied format:
-    # the worker's format can be stale/wrong (e.g. an SRT member labeled "vtt"),
-    # which would otherwise save SRT bytes to a .vtt file. Fall back to the
-    # worker format, then the existing one.
-    subtitle.format = _format_from_member(chosen) or payload.get("format") or getattr(subtitle, "format", "srt")
+    # Prefer what the member actually is over a worker-supplied format: the worker's
+    # format can be stale or wrong (e.g. an SRT member labeled "vtt"), which would
+    # otherwise save SRT bytes to a .vtt file. The episode picker does not report
+    # which member it chose, so when the name is unknown the bytes decide. Fall back
+    # to the worker format, then the existing one.
+    subtitle.format = (
+        _format_from_member(chosen, content)
+        or _sniffed_format(content)
+        or payload.get("format")
+        or getattr(subtitle, "format", "srt")
+    )
     # Clear any encoding carried over from search (e.g. via the display attribute splat)
     # so Subtitle.normalize()/chardet detects it from the extracted bytes, the same as
     # native subliminal providers; do not let a stale or worker-supplied guess pin it.
