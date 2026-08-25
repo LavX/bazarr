@@ -44,6 +44,13 @@ dangerous. `set` takes only -e, -u and -x, because `set -n` makes bash read a
 whole script without executing a line of it and still exit 0, and `set +e` lets
 a failing pytest leave the step green.
 
+A whitelisted option whose value nobody inspects is as good as no whitelist at
+all, so `-o`, `--override-ini` and `-c` are refused outright: each can carry
+`addopts=--collect-only`, which is the PYTEST_ADDOPTS hole with a different
+spelling. `--ignore-glob` is refused because pytest matches it recursively
+during collection while a filesystem glob does not, so the guard would subtract
+far less than pytest really skips.
+
 The consequence of a shape nobody anticipated is therefore a red build asking a
 human to look at it, not a green build hiding a suite that stopped running.
 That is the whole design: the failure mode is refusal, never a guess in the
@@ -253,10 +260,10 @@ _SET_MODES = frozenset("eux")
 # one of these positions is an argument to the option, not something pytest
 # collects, so it must never be read as coverage.
 _PYTEST_VALUE_OPTIONS = {
-    "-p", "-k", "-m", "-o", "-c", "-n", "-W", "-r",
+    "-p", "-k", "-m", "-n", "-W", "-r",
     "--tb", "--rootdir", "--basetemp", "--color", "--durations", "--maxfail",
-    "--log-level", "--junitxml", "--override-ini", "--import-mode",
-    "--ignore", "--ignore-glob", "--deselect",
+    "--log-level", "--junitxml", "--import-mode",
+    "--ignore", "--deselect",
 }
 # Options that take no value.
 _PYTEST_FLAGS = {
@@ -268,12 +275,33 @@ _PYTEST_FLAGS = {
     "--markers", "--help", "-h",
 }
 # Options whose paths pytest is told NOT to collect. They subtract.
-_PYTEST_SUBTRACTING = {"--ignore", "--ignore-glob", "--deselect"}
+_PYTEST_SUBTRACTING = {"--ignore", "--deselect"}
 # Options that stop pytest asserting anything, or narrow it to an arbitrary
 # subset. A command carrying one of these proves nothing about coverage.
 _PYTEST_NEUTERING = {
     "--collect-only", "--co", "--setup-only", "--setup-plan", "--fixtures",
     "--markers", "--help", "-h", "-k", "-m",
+}
+# Options refused outright on a test-bearing command, each with the reason.
+# Refused rather than modelled: what each of these does to a run is decided
+# somewhere the guard cannot read, so accepting the option with its value
+# uninspected is the same hole PYTEST_ADDOPTS already closes.
+_PYTEST_REFUSED = {
+    "-o": (
+        "overrides an ini option, so `-o addopts=--collect-only` collects and "
+        "exits 0 while asserting nothing"
+    ),
+    "--override-ini": "is the long form of -o, with the same reach over addopts",
+    "-c": (
+        "loads configuration from an arbitrary file, which can carry exactly "
+        "that addopts"
+    ),
+    "--ignore-glob": (
+        "excludes recursively by pattern during collection, which is not "
+        "filesystem glob semantics. `--ignore-glob=*ui.py` really does drop "
+        "tests/bazarr/test_ui.py, while the same pattern against the repo root "
+        "matches nothing, so the guard would subtract far less than pytest skips"
+    ),
 }
 
 # Workflow, job and step keys the guard has reasoned about. A key that is on
@@ -417,6 +445,11 @@ def _pytest_command(tokens: list, line: str) -> tuple:
             positional.append(token)
             continue
         name, separator, inline = token.partition("=")
+        if name in _PYTEST_REFUSED:
+            raise _Unverifiable(
+                f"{name} in {line!r} {_PYTEST_REFUSED[name]}, so the command "
+                "cannot be read as coverage"
+            )
         if name in _PYTEST_NEUTERING:
             raise _Unverifiable(
                 f"{name} in {line!r} stops pytest asserting anything, or narrows "
@@ -866,6 +899,21 @@ _SCRIPT_REFUSALS = {
     "the path names a test file that was deleted": (
         "pytest tests/bazarr/test_deleted_in_some_other_branch.py\n"
     ),
+    # pytest matches --ignore-glob recursively during collection, so
+    # `--ignore-glob=*ui.py` really drops tests/bazarr/test_ui.py while the same
+    # pattern against the repo root matches nothing at all.
+    "an ignore glob is matched by pytest, not by the filesystem": (
+        "pytest tests/bazarr/ --ignore-glob=*ui.py\n"
+    ),
+    # -o, --override-ini and -c all reach addopts, which is the PYTEST_ADDOPTS
+    # hole spelled as a command-line option.
+    "an ini option is overridden by a separated value": (
+        f"pytest {_REAL} -o addopts=--collect-only\n"
+    ),
+    "the long option overrides the same ini setting inline": (
+        f"pytest {_REAL} --override-ini=addopts=--collect-only\n"
+    ),
+    "config is loaded from an arbitrary file": f"pytest {_REAL} -c neutered.ini\n",
     # `set -n` makes bash read the script and execute none of it, exiting 0, so
     # every file the script names would be credited by a step that ran nothing.
     # `set +e` leaves a failing pytest unable to fail the step.
