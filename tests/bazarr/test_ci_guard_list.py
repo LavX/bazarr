@@ -158,14 +158,21 @@ EXCLUDED = {
         "be enumerated."
     ),
     "tests/subliminal_patch/test_supersubtitles.py": (
-        "six of its seven cases call www.feliratok.eu for real over a plain "
-        "requests.Session. The file has no cassette directory and no "
-        "requests_mock at all: 7 passed in 18s online against 6 failed, 1 "
-        "passed in 61s offline, the extra minute being ProviderRetryMixin "
-        "sleep. Only test_list_video is offline-safe. This is NOT the "
-        "CFSession bug that test_prijevodi.py and test_titlovi.py have: "
-        "supersubtitles.py builds a plain requests.Session and never touches "
-        "CFSession, so fixing cloudscraper does not make this file safe to run."
+        "six of its seven cases call www.feliratok.eu for real. The file has no "
+        "cassette directory and no requests_mock at all: 7 passed in 18s online "
+        "against 6 failed, 1 passed in 61s offline, the extra minute being "
+        "RetryingSession.retry_method, which is retry_call(tries=3, delay=5) at "
+        "custom_libs/subliminal_patch/http.py:217. The provider writes `from "
+        "requests import Session`, but the patched Provider base rebinds the "
+        "module's Session to RetryingSession at import time "
+        "(custom_libs/subliminal_patch/providers/__init__.py:133), which is why "
+        "the retries happen at all. Only test_subtitle_reprs is offline-safe: "
+        "it builds a SuperSubtitlesSubtitle by hand and asserts on it, and it "
+        "is the one that passes offline. test_list_video_2 is NOT offline-safe, "
+        "whatever its name suggests; it calls provider.list_subtitles. This is "
+        "also NOT the CFSession bug that test_prijevodi.py and test_titlovi.py "
+        "have: RetryingSession is not a CFSession, so fixing cloudscraper does "
+        "not make this file safe to run."
     ),
     # Not network-dependent at all, despite what they look like. These seven
     # were previously all labelled "live network call to the provider", which
@@ -227,7 +234,11 @@ EXCLUDED = {
         "before any handler code runs unless the request carries the global API "
         "key. The session-injection helper still gets past @check_login but not "
         "past that, so the 14 test_proxy_service_* cases read a non-JSON 401 "
-        "body and die on it. Give the helper the API key, then remove this entry."
+        "body and die on it. Give the helper the API key, then remove this "
+        "entry. The other 28 cases pass deterministically and are this "
+        "repository's only coverage for _resolve_and_validate_constrained and "
+        "the DNS-rebinding pinning cases, so they are worth splitting out if "
+        "the helper is not fixed soon."
     ),
     "tests/bazarr/test_database_sqlite_maintenance.py": (
         "one stale case out of six, test_configure_sqlite_connection_sets_wal_once. "
@@ -245,7 +256,10 @@ EXCLUDED = {
         "the guess', before any attribute is assigned: the tests are wrong, not "
         "the code. Only test_video_fromname_movie is a dropped attribute, "
         "video.other is None where it expects 'Proper', and it is dropped by "
-        "Video.fromname, not by fromguess."
+        "fromguess: Video.fromname is one line, `return cls.fromguess(name, "
+        "guessit(name))`, and Movie.fromguess never passes `other` through. "
+        "Written the other way round here twice; the direction is fromname to "
+        "fromguess, so a reader sent to fromname will find nothing to fix."
     ),
     # These two are fully requests_mock-ed, so they are deterministic and touch
     # no network, and they still fail for a real reason: a product bug in
