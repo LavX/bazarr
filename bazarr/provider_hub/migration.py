@@ -80,10 +80,13 @@ MIGRATED_BUILT_IN_PROVIDER_IDS = frozenset({
 RETIRED_BUILT_IN_PROVIDER_IDS = frozenset({
     "argenteamdump",
     "hosszupuska",
+    "podnapisi",
     "subdivx",
     "subscene",
     "subscene_cloudscraper",
+    "subscenter",
     "tusubtitulo",
+    "xsubs",
 })
 
 

@@ -15,7 +15,10 @@ from subliminal_patch.subtitle import Subtitle, guess_matches
 
 logger = logging.getLogger(__name__)
 
-CUSTOM_SESSION_EXCLUDED_PROVIDERS = ["podnapisi.py"]
+# Provider module files that must keep the plain requests.Session instead of
+# RetryingSession, because retries would hurt a site that is already struggling.
+# Empty right now: the only entry was podnapisi.py, retired with the site.
+CUSTOM_SESSION_EXCLUDED_PROVIDERS = []
 
 
 class Provider(_Provider):
