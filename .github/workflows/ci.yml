@@ -194,14 +194,25 @@ jobs:
         # These existed but were never collected by CI, so their assertions protected
         # nothing. Backfilled wholesale; test_ci_guard_list.py fails if a new test file
         # is added without being enumerated here or excluded with a reason.
+        #
         # Kept separate from the subliminal_patch step below, and this is a
         # WORKAROUND, not a structural choice. Co-collecting the two trees makes
-        # tests/subliminal_patch/test_utils.py fail, and that failure is real: any
-        # file here that imports the app runs init_binaries(), which globally
-        # points rarfile at 7z exactly as production does, and the 7z in the image
-        # cannot decode RAR. So the co-collected run was detecting the shipped RAR
-        # bug, and this split hides it. Remove the split once RAR extraction is
-        # fixed in the image.
+        # tests/subliminal_patch/test_utils.py::test_get_subtitle_from_archive_season_pack
+        # fail, and that failure is real. Exactly five of the files below load the
+        # api package transitively: test_combine_api_dto, test_combine_main,
+        # test_secret_store_e2e, test_subtitle_content_sync_outputs and
+        # test_upgrade_embedded_history. api/system/status.py does
+        # `from init import startTime`, and bazarr/init.py calls init_binaries() at
+        # module scope, which globally repoints rarfile at 7z exactly as production
+        # does. The 7z in the image cannot decode the RAR fixture that test reads,
+        # so the co-collected run was detecting the shipped RAR bug and this split
+        # hides it.
+        #
+        # Do not go looking for those five by grepping for `import api`: one of them
+        # gets there through importlib.import_module on a string, two import neither
+        # api nor app by name, and three files that DO import api.* are inert because
+        # they stub `init` in sys.modules before importing. Remove the split once RAR
+        # extraction is fixed in the image.
         run: |
           pytest \
             tests/bazarr/test_app_notifier.py \

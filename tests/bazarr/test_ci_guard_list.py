@@ -65,16 +65,15 @@ import yaml
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
-# Files deliberately kept out of CI, each with the reason. Keep sorted.
+# Files deliberately kept out of CI, grouped by cause, each with the reason it
+# cannot run. Every reason below was verified by running the file twice, once
+# normally and once inside a network namespace with no route out: a file whose
+# two runs are identical is not network-dependent, whatever it looks like.
 EXCLUDED = {
     # Built-in provider tests that really do reach the provider's site, so a
     # third party being down would turn every pull request in the repo red.
     # The built-in providers are being retired in favour of catalog plugins,
     # which are tested in their own repo.
-    #
-    # Each reason below was verified by running the file twice, once normally
-    # and once inside a network namespace with no route out. A file whose two
-    # runs are identical is not network-dependent, whatever it looks like.
     "tests/subliminal_patch/test_subclub.py": (
         "four vcr-marked cases have no recorded cassette, so vcr records live "
         "against subclub.eu on every run. The site currently answers 500, so "
@@ -100,14 +99,18 @@ EXCLUDED = {
         "be enumerated."
     ),
     "tests/subliminal_patch/test_supersubtitles.py": (
-        "all seven cases reach www.feliratok.eu for real over a plain "
-        "requests.Session, with no cassettes and no requests_mock anywhere in "
-        "the file: 7 passed online, 6 failed offline. A feliratok.eu outage "
-        "would turn every pull request in the repo red."
+        "six of its seven cases call www.feliratok.eu for real over a plain "
+        "requests.Session. The file has no cassette directory and no "
+        "requests_mock at all: 7 passed in 18s online against 6 failed, 1 "
+        "passed in 61s offline, the extra minute being ProviderRetryMixin "
+        "sleep. Only test_list_video is offline-safe. This is NOT the "
+        "CFSession bug that test_prijevodi.py and test_titlovi.py have: "
+        "supersubtitles.py builds a plain requests.Session and never touches "
+        "CFSession, so fixing cloudscraper does not make this file safe to run."
     ),
-    # Not network-dependent at all, despite what they look like. These were
-    # previously all labelled "live network call to the provider", which was
-    # wrong and hid four different real problems. Each needs a fix, not an
+    # Not network-dependent at all, despite what they look like. These seven
+    # were previously all labelled "live network call to the provider", which
+    # was wrong and hid seven different real problems. Each needs a fix, not an
     # exemption.
     "tests/subliminal_patch/test_addic7ed.py": (
         "skipped in full, so it protects nothing: a module-level skipif needs "
@@ -126,11 +129,12 @@ EXCLUDED = {
         "with KeyError at setup. Red in CI, not skipped, and not flaky."
     ),
     "tests/subliminal_patch/test_animesubinfo.py": (
-        "replays recorded HTTP and touches no network: identical results online "
-        "and inside a network namespace. Three of its seven cases fail because "
-        "the cassettes only recorded the pTitle=org query while the provider "
-        "now issues org, en and pl. Two of the four that pass do so vacuously, "
-        "asserting only isinstance(subs, list)."
+        "replays recorded HTTP and touches no network: 3 failed, 4 passed, "
+        "identical online and inside a network namespace. The three failures "
+        "are CannotOverwriteExistingCassetteException, because the cassettes "
+        "only recorded the pTitle=org query while the provider now issues org, "
+        "en and pl. Two of the four that pass do so vacuously, one asserting "
+        "only isinstance(subs, list) and one looping over a list that is empty."
     ),
     "tests/subliminal_patch/test_hosszupuska.py": (
         "hosszupuskasub.com is dead, so the provider is being retired. Until "
@@ -145,8 +149,8 @@ EXCLUDED = {
         "Both cases also burn 30 seconds each of ProviderRetryMixin sleep."
     ),
     "tests/subliminal_patch/test_core.py": (
-        "no network at all: 8 failed, 14 passed in 0.16s, identical online and "
-        "offline. Four pool tests compare SZProviderPool.providers against a "
+        "no network at all: 8 failed, 14 passed in under a fifth of a second, "
+        "identical online and offline. Four pool tests compare SZProviderPool.providers against a "
         "set, but it became an ordered list in af95a58bf. Three language-equals "
         "tests build the pool with an empty opensubtitlescom config, so it "
         "raises ConfigurationError before any request. test_scan_video_episode "
@@ -159,36 +163,56 @@ EXCLUDED = {
     # fix, not an exemption; the reason names what is wrong so it cannot be
     # forgotten again.
     "tests/bazarr/test_connection_tester.py": (
-        "stale harness: the /test endpoint was hardened and now answers 401, so "
-        "the login helper no longer bypasses auth. Fix the helper, then remove "
-        "this entry."
+        "stale harness, 14 failed and 28 passed. /test gained a second guard, "
+        "_require_proxy_api_key() at bazarr/app/ui.py:74, which aborts 401 "
+        "before any handler code runs unless the request carries the global API "
+        "key. The session-injection helper still gets past @check_login but not "
+        "past that, so the 14 test_proxy_service_* cases read a non-JSON 401 "
+        "body and die on it. Give the helper the API key, then remove this entry."
     ),
     "tests/bazarr/test_database_sqlite_maintenance.py": (
-        "asserts the SQLite maintenance pragmas are issued and observes none. "
-        "Either the pragmas regressed or the test is stale; needs triage."
-    ),
-    # These two replay recorded HTTP, so they are deterministic, and they fail
-    # for a real reason: CFSession's request override calls a cloudscraper method
-    # that no longer exists in the version the image actually installs, so every
-    # request through it raises AttributeError. Tracked separately; excluded here
-    # only so the guard-list backfill is not blocked by an unrelated product bug.
-    # test_supersubtitles.py used to sit here too, wrongly: its provider never
-    # touches CFSession, and lifting these two must not lift that one.
-    "tests/subliminal_patch/test_prijevodi.py": (
-        "CFSession request override calls a cloudscraper method missing in the "
-        "installed version; every request raises AttributeError. Product bug, "
-        "tracked separately."
-    ),
-    "tests/subliminal_patch/test_titlovi.py": (
-        "same CFSession AttributeError as test_prijevodi.py"
+        "one stale case out of six, test_configure_sqlite_connection_sets_wal_once. "
+        "configure_sqlite_connection gained an isinstance(dbapi_connection, "
+        "sqlite3.Connection) guard at bazarr/app/database.py:49, and the test "
+        "passes a plain stub object, so the function returns before issuing any "
+        "PRAGMA. The pragmas did not regress; the stub needs to be a real "
+        "sqlite3 connection."
     ),
     "tests/subliminal_patch/test_video.py": (
-        "three failures, none of them a network problem. "
-        "test_video_fromguess_episode and test_video_fromguess_movie both raise "
-        "subliminal.exceptions.GuessingError, 'Insufficient data to process the "
-        "guess', before Video.fromguess sets any attribute at all. "
-        "test_video_fromname_movie is the only dropped attribute, and it is "
-        "dropped by Video.fromname, not fromguess. Needs triage."
+        "three failures, none of them a network problem, and none of them what "
+        "this entry claimed until now. test_video_fromguess_episode and "
+        "test_video_fromguess_movie hand fromguess a guess dict with no title "
+        "key, so subliminal raises GuessingError, 'Insufficient data to process "
+        "the guess', before any attribute is assigned: the tests are wrong, not "
+        "the code. Only test_video_fromname_movie is a dropped attribute, "
+        "video.other is None where it expects 'Proper', and it is dropped by "
+        "Video.fromname, not by fromguess."
+    ),
+    # These two are fully requests_mock-ed, so they are deterministic and touch
+    # no network, and they still fail for a real reason: a product bug in
+    # CFSession. Excluded only so the guard-list backfill is not blocked by it.
+    #
+    # WATCH OUT before lifting either: both PASS on a machine with an older
+    # cloudscraper still installed, so "it is green locally" is not evidence.
+    # requirements.txt pins cloudscraper<=1.2.71, which resolves to 1.2.71, and
+    # 1.2.71 no longer has is_Challenge_Request. CFSession._request calls it at
+    # custom_libs/subliminal_patch/http.py:95, outside anything that catches
+    # AttributeError, so every request through CFSession dies there. Verified by
+    # running both files against 1.2.71 (5 failed, 1 failed) and against a
+    # locally installed 1.2.58, which still has the method (5 passed, 1 passed).
+    #
+    # test_supersubtitles.py used to sit in this block, wrongly. Its provider
+    # builds a plain requests.Session, so fixing cloudscraper does not make it
+    # safe to enumerate: lifting these two must not lift that one.
+    "tests/subliminal_patch/test_prijevodi.py": (
+        "CFSession._request calls is_Challenge_Request, which cloudscraper "
+        "1.2.71 removed, so all five cases raise AttributeError even though "
+        "requests_mock means they never reach a socket. Product bug in "
+        "custom_libs/subliminal_patch/http.py, tracked separately."
+    ),
+    "tests/subliminal_patch/test_titlovi.py": (
+        "same missing is_Challenge_Request as test_prijevodi.py: one case, "
+        "fully requests_mock-ed, fails on cloudscraper 1.2.71."
     ),
 }
 
