@@ -336,6 +336,12 @@ _CHECKED_KEYS = {"if", "continue-on-error", "working-directory", "shell"}
 _ALWAYS_RUNS = {True, "true", "always()", "${{ always() }}", "${{always()}}"}
 # Shells whose semantics the grammar below describes.
 _SAFE_SHELLS = {None, "bash", "sh", "bash -e {0}"}
+# Keys under `on.pull_request` that cannot stop an ordinary code change running
+# the workflow. `branches` is here on purpose: which branches are gated is an
+# ordinary decision, and hardcoding a list would fight every change to it.
+# `paths` and `paths-ignore` are not, and neither is `types`, which can narrow
+# the event to something a pushed commit never raises.
+_PULL_REQUEST_SAFE_KEYS = {"branches", "branches-ignore"}
 
 # Environment names that decide what a pytest run does before pytest is in a
 # position to be asked. PYTEST_* is read by pytest itself. The three PYTHON*
@@ -870,13 +876,64 @@ def _dependency_problems(job_name: str, jobs: dict) -> list:
     return problems
 
 
+def _trigger_problem(workflow: dict) -> str:
+    """Whether the workflow really fires on the pull requests it is meant to gate.
+
+    `on:` was safe-listed wholesale, so its contents were never read. Narrowing
+    `on.pull_request` with a `paths:` filter that a code change never matches
+    switches off everything below without touching a single line the guard
+    inspects: the steps still enumerate every path, the shell still parses, and
+    the workflow simply never runs. Every check in this file then vouches for a
+    run that did not happen.
+
+    What has to hold is only that an ordinary pull request reaches this workflow.
+    Which branches it gates is left alone deliberately.
+    """
+    triggers = workflow.get("on", workflow.get(True))
+    if isinstance(triggers, str):
+        triggers = {triggers: None}
+    elif isinstance(triggers, list) and all(isinstance(item, str) for item in triggers):
+        triggers = {item: None for item in triggers}
+    if not isinstance(triggers, dict):
+        return (
+            f"`on:` is {triggers!r}, which the guard cannot read. It decides "
+            "whether any of this runs at all"
+        )
+    if "pull_request" not in triggers:
+        return (
+            "`on:` does not include pull_request, so this workflow does not gate "
+            "a pull request and the checks in it block nothing from merging"
+        )
+    filters = triggers["pull_request"] or {}
+    if not isinstance(filters, dict):
+        return f"`on.pull_request` is {filters!r}, which the guard cannot read"
+    for key in ("paths", "paths-ignore"):
+        if key in filters:
+            return (
+                f"`on.pull_request` carries a {key} filter, so a pull request "
+                "that changes code outside it never runs this workflow at all. "
+                "Every path enumerated below would still read as coverage while "
+                "nothing ran"
+            )
+    unknown = sorted(str(key) for key in filters if key not in _PULL_REQUEST_SAFE_KEYS)
+    if unknown:
+        return (
+            f"`on.pull_request` uses {', '.join(unknown)}, which the guard has "
+            "not reasoned about. Work out whether it can stop an ordinary pull "
+            "request running the workflow, then add it to _PULL_REQUEST_SAFE_KEYS"
+        )
+    return ""
+
+
 def _read_workflow() -> tuple:
     """(files CI really runs, problems that stop the guard vouching for a step)."""
     workflow = _workflow()
     problems = []
     covered = set()
 
-    top = _scope_problem("workflow", WORKFLOW.name, workflow, _SAFE_WORKFLOW_KEYS)
+    top = _scope_problem(
+        "workflow", WORKFLOW.name, workflow, _SAFE_WORKFLOW_KEYS
+    ) or _trigger_problem(workflow)
     if top:
         return covered, [top]
 
@@ -1265,7 +1322,11 @@ def constructed_workflow(tmp_path, monkeypatch):
 
 
 def _one_job(*steps: dict, **job) -> dict:
-    return {"jobs": {"backend": dict(job, steps=list(steps))}}
+    """A workflow with one job, triggered the way `on:` now has to be."""
+    return {
+        "on": {"pull_request": None},
+        "jobs": {"backend": dict(job, steps=list(steps))},
+    }
 
 
 def test_path_only_in_a_step_name_is_not_coverage(constructed_workflow):
@@ -1379,6 +1440,61 @@ def test_the_one_allowed_test_environment_key_still_counts(constructed_workflow)
     assert covered == {_REAL} and not problems
 
 
+@pytest.mark.parametrize(
+    "case,triggers",
+    [
+        ("paths", {"pull_request": {"paths": ["docs/**"]}}),
+        ("paths-ignore", {"pull_request": {"paths-ignore": ["**"]}}),
+        ("types", {"pull_request": {"types": ["labeled"]}}),
+        ("pull_request", {"push": {"branches": ["development"]}}),
+        ("pull_request", ["push"]),
+        ("pull_request", "push"),
+        ("on:", {}),
+    ],
+)
+def test_workflow_that_never_fires_on_a_pull_request_is_not_coverage(
+    constructed_workflow, case, triggers
+):
+    """`on:` was safe-listed wholesale, so nobody read what was in it.
+
+    A `paths:` filter under pull_request that a code change never matches
+    disables every check this file vouches for, without changing one line the
+    guard inspects. The workflow simply never runs, and the guard stays green.
+    """
+    workflow = _one_job({"run": f"pytest {_REAL}\n"})
+    workflow["on"] = triggers
+    constructed_workflow(workflow)
+    covered, problems = _read_workflow()
+    assert not covered, f"a workflow narrowed by {case} was counted as coverage"
+    assert any(case in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
+    "triggers",
+    [
+        {"pull_request": None},
+        {"pull_request": {"branches": ["master", "development"]}},
+        # A separate branch removes the branch filter. Nothing here fights that.
+        {"pull_request": {}},
+        {"push": {"paths": ["bazarr/**"]}, "pull_request": None},
+        ["push", "pull_request"],
+    ],
+)
+def test_workflow_that_fires_on_any_pull_request_is_still_coverage(
+    constructed_workflow, triggers
+):
+    """Which branches are gated is an ordinary decision, and stays unchecked.
+
+    A `paths:` filter on push is fine too: what has to hold is that an ordinary
+    pull request reaches the workflow, whatever it touches.
+    """
+    workflow = _one_job({"run": f"pytest {_REAL}\n"})
+    workflow["on"] = triggers
+    constructed_workflow(workflow)
+    covered, problems = _read_workflow()
+    assert covered == {_REAL} and not problems
+
+
 @pytest.mark.parametrize("condition", ["always()", "${{ always() }}", True])
 def test_step_that_always_runs_is_still_coverage(constructed_workflow, condition):
     """`if: always()` really does always run, so refusing it would be a false alarm.
@@ -1459,6 +1575,7 @@ def test_job_reached_through_needs_is_checked_too(constructed_workflow, case, up
     """
     constructed_workflow(
         {
+            "on": {"pull_request": None},
             "jobs": {
                 "Frontend": dict(
                     upstream, **{"runs-on": "ubuntu-latest", "steps": [{"run": "npm run build\n"}]}
@@ -1488,6 +1605,7 @@ def test_needs_a_healthy_job_is_still_coverage(constructed_workflow):
     """The real workflow's Backend needs Frontend, so this must not false-alarm."""
     constructed_workflow(
         {
+            "on": {"pull_request": None},
             "jobs": {
                 "Frontend": {"runs-on": "ubuntu-latest", "steps": [{"run": "npm run build\n"}]},
                 "Backend": {
