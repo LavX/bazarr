@@ -607,17 +607,18 @@ def test_service_update_keeps_subtitle_settings_intact(schema_session):
 # The opt-in apply action: unset profiles only, one instance only
 # --------------------------------------------------------------------------
 
-def _series(session, local_id, upstream_id, instance_id, profile=None):
+def _series(session, local_id, upstream_id, instance_id, profile=None, tags=None):
     session.execute(insert(TableShows).values(
         id=local_id, sonarrSeriesId=upstream_id, arr_instance_id=instance_id,
-        path=f"/tv/{local_id}", title=f"S{local_id}", profileId=profile))
+        path=f"/tv/{local_id}", title=f"S{local_id}", profileId=profile,
+        tags=str(tags) if tags is not None else None))
 
 
-def _movie(session, local_id, upstream_id, instance_id, profile=None):
+def _movie(session, local_id, upstream_id, instance_id, profile=None, tags=None):
     session.execute(insert(TableMovies).values(
         id=local_id, radarrId=upstream_id, arr_instance_id=instance_id,
         path=f"/m/{local_id}", title=f"M{local_id}", tmdbId=f"t{local_id}",
-        profileId=profile))
+        profileId=profile, tags=str(tags) if tags is not None else None))
 
 
 def test_apply_fills_only_unset_profiles_on_that_instance(schema_session):
@@ -749,3 +750,196 @@ def test_service_update_accepts_both_blobs_in_one_request(schema_session):
     assert status == 200, updated
     assert updated["subtitle_settings"] == {"subsync": {"subsync_threshold": 80}}
     assert updated["media_defaults"] == {"default_enabled": True, "default_profile": 2}
+
+
+# --------------------------------------------------------------------------
+# Review findings: the bulk apply undoing a deliberate exclusion, the sync
+# re-resolving per item, the health check not seeing instance defaults, and
+# the apply endpoint doing a whole library's reindex inside the request.
+# --------------------------------------------------------------------------
+
+
+def test_apply_skips_series_a_tag_deliberately_excluded(schema_session, monkeypatch):
+    """A tag in remove_profile_tags makes the sync parser set profileId to None
+    on purpose. That is not "unset yet", it is "kept out", and a bulk apply that
+    fills it in silently undoes the rule the user configured."""
+    from app.config import settings
+    from arr_instances import service
+
+    monkeypatch.setattr(settings.general, "serie_tag_enabled", True)
+    monkeypatch.setattr(settings.general, "remove_profile_tags", ["nosubs"])
+
+    _profile(schema_session, 2, "Anime")
+    anime = _instance(schema_session, "sonarr", "Anime", 8990,
+                      {"default_enabled": True, "default_profile": 2})
+    _series(schema_session, 1, 10, anime.id, None)
+    _series(schema_session, 2, 11, anime.id, None, tags=["nosubs"])
+
+    body, status = service.apply_default_profile(schema_session, anime.id)
+
+    assert status == 200, body
+    assert body["updated"] == 1
+    assert body["upstream_ids"] == [10]
+    profiles = dict(schema_session.execute(
+        select(TableShows.id, TableShows.profileId)).all())
+    assert profiles == {1: 2, 2: None}
+
+
+def test_apply_skips_movies_a_tag_deliberately_excluded(schema_session, monkeypatch):
+    from app.config import settings
+    from arr_instances import service
+
+    monkeypatch.setattr(settings.general, "movie_tag_enabled", True)
+    monkeypatch.setattr(settings.general, "remove_profile_tags", ["nosubs"])
+
+    _profile(schema_session, 2, "Anime")
+    anime = _instance(schema_session, "radarr", "Anime", 7879,
+                      {"default_enabled": True, "default_profile": 2})
+    _movie(schema_session, 1, 10, anime.id, None)
+    _movie(schema_session, 2, 11, anime.id, None, tags=["nosubs"])
+
+    body, status = service.apply_default_profile(schema_session, anime.id)
+
+    assert body["updated"] == 1
+    assert body["upstream_ids"] == [10]
+
+
+def test_apply_ignores_the_exclusion_when_tag_handling_is_off(schema_session, monkeypatch):
+    """The tag list only means anything while tag handling is enabled."""
+    from app.config import settings
+    from arr_instances import service
+
+    monkeypatch.setattr(settings.general, "serie_tag_enabled", False)
+    monkeypatch.setattr(settings.general, "remove_profile_tags", ["nosubs"])
+
+    _profile(schema_session, 2, "Anime")
+    anime = _instance(schema_session, "sonarr", "Anime", 8990,
+                      {"default_enabled": True, "default_profile": 2})
+    _series(schema_session, 1, 10, anime.id, None, tags=["nosubs"])
+
+    body, _status = service.apply_default_profile(schema_session, anime.id)
+
+    assert body["updated"] == 1
+
+
+def test_the_bulk_series_sync_resolves_the_default_profile_once(schema_session, monkeypatch):
+    """Once per sync, not once per series: the resolution issues an indexed
+    query whenever an override is set, so a library of a few thousand shows pays
+    for a few thousand round trips that all return the same answer. Every other
+    invariant in this loop is already hoisted; this one was not."""
+    series_mod = _prepare_series_sync(monkeypatch, schema_session)
+
+    calls = []
+
+    def counting(*args, **kwargs):
+        calls.append(args)
+        return 2
+
+    monkeypatch.setattr(series_mod, "resolve_default_profile", counting)
+    monkeypatch.setattr(series_mod, "jobs_queue", _DummyJobs())
+    monkeypatch.setattr(series_mod, "check_sonarr_rootfolder", _noop)
+    monkeypatch.setattr(series_mod, "get_profile_list", lambda *a, **k: [])
+    monkeypatch.setattr(series_mod, "get_tags", lambda *a, **k: [])
+    monkeypatch.setattr(series_mod, "get_language_profiles", lambda *a, **k: [])
+    monkeypatch.setattr(series_mod, "get_series_from_sonarr_api",
+                        lambda *a, **k: [{"id": n, "title": f"S{n}"} for n in range(1, 6)])
+    monkeypatch.setattr(series_mod, "get_episodes_from_sonarr_api", lambda *a, **k: [])
+
+    series_mod.update_series(job_id=1)
+
+    assert len(calls) == 1, f"resolved {len(calls)} times for 5 series"
+
+
+def test_the_health_check_sees_a_per_instance_default_profile(schema_session, monkeypatch):
+    """With the global default enabled but no profile chosen, a per-instance
+    override is what newly synced media actually gets. Reporting "no default
+    profile" then sends the user to fix something that is already configured."""
+    from app.config import settings
+    from utilities import health
+
+    monkeypatch.setattr(settings.general, "serie_default_enabled", True)
+    monkeypatch.setattr(settings.general, "serie_default_profile", "")
+    monkeypatch.setattr(settings.general, "movie_default_enabled", False)
+    monkeypatch.setattr(health, "database", schema_session)
+
+    _profile(schema_session, 2, "Anime")
+    _instance(schema_session, "sonarr", "Anime", 8990,
+              {"default_enabled": True, "default_profile": 2})
+
+    assert health.series_default_profile_is_missing() is False
+
+
+def test_the_health_check_still_reports_a_genuinely_missing_default(schema_session, monkeypatch):
+    from app.config import settings
+    from utilities import health
+
+    monkeypatch.setattr(settings.general, "serie_default_enabled", True)
+    monkeypatch.setattr(settings.general, "serie_default_profile", "")
+    monkeypatch.setattr(health, "database", schema_session)
+
+    _instance(schema_session, "sonarr", "Plain", 8989)
+
+    assert health.series_default_profile_is_missing() is True
+
+
+def test_the_apply_endpoint_queues_the_reindex_instead_of_running_it(monkeypatch):
+    """A library of a few thousand unprofiled series means a few thousand
+    index passes, each scanning every episode and emitting events. Doing that
+    inside the request holds a web worker for minutes and can outlive a proxy
+    timeout, while the UI has nothing to show for it."""
+    import api.system.arr_instances as endpoint_module
+
+    queued = []
+    indexed = []
+
+    class _Queue:
+        def feed_jobs_pending_queue(self, job_name, module, func, args=None, kwargs=None,
+                                    **options):
+            queued.append({"job_name": job_name, "module": module, "func": func,
+                           "args": args, "kwargs": kwargs})
+            return 1
+
+    monkeypatch.setattr(endpoint_module.service, "apply_default_profile",
+                        lambda *a, **k: ({"updated": 3, "profileId": 2, "kind": "sonarr",
+                                          "upstream_ids": [10, 11, 12]}, 200))
+    monkeypatch.setattr(endpoint_module, "database", _CommitOnly())
+    monkeypatch.setattr(endpoint_module, "jobs_queue", _Queue())
+
+    import subtitles.indexer.series as indexer
+    monkeypatch.setattr(indexer, "list_missing_subtitles",
+                        lambda **kwargs: indexed.append(kwargs))
+
+    resource = endpoint_module.ArrInstanceApplyDefaultProfile()
+    body, status = resource.post.__wrapped__(resource, 4)
+
+    assert status == 200
+    assert body == {"updated": 3, "profileId": 2}
+    assert indexed == [], "the reindex ran inside the request"
+    assert len(queued) == 1
+    assert queued[0]["kwargs"]["upstream_ids"] == [10, 11, 12]
+    assert queued[0]["kwargs"]["arr_instance_id"] == 4
+
+
+def test_the_queued_reindex_does_the_work_the_request_no_longer_does(monkeypatch):
+    from arr_instances import service
+
+    indexed = []
+    events = []
+    monkeypatch.setattr(service, "event_stream",
+                        lambda *args, **kwargs: events.append(kwargs or args))
+
+    import subtitles.indexer.series as indexer
+    monkeypatch.setattr(indexer, "list_missing_subtitles",
+                        lambda **kwargs: indexed.append(kwargs))
+
+    service.reindex_after_default_profile(
+        kind="sonarr", upstream_ids=[10, 11], arr_instance_id=4, job_id=1)
+
+    assert [entry["no"] for entry in indexed] == [10, 11]
+    assert all(entry["arr_instance_id"] == 4 for entry in indexed)
+    assert events, "the UI was never told the items changed"
+
+
+class _CommitOnly:
+    def commit(self):
+        return None

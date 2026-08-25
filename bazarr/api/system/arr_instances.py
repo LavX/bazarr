@@ -1,12 +1,10 @@
 # coding=utf-8
 
-import logging
-
 from flask import request
 from flask_restx import Namespace, Resource, reqparse
 
 from app.database import database
-from app.event_handler import event_stream
+from app.jobs_queue import jobs_queue
 from arr_instances import service
 
 from ..utils import authenticate
@@ -176,29 +174,19 @@ class ArrInstanceApplyDefaultProfile(Resource):
             return body, status
         database.commit()
 
-        # Recompute what is missing for exactly the items that changed, and tell
-        # the UI, the same way the mass-edit profile selector does.
-        kind = body.get("kind")
+        # Recompute what is missing for exactly the items that changed, in the
+        # background. Each pass scans every episode of an item and emits events,
+        # so doing a whole library inside this request would hold a web worker
+        # for minutes and can outlive a proxy timeout.
         upstream_ids = body.get("upstream_ids") or []
-        try:
-            if kind == "sonarr":
-                from subtitles.indexer.series import list_missing_subtitles
-                for upstream_id in upstream_ids:
-                    list_missing_subtitles(no=upstream_id, arr_instance_id=instance_id)
-                    event_stream(type="series", payload=upstream_id)
-            else:
-                from subtitles.indexer.movies import list_missing_subtitles_movies
-                for upstream_id in upstream_ids:
-                    list_missing_subtitles_movies(no=upstream_id, arr_instance_id=instance_id)
-                    event_stream(type="movie", payload=upstream_id)
-            if upstream_ids:
-                event_stream(type="badges")
-        except Exception:
-            # The profiles are committed; a failed re-index must not read as a
-            # failed request. The scheduled indexer picks it up regardless.
-            logging.exception(
-                "BAZARR failed to refresh missing subtitles after applying the "
-                "default language profile of instance %s", instance_id)
+        if upstream_ids:
+            jobs_queue.feed_jobs_pending_queue(
+                job_name=f"Refreshing missing subtitles for {len(upstream_ids)} items",
+                module="arr_instances.service",
+                func="reindex_after_default_profile",
+                kwargs={"kind": body.get("kind"), "upstream_ids": upstream_ids,
+                        "arr_instance_id": instance_id},
+                is_progress=False)
 
         # upstream_ids is an implementation detail of the refresh above.
         return {"updated": body["updated"], "profileId": body["profileId"]}, 200

@@ -9,6 +9,7 @@ chain, and keeps the resources to thin parse/commit glue.
 The session is flushed but NOT committed here; the HTTP boundary owns the
 transaction and commits on success.
 """
+import ast
 import logging
 
 from sqlalchemy import select, update
@@ -394,6 +395,73 @@ def _known_profile_ids(session):
         select(TableLanguagesProfiles.profileId)).all()}
 
 
+def _excluded_profile_tags(kind):
+    """Tags that mean "no profile", or an empty set when tag handling is off."""
+    from app.config import settings
+
+    enabled = (settings.general.serie_tag_enabled if kind == "sonarr"
+               else settings.general.movie_tag_enabled)
+    if not enabled:
+        return frozenset()
+
+    return frozenset(settings.general.remove_profile_tags or ())
+
+
+def _tags_exclude_a_profile(stored_tags, excluded_tags):
+    """True when this row's tags intersect the no-profile list.
+
+    ``tags`` is stored as the repr of a Python list, which is what the sync
+    writes, so it is read back the same way. An unreadable value excludes
+    nothing: refusing to apply the default because a tag blob is malformed
+    would be a worse failure than applying it.
+    """
+    if not excluded_tags or not stored_tags:
+        return False
+
+    try:
+        tags = ast.literal_eval(stored_tags)
+    except (ValueError, SyntaxError):
+        return False
+
+    if not isinstance(tags, (list, tuple, set)):
+        return False
+
+    return bool(set(tags) & excluded_tags)
+
+
+def reindex_after_default_profile(kind, upstream_ids, arr_instance_id, job_id=None):
+    """Recompute what is missing for the items apply_default_profile changed.
+
+    Runs as a queued job rather than inside the Apply request: one index pass
+    per item scans every episode and emits events, so a library of a few
+    thousand unprofiled items would hold a web worker for minutes and can
+    outlive a proxy timeout, with nothing to show for it in the UI meanwhile.
+
+    Failures are logged, not raised: the profiles are already committed, and the
+    scheduled indexer picks up anything missed here.
+    """
+    if not upstream_ids:
+        return
+
+    if kind == "sonarr":
+        from subtitles.indexer.series import list_missing_subtitles as index_one
+        event_type = "series"
+    else:
+        from subtitles.indexer.movies import list_missing_subtitles_movies as index_one
+        event_type = "movie"
+
+    for upstream_id in upstream_ids:
+        try:
+            index_one(no=upstream_id, arr_instance_id=arr_instance_id)
+            event_stream(type=event_type, payload=upstream_id)
+        except Exception:
+            logging.exception(
+                "BAZARR failed to refresh missing subtitles for %s %s on instance %s",
+                kind, upstream_id, arr_instance_id)
+
+    event_stream(type="badges")
+
+
 def apply_default_profile(session, instance_id):
     """Assign this instance's default language profile to its media that has no
     profile yet. Opt-in, and deliberately narrow.
@@ -426,14 +494,23 @@ def apply_default_profile(session, instance_id):
     # Collect the targets before the write: the UPDATE's own WHERE stops
     # matching them once profileId is set, and the caller needs the ids.
     targets = session.execute(
-        select(upstream_column)
+        select(upstream_column, table.tags)
         .where(table.arr_instance_id == instance_id, table.profileId.is_(None))).all()
-    upstream_ids = [t[0] for t in targets]
+
+    # A row a tag rule deliberately excluded is not "unset yet", it is "kept
+    # out": the sync parsers set profileId to None on purpose when the item
+    # carries one of remove_profile_tags. Filling those in here would silently
+    # undo the rule the user configured, on their whole library at once.
+    excluded_tags = _excluded_profile_tags(row.kind)
+    upstream_ids = [t[0] for t in targets
+                    if not _tags_exclude_a_profile(t[1], excluded_tags)]
     if upstream_ids:
         session.execute(
             update(table)
             .values(profileId=profile)
-            .where(table.arr_instance_id == instance_id, table.profileId.is_(None)))
+            .where(table.arr_instance_id == instance_id,
+                   table.profileId.is_(None),
+                   upstream_column.in_(upstream_ids)))
 
     logging.info("Assigned language profile %s to %s unprofiled %s items on instance %s",
                  profile, len(upstream_ids), row.kind, instance_id)

@@ -1,5 +1,7 @@
 # coding=utf-8
 
+import logging
+
 import json
 
 from sqlalchemy import func
@@ -49,6 +51,46 @@ def check_health(job_id=None, wait_for_completion=False):
     backup_rotation()
 
     jobs_queue.update_job_name(job_id=job_id, new_job_name="Checked Health")
+
+
+def _any_instance_default_profile(kind):
+    """True when some instance of ``kind`` supplies a default profile of its own.
+
+    The global default is not the only source any more: media synced by an
+    instance with an override gets that profile, so reporting "you must assign a
+    profile" while one is configured sends the user to fix something that is
+    already set up. Never raises: a health check that throws takes the whole
+    page with it.
+    """
+    try:
+        from arr_instances.media_defaults import instance_default_profile, read_media_defaults
+        from arr_instances.repository import ArrInstanceRepository
+
+        for row in ArrInstanceRepository(database).list(kind=kind):
+            has_override, profile = instance_default_profile(read_media_defaults(row.options))
+            if has_override and profile is not None:
+                return True
+    except Exception:
+        logging.exception("BAZARR could not read the per-instance default language profiles")
+
+    return False
+
+
+def series_default_profile_is_missing():
+    """The global series default is enabled but nothing supplies a profile."""
+    if not settings.general.serie_default_enabled:
+        return False
+    if settings.general.serie_default_profile != '':
+        return False
+    return not _any_instance_default_profile('sonarr')
+
+
+def movie_default_profile_is_missing():
+    if not settings.general.movie_default_enabled:
+        return False
+    if settings.general.movie_default_profile != '':
+        return False
+    return not _any_instance_default_profile('radarr')
 
 
 def get_health_issues():
@@ -102,8 +144,8 @@ def get_health_issues():
                                            .where(TableShows.profileId.is_not(None))).scalar()
     movies_with_profile = database.execute(select(func.count(TableMovies.radarrId))
                                            .where(TableMovies.profileId.is_not(None))).scalar()
-    default_series_profile_empty = settings.general.serie_default_enabled and settings.general.serie_default_profile == ''
-    default_movies_profile_empty = settings.general.movie_default_enabled and settings.general.movie_default_profile == ''
+    default_series_profile_empty = series_default_profile_is_missing()
+    default_movies_profile_empty = movie_default_profile_is_missing()
     if languages_profiles_count == 0:
         health_issues.append({'object': 'Missing languages profile',
                               'issue': 'You must create at least one languages profile and assign it to your content.'})
