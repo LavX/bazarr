@@ -255,20 +255,7 @@ EXCLUDED = {
     # Currently failing for reasons that are not network flakiness. Each needs a
     # fix, not an exemption; the reason names what is wrong so it cannot be
     # forgotten again.
-    "tests/subliminal_patch/test_video.py": (
-        "three failures, none of them a network problem, and none of them what "
-        "this entry claimed until now. test_video_fromguess_episode and "
-        "test_video_fromguess_movie hand fromguess a guess dict with no title "
-        "key, so subliminal raises GuessingError, 'Insufficient data to process "
-        "the guess', before any attribute is assigned: the tests are wrong, not "
-        "the code. Only test_video_fromname_movie is a dropped attribute, "
-        "video.other is None where it expects 'Proper', and it is dropped by "
-        "fromguess: Video.fromname is one line, `return cls.fromguess(name, "
-        "guessit(name))`, and Movie.fromguess never passes `other` through. "
-        "Written the other way round here twice; the direction is fromname to "
-        "fromguess, so a reader sent to fromname will find nothing to fix."
-    ),
-    # These two are fully requests_mock-ed, so they are deterministic and touch
+    # These are fully requests_mock-ed, so they are deterministic and touch
     # no network, and they still fail for a real reason: a product bug in
     # CFSession. Excluded only so the guard-list backfill is not blocked by it.
     #
