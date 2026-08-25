@@ -15,8 +15,8 @@ def test_language_list_is_convertible():
 @pytest.mark.parametrize(
     "episode_key,language,expected_any_release_info",
     [
-        ("breaking_bad_s01e01", Language.fromietf("en"), "BluRayREWARD"),
-        ("better_call_saul_s06e04", Language.fromietf("fr"), "AMZN-NTb"),
+        ("breaking_bad_s01e01", Language.fromietf("en"), "Breaking.Bad.S01E01.BluRayREWARD"),
+        ("better_call_saul_s06e04", Language.fromietf("fr"), "Better.Call.Saul.S06E04.AMZN-NTb"),
     ],
 )
 def test_list_subtitles(episodes, episode_key, language, expected_any_release_info):
@@ -25,7 +25,6 @@ def test_list_subtitles(episodes, episode_key, language, expected_any_release_in
         assert any(
             subtitle.release_info == expected_any_release_info for subtitle in subtitles
         )
-
 
 def test_list_subtitles_hearing_impaired(episodes):
     with GestdownProvider() as provider:
@@ -87,6 +86,22 @@ def test_subtitle_multi_release_version():
     assert sub.release_info == "HDTV\nWEB"
 
 
+def test_subtitle_formatted_with_series_and_episode():
+    sub = GestdownSubtitle(
+        Language.fromietf("en"),
+        {
+            "subtitleId": "abc",
+            "version": "LOL, DVDRip ORPHEUS",
+            "hearingImpaired": False,
+            "downloadUri": "/download/abc",
+            "qualities": [],
+        },
+        series="Breaking Bad",
+        season=1,
+        episode=4,
+    )
+    assert sub.releases == ["Breaking.Bad.S01E04.LOL", "Breaking.Bad.S01E04.DVDRip.ORPHEUS"]
+    assert sub.release_info == "Breaking.Bad.S01E04.LOL\nBreaking.Bad.S01E04.DVDRip.ORPHEUS"
 def test_subtitle_get_matches_release_group(episodes):
     sub = GestdownSubtitle(
         Language.fromietf("en"),
