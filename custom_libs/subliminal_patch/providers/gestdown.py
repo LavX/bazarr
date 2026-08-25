@@ -48,14 +48,25 @@ def _token_boundaries(token):
 # The tail is one flat character class rather than a repeated group of
 # quantifiers: a nested one backtracks exponentially on a malformed token like
 # S01E0000000000000000x, and one such Gestdown result would stall the listing.
-_SEASON_EPISODES = re.compile(r"(?<![a-z0-9])s(\d+)((?:[-_. ]|e|\d)*)(?![a-z0-9])")
+# A trailing vN is a re-release marker rather than part of the episode number,
+# and the numbers are length-bounded because int() refuses a string of more
+# than 4300 digits and the ValueError would take the whole listing with it.
+_SEASON_EPISODES = re.compile(
+    r"(?<![a-z0-9])s(\d{1,4})((?:[-_. ]|e|\d)*)(?:v\d{1,3})?(?![a-z0-9])"
+)
 # The same in the NxMM spelling.
-_SEASON_X_EPISODES = re.compile(r"(?<![a-z0-9])(\d+)x((?:[-_. ]|\d)*)(?![a-z0-9])")
+_SEASON_X_EPISODES = re.compile(
+    r"(?<![a-z0-9])(\d{1,4})x((?:[-_. ]|\d)*)(?:v\d{1,3})?(?![a-z0-9])"
+)
+
+# Longer than any real episode number, and short enough for int() to accept.
+_MAX_NUMBER_DIGITS = 6
 
 
 def _tail_covers(tail, episode):
     """True when ``tail`` names ``episode``, expanding ranges as it goes."""
-    parts = re.findall(r"\d+|-", tail)
+    parts = [part for part in re.findall(r"\d+|-", tail)
+             if part == "-" or len(part) <= _MAX_NUMBER_DIGITS]
     for index, part in enumerate(parts):
         if part != "-":
             if int(part) == episode:

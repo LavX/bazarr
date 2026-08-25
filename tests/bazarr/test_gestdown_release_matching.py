@@ -168,3 +168,25 @@ def test_a_pathological_episode_token_is_rejected_quickly():
     assert sub.release_info
 
     assert time.monotonic() - started < 1.0
+
+
+@pytest.mark.parametrize("version", [
+    "S01E02v2.1080p.WEB-DL",
+    "1x02v2.1080p.WEB-DL",
+])
+def test_a_revision_suffix_does_not_hide_the_episode(version):
+    """vN is a re-release marker, not part of the episode number."""
+    sub = _subtitle(version, series="Show", season=1, episode=2)
+
+    assert sub.release_info == version
+
+
+def test_an_absurdly_long_numeric_token_does_not_abort_the_listing():
+    """int() refuses to parse a string of more than 4300 digits, and the
+    exception would come out of the subtitle constructor and take the whole
+    listing with it."""
+    version = "S01E" + "9" * 5000
+
+    sub = _subtitle(version, series="Show", season=1, episode=2)
+
+    assert sub.release_info.endswith(version)
