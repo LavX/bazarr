@@ -28,6 +28,17 @@ coverage to a parser that guesses, and each was found by a reviewer rather than
 by the guard. Patching them one at a time only ever bought time until the next
 shape.
 
+Later audits found five more of exactly that kind, all of which left the guard
+green: a step that mentions neither pytest nor tests/ writing
+`PYTEST_ADDOPTS=--collect-only` into `$GITHUB_ENV`, which GitHub then applies to
+every later step in the job; `if: false` on a job that runs no tests but that
+the test job waits on, because a skipped dependency skips everything downstream
+and a skipped job fails nothing; `on.pull_request` narrowed by a `paths:` filter
+that a code change never matches, which stops the whole workflow without
+changing a line the guard reads; `-p neuter`, a whitelisted option whose value
+nobody inspected; and this file itself being dropped from the workflow and added
+to its own exclusion list, which switched off every check here in two edits.
+
 This version does not guess. It refuses.
 
 A `run:` script that mentions pytest or a tests/ path has to be built entirely
@@ -73,6 +84,28 @@ path that no longer exists covers nothing. That is why there is no list of
 "directories CI runs wholesale" any more. The old list was matched as a
 substring, so a single-file run, or even `--ignore=tests/compat/`, credited all
 55 files under it.
+
+What this cannot see
+--------------------
+The guard proves one thing: that CI hands pytest a path, in a step and a job
+whose result binds, under configuration that does not stop pytest asserting.
+It does not prove a single assertion ran. These are outside what reading a
+workflow can reach, and no amount of parsing gets to them:
+
+- A dependency that changes what pytest does. A plugin in dev-requirements.txt
+  that skips, deselects or exits early is installed by the same
+  `pip install -r` line the grammar accepts, and nothing in the workflow says
+  what it does.
+- A conftest.py that empties the run. It is Python the guard does not execute,
+  and one module-level skip leaves a green run with nothing in it.
+- A test file that has been emptied, or whose assertions stopped asserting.
+  Coverage here is counted per file: what is inside the file is a review
+  question, not a parsing one.
+- Tests moved into a composite action or a second workflow file. Neither grants
+  coverage, so the files show up as unaccounted, but the guard reports them as
+  unrun rather than as moved, and it reads no other workflow file at all.
+- Whether the run passed, or how many tests it collected. A path handed to
+  pytest and a suite that really executed are not the same claim.
 """
 
 import configparser
