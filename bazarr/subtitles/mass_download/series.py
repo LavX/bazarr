@@ -32,12 +32,14 @@ def series_download_subtitles(no, job_id=None, job_sub_function=False, arr_insta
 
     series_row = database.execute(scoped(
         select(TableShows.path,
+               TableShows.arr_instance_id,
                TableShows.title)
         .where(TableShows.sonarrSeriesId == no),
         TableShows.arr_instance_id, arr_instance_id))\
         .first()
 
-    if series_row and not os.path.exists(path_mappings.path_replace(series_row.path)):
+    if series_row and not os.path.exists(
+            path_mappings.path_replace_instance(series_row.path, series_row.arr_instance_id, 'series')):
         raise OSError
 
     conditions = [(TableEpisodes.sonarrSeriesId == no),
@@ -98,6 +100,7 @@ def episode_download_subtitles(no, job_id=None, job_sub_function=False, provider
     conditions = [(TableEpisodes.sonarrEpisodeId == no)]
     conditions += get_exclusion_clause('series')
     stmt = scoped(select(TableEpisodes.path,
+                  TableEpisodes.arr_instance_id,
                   TableEpisodes.missing_subtitles,
                   TableEpisodes.monitored,
                   TableEpisodes.sonarrEpisodeId,
@@ -124,14 +127,15 @@ def episode_download_subtitles(no, job_id=None, job_sub_function=False, provider
         return
     elif episode.subtitles is None:
         # subtitles indexing for this episode is incomplete, we'll do it again
-        store_subtitles(episode.path, path_mappings.path_replace_movie(episode.path))
+        store_subtitles(episode.path,
+                        path_mappings.path_replace_instance(episode.path, episode.arr_instance_id, 'series'))
         episode = database.execute(stmt).first()
     elif episode.missing_subtitles is None:
         # missing subtitles calculation for this episode is incomplete, we'll do it again
         list_missing_subtitles(epno=no, arr_instance_id=arr_instance_id)
         episode = database.execute(stmt).first()
 
-    episodePath = path_mappings.path_replace(episode.path)
+    episodePath = path_mappings.path_replace_instance(episode.path, episode.arr_instance_id, 'series')
 
     if not os.path.exists(episodePath):
         logging.debug(f"BAZARR episode file not found. Path mapping issue?: {episodePath}")  # noqa: G004
@@ -177,7 +181,9 @@ def episode_download_subtitles(no, job_id=None, job_sub_function=False, provider
                 if result:
                     if isinstance(result, tuple) and len(result):
                         result = result[0]
-                    store_subtitles(episode.path, path_mappings.path_replace(episode.path))
+                    store_subtitles(episode.path,
+                                    path_mappings.path_replace_instance(episode.path, episode.arr_instance_id,
+                                                                        'series'))
                     history_log(1, episode.sonarrSeriesId, episode.sonarrEpisodeId, result,
                                 arr_instance_id=arr_instance_id)
                     send_notifications(episode.sonarrSeriesId, episode.sonarrEpisodeId, result.message,
@@ -203,6 +209,7 @@ def episode_download_specific_subtitles(sonarr_series_id, sonarr_episode_id, lan
     episodeInfo = database.execute(
         scoped(
             select(TableEpisodes.id,
+                   TableEpisodes.arr_instance_id,
                    TableEpisodes.path,
                    TableEpisodes.sceneName,
                    TableEpisodes.audio_language,
@@ -219,7 +226,7 @@ def episode_download_specific_subtitles(sonarr_series_id, sonarr_episode_id, lan
     if not episodeInfo:
         return 'Episode not found', 404
 
-    episodePath = path_mappings.path_replace(episodeInfo.path)
+    episodePath = path_mappings.path_replace_instance(episodeInfo.path, episodeInfo.arr_instance_id, 'series')
 
     if not os.path.exists(episodePath):
         return 'Episode file not found. Path mapping issue?', 500
