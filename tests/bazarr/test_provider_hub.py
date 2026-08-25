@@ -940,15 +940,15 @@ def test_dead_origin_providers_are_not_builtin_replacements():
     )
 
 
-def test_retired_built_in_ids_are_claimed_but_never_shadowable():
+def test_retired_built_in_ids_stay_claimed_and_are_trusted_only():
     # Retiring a built-in deletes its module, so the id leaves provider_registry and
     # the dynamic half of the shadow gate stops covering it. RETIRED_BUILT_IN_PROVIDER_IDS
-    # keeps it claimed, and keeping it off the migration allowlist keeps it unshadowable
-    # by trusted sources too.
+    # keeps it claimed. It is a separate set from the migration allowlist, which carries
+    # its own auto-install and rename semantics, but both are shadowable on the same
+    # terms: trusted yes, untrusted no.
     from provider_hub.migration import (
         MIGRATED_BUILT_IN_PROVIDER_IDS,
         RETIRED_BUILT_IN_PROVIDER_IDS,
-        can_shadow_built_in_provider,
     )
     from subliminal_patch.extensions import provider_registry
 
@@ -958,15 +958,32 @@ def test_retired_built_in_ids_are_claimed_but_never_shadowable():
         # A retired id has no provider class left, which is the whole reason the set
         # has to exist.
         assert provider_id not in provider_registry.names()
-        assert not can_shadow_built_in_provider(provider_id, trusted=True)
-        assert not can_shadow_built_in_provider(provider_id, trusted=False)
 
 
-@pytest.mark.parametrize("trusted", [False, True])
-def test_retired_built_in_provider_id_cannot_be_claimed_by_a_plugin(trusted):
-    # Before the built-in module was deleted, a catalog entry claiming its id was
-    # rejected as shadowing a built-in, regardless of trust. Deleting the module must
-    # not hand the id to the next plugin that asks for it.
+@pytest.mark.parametrize(
+    "provider_id,trusted,expected",
+    [
+        # Retired id: a trusted catalog entry may adopt it, an untrusted one may not.
+        ("hosszupuska", True, True),
+        ("hosszupuska", False, False),
+        # Migrated id: unchanged in both directions.
+        ("gestdown", True, True),
+        ("gestdown", False, False),
+        # Neither set: no source of any trust level may shadow a live built-in.
+        ("subscenter", True, False),
+        ("subscenter", False, False),
+    ],
+)
+def test_shadow_gate_matrix(provider_id, trusted, expected):
+    from provider_hub.migration import can_shadow_built_in_provider
+
+    assert can_shadow_built_in_provider(provider_id, trusted) is expected
+
+
+def test_retired_built_in_provider_id_cannot_be_claimed_by_an_untrusted_plugin():
+    # Before the built-in module was deleted, an untrusted catalog entry claiming its
+    # id was rejected as shadowing a built-in. Deleting the module must not hand the
+    # id to the next plugin that asks for it.
     import provider_hub.registry as hub_registry
     from provider_hub.registry import register_active_provider_classes
     from subliminal_patch.extensions import provider_registry
@@ -976,7 +993,7 @@ def test_retired_built_in_provider_id_cannot_be_claimed_by_a_plugin(trusted):
 
     installation = _install(
         provider_id,
-        trusted=trusted,
+        trusted=False,
         manifest=_manifest(
             provider_id=provider_id,
             name="Hosszupuska",
@@ -995,19 +1012,62 @@ def test_retired_built_in_provider_id_cannot_be_claimed_by_a_plugin(trusted):
             del provider_registry[provider_id]
 
 
-def test_retired_built_in_provider_id_is_rejected_by_manifest_validation():
-    # Same protection one layer earlier: the install/upload paths validate the manifest
-    # against the built-in denylist, so a retired id never even gets staged.
+def test_retired_built_in_provider_id_can_be_claimed_by_a_trusted_plugin():
+    # Catalog plugins are the provider mechanism going forward, so a trusted catalog
+    # entry adopting a retired built-in id is the intended path. Keeping the id claimed
+    # must not lock the official catalog out of it.
+    import provider_hub.registry as hub_registry
+    from provider_hub.registry import HubProxyProvider, register_active_provider_classes
+    from subliminal_patch.extensions import provider_registry
+
+    provider_id = "hosszupuska"
+    assert provider_id not in provider_registry.names()
+
+    installation = _install(
+        provider_id,
+        trusted=True,
+        manifest=_manifest(
+            provider_id=provider_id,
+            name="Hosszupuska",
+            dependencies={"requirements": []},
+        ),
+    )
+
+    try:
+        registered = register_active_provider_classes(installations=[installation])
+
+        assert registered == [provider_id]
+        assert issubclass(provider_registry[provider_id], HubProxyProvider)
+    finally:
+        hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if provider_id in provider_registry:
+            del provider_registry[provider_id]
+
+
+def test_retired_built_in_provider_id_is_rejected_by_untrusted_manifest_validation():
+    # Same protection one layer earlier: the local-upload path validates the manifest
+    # against the full built-in denylist, with no trusted discount, so an untrusted
+    # package claiming a retired id never even gets staged. The trusted catalog path
+    # discounts the id and validates.
     from provider_hub.manifest import ManifestValidationError, validate_manifest
+    from provider_hub.migration import validation_built_in_provider_ids
     from provider_hub.service import _built_in_provider_ids
 
-    assert "hosszupuska" in _built_in_provider_ids()
+    provider_id = "hosszupuska"
+    assert provider_id in _built_in_provider_ids()
 
     with pytest.raises(ManifestValidationError):
         validate_manifest(
-            _manifest(provider_id="hosszupuska", name="Hosszupuska"),
+            _manifest(provider_id=provider_id, name="Hosszupuska"),
             built_in_provider_ids=_built_in_provider_ids(),
         )
+
+    validate_manifest(
+        _manifest(provider_id=provider_id, name="Hosszupuska"),
+        built_in_provider_ids=validation_built_in_provider_ids(
+            provider_id, _built_in_provider_ids(), trusted=True
+        ),
+    )
 
 
 def test_active_trusted_provider_replaces_non_gestdown_built_in():
