@@ -51,6 +51,10 @@ spelling. `--ignore-glob` is refused because pytest matches it recursively
 during collection while a filesystem glob does not, so the guard would subtract
 far less than pytest really skips.
 
+A `file.py::case` node selector is refused for the same reason: it exits 0
+having run one case, which says nothing about the rest of the module, and
+coverage here is counted per file.
+
 The consequence of a shape nobody anticipated is therefore a red build asking a
 human to look at it, not a green build hiding a suite that stopped running.
 That is the whole design: the failure mode is refusal, never a guess in the
@@ -398,14 +402,27 @@ def _reject_operators(tokens: list, line: str, allow_semicolon: bool = False) ->
             )
 
 
-def _expand(token: str) -> set:
+def _expand(token: str, allow_node_selector: bool = False) -> set:
     """The repo-relative test files a pytest path argument really names.
 
     Grounded in the filesystem rather than in string matching: a directory
     covers what is under it, a glob covers what it matches, and a path that no
     longer exists covers nothing.
+
+    A `file.py::case` node selector is refused, because coverage here is counted
+    per file: `pytest tests/bazarr/test_ui.py::test_one_case` exits 0 having run
+    one case, and crediting the module would vouch for every other assertion in
+    it. `allow_node_selector` is passed only where a node id subtracts, where
+    collapsing it to its module removes more coverage than pytest really skips,
+    which is the safe direction.
     """
-    path = token.split("::", 1)[0]
+    path, selector, _ = token.partition("::")
+    if selector and not allow_node_selector:
+        raise _Unverifiable(
+            f"{token!r} selects a single test node, so the rest of the module "
+            "does not run. The guard credits whole files, so it refuses rather "
+            "than claim the file ran"
+        )
     if not path or path.startswith("-"):
         return set()
     if path.startswith("/") or ".." in pathlib.PurePosixPath(path).parts:
@@ -464,7 +481,7 @@ def _pytest_command(tokens: list, line: str) -> tuple:
             else:
                 raise _Unverifiable(f"{name} in {line!r} has no value")
             if name in _PYTEST_SUBTRACTING:
-                subtracted |= _expand(value)
+                subtracted |= _expand(value, allow_node_selector=True)
             continue
         if name in _PYTEST_FLAGS and not separator:
             continue
@@ -898,6 +915,13 @@ _SCRIPT_REFUSALS = {
     ),
     "the path names a test file that was deleted": (
         "pytest tests/bazarr/test_deleted_in_some_other_branch.py\n"
+    ),
+    # A node selector runs one case and exits 0. Crediting its module would
+    # vouch for every other assertion in the file.
+    "the run is narrowed to a single test node": f"pytest {_OTHER}::test_one_case\n",
+    "a node selector hides in a longer list": f"pytest {_REAL} {_OTHER}::test_one_case\n",
+    "a loop iterates over node selectors": (
+        f'for f in \\\n  {_REAL}::test_one_case \\\n  ; do\n  pytest "$f"\ndone\n'
     ),
     # pytest matches --ignore-glob recursively during collection, so
     # `--ignore-glob=*ui.py` really drops tests/bazarr/test_ui.py while the same
