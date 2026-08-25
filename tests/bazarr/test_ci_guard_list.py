@@ -31,20 +31,82 @@ DIRECTORY_RUNS = ("tests/compat/",)
 
 # Files deliberately kept out of CI, each with the reason. Keep sorted.
 EXCLUDED = {
-    # Legacy built-in provider tests that perform live HTTP against the
-    # provider's real site. Non-deterministic and dependent on a third party
-    # being up, so they cannot gate a merge. The built-in providers are being
-    # retired in favour of catalog plugins, which are tested in their own repo.
-    "tests/subliminal_patch/test_addic7ed.py": "live network call to the provider",
-    "tests/subliminal_patch/test_animesubinfo.py": "live network call to the provider",
-    "tests/subliminal_patch/test_hosszupuska.py": "live network call to the provider",
-    "tests/subliminal_patch/test_karagarga.py": "live network call to the provider",
-    "tests/subliminal_patch/test_napiprojekt.py": "live network call to the provider",
-    "tests/subliminal_patch/test_subclub.py": "live network call to the provider",
-    "tests/subliminal_patch/test_subdl.py": "live network call to the provider",
-    "tests/subliminal_patch/test_subf2m.py": "live network call to the provider",
-    "tests/subliminal_patch/test_subtitrarinoi.py": "live network call to the provider",
-    "tests/subliminal_patch/test_core.py": "live network call plus environment-dependent guessit fixtures",
+    # Built-in provider tests that really do reach the provider's site, so a
+    # third party being down would turn every pull request in the repo red.
+    # The built-in providers are being retired in favour of catalog plugins,
+    # which are tested in their own repo.
+    #
+    # Each reason below was verified by running the file twice, once normally
+    # and once inside a network namespace with no route out. A file whose two
+    # runs are identical is not network-dependent, whatever it looks like.
+    "tests/subliminal_patch/test_subclub.py": (
+        "four vcr-marked cases have no recorded cassette, so vcr records live "
+        "against subclub.eu on every run. The site currently answers 500, so "
+        "they fail online as well as offline. The other seven cases are "
+        "offline-safe and could be split out."
+    ),
+    "tests/subliminal_patch/test_subf2m.py": (
+        "23 of its 29 cases hit subf2m.co for real, and each burns ten seconds "
+        "of retry sleep when it is unreachable: 222s offline against 30s "
+        "online. Separately, test_list_and_download_subtitles_complete_series_pack "
+        "fails online too, because Episode.name has no setter."
+    ),
+    "tests/subliminal_patch/test_subtitrarinoi.py": (
+        "two of its eight cases call subtitrari-noi.ro for real. The other six "
+        "are pure get_matches checks, so splitting them out would let this file "
+        "be enumerated. test_provider_download_subtitle fails online as well, "
+        "with a pysubs2 FormatAutodetectionError."
+    ),
+    # Not network-dependent at all, despite what they look like. These were
+    # previously all labelled "live network call to the provider", which was
+    # wrong and hid four different real problems. Each needs a fix, not an
+    # exemption.
+    "tests/subliminal_patch/test_addic7ed.py": (
+        "skipped in full, so it protects nothing: a module-level skipif needs "
+        "ADDIC7ED_USERNAME and ADDIC7ED_PASSWORD plus two ANTICAPTCHA "
+        "variables, and CI sets none of them. Both cases would go live if it did."
+    ),
+    "tests/subliminal_patch/test_karagarga.py": (
+        "skipped in full: a module-level skipif needs KARAGARGA_USER and "
+        "KARAGARGA_PASSWORD, which CI does not set, so all eight cases skip. "
+        "Two of them need no network and could be split out. Note the "
+        "import-time region.configure(), which is a co-collection hazard."
+    ),
+    "tests/subliminal_patch/test_subdl.py": (
+        "errors before it reaches a socket: the session fixture reads "
+        "os.environ['SUBDL_TOKEN'], which CI does not set, so both cases error "
+        "with KeyError at setup. Red in CI, not skipped, and not flaky."
+    ),
+    "tests/subliminal_patch/test_animesubinfo.py": (
+        "replays recorded HTTP and touches no network: identical results online "
+        "and inside a network namespace. Three of its seven cases fail because "
+        "the cassettes only recorded the pTitle=org query while the provider "
+        "now issues org, en and pl. Two of the four that pass do so vacuously, "
+        "asserting only isinstance(subs, list)."
+    ),
+    "tests/subliminal_patch/test_hosszupuska.py": (
+        "hosszupuskasub.com is dead, so the provider is being retired. Until "
+        "that lands: replays recorded HTTP, touches no network, and both cases "
+        "fail because the recorded page now yields adf.ly-wrapped links while "
+        "the assertions expect bare download URLs."
+    ),
+    "tests/subliminal_patch/test_napiprojekt.py": (
+        "replays recorded HTTP and touches no network, but subliminal 2.6.0 "
+        "moved server_url to https while the cassettes were recorded against "
+        "http, and vcrpy matches on scheme and port, so every request misses. "
+        "Both cases also burn 30 seconds each of ProviderRetryMixin sleep."
+    ),
+    "tests/subliminal_patch/test_core.py": (
+        "no network at all: 8 failed, 14 passed in 0.16s, identical online and "
+        "offline. Four pool tests compare SZProviderPool.providers against a "
+        "set, but it became an ordered list in af95a58bf. Three language-equals "
+        "tests build the pool with an empty opensubtitlescom config, so it "
+        "raises ConfigurationError before any request. test_scan_video_episode "
+        "depends on the pytest tmpdir counter: guessit parses the parent "
+        "directory, and from pytest-10 onward it drops the title and subliminal "
+        "raises GuessingError, so it passes on a fresh runner and fails on any "
+        "machine that has run pytest more than ten times."
+    ),
     "tests/subliminal_patch/test_gestdown.py": (
         "five of its cases call api.gestdown.info for real, so a provider "
         "outage would turn every pull request in the repo red. The offline "
