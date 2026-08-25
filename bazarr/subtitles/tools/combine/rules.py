@@ -28,6 +28,9 @@ def resolve_source_paths(video_path, languages):
     language are present, prefers plain > hi > forced. Sync-engine outputs
     (.ffsubsync, .autosubsync, .alass) and combined outputs are never picked.
 
+    Custom-language filename tags (e.g. .zh-TW.srt → zt, .pt-BR.srt → pb) are
+    resolved through CustomLanguage, matching the external-subtitle indexer.
+
     Returns SourcePaths if every requested language has a matching file,
     None if any is missing.
 
@@ -80,6 +83,9 @@ def _extract_code_and_priority(base, path):
     <base>.<code>.hi.srt and <base>.<code>.sdh.srt and <base>.<code>.cc.srt
     (priority _HI), and <base>.<code>.forced.srt (priority _FORCED).
 
+    Also recognizes CustomLanguage filename tags such as .zh-TW / .pt-BR so
+    profiles that request zt / pb can combine those on-disk files.
+
     Returns None for combined outputs, sync-engine outputs, and anything that
     does not match a recognized single-language pattern.
     """
@@ -91,13 +97,25 @@ def _extract_code_and_priority(base, path):
     if len(parts) != 2 or parts[1] != "srt":
         return None
     middle = parts[0]
-    if "-" in middle:
-        # combined-X[-Y] markers always contain a hyphen.
+
+    # Combined outputs use ".combined-" (e.g. en.combined-hu). Do not treat
+    # every hyphen as combined — custom langs legitimately use tags like zh-TW.
+    if "combined-" in middle:
         return None
 
     segments = middle.split(".")
     if not segments:
         return None
+
+    # Sync-engine outputs are never combine sources, including custom-lang tags
+    # such as zh-TW.ffsubsync.srt.
+    if segments[-1].lower() in _SYNC_ENGINES:
+        return None
+
+    custom = _custom_language_match(filename, path)
+    if custom is not None:
+        return custom
+
     code = segments[0]
     if len(code) != 2 or not code.isalpha() or not code.islower():
         return None
@@ -117,4 +135,27 @@ def _extract_code_and_priority(base, path):
         return None
 
     # More than two segments: e.g. en.hi.ffsubsync.srt. Reject.
+    return None
+
+
+def _custom_language_match(filename, path):
+    """Map CustomLanguage filename tags to (code2, priority), or None."""
+    try:
+        from languages.custom_lang import CustomLanguage
+    except Exception:
+        return None
+
+    custom_code = CustomLanguage.found_external(filename, path)
+    if not custom_code:
+        return None
+
+    if ":" not in custom_code:
+        return custom_code, _PLAIN
+
+    code, modifier = custom_code.split(":", 1)
+    modifier = modifier.lower()
+    if modifier in ("hi", "sdh", "cc"):
+        return code, _HI
+    if modifier == "forced":
+        return code, _FORCED
     return None
