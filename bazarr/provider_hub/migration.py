@@ -65,8 +65,41 @@ MIGRATED_BUILT_IN_PROVIDER_IDS = frozenset({
 })
 
 
+# Built-in provider ids whose module has been deleted. Deleting it drops the id
+# from provider_registry.names(), and that is the dynamic half of the shadow gate,
+# so the id would otherwise fall out of the built-in set entirely and the next
+# plugin to ask for it would get it. These ids stay claimed instead.
+#
+# Ids here are registry keys, which is the provider module name, not the class's
+# provider_name attribute (argenteamdump registered as "argenteamdump" while its
+# provider_name read "argenteam_dump").
+#
+# This is a separate set from the migration allowlist above and stays separate:
+# migration carries its own auto-install and rename semantics for a built-in that
+# a catalog entry takes over, while this one only keeps a dead id spoken for.
+RETIRED_BUILT_IN_PROVIDER_IDS = frozenset({
+    "argenteamdump",
+    "hosszupuska",
+    "subdivx",
+    "subscene",
+    "subscene_cloudscraper",
+    "tusubtitulo",
+})
+
+
+# Both sets are shadowable, by a trusted source only. Catalog plugins are the
+# provider mechanism going forward, so a trusted catalog entry adopting a migrated
+# or a retired built-in id is the intended path, not an attack: "trusted" means
+# the entry came from a catalog source marked trusted AND its manifest hash
+# matched. What the gate exists to stop is an UNTRUSTED plugin impersonating a
+# well-known provider id, and that stays blocked for every id in either set.
+_TRUSTED_SHADOWABLE_PROVIDER_IDS = (
+    MIGRATED_BUILT_IN_PROVIDER_IDS | RETIRED_BUILT_IN_PROVIDER_IDS
+)
+
+
 def can_shadow_built_in_provider(provider_id: str, trusted: bool) -> bool:
-    return bool(trusted) and str(provider_id or "") in MIGRATED_BUILT_IN_PROVIDER_IDS
+    return bool(trusted) and str(provider_id or "") in _TRUSTED_SHADOWABLE_PROVIDER_IDS
 
 
 def validation_built_in_provider_ids(
