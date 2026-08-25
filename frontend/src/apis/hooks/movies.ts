@@ -116,13 +116,17 @@ export function useMovieAddBlacklist() {
       return api.movies.addBlacklist(id, form);
     },
 
-    onSuccess: (_, { id }) => {
+    onSuccess: () => {
       void client.invalidateQueries({
         queryKey: [QueryKeys.Movies, QueryKeys.Blacklist],
       });
 
+      // Prefix, not [Movies, id]. Movies are cached under the canonical LOCAL
+      // id while callers pass the upstream radarrId, so the old key matched
+      // nothing and the detail page kept showing a blacklisted subtitle. Unlike
+      // the sibling movie hooks there is no other broad invalidation here.
       void client.invalidateQueries({
-        queryKey: [QueryKeys.Movies, id],
+        queryKey: [QueryKeys.Movies],
       });
     },
   });

@@ -66,7 +66,7 @@ type SubtitleValidateResult = {
 
 const validator = (
   file: SubtitleFile,
-  episodes: Item.Episode[],
+  seriesLocalId: number,
 ): SubtitleValidateResult => {
   if (file.language === null) {
     return {
@@ -78,7 +78,7 @@ const validator = (
       state: "error",
       messages: "Episode is not selected",
     };
-  } else if (!episodeBelongsToSeries(file.episode, episodes)) {
+  } else if (!episodeBelongsToSeries(file.episode, seriesLocalId)) {
     return {
       state: "error",
       messages: "Episode does not belong to this series",
@@ -118,8 +118,7 @@ const SeriesUploadForm: FunctionComponent<Props> = ({
   // drift from the local id for anything added after the local-id cutover, so
   // reading by the upstream id can return another series' episodes.
   const episodes = useEpisodesBySeriesId(series.id);
-  // Stable list for row validation, so a row cannot keep an episode that the
-  // opened series does not own.
+  // Stable reference for the auto-match effect's dependency array.
   const episodeList = useMemo(() => episodes.data ?? [], [episodes.data]);
   const episodeOptions = useSelectorOptions(
     episodes.data ?? [],
@@ -149,9 +148,9 @@ const SeriesUploadForm: FunctionComponent<Props> = ({
         hi: defaultLanguage?.hi ?? false,
         episode: null,
       };
-      return { ...row, validateResult: validator(row, episodeList) };
+      return { ...row, validateResult: validator(row, series.id) };
     },
-    [defaultLanguage, episodeList],
+    [defaultLanguage, series.id],
   );
 
   const [processing, setProcessing] = useState(false);
@@ -224,7 +223,7 @@ const SeriesUploadForm: FunctionComponent<Props> = ({
     form.setValues((values) => {
       const newFiles = fn(values.files ?? []);
       newFiles.forEach((v) => {
-        v.validateResult = validator(v, episodeList);
+        v.validateResult = validator(v, series.id);
       });
       return { ...values, files: newFiles };
     });
