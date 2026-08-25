@@ -25,7 +25,13 @@ def _parse_verify_ssl(raw):
 class JellyfinTestConnection(Resource):
     post_request_parser = reqparse.RequestParser()
     post_request_parser.add_argument('url', type=str, required=True, help='Jellyfin server URL')
-    post_request_parser.add_argument('apikey', type=str, required=True, help='Jellyfin API key')
+    # Body only. The flask_restx default location is ('json', 'values'), and
+    # 'values' covers the query string, so a key in the URL would override the
+    # body and land in browser history and access logs. This argument is the
+    # Jellyfin server's key, which this endpoint forwards to a caller-supplied
+    # host, so it must never travel in a URL.
+    post_request_parser.add_argument('apikey', type=str, required=True, help='Jellyfin API key',
+                                     location=('json', 'form'))
     post_request_parser.add_argument('verify_ssl', type=str, required=False,
                                      help='Override saved verify_ssl flag for this test (true/false)')
 
@@ -58,7 +64,8 @@ class JellyfinLibraries(Resource):
     # tunnel and out of long-lived logs.
     post_request_parser = reqparse.RequestParser()
     post_request_parser.add_argument('url', type=str, required=False, help='Jellyfin server URL')
-    post_request_parser.add_argument('apikey', type=str, required=False, help='Jellyfin API key')
+    post_request_parser.add_argument('apikey', type=str, required=False, help='Jellyfin API key',
+                                     location=('json', 'form'))
     post_request_parser.add_argument('verify_ssl', type=str, required=False,
                                      help='Override saved verify_ssl flag for this query (true/false)')
 
