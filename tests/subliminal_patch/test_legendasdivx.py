@@ -689,3 +689,16 @@ def test_legendasdivx_multi_episode_video_still_rejects_another_episode():
     provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
 
     assert provider._get_subtitle_from_archive(archive, content, _episode_subtitle(video)) is None
+
+
+def test_legendasdivx_absolute_numbering_does_not_override_a_stated_season():
+    """A member that names a season is claiming season-relative numbering, so
+    its episode number is not an absolute one. Show.S01E14 is not the subtitle
+    for S02E01 just because that episode's absolute number happens to be 14."""
+    content = _zip_bytes({"Show.S01E14.srt": "1\n00:00:01,000 --> 00:00:02,000\nwrong\n"})
+    archive = zipfile.ZipFile(io.BytesIO(content))
+    video = Episode("Show.S02E01.mkv", "Show", 2, 1)
+    video.absolute_episode = 14
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
+    assert provider._get_subtitle_from_archive(archive, content, _episode_subtitle(video)) is None

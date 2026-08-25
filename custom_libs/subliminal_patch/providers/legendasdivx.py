@@ -90,7 +90,6 @@ def guess_matches_wanted_episode(video, guess):
         return True
 
     episode = guess.get('episode')
-    matched_absolutely = False
     if episode is not None:
         candidates = episode if isinstance(episode, list) else [episode]
         # Every episode the video carries, not just video.episode: that is the
@@ -103,17 +102,14 @@ def guess_matches_wanted_episode(video, guess):
         # video as season-relative and carries the absolute number separately,
         # so both spellings of the same episode have to be accepted.
         absolute = getattr(video, 'absolute_episode', None)
-        if wanted.intersection(candidates):
-            pass
-        elif absolute is not None and absolute in candidates:
-            matched_absolutely = True
-        else:
+        if not wanted.intersection(candidates) and (absolute is None or absolute not in candidates):
             return False
 
     season = guess.get('season')
-    # Absolute numbering runs straight through the seasons, so a name that
-    # matched that way must not then be rejected over a season it never meant.
-    if season is not None and not matched_absolutely:
+    # The season is still checked after an absolute match: a name that states a
+    # season is claiming season-relative numbering, so Show.S01E14 is not the
+    # subtitle for S02E01 just because that episode's absolute number is 14.
+    if season is not None:
         if isinstance(season, list):
             if video.season not in season:
                 return False
