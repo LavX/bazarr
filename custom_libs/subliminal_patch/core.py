@@ -114,8 +114,17 @@ class _ProviderConfigs(dict):
                 provider = provider_registry[key](**registered_val)  # type: ignore
                 provider.initialize()
             except Exception as error:
+                # The running provider stays: a replacement that could not
+                # start is no reason to lose the one that works.
                 self._pool.throttle_callback(key, error)
             else:
+                if key in self._pool.initialized_providers:
+                    # Terminate the instance being replaced. Dropping the
+                    # reference releases nothing it owns, and a Provider Hub
+                    # provider owns a worker process and the threads pumping
+                    # its stdio, so every settings save that touched a config
+                    # leaked one for the life of the process.
+                    del self._pool[key]
                 self._pool.initialized_providers[key] = provider
 
         if updated:
