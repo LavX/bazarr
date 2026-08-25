@@ -21,9 +21,10 @@ the first one on PATH, with the arguments it was given.
 """
 
 import json
+import logging
 import os
+import shlex
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -33,6 +34,8 @@ import tempfile
 UNKNOWN_CODEC = "unknown"
 
 REAL_FFPROBE_ENV = "BAZARR_ALASS_REAL_FFPROBE"
+
+logger = logging.getLogger(__name__)
 
 
 def patch_ffprobe_json(text):
@@ -65,9 +68,18 @@ def patch_ffprobe_json(text):
     return json.dumps(probe)
 
 
-_LAUNCHER = """#!/bin/sh
-exec {python} {shim} "$@"
-"""
+_LAUNCHER_PATH = None
+
+
+def launcher_script(python, shim):
+    """The one line shell wrapper that runs the shim under ``python``.
+
+    Both paths are quoted: /bin/sh splits on whitespace, and an install path
+    with a space in it is ordinary rather than exotic.
+    """
+    return "#!/bin/sh\nexec {python} {shim} \"$@\"\n".format(
+        python=shlex.quote(python), shim=shlex.quote(shim),
+    )
 
 
 def ensure_launcher():
@@ -76,36 +88,37 @@ def ensure_launcher():
     alass execs ALASS_FFPROBE_PATH directly, so it has to be a program, not an
     interpreter plus a script. A one line shell wrapper pins the interpreter to
     the one Bazarr is running under rather than whatever a shebang would find.
-    Windows has no equivalent that alass would run, so there the shim is simply
-    not installed and alass behaves as it always has.
+
+    The directory is created with mkdtemp rather than at a predictable path:
+    on a shared host another user could pre-create a well known path as
+    world-writable, and replace the launcher between our write and alass
+    execing it, which would run their code with Bazarr's credentials.
+
+    Windows has no equivalent alass would run, so there the shim is simply not
+    installed and alass behaves as it always has.
     """
+    global _LAUNCHER_PATH
+
     if os.name != "posix":
         return None
 
-    directory = os.path.join(tempfile.gettempdir(), "bazarr-alass-shim")
-    launcher = os.path.join(directory, "ffprobe")
-    content = _LAUNCHER.format(python=sys.executable, shim=os.path.abspath(__file__))
+    if _LAUNCHER_PATH and os.path.isfile(_LAUNCHER_PATH):
+        return _LAUNCHER_PATH
 
+    content = launcher_script(sys.executable, os.path.abspath(__file__))
     try:
-        os.makedirs(directory, exist_ok=True)
-        # Rewritten whenever it differs: the interpreter or the install path
-        # can move under an upgrade, and a stale wrapper would point at neither.
-        if not os.path.isfile(launcher) or _read(launcher) != content:
-            with open(launcher, "w", encoding="utf-8") as handle:
-                handle.write(content)
-        os.chmod(launcher, os.stat(launcher).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        # mkdtemp gives us 0700 ownership of a name nobody could have guessed.
+        directory = tempfile.mkdtemp(prefix="bazarr-alass-shim-", dir=tempfile.gettempdir())
+        launcher = os.path.join(directory, "ffprobe")
+        with open(launcher, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.chmod(launcher, 0o700)
     except OSError:
+        logger.debug("Could not install the alass ffprobe shim", exc_info=True)
         return None
 
+    _LAUNCHER_PATH = launcher
     return launcher
-
-
-def _read(path):
-    try:
-        with open(path, encoding="utf-8") as handle:
-            return handle.read()
-    except OSError:
-        return None
 
 
 def real_ffprobe():

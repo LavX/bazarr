@@ -179,3 +179,79 @@ def test_the_launcher_really_runs_the_shim(tmp_path):
     done = subprocess.run([launcher, "-of", "json", "x.mkv"], capture_output=True, text=True, env=env)
 
     assert json.loads(done.stdout)["streams"][0]["codec_long_name"] == "unknown"
+
+
+# --- the launcher must be ours, and must survive awkward install paths ------
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the launcher is a POSIX shell script")
+def test_the_launcher_never_lands_in_a_directory_someone_else_prepared(monkeypatch, tmp_path):
+    """A predictable path under /tmp can be pre-created world-writable by
+    another user on a shared host. makedirs(exist_ok=True) would accept it, and
+    that user could then swap the file between our write and alass execing it,
+    so alass would run their code with our credentials."""
+    import stat as stat_module
+
+    shim = _shim()
+    monkeypatch.setattr(shim.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(shim, "_LAUNCHER_PATH", None, raising=False)
+    hostile = tmp_path / "bazarr-alass-shim"
+    hostile.mkdir(mode=0o777)
+
+    launcher = shim.ensure_launcher()
+
+    directory = os.path.dirname(launcher)
+    mode = os.stat(directory).st_mode
+    assert not mode & (stat_module.S_IWGRP | stat_module.S_IWOTH), (
+        f"{directory} is writable by someone other than us"
+    )
+    assert os.stat(directory).st_uid == os.getuid()
+    assert not os.path.exists(hostile / "ffprobe"), "the launcher landed in the directory someone else prepared"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the launcher is a POSIX shell script")
+def test_an_install_path_with_spaces_still_produces_a_working_launcher(tmp_path):
+    """/bin/sh splits on whitespace, so an unquoted path in the generated
+    script means every alass sync fails on an install path with a space in it,
+    which is ordinary on macOS and Windows-turned-POSIX mounts."""
+    awkward = tmp_path / "my programs" / "shim dir"
+    awkward.mkdir(parents=True)
+    shim_copy = awkward / "alass_ffprobe_shim.py"
+    shim_copy.write_text(open(_shim().__file__, encoding="utf-8").read(), encoding="utf-8")
+
+    launcher = awkward / "ffprobe"
+    launcher.write_text(_shim().launcher_script(sys.executable, str(shim_copy)), encoding="utf-8")
+    launcher.chmod(0o700)
+
+    probe = {"streams": [{"index": 0, "codec_type": "attachment"}]}
+    fake = tmp_path / "ffprobe-real"
+    fake.write_text(f"#!/bin/sh\ncat <<'EOF'\n{json.dumps(probe)}\nEOF\n")
+    fake.chmod(0o755)
+
+    done = subprocess.run([str(launcher), "-of", "json", "x.mkv"], capture_output=True, text=True,
+                          env=dict(os.environ, BAZARR_ALASS_REAL_FFPROBE=str(fake)))
+
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout)["streams"][0]["codec_long_name"] == "unknown"
+
+
+def test_alass_runs_unshimmed_when_ffprobe_cannot_be_found(recorded_alass_run, monkeypatch, tmp_path):
+    """get_binary raises rather than returning a falsy value when it cannot
+    find a binary. An install running alass off an inherited PATH worked before
+    the shim existed and has to keep working."""
+    from subtitles.tools import subsyncer as module
+    from utilities.binaries import BinaryNotFound
+
+    syncer, calls = recorded_alass_run
+
+    def raising(name):
+        raise BinaryNotFound()
+
+    monkeypatch.setattr(module, "get_binary", raising)
+
+    syncer._run_external_engine(engine="alass", output_path=tmp_path / "out.srt",
+                                video_path=str(tmp_path / "video.mkv"))
+
+    env = calls[0]["env"]
+    assert "ALASS_FFPROBE_PATH" not in env
+    assert env["PATH"] == os.environ["PATH"]

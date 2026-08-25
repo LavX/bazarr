@@ -328,7 +328,15 @@ class SubSyncer:
         """
         environment = dict(os.environ)
 
-        ffprobe_exe = get_binary('ffprobe')
+        try:
+            ffprobe_exe = get_binary('ffprobe')
+        except Exception:
+            # get_binary raises when it can neither find nor fetch the binary.
+            # An install that runs alass off an inherited PATH worked before
+            # this shim existed and has to keep working.
+            logging.debug('BAZARR no ffprobe for the alass shim, running alass unshimmed', exc_info=True)
+            return environment
+
         launcher = alass_ffprobe_shim.ensure_launcher()
         if not ffprobe_exe or not launcher:
             return environment
