@@ -122,10 +122,10 @@ export function useDownloadMovieSubtitles() {
         param.arrInstanceId,
       ),
 
-    onSuccess: (_, param) => {
-      client.invalidateQueries({
-        queryKey: [QueryKeys.Movies, param.radarrId],
-      });
+    onSuccess: () => {
+      // Invalidate by prefix. Movie queries are cached under the canonical
+      // LOCAL id, while radarrId here is the upstream one, so a key built from
+      // it never matched a movie cache entry.
       client.invalidateQueries({
         queryKey: [QueryKeys.Movies],
       });

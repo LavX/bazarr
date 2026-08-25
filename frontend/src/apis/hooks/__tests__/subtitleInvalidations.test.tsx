@@ -126,7 +126,7 @@ describe("useSubtitleAction – movie", () => {
     ({ spy, wrapper } = makeClientAndWrapper());
   });
 
-  it("invalidates [Movies, id] and [Movies, History] but NOT [Episodes] or [Series]", async () => {
+  it("invalidates the Movies prefix and [Movies, History] but NOT [Episodes] or [Series]", async () => {
     const { result } = renderHook(() => useSubtitleAction(), { wrapper });
 
     result.current.mutate({
@@ -143,8 +143,13 @@ describe("useSubtitleAction – movie", () => {
 
     const keys = capturedKeys(spy);
 
-    // Must have invalidated the specific movie id
-    expect(keys).toContainEqual([QueryKeys.Movies, 99]);
+    // The prefix, not [Movies, 99]. Movie queries are cached under the
+    // canonical LOCAL id while this id is the upstream radarrId, so a key built
+    // from it matches nothing once the two diverge, which is any install with a
+    // second Radarr. The prefix covers every movie query including the one for
+    // this movie.
+    expect(keys).toContainEqual([QueryKeys.Movies]);
+    expect(keys).not.toContainEqual([QueryKeys.Movies, 99]);
 
     // Must have invalidated [Movies, History] to refresh movie history page
     expect(keys).toContainEqual([QueryKeys.Movies, QueryKeys.History]);

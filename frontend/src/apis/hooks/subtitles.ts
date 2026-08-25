@@ -31,8 +31,13 @@ export function useSubtitleAction() {
           queryKey: [QueryKeys.Series],
         });
       } else {
+        // The prefix, not [Movies, id]. Movie queries are cached under the
+        // canonical LOCAL id while this id is the upstream radarrId, so a key
+        // built from it matches nothing once the two diverge, which is any
+        // install with a second Radarr. Worse than a no-op: it can match a
+        // different movie that happens to hold that local id.
         client.invalidateQueries({
-          queryKey: [QueryKeys.Movies, id],
+          queryKey: [QueryKeys.Movies],
         });
         // Movie history lives under [Movies, History] and is not covered by
         // the per-movie invalidation above.
@@ -142,10 +147,10 @@ export function useMovieSubtitleModification() {
         param.arrInstanceId,
       ),
 
-    onSuccess: (_, param) => {
-      client.invalidateQueries({
-        queryKey: [QueryKeys.Movies, param.radarrId],
-      });
+    onSuccess: () => {
+      // Invalidate by prefix. Movie queries are cached under the canonical
+      // LOCAL id, while radarrId here is the upstream one, so a key built from
+      // it never matched a movie cache entry.
       client.invalidateQueries({
         queryKey: [QueryKeys.Movies],
       });
@@ -162,10 +167,10 @@ export function useMovieSubtitleModification() {
         param.arrInstanceId,
       ),
 
-    onSuccess: (_, param) => {
-      client.invalidateQueries({
-        queryKey: [QueryKeys.Movies, param.radarrId],
-      });
+    onSuccess: () => {
+      // Invalidate by prefix. Movie queries are cached under the canonical
+      // LOCAL id, while radarrId here is the upstream one, so a key built from
+      // it never matched a movie cache entry.
       client.invalidateQueries({
         queryKey: [QueryKeys.Movies],
       });
@@ -182,10 +187,10 @@ export function useMovieSubtitleModification() {
         param.arrInstanceId,
       ),
 
-    onSuccess: (_, { radarrId }) => {
-      client.invalidateQueries({
-        queryKey: [QueryKeys.Movies, radarrId],
-      });
+    onSuccess: () => {
+      // Invalidate by prefix. Movie queries are cached under the canonical
+      // LOCAL id, while radarrId here is the upstream one, so a key built from
+      // it never matched a movie cache entry.
       client.invalidateQueries({
         queryKey: [QueryKeys.Movies],
       });
