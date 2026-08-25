@@ -762,8 +762,14 @@ def _expand(token: str, allow_node_selector: bool = False) -> set:
     """The repo-relative test files a pytest path argument really names.
 
     Grounded in the filesystem rather than in string matching: a directory
-    covers what is under it, a glob covers what it matches, and a path that no
-    longer exists covers nothing.
+    covers what is under it, and a glob covers what it matches, with bash's
+    semantics rather than pathlib's.
+
+    A `tests/...py` path that no longer exists is refused, not quietly dropped,
+    and the refusal costs the whole step its coverage. That is not an
+    overreaction: pytest exits 4 on a path it cannot find, so the step really
+    does fail and really does run none of the files it names. The report says
+    which name is wrong.
 
     A `file.py::case` node selector is refused, because coverage here is counted
     per file: `pytest tests/bazarr/test_ui.py::test_one_case` exits 0 having run
