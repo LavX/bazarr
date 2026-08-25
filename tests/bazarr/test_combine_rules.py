@@ -508,3 +508,52 @@ def test_same_code_from_several_spellings_is_deterministic(tmp_path, monkeypatch
     assert forward is not None
     assert backward is not None
     assert forward.primary == backward.primary
+
+
+# --- Two-letter tags that are not ISO codes still reach CustomLanguage ------
+
+
+def test_maps_tc_filename_to_traditional_chinese(tmp_path):
+    """'.tc' is not an ISO 639-1 code, it is CustomLanguage's alias for
+    Traditional Chinese. Taking it at face value produces the code 'tc', which
+    no profile ever requests, so the file becomes invisible to combine while
+    the regular indexer files it as zt."""
+    base = make_video_dir(tmp_path, [
+        "Movie.mkv",
+        "Movie.tc.srt",
+        "Movie.en.srt",
+    ])
+    result = resolve_source_paths(
+        video_path=str(base / "Movie.mkv"),
+        languages=["zt", "en"],
+    )
+    assert result is not None
+    assert result.primary == str(base / "Movie.tc.srt")
+
+
+def test_maps_gb_filename_to_simplified_chinese(tmp_path):
+    base = make_video_dir(tmp_path, [
+        "Movie.mkv",
+        "Movie.gb.srt",
+        "Movie.en.srt",
+    ])
+    result = resolve_source_paths(
+        video_path=str(base / "Movie.mkv"),
+        languages=["zh", "en"],
+    )
+    assert result is not None
+    assert result.primary == str(base / "Movie.gb.srt")
+
+
+def test_a_non_iso_two_letter_tag_keeps_its_hi_variant(tmp_path):
+    base = make_video_dir(tmp_path, [
+        "Movie.mkv",
+        "Movie.tc.hi.srt",
+        "Movie.en.srt",
+    ])
+    result = resolve_source_paths(
+        video_path=str(base / "Movie.mkv"),
+        languages=["zt", "en"],
+    )
+    assert result is not None
+    assert result.primary == str(base / "Movie.tc.hi.srt")

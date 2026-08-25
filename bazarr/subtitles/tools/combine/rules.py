@@ -4,6 +4,7 @@ import glob
 import logging
 import os
 from dataclasses import dataclass
+from functools import lru_cache
 
 
 @dataclass(frozen=True)
@@ -145,17 +146,39 @@ def _extract_code_and_priority(base, path):
 def _language_code_from_tag(tag):
     """Map one isolated filename tag to a language code2, or None.
 
-    Plain 2-letter lowercase tags are taken as-is. Everything else falls back
-    to CustomLanguage, which is what lets .zh-TW / .pt-BR / .es-MX resolve to
-    the zt / pb / ea codes profiles request.
+    A 2-letter tag that really is an ISO 639-1 code is taken as-is, so
+    Movie.sc.srt stays Sardinian instead of being claimed by Simplified
+    Chinese's alias list. Everything else falls back to CustomLanguage, which
+    is what lets .zh-TW / .pt-BR / .es-MX resolve to the zt / pb / ea codes
+    profiles request, and equally what lets the 2-letter aliases .tc and .gb
+    resolve to zt and zh. Taking those at face value instead would yield the
+    codes "tc" and "gb", which no profile asks for, so the file would be
+    invisible here while the regular indexer files it as Chinese.
 
     A tag is one filename segment, so CustomLanguage's single dotted spelling,
     .es.ar, is deliberately not honoured: accepting a two-segment tag would
     also read Movie.en.pt.srt as Portuguese, since ".en.pt" ends in ".pt".
     """
-    if len(tag) == 2 and tag.isalpha() and tag.islower():
+    if len(tag) == 2 and tag.isalpha() and tag.islower() and _is_iso_639_1(tag):
         return tag
     return _custom_language_code(tag)
+
+
+@lru_cache(maxsize=None)
+def _is_iso_639_1(tag):
+    """True when the 2-letter tag is a real ISO 639-1 code.
+
+    Cached: this runs once per candidate file per directory scan, and the
+    answer for a given tag never changes.
+    """
+    from babelfish import Language
+    from babelfish.exceptions import LanguageReverseError
+
+    try:
+        Language.fromalpha2(tag)
+    except (LanguageReverseError, ValueError):
+        return False
+    return True
 
 
 _custom_language_cls = None
