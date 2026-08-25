@@ -55,6 +55,11 @@ A `file.py::case` node selector is refused for the same reason: it exits 0
 having run one case, which says nothing about the rest of the module, and
 coverage here is counted per file.
 
+And `$(`, backticks and parameter expansions are refused inside a token, not
+only as standalone punctuation, because quoting hides them from the tokenizer:
+shlex keeps `"$(printf '%s' --collect-only)"` as one word, so no operator check
+sees it, and bash expands it before pytest starts.
+
 The consequence of a shape nobody anticipated is therefore a red build asking a
 human to look at it, not a green build hiding a suite that stopped running.
 That is the whole design: the failure mode is refusal, never a guess in the
@@ -329,6 +334,11 @@ _ALWAYS_RUNS = {True, "true", "always()", "${{ always() }}", "${{always()}}"}
 # Shells whose semantics the grammar below describes.
 _SAFE_SHELLS = {None, "bash", "sh", "bash -e {0}"}
 
+# A bare `$VAR` or `${VAR}`, the only expansion shape the loop grammar needs.
+_VARIABLE_REFERENCE = re.compile(
+    r"^\$([A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$"
+)
+
 # Every shell operator, all of them refused inside a test-bearing script. Each
 # one is a way for a command to name a path without running it, or to run it
 # without its exit status binding.
@@ -393,13 +403,46 @@ def _reject_operators(tokens: list, line: str, allow_semicolon: bool = False) ->
                 f"shell operator {token!r} in {line!r}: the guard cannot tell "
                 "whether the command runs, or whether its exit status binds"
             )
-        if "`" in token:
-            raise _Unverifiable(f"command substitution in {line!r}")
+
+
+def _reject_expansions(
+    tokens: list,
+    line: str,
+    allowed: frozenset = frozenset(),
+    parameters_are_inert: bool = False,
+) -> None:
+    """Refuse whatever the shell would rewrite before the command sees it.
+
+    Checked inside every token, not only as standalone punctuation, because
+    quoting hides a substitution from the tokenizer:
+    `pytest tests/x.py "$(printf '%s' --collect-only)"` survives shlex as one
+    token, no operator check fires, and bash then hands pytest --collect-only.
+
+    A plain parameter expansion is refused for the same reason wherever it could
+    change what runs: the guard cannot see what `pytest tests/x.py $EXTRA`
+    becomes. `allowed` carries the loop variable, the one expansion the loop
+    grammar has to read. `parameters_are_inert` is passed only for `echo`, whose
+    arguments cannot change what pytest does, so the workflow's own
+    `echo "::group::$f"` stays legal without widening anything else.
+    """
+    for token in tokens:
+        if "`" in token or "$(" in token:
+            raise _Unverifiable(
+                f"command substitution in {line!r}: quoted or not, the guard "
+                "cannot read the token the shell will produce"
+            )
         if "${{" in token:
             raise _Unverifiable(
                 f"workflow expression in {line!r}: it can expand to anything, so "
                 "the guard cannot read the command it produces"
             )
+        if "$" not in token or token in allowed or parameters_are_inert:
+            continue
+        raise _Unverifiable(
+            f"parameter expansion {token!r} in {line!r}: the guard cannot see "
+            "what the shell puts there, and an expansion in this position can "
+            "become an option that stops pytest asserting anything"
+        )
 
 
 def _expand(token: str, allow_node_selector: bool = False) -> set:
@@ -508,6 +551,9 @@ def _strip_assignments(tokens: list, line: str) -> list:
                 f"{match.group(1)} is set on {line!r}; it can silence pytest "
                 "while the command still looks like it runs the tests"
             )
+        # The value too: `FOO="$(...)" pytest X` keeps the substitution inside a
+        # single token, so nothing else would look at it.
+        _reject_expansions([tokens[index]], line)
         index += 1
     return tokens[index:]
 
@@ -544,12 +590,15 @@ def _script_coverage(script: str) -> set:
             continue
         if head in {"pip", "pip3"} and tokens[1:2] == ["install"]:
             _reject_operators(tokens, line)
+            _reject_expansions(tokens, line)
             continue
         if head == "echo":
             _reject_operators(tokens, line)
+            _reject_expansions(tokens, line, parameters_are_inert=True)
             continue
         if head == "pytest":
             _reject_operators(tokens, line)
+            _reject_expansions(tokens, line)
             collected, _, _ = _pytest_command(tokens[1:], line)
             covered |= collected
             continue
@@ -586,6 +635,7 @@ def _check_set_modes(tokens: list, line: str) -> None:
 def _for_header(tokens: list, line: str) -> tuple:
     """(files the list names, loop variable). The list must be test paths only."""
     _reject_operators(tokens, line, allow_semicolon=True)
+    _reject_expansions(tokens, line)
     if len(tokens) < 4 or tokens[2] != "in" or not _IDENTIFIER.match(tokens[1]):
         raise _Unverifiable(f"{line!r} is not a `for VAR in ...` header")
     if "do" in tokens and tokens.index("do") != len(tokens) - 1:
@@ -635,8 +685,10 @@ def _loop_body(lines: list, index: int, variable: str) -> tuple:
             continue
         _reject_operators(tokens, line)
         if tokens[0] == "echo":
+            _reject_expansions(tokens, line, parameters_are_inert=True)
             continue
         if tokens[0] == "pytest":
+            _reject_expansions(tokens, line, allowed=frozenset(reference))
             collected, positional, ignored = _pytest_command(tokens[1:], line)
             if reference & set(positional):
                 runs = True
@@ -915,6 +967,19 @@ _SCRIPT_REFUSALS = {
     ),
     "the path names a test file that was deleted": (
         "pytest tests/bazarr/test_deleted_in_some_other_branch.py\n"
+    ),
+    # shlex keeps a quoted substitution as a single token, so no operator check
+    # sees it, and bash expands it to --collect-only before pytest starts.
+    "command substitution hides inside a quoted token": (
+        f"""pytest {_REAL} "$(printf '%s' --collect-only)"\n"""
+    ),
+    "backticks hide inside a quoted token": (
+        f'pytest {_REAL} "`printf -- --collect-only`"\n'
+    ),
+    "an option is hidden behind a variable": f"pytest {_REAL} $EXTRA\n",
+    "an expansion is concatenated onto a path": f"pytest {_REAL}$SUFFIX\n",
+    "an assignment value is produced by command substitution": (
+        f'FOO="$(echo --collect-only)" pytest {_REAL}\n'
     ),
     # A node selector runs one case and exits 0. Crediting its module would
     # vouch for every other assertion in the file.
