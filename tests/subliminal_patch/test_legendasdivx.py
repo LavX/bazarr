@@ -4,6 +4,7 @@ import pytest
 from subliminal.cache import region
 from subliminal.exceptions import AuthenticationError, ConfigurationError
 from subliminal.video import Movie
+from subliminal_patch.providers import legendasdivx
 from subliminal_patch.providers.legendasdivx import LegendasdivxProvider, LegendasdivxSubtitle, extract_release_info
 from subzero.language import Language
 
@@ -170,3 +171,51 @@ def test_legendasdivx_query_movie(requests_mock):
     assert "video_codec" in matches
     assert "resolution" in matches
     assert "release_group" in matches
+
+
+def test_legendasdivx_cli_extraction_uses_bounded_subprocess_timeout(monkeypatch, tmp_path):
+    calls = []
+
+    class Proc:
+        returncode = 0
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        # the extractor "wrote" the subtitle the caller asked for
+        (tmp_path / "extracted.srt").write_bytes(b"1\n00:00:01,000 --> 00:00:02,000\nhi\n")
+        return Proc()
+
+    monkeypatch.setattr(legendasdivx.tempfile, "mkdtemp", lambda: str(tmp_path))
+    monkeypatch.setattr(legendasdivx.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(legendasdivx.shutil, "rmtree", lambda *args, **kwargs: None)
+    monkeypatch.setattr(legendasdivx.subprocess, "run", fake_run)
+
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+    assert provider._extract_via_cli(b"not-a-real-archive") is not None
+
+    assert len(calls) == 1
+    assert calls[0][1]["timeout"] == legendasdivx.CLI_EXTRACT_TIMEOUT
+
+
+def test_legendasdivx_cli_extraction_skips_extractor_that_times_out(monkeypatch, tmp_path):
+    tried = []
+
+    class Proc:
+        returncode = 0
+
+    def fake_run(cmd, **kwargs):
+        tried.append(cmd[0])
+        if cmd[0] == "unar":
+            raise legendasdivx.subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+        (tmp_path / "extracted.srt").write_bytes(b"1\n00:00:01,000 --> 00:00:02,000\nhi\n")
+        return Proc()
+
+    monkeypatch.setattr(legendasdivx.tempfile, "mkdtemp", lambda: str(tmp_path))
+    monkeypatch.setattr(legendasdivx.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(legendasdivx.shutil, "rmtree", lambda *args, **kwargs: None)
+    monkeypatch.setattr(legendasdivx.subprocess, "run", fake_run)
+
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+    # a hung unar must not abort the whole fallback: 7z still gets its turn
+    assert provider._extract_via_cli(b"not-a-real-archive") is not None
+    assert tried == ["unar", "7z"]
