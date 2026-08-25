@@ -1351,6 +1351,18 @@ def get_subtitle_path(video_path, language=None, extension='.srt', forced_tag=Fa
     return subtitle_root + extension
 
 
+# pysubs2 names a format, the filesystem names a file, and the two vocabularies
+# do not match: pysubs2 calls SAMI "sami" and MPL2 "mpl2" while the files are
+# .smi and .mpl. Saving under the parser's name produces an extension nothing in
+# Bazarr indexes, so the subtitle it just downloaded still reads as missing.
+SUBTITLE_FORMAT_EXTENSIONS = {
+    "sami": "smi",
+    "mpl2": "mpl",
+    "microdvd": "sub",
+    "tmp": "txt",
+}
+
+
 def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=None, formats=("srt",),
                    tags=None, path_decoder=None, debug_mods=False):
     """Save subtitles on filesystem.
@@ -1417,8 +1429,9 @@ def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=Non
         subtitle.storage_path = subtitle_path
 
         for format in formats:
-            if format != "srt":
-                subtitle_path = os.path.splitext(subtitle_path)[0] + (u".%s" % format)
+            extension = SUBTITLE_FORMAT_EXTENSIONS.get(format, format)
+            if extension != "srt":
+                subtitle_path = os.path.splitext(subtitle_path)[0] + (u".%s" % extension)
 
             logger.debug(u"Saving %r to %r", subtitle, subtitle_path)
             content = subtitle.get_modified_content(format=format, debug=debug_mods)
