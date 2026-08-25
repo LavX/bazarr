@@ -1,8 +1,11 @@
 import io
+import itertools
 import os
 import shutil
 import stat
+import time
 import zipfile
+from pathlib import Path
 
 import brotli
 import rarfile
@@ -186,52 +189,217 @@ def test_legendasdivx_query_movie(requests_mock):
     assert "release_group" in matches
 
 
-def test_legendasdivx_cli_extraction_uses_bounded_subprocess_timeout(monkeypatch, tmp_path):
-    calls = []
+def _stub_extractors(monkeypatch, tmp_path, behaviour):
+    """Replace the real extractors with a stub process under our control.
 
-    class Proc:
-        returncode = 0
-
-    def fake_run(cmd, **kwargs):
-        calls.append((cmd, kwargs))
-        # the extractor "wrote" the subtitle the caller asked for
-        (tmp_path / "extracted.srt").write_bytes(b"1\n00:00:01,000 --> 00:00:02,000\nhi\n")
-        return Proc()
-
-    monkeypatch.setattr(legendasdivx.tempfile, "mkdtemp", lambda: str(tmp_path))
-    monkeypatch.setattr(legendasdivx.shutil, "which", lambda tool: f"/usr/bin/{tool}")
-    monkeypatch.setattr(legendasdivx.shutil, "rmtree", lambda *args, **kwargs: None)
-    monkeypatch.setattr(legendasdivx.subprocess, "run", fake_run)
-
-    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
-    assert provider._extract_via_cli(b"not-a-real-archive") is not None
-
-    assert len(calls) == 1
-    assert calls[0][1]["timeout"] == legendasdivx.CLI_EXTRACT_TIMEOUT
-
-
-def test_legendasdivx_cli_extraction_skips_extractor_that_times_out(monkeypatch, tmp_path):
+    behaviour(tool, outdir) stands in for running `tool`: it writes whatever that
+    extractor would have produced and returns its exit code, or the string "hang"
+    for a process that never exits on its own.
+    """
     tried = []
+    procs = []
+    runs = itertools.count()
 
-    class Proc:
-        returncode = 0
+    def fake_mkdtemp():
+        # a fresh tree per call, since _extract_via_cli really removes its own
+        run_dir = tmp_path / f"run{next(runs)}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        return str(run_dir)
 
-    def fake_run(cmd, **kwargs):
-        tried.append(cmd[0])
+    def outdir_of(cmd):
         if cmd[0] == "unar":
-            raise legendasdivx.subprocess.TimeoutExpired(cmd, kwargs["timeout"])
-        (tmp_path / "extracted.srt").write_bytes(b"1\n00:00:01,000 --> 00:00:02,000\nhi\n")
-        return Proc()
+            return Path(cmd[2])
+        if cmd[0] == "7z":
+            return Path(cmd[3][2:])
+        return Path(cmd[4])
 
-    monkeypatch.setattr(legendasdivx.tempfile, "mkdtemp", lambda: str(tmp_path))
+    class StubPopen:
+        # A hung extractor is only ever stopped by one of the guards. If none of
+        # them fires, the poll loop would spin until CLI_EXTRACT_TIMEOUT, so fail
+        # fast and say why instead of letting the suite look merely slow.
+        max_waits = 20
+
+        def __init__(self, cmd, **kwargs):
+            self.cmd = cmd
+            self.kwargs = kwargs
+            self.killed = False
+            self.returncode = None
+            self.waits = 0
+            tried.append(cmd[0])
+            procs.append(self)
+            self._result = behaviour(cmd[0], outdir_of(cmd))
+
+        def wait(self, timeout=None):
+            self.waits += 1
+            if self.waits > self.max_waits:
+                raise AssertionError(
+                    f"{self.cmd[0]} was polled {self.waits} times without being stopped: "
+                    "no time or size guard fired")
+            if self._result == "hang" and not self.killed:
+                # a real wait() blocks for the poll interval; without that the
+                # loop would spin and the deadline would never be reached
+                time.sleep(timeout or 0)
+                raise legendasdivx.subprocess.TimeoutExpired(self.cmd, timeout)
+            if self.returncode is None:
+                self.returncode = 0 if self._result == "hang" else self._result
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+    monkeypatch.setattr(legendasdivx.tempfile, "mkdtemp", fake_mkdtemp)
     monkeypatch.setattr(legendasdivx.shutil, "which", lambda tool: f"/usr/bin/{tool}")
-    monkeypatch.setattr(legendasdivx.shutil, "rmtree", lambda *args, **kwargs: None)
-    monkeypatch.setattr(legendasdivx.subprocess, "run", fake_run)
+    monkeypatch.setattr(legendasdivx.subprocess, "Popen", StubPopen)
+    return tried, procs
 
+
+def _write_subtitle(outdir, name="extracted.srt", body=b"1\n00:00:01,000 --> 00:00:02,000\nhi\n"):
+    outdir.mkdir(parents=True, exist_ok=True)
+    (outdir / name).write_bytes(body)
+
+
+def test_legendasdivx_cli_extraction_closes_stdin(monkeypatch, tmp_path):
+    def behaviour(tool, outdir):
+        _write_subtitle(outdir)
+        return 0
+
+    _, procs = _stub_extractors(monkeypatch, tmp_path, behaviour)
     provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
+    assert provider._extract_via_cli(b"archive") is not None
+    # an encrypted archive makes extractors prompt; with an inherited terminal
+    # that blocks the download worker until the deadline
+    assert procs[0].kwargs["stdin"] == legendasdivx.subprocess.DEVNULL
+
+
+def test_legendasdivx_cli_extraction_kills_an_extractor_that_hangs(monkeypatch, tmp_path):
+    monkeypatch.setattr(legendasdivx, "CLI_EXTRACT_TIMEOUT", 0.05)
+
+    def behaviour(tool, outdir):
+        return "hang"
+
+    tried, procs = _stub_extractors(monkeypatch, tmp_path, behaviour)
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
+    assert provider._extract_via_cli(b"archive") is None
+    # every extractor gets its turn, and none of them is left running
+    assert tried == ["unar", "7z", "unrar"]
+    assert all(proc.killed for proc in procs)
+
+
+def test_legendasdivx_cli_extraction_moves_on_from_an_extractor_that_hangs(monkeypatch, tmp_path):
+    monkeypatch.setattr(legendasdivx, "CLI_EXTRACT_TIMEOUT", 0.05)
+
+    def behaviour(tool, outdir):
+        if tool == "unar":
+            return "hang"
+        _write_subtitle(outdir)
+        return 0
+
+    tried, _ = _stub_extractors(monkeypatch, tmp_path, behaviour)
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
     # a hung unar must not abort the whole fallback: 7z still gets its turn
-    assert provider._extract_via_cli(b"not-a-real-archive") is not None
+    assert provider._extract_via_cli(b"archive") is not None
     assert tried == ["unar", "7z"]
+
+
+def test_legendasdivx_cli_extraction_kills_an_extractor_over_the_size_budget(monkeypatch, tmp_path):
+    monkeypatch.setattr(legendasdivx, "CLI_EXTRACT_MAX_BYTES", 1024)
+
+    def behaviour(tool, outdir):
+        # still running, and already past the budget
+        _write_subtitle(outdir, body=b"x" * 4096)
+        return "hang"
+
+    _, procs = _stub_extractors(monkeypatch, tmp_path, behaviour)
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
+    assert provider._extract_via_cli(b"archive") is None
+    # killed mid-run rather than waited out: the point is to stop the fill, so
+    # this has to happen on the first budget poll, not at the timeout
+    assert procs[0].killed
+    assert procs[0].waits <= 3
+
+
+def test_legendasdivx_cli_extraction_rejects_an_extractor_over_the_size_budget_at_exit(monkeypatch, tmp_path):
+    monkeypatch.setattr(legendasdivx, "CLI_EXTRACT_MAX_BYTES", 1024)
+
+    def behaviour(tool, outdir):
+        # fast enough to finish between two polls
+        _write_subtitle(outdir, body=b"x" * 4096)
+        return 0
+
+    _stub_extractors(monkeypatch, tmp_path, behaviour)
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
+    assert provider._extract_via_cli(b"archive") is None
+
+
+def test_legendasdivx_cli_extraction_kills_an_extractor_over_the_member_budget(monkeypatch, tmp_path):
+    monkeypatch.setattr(legendasdivx, "CLI_EXTRACT_MAX_MEMBERS", 5)
+
+    def behaviour(tool, outdir):
+        for i in range(20):
+            _write_subtitle(outdir, name=f"member{i}.srt")
+        return "hang"
+
+    _, procs = _stub_extractors(monkeypatch, tmp_path, behaviour)
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
+    # the same attack aimed at inodes instead of bytes
+    assert provider._extract_via_cli(b"archive") is None
+    assert procs[0].killed
+    assert procs[0].waits <= 3
+
+
+def test_legendasdivx_cli_extraction_moves_on_after_a_blown_budget(monkeypatch, tmp_path):
+    monkeypatch.setattr(legendasdivx, "CLI_EXTRACT_MAX_BYTES", 1024)
+    good = b"1\n00:00:01,000 --> 00:00:02,000\ngenuine subtitle\n"
+
+    def behaviour(tool, outdir):
+        if tool == "unar":
+            _write_subtitle(outdir, name="bomb.srt", body=b"x" * 4096)
+            return "hang"
+        _write_subtitle(outdir, body=good)
+        return 0
+
+    tried, _ = _stub_extractors(monkeypatch, tmp_path, behaviour)
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
+    # a blown budget must behave like every other guard here: give up on that
+    # extractor, never raise out of the loop, and let the next one try
+    assert provider._extract_via_cli(b"archive") == good
+    assert tried == ["unar", "7z"]
+
+
+def test_legendasdivx_cli_extraction_gives_each_extractor_a_clean_tree(monkeypatch, tmp_path):
+    monkeypatch.setattr(legendasdivx, "CLI_EXTRACT_MAX_BYTES", 4096)
+    good = b"1\n00:00:01,000 --> 00:00:02,000\ngenuine subtitle\n"
+    seen = {}
+
+    def behaviour(tool, outdir):
+        outdir.mkdir(parents=True, exist_ok=True)
+        seen[tool] = sorted(os.listdir(outdir))
+        if tool == "unar":
+            _write_subtitle(outdir, name="bomb.srt", body=b"x" * 8192)
+            return "hang"
+        _write_subtitle(outdir, body=good)
+        return 0
+
+    _stub_extractors(monkeypatch, tmp_path, behaviour)
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
+    assert provider._extract_via_cli(b"archive") == good
+    # 7z must not inherit unar's leftovers, or it would trip the budget too and
+    # a recoverable archive would look like a bomb
+    assert seen["7z"] == []
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -326,19 +494,14 @@ def test_legendasdivx_single_subtitle_archive_returns_the_wanted_episode():
 
 
 def _fake_extractor(monkeypatch, tmp_path, lay_down):
-    """Point _extract_via_cli at a stub extractor that writes lay_down(tmp_path)."""
+    """A stub extractor that succeeds after writing lay_down(outdir)."""
 
-    class Proc:
-        returncode = 0
+    def behaviour(tool, outdir):
+        outdir.mkdir(parents=True, exist_ok=True)
+        lay_down(outdir)
+        return 0
 
-    def fake_run(cmd, **kwargs):
-        lay_down(tmp_path)
-        return Proc()
-
-    monkeypatch.setattr(legendasdivx.tempfile, "mkdtemp", lambda: str(tmp_path))
-    monkeypatch.setattr(legendasdivx.shutil, "which", lambda tool: f"/usr/bin/{tool}")
-    monkeypatch.setattr(legendasdivx.shutil, "rmtree", lambda *args, **kwargs: None)
-    monkeypatch.setattr(legendasdivx.subprocess, "run", fake_run)
+    _stub_extractors(monkeypatch, tmp_path, behaviour)
 
 
 def test_legendasdivx_cli_extraction_never_substitutes_another_member(monkeypatch, tmp_path):

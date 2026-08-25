@@ -21,6 +21,7 @@ import zipfile
 import tempfile
 import subprocess
 import shutil
+import time
 from time import sleep
 from urllib.parse import quote
 from urllib.parse import parse_qs
@@ -46,12 +47,35 @@ from dogpile.cache.api import NO_VALUE
 
 logger = logging.getLogger(__name__)
 
-# Upper bound for a single CLI extractor invocation. A malformed or
-# password-protected archive can make unar/7z/unrar sit on stdin forever,
-# and _extract_via_cli runs inside the download worker, so an unbounded
-# subprocess.run() would block that worker indefinitely. Mirrors
-# FILEBOT_XATTR_TIMEOUT in subliminal_patch.refiners.filebot.
+# Budget for a single CLI extractor invocation. These three limits are one
+# policy: the archives come from a third-party subtitle site, so their contents
+# are untrusted, and _extract_via_cli runs inside the download worker.
+#
+# Time bounds a hang. A malformed or password-protected archive can make
+# unar/7z/unrar sit waiting forever. Mirrors FILEBOT_XATTR_TIMEOUT in
+# subliminal_patch.refiners.filebot.
+#
+# Size and member count bound a fill, which the timeout does not: extraction
+# writes to disk, and a small response can expand enormously. A 76KB 7z reaching
+# 500MB, roughly 6800:1, is trivial to build, so a 1MB provider response can fill
+# several GB of the user's disk in seconds. A huge member count is the same
+# attack aimed at inodes instead of bytes.
+#
+# Headroom is deliberate, since a cap that trips on a genuine season pack would
+# be worse than no cap. The largest real archive in tests/subliminal_patch/data
+# is titlovi_some_subtitle_pack.zip: 588639 bytes across 24 members. 128MB is
+# roughly 230x that size and 2000 members roughly 80x that count, which leaves
+# room for packs far larger than anything this provider ships, VobSub .sub
+# members included.
 CLI_EXTRACT_TIMEOUT = 60
+CLI_EXTRACT_MAX_BYTES = 128 * 1024 * 1024
+CLI_EXTRACT_MAX_MEMBERS = 2000
+
+# How often the budget is checked while an extractor runs. Peak disk use is the
+# cap plus at most one interval of writing, so this trades a little polling
+# against the overshoot. Measured on a 1.2GB zip bomb (1028:1): the extractor is
+# killed at about 156MB against the 128MB cap, in well under a second.
+CLI_EXTRACT_POLL_SECONDS = 0.1
 
 
 def guess_matches_wanted_episode(video, guess):
@@ -659,6 +683,82 @@ class LegendasdivxProvider(Provider):
             return self._extract_via_cli(content, target_name, video=video)
 
     @staticmethod
+    def _extracted_usage(outdir):
+        """(bytes, member count) written below outdir so far.
+
+        lstat, not stat: a symlink member must not be charged the size of
+        whatever it points at, and _is_safe_extracted_file drops those anyway.
+        """
+        total_bytes = 0
+        members = 0
+        for root, _, files in os.walk(outdir):
+            for f in files:
+                members += 1
+                try:
+                    total_bytes += os.lstat(os.path.join(root, f)).st_size
+                except OSError:
+                    continue
+
+        return total_bytes, members
+
+    def _over_extraction_budget(self, outdir, tool):
+        used_bytes, members = self._extracted_usage(outdir)
+        if used_bytes > CLI_EXTRACT_MAX_BYTES or members > CLI_EXTRACT_MAX_MEMBERS:
+            logger.warning("Legendasdivx.pt :: %s blew the extraction budget "
+                           "(%s bytes against a %s limit, %s members against %s), abandoning it",
+                           tool, used_bytes, CLI_EXTRACT_MAX_BYTES, members, CLI_EXTRACT_MAX_MEMBERS)
+            return True
+
+        return False
+
+    def _run_extractor(self, tool, cmd, outdir):
+        """Run one extractor under the time, size and member budget.
+
+        True only when it exited successfully inside the budget. Never raises: a
+        hang, a blown budget or a failure to start is just this extractor not
+        working out, and the caller moves on to the next one.
+        """
+        try:
+            # stdin is closed so an extractor that prompts, which is what an
+            # encrypted archive triggers, cannot block on an inherited terminal.
+            # Output is discarded rather than piped: nothing reads it, and an
+            # unread pipe would deadlock a long extraction once its buffer fills.
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as err:
+            logger.warning("Legendasdivx.pt :: could not run %s: %s", tool, err)
+            return False
+
+        deadline = time.monotonic() + CLI_EXTRACT_TIMEOUT
+        returncode = None
+        try:
+            while True:
+                try:
+                    returncode = proc.wait(timeout=CLI_EXTRACT_POLL_SECONDS)
+                except subprocess.TimeoutExpired:
+                    pass
+                else:
+                    break
+
+                if time.monotonic() >= deadline:
+                    logger.warning("Legendasdivx.pt :: %s timed out after %ss extracting archive, "
+                                   "trying next extractor", tool, CLI_EXTRACT_TIMEOUT)
+                    return False
+
+                if self._over_extraction_budget(outdir, tool):
+                    return False
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+
+        if returncode != 0:
+            return False
+
+        # a fast extractor can blow the budget between two polls
+        return not self._over_extraction_budget(outdir, tool)
+
+    @staticmethod
     def _is_safe_extracted_file(full_path, safe_root):
         """Reject anything that is not a regular file inside the temp directory.
 
@@ -690,22 +790,27 @@ class LegendasdivxProvider(Provider):
             with open(tmparc, "wb") as f:
                 f.write(content)
 
+            # Extract into a directory of its own, beside the archive rather than
+            # around it. Each extractor then gets a clean tree and its own budget,
+            # instead of inheriting whatever a previous attempt left behind when
+            # it timed out or overran.
+            outdir = os.path.join(tmpdir, "extracted")
+
             extracted = False
             for tool, cmd in [
-                ("unar", ["unar", "-o", tmpdir, "-f", tmparc]),
-                ("7z", ["7z", "x", "-y", f"-o{tmpdir}", tmparc]),
-                ("unrar", ["unrar", "x", "-y", tmparc, tmpdir]),
+                ("unar", ["unar", "-o", outdir, "-f", tmparc]),
+                ("7z", ["7z", "x", "-y", f"-o{outdir}", tmparc]),
+                ("unrar", ["unrar", "x", "-y", tmparc, outdir]),
             ]:
-                if shutil.which(tool):
-                    try:
-                        p = subprocess.run(cmd, capture_output=True, timeout=CLI_EXTRACT_TIMEOUT)
-                    except subprocess.TimeoutExpired:
-                        logger.warning("Legendasdivx.pt :: %s timed out after %ss extracting archive, "
-                                       "trying next extractor", tool, CLI_EXTRACT_TIMEOUT)
-                        continue
-                    if p.returncode == 0:
-                        extracted = True
-                        break
+                if not shutil.which(tool):
+                    continue
+
+                os.makedirs(outdir, exist_ok=True)
+                if self._run_extractor(tool, cmd, outdir):
+                    extracted = True
+                    break
+
+                shutil.rmtree(outdir, ignore_errors=True)
 
             if extracted:
                 _tmp = list(SUBTITLE_EXTENSIONS)
@@ -714,11 +819,11 @@ class LegendasdivxProvider(Provider):
                 _subtitle_extensions = tuple(_tmp)
 
                 target_base = os.path.split(target_name)[-1].lower() if target_name else None
-                safe_root = os.path.realpath(tmpdir)
+                safe_root = os.path.realpath(outdir)
                 found_files = []
-                for root, _, files in os.walk(tmpdir):
+                for root, _, files in os.walk(outdir):
                     for f in files:
-                        if f == "archive.rar" or not f.lower().endswith(_subtitle_extensions):
+                        if not f.lower().endswith(_subtitle_extensions):
                             continue
 
                         full_path = os.path.join(root, f)
