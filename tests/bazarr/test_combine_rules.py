@@ -287,13 +287,15 @@ def test_video_name_does_not_offer_a_hindi_file_as_chinese(tmp_path):
     ) is None
 
 
-# --- Plain 2-letter codes win over the custom-tag lists ---------------------
+# --- An ambiguous tag is read the way the indexer reads it ------------------
 
 
-def test_plain_two_letter_code_is_not_shadowed_by_a_custom_tag(tmp_path):
-    """'.sc' is Sardinian, an ISO 639-1 code Bazarr seeds, and it is also in
-    CustomLanguage's Simplified Chinese disambiguation list. The strict parser
-    owns 2-letter codes, so Movie.sc.srt is Sardinian."""
+def test_sc_is_read_as_the_indexer_reads_it(tmp_path):
+    """'.sc' is both Sardinian's ISO 639-1 code and CustomLanguage's alias for
+    Simplified Chinese, and CustomLanguage wins: found_external('.sc.srt')
+    returns zh, so the subtitle Bazarr already has in its table for this file
+    is Chinese. Combine has to agree, or it reports a source missing that the
+    rest of the application can see, and composes nothing."""
     base = make_video_dir(tmp_path, [
         "Movie.mkv",
         "Movie.sc.srt",
@@ -301,14 +303,14 @@ def test_plain_two_letter_code_is_not_shadowed_by_a_custom_tag(tmp_path):
     ])
     result = resolve_source_paths(
         video_path=str(base / "Movie.mkv"),
-        languages=["sc", "en"],
+        languages=["zh", "en"],
     )
     assert result is not None
     assert result.primary == str(base / "Movie.sc.srt")
     assert result.secondaries == [str(base / "Movie.en.srt")]
 
 
-def test_sardinian_file_is_not_offered_as_chinese(tmp_path):
+def test_a_chinese_alias_is_not_offered_as_sardinian(tmp_path):
     base = make_video_dir(tmp_path, [
         "Movie.mkv",
         "Movie.sc.srt",
@@ -316,8 +318,25 @@ def test_sardinian_file_is_not_offered_as_chinese(tmp_path):
     ])
     assert resolve_source_paths(
         video_path=str(base / "Movie.mkv"),
-        languages=["zh", "en"],
+        languages=["sc", "en"],
     ) is None
+
+
+def test_a_modified_ambiguous_tag_reads_the_same_way_as_the_plain_one(tmp_path):
+    """The indexer reads .sc.forced as zh:forced. A rule that read the plain
+    spelling as Chinese and the forced spelling as Sardinian would compose a
+    Chinese subtitle into a Sardinian combine."""
+    base = make_video_dir(tmp_path, [
+        "Movie.mkv",
+        "Movie.sc.forced.srt",
+        "Movie.en.srt",
+    ])
+    result = resolve_source_paths(
+        video_path=str(base / "Movie.mkv"),
+        languages=["zh", "en"],
+    )
+    assert result is not None
+    assert result.primary == str(base / "Movie.sc.forced.srt")
 
 
 # --- Custom tags keep the hi / forced variants ------------------------------

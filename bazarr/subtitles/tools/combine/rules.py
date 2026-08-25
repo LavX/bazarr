@@ -4,7 +4,6 @@ import glob
 import logging
 import os
 from dataclasses import dataclass
-from functools import lru_cache
 
 
 @dataclass(frozen=True)
@@ -151,49 +150,31 @@ def _extract_code_and_priority(base, path):
 def _language_code_from_tag(tag, modifier=None):
     """Map one isolated filename tag to a language code2, or None.
 
-    A 2-letter tag that really is an ISO 639-1 code is taken as-is, so
-    Movie.sc.srt stays Sardinian instead of being claimed by Simplified
-    Chinese's alias list. Everything else falls back to CustomLanguage, which
-    is what lets .zh-TW / .pt-BR / .es-MX resolve to the zt / pb / ea codes
-    profiles request, and equally what lets the 2-letter aliases .tc and .gb
-    resolve to zt and zh. Taking those at face value instead would yield the
-    codes "tc" and "gb", which no profile asks for, so the file would be
-    invisible here while the regular indexer files it as Chinese.
+    CustomLanguage is asked first, because it is what the regular subtitle
+    indexer asks: it is what lets .zh-TW / .pt-BR / .es-MX resolve to the
+    zt / pb / ea codes profiles request, and equally what decides the tags that
+    are ambiguous. ".sc" is both Sardinian's ISO 639-1 code and Simplified
+    Chinese's alias, and the indexer reads it as Chinese, so the subtitle
+    already in Bazarr's table for that file is Chinese. Reading it as Sardinian
+    here would report a source missing that the rest of the application can
+    see, and offer a Chinese subtitle to a Sardinian combine.
+
+    An ISO 639-1 code is next, and the bare tag last: Bazarr registers
+    synthetic 2-letter codes of its own, "me" for Montenegrin, which has no ISO
+    code at all, and a profile really can ask for it.
 
     A tag is one filename segment, so CustomLanguage's single dotted spelling,
     .es.ar, is deliberately not honoured: accepting a two-segment tag would
     also read Movie.en.pt.srt as Portuguese, since ".en.pt" ends in ".pt".
     """
-    plain_two_letter = len(tag) == 2 and tag.isalpha() and tag.islower()
-    if plain_two_letter and _is_iso_639_1(tag):
-        return tag
-
     code = _custom_language_code(tag, modifier)
     if code is not None:
         return code
 
-    # Not ISO and not a custom alias, but Bazarr registers synthetic 2-letter
-    # codes of its own: "me" is Montenegrin, which has no ISO 639-1 code, and a
-    # profile really can ask for it. Taking the tag at face value is what the
-    # settings vocabulary means, so fall back to it last rather than first.
-    return tag if plain_two_letter else None
+    if len(tag) == 2 and tag.isalpha() and tag.islower():
+        return tag
 
-
-@lru_cache(maxsize=None)
-def _is_iso_639_1(tag):
-    """True when the 2-letter tag is a real ISO 639-1 code.
-
-    Cached: this runs once per candidate file per directory scan, and the
-    answer for a given tag never changes.
-    """
-    from babelfish import Language
-    from babelfish.exceptions import LanguageReverseError
-
-    try:
-        Language.fromalpha2(tag)
-    except (LanguageReverseError, ValueError):
-        return False
-    return True
+    return None
 
 
 _custom_language_cls = None
