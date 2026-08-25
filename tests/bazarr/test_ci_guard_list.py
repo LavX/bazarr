@@ -235,12 +235,6 @@ EXCLUDED = {
         "en and pl. Two of the four that pass do so vacuously, one asserting "
         "only isinstance(subs, list) and one looping over a list that is empty."
     ),
-    "tests/subliminal_patch/test_hosszupuska.py": (
-        "hosszupuskasub.com is dead, so the provider is being retired. Until "
-        "that lands: replays recorded HTTP, touches no network, and both cases "
-        "fail because the recorded page now yields adf.ly-wrapped links while "
-        "the assertions expect bare download URLs."
-    ),
     "tests/subliminal_patch/test_napiprojekt.py": (
         "replays recorded HTTP and touches no network, but subliminal 2.6.0 "
         "moved server_url to https while the cassettes were recorded against "
