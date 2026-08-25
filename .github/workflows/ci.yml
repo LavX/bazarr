@@ -211,6 +211,9 @@ jobs:
             tests/subliminal_patch/test_embeddedsubtitles.py \
             tests/subliminal_patch/test_subsunacs.py \
             tests/subliminal_patch/test_filebot_refiner.py \
+            tests/subliminal_patch/test_http.py \
+            tests/subliminal_patch/test_legendasdivx.py \
+            tests/subliminal_patch/test_provider_pool.py \
             tests/subliminal_patch/test_mods.py \
             tests/subliminal_patch/test_mods_keep_lyrics.py \
             -v --tb=short

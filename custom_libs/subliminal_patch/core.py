@@ -326,13 +326,17 @@ class SZProviderPool(ProviderPool):
 
     def __getitem__(self, name):
         if name not in self.providers:
-            if name in provider_registry:
-                if isinstance(self.providers, set):
-                    self.providers.add(name)
-                else:
-                    self.providers.append(name)
-            else:
+            # A download can name a provider the pool was not built with, for
+            # instance when the subtitle came from an earlier search and the
+            # enabled-provider list has changed since. Adopt it when it is
+            # registered, otherwise it is a genuine lookup error.
+            #
+            # self.providers is always an ordered list (see __init__ and
+            # update(), both of which route through _dedupe_provider_names), so
+            # appending keeps the configured priority order.
+            if name not in provider_registry:
                 raise KeyError(name)
+            self.providers.append(name)
         if name not in self.initialized_providers:
             logger.info('Initializing provider %s', name)
             provider = provider_registry[name](**self.provider_configs.get(name, {}))
