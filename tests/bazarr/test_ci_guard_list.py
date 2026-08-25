@@ -18,6 +18,7 @@ there should be a ticket to fix it, and the reason should say so.
 
 import pathlib
 import re
+import sys
 
 import pytest
 import yaml
@@ -90,6 +91,9 @@ EXCLUDED = {
 # pytest, or a step disabled with `if:` would all count as coverage.
 _PYTEST_COMMAND = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*pytest\b")
 _TEST_PATH = re.compile(r"tests/[\w./-]+\.py")
+# `for <var> in`, so the body check can look for that exact variable rather than
+# assuming the workflow always spells it `f`.
+_FOR_IN = re.compile(r"^for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\b")
 
 
 def _workflow() -> dict:
@@ -114,23 +118,63 @@ def _unconditional_run_scripts() -> list:
     return scripts
 
 
+def _continued_paths(lines: list, start: int) -> tuple:
+    """Paths on the line at `start` plus its backslash continuations.
+
+    Returns the paths and the index of the first line after the run, which is
+    how the workflow spells its multi-line pytest invocations and loop headers.
+    """
+    paths = set()
+    index = start
+    while index < len(lines):
+        line = lines[index]
+        paths.update(_TEST_PATH.findall(line))
+        index += 1
+        if not line.endswith("\\"):
+            break
+    return paths, index
+
+
+def _body_runs_pytest_on(lines: list, start: int, variable: str) -> bool:
+    """Whether the loop body beginning at `start` hands `$variable` to pytest.
+
+    Anything else the body does with the list runs no tests: `echo "$f"` prints
+    it, and `pytest tests/other.py` tests a file the list never named.
+    """
+    reference = re.compile(
+        r"\$(?:\{%s\}|%s(?![A-Za-z0-9_]))" % (re.escape(variable), re.escape(variable))
+    )
+    for line in lines[start:]:
+        if re.match(r"done\b", line):
+            break
+        if _PYTEST_COMMAND.match(line) and reference.search(line):
+            return True
+    return False
+
+
 def _paths_in_script(script: str) -> set:
     """Paths that a pytest command in this script actually receives.
 
     Argument lists continue while lines end in a backslash, which is how the
     workflow spells its multi-line invocations. `for f in ... ; do pytest "$f"`
-    counts too, since that list is what pytest iterates.
+    counts too, but only when the body really passes the iterator variable to
+    pytest: a header listing twenty files proves nothing on its own, so deleting
+    the one pytest line inside `do ... done` must stop the list counting.
     """
+    lines = [re.sub(r"#.*$", "", raw).strip() for raw in script.splitlines()]
     paths = set()
-    collecting = False
-    for raw in script.splitlines():
-        line = re.sub(r"#.*$", "", raw).strip()
-        if _PYTEST_COMMAND.match(line) or line.startswith("for f in"):
-            collecting = True
-        if collecting:
-            paths.update(_TEST_PATH.findall(line))
-            if not line.endswith("\\"):
-                collecting = False
+    index = 0
+    while index < len(lines):
+        loop = _FOR_IN.match(lines[index])
+        if loop:
+            listed, index = _continued_paths(lines, index)
+            if _body_runs_pytest_on(lines, index, loop.group(1)):
+                paths |= listed
+        elif _PYTEST_COMMAND.match(lines[index]):
+            found, index = _continued_paths(lines, index)
+            paths |= found
+        else:
+            index += 1
     return paths
 
 
@@ -220,3 +264,197 @@ def test_exclusions_are_not_also_enumerated():
 @pytest.mark.parametrize("name,reason", sorted(EXCLUDED.items()))
 def test_every_exclusion_states_a_reason(name, reason):
     assert reason and len(reason) > 15, f"{name} needs a real reason, got {reason!r}"
+
+
+# Scripts that name a test path without ever running it. Every one of these
+# shapes has been mistaken for coverage by some version of this parser, so each
+# stays encoded rather than checked by hand once. Each entry is the script, the
+# paths the parser must NOT count, and the paths it must count: the second half
+# matters as much as the first, since a parser that returned nothing at all
+# would sail through every bypass case while covering nothing.
+_SCRIPT_BYPASSES = {
+    "path sits in a trailing comment": (
+        """
+        pytest tests/bazarr/test_real.py -q  # dropped: tests/bazarr/test_commented.py
+        """,
+        ("tests/bazarr/test_commented.py",),
+        ("tests/bazarr/test_real.py",),
+    ),
+    "path is echoed by a non-pytest command": (
+        """
+        echo tests/bazarr/test_echoed.py
+        pytest tests/bazarr/test_real.py
+        """,
+        ("tests/bazarr/test_echoed.py",),
+        ("tests/bazarr/test_real.py",),
+    ),
+    "pytest is an argument to echo, not the command": (
+        """
+        echo pytest tests/bazarr/test_announced.py
+        pytest tests/bazarr/test_real.py
+        """,
+        ("tests/bazarr/test_announced.py",),
+        ("tests/bazarr/test_real.py",),
+    ),
+    "loop body only echoes the file": (
+        """
+        set -e
+        for f in \\
+          tests/bazarr/test_editor_api.py \\
+          tests/bazarr/test_mass_operations.py \\
+          ; do
+          echo "::group::$f"
+          echo "$f"
+          echo "::endgroup::"
+        done
+        pytest tests/bazarr/test_real.py
+        """,
+        ("tests/bazarr/test_editor_api.py", "tests/bazarr/test_mass_operations.py"),
+        ("tests/bazarr/test_real.py",),
+    ),
+    "loop body runs pytest on an unrelated file": (
+        """
+        set -e
+        for f in \\
+          tests/bazarr/test_editor_api.py \\
+          tests/bazarr/test_mass_operations.py \\
+          ; do
+          pytest tests/bazarr/test_something_else.py -q
+        done
+        """,
+        ("tests/bazarr/test_editor_api.py", "tests/bazarr/test_mass_operations.py"),
+        ("tests/bazarr/test_something_else.py",),
+    ),
+    "loop body mentions the variable but not to pytest": (
+        """
+        for candidate in \\
+          tests/bazarr/test_editor_api.py \\
+          ; do
+          test -f "$candidate" || exit 1
+          pytest --collect-only
+        done
+        pytest tests/bazarr/test_real.py
+        """,
+        ("tests/bazarr/test_editor_api.py",),
+        ("tests/bazarr/test_real.py",),
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "case,script,ignored,counted",
+    [(case,) + value for case, value in sorted(_SCRIPT_BYPASSES.items())],
+)
+def test_script_that_only_names_a_path_is_not_coverage(case, script, ignored, counted):
+    found = _paths_in_script(script)
+
+    wrongly_counted = sorted(found & set(ignored))
+    assert not wrongly_counted, (
+        f"the guard counted a path as coverage when the {case}, so CI could stop "
+        "running these files while the guard stayed green:\n  "
+        + "\n  ".join(wrongly_counted)
+    )
+
+    assert set(counted) <= found, (
+        f"the {case} case proves nothing: the parser missed the paths that script "
+        "really does hand to pytest, so it would pass even if it counted nothing"
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'pytest "$f"',
+        "pytest $f",
+        'pytest -q "$f" -p no:cacheprovider',
+        'PYTHONPATH=. pytest "${f}"',
+    ],
+)
+def test_loop_list_with_pytest_on_the_variable_is_coverage(body):
+    script = (
+        "for f in \\\n"
+        "  tests/bazarr/test_editor_api.py \\\n"
+        "  ; do\n"
+        f"  {body}\n"
+        "done\n"
+    )
+    assert _paths_in_script(script) == {"tests/bazarr/test_editor_api.py"}
+
+
+@pytest.fixture
+def constructed_workflow(tmp_path, monkeypatch):
+    """Run the guard against a workflow built in the test, not the repo's own.
+
+    The helpers read WORKFLOW from disk on purpose, so the path itself is the
+    seam: nothing test-only has to be threaded through them.
+    """
+
+    def build(workflow: dict) -> pathlib.Path:
+        path = tmp_path / "ci.yml"
+        path.write_text(yaml.safe_dump(workflow, sort_keys=False))
+        monkeypatch.setattr(sys.modules[__name__], "WORKFLOW", path)
+        return path
+
+    return build
+
+
+def _one_job(*steps: dict) -> dict:
+    return {"jobs": {"backend": {"steps": list(steps)}}}
+
+
+def test_path_only_in_a_step_name_is_not_coverage(constructed_workflow):
+    """A step called after the file it used to run is not running it."""
+    constructed_workflow(
+        _one_job(
+            {
+                "name": "pytest tests/bazarr/test_named_only.py",
+                "run": "pytest tests/bazarr/test_real.py\n",
+            }
+        )
+    )
+    enumerated = _enumerated_paths()
+    assert "tests/bazarr/test_named_only.py" not in enumerated, (
+        "a path in a step's name was counted as coverage, so renaming a step "
+        "could keep the guard green after its pytest line was gone"
+    )
+    assert "tests/bazarr/test_real.py" in enumerated, "the script itself must still count"
+
+
+def test_path_in_a_conditional_step_is_not_coverage(constructed_workflow):
+    """`if: false` really does invoke pytest, and really never runs."""
+    constructed_workflow(
+        _one_job(
+            {
+                "name": "disabled suite",
+                "if": "false",
+                "run": "pytest tests/bazarr/test_disabled.py\n",
+            },
+            {"name": "backend", "run": "pytest tests/bazarr/test_real.py\n"},
+        )
+    )
+    enumerated = _enumerated_paths()
+    assert "tests/bazarr/test_disabled.py" not in enumerated, (
+        "a step carrying an `if:` was counted as coverage, so disabling a pytest "
+        "step with `if: false` would stop the tests without failing this guard"
+    )
+    assert "tests/bazarr/test_real.py" in enumerated, "the unconditional step must still count"
+
+
+def test_deleted_directory_run_is_not_coverage(constructed_workflow):
+    """The wholesale `tests/compat/` run is the only thing covering that tree."""
+    constructed_workflow(_one_job({"run": "pytest tests/bazarr/test_real.py\n"}))
+    assert not _directory_is_run("tests/compat/"), (
+        "the directory guard reported tests/compat/ as run by a workflow that "
+        "never mentions it"
+    )
+
+
+def test_directory_named_by_a_non_pytest_command_is_not_coverage(constructed_workflow):
+    """Mentioning the directory in an echo is not running it."""
+    constructed_workflow(
+        _one_job({"run": 'echo "skipping tests/compat/"\npytest tests/bazarr/test_real.py\n'})
+    )
+    assert not _directory_is_run("tests/compat/"), (
+        "an echoed directory name was taken for a wholesale run"
+    )
+    assert _directory_is_run("tests/bazarr/"), "a real pytest run must still count"
