@@ -174,6 +174,7 @@ jobs:
             tests/bazarr/test_sync_progress_report.py \
             tests/bazarr/test_subsync_engines.py \
             tests/bazarr/test_sync_instance_overrides.py \
+            tests/bazarr/test_sync_outcome_reporting.py \
             tests/bazarr/test_subzero_keep_lyrics.py \
             tests/bazarr/test_archive_extraction.py \
             tests/bazarr/test_security_guards.py \
