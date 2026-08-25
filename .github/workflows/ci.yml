@@ -14,8 +14,13 @@ on:
       - requirements.txt
       - dev-requirements.txt
       - .github/workflows/ci.yml
+  # No branches filter on purpose. A stacked pull request, one whose base is
+  # another feature branch rather than development, got no CI at all under
+  # `branches: [master, development]`: GitHub simply did not trigger, and the
+  # pull request sat green-looking with zero checks. Running on every pull
+  # request costs one extra run per stacked branch and removes a whole class of
+  # silently unverified change.
   pull_request:
-    branches: [master, development]
 
 permissions:
   contents: read
