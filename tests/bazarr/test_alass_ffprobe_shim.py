@@ -147,6 +147,11 @@ def recorded_alass_run(monkeypatch, tmp_path):
     return syncer, calls
 
 
+def _alass_call(calls):
+    """The alass invocation, not the launcher self-test that precedes it."""
+    return next(call for call in calls if str(call["command"][0]).endswith("alass"))
+
+
 @pytest.mark.skipif(os.name != "posix", reason="the launcher is a POSIX shell script")
 def test_alass_is_run_against_the_shim(recorded_alass_run, tmp_path):
     syncer, calls = recorded_alass_run
@@ -154,7 +159,8 @@ def test_alass_is_run_against_the_shim(recorded_alass_run, tmp_path):
     syncer._run_external_engine(engine="alass", output_path=tmp_path / "out.srt",
                                 video_path=str(tmp_path / "video.mkv"))
 
-    env = calls[0]["env"]
+    call = _alass_call(calls)
+    env = call["env"]
     assert env is not None
     assert env["BAZARR_ALASS_REAL_FFPROBE"] == "/usr/bin/ffprobe"
     launcher = env["ALASS_FFPROBE_PATH"]
@@ -162,7 +168,7 @@ def test_alass_is_run_against_the_shim(recorded_alass_run, tmp_path):
     # The rest of the environment is alass's own, not a two-variable replacement for it.
     assert env["PATH"] == os.environ["PATH"]
     # And the invocation itself is untouched.
-    assert calls[0]["command"][0] == "/usr/bin/alass"
+    assert call["command"][0] == "/usr/bin/alass"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="the launcher is a POSIX shell script")
@@ -252,6 +258,51 @@ def test_alass_runs_unshimmed_when_ffprobe_cannot_be_found(recorded_alass_run, m
     syncer._run_external_engine(engine="alass", output_path=tmp_path / "out.srt",
                                 video_path=str(tmp_path / "video.mkv"))
 
-    env = calls[0]["env"]
+    env = _alass_call(calls)["env"]
     assert "ALASS_FFPROBE_PATH" not in env
     assert env["PATH"] == os.environ["PATH"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the launcher is a POSIX shell script")
+def test_a_noexec_temp_directory_is_not_where_the_launcher_ends_up(monkeypatch, tmp_path):
+    """A temp filesystem mounted noexec is ordinary hardening. The launcher can
+    be written and marked executable there and still fail to run, which would
+    turn every alass sync into a permission error instead of the unshimmed
+    behaviour it had before this shim existed."""
+    shim = _shim()
+    noexec = tmp_path / "noexec-tmp"
+    noexec.mkdir()
+    usable = tmp_path / "config"
+    usable.mkdir()
+
+    monkeypatch.setattr(shim, "_LAUNCHER_PATH", None, raising=False)
+    monkeypatch.setattr(shim.tempfile, "gettempdir", lambda: str(noexec))
+    monkeypatch.setattr(shim, "_writable_directories", lambda: [str(noexec), str(usable)])
+
+    real_run = shim.subprocess.run
+
+    def run(command, *args, **kwargs):
+        if str(command[0]).startswith(str(noexec)):
+            raise PermissionError(13, "Permission denied")
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(shim.subprocess, "run", run)
+
+    launcher = shim.ensure_launcher()
+
+    assert launcher is not None, "no usable directory was found even though one was offered"
+    assert launcher.startswith(str(usable))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the launcher is a POSIX shell script")
+def test_no_launcher_at_all_when_nothing_can_execute(monkeypatch, tmp_path):
+    shim = _shim()
+    monkeypatch.setattr(shim, "_LAUNCHER_PATH", None, raising=False)
+    monkeypatch.setattr(shim, "_writable_directories", lambda: [str(tmp_path)])
+
+    def run(command, *args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(shim.subprocess, "run", run)
+
+    assert shim.ensure_launcher() is None

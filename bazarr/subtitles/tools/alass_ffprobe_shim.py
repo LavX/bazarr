@@ -82,6 +82,50 @@ def launcher_script(python, shim):
     )
 
 
+def _writable_directories():
+    """Where the launcher may live, best first.
+
+    Bazarr's own config directory comes first: the system temp directory is
+    routinely mounted noexec, and a launcher there can be written and marked
+    executable and still refuse to run.
+    """
+    directories = []
+    try:
+        from app.get_args import args
+
+        if args.config_dir:
+            directories.append(os.path.join(args.config_dir, "cache"))
+    except Exception:
+        # Imported by the shim's own process too, which has no Bazarr around it.
+        logger.debug("No Bazarr config directory for the alass shim", exc_info=True)
+
+    directories.append(tempfile.gettempdir())
+    return directories
+
+
+def _install_launcher(parent, content):
+    """Write the launcher under ``parent`` and prove it can actually run."""
+    os.makedirs(parent, exist_ok=True)
+    # mkdtemp gives us 0700 ownership of a name nobody could have guessed.
+    directory = tempfile.mkdtemp(prefix="bazarr-alass-shim-", dir=parent)
+    launcher = os.path.join(directory, "ffprobe")
+    with open(launcher, "w", encoding="utf-8") as handle:
+        handle.write(content)
+    os.chmod(launcher, 0o700)
+
+    # Run it once against a program that ignores its arguments and succeeds. A
+    # noexec mount fails here rather than in the middle of a subtitle sync.
+    probe = subprocess.run(
+        [launcher], capture_output=True,
+        env=dict(os.environ, **{REAL_FFPROBE_ENV: "/bin/true"}),
+        timeout=30,
+    )
+    if probe.returncode != 0:
+        raise OSError(f"the launcher in {parent} exited {probe.returncode}")
+
+    return launcher
+
+
 def ensure_launcher():
     """Path to an executable that runs this shim, or None if there cannot be one.
 
@@ -106,19 +150,16 @@ def ensure_launcher():
         return _LAUNCHER_PATH
 
     content = launcher_script(sys.executable, os.path.abspath(__file__))
-    try:
-        # mkdtemp gives us 0700 ownership of a name nobody could have guessed.
-        directory = tempfile.mkdtemp(prefix="bazarr-alass-shim-", dir=tempfile.gettempdir())
-        launcher = os.path.join(directory, "ffprobe")
-        with open(launcher, "w", encoding="utf-8") as handle:
-            handle.write(content)
-        os.chmod(launcher, 0o700)
-    except OSError:
-        logger.debug("Could not install the alass ffprobe shim", exc_info=True)
-        return None
+    for parent in _writable_directories():
+        try:
+            _LAUNCHER_PATH = _install_launcher(parent, content)
+        except Exception:
+            logger.debug("Could not install the alass ffprobe shim in %s", parent, exc_info=True)
+            continue
 
-    _LAUNCHER_PATH = launcher
-    return launcher
+        return _LAUNCHER_PATH
+
+    return None
 
 
 def real_ffprobe():
