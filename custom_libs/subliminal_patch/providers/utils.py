@@ -14,7 +14,7 @@ import rarfile
 from subliminal.subtitle import fix_line_ending
 from subliminal.utils import sanitize_release_group
 from subliminal_patch.exceptions import MustGetBlacklisted
-from subliminal_patch.core import Episode
+from subliminal_patch.core import SUBTITLE_EXTENSIONS, Episode
 from subliminal_patch.subtitle import guess_matches
 
 from ._agent_list import FIRST_THOUSAND_OR_SO_USER_AGENTS
@@ -25,6 +25,71 @@ logger = logging.getLogger(__name__)
 
 
 _MatchingSub = namedtuple("_MatchingSub", ("file", "priority", "context"))
+
+# Extensions the codebase calls a subtitle but which a scene archive also uses for
+# something else. A release-info text file sits next to the subtitle in the same
+# archive, and the movie selector takes the first match and stops, so an ambiguous
+# member is only ever considered when the archive holds nothing better.
+AMBIGUOUS_SUBTITLE_EXTENSIONS = (".txt",)
+
+# The conservative default for the built-in providers. Callers that want the whole
+# canonical set pass subliminal_patch.core.SUBTITLE_EXTENSIONS explicitly rather
+# than growing their own copy of it.
+DEFAULT_ARCHIVE_EXTENSIONS = (".srt", ".sub", ".ssa", ".ass")
+
+
+def is_subtitle_member(name, extensions=DEFAULT_ARCHIVE_EXTENSIONS):
+    """Whether an archive member is a subtitle file we are willing to extract.
+
+    The extension is compared on its own and case-insensitively, so a member named
+    ``MOVIE.SRT`` matches. Only the extension is lowercased: the rest of the member
+    name carries the language and the HI/forced tags, and a lowercased copy bleeding
+    into that parsing is how a name resolves as a language it never claimed. For the
+    same reason this never substring-tests the whole name.
+
+    Directories and dot-prefixed members (``.DS_Store``, the ``__MACOSX/._name``
+    resource forks zip adds) are not subtitles.
+    """
+    if not name:
+        return False
+    base = name.replace("\\", "/").rsplit("/", 1)[-1]
+    if not base or base.startswith("."):
+        return False
+    return os.path.splitext(base)[1].lower() in tuple(
+        extension.lower() for extension in extensions
+    )
+
+
+def list_subtitle_members(archive, extensions=DEFAULT_ARCHIVE_EXTENSIONS):
+    """The subtitle members of ``archive``, in archive order.
+
+    Single source of truth for "what counts as a subtitle member in this archive":
+    the list offered to a plugin for language selection and the list the selector
+    picks from both come from here, so the two can never disagree about a given
+    archive the way they did when each filtered for itself.
+
+    Members whose extension is ambiguous are dropped while an unambiguous one is
+    present, and returned only when they are all there is.
+    """
+    unambiguous = []
+    ambiguous = []
+    for name in archive.namelist():
+        if not is_subtitle_member(name, extensions):
+            continue
+        if os.path.splitext(name)[1].lower() in AMBIGUOUS_SUBTITLE_EXTENSIONS:
+            ambiguous.append(name)
+        else:
+            unambiguous.append(name)
+    return unambiguous or ambiguous
+
+
+def _archive_member_names(archive):
+    """Member names for a log line, best effort: a broken archive must not turn a
+    failed extraction into a traceback."""
+    try:
+        return list(archive.namelist())
+    except Exception:  # pragma: no cover - exotic archive objects
+        return []
 
 
 def blacklist_on(*exc_types):
@@ -114,18 +179,18 @@ def get_subtitle_from_archive(
     forced=False,
     episode=None,
     get_first_subtitle=False,
-    extensions=(".srt", ".sub", ".ssa", ".ass"),
+    extensions=DEFAULT_ARCHIVE_EXTENSIONS,
     **kwargs,
 ):
     "Get subtitle from Rarfile/Zipfile object. Return None if nothing is found."
-    subs_in_archive = [
-        name
-        for name in archive.namelist()
-        if name.endswith(tuple(extensions))
-    ]
+    subs_in_archive = list_subtitle_members(archive, extensions)
 
     if not subs_in_archive:
-        logger.info("No subtitles found in archive")
+        # Name the members: without them a user whose download failed here has no
+        # way to tell an archive full of the wrong extensions from a broken one.
+        logger.warning(
+            "No subtitles found in archive. Members: %s", _archive_member_names(archive)
+        )
         return None
 
     logger.debug("Subtitles in archive: %s", subs_in_archive)
@@ -140,7 +205,9 @@ def get_subtitle_from_archive(
         logger.info("Using %s from archive", matching_sub)
         return fix_line_ending(archive.read(matching_sub))
 
-    logger.debug("No subtitle found in archive")
+    logger.warning(
+        "No subtitle in archive matched this episode. Members: %s", subs_in_archive
+    )
     return None
 
 

@@ -49,9 +49,25 @@ def _archive_payload(body, **extra):
 
 
 def test_list_archive_members_filters_to_subtitles():
+    # Design note: ".txt" IS now one of the extensions the hub accepts, because
+    # several providers ship MicroDVD subtitles under it. It stays out of this
+    # listing anyway, and that is the point of the change rather than an accident:
+    # ".txt" is treated as ambiguous, so it is dropped while any unambiguous
+    # subtitle member is present and offered only when it is all the archive has.
+    # The guard the assertion below used to provide (a release-info text file can
+    # never be picked ahead of the real subtitle) therefore still holds, but it now
+    # comes from the ambiguity rule instead of from ".txt" being rejected outright.
     body = _zip(["a.eng.srt", "b.fre.srt", ".hidden.srt", "notes.txt"])
     archive = get_archive_from_bytes(body)
     assert sorted(proto._list_archive_members(archive)) == ["a.eng.srt", "b.fre.srt"]
+
+
+def test_list_archive_members_offers_text_member_when_it_is_all_there_is():
+    # The other half of the same rule: with no unambiguous member the ".txt" is
+    # what the archive has, so the worker must get the chance to pin it.
+    body = _zip(["film.txt"])
+    archive = get_archive_from_bytes(body)
+    assert proto._list_archive_members(archive) == ["film.txt"]
 
 
 def test_select_member_pin_extracts_named_member():
@@ -141,6 +157,10 @@ def test_worker_runner_select_archive_member_coerces_bad_decision():
 
 
 def test_select_member_callback_receives_listed_members():
+    # Design note: see test_list_archive_members_filters_to_subtitles. "notes.txt"
+    # is an accepted extension now, and is still withheld from the worker here
+    # because two unambiguous members outrank it. The worker must not be handed a
+    # release-info text file to language-pin.
     body = _zip(["show.eng.srt", "show.fre.srt", "notes.txt"])
     seen = {}
 
