@@ -65,6 +65,23 @@ MIGRATED_BUILT_IN_PROVIDER_IDS = frozenset({
 })
 
 
+# Provider ids that WERE built-in and have been retired because their upstream
+# origin is dead. Deleting the module drops the id from provider_registry.names(),
+# which would otherwise re-open it: the shadow gate would stop seeing it as a
+# built-in and any catalog plugin could claim it. These ids stay permanently
+# claimed instead. They are deliberately NOT on the migration allowlist above, so
+# can_shadow_built_in_provider() refuses them for trusted and untrusted sources
+# alike, which is exactly the protection the built-in module used to give.
+#
+# subdivx is deliberately absent: it was dropped as unsupported, not because the
+# site died, so a catalog plugin may legitimately claim that id one day.
+RETIRED_BUILT_IN_PROVIDER_IDS = frozenset({
+    "argenteamdump",
+    "hosszupuska",
+    "tusubtitulo",
+})
+
+
 def can_shadow_built_in_provider(provider_id: str, trusted: bool) -> bool:
     return bool(trusted) and str(provider_id or "") in MIGRATED_BUILT_IN_PROVIDER_IDS
 

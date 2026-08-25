@@ -940,6 +940,76 @@ def test_dead_origin_providers_are_not_builtin_replacements():
     )
 
 
+def test_retired_built_in_ids_are_claimed_but_never_shadowable():
+    # Retiring a built-in deletes its module, so the id leaves provider_registry and
+    # the dynamic half of the shadow gate stops covering it. RETIRED_BUILT_IN_PROVIDER_IDS
+    # keeps it claimed, and keeping it off the migration allowlist keeps it unshadowable
+    # by trusted sources too.
+    from provider_hub.migration import (
+        MIGRATED_BUILT_IN_PROVIDER_IDS,
+        RETIRED_BUILT_IN_PROVIDER_IDS,
+        can_shadow_built_in_provider,
+    )
+    from subliminal_patch.extensions import provider_registry
+
+    assert "hosszupuska" in RETIRED_BUILT_IN_PROVIDER_IDS
+    assert RETIRED_BUILT_IN_PROVIDER_IDS.isdisjoint(MIGRATED_BUILT_IN_PROVIDER_IDS)
+    for provider_id in RETIRED_BUILT_IN_PROVIDER_IDS:
+        # A retired id has no provider class left, which is the whole reason the set
+        # has to exist.
+        assert provider_id not in provider_registry.names()
+        assert not can_shadow_built_in_provider(provider_id, trusted=True)
+        assert not can_shadow_built_in_provider(provider_id, trusted=False)
+
+
+@pytest.mark.parametrize("trusted", [False, True])
+def test_retired_built_in_provider_id_cannot_be_claimed_by_a_plugin(trusted):
+    # Before the built-in module was deleted, a catalog entry claiming its id was
+    # rejected as shadowing a built-in, regardless of trust. Deleting the module must
+    # not hand the id to the next plugin that asks for it.
+    import provider_hub.registry as hub_registry
+    from provider_hub.registry import register_active_provider_classes
+    from subliminal_patch.extensions import provider_registry
+
+    provider_id = "hosszupuska"
+    assert provider_id not in provider_registry.names()
+
+    installation = _install(
+        provider_id,
+        trusted=trusted,
+        manifest=_manifest(
+            provider_id=provider_id,
+            name="Hosszupuska",
+            dependencies={"requirements": []},
+        ),
+    )
+
+    try:
+        registered = register_active_provider_classes(installations=[installation])
+
+        assert registered == []
+        assert provider_id not in provider_registry
+    finally:
+        hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if provider_id in provider_registry:
+            del provider_registry[provider_id]
+
+
+def test_retired_built_in_provider_id_is_rejected_by_manifest_validation():
+    # Same protection one layer earlier: the install/upload paths validate the manifest
+    # against the built-in denylist, so a retired id never even gets staged.
+    from provider_hub.manifest import ManifestValidationError, validate_manifest
+    from provider_hub.service import _built_in_provider_ids
+
+    assert "hosszupuska" in _built_in_provider_ids()
+
+    with pytest.raises(ManifestValidationError):
+        validate_manifest(
+            _manifest(provider_id="hosszupuska", name="Hosszupuska"),
+            built_in_provider_ids=_built_in_provider_ids(),
+        )
+
+
 def test_active_trusted_provider_replaces_non_gestdown_built_in():
     # The allowlist covers the full built-in set, not just gestdown: a trusted catalog
     # entry for any allowlisted built-in (here addic7ed) replaces it with a hub proxy.
