@@ -18,7 +18,8 @@ from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.mass_download import movies_download_subtitles  # noqa: F401
 from utilities.path_mappings import path_mappings
 from subtitles.adaptive_searching import is_search_active
-from arr_instances.resolution import client_for_instance, default_instance_id, scoped, stamp_owner
+from arr_instances.resolution import (client_for_instance, default_instance_id,
+                                      resolve_default_profile, scoped, stamp_owner)
 
 from sqlalchemy.exc import IntegrityError
 from .parser import movieParser
@@ -119,22 +120,6 @@ def update_movies(job_id=None, wait_for_completion=False, arr_instance_id=None, 
     logging.debug('BAZARR Starting movie sync from Radarr.')
     apikey_radarr = settings.radarr.apikey
 
-    movie_default_enabled = settings.general.movie_default_enabled
-
-    if movie_default_enabled is True:
-        movie_default_profile = settings.general.movie_default_profile
-        if movie_default_profile == '':
-            movie_default_profile = None
-    else:
-        movie_default_profile = None
-
-    # Prevent trying to insert a movie with a non-existing languages profileId
-    if (movie_default_profile and not database.execute(
-            select(TableLanguagesProfiles)
-            .where(TableLanguagesProfiles.profileId == movie_default_profile))
-            .first()):
-        movie_default_profile = None
-
     # The scalar apikey gate only blocks the legacy default path; an
     # instance-scoped sync carries its own credentials in arr_client.
     if arr_client is None and apikey_radarr is None:
@@ -148,6 +133,22 @@ def update_movies(job_id=None, wait_for_completion=False, arr_instance_id=None, 
         # else the enabled default. stamp_owner leaves it unset pre-backfill.
         instance_id = arr_instance_id if arr_instance_id is not None \
             else default_instance_id(database, 'radarr')
+
+        # Default languages profile for movies this pass INSERTS: the owning
+        # instance's override when it has one, otherwise the global default
+        # exactly as before, so an instance without an override is unaffected.
+        movie_default_profile = resolve_default_profile(
+            instance_id,
+            settings.general.movie_default_enabled,
+            settings.general.movie_default_profile,
+            session=database)
+
+        # Prevent trying to insert a movie with a non-existing languages profileId
+        if (movie_default_profile and not database.execute(
+                select(TableLanguagesProfiles)
+                .where(TableLanguagesProfiles.profileId == movie_default_profile))
+                .first()):
+            movie_default_profile = None
 
         # Get movies data from radarr
         movies = get_movies_from_radarr_api(apikey_radarr=apikey_radarr, arr_client=arr_client)
@@ -372,15 +373,6 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False,
                     '%s', path_mappings.path_replace_movie(existing_movie.path))
         return
 
-    movie_default_enabled = settings.general.movie_default_enabled
-
-    if movie_default_enabled is True:
-        movie_default_profile = settings.general.movie_default_profile
-        if movie_default_profile == '':
-            movie_default_profile = None
-    else:
-        movie_default_profile = None
-
     audio_profiles = get_profile_list(arr_client=arr_client)
     tagsDict = get_tags(arr_client=arr_client)
     language_profiles = get_language_profiles()
@@ -388,6 +380,13 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False,
     # Resolve the owning instance: explicit when scoped, else the default.
     instance_id = arr_instance_id if arr_instance_id is not None \
         else default_instance_id(database, 'radarr')
+
+    # Same per-instance default resolution as the bulk sync above; see there.
+    movie_default_profile = resolve_default_profile(
+        instance_id,
+        settings.general.movie_default_enabled,
+        settings.general.movie_default_profile,
+        session=database)
 
     try:
         # Get movie data from radarr api

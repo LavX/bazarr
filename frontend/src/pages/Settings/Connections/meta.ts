@@ -7,6 +7,7 @@ import type {
   ArrInstance,
   ArrInstanceCreate,
   ArrKind,
+  ArrMediaDefaults,
   ArrSubtitleSettings,
 } from "@/apis/raw/arrInstances";
 import { Environment } from "@/utilities/env";
@@ -75,6 +76,7 @@ export function buildArrInstanceCreateBody(
     isDefault: boolean;
     apiKey?: string;
     subtitleSettings?: ArrSubtitleSettings;
+    mediaDefaults?: ArrMediaDefaults;
   },
 ): ArrInstanceCreate {
   const body: ArrInstanceCreate = {
@@ -101,6 +103,11 @@ export function buildArrInstanceCreateBody(
     Object.keys(fields.subtitleSettings).length > 0
   ) {
     body.subtitle_settings = fields.subtitleSettings;
+  }
+  // Same rule for the default language profile: an empty block is omitted so a
+  // new instance starts out inheriting the global default.
+  if (fields.mediaDefaults && Object.keys(fields.mediaDefaults).length > 0) {
+    body.media_defaults = fields.mediaDefaults;
   }
   return body;
 }
