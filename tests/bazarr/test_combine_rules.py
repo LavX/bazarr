@@ -623,3 +623,50 @@ def test_a_modifier_only_simplified_alias_still_resolves(tmp_path):
     )
     assert result is not None
     assert result.primary == str(base / "Movie.简体中文.hi.srt")
+
+
+def test_the_registered_dotted_alias_es_ar_resolves(tmp_path):
+    """'.es.ar' is spelled with a dot in CustomLanguage's own extension list,
+    so the indexer files Movie.es.ar.srt as Latin American Spanish. A tag is
+    normally one segment, and it has to stay that way: accepting arbitrary
+    two-segment tags would read Movie.en.pt.srt as Portuguese."""
+    base = make_video_dir(tmp_path, [
+        "Movie.mkv",
+        "Movie.es.ar.srt",
+        "Movie.en.srt",
+    ])
+    result = resolve_source_paths(
+        video_path=str(base / "Movie.mkv"),
+        languages=["ea", "en"],
+    )
+    assert result is not None
+    assert result.primary == str(base / "Movie.es.ar.srt")
+
+
+def test_the_dotted_alias_keeps_its_modifiers(tmp_path):
+    base = make_video_dir(tmp_path, [
+        "Movie.mkv",
+        "Movie.es.ar.forced.srt",
+        "Movie.en.srt",
+    ])
+    result = resolve_source_paths(
+        video_path=str(base / "Movie.mkv"),
+        languages=["ea", "en"],
+    )
+    assert result is not None
+    assert result.primary == str(base / "Movie.es.ar.forced.srt")
+
+
+def test_an_unregistered_two_segment_tag_is_still_rejected(tmp_path):
+    """Movie.en.pt.srt is an English subtitle for a Portuguese release, or
+    anything else; it is not a Portuguese subtitle, though '.en.pt' ends in
+    '.pt'."""
+    base = make_video_dir(tmp_path, [
+        "Movie.mkv",
+        "Movie.en.pt.srt",
+        "Movie.hu.srt",
+    ])
+    assert resolve_source_paths(
+        video_path=str(base / "Movie.mkv"),
+        languages=["pt", "hu"],
+    ) is None

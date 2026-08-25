@@ -122,15 +122,19 @@ def _extract_code_and_priority(base, path):
     if segments[-1].lower() in _SYNC_ENGINES:
         return None
 
-    # Exactly <tag> or <tag>.<modifier>. Anything longer is another artifact
-    # (or another edition's file, since the glob only prefix-tests the base).
-    if len(segments) > 2:
+    # Exactly <tag> or <tag>.<modifier>, where the tag is normally one segment
+    # but is two for the handful of aliases CustomLanguage spells with a dot in
+    # them, .es.ar being the one that exists today. Anything longer is another
+    # artifact (or another edition's file, since the glob only prefix-tests the
+    # base name).
+    tag, rest = _split_tag(segments)
+    if tag is None or len(rest) > 1:
         return None
 
-    if len(segments) == 1:
+    if not rest:
         modifier, priority = None, _PLAIN
     else:
-        modifier = segments[1].lower()
+        modifier = rest[0].lower()
         if modifier in ("hi", "sdh", "cc"):
             priority = _HI
         elif modifier == "forced":
@@ -140,11 +144,60 @@ def _extract_code_and_priority(base, path):
 
     # The modifier goes down with the tag: some custom-language aliases exist
     # only in the forced or HI lists, so the bare tag alone resolves to nothing.
-    code = _language_code_from_tag(segments[0], modifier)
+    code = _language_code_from_tag(tag, modifier)
     if code is None:
         return None
 
     return code, priority
+
+
+def _split_tag(segments):
+    """(tag, remaining segments), or (None, ...) when there is no usable tag.
+
+    A tag is one segment, and it has to stay that way: accepting any two
+    segments would read Movie.en.pt.srt as Portuguese, since ".en.pt" ends in
+    ".pt". The exception is an alias CustomLanguage itself spells with a dot,
+    which is matched exactly rather than by suffix.
+    """
+    if len(segments) >= 2:
+        candidate = ".".join(segments[:2]).lower()
+        if candidate in _dotted_custom_aliases():
+            return candidate, segments[2:]
+
+    if not segments:
+        return None, []
+
+    return segments[0], segments[1:]
+
+
+_dotted_aliases = None
+
+
+def _dotted_custom_aliases():
+    """The custom-language aliases that are spelled with a dot inside them.
+
+    Read off CustomLanguage rather than hardcoded, so an alias added there does
+    not silently stop resolving here.
+    """
+    global _dotted_aliases
+    if _dotted_aliases is not None:
+        return _dotted_aliases
+
+    aliases = set()
+    try:
+        from languages.custom_lang import CustomLanguage
+
+        for subclass in CustomLanguage.__subclasses__():
+            for extension in getattr(subclass, "_extensions", ()) or ():
+                stripped = extension.lstrip(".").lower()
+                if "." in stripped:
+                    aliases.add(stripped)
+    except Exception:
+        logging.debug("BAZARR combine: could not read the custom-language aliases",
+                      exc_info=True)
+
+    _dotted_aliases = aliases
+    return _dotted_aliases
 
 
 def _language_code_from_tag(tag, modifier=None):
