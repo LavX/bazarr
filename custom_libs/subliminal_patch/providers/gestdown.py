@@ -14,6 +14,7 @@
 # A pull request against this file will most likely be asked to move.
 
 import logging
+import re
 import time
 
 from requests import HTTPError
@@ -32,6 +33,93 @@ logger = logging.getLogger(__name__)
 _BASE_URL = "https://api.gestdown.info"
 
 
+def _token_boundaries(token):
+    """``token`` surrounded by release-name separators, or by nothing.
+
+    Not ``\\b``: the underscore is a regex word character but a release-name
+    separator, so ``Show_S01E02_1080p`` would read as naming no episode at all
+    and get a second copy of the name prefixed onto it.
+    """
+    return rf"(?<![a-z0-9]){token}(?![a-z0-9])"
+
+
+# A season tag and everything hanging off it, so a multi-episode release such
+# as S01E01-E02, S01E01E02 or S01E01-10 is recognised as naming all of them.
+# The tail is one flat character class rather than a repeated group of
+# quantifiers: a nested one backtracks exponentially on a malformed token like
+# S01E0000000000000000x, and one such Gestdown result would stall the listing.
+# A trailing vN is a re-release marker rather than part of the episode number,
+# and the numbers are length-bounded because int() refuses a string of more
+# than 4300 digits and the ValueError would take the whole listing with it.
+_SEASON_EPISODES = re.compile(
+    r"(?<![a-z0-9])s(\d{1,4})((?:[-_. ]|e|\d)*)(?:v\d{1,3})?(?![a-z0-9])"
+)
+# The same in the NxMM spelling.
+_SEASON_X_EPISODES = re.compile(
+    r"(?<![a-z0-9])(\d{1,4})x((?:[-_. ]|\d)*)(?:v\d{1,3})?(?![a-z0-9])"
+)
+
+# Longer than any real episode number, and short enough for int() to accept.
+_MAX_NUMBER_DIGITS = 6
+
+
+def _tail_covers(tail, episode):
+    """True when ``tail`` names ``episode``, expanding ranges as it goes."""
+    parts = [part for part in re.findall(r"\d+|-", tail)
+             if part == "-" or len(part) <= _MAX_NUMBER_DIGITS]
+    for index, part in enumerate(parts):
+        if part != "-":
+            if int(part) == episode:
+                return True
+            continue
+
+        if 0 < index < len(parts) - 1 and parts[index - 1] != "-" and parts[index + 1] != "-":
+            first, last = int(parts[index - 1]), int(parts[index + 1])
+            if first <= episode <= last:
+                return True
+
+    return False
+
+
+def _already_names_the_episode(lowered, season, episode):
+    """True when the release name already says which episode this is."""
+    for pattern in (_SEASON_EPISODES, _SEASON_X_EPISODES):
+        for match in pattern.finditer(lowered):
+            if int(match.group(1)) == season and _tail_covers(match.group(2), episode):
+                return True
+
+    return False
+
+
+def _format_release(version_item, series, season, episode):
+    """Display-only scene-style name: ``Series.SxxEyy.version``.
+
+    Left alone when the version already names the episode, so a proper release
+    name is never mangled. The tests are anchored rather than bare substrings:
+    an unanchored series test matches far too eagerly on short titles.
+    """
+    if season is None or episode is None:
+        return version_item
+
+    lowered = version_item.lower()
+    if _already_names_the_episode(lowered, season, episode):
+        return version_item
+
+    clean_version = version_item.replace(" ", ".")
+    # Trailing separator punctuation goes: a title like "S.W.A.T." ends in the
+    # dot that also separates release tokens, and the two share it, so keeping
+    # it would make the boundary test look past it at the W of WEB-DL and
+    # prefix a second copy of the title.
+    clean_series = series.strip().replace(" ", ".").strip("._-") if series else ""
+    if clean_series and re.search(
+        _token_boundaries(re.escape(clean_series.lower())), clean_version.lower()
+    ):
+        return clean_version
+    if clean_series:
+        return f"{clean_series}.S{season:02d}E{episode:02d}.{clean_version}"
+    return f"S{season:02d}E{episode:02d}.{clean_version}"
+
+
 class GestdownSubtitle(Subtitle):
     provider_name = "gestdown"
     hash_verifiable = False
@@ -41,31 +129,28 @@ class GestdownSubtitle(Subtitle):
         super().__init__(language, hearing_impaired=data["hearingImpaired"])
         self.page_link = _BASE_URL + data["downloadUri"]
         self._id = data["subtitleId"]
-        raw_releases = [v.strip() for v in data["version"].split(",") if v.strip()]
-        self.releases = []
-        for v in raw_releases:
-            if season is not None and episode is not None and not (
-                f"s{season:02d}" in v.lower()
-                or f"{season}x" in v.lower()
-                or (series and series.lower() in v.lower())
-            ):
-                clean_ver = v.replace(" ", ".")
-                clean_series = series.strip().replace(" ", ".") if series else ""
-                formatted = (
-                    f"{clean_series}.S{season:02d}E{episode:02d}.{clean_ver}"
-                    if clean_series
-                    else f"S{season:02d}E{episode:02d}.{clean_ver}"
-                )
-                self.releases.append(formatted)
-            else:
-                self.releases.append(v)
+        # `releases` stays RAW. get_matches below searches it for the video's
+        # release group, so injecting the series title here would let a group
+        # name that occurs inside the show's own title score a match it did not
+        # earn. Only release_info, which is display text, gets the scene-style
+        # name.
+        self.releases = [v.strip() for v in data["version"].split(",") if v.strip()]
         self.qualities = data.get("qualities") or []
-        self.release_info = "\n".join(self.releases) if self.releases else data.get("version", "")
+        formatted = [
+            _format_release(release, series, season, episode)
+            for release in self.releases
+        ]
+        self.release_info = "\n".join(formatted) if formatted else data.get("version", "")
         self.matches = set()
+
     def get_matches(self, video):
         self.matches = {"title", "series", "season", "episode", "tvdb_id"}
 
-        update_matches(self.matches, video, self.release_info)
+        # Raw versions, never release_info. update_matches searches whatever it
+        # is handed for the video's release group, so display text prefixed with
+        # the series title would score the same unearned match the loop below is
+        # careful to avoid.
+        update_matches(self.matches, video, self.releases or [self.release_info])
 
         # release_group
         if (
