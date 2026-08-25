@@ -12,9 +12,10 @@ repos:
       - id: check-merge-conflict
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.11.0
+    rev: v0.16.4
     hooks:
-      - id: ruff
+      # `ruff` is a legacy alias for `ruff-check` in ruff-pre-commit >= 0.12.
+      - id: ruff-check
         args: [--fix]
       - id: ruff-format
 

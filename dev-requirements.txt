@@ -1,5 +1,5 @@
 sympy
-vcrpy>=8.2.1
+vcrpy>=8.3.0
 pytest
 pytest-asyncio>=1.4.0
 pytest-cov
@@ -11,5 +11,5 @@ requests-mock
 # runtime image transitively via Flask-Compress and py7zr, but a test that
 # imports it deserves its own declaration.
 brotli==1.2.0
-ruff==0.15.20
+ruff==0.16.4
 setuptools
