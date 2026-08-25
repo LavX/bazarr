@@ -113,6 +113,21 @@ export function useThrottle<F extends GenericFunction>(fn: F, ms: number) {
 
   const timer = useRef<number>(undefined);
 
+  // Clear any pending timer on unmount. Without this the scheduled callback
+  // still fires after the component is gone: a state update on an unmounted
+  // component in the app, and in the test suite a callback running against a
+  // torn-down environment, which surfaces as an unhandled "window is not
+  // defined" attributed to whichever file happened to be running.
+  useEffect(
+    () => () => {
+      if (timer.current) {
+        clearTimeout(timer.current);
+        timer.current = undefined;
+      }
+    },
+    [],
+  );
+
   return useCallback(
     (...args: Parameters<F>) => {
       if (timer.current) {
