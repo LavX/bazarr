@@ -1571,14 +1571,14 @@ def test_provider_hub_config_redacts_secret_and_preserves_placeholder(tmp_path, 
     redacted = update_provider(
         "examplehub",
         enabled=True,
-        config={"api_key": "real-secret", "region": "eu"},
+        config={"api_key": "real-secret", "region": "eu"},  # pragma: allowlist secret
     )
 
     assert redacted["enabled"] is True
     assert redacted["config"]["api_key"] == SECRET_PLACEHOLDER
     assert redacted["config"]["region"] == "eu"
     assert "real-secret" not in json.dumps(redacted)
-    assert runtime_provider_configs()["examplehub"]["api_key"] == "real-secret"
+    assert runtime_provider_configs()["examplehub"]["api_key"] == "real-secret"  # pragma: allowlist secret
 
     redacted = update_provider(
         "examplehub",
@@ -1588,13 +1588,13 @@ def test_provider_hub_config_redacts_secret_and_preserves_placeholder(tmp_path, 
     assert redacted["config"]["api_key"] == SECRET_PLACEHOLDER
     assert redacted["config"]["region"] == "us"
     assert runtime_provider_configs()["examplehub"] == {
-        "api_key": "real-secret",
+        "api_key": "real-secret",  # pragma: allowlist secret
         "region": "us",
     }
 
-    update_provider("examplehub", config={"api_key": "new-secret"})
+    update_provider("examplehub", config={"api_key": "new-secret"})  # pragma: allowlist secret
 
-    assert runtime_provider_configs()["examplehub"]["api_key"] == "new-secret"
+    assert runtime_provider_configs()["examplehub"]["api_key"] == "new-secret"  # pragma: allowlist secret
 
 
 def test_get_providers_auth_includes_active_provider_hub_config(tmp_path, monkeypatch):
@@ -1616,9 +1616,9 @@ def test_get_providers_auth_includes_active_provider_hub_config(tmp_path, monkey
         }
     }
     save_state(state)
-    update_provider("examplehub", config={"api_key": "runtime-secret", "region": "eu"})
+    update_provider("examplehub", config={"api_key": "runtime-secret", "region": "eu"})  # pragma: allowlist secret
 
-    assert get_providers_auth()["examplehub"]["api_key"] == "runtime-secret"
+    assert get_providers_auth()["examplehub"]["api_key"] == "runtime-secret"  # pragma: allowlist secret
     assert get_providers_auth()["examplehub"]["region"] == "eu"
 
 
@@ -2660,7 +2660,7 @@ class ExampleProvider:
         content = b"hello from worker"
         return {
             "content_b64": base64.b64encode(content).decode("ascii"),
-            "content_sha256": "94bbc6037685e2186909083aa02abe58fbec222f6e2d73bb3e9e59d5b24a3d25",
+            "content_sha256": "94bbc6037685e2186909083aa02abe58fbec222f6e2d73bb3e9e59d5b24a3d25",  # pragma: allowlist secret
             "empty": False,
         }
 """,
