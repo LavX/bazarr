@@ -42,18 +42,34 @@ to its own exclusion list, which switched off every check here in two edits.
 This version does not guess. It refuses.
 
 A `run:` script that mentions pytest or a tests/ path has to be built entirely
-out of a small whitelisted grammar: `set`, `pip install`, `echo`, a
-`for VAR in <paths>; do ... done` loop, and a pytest command. Every pytest
-option has to be one the guard knows. Every workflow, job and step key on the
-path to that script has to be on a safe list, which deliberately excludes `if`,
-`continue-on-error` and `working-directory`. Any shell operator at all,
+out of a small whitelisted grammar: `set`, `pip install`, `echo`, `printf`,
+`ruff`, `cd .`, a `for VAR in <paths>; do ... done` loop, and a pytest command.
+Every pytest option has to be one the guard knows. Every workflow, job and step
+key on the path to that script has to be either on a safe list or read: `if`,
+`continue-on-error`, `working-directory`, `shell`, `defaults`, `runs-on`,
+`strategy` and `services` are all read, because each of them decides something
+with its value rather than with its presence. Any shell operator at all,
 anything else, and the script is reported as UNVERIFIABLE and grants no
 coverage whatsoever.
 
 Refusal has to be applied all the way down, not only to the shapes that look
-dangerous. `set` takes only -e, -u and -x, because `set -n` makes bash read a
-whole script without executing a line of it and still exit 0, and `set +e` lets
-a failing pytest leave the step green.
+dangerous. `set` takes -e, -u, -x and -o pipefail, and nothing else, because
+`set -n` makes bash read a whole script without executing a line of it and
+still exit 0, and `set +e` lets a failing pytest leave the step green.
+
+And refusal has to stop there, which is the other half of the design and the
+half a later audit found missing. Ten of eighteen ordinary maintainer edits
+were refused: `set -euo pipefail`, which is stricter than the `set -e` the
+guard accepted; `--cov=bazarr`, which cannot drop a test; a workflow-level
+`concurrency:` group, which emptied coverage entirely and printed all 168 test
+files as unrun. A guard that goes red on routine, correct work gets deleted by
+the first person it obstructs, and a deleted guard reopens every hole above at
+once, so the friction is not a side effect of the safety, it is a threat to it.
+The rule is therefore: refuse a shape that can stop tests running, skip them,
+deselect them, or mask an exit code. Accept a key or an option that is inert
+with respect to whether assertions execute. Where the answer depends on the
+value, read the value. TestOrdinaryEditsStayGreen holds that line from the
+other side, and it is as load-bearing as the bypass cases.
 
 A whitelisted option whose value nobody inspects is as good as no whitelist at
 all, so `-o`, `--override-ini` and `-c` are refused outright: each can carry
@@ -80,10 +96,19 @@ shape, and it buys the property the five previous versions did not have.
 Coverage is also grounded in the filesystem rather than in string matching. A
 positional argument is expanded against the repo: `tests/compat/` covers the
 files that are really under it, a glob covers what it really matches, and a
-path that no longer exists covers nothing. That is why there is no list of
-"directories CI runs wholesale" any more. The old list was matched as a
-substring, so a single-file run, or even `--ignore=tests/compat/`, credited all
-55 files under it.
+path that no longer exists is refused, taking the whole step's coverage with it.
+That last one is not a technicality: pytest exits 4 on a missing path, so the
+step really does fail and really does run none of the files it names. That is
+why there is no list of "directories CI runs wholesale" any more. The old list
+was matched as a substring, so a single-file run, or even
+`--ignore=tests/compat/`, credited all 55 files under it.
+
+The expansion has to mean what the runner's bash means, not what pathlib means.
+`**` is refused for that reason: globstar is off in a non-interactive shell, so
+bash hands pytest one level of directories where pathlib matches the whole
+tree. Reading `tests/**/test_*.py` as recursive credited 185 files against the
+130 bash really expands, and the 55 in between are the same tests/compat/ tree
+the substring hole used to give away.
 
 What this cannot see
 --------------------
@@ -95,7 +120,15 @@ workflow can reach, and no amount of parsing gets to them:
 - A dependency that changes what pytest does. A plugin in dev-requirements.txt
   that skips, deselects or exits early is installed by the same
   `pip install -r` line the grammar accepts, and nothing in the workflow says
-  what it does.
+  what it does. A `container:` image is the same claim by another route: it
+  decides which python and which site-packages the run gets. Both are accepted
+  for that reason, not overlooked.
+- A test file that skips itself. Coverage here means a path was handed to
+  pytest, and a module-level skip, or a fixture calling pytest.skip, leaves that
+  true while nothing is asserted. The one case the workflow says enough about to
+  check is encoded in _REQUIRES_SERVICE: the Postgres cutover suite skips unless
+  the job really defines the service it connects to. Nothing catches the next
+  one automatically.
 - A conftest.py that empties the run. It is Python the guard does not execute,
   and one module-level skip leaves a green run with nothing in it.
 - A test file that has been emptied, or whose assertions stopped asserting.
@@ -307,15 +340,41 @@ _ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 # not are left alone: `ruff check .` and `npm run build` are not this guard's
 # business, and holding them to a shell grammar would be pointless friction.
 _MENTIONS_TESTS = re.compile(r"(?<![\w./-])pytest\b|(?<![\w./-])tests/")
-# The only `set` modes the guard has reasoned about. `-e` exits on the first
-# failure, `-u` aborts on an unset variable, `-x` only traces: each of the three
-# either leaves every later command running or stops the script loudly. Every
-# other mode is refused, because a mode that changes whether commands run at all
-# is precisely how a script can name every test file and execute none. `set -n`
+# Commands that print and do nothing else. `printf` is here for the same reason
+# `echo` is: the workflow groups its per-file loop output, and which of the two
+# builtins does the printing cannot change what pytest collects.
+_INERT_COMMANDS = frozenset({"echo", "printf"})
+# Commands that are not this guard's business but that a test-bearing step can
+# legitimately contain, because they name a tests/ path in passing. `ruff check
+# tests/ bazarr/` is the case that mattered: it mentions tests/, so the step
+# became test-bearing, and the guard then demanded the linter be rewritten into
+# a pytest grammar. It grants no coverage, and it cannot change what a later
+# pytest line does without a redirect or an expansion, both of which are still
+# refused on the line.
+_NON_PYTEST_COMMANDS = frozenset({"ruff"})
+# The `set` modes the guard has reasoned about. `-e` exits on the first failure,
+# `-u` aborts on an unset variable, `-x` only traces: each of the three either
+# leaves every later command running or stops the script loudly. Every other
+# mode is refused, because a mode that changes whether commands run at all is
+# precisely how a script can name every test file and execute none. `set -n`
 # makes bash read the rest of the script without executing it and still exit 0,
 # and any `+` form turns a mode back off, so `set +e` lets a failing pytest
 # leave the step green.
 _SET_MODES = frozenset("eux")
+# The long-form options, and the letter each one corresponds to. `pipefail` has
+# no letter, and it is the reason this exists: `set -euo pipefail` is strictly
+# stricter than the `set -e` the workflow uses, because it stops a failure being
+# swallowed by a pipeline, and refusing it while accepting `set -e` told
+# maintainers to write the weaker line. Every `+` spelling is still refused.
+_SET_OPTIONS = {
+    "pipefail": "pipefail",
+    "errexit": "e",
+    "nounset": "u",
+    "xtrace": "x",
+}
+# The commands a `shell:` value may name. GitHub's own `bash` and `sh` keywords
+# select the same shell the grammar below describes.
+_SHELL_COMMANDS = frozenset({"bash", "sh"})
 
 # Options pytest takes that consume the following token. A test path sitting in
 # one of these positions is an argument to the option, not something pytest
@@ -325,6 +384,14 @@ _PYTEST_VALUE_OPTIONS = {
     "--tb", "--rootdir", "--basetemp", "--color", "--durations", "--maxfail",
     "--log-level", "--junitxml", "--import-mode",
     "--ignore", "--deselect",
+    # Coverage and timeouts. Neither can drop a test or hide a failure: a
+    # coverage run collects and asserts exactly what the same command collects
+    # and asserts without it, and --cov-fail-under and --timeout can only turn a
+    # green run red. `--cov` takes an optional value, and pytest-cov really does
+    # swallow the following token when it is not an option, so consuming one
+    # here is what pytest does rather than a guess.
+    "--cov", "--cov-report", "--cov-config", "--cov-fail-under",
+    "--timeout", "--timeout-method",
 }
 # Options that take no value.
 _PYTEST_FLAGS = {
@@ -334,7 +401,15 @@ _PYTEST_FLAGS = {
     "--strict-markers", "--strict-config", "--continue-on-collection-errors",
     "--collect-only", "--co", "--setup-only", "--setup-plan", "--fixtures",
     "--markers", "--help", "-h",
+    "--cov-branch", "--cov-append", "--no-cov", "--no-cov-on-fail",
 }
+# The short options that may appear inside a combined cluster such as `-svx`.
+# Only the flags: a cluster carrying a letter that takes a value, or one that is
+# refused on its own, is refused as a cluster too, so `-sk nothing_matches`
+# cannot smuggle a -k filter past the check that refuses `-k`.
+_PYTEST_CLUSTERABLE = frozenset(
+    option for option in _PYTEST_FLAGS if len(option) == 2 and option[1].isalpha()
+)
 # Options whose paths pytest is told NOT to collect. They subtract.
 _PYTEST_SUBTRACTING = {"--ignore", "--deselect"}
 # Options that stop pytest asserting anything, or narrow it to an arbitrary
@@ -400,22 +475,66 @@ _NEUTERING_INI_KEYS = ("addopts", "testpaths")
 # neither this list nor _CHECKED_KEYS below is absent because nobody has
 # reasoned about it yet, which is exactly when the guard should stop rather than
 # assume.
-_SAFE_WORKFLOW_KEYS = {"name", "run-name", "on", True, "permissions", "env", "jobs"}
+# Keys that cannot decide whether the tests run or whether their result binds,
+# whatever their value is. `concurrency` cancels superseded runs, and a cancelled
+# run is not a successful one, so it can never stand in for a suite that passed:
+# the run that gates the merge is the last one, and it runs in full. `outputs`
+# hands values to a downstream job and reaches nothing in this one. Refusing
+# either was friction with no safety behind it, and friction is how a guard gets
+# deleted, which reopens every hole in this file at once.
+_SAFE_WORKFLOW_KEYS = {
+    "name", "run-name", "on", True, "permissions", "env", "jobs", "concurrency",
+}
+# `container` is on this list for a reason worth writing down, because it looks
+# like it belongs with PYTHONPATH: an image decides which python and which
+# site-packages pytest runs against, so an image carrying a sitecustomize.py or
+# a collection-emptying plugin reaches a run the same way. It is accepted
+# because that is the class of thing this guard already says it cannot see: the
+# `pip install -r requirements.txt` line the grammar accepts installs whatever
+# those files name, and a plugin that skips everything arrives that way today.
+# Refusing the key would not close that route, it would only refuse an ordinary
+# edit while the route stayed open through pip. See "What this cannot see".
 _SAFE_JOB_KEYS = {
     "name", "runs-on", "needs", "permissions", "strategy", "services", "steps",
-    "env", "timeout-minutes",
+    "env", "timeout-minutes", "concurrency", "outputs", "container",
 }
 _SAFE_STEP_KEYS = {"name", "id", "run", "env", "timeout-minutes"}
 # Keys whose value decides, rather than their presence. `if` and
 # `continue-on-error` say whether the result binds, `working-directory` changes
-# what the paths mean, `shell` changes what the script means.
-_CHECKED_KEYS = {"if", "continue-on-error", "working-directory", "shell"}
-# `if` values that are exactly, unconditionally true. An exact literal match, not
-# an expression evaluator: anything else is refused, `always()` included in the
-# form GitHub also accepts it.
-_ALWAYS_RUNS = {True, "true", "always()", "${{ always() }}", "${{always()}}"}
-# Shells whose semantics the grammar below describes.
-_SAFE_SHELLS = {None, "bash", "sh", "bash -e {0}"}
+# what the paths mean, `shell` and `defaults` change what the script means,
+# `runs-on` says whether the job is ever picked up, `strategy` says how many
+# times it runs, and `services` says whether the suites that need one assert
+# anything.
+_CHECKED_KEYS = {
+    "if", "continue-on-error", "working-directory", "shell", "defaults",
+}
+# `if` values that are exactly, unconditionally true, plus success(), which is
+# what a step does by default: it runs unless an earlier step in the same job
+# already failed, and a job with a failed step is red either way. So a step
+# carrying it cannot hide a failing suite, while `failure()` and `cancelled()`
+# can and stay refused. An exact literal match on a small set, not an expression
+# evaluator.
+_ALWAYS_RUNS = {
+    True, "true", "always()", "${{ always() }}", "${{always()}}",
+    "success()", "${{ success() }}", "${{success()}}",
+}
+# `working-directory` values that leave every path in the script meaning what it
+# says. Anything else is refused, because the guard resolves paths against the
+# repository root.
+_REPOSITORY_ROOT_DIRECTORIES = {".", "./"}
+# Runner labels the guard knows GitHub schedules. A label nobody provides is the
+# quietest way to stop a job: the job is never picked up, so it never fails, it
+# just sits queued, and `development` has no required status checks to notice.
+# GitHub-hosted labels only: a self-hosted pool is a claim about infrastructure
+# this file cannot check, so naming one is a decision to record here.
+# `strategy` keys the guard has reasoned about. `fail-fast` and `max-parallel`
+# change how the rows are scheduled, never whether they run.
+_SAFE_STRATEGY_KEYS = {"matrix", "fail-fast", "max-parallel"}
+_SAFE_RUNNERS = {
+    "ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04",
+    "windows-latest", "windows-2025", "windows-2022",
+    "macos-latest", "macos-15", "macos-14",
+}
 # Keys under `on.pull_request` that cannot stop an ordinary code change running
 # the workflow. `branches` is here on purpose: which branches are gated is an
 # ordinary decision, and hardcoding a list would fight every change to it.
@@ -432,6 +551,32 @@ _PULL_REQUEST_SAFE_KEYS = {"branches", "branches-ignore"}
 # the same place by other routes. Refused wherever PYTEST_* is refused: workflow,
 # job and step `env:`, and a leading assignment on the command itself.
 _NEUTERING_ENV_NAMES = frozenset({"PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME"})
+# Files that are handed to pytest and still assert nothing unless something
+# outside pytest is up. Each one calls pytest.skip when its dependency is
+# unreachable, so the coverage this guard counts, a path handed to pytest, is
+# not enough on its own.
+#
+# tests/bazarr/test_arr_pg_cutover_migration.py is the whole list: all five of
+# its cases take the pg_bind fixture, which calls pytest.skip when nothing
+# answers on the URL. Deleting the `services:` block was therefore a one-line
+# edit that turned the native-Postgres cutover suite into five skips, with the
+# file still enumerated and the guard still green. The general case, a file that
+# skips itself for a reason the workflow does not mention, is outside what
+# reading a workflow can reach and is listed under "What this cannot see"; this
+# is the one instance the workflow does say enough about to check.
+#
+# name -> (environment variable naming the service, image prefix, port inside
+# the container, what happens when it is not there).
+_REQUIRES_SERVICE = {
+    "tests/bazarr/test_arr_pg_cutover_migration.py": (
+        "BAZARR_PG_TEST_URL",
+        "postgres",
+        5432,
+        "every case takes the pg_bind fixture, which calls pytest.skip when no "
+        "Postgres answers, so the file is collected, reports five skips and "
+        "asserts nothing at all",
+    ),
+}
 # The only `env:` key a job or step that runs tests needs in this repo. An env
 # key is as good as a command-line option for deciding what a run does, so a new
 # one is a decision, not a detail: name it here once you have made it.
@@ -450,9 +595,15 @@ _EXPORTS_ENVIRONMENT = re.compile(r"\bGITHUB_(ENV|PATH)\b")
 # Every shell operator, all of them refused inside a test-bearing script. Each
 # one is a way for a command to name a path without running it, or to run it
 # without its exit status binding.
-_SHELL_OPERATORS = {
-    "|", "||", "&", "&&", ";", ";;", "(", ")", "()", "<", ">", "<<", ">>", "<&", ">&",
-}
+#
+# Recognised as "a token made only of shell punctuation" rather than as a list
+# of spellings. shlex with punctuation_chars merges a run of these characters
+# into one token of whatever length the run happens to be, so `|&`, `;&`, `&>`
+# and `>|` each arrive as a single token that an exact-string set has to have
+# listed to catch. `pytest X |& true` is the one that mattered: the default step
+# shell is `bash -e {0}` with no pipefail, so pytest's exit status is thrown
+# away and the step is green whatever the suite did.
+_SHELL_PUNCTUATION = frozenset("();<>|&")
 
 
 class _Unverifiable(Exception):
@@ -503,10 +654,15 @@ def _logical_lines(script: str) -> list:
     return [line for line in lines if line.strip()]
 
 
+def _is_shell_operator(token: str) -> bool:
+    """Whether shlex handed back a run of shell punctuation rather than a word."""
+    return bool(token) and set(token) <= _SHELL_PUNCTUATION
+
+
 def _reject_operators(tokens: list, line: str, allow_semicolon: bool = False) -> None:
     permitted = {";"} if allow_semicolon else set()
     for token in tokens:
-        if token in _SHELL_OPERATORS and token not in permitted:
+        if _is_shell_operator(token) and token not in permitted:
             raise _Unverifiable(
                 f"shell operator {token!r} in {line!r}: the guard cannot tell "
                 "whether the command runs, or whether its exit status binds"
@@ -634,6 +790,14 @@ def _expand(token: str, allow_node_selector: bool = False) -> set:
             "rather than answering"
         )
     glob = any(char in path for char in "*?[")
+    if "**" in path:
+        raise _Unverifiable(
+            f"{token!r} uses `**`, which the runner's bash does not expand "
+            "recursively: globstar is off in a non-interactive shell, so bash "
+            "hands pytest one level of directories while pathlib matches the "
+            "whole tree. Reading it as recursive credits files pytest is never "
+            "given. Name the directory instead"
+        )
     matches = _glob(path) if glob else [REPO_ROOT / path]
     found = set()
     for match in matches:
@@ -671,6 +835,16 @@ def _pytest_command(tokens: list, line: str) -> tuple:
     while index < len(tokens):
         token = tokens[index]
         index += 1
+        if token.startswith("@"):
+            # pytest sets fromfile_prefix_chars="@", so it reads the rest of its
+            # arguments out of that file before parsing any of them. Every
+            # option the guard refuses on the command line can sit in there, and
+            # the token itself reads as an ordinary positional.
+            raise _Unverifiable(
+                f"{token!r} in {line!r} is an arguments file: pytest reads the "
+                "rest of its options out of it before parsing, so it can carry "
+                "--collect-only, -k or -p and the guard cannot see any of it"
+            )
         if not token.startswith("-") or token == "-":
             positional.append(token)
             continue
@@ -704,6 +878,9 @@ def _pytest_command(tokens: list, line: str) -> tuple:
             continue
         if name in _PYTEST_FLAGS and not separator:
             continue
+        if not separator and re.fullmatch(r"-[A-Za-z]{2,}", token):
+            _check_option_cluster(token, line)
+            continue
         raise _Unverifiable(
             f"pytest option {token!r} in {line!r} is not one the guard knows. "
             "Add it to _PYTEST_FLAGS, _PYTEST_VALUE_OPTIONS or _PYTEST_NEUTERING "
@@ -713,6 +890,29 @@ def _pytest_command(tokens: list, line: str) -> tuple:
     for token in positional:
         collected |= _expand(token)
     return collected - subtracted, positional, subtracted
+
+
+def _check_option_cluster(token: str, line: str) -> None:
+    """`-svx` is three flags, and only flags may be written that way.
+
+    pytest reads a cluster of short options exactly as the same letters written
+    apart, so refusing the spelling was friction rather than safety. The letters
+    are checked one at a time so nothing changes about what is accepted: a
+    cluster carrying a letter that takes a value, or one that is refused on its
+    own, is refused as a cluster.
+    """
+    bad = sorted(
+        "-" + letter
+        for letter in token[1:]
+        if "-" + letter not in _PYTEST_CLUSTERABLE
+        or "-" + letter in _PYTEST_NEUTERING
+    )
+    if bad:
+        raise _Unverifiable(
+            f"the combined short options {token!r} in {line!r} include "
+            f"{', '.join(bad)}, which the guard does not accept on its own "
+            "either, so it cannot accept it hidden in a cluster"
+        )
 
 
 def _strip_assignments(tokens: list, line: str) -> list:
@@ -772,9 +972,16 @@ def _script_coverage(script: str) -> set:
             _reject_operators(tokens, line)
             _reject_expansions(tokens, line)
             continue
-        if head == "echo":
+        if head in _INERT_COMMANDS:
             _reject_operators(tokens, line)
             _reject_expansions(tokens, line, parameters_are_inert=True)
+            continue
+        if head == "cd":
+            _check_directory_change(tokens, line)
+            continue
+        if head in _NON_PYTEST_COMMANDS:
+            _reject_operators(tokens, line)
+            _reject_expansions(tokens, line)
             continue
         if head == "pytest":
             _reject_operators(tokens, line)
@@ -792,30 +999,129 @@ def _script_coverage(script: str) -> set:
             continue
         raise _Unverifiable(
             f"{line!r} is not a command the guard understands. Test-bearing "
-            "steps must use only `set`, `pip install`, `echo`, "
-            "`for VAR in <paths>; do ... done` and pytest, so that what runs is "
-            "readable without interpreting shell"
+            "steps must use only `set`, `pip install`, `echo`, `printf`, "
+            "`ruff`, `cd .`, `for VAR in <paths>; do ... done` and pytest, so "
+            "that what runs is readable without interpreting shell"
         )
     return covered
 
 
+def _check_directory_change(tokens: list, line: str) -> None:
+    """`cd` back to where the script already is, and nothing else.
+
+    The paths in this file are resolved against the repository root, so a `cd`
+    anywhere else makes every later path mean something the guard cannot check.
+    `cd .` means nothing at all, which is why it is allowed rather than refused:
+    a line that changes nothing should not turn a build red.
+    """
+    _reject_operators(tokens, line)
+    _reject_expansions(tokens, line)
+    if len(tokens) != 2 or tokens[1] not in _REPOSITORY_ROOT_DIRECTORIES:
+        raise _Unverifiable(
+            f"{line!r} moves the shell out of the repository root, so every "
+            "path after it means something the guard cannot resolve"
+        )
+
+
+def _shell_modes(words: list) -> tuple:
+    """(modes these words turn on, why the guard cannot accept them).
+
+    Shared by `set` and by a `shell:` value, because they are the same grammar:
+    `set -euo pipefail` and `bash -eo pipefail {0}` say the same thing in two
+    places. Both are stricter than what the workflow uses today, and both were
+    refused by a check that only recognised a single `-eux` cluster.
+    """
+    modes = set()
+    index = 0
+    while index < len(words):
+        word = words[index]
+        index += 1
+        if word.startswith("+"):
+            return modes, (
+                f"{word!r} turns a shell mode back off, and a mode that can be "
+                "turned off can be turned off around a failing pytest: `set +e` "
+                "leaves the step green whatever the suite did"
+            )
+        if not word.startswith("-") or len(word) < 2:
+            return modes, (
+                f"{word!r} is not a `set` mode the guard has modelled. Only -e, "
+                "-u, -x and the long forms of those, plus -o pipefail, are "
+                "accepted"
+            )
+        letters = word[1:]
+        if "o" in letters:
+            if not letters.endswith("o"):
+                return modes, (
+                    f"{word!r} puts -o inside a cluster, where the guard cannot "
+                    "tell which token is the option name"
+                )
+            if index >= len(words):
+                return modes, f"{word!r} names a shell option with no value"
+            option = words[index]
+            index += 1
+            if option not in _SET_OPTIONS:
+                return modes, (
+                    f"`set -o {option}` is not an option the guard has modelled. "
+                    "Only pipefail, errexit, nounset and xtrace are, because "
+                    "each of those either leaves every later command running or "
+                    "stops the script loudly"
+                )
+            modes.add(_SET_OPTIONS[option])
+            letters = letters[:-1]
+        unknown = sorted(set(letters) - _SET_MODES)
+        if unknown:
+            return modes, (
+                f"{word!r} is not a `set` mode the guard has modelled. Only -e, "
+                "-u, -x and the long forms of those, plus -o pipefail, are "
+                "accepted: `set -n` reads the rest of the script without "
+                "executing a line of it and still exits 0"
+            )
+        modes |= set(letters)
+    return modes, ""
+
+
 def _check_set_modes(tokens: list, line: str) -> None:
     """`set` carrying only modes that leave every later command running."""
-    mode = tokens[1] if len(tokens) == 2 else ""
-    if not (mode.startswith("-") and len(mode) > 1 and set(mode[1:]) <= _SET_MODES):
+    words = tokens[1:]
+    if not words:
         raise _Unverifiable(
-            f"{line!r} uses a `set` mode the guard has not modelled. Only -e, "
-            "-u and -x are accepted, in any combination: `set -n` reads the rest "
-            "of the script without executing a line of it and still exits 0, and "
-            "any `+` form turns a mode back off, so `set +e` leaves a failing "
-            "pytest unable to fail the step"
+            f"`set` with no mode in {line!r} prints the shell's variables and "
+            "decides nothing, so the guard has nothing to reason about"
         )
+    _, problem = _shell_modes(words)
+    if problem:
+        raise _Unverifiable(f"{line!r} cannot be read: {problem}")
+
+
+def _unmodelled_shell(value) -> bool:
+    """Whether a `shell:` value means something other than the grammar below.
+
+    GitHub's `bash` and `sh` keywords, and any bash or sh invocation whose flags
+    are the modes above with `-e` among them, run the script the same way the
+    default `bash -e {0}` does. `bash -eo pipefail {0}` is one of those, and it
+    is strictly stricter than the default, so refusing it while accepting the
+    default was backwards. A form with no `-e` is still refused: without it a
+    failing pytest in the middle of a script leaves the step's status to be
+    decided by whatever ran last.
+    """
+    if value is None or value in _SHELL_COMMANDS:
+        return False
+    if not isinstance(value, str):
+        return True
+    words = value.split()
+    if len(words) < 2 or words[0] not in _SHELL_COMMANDS or words[-1] != "{0}":
+        return True
+    modes, problem = _shell_modes(words[1:-1])
+    return bool(problem) or "e" not in modes
 
 
 def _for_header(tokens: list, line: str) -> tuple:
     """(files the list names, loop variable). The list must be test paths only."""
     _reject_operators(tokens, line, allow_semicolon=True)
-    _reject_expansions(tokens, line)
+    # Shape before content, so a one-line loop is reported as a one-line loop.
+    # The expansion check used to run first, and the `$f` in the body of the
+    # one-liner a maintainer would really write tripped it, so the sentence
+    # about the body sitting on the header line was never the one anybody saw.
     if len(tokens) < 4 or tokens[2] != "in" or not _IDENTIFIER.match(tokens[1]):
         raise _Unverifiable(f"{line!r} is not a `for VAR in ...` header")
     if "do" in tokens and tokens.index("do") != len(tokens) - 1:
@@ -823,6 +1129,7 @@ def _for_header(tokens: list, line: str) -> tuple:
             f"{line!r} puts the loop body on the header line. Spread the loop "
             "over several lines so the guard can read the body that runs pytest"
         )
+    _reject_expansions(tokens, line)
     words = [token for token in tokens[3:] if token not in {";", "do"}]
     if not words:
         raise _Unverifiable(f"{line!r} iterates over nothing")
@@ -864,7 +1171,7 @@ def _loop_body(lines: list, index: int, variable: str) -> tuple:
         if not tokens:
             continue
         _reject_operators(tokens, line)
-        if tokens[0] == "echo":
+        if tokens[0] in _INERT_COMMANDS:
             _reject_expansions(tokens, line, parameters_are_inert=True)
             continue
         if tokens[0] == "pytest":
@@ -920,16 +1227,21 @@ def _scope_problem(
             "cannot fail the workflow. Its assertions gate nothing, which is the "
             "state this guard exists to prevent"
         )
-    if scope.get("working-directory"):
+    directory = scope.get("working-directory")
+    if directory is not None and str(directory).strip() not in _REPOSITORY_ROOT_DIRECTORIES:
         return (
-            f"{kind} {name} sets working-directory, so the guard cannot tell "
-            "which files its paths name"
+            f"{kind} {name} sets working-directory: {directory!r}, so the guard "
+            "cannot tell which files its paths name. Only the repository root "
+            "leaves every path meaning what it says"
         )
-    if scope.get("shell") not in _SAFE_SHELLS:
+    if _unmodelled_shell(scope.get("shell")):
         return (
             f"{kind} {name} runs under shell {scope['shell']!r}, whose semantics "
             "the guard does not model"
         )
+    defaults_problem = _defaults_problem(kind, name, scope.get("defaults"))
+    if defaults_problem:
+        return defaults_problem
 
     environment = [str(key) for key in (scope.get("env") or {})]
     neutering = sorted(key for key in environment if _neuters_pytest(key))
@@ -951,7 +1263,149 @@ def _scope_problem(
                 "command-line option does, so decide what this one does and add "
                 "it to _ALLOWED_TEST_ENV"
             )
+    if kind == "job":
+        return _runs_on_problem(name, scope) or _strategy_problem(name, scope)
     return ""
+
+
+def _defaults_problem(kind: str, name: str, defaults) -> str:
+    """`defaults:` decides the shell and directory of every `run:` under it.
+
+    Safe-listing the key would hand `defaults: run: shell: pwsh` a script the
+    grammar below cannot read, and refusing the key outright turned
+    `defaults: run: shell: bash`, which is what the steps already get, into a
+    red build.
+    """
+    if defaults is None:
+        return ""
+    if not isinstance(defaults, dict) or set(defaults) - {"run"}:
+        return (
+            f"{kind} {name} carries a `defaults:` the guard cannot read: "
+            f"{defaults!r}. It decides how every `run:` under it is executed"
+        )
+    run = defaults.get("run") or {}
+    if not isinstance(run, dict) or set(run) - {"shell", "working-directory"}:
+        return (
+            f"{kind} {name} carries a `defaults.run` the guard cannot read: "
+            f"{run!r}"
+        )
+    if _unmodelled_shell(run.get("shell")):
+        return (
+            f"{kind} {name} defaults every run to shell {run['shell']!r}, whose "
+            "semantics the guard does not model"
+        )
+    directory = run.get("working-directory")
+    if directory is not None and str(directory).strip() not in _REPOSITORY_ROOT_DIRECTORIES:
+        return (
+            f"{kind} {name} defaults every run to working-directory: "
+            f"{directory!r}, so the guard cannot tell which files the paths name"
+        )
+    return ""
+
+
+def _runs_on_problem(name: str, job: dict) -> str:
+    """A label no runner answers to leaves the job queued, and queued is not red.
+
+    The key was safe-listed with its value unread, so one word turned every
+    check in this file into a claim about a job that never started. Nothing
+    downstream catches it either: a queued job reports no conclusion, and
+    `development` has no required status checks.
+    """
+    if "runs-on" not in job:
+        return (
+            f"job {name} names no runs-on, so GitHub has nowhere to schedule it"
+        )
+    label = job["runs-on"]
+    if isinstance(label, str) and label in _SAFE_RUNNERS:
+        return ""
+    return (
+        f"job {name} runs on {label!r}, which is not a runner label the guard "
+        "knows GitHub provides. A label no runner answers to leaves the job "
+        "queued forever: it never fails, so nothing goes red, and every path it "
+        "enumerates would still read as coverage. Add the label to "
+        "_SAFE_RUNNERS once you know a runner really picks it up"
+    )
+
+
+def _strategy_problem(name: str, job: dict) -> str:
+    """A matrix with no combination left runs the job zero times.
+
+    `strategy` was safe-listed with its value unread, so emptying
+    `matrix.python-version`, or excluding every version in it, skipped the whole
+    job while the guard still credited all 168 files to it.
+    """
+    if "strategy" not in job:
+        return ""
+    strategy = job["strategy"]
+    if not isinstance(strategy, dict):
+        return f"job {name} carries a `strategy:` the guard cannot read: {strategy!r}"
+    unknown = sorted(str(key) for key in strategy if key not in _SAFE_STRATEGY_KEYS)
+    if unknown:
+        return (
+            f"job {name} uses strategy.{', strategy.'.join(unknown)}, which the "
+            "guard has not reasoned about. Work out whether it can stop the job "
+            "running, then add it to _SAFE_STRATEGY_KEYS"
+        )
+    if "matrix" not in strategy:
+        return ""
+    combinations, problem = _matrix_combinations(strategy["matrix"])
+    if problem:
+        return f"job {name} carries a matrix the guard cannot read: {problem}"
+    if not combinations:
+        return (
+            f"job {name} has a matrix that produces no combination, so GitHub "
+            "runs the job zero times. It does not fail, it simply never happens, "
+            "and every path it enumerates would still read as coverage"
+        )
+    return ""
+
+
+def _matrix_combinations(matrix) -> tuple:
+    """(combinations the matrix really produces, why it cannot be read).
+
+    Only what decides whether the job runs at all: the product of the dimensions,
+    minus the `exclude` entries that cover a whole combination. `include` is not
+    modelled, so a matrix that ends up empty and carries one is refused rather
+    than guessed at.
+    """
+    if not isinstance(matrix, dict):
+        return [], f"{matrix!r} is not a mapping"
+    dimensions = {}
+    for key, value in matrix.items():
+        if key in {"include", "exclude"}:
+            continue
+        if isinstance(value, str) and "${{" in value:
+            return [], (
+                f"dimension {key} is the expression {value!r}, which can expand "
+                "to an empty list"
+            )
+        if not isinstance(value, list):
+            return [], f"dimension {key} is {value!r}, which is not a list"
+        dimensions[key] = value
+    combinations = [{}]
+    for key, values in dimensions.items():
+        combinations = [
+            dict(combination, **{key: value})
+            for combination in combinations
+            for value in values
+        ]
+    excluded = matrix.get("exclude") or []
+    if not isinstance(excluded, list):
+        return [], f"`exclude` is {excluded!r}, which is not a list"
+    for entry in excluded:
+        if not isinstance(entry, dict):
+            return [], f"`exclude` entry {entry!r} is not a mapping"
+        combinations = [
+            combination
+            for combination in combinations
+            if not all(combination.get(key) == value for key, value in entry.items())
+        ]
+    if not combinations and matrix.get("include"):
+        return [], (
+            "every combination is excluded and an `include` may or may not add "
+            "one back, which the guard does not model"
+        )
+    return combinations, ""
 
 
 def _exported_environment_problems(job_name: str, steps: list) -> list:
@@ -976,6 +1430,71 @@ def _exported_environment_problems(job_name: str, steps: list) -> list:
             "this job counts while that line is here"
         )
     return problems
+
+
+def _service_problems(job_name: str, job: dict, steps: list, covered: set) -> list:
+    """Files whose assertions need a service container the job may not define.
+
+    Called with the coverage the job's steps produced, and it takes credit away:
+    a file that skips itself is not covered, so leaving it in the set would put
+    the guard back to vouching for assertions that did not run.
+    """
+    problems = []
+    for name in sorted(_REQUIRES_SERVICE):
+        if name not in covered:
+            continue
+        problem = _service_problem(job_name, job, steps, name)
+        if problem:
+            problems.append(problem)
+            covered.discard(name)
+    return problems
+
+
+def _service_problem(job_name: str, job: dict, steps: list, name: str) -> str:
+    variable, image, container_port, consequence = _REQUIRES_SERVICE[name]
+    label = f"{name} runs in job {job_name!r}, where {consequence}"
+
+    scopes = [job.get("env") or {}]
+    scopes += [step.get("env") or {} for step in steps or [] if isinstance(step, dict)]
+    values = [scope[variable] for scope in scopes if variable in scope]
+    if not values:
+        return (
+            f"{label}. Nothing in the job sets {variable}, so the file falls "
+            "back to its own default and skips"
+        )
+
+    for value in values:
+        location = re.search(r"://(?:[^@/\s]*@)?([^:/\s]+):(\d+)/", str(value))
+        if not location:
+            return (
+                f"{label}. {variable} is {value!r}, which the guard cannot read "
+                f"a host and port out of"
+            )
+        host, port = location.group(1), location.group(2)
+        if host not in {"localhost", "127.0.0.1"}:
+            return (
+                f"{label}. {variable} points at {host}, which is not a service "
+                "container of this job, so whether anything answers is decided "
+                "outside the workflow"
+            )
+        services = job.get("services") or {}
+        if not isinstance(services, dict):
+            return f"{label}. The job's `services:` is {services!r}, which the guard cannot read"
+        wanted = f"{port}:{container_port}"
+        matching = [
+            service
+            for service in services.values()
+            if isinstance(service, dict)
+            and str(service.get("image", "")).startswith(image)
+            and wanted in [str(mapping) for mapping in (service.get("ports") or [])]
+        ]
+        if not matching:
+            return (
+                f"{label}. {variable} points at port {port}, and the job "
+                f"defines no {image} service publishing {wanted}. Removing the "
+                "service leaves the file enumerated, collected and silent"
+            )
+    return ""
 
 
 def _dependency_problems(job_name: str, jobs: dict) -> list:
@@ -1174,6 +1693,7 @@ def _read_workflow() -> tuple:
             problems.extend(scope_problems)
             continue
 
+        job_covered = set()
         for position, step, script in bearing:
             label = f"{job_name!r} step {step.get('name') or position!r}"
             step_problem = _scope_problem(
@@ -1183,9 +1703,12 @@ def _read_workflow() -> tuple:
                 problems.append(step_problem)
                 continue
             try:
-                covered |= _script_coverage(script)
+                job_covered |= _script_coverage(script)
             except _Unverifiable as refusal:
                 problems.append(f"{label}: {refusal}")
+
+        problems += _service_problems(job_name, job, steps, job_covered)
+        covered |= job_covered
 
     return covered, problems
 
@@ -1217,6 +1740,26 @@ def test_workflow_exists():
     assert WORKFLOW.is_file(), f"CI workflow not found at {WORKFLOW}"
 
 
+def _guard_disabled_problem() -> str:
+    """Why the checks in this file are switched off, or "" while they are live.
+
+    A function rather than two asserts inside the test, so the test below can be
+    exercised against a workflow that really has dropped this file. Written as
+    asserts, deleting the second one was a mutation nothing caught.
+    """
+    consequence = (
+        f" Removing {SELF} from {WORKFLOW.name}, or excluding it, disables EVERY "
+        "other check in this file: the guard only ever runs because CI hands "
+        "pytest this path, so a disabled guard reports nothing while looking "
+        "exactly as green as a working one."
+    )
+    if SELF in EXCLUDED:
+        return f"{SELF} is in EXCLUDED, so it does not run." + consequence
+    if SELF not in _enumerated_paths():
+        return f"{SELF} is not enumerated in {WORKFLOW.name}." + consequence
+    return ""
+
+
 def test_this_guard_runs_in_ci_and_is_not_excluded():
     """The guard has to guard itself, or two edits switch off all of the rest.
 
@@ -1226,15 +1769,7 @@ def test_this_guard_runs_in_ci_and_is_not_excluded():
     another unrun test file again. Nothing else here would notice, because
     nothing else here runs.
     """
-    disabled = (
-        f"{SELF} must be enumerated in {WORKFLOW.name} and must not be in "
-        "EXCLUDED. Removing it from the workflow, or excluding it, disables "
-        "EVERY other check in this file: the guard only ever runs because CI "
-        "hands pytest this path, so an excluded guard reports nothing while "
-        "looking exactly as green as a working one."
-    )
-    assert SELF not in EXCLUDED, disabled
-    assert SELF in _enumerated_paths(), disabled
+    assert not _guard_disabled_problem(), _guard_disabled_problem()
 
 
 def test_every_test_bearing_step_is_verifiable():
@@ -1254,6 +1789,17 @@ def test_every_test_bearing_step_is_verifiable():
 def test_every_test_file_runs_in_ci_or_is_excluded():
     covered, problems = _read_workflow()
     unaccounted = sorted(_all_test_files() - covered - set(EXCLUDED))
+
+    if problems and not covered:
+        # A refusal at workflow scope stops the guard reading anything, so every
+        # test file in the repository lands in `unaccounted` at once. Printing
+        # all 168 of them says "none of your tests run", which is false and
+        # buries the one line that is true. Report the cause and nothing else.
+        pytest.fail(
+            "The guard could not read the workflow at all, so it credits no "
+            "file and a list of unrun tests would be meaningless here. Fix "
+            "this first:\n  " + "\n  ".join(problems)
+        )
 
     message = (
         "These test files are not run by CI and are not listed as deliberate "
@@ -1370,74 +1916,204 @@ _SCRIPT_BYPASSES = {
     ),
 }
 
+# case -> (script, the reason the guard has to give). The second half matters as
+# much as the first: a bare `pytest.raises(_Unverifiable)` passes when the script
+# is refused for some entirely different reason, so a mutation that deletes one
+# check survives as long as any other check still fires on the same line. Every
+# entry pins the sentence that names the shape it is about.
 _SCRIPT_REFUSALS = {
-    "failure is masked with || true": f"pytest {_REAL} || true\n",
-    "command sits in a branch that is never taken": f"if false; then\n  pytest {_REAL}\nfi\n",
+    "failure is masked with || true": (
+        f"pytest {_REAL} || true\n",
+        r"shell operator '\|\|'",
+    ),
+    # `|&` pipes stderr as well as stdout, and the default step shell carries no
+    # pipefail, so pytest's exit status is discarded exactly as `|| true`
+    # discards it. shlex merges it into one two-character token, which is why the
+    # operator check reads punctuation runs rather than a list of spellings.
+    "failure is masked by a pipeline that swallows the status": (
+        f"pytest {_REAL} |& true\n",
+        r"shell operator '\|&'",
+    ),
+    "a fallthrough separator hides a second command": (
+        f"pytest {_REAL} ;& true\n",
+        r"shell operator ';&'",
+    ),
+    "command sits in a branch that is never taken": (
+        f"if false; then\n  pytest {_REAL}\nfi\n",
+        r"'if false; then' is not a command the guard understands",
+    ),
     "command sits in a function nothing calls": (
-        f"run_them() {{\n  pytest {_REAL}\n}}\necho done\n"
+        f"run_them() {{\n  pytest {_REAL}\n}}\necho done\n",
+        r"is not a command the guard understands",
     ),
-    "command sits in a heredoc body": f"cat <<EOF\npytest {_REAL}\nEOF\n",
-    "command sits after exit 0": f"exit 0\npytest {_REAL}\n",
-    "command is backgrounded": f"pytest {_REAL} &\n",
-    "command is piped into something else": f"pytest {_REAL} | tee log.txt\n",
-    "output is redirected away": f"pytest {_REAL} > /dev/null\n",
-    "path is produced by command substitution": f"pytest $(echo {_REAL})\n",
-    "pytest is neutered inline": f'PYTEST_ADDOPTS="--collect-only" pytest {_REAL}\n',
-    "pytest is asked only to collect": f"pytest --collect-only {_REAL}\n",
-    "pytest is narrowed by an arbitrary -k filter": f"pytest {_REAL} -k nothing_matches\n",
-    "an unknown option might change what runs": f"pytest {_REAL} --some-new-flag\n",
-    "the command is reached through another tool": f"echo {_REAL} | xargs pytest\n",
-    "the directory is changed first": f"cd . && pytest {_REAL}\n",
+    "command sits in a heredoc body": (
+        f"cat <<EOF\npytest {_REAL}\nEOF\n",
+        r"'cat <<EOF' is not a command the guard understands",
+    ),
+    "command sits after exit 0": (
+        f"exit 0\npytest {_REAL}\n",
+        r"'exit 0' is not a command the guard understands",
+    ),
+    "command is backgrounded": (
+        f"pytest {_REAL} &\n",
+        r"shell operator '&'",
+    ),
+    "command is piped into something else": (
+        f"pytest {_REAL} | tee log.txt\n",
+        r"shell operator '\|'",
+    ),
+    "output is redirected away": (
+        f"pytest {_REAL} > /dev/null\n",
+        r"shell operator '>'",
+    ),
+    # Reported as the redirect it is. It used to be reported as "path
+    # '/dev/null' escapes the repository", which sends the reader looking for a
+    # path problem that is not there.
+    "output and errors are both redirected away": (
+        f"pytest {_REAL} &> /dev/null\n",
+        r"shell operator '&>'",
+    ),
+    "an existing file is clobbered by a redirect": (
+        f"pytest {_REAL} >| log.txt\n",
+        r"shell operator '>\|'",
+    ),
+    "path is produced by command substitution": (
+        f"pytest $(echo {_REAL})\n",
+        r"shell operator '\('",
+    ),
+    "pytest is neutered inline": (
+        f'PYTEST_ADDOPTS="--collect-only" pytest {_REAL}\n',
+        r"PYTEST_ADDOPTS is set on",
+    ),
+    "pytest is asked only to collect": (
+        f"pytest --collect-only {_REAL}\n",
+        r"--collect-only in .* stops pytest asserting anything",
+    ),
+    "pytest is narrowed by an arbitrary -k filter": (
+        f"pytest {_REAL} -k nothing_matches\n",
+        r"-k in .* stops pytest asserting anything",
+    ),
+    "an unknown option might change what runs": (
+        f"pytest {_REAL} --some-new-flag\n",
+        r"pytest option '--some-new-flag' .* is not one the guard knows",
+    ),
+    "the command is reached through another tool": (
+        f"echo {_REAL} | xargs pytest\n",
+        r"shell operator '\|'",
+    ),
+    "the directory is changed to somewhere else first": (
+        f"cd tests\npytest {_REAL}\n",
+        r"'cd tests' moves the shell out of the repository root",
+    ),
     "a loop iterates over something that is not a test path": (
-        'for f in one two ; do\n  pytest "$f"\ndone\n'
+        'for f in one two ; do\n  pytest "$f"\ndone\n',
+        r"'one' in .* names no test file",
     ),
+    # Reachable, and now reached by the case named after it. The check on where
+    # `do` sits used to run after the expansion check, so the one-liner that a
+    # maintainer would really write was refused for its `$f` and this sentence
+    # was never the one a reader saw.
     "a loop is written on one line": (
-        'for f in tests/bazarr/test_pretty_date.py; do pytest "$f"; done\n'
+        'for f in tests/bazarr/test_pretty_date.py; do pytest "$f"; done\n',
+        r"puts the loop body on the header line",
     ),
     "the path names a test file that was deleted": (
-        "pytest tests/bazarr/test_deleted_in_some_other_branch.py\n"
+        "pytest tests/bazarr/test_deleted_in_some_other_branch.py\n",
+        r"names a test file that does not exist",
     ),
     # shlex keeps a quoted substitution as a single token, so no operator check
     # sees it, and bash expands it to --collect-only before pytest starts.
     "command substitution hides inside a quoted token": (
-        f"""pytest {_REAL} "$(printf '%s' --collect-only)"\n"""
+        f"""pytest {_REAL} "$(printf '%s' --collect-only)"\n""",
+        r"command substitution in",
     ),
     "backticks hide inside a quoted token": (
-        f'pytest {_REAL} "`printf -- --collect-only`"\n'
+        f'pytest {_REAL} "`printf -- --collect-only`"\n',
+        r"command substitution in",
     ),
-    "an option is hidden behind a variable": f"pytest {_REAL} $EXTRA\n",
-    "an expansion is concatenated onto a path": f"pytest {_REAL}$SUFFIX\n",
+    "an option is hidden behind a variable": (
+        f"pytest {_REAL} $EXTRA\n",
+        r"parameter expansion '\$EXTRA'",
+    ),
+    "an expansion is concatenated onto a path": (
+        f"pytest {_REAL}$SUFFIX\n",
+        r"parameter expansion 'tests/bazarr/test_pretty_date.py\$SUFFIX'",
+    ),
     "an assignment value is produced by command substitution": (
-        f'FOO="$(echo --collect-only)" pytest {_REAL}\n'
+        f'FOO="$(echo --collect-only)" pytest {_REAL}\n',
+        r"command substitution in",
     ),
     # A node selector runs one case and exits 0. Crediting its module would
     # vouch for every other assertion in the file.
-    "the run is narrowed to a single test node": f"pytest {_OTHER}::test_one_case\n",
-    "a node selector hides in a longer list": f"pytest {_REAL} {_OTHER}::test_one_case\n",
+    "the run is narrowed to a single test node": (
+        f"pytest {_OTHER}::test_one_case\n",
+        r"selects a single test node",
+    ),
+    "a node selector hides in a longer list": (
+        f"pytest {_REAL} {_OTHER}::test_one_case\n",
+        r"selects a single test node",
+    ),
     "a loop iterates over node selectors": (
-        f'for f in \\\n  {_REAL}::test_one_case \\\n  ; do\n  pytest "$f"\ndone\n'
+        f'for f in \\\n  {_REAL}::test_one_case \\\n  ; do\n  pytest "$f"\ndone\n',
+        r"selects a single test node",
     ),
     # pytest matches --ignore-glob recursively during collection, so
     # `--ignore-glob=*ui.py` really drops tests/bazarr/test_ui.py while the same
     # pattern against the repo root matches nothing at all.
     "an ignore glob is matched by pytest, not by the filesystem": (
-        "pytest tests/bazarr/ --ignore-glob=*ui.py\n"
+        "pytest tests/bazarr/ --ignore-glob=*ui.py\n",
+        r"--ignore-glob in .* excludes recursively by pattern",
+    ),
+    # `**` is the mirror image: pathlib recurses and the runner's bash does not,
+    # so reading it as recursive credits 55 files under tests/compat/ that bash
+    # never hands to pytest.
+    "a recursive glob means one level to the runner's bash": (
+        "pytest tests/**/test_*.py\n",
+        r"uses `\*\*`, which the runner's bash does not expand recursively",
+    ),
+    # pytest's fromfile_prefix_chars is "@", so the file's contents become
+    # arguments before pytest parses anything, and the token reads as a path.
+    "arguments are read out of a file pytest expands": (
+        f"pytest {_REAL} @pytest.args\n",
+        r"is an arguments file",
     ),
     # -o, --override-ini and -c all reach addopts, which is the PYTEST_ADDOPTS
     # hole spelled as a command-line option.
     "an ini option is overridden by a separated value": (
-        f"pytest {_REAL} -o addopts=--collect-only\n"
+        f"pytest {_REAL} -o addopts=--collect-only\n",
+        r"-o in .* overrides an ini option",
     ),
     "the long option overrides the same ini setting inline": (
-        f"pytest {_REAL} --override-ini=addopts=--collect-only\n"
+        f"pytest {_REAL} --override-ini=addopts=--collect-only\n",
+        r"--override-ini in .* is the long form of -o",
     ),
-    "config is loaded from an arbitrary file": f"pytest {_REAL} -c neutered.ini\n",
+    "config is loaded from an arbitrary file": (
+        f"pytest {_REAL} -c neutered.ini\n",
+        r"-c in .* loads configuration from an arbitrary file",
+    ),
     # `set -n` makes bash read the script and execute none of it, exiting 0, so
     # every file the script names would be credited by a step that ran nothing.
     # `set +e` leaves a failing pytest unable to fail the step.
-    "execution is switched off by set -n": f"set -n\npytest {_REAL}\n",
-    "a set mode is turned back off": f"set +e\npytest {_REAL}\n",
-    "an unmodelled set mode is used": f"set -o pipefail\npytest {_REAL}\n",
+    "execution is switched off by set -n": (
+        f"set -n\npytest {_REAL}\n",
+        r"'-n' is not a `set` mode the guard has modelled",
+    ),
+    "a set mode is turned back off": (
+        f"set +e\npytest {_REAL}\n",
+        r"'\+e' turns a shell mode back off",
+    ),
+    "a set option is turned back off by its long name": (
+        f"set +o pipefail\npytest {_REAL}\n",
+        r"'\+o' turns a shell mode back off",
+    ),
+    "an unmodelled set option is used": (
+        f"set -o noexec\npytest {_REAL}\n",
+        r"`set -o noexec` is not an option the guard has modelled",
+    ),
+    "set is given no modes at all": (
+        f"set\npytest {_REAL}\n",
+        r"`set` with no mode",
+    ),
     # This one was blessed as legitimate by the guard's own test data until now,
     # as a leading `PYTHONPATH=. pytest "${f}"` in the loop-body cases. It is not
     # legitimate: `PYTHONPATH=.` puts a repository directory ahead of
@@ -1446,24 +2122,55 @@ _SCRIPT_REFUSALS = {
     # PYTEST_ADDOPTS without the workflow ever spelling it. The workflow does not
     # use the shape, so refusing it costs nothing today.
     "the interpreter's import path is set on the command": (
-        f"PYTHONPATH=. pytest {_REAL}\n"
+        f"PYTHONPATH=. pytest {_REAL}\n",
+        r"PYTHONPATH is set on",
     ),
     "an interpreter startup file is set on the command": (
-        f"PYTHONSTARTUP=tests/helpers/start.py pytest {_REAL}\n"
+        f"PYTHONSTARTUP=tests/helpers/start.py pytest {_REAL}\n",
+        r"PYTHONSTARTUP is set on",
     ),
     # -p was whitelisted with its value never read, which is the same hole -o,
     # --override-ini and -c are refused for: a plugin decides what collection
     # returns, so `-p neuter` can empty the run and still exit 0.
     "a plugin is loaded whose behaviour nobody inspected": (
-        f"pytest -p neuter {_REAL}\n"
+        f"pytest -p neuter {_REAL}\n",
+        r"-p 'neuter' .* loads a pytest plugin",
     ),
     "a plugin disable the guard has not reasoned about": (
-        f"pytest -p no:python {_REAL}\n"
+        f"pytest -p no:python {_REAL}\n",
+        r"-p 'no:python' .* loads a pytest plugin",
+    ),
+    # Combined short options are accepted only when every letter in the cluster
+    # is one of the inert ones, so `-sk` cannot smuggle a -k filter past the
+    # check that refuses `-k` on its own.
+    "a combined short option hides a filter": (
+        f"pytest {_REAL} -sk nothing_matches\n",
+        r"combined short options '-sk' .* include -k",
+    ),
+    "a combined short option hides an ini override": (
+        f"pytest {_REAL} -so addopts=--collect-only\n",
+        r"combined short options '-so' .* include -o",
     ),
     # A NUL byte used to raise ValueError out of glob, so the guard died with a
     # stack trace instead of reporting a refusal a human could act on.
-    "a path carries a NUL byte": f"pytest {_REAL}\x00\n",
-    "a glob carries a NUL byte": "pytest tests/bazarr/*\x00/test_ui.py\n",
+    # The escape check is lexical and runs before anything touches the
+    # filesystem. Deleting it survived a mutation run with every test green.
+    "an absolute path is handed to pytest": (
+        "pytest /tmp/test_somewhere_else.py\n",
+        r"escapes the repository",
+    ),
+    "a path climbs out of the repository": (
+        "pytest tests/../../elsewhere/test_x.py\n",
+        r"escapes the repository",
+    ),
+    "a path carries a NUL byte": (
+        f"pytest {_REAL}\x00\n",
+        r"contains a NUL byte",
+    ),
+    "a glob carries a NUL byte": (
+        "pytest tests/bazarr/*\x00/test_ui.py\n",
+        r"contains a NUL byte",
+    ),
 }
 
 
@@ -1483,14 +2190,21 @@ def test_script_that_only_names_a_path_is_not_coverage(case, script, expected):
     )
 
 
-@pytest.mark.parametrize("case,script", sorted(_SCRIPT_REFUSALS.items()))
-def test_script_the_guard_cannot_read_is_refused(case, script):
-    """Refusal, not a quiet zero: an unreadable step has to reach a human.
+@pytest.mark.parametrize(
+    "case,script,reason",
+    [(case,) + value for case, value in sorted(_SCRIPT_REFUSALS.items())],
+)
+def test_script_the_guard_cannot_read_is_refused(case, script, reason):
+    """Refusal, not a quiet zero, and refusal for the reason that applies.
 
     Returning an empty set here would be safe for coverage and useless in
-    practice, because the workflow would go red with no idea why.
+    practice, because the workflow would go red with no idea why. Matching the
+    message matters just as much: without it, a mutation that deletes one check
+    stays green as long as some other check happens to fire on the same line,
+    which is how the `shell:` check and the --ignore subtraction survived a
+    mutation run with every test passing.
     """
-    with pytest.raises(_Unverifiable):
+    with pytest.raises(_Unverifiable, match=reason):
         _script_coverage(script)
 
 
@@ -1645,7 +2359,9 @@ def test_symlink_out_of_the_repository_is_not_coverage(constructed_repo, tmp_pat
 
 
 def _one_job(*steps: dict, **job) -> dict:
-    """A workflow with one job, triggered the way `on:` now has to be."""
+    """A workflow with one job, triggered and scheduled the way `on:` and
+    `runs-on:` now both have to be."""
+    job.setdefault("runs-on", "ubuntu-latest")
     return {
         "on": {"pull_request": None},
         "jobs": {"backend": dict(job, steps=list(steps))},
@@ -1941,6 +2657,523 @@ def test_needs_a_healthy_job_is_still_coverage(constructed_workflow):
     )
     covered, problems = _read_workflow()
     assert covered == {_REAL} and not problems
+
+
+@pytest.mark.parametrize(
+    "case,label",
+    [
+        ("self-hosted-nope", "self-hosted-nope"),
+        ("no runner at all", None),
+    ],
+)
+def test_job_no_runner_picks_up_is_not_coverage(constructed_workflow, case, label):
+    """`runs-on:` was safe-listed with its value never read.
+
+    One word, and the job is never scheduled. It does not fail: it sits queued,
+    reports no conclusion, and `development` has no required status checks to
+    notice. Every path the job enumerated still read as guaranteed coverage.
+    """
+    job = {} if label is None else {"runs-on": label}
+    workflow = _one_job({"run": f"pytest {_REAL}\n"})
+    workflow["jobs"]["backend"].pop("runs-on")
+    workflow["jobs"]["backend"].update(job)
+    constructed_workflow(workflow)
+    covered, problems = _read_workflow()
+    assert not covered, f"a job with {case} was counted as coverage"
+    assert any("runs-on" in problem or "runner" in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
+    "case,strategy",
+    [
+        ("empty dimension", {"matrix": {"python-version": []}}),
+        (
+            "every row excluded",
+            {
+                "matrix": {
+                    "python-version": ["3.12", "3.13"],
+                    "exclude": [{"python-version": "3.12"}, {"python-version": "3.13"}],
+                }
+            },
+        ),
+        ("dimension is an expression", {"matrix": {"python-version": "${{ fromJSON(x) }}"}}),
+        ("unknown strategy key", {"matrix": {"python-version": ["3.13"]}, "some-new-key": 1}),
+    ],
+)
+def test_matrix_that_produces_no_row_is_not_coverage(
+    constructed_workflow, case, strategy
+):
+    """A matrix with nothing left in it runs the job zero times.
+
+    Not once with a default: zero. The job does not fail, it never happens, and
+    `strategy` sat on the job safe list with its value unread, so emptying
+    `python-version` was a one-line edit that left the guard reporting 168 files
+    covered and no problems.
+    """
+    constructed_workflow(_one_job({"run": f"pytest {_REAL}\n"}, strategy=strategy))
+    covered, problems = _read_workflow()
+    assert not covered, f"a matrix with {case} was counted as coverage"
+    assert problems
+
+
+def test_a_matrix_with_rows_left_is_still_coverage(constructed_workflow):
+    """Adding or removing a python version must not fight the guard."""
+    constructed_workflow(
+        _one_job(
+            {"run": f"pytest {_REAL}\n"},
+            strategy={
+                "fail-fast": False,
+                "max-parallel": 2,
+                "matrix": {
+                    "python-version": ["3.12", "3.13", "3.14"],
+                    "exclude": [{"python-version": "3.12"}],
+                },
+            },
+        )
+    )
+    covered, problems = _read_workflow()
+    assert covered == {_REAL} and not problems
+
+
+_PG_FILE = "tests/bazarr/test_arr_pg_cutover_migration.py"
+_PG_URL = "postgresql+psycopg://postgres:postgres@localhost:5432/bazarr_test"
+_PG_SERVICE = {
+    "postgres": {"image": "postgres:16-alpine", "ports": ["5432:5432"]}
+}
+
+
+@pytest.mark.parametrize(
+    "case,job",
+    [
+        ("no service at all", {}),
+        (
+            "a service on another port",
+            {"services": {"postgres": {"image": "postgres:16-alpine", "ports": ["55432:5432"]}}},
+        ),
+        (
+            "a service that is not postgres",
+            {"services": {"db": {"image": "redis:7", "ports": ["5432:5432"]}}},
+        ),
+    ],
+)
+def test_a_suite_that_skips_without_its_service_is_not_coverage(
+    constructed_workflow, case, job
+):
+    """Being handed to pytest is not enough when the file skips itself.
+
+    All five cases in the Postgres cutover suite take the pg_bind fixture, which
+    calls pytest.skip when nothing answers. So deleting the `services:` block
+    was a one-line edit that turned the file into five skips while it stayed
+    enumerated, and `services` sat on the job safe list with its value unread.
+    """
+    constructed_workflow(
+        _one_job({"env": {"BAZARR_PG_TEST_URL": _PG_URL}, "run": f"pytest {_PG_FILE}\n"}, **job)
+    )
+    covered, problems = _read_workflow()
+    assert _PG_FILE not in covered, f"with {case}, a suite that skips was credited"
+    assert any(_PG_FILE in problem for problem in problems)
+
+
+def test_the_service_the_workflow_defines_is_still_coverage(constructed_workflow):
+    """The real shape has to pass, or the check is just an outage."""
+    constructed_workflow(
+        _one_job(
+            {"env": {"BAZARR_PG_TEST_URL": _PG_URL}, "run": f"pytest {_PG_FILE}\n"},
+            services=_PG_SERVICE,
+        )
+    )
+    covered, problems = _read_workflow()
+    assert covered == {_PG_FILE} and not problems
+
+
+def test_the_url_must_point_at_this_job_s_service(constructed_workflow):
+    """A URL pointing somewhere else is a claim the workflow cannot support."""
+    constructed_workflow(
+        _one_job(
+            {
+                "env": {"BAZARR_PG_TEST_URL": _PG_URL.replace("localhost", "db.example.com")},
+                "run": f"pytest {_PG_FILE}\n",
+            },
+            services=_PG_SERVICE,
+        )
+    )
+    covered, problems = _read_workflow()
+    assert _PG_FILE not in covered
+    assert any("db.example.com" in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
+    "case,defaults",
+    [
+        ("pwsh", {"run": {"shell": "pwsh"}}),
+        ("python", {"run": {"shell": "python"}}),
+        ("bash with no -e", {"run": {"shell": "bash {0}"}}),
+        ("a directory that is not the root", {"run": {"working-directory": "tests"}}),
+        ("a key nobody has read", {"run": {"some-new-key": 1}}),
+    ],
+)
+def test_defaults_that_change_what_a_run_means_is_not_coverage(
+    constructed_workflow, case, defaults
+):
+    """`defaults:` sets the shell and directory of every `run:` under it.
+
+    Safe-listing the key hands the grammar a script it cannot read; refusing the
+    key turns `defaults: run: shell: bash`, which is what the steps effectively
+    already get, into a red build. So the value is read.
+    """
+    workflow = _one_job({"run": f"pytest {_REAL}\n"})
+    workflow["defaults"] = defaults
+    constructed_workflow(workflow)
+    covered, problems = _read_workflow()
+    assert not covered, f"defaults naming {case} was counted as coverage"
+    assert any("defaults" in problem for problem in problems)
+
+
+@pytest.mark.parametrize("shell", ["pwsh", "python", "bash {0}", "sh {0}", "bash -n {0}"])
+def test_step_shell_the_grammar_does_not_describe_is_not_coverage(
+    constructed_workflow, shell
+):
+    """`bash {0}` is on this list on purpose: no -e.
+
+    Without it a failing pytest halfway through a script leaves the step's
+    status to whatever ran last, which is `|| true` spelled as a shell option.
+    """
+    constructed_workflow(_one_job({"shell": shell, "run": f"pytest {_REAL}\n"}))
+    covered, problems = _read_workflow()
+    assert not covered, f"shell {shell!r} was counted as coverage"
+    assert any("shell" in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
+    "shell", ["bash", "sh", "bash -e {0}", "bash -eo pipefail {0}", "bash -euo pipefail {0}"]
+)
+def test_a_stricter_shell_than_the_default_is_still_coverage(
+    constructed_workflow, shell
+):
+    """Every one of these is at least as strict as the `bash -e {0}` default.
+
+    Refusing `bash -eo pipefail {0}` while accepting `bash -e {0}` told
+    maintainers to write the spelling that lets `pytest X | tee log` pass.
+    """
+    constructed_workflow(_one_job({"shell": shell, "run": f"pytest {_REAL}\n"}))
+    covered, problems = _read_workflow()
+    assert covered == {_REAL} and not problems
+
+
+@pytest.mark.parametrize("condition", ["failure()", "cancelled()", "${{ cancelled() }}"])
+def test_a_condition_that_needs_something_to_go_wrong_is_not_coverage(
+    constructed_workflow, condition
+):
+    """`success()` is accepted and these are not, which is the whole distinction.
+
+    A step carrying `success()` runs unless an earlier step already failed, and
+    a job with a failed step is red either way, so it cannot hide anything. A
+    step carrying `failure()` or `cancelled()` runs only when the run is already
+    going wrong, which is never in the case the guard is vouching for.
+    """
+    constructed_workflow(_one_job({"if": condition, "run": f"pytest {_REAL}\n"}))
+    covered, problems = _read_workflow()
+    assert not covered, f"a step gated on {condition} was counted as coverage"
+    assert any(condition in problem for problem in problems)
+
+
+def test_ignore_inside_the_directory_it_runs_really_subtracts():
+    """The --ignore shape that matters, which no case covered until now.
+
+    Every earlier --ignore case put the ignored path outside the positional set,
+    so `collected - subtracted` equalled `collected` in all of them and emptying
+    _PYTEST_SUBTRACTING left every test green.
+    """
+    covered = _script_coverage("pytest tests/compat/ --ignore=tests/compat/contract/\n")
+    under = {name for name in _all_test_files() if name.startswith("tests/compat/")}
+    contract = {name for name in under if name.startswith("tests/compat/contract/")}
+    assert contract, "the fixture directory this case relies on has moved"
+    assert covered == under - contract
+
+
+# ---------------------------------------------------------------------------
+# Ordinary maintainer edits, which have to stay green.
+#
+# This half matters as much as the half above. A guard that goes red on routine,
+# correct changes gets deleted by the first person it obstructs, and deleting it
+# reopens every shape above at once. An audit of eighteen everyday edits found
+# ten of them refused, including `set -euo pipefail`, which is stricter than the
+# `set -e` the guard accepted, and a workflow-level `concurrency:` group, which
+# emptied coverage entirely and printed 168 files as unrun.
+#
+# The line is: refusal is for shapes that can stop tests running or mask a
+# failure. A key or an option that is inert with respect to whether assertions
+# execute is accepted. Each case below is one edit somebody plausibly makes,
+# asserted to leave coverage exactly as it was, so a later narrowing pass cannot
+# quietly bring the hostility back.
+# ---------------------------------------------------------------------------
+
+
+def _test_bearing_job(workflow: dict) -> dict:
+    """The job whose steps run tests, found rather than named."""
+    for job in (workflow.get("jobs") or {}).values():
+        for step in job.get("steps") or []:
+            script = step.get("run") if isinstance(step, dict) else None
+            if isinstance(script, str) and _MENTIONS_TESTS.search(script):
+                return job
+    raise AssertionError("the workflow has no test-bearing job any more")
+
+
+def _first_test_step(workflow: dict) -> dict:
+    for step in _test_bearing_job(workflow).get("steps") or []:
+        script = step.get("run") if isinstance(step, dict) else None
+        if isinstance(script, str) and _MENTIONS_TESTS.search(script):
+            return step
+    raise AssertionError("the workflow has no test-bearing step any more")
+
+
+def _rewrite_runs(workflow: dict, old: str, new: str) -> dict:
+    """Rewrite every `run:` containing `old`, refusing to be a silent no-op.
+
+    A case that stops matching would otherwise keep passing while testing
+    nothing, which is the failure this whole file is about.
+    """
+    changed = 0
+    for job in (workflow.get("jobs") or {}).values():
+        for step in job.get("steps") or []:
+            script = step.get("run") if isinstance(step, dict) else None
+            if isinstance(script, str) and old in script:
+                step["run"] = script.replace(old, new)
+                changed += 1
+    assert changed, (
+        f"no `run:` in the workflow contains {old!r} any more, so this case "
+        "tests nothing. Re-anchor it on what the workflow says now"
+    )
+    return workflow
+
+
+def _add_workflow_concurrency(workflow: dict) -> dict:
+    workflow["concurrency"] = {
+        "group": "ci-${{ github.ref }}",
+        "cancel-in-progress": True,
+    }
+    return workflow
+
+
+def _add_job_concurrency(workflow: dict) -> dict:
+    _test_bearing_job(workflow)["concurrency"] = "backend"
+    return workflow
+
+
+def _add_defaults_shell(workflow: dict) -> dict:
+    workflow["defaults"] = {"run": {"shell": "bash"}}
+    return workflow
+
+
+def _add_container(workflow: dict) -> dict:
+    _test_bearing_job(workflow)["container"] = "python:3.13-slim"
+    return workflow
+
+
+def _add_job_outputs(workflow: dict) -> dict:
+    _test_bearing_job(workflow)["outputs"] = {"result": "${{ steps.one.outputs.result }}"}
+    return workflow
+
+
+def _add_job_timeout(workflow: dict) -> dict:
+    _test_bearing_job(workflow)["timeout-minutes"] = 45
+    return workflow
+
+
+def _add_step_timeout(workflow: dict) -> dict:
+    _first_test_step(workflow)["timeout-minutes"] = 20
+    return workflow
+
+
+def _add_max_parallel(workflow: dict) -> dict:
+    _test_bearing_job(workflow)["strategy"]["max-parallel"] = 2
+    return workflow
+
+
+def _add_python_version(workflow: dict) -> dict:
+    matrix = _test_bearing_job(workflow)["strategy"]["matrix"]
+    matrix["python-version"] = list(matrix["python-version"]) + ["3.15"]
+    return workflow
+
+
+def _newer_runner(workflow: dict) -> dict:
+    _test_bearing_job(workflow)["runs-on"] = "ubuntu-24.04"
+    return workflow
+
+
+def _add_step_success_condition(workflow: dict) -> dict:
+    _first_test_step(workflow)["if"] = "success()"
+    return workflow
+
+
+def _add_root_working_directory(workflow: dict) -> dict:
+    _first_test_step(workflow)["working-directory"] = "."
+    return workflow
+
+
+def _add_pipefail_shell(workflow: dict) -> dict:
+    _first_test_step(workflow)["shell"] = "bash -eo pipefail {0}"
+    return workflow
+
+
+def _add_coverage(workflow: dict) -> dict:
+    return _rewrite_runs(
+        workflow, "-v --tb=short", "-v --tb=short --cov=bazarr --cov-report=xml"
+    )
+
+
+def _add_timeout_option(workflow: dict) -> dict:
+    return _rewrite_runs(workflow, "-v --tb=short", "-v --tb=short --timeout=300")
+
+
+def _combine_short_options(workflow: dict) -> dict:
+    return _rewrite_runs(workflow, "-v --tb=short", "-svx --tb=short")
+
+
+def _quieten(workflow: dict) -> dict:
+    return _rewrite_runs(workflow, "-v --tb=short", "-q --tb=short")
+
+
+def _stricter_set(workflow: dict) -> dict:
+    return _rewrite_runs(workflow, "set -e\n", "set -euo pipefail\n")
+
+
+def _separated_set_modes(workflow: dict) -> dict:
+    return _rewrite_runs(workflow, "set -e\n", "set -e -u\n")
+
+
+def _printf_instead_of_echo(workflow: dict) -> dict:
+    return _rewrite_runs(
+        workflow, 'echo "::group::$f"', 'printf "::group::%s\\n" "$f"'
+    )
+
+
+def _leading_cd(workflow: dict) -> dict:
+    return _rewrite_runs(workflow, "pip install pytest", "cd .\npip install pytest")
+
+
+def _lint_the_test_tree(workflow: dict) -> dict:
+    return _rewrite_runs(workflow, "ruff check .", "ruff check tests/ bazarr/")
+
+
+def _enumerate_another_file(workflow: dict) -> dict:
+    """A file already covered elsewhere, added to a second step.
+
+    Coverage is a set, so the total cannot move; what this pins is that adding a
+    positional argument is still readable as one.
+    """
+    return _rewrite_runs(
+        workflow, "pytest tests/compat/", "pytest tests/compat/ " + _REAL
+    )
+
+
+_ORDINARY_EDITS = {
+    "a workflow-level concurrency group is added": _add_workflow_concurrency,
+    "a job-level concurrency group is added": _add_job_concurrency,
+    "the default shell is stated explicitly": _add_defaults_shell,
+    "the job moves into a container image": _add_container,
+    "the job gains an output": _add_job_outputs,
+    "the job gains a timeout": _add_job_timeout,
+    "the step gains a timeout": _add_step_timeout,
+    "the matrix gains max-parallel": _add_max_parallel,
+    "a new python version is added to the matrix": _add_python_version,
+    "the runner label is pinned to a version": _newer_runner,
+    "a step is marked to run only after the earlier ones passed":
+        _add_step_success_condition,
+    "a step states the repository root as its working directory":
+        _add_root_working_directory,
+    "a step asks for pipefail explicitly": _add_pipefail_shell,
+    "coverage is measured": _add_coverage,
+    "a per-test timeout is added": _add_timeout_option,
+    "short options are combined": _combine_short_options,
+    "the output is made quiet": _quieten,
+    "the script is made stricter with set -euo pipefail": _stricter_set,
+    "the set modes are written separately": _separated_set_modes,
+    "printf replaces echo": _printf_instead_of_echo,
+    "the script changes to the directory it is already in": _leading_cd,
+    "the linter is pointed at the test tree": _lint_the_test_tree,
+    "another file is enumerated": _enumerate_another_file,
+}
+
+
+@pytest.fixture
+def edited_workflow(constructed_workflow):
+    """Apply one edit to the repository's real workflow, and report the baseline.
+
+    Built from the real ci.yml rather than a toy, because the claim being made
+    is about this workflow: an edit somebody really makes to the file that is
+    really there leaves the same 168 files covered.
+    """
+
+    def build(edit):
+        baseline = _enumerated_paths()
+        assert baseline, "the real workflow covers nothing, so the case proves nothing"
+        constructed_workflow(edit(_workflow()))
+        return baseline
+
+    return build
+
+
+class TestOrdinaryEditsStayGreen:
+    """Everyday edits, each asserted to leave the guard exactly where it was.
+
+    Refusal costs something every time it happens, and it is only worth paying
+    where a shape can really stop tests running or mask a failure. None of these
+    can. If one of them starts failing, the fix is in the guard, not in the
+    workflow: narrowing the guard until ordinary work goes red is how a control
+    like this gets deleted, and a deleted guard protects nothing at all.
+    """
+
+    @pytest.mark.parametrize("case,edit", sorted(_ORDINARY_EDITS.items()))
+    def test_the_edit_is_accepted(self, edited_workflow, case, edit):
+        baseline = edited_workflow(edit)
+        covered, problems = _read_workflow()
+        assert not problems, (
+            f"when {case}, the guard refused to read the workflow:\n  "
+            + "\n  ".join(problems)
+            + "\n\nNothing about this edit can stop a test running or hide a "
+            "failure, so refusing it is friction the guard cannot afford."
+        )
+        assert covered == baseline, (
+            f"when {case}, the set of files the guard reads as covered changed "
+            f"by {sorted(baseline ^ covered)}"
+        )
+
+
+@pytest.mark.parametrize("case", ["dropped from the workflow", "added to EXCLUDED"])
+def test_a_workflow_that_switches_this_guard_off_is_reported(
+    constructed_workflow, monkeypatch, case
+):
+    """The two-edit self-removal, exercised rather than assumed.
+
+    The self-check passes today whatever it says, so nothing noticed when its
+    second half was deleted. These two build the states it exists to catch.
+    """
+    if case == "dropped from the workflow":
+        constructed_workflow(_one_job({"run": f"pytest {_REAL}\n"}))
+    else:
+        constructed_workflow(_one_job({"run": f"pytest {SELF}\n"}))
+        monkeypatch.setitem(EXCLUDED, SELF, "excluded with a plausible sentence")
+    assert _guard_disabled_problem(), (
+        f"with the guard {case}, every check in this file is off and it said so "
+        "to nobody"
+    )
+
+
+def test_the_guard_enumerated_and_not_excluded_is_not_reported(constructed_workflow):
+    """The state the repository is really in has to read as healthy."""
+    constructed_workflow(_one_job({"run": f"pytest {SELF}\n"}))
+    assert not _guard_disabled_problem()
+
+
+def test_a_file_named_the_other_way_round_is_enumerated(constructed_repo):
+    """pytest collects `*_test.py` too, and nothing here narrows python_files.
+
+    A file named that way would otherwise get no CI coverage and no complaint,
+    which is the exact state this whole file exists to make impossible.
+    """
+    constructed_repo({"tests/bazarr/test_one.py": "", "tests/bazarr/two_test.py": ""})
+    assert _all_test_files() == {"tests/bazarr/test_one.py", "tests/bazarr/two_test.py"}
 
 
 def test_non_test_steps_are_left_alone(constructed_workflow):
