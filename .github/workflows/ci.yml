@@ -170,6 +170,7 @@ jobs:
             tests/bazarr/test_signalrcore_compat.py \
             tests/bazarr/test_app_get_providers.py \
             tests/bazarr/test_retired_provider_config_compat.py \
+            tests/bazarr/test_jellyfin_apikey_location.py \
             tests/bazarr/test_provider_hub.py \
             tests/bazarr/test_provider_pool_config_reload.py \
             tests/bazarr/test_provider_hub_auto_install_optin.py \
@@ -211,8 +212,12 @@ jobs:
             tests/subliminal_patch/test_embeddedsubtitles.py \
             tests/subliminal_patch/test_subsunacs.py \
             tests/subliminal_patch/test_filebot_refiner.py \
+            tests/subliminal_patch/test_http.py \
+            tests/subliminal_patch/test_legendasdivx.py \
+            tests/subliminal_patch/test_provider_pool.py \
             tests/subliminal_patch/test_mods.py \
             tests/subliminal_patch/test_mods_keep_lyrics.py \
+            tests/subliminal_patch/test_video.py \
             -v --tb=short
 
       - name: pytest previously unguarded bazarr suites

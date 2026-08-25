@@ -12,7 +12,11 @@ certifi==2026.6.17
 chardet==7.4.3
 charset-normalizer==3.5.1
 click-option-group>=0.5.9
-cloudscraper<=1.2.71  # newer version dropped captcha v1 support
+# Ceiling, not a floor: subliminal_patch CFSession relies on cloudscraper to
+# solve Cloudflare v1 challenges and captchas, so a release that drops that
+# support must not be picked up unattended. 1.2.71 is the newest release on
+# PyPI today, so this resolves to the latest version.
+cloudscraper<=1.2.71
 cryptography>=49.0.0
 deathbycaptcha-official==4.7.1
 deep-translator==1.11.4

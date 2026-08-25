@@ -74,7 +74,9 @@ LABEL org.opencontainers.image.title="Bazarr+" \
       org.opencontainers.image.licenses="GPL-3.0"
 
 # Install runtime dependencies. RAR archives from subtitle providers are
-# extracted via unar (from Debian main) or unrar.
+# extracted via unar (from Debian main); unrar is used instead when an
+# operator installs it, since it is not in Debian main. p7zip-full stays for
+# zip/7z archives and as the last-resort RAR fallback in init_binaries().
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
