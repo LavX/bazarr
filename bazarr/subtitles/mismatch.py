@@ -46,12 +46,19 @@ from subliminal_patch.score import DEFAULT_SCORES
 from subliminal_patch.subtitle import MERGED_FORMATS_REV
 
 from app.config import settings
-from app.database import (TableEpisodes, TableMovies, TableReleaseTypeMismatch, database, insert,
-                          select)
+from app.database import (TableEpisodes, TableMovies, TableReleaseTypeMismatch, database, delete,
+                          insert, select)
+from app.event_handler import event_stream
 from app.notifier import send_notifications, send_notifications_movie
 from arr_instances.resolution import scoped
 
 logger = logging.getLogger(__name__)
+
+# Stored where the owning instance is unknown, instead of NULL. The unique index
+# is what keeps two concurrent searches from both notifying, and NULL never
+# equals NULL, so a nullable owner column silently opts those rows out of it.
+# 0 is not a real instance id: they are assigned from 1.
+UNOWNED = 0
 
 
 # Providers that synthesise a subtitle rather than distributing a released one.
@@ -254,18 +261,21 @@ def record_mismatch(session, media_type, media_id, arr_instance_id, language, mi
     therefore records nothing and notifies nothing, while a re-grab as another
     release type is a new situation and may be reported once more.
     """
+    owner = UNOWNED if arr_instance_id is None else arr_instance_id
     existing = (
         select(TableReleaseTypeMismatch.video_release_type)
         .where(TableReleaseTypeMismatch.media_type == media_type)
         .where(TableReleaseTypeMismatch.media_id == media_id)
         .where(TableReleaseTypeMismatch.language == language)
     )
-    if arr_instance_id is None:
-        # NULL never equals NULL, so the unique index cannot dedupe an unowned
-        # row on its own. Match it explicitly.
-        existing = existing.where(TableReleaseTypeMismatch.arr_instance_id.is_(None))
+    if owner == UNOWNED:
+        # Rows written before the sentinel existed still carry NULL, so match
+        # both spellings of "no known owner".
+        existing = existing.where(
+            (TableReleaseTypeMismatch.arr_instance_id == UNOWNED)
+            | (TableReleaseTypeMismatch.arr_instance_id.is_(None)))
     else:
-        existing = existing.where(TableReleaseTypeMismatch.arr_instance_id == arr_instance_id)
+        existing = existing.where(TableReleaseTypeMismatch.arr_instance_id == owner)
 
     # Compared by group, not by name: a re-grab that lands on another spelling
     # of the same release type (Blu-ray to Ultra HD Blu-ray) changed nothing for
@@ -281,7 +291,7 @@ def record_mismatch(session, media_type, media_id, arr_instance_id, language, mi
         session.execute(insert(TableReleaseTypeMismatch).values(
             media_type=media_type,
             media_id=media_id,
-            arr_instance_id=arr_instance_id,
+            arr_instance_id=owner,
             language=language,
             video_release_type=mismatch.video_release_type,
             subtitle_release_type=mismatch.subtitle_release_type,
@@ -298,6 +308,43 @@ def record_mismatch(session, media_type, media_id, arr_instance_id, language, mi
     return True
 
 
+def clear_mismatch(session, media_type, media_id, language=None):
+    """Drop recorded mismatches for an item, optionally just one language.
+
+    Called when a subtitle actually lands, because at that point the recorded
+    detection describes a problem the user no longer has. Without this the badge
+    outlives the mismatch: the item stays flagged for a language that has since
+    been satisfied, which is worse than not flagging it at all, since the user
+    cannot tell the stale flags from the live ones.
+    """
+    stmt = (delete(TableReleaseTypeMismatch)
+            .where(TableReleaseTypeMismatch.media_type == media_type)
+            .where(TableReleaseTypeMismatch.media_id == media_id))
+    if language is not None:
+        stmt = stmt.where(TableReleaseTypeMismatch.language == _language_key(language))
+
+    session.execute(stmt)
+
+
+def clear_mismatch_for_video(video, media_type, language, arr_instance_id=None):
+    """Clear the recorded mismatch for a video that just got its subtitle.
+
+    Resolves the same local id the reporter records against, so a language that
+    has been satisfied stops being flagged. Never raises: this runs on the
+    success path of a download and must not turn a working search into an error.
+    """
+    try:
+        if arr_instance_id is None:
+            arr_instance_id = getattr(video, 'arr_instance_id', None)
+        media_id = _resolve_media_id(media_type, video, arr_instance_id)
+        if media_id is None:
+            return
+
+        clear_mismatch(database, media_type, media_id, language)
+    except Exception:
+        logger.exception('BAZARR could not clear the release-type mismatch record')
+
+
 def _notification_body(language_label, mismatch):
     return (f'No {language_label} subtitle reached the minimum score for this '
             f'{mismatch.video_release_type} release, but {mismatch.provider_name} has one for a '
@@ -305,7 +352,8 @@ def _notification_body(language_label, mismatch):
             f'{mismatch.subtitle_release_type} release would likely give you a subtitle.')
 
 
-def report_release_type_mismatch(video, media_type, language, candidates, min_score):
+def report_release_type_mismatch(video, media_type, language, candidates, min_score,
+                                 arr_instance_id=None):
     """Detect, record and notify once. Returns the mismatch when it notified.
 
     Called after a search that downloaded nothing for ``language``, with the
@@ -323,7 +371,12 @@ def report_release_type_mismatch(video, media_type, language, candidates, min_sc
     if mismatch is None:
         return None
 
-    arr_instance_id = getattr(video, 'arr_instance_id', None)
+    # The caller's value wins. video.arr_instance_id is set by the database
+    # refiner, which reverses the path through the GLOBAL mapping and so can
+    # fail to find the row for an instance with a mapping of its own, while
+    # generate_subtitles already knows which instance it is searching for.
+    if arr_instance_id is None:
+        arr_instance_id = getattr(video, 'arr_instance_id', None)
     media_id = _resolve_media_id(media_type, video, arr_instance_id)
     if media_id is None:
         return None
@@ -344,6 +397,15 @@ def report_release_type_mismatch(video, media_type, language, candidates, min_sc
                                      arr_instance_id=arr_instance_id)
     except Exception:  # a notifier must never break a search
         logger.exception('BAZARR could not send the release-type mismatch notification')
+
+    # The Wanted pagination query refreshes only from this event: it has no
+    # polling and no refetch on focus, so without it a page that is already open
+    # shows the new badge on the next manual reload and not before.
+    try:
+        event_stream(type='episode-wanted' if media_type == 'series' else 'movie-wanted',
+                     action='update', payload=media_id)
+    except Exception:
+        logger.exception('BAZARR could not announce the release-type mismatch')
 
     return mismatch
 

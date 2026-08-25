@@ -17,7 +17,7 @@ from utilities.path_mappings import path_mappings
 from utilities.helper import get_target_folder, force_unicode
 from languages.get_languages import alpha3_from_alpha2
 
-from .mismatch import report_release_type_mismatch
+from .mismatch import clear_mismatch_for_video, report_release_type_mismatch
 from .pool import update_pools, _get_pool
 from .utils import get_video, _get_lang_obj, _get_scores
 from .processing import process_subtitle
@@ -115,11 +115,19 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                             and not forced_minimum_score:
                         try:
                             report_release_type_mismatch(video, media_type, language,
-                                                         candidate_sink, int(min_score))
+                                                         candidate_sink, int(min_score),
+                                                         arr_instance_id=arr_instance_id)
                         except Exception:
                             # A report must never cost the user a search.
                             logging.exception('BAZARR Error checking for a release type '
                                               'mismatch for this file %s', path)
+                    elif downloaded_subtitles.get(video):
+                        # The language is satisfied, so whatever was recorded for
+                        # it describes a problem the user no longer has. A badge
+                        # that outlives its mismatch is worse than no badge:
+                        # nothing distinguishes it from a live one.
+                        clear_mismatch_for_video(video, media_type, language,
+                                                 arr_instance_id=arr_instance_id)
 
                 if downloaded_subtitles:
                     for video, subtitles in downloaded_subtitles.items():

@@ -874,3 +874,139 @@ def test_a_regrab_inside_the_same_release_type_group_does_not_record_again(schem
     # the user, so nothing is reported.
     assert record_mismatch(schema_session, "series", 101, 2, "en",
                            _mismatch(video_release_type="ultra hd blu-ray")) is False
+
+
+# --------------------------------------------------------------------------
+# Four gaps found in review: the badge outliving the problem, the owning
+# instance being rediscovered instead of passed, NULL owners defeating the
+# unique index, and an open Wanted page not hearing about a new badge.
+# --------------------------------------------------------------------------
+
+
+def test_a_downloaded_language_clears_its_recorded_mismatch(detection):
+    from sqlalchemy import func, select as sa_select
+
+    from app.database import TableReleaseTypeMismatch
+
+    detection.module.report_release_type_mismatch(
+        _video(), "series", "en", _mismatching_candidates(), MIN_SCORE)
+    assert detection.session.execute(
+        sa_select(func.count()).select_from(TableReleaseTypeMismatch)).scalar() == 1
+
+    detection.module.clear_mismatch(detection.session, "series", 101, "en")
+
+    assert detection.session.execute(
+        sa_select(func.count()).select_from(TableReleaseTypeMismatch)).scalar() == 0
+
+
+def test_clearing_one_language_leaves_the_others_flagged(detection):
+    detection.module.report_release_type_mismatch(
+        _video(), "series", "en", _mismatching_candidates(), MIN_SCORE)
+    detection.module.report_release_type_mismatch(
+        _video(), "series", "hu", _mismatching_candidates(), MIN_SCORE)
+
+    detection.module.clear_mismatch(detection.session, "series", 101, "en")
+
+    assert detection.module.flagged_media_ids(detection.session, "series", [101]) == {101}
+
+
+def test_clearing_the_last_language_takes_the_badge_with_it(detection):
+    detection.module.report_release_type_mismatch(
+        _video(), "series", "en", _mismatching_candidates(), MIN_SCORE)
+
+    detection.module.clear_mismatch(detection.session, "series", 101, "en")
+
+    assert detection.module.flagged_media_ids(detection.session, "series", [101]) == set()
+
+
+def test_the_caller_s_instance_id_wins_over_the_refiner_s(detection):
+    """generate_subtitles knows the owning instance. The video attribute is set
+    by the database refiner, which reverses paths through the global mapping and
+    can miss the row for a non-default instance, so the known value has to win.
+    """
+    video = _video(arr_instance_id=None)
+
+    detection.module.report_release_type_mismatch(
+        video, "series", "en", _mismatching_candidates(), MIN_SCORE,
+        arr_instance_id=2)
+
+    args, kwargs = detection.sent.episodes[0]
+    assert kwargs["arr_instance_id"] == 2
+
+
+def test_an_unowned_row_is_deduplicated_by_the_unique_index(schema_session):
+    """NULL never equals NULL, so a nullable owner column cannot dedupe on its
+    own and two concurrent searches would both insert and both notify. The
+    unowned case is stored as a sentinel so the index does the work.
+    """
+    from sqlalchemy import select as sa_select
+
+    from app.database import TableReleaseTypeMismatch
+    from subtitles.mismatch import UNOWNED, record_mismatch
+
+    assert record_mismatch(schema_session, "series", 111, None, "en", _mismatch()) is True
+
+    stored = schema_session.execute(
+        sa_select(TableReleaseTypeMismatch.arr_instance_id)
+        .where(TableReleaseTypeMismatch.media_id == 111)).all()
+    assert [row.arr_instance_id for row in stored] == [UNOWNED]
+
+    # The pre-check is not what is under test here: bypass it and let the index
+    # be the thing that refuses the duplicate.
+    assert record_mismatch(schema_session, "series", 111, None, "en", _mismatch()) is False
+
+
+def test_recording_a_mismatch_tells_an_open_wanted_page(detection, monkeypatch):
+    """The Wanted pagination query refreshes only from a socket event, and has
+    no polling or focus refresh, so without one the new badge appears on the
+    next manual reload and not before."""
+    events = []
+    monkeypatch.setattr(detection.module, "event_stream",
+                        lambda *args, **kwargs: events.append((args, kwargs)))
+
+    detection.module.report_release_type_mismatch(
+        _video(), "series", "en", _mismatching_candidates(), MIN_SCORE)
+
+    assert any(kwargs.get("type") == "episode-wanted" or "episode-wanted" in args
+               for args, kwargs in events), events
+
+
+def test_recording_a_movie_mismatch_tells_an_open_wanted_page(detection, monkeypatch):
+    events = []
+    monkeypatch.setattr(detection.module, "event_stream",
+                        lambda *args, **kwargs: events.append((args, kwargs)))
+
+    detection.module.report_release_type_mismatch(
+        _video(), "movies", "en", _mismatching_candidates(), MIN_SCORE)
+
+    assert any(kwargs.get("type") == "movie-wanted" or "movie-wanted" in args
+               for args, kwargs in events), events
+
+
+def test_the_search_clears_the_record_when_the_language_finally_lands(search):
+    """The end-to-end half of the clearing rule: the download path itself has to
+    call it, or the badge only ever clears in a unit test."""
+    cleared = []
+    search.monkeypatch.setattr(
+        search.module, "clear_mismatch_for_video",
+        lambda video, media_type, language, arr_instance_id=None:
+        cleared.append((media_type, str(language), arr_instance_id)))
+    search.monkeypatch.setattr(search.module, "download_best_subtitles",
+                               lambda **kwargs: {search.video: [_FakeSubtitle(
+                                   "othersubs", WEB_RELEASE, {"series"})]})
+    search.monkeypatch.setattr(search.module, "save_subtitles", lambda *args, **kwargs: [])
+
+    search.run()
+
+    assert cleared == [("series", "en", 2)]
+
+
+def test_the_search_passes_the_owning_instance_to_the_reporter(search):
+    """The reporter must not have to rediscover it from the video."""
+    reports = []
+    search.monkeypatch.setattr(search.module, "report_release_type_mismatch",
+                               lambda *args, **kwargs: reports.append(kwargs))
+
+    search.run()
+
+    assert reports == [{"arr_instance_id": 2}]
