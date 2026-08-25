@@ -667,3 +667,25 @@ def test_legendasdivx_extraction_budget_stops_walking_once_it_is_over(monkeypatc
 
     assert provider._over_extraction_budget(str(tmp_path), "unzip") is True
     assert len(walked) < 10 ** 6
+
+
+def test_legendasdivx_multi_episode_video_accepts_either_episode():
+    """A combined video carries several episodes and video.episode is only the
+    lowest of them, so an archive naming one of the others is still the
+    subtitle for this file."""
+    body = "1\n00:00:01,000 --> 00:00:02,000\none and two\n"
+    content = _zip_bytes({"Breaking.Bad.S01E02.srt": body})
+    archive = zipfile.ZipFile(io.BytesIO(content))
+    video = Episode("Breaking.Bad.S01E01-E02.mkv", "Breaking Bad", 1, episodes=[1, 2])
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
+    assert provider._get_subtitle_from_archive(archive, content, _episode_subtitle(video)) == body.encode()
+
+
+def test_legendasdivx_multi_episode_video_still_rejects_another_episode():
+    content = _zip_bytes({"Breaking.Bad.S01E05.srt": "1\n00:00:01,000 --> 00:00:02,000\nfive\n"})
+    archive = zipfile.ZipFile(io.BytesIO(content))
+    video = Episode("Breaking.Bad.S01E01-E02.mkv", "Breaking Bad", 1, episodes=[1, 2])
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
+    assert provider._get_subtitle_from_archive(archive, content, _episode_subtitle(video)) is None

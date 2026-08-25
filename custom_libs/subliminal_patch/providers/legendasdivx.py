@@ -93,11 +93,17 @@ def guess_matches_wanted_episode(video, guess):
     matched_absolutely = False
     if episode is not None:
         candidates = episode if isinstance(episode, list) else [episode]
+        # Every episode the video carries, not just video.episode: that is the
+        # lowest of them, so a combined S01E01-E02 file would reject the
+        # subtitle for its own second episode.
+        wanted = set(getattr(video, 'episodes', None) or [])
+        if video.episode is not None:
+            wanted.add(video.episode)
         # Anime archives number episodes absolutely while Sonarr stores the
         # video as season-relative and carries the absolute number separately,
         # so both spellings of the same episode have to be accepted.
         absolute = getattr(video, 'absolute_episode', None)
-        if video.episode in candidates:
+        if wanted.intersection(candidates):
             pass
         elif absolute is not None and absolute in candidates:
             matched_absolutely = True
