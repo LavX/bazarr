@@ -317,11 +317,16 @@ def test_download_best_subtitles_reports_every_scored_candidate():
     assert [s.provider_name for s in downloaded] == ["acceptable"]
     # 160 series + 90 year + 30 season + 30 episode + 1 hearing impaired = 311,
     # and 311 - 90 = 221 for the candidate that misses the year.
+    # matches ride along because the download loop applies more than the score:
+    # an episode subtitle that does not match the season and episode is refused
+    # however high it scores, and the detector has to apply the same rule.
     assert sink == [
         {"provider_name": "acceptable", "release_info": WEB_RELEASE,
-         "score": 311, "downloaded": True},
+         "score": 311, "downloaded": True,
+         "matches": ["episode", "season", "series", "year"]},
         {"provider_name": "rejected", "release_info": BLURAY_RELEASE,
-         "score": 221, "downloaded": False},
+         "score": 221, "downloaded": False,
+         "matches": ["episode", "season", "series"]},
     ]
 
 
@@ -1010,3 +1015,137 @@ def test_the_search_passes_the_owning_instance_to_the_reporter(search):
     search.run()
 
     assert reports == [{"arr_instance_id": 2}]
+
+
+# --------------------------------------------------------------------------
+# Second review pass: eligibility beyond the score, media resolution without a
+# refiner-supplied upstream id, clearing only after the file lands, and rows
+# outliving the media they describe.
+# --------------------------------------------------------------------------
+
+
+def test_an_episode_candidate_the_download_loop_would_reject_is_not_a_mismatch():
+    """Crossing the score threshold is not enough for an episode.
+
+    The download loop separately requires season and episode plus series or
+    imdb_id in the original matches, so a wrong-episode candidate sitting just
+    under the threshold would still be refused after a release-type regrab.
+    Reporting it promises the user a fix that would not work.
+    """
+    from subtitles.mismatch import detect_release_type_mismatch
+
+    wrong_episode = _candidate(release_info=BLURAY_RELEASE, score=270)
+    wrong_episode["matches"] = ["series", "season"]  # no episode match
+
+    assert detect_release_type_mismatch(
+        video_release_type="Web", candidates=[wrong_episode],
+        min_score=MIN_SCORE, media_type="series") is None
+
+
+def test_an_episode_candidate_the_loop_would_accept_is_still_a_mismatch():
+    from subtitles.mismatch import detect_release_type_mismatch
+
+    right_episode = _candidate(release_info=BLURAY_RELEASE, score=270)
+    right_episode["matches"] = ["series", "season", "episode"]
+
+    assert detect_release_type_mismatch(
+        video_release_type="Web", candidates=[right_episode],
+        min_score=MIN_SCORE, media_type="series") is not None
+
+
+def test_a_candidate_without_recorded_matches_is_judged_on_score_alone():
+    """Older records carry no matches. Treating that as ineligible would turn
+    the detector off wherever the sink has not been updated."""
+    from subtitles.mismatch import detect_release_type_mismatch
+
+    assert detect_release_type_mismatch(
+        video_release_type="Web", candidates=[_candidate()],
+        min_score=MIN_SCORE, media_type="series") is not None
+
+
+def test_movie_candidates_are_not_held_to_the_episode_rule():
+    """The season/episode requirement is the download loop's episode branch.
+    A movie has no season to match, so nothing extra is asked of it."""
+    from subtitles.mismatch import detect_release_type_mismatch
+
+    candidate = _candidate(release_info="Movie.2019.1080p.BluRay.x264-GRP", score=100)
+    candidate["matches"] = ["title"]
+
+    assert detect_release_type_mismatch(
+        video_release_type="Web", candidates=[candidate],
+        min_score=126, media_type="movie") is not None
+
+
+def test_the_media_row_resolves_from_the_path_when_the_refiner_left_no_id(detection):
+    """The database refiner reverses the video path through the GLOBAL mapping,
+    so on an instance with a mapping of its own it can fail to find the row and
+    leave the video with no sonarrEpisodeId at all. The detection is still about
+    a real item, and the path is the thing that identifies it."""
+    from types import SimpleNamespace
+
+    from sqlalchemy import update
+
+    from app.database import TableEpisodes
+
+    detection.session.execute(
+        update(TableEpisodes).values(path="/tv/show/s01e01.mkv")
+        .where(TableEpisodes.id == 101))
+
+    video = SimpleNamespace(source="Web", arr_instance_id=2,
+                            original_path="/tv/show/s01e01.mkv")
+
+    assert detection.module.report_release_type_mismatch(
+        video, "series", "en", _mismatching_candidates(), MIN_SCORE,
+        arr_instance_id=2) is not None
+
+
+def test_deleting_a_series_takes_its_recorded_mismatches_with_it(schema_session):
+    """A local id can be reused by SQLite after a delete, so an orphan row does
+    not merely accumulate: it can badge an unrelated new item."""
+    from sqlalchemy import func, select as sa_select
+
+    from app.database import TableReleaseTypeMismatch
+    from subtitles.mismatch import forget_media, record_mismatch
+
+    _seed_episode(schema_session, 101, 2)
+    record_mismatch(schema_session, "series", 101, 2, "en", _mismatch())
+
+    forget_media(schema_session, "series", [101])
+
+    assert schema_session.execute(
+        sa_select(func.count()).select_from(TableReleaseTypeMismatch)).scalar() == 0
+
+
+def test_forgetting_one_item_leaves_the_others_recorded(schema_session):
+    from subtitles.mismatch import flagged_media_ids, forget_media, record_mismatch
+
+    _seed_episode(schema_session, 101, 2)
+    _seed_episode(schema_session, 102, 2, sonarr_episode_id=21)
+    record_mismatch(schema_session, "series", 101, 2, "en", _mismatch())
+    record_mismatch(schema_session, "series", 102, 2, "en", _mismatch())
+
+    forget_media(schema_session, "series", [101])
+
+    assert flagged_media_ids(schema_session, "series", [101, 102]) == {102}
+
+
+def test_a_failed_save_keeps_the_recorded_mismatch(search):
+    """The download succeeded but nothing reached disk, so the language is still
+    missing. Clearing the record there would drop the badge and the once-only
+    guard for a problem the user still has."""
+    cleared = []
+    search.monkeypatch.setattr(
+        search.module, "clear_mismatch_for_video",
+        lambda *args, **kwargs: cleared.append(args))
+    search.monkeypatch.setattr(search.module, "download_best_subtitles",
+                               lambda **kwargs: {search.video: [_FakeSubtitle(
+                                   "othersubs", WEB_RELEASE, {"series"})]})
+
+    def exploding_save(*args, **kwargs):
+        raise OSError("read-only file system")
+
+    search.monkeypatch.setattr(search.module, "save_subtitles", exploding_save)
+
+    search.run()
+
+    assert cleared == []

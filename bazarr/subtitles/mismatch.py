@@ -51,6 +51,7 @@ from app.database import (TableEpisodes, TableMovies, TableReleaseTypeMismatch, 
 from app.event_handler import event_stream
 from app.notifier import send_notifications, send_notifications_movie
 from arr_instances.resolution import scoped
+from utilities.path_mappings import path_mappings
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +190,9 @@ def detect_release_type_mismatch(video_release_type, candidates, min_score,
         if projected_score < min_score:
             continue
 
+        if not _would_be_downloadable(candidate, media_type):
+            continue
+
         if best is None or projected_score > best.projected_score:
             best = ReleaseTypeMismatch(
                 video_release_type=video_type,
@@ -200,6 +204,32 @@ def detect_release_type_mismatch(video_release_type, candidates, min_score,
             )
 
     return best
+
+
+
+def _would_be_downloadable(candidate, media_type):
+    """False when the download loop would refuse this candidate anyway.
+
+    Score is not the only gate. For an episode the loop separately requires the
+    season and episode to match, plus the series or the imdb id, so a
+    wrong-episode subtitle sitting just under the threshold would still be
+    refused after a release-type regrab. Reporting it promises the user a fix
+    that would not work.
+
+    A candidate carrying no recorded matches is judged on score alone: that is
+    what older records look like, and treating them as ineligible would turn
+    the detector off wherever the record has not caught up.
+    """
+    if media_type != 'series':
+        return True
+
+    matches = candidate.get('matches')
+    if not matches:
+        return True
+
+    matches = set(matches)
+    return ({'season', 'episode'}.issubset(matches)
+            and ('series' in matches or 'imdb_id' in matches))
 
 
 # --------------------------------------------------------------------------
@@ -221,6 +251,36 @@ def _language_label(language):
     return name if isinstance(name, str) and name else str(language)
 
 
+def _resolve_media_id_by_path(media_type, video, arr_instance_id):
+    """Local id from the video's path, for a video with no upstream id set.
+
+    The path is what the indexer stores on the media row, so it identifies the
+    item even when the refiner could not. Reversed through the owning instance's
+    mapping, which is the whole reason the refiner missed it.
+    """
+    path = getattr(video, 'original_path', None) or getattr(video, 'name', None)
+    if not path:
+        return None
+
+    table = TableEpisodes if media_type == 'series' else TableMovies
+    kind = 'series' if media_type == 'series' else 'movie'
+    try:
+        stored = path_mappings.path_replace_reverse_instance(path, arr_instance_id, kind)
+    except Exception:
+        logger.debug('BAZARR could not reverse %s for instance %s', path, arr_instance_id,
+                     exc_info=True)
+        stored = path
+
+    rows = database.execute(
+        scoped(select(table.id).where(table.path == stored),
+               table.arr_instance_id, arr_instance_id)).all()
+    if len(rows) != 1:
+        logger.debug('BAZARR release-type mismatch: %s path %s resolved to %s rows, skipping',
+                     media_type, stored, len(rows))
+        return None
+    return rows[0].id
+
+
 def _resolve_media_id(media_type, video, arr_instance_id):
     """Local id (#156) of the media row the video belongs to, or None.
 
@@ -231,7 +291,11 @@ def _resolve_media_id(media_type, video, arr_instance_id):
     if media_type == 'series':
         upstream_id = getattr(video, 'sonarrEpisodeId', None)
         if upstream_id is None:
-            return None
+            # The database refiner is what sets these, and it reverses the video
+            # path through the GLOBAL mapping, so on an instance with a mapping
+            # of its own it can find no row and leave them unset. The path still
+            # identifies the item, and it is what the indexer stores.
+            return _resolve_media_id_by_path(media_type, video, arr_instance_id)
         stmt = scoped(
             select(TableEpisodes.id)
             .where(TableEpisodes.sonarrEpisodeId == upstream_id),
@@ -239,7 +303,7 @@ def _resolve_media_id(media_type, video, arr_instance_id):
     else:
         upstream_id = getattr(video, 'radarrId', None)
         if upstream_id is None:
-            return None
+            return _resolve_media_id_by_path(media_type, video, arr_instance_id)
         stmt = scoped(
             select(TableMovies.id)
             .where(TableMovies.radarrId == upstream_id),
@@ -408,6 +472,57 @@ def report_release_type_mismatch(video, media_type, language, candidates, min_sc
         logger.exception('BAZARR could not announce the release-type mismatch')
 
     return mismatch
+
+
+def forget_media(session, media_type, media_ids):
+    """Drop every recorded mismatch for media that no longer exists.
+
+    Called when a sync removes the media row. The link is a plain integer, not
+    a foreign key, because the column is polymorphic across two tables, so
+    nothing removes these rows on its own. They do not merely accumulate:
+    SQLite reuses a deleted row id for a later insert, so an orphan can badge
+    an unrelated new item.
+    """
+    media_ids = [media_id for media_id in media_ids if media_id is not None]
+    if not media_ids:
+        return
+
+    session.execute(
+        delete(TableReleaseTypeMismatch)
+        .where(TableReleaseTypeMismatch.media_type == media_type)
+        .where(TableReleaseTypeMismatch.media_id.in_(media_ids)))
+
+
+def forget_media_by_upstream(media_type, upstream_ids, arr_instance_id=None,
+                             series_upstream_id=None):
+    """Forget the mismatches of media about to be deleted, by upstream id.
+
+    Called from the sync paths, which know an item by its upstream id, just
+    before they remove the row. Never raises: losing a cleanup must not turn a
+    successful sync delete into an error, and the rows it leaves behind are the
+    status quo.
+
+    ``series_upstream_id`` forgets every episode of one series instead, which is
+    what a series deletion needs: the records are per episode.
+    """
+    try:
+        upstream_ids = [i for i in (upstream_ids or []) if i is not None]
+        if not upstream_ids and series_upstream_id is None:
+            return
+
+        if media_type == 'series':
+            stmt = select(TableEpisodes.id)
+            stmt = (stmt.where(TableEpisodes.sonarrSeriesId == int(series_upstream_id))
+                    if series_upstream_id is not None
+                    else stmt.where(TableEpisodes.sonarrEpisodeId.in_(upstream_ids)))
+            stmt = scoped(stmt, TableEpisodes.arr_instance_id, arr_instance_id)
+        else:
+            stmt = scoped(select(TableMovies.id).where(TableMovies.radarrId.in_(upstream_ids)),
+                          TableMovies.arr_instance_id, arr_instance_id)
+
+        forget_media(database, media_type, [row.id for row in database.execute(stmt).all()])
+    except Exception:
+        logger.exception('BAZARR could not forget the release-type mismatches of deleted media')
 
 
 def flagged_media_ids(session, media_type, media_ids):

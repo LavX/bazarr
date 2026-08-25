@@ -79,6 +79,12 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
 
             if forced_minimum_score:
                 min_score = int(forced_minimum_score) + 1
+
+            # Languages whose subtitle was downloaded. Their recorded release-type
+            # mismatch is cleared once the file is actually on disk, not before:
+            # save_subtitles can still fail, and clearing early would drop the
+            # badge while the language is in fact still missing.
+            languages_that_landed = []
             for language in language_set:
                 # confirm if language is still missing or if cutoff has been reached
                 if check_if_still_required and language not in check_missing_languages(path, media_type):
@@ -122,12 +128,12 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                             logging.exception('BAZARR Error checking for a release type '
                                               'mismatch for this file %s', path)
                     elif downloaded_subtitles.get(video):
-                        # The language is satisfied, so whatever was recorded for
-                        # it describes a problem the user no longer has. A badge
-                        # that outlives its mismatch is worse than no badge:
-                        # nothing distinguishes it from a live one.
-                        clear_mismatch_for_video(video, media_type, language,
-                                                 arr_instance_id=arr_instance_id)
+                        # Only remembered here. The record is cleared after the
+                        # file is actually on disk: save_subtitles can fail on
+                        # permissions or a full filesystem, and clearing first
+                        # would drop the badge and the once-only record while
+                        # the language is still missing.
+                        languages_that_landed.append((video, language))
 
                 if downloaded_subtitles:
                     for video, subtitles in downloaded_subtitles.items():
@@ -164,6 +170,10 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                             pass
                         else:
                             saved_any = True
+                            for landed_video, landed_language in languages_that_landed:
+                                clear_mismatch_for_video(landed_video, media_type, landed_language,
+                                                         arr_instance_id=arr_instance_id)
+                            languages_that_landed = []
                             for subtitle in saved_subtitles:
                                 if "hash" in subtitle.matches:
                                     # make matches set cleaner for history purpose when hash matches

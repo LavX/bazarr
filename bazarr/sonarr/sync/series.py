@@ -13,6 +13,7 @@ from sonarr.rootfolder import check_sonarr_rootfolder
 from app.database import TableShows, TableLanguagesProfiles, database, insert, update, delete, select
 from utilities.path_mappings import path_mappings
 from app.event_handler import event_stream
+from subtitles.mismatch import forget_media_by_upstream
 from app.jobs_queue import jobs_queue
 from arr_instances.resolution import client_for_instance, default_instance_id, scoped, stamp_owner
 
@@ -261,6 +262,10 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
 
     # Delete series from DB
     if action == 'deleted' and existing_in_db:
+        # The mismatch records are per episode, so a series deletion has to take
+        # every one of its episodes' records with it.
+        forget_media_by_upstream('series', [], arr_instance_id,
+                                 series_upstream_id=int(series_id))
         database.execute(
             scoped(delete(TableShows)
                    .where(TableShows.sonarrSeriesId == int(series_id)),
