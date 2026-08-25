@@ -40,6 +40,14 @@ deprecated and will be removed after v3.0.0, they are not maintained, and each o
 saying so. A pull request that patches one will most likely be asked to move to the catalog, which
 is wasted effort for you, so please start there.
 
+One exception to the release-independence above, worth knowing before you port anything: the
+Provider Hub only lets an official catalog plugin take over a built-in provider id that is listed in
+`MIGRATED_BUILT_IN_PROVIDER_IDS` in `bazarr/provider_hub/migration.py`. A plugin claiming an id that
+is not on that list is skipped at registration, so it cannot replace the shipped built-in until this
+repository is released with that id added. Check the list first. The ids deliberately kept off it
+are providers whose sites are gone, `podnapisi`, `subscenter` and `xsubs` among them, and those are
+headed for deletion rather than a catalog port, so please do not spend time porting one.
+
 Read `docs/writing-a-scraper-provider.md` in the catalog repository before you begin. One thing
 worth checking early: if the built-in you are porting from uses `CFSession`, the site is behind
 Cloudflare, and the plugin needs cloudscraper plus the anti-captcha or FlareSolverr manifest flags
