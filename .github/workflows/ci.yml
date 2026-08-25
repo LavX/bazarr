@@ -204,9 +204,10 @@ jobs:
         # test_upgrade_embedded_history. api/system/status.py does
         # `from init import startTime`, and bazarr/init.py calls init_binaries() at
         # module scope, which globally repoints rarfile at 7z exactly as production
-        # does. The 7z in the image cannot decode the RAR fixture that test reads,
-        # so the co-collected run was detecting the shipped RAR bug and this split
-        # hides it.
+        # does. get_binary() resolves that through which(), so the binary in play
+        # here is the runner's own 7z, not anything in the Docker image, and it
+        # cannot decode the RAR fixture that test reads. The co-collected run was
+        # detecting the shipped RAR bug and this split hides it.
         #
         # Do not go looking for those five by grepping for `import api`: one of them
         # gets there through importlib.import_module on a string, two import neither
