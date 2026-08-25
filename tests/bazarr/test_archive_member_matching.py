@@ -248,14 +248,39 @@ def test_release_info_text_file_never_wins_over_a_real_subtitle_in_archive_order
     assert sub.format == "srt"
 
 
-def test_ambiguous_member_is_dropped_while_an_unambiguous_one_exists():
+def test_ambiguous_member_is_ordered_last_rather_than_dropped():
+    """A .txt member is usually release info, so it must never win the pick that
+    just takes the first member. Dropping it outright is a different thing and
+    the wrong one: this same list is what language and episode matching sees, so
+    an archive of movie.sr.txt beside movie.en.srt would lose its Serbian
+    subtitle entirely.
+    """
     archive = _archive([("info.txt", b"release info"), ("movie.srt", _SRT)])
-    assert utils.list_subtitle_members(archive, SUBTITLE_EXTENSIONS) == ["movie.srt"]
+    assert utils.list_subtitle_members(archive, SUBTITLE_EXTENSIONS) == ["movie.srt", "info.txt"]
 
 
 def test_ambiguous_member_is_used_when_it_is_all_there_is():
     archive = _archive([("info.txt", _MICRODVD)])
     assert utils.list_subtitle_members(archive, SUBTITLE_EXTENSIONS) == ["info.txt"]
+
+
+def test_a_language_tagged_text_member_survives_beside_a_real_subtitle():
+    """The ex-Yugoslav providers ship MicroDVD in .txt files, so a mixed archive
+    is a real shape and the .txt is the only copy of that language."""
+    archive = _archive([("movie.sr.txt", _MICRODVD), ("movie.en.srt", _SRT)])
+
+    members = utils.list_subtitle_members(archive, SUBTITLE_EXTENSIONS)
+
+    assert "movie.sr.txt" in members
+    assert members[0] == "movie.en.srt"
+
+
+def test_the_hub_offers_the_text_member_for_language_selection():
+    members = proto._list_archive_members(
+        get_archive_from_bytes(_zip([("movie.sr.txt", _MICRODVD), ("movie.en.srt", _SRT)]))
+    )
+
+    assert sorted(members) == ["movie.en.srt", "movie.sr.txt"]
 
 
 # --------------------------------------------------------------------------
@@ -306,3 +331,45 @@ def test_extracted_file_guard_rejects_symlinks_and_escapes(tmp_path):
     link = os.path.join(root, "link.srt")
     os.symlink(str(outside), link)
     assert not proto._is_safe_extracted_file(link, root)
+
+
+# --------------------------------------------------------------------------
+# The pysubs2 format identifier is not a filename extension.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("subtitle_format,expected_suffix", [
+    ("sami", ".smi"),
+    ("mpl2", ".mpl"),
+    ("microdvd", ".sub"),
+    ("tmp", ".txt"),
+    ("ass", ".ass"),
+    ("vtt", ".vtt"),
+])
+def test_saving_uses_the_file_extension_not_the_parser_name(tmp_path, subtitle_format, expected_suffix):
+    """save_subtitles uses the format both to render the content and to name the
+    file. They are not the same vocabulary: pysubs2 calls SAMI "sami" and MPL2
+    "mpl2", so preserving the original format wrote Film.en.sami, which is not a
+    subtitle extension Bazarr indexes and the download reads as still missing.
+    """
+    from subliminal_patch.core import save_subtitles
+    from subzero.language import Language
+
+    video = tmp_path / "Film.mkv"
+    video.write_bytes(b"")
+
+    class _Subtitle:
+        language = Language("eng")
+        mods = None
+        text = "Hello"
+        content = b"Hello"
+        format = subtitle_format
+        storage_path = None
+
+        def get_modified_content(self, format=None, debug=False):
+            return b"payload"
+
+    save_subtitles(str(video), [_Subtitle()], formats={subtitle_format})
+
+    written = sorted(p.name for p in tmp_path.iterdir() if p.suffix != ".mkv")
+    assert written == [f"Film.en{expected_suffix}"]

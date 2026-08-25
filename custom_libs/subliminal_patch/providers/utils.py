@@ -68,8 +68,13 @@ def list_subtitle_members(archive, extensions=DEFAULT_ARCHIVE_EXTENSIONS):
     picks from both come from here, so the two can never disagree about a given
     archive the way they did when each filtered for itself.
 
-    Members whose extension is ambiguous are dropped while an unambiguous one is
-    present, and returned only when they are all there is.
+    Members whose extension is ambiguous come last, in archive order among
+    themselves. Last rather than absent: a caller that just takes the first
+    member gets the real subtitle instead of the release-info text file, which
+    is what the ordering is for, while language and episode matching can still
+    reach a .txt member. The ex-Yugoslav providers ship MicroDVD in .txt files,
+    so an archive holding movie.sr.txt beside movie.en.srt is a real shape and
+    the .txt is the only copy of that language.
     """
     unambiguous = []
     ambiguous = []
@@ -80,7 +85,7 @@ def list_subtitle_members(archive, extensions=DEFAULT_ARCHIVE_EXTENSIONS):
             ambiguous.append(name)
         else:
             unambiguous.append(name)
-    return unambiguous or ambiguous
+    return unambiguous + ambiguous
 
 
 def _archive_member_names(archive):
