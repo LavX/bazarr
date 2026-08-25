@@ -208,7 +208,15 @@ class LegendasdivxSubtitle(Subtitle):
         type_ = "movie" if isinstance(video, Movie) else "episode"
 
         if isinstance(video, Movie):
-            if video.imdb_id:
+            # score.py expands a movie imdb_id match into title plus year, which
+            # is 100 of the 180 available points against a default
+            # minimum_score_movie of 126. The episode branch below can take that
+            # shortcut because query() passes series_imdb_id to the site's imdb=
+            # filter, so the backend guarantees the match. For movies query()
+            # sends imdbid='' and only puts the id in the free-text query, so
+            # there is no such guarantee: claim it only when this result
+            # actually carries the id.
+            if video.imdb_id and video.imdb_id.lower() in self.description.lower():
                 self.matches.update(['imdb_id'])
         else:
             if video.series:

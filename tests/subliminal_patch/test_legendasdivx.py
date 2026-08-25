@@ -12,6 +12,7 @@ from subliminal.cache import region
 from subliminal.exceptions import AuthenticationError, ConfigurationError
 from subliminal.video import Movie
 from subliminal_patch.core import Episode
+from subliminal_patch.score import compute_score
 from subliminal_patch.providers import legendasdivx
 from subliminal_patch.providers.legendasdivx import LegendasdivxProvider, LegendasdivxSubtitle, extract_release_info
 from subzero.language import Language
@@ -175,7 +176,11 @@ def test_legendasdivx_query_movie(requests_mock):
     matches = sub.get_matches(movie)
     assert "title" in matches
     assert "year" in matches
-    assert "imdb_id" in matches
+    # This result is for the right film, but the page carries no imdb id, and a
+    # movie imdb_id match expands into title plus year in score.py. Title and
+    # year are matched on their own above, so nothing is lost by requiring the
+    # id to actually appear. See the two imdb_id tests at the end of this file.
+    assert "imdb_id" not in matches
     assert "video_codec" in matches
     assert "resolution" in matches
     assert "release_group" in matches
@@ -374,6 +379,49 @@ def test_legendasdivx_cli_extraction_filters_untargeted_members_by_episode(monke
 
     video = Episode("Breaking.Bad.S01E07.mkv", "Breaking Bad", 1, 7)
     assert provider._extract_via_cli(b"archive", video=video) == b"wrong episode\n"
+
+
+# ---------------------------------------------------------------------------
+# Movie imdb_id claim.
+# ---------------------------------------------------------------------------
+
+def _movie_subtitle(video, description, title, year):
+    data = {
+        "link": "https://www.legendasdivx.pt/modules.php?lid=2",
+        "hits": 1,
+        "exact_match": False,
+        "title": title,
+        "year": year,
+        "description": description,
+        "frame_rate": "0",
+        "uploader": "uploader",
+        "release_info": description,
+    }
+    return LegendasdivxSubtitle(Language("por"), video, data, skip_wrong_fps=False)
+
+
+def test_legendasdivx_movie_imdb_id_needs_evidence_in_the_result():
+    video = Movie("The.Matrix.1999.1080p.BluRay.x264-SPARKS.mkv", "The Matrix", year=1999)
+    video.imdb_id = "tt0133093"
+
+    # a result for an unrelated film; query() sends imdbid='' for movies, so the
+    # backend guarantees nothing here
+    subtitle = _movie_subtitle(video, "Legendas para outro filme qualquer", "Totally Different Film", 2015)
+    matches = subtitle.get_matches(video)
+
+    assert "imdb_id" not in matches
+    # score.py expands a movie imdb_id match into title plus year, 100 of 180
+    # points, against a default minimum_score_movie of 126
+    assert compute_score(set(matches), subtitle, video)[0] < 126
+
+
+def test_legendasdivx_movie_imdb_id_claimed_when_the_result_carries_it():
+    video = Movie("The.Matrix.1999.1080p.BluRay.x264-SPARKS.mkv", "The Matrix", year=1999)
+    video.imdb_id = "tt0133093"
+
+    subtitle = _movie_subtitle(video, "The Matrix (1999) imdb tt0133093 BluRay", "The Matrix", 1999)
+
+    assert "imdb_id" in subtitle.get_matches(video)
 
 
 @pytest.mark.skipif(shutil.which("unar") is None, reason="needs a real unar to restore symlink members")
