@@ -54,8 +54,11 @@ def _format_release(version_item, series, season, episode):
         return version_item
 
     lowered = version_item.lower()
-    if re.search(_token_boundaries(rf"s{season:02d}e{episode:02d}"), lowered) or re.search(
-        _token_boundaries(rf"{season}x{episode:02d}"), lowered
+    # 0* on each number: S01E2, S1E02 and 1x2 all name this episode as surely
+    # as the zero-padded spelling does, and a name that already says which
+    # episode it is must not get a second copy prefixed onto it.
+    if re.search(_token_boundaries(rf"s0*{season}e0*{episode}"), lowered) or re.search(
+        _token_boundaries(rf"0*{season}x0*{episode}"), lowered
     ):
         return version_item
 

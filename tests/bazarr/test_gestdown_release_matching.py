@@ -101,6 +101,13 @@ def test_a_group_the_subtitle_really_names_still_matches():
     "Show_S01E02_1080p_WEB-DL",
     "Show S01E02 1080p WEB-DL",
     "Show.1x02.1080p.WEB-DL",
+    # Unpadded is just as common a spelling, and the point of the check is to
+    # leave a name that already says which episode it is alone. These carry no
+    # series title, so the episode test is the only thing standing between them
+    # and a prefixed second copy of the same episode number.
+    "S01E2.1080p.WEB-DL",
+    "S1E2.1080p.WEB-DL",
+    "1x2.1080p.WEB-DL",
 ])
 def test_a_release_that_already_names_the_episode_is_never_duplicated(version):
     """Underscores separate release tokens as surely as dots do, but they are
