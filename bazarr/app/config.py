@@ -390,9 +390,6 @@ validators = [
     Validator('cinemaz.cookies', must_exist=True, default='', is_type_of=str),
     Validator('cinemaz.user_agent', must_exist=True, default='', is_type_of=str),
 
-    # podnapisi section
-    Validator('podnapisi.verify_ssl', must_exist=True, default=True, is_type_of=bool),
-
     # subf2m section
     Validator('subf2m.verify_ssl', must_exist=True, default=True, is_type_of=bool),
     Validator('subf2m.user_agent', must_exist=True, default='', is_type_of=str),
@@ -425,10 +422,6 @@ validators = [
     # ktuvit section
     Validator('ktuvit.email', must_exist=True, default='', is_type_of=str),
     Validator('ktuvit.hashed_password', must_exist=True, default='', is_type_of=str, cast=str),
-
-    # xsubs section
-    Validator('xsubs.username', must_exist=True, default='', is_type_of=str, cast=str),
-    Validator('xsubs.password', must_exist=True, default='', is_type_of=str, cast=str),
 
     # assrt section
     Validator('assrt.token', must_exist=True, default='', is_type_of=str, cast=str),
