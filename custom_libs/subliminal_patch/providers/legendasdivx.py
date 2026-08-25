@@ -711,17 +711,21 @@ class LegendasdivxProvider(Provider):
         members = 0
         for root, dirs, files in os.walk(outdir):
             members += len(dirs)
+            if members > CLI_EXTRACT_MAX_MEMBERS:
+                return total_bytes, members
+
             for f in files:
                 members += 1
+                if members > CLI_EXTRACT_MAX_MEMBERS:
+                    return total_bytes, members
+
                 try:
                     total_bytes += os.lstat(os.path.join(root, f)).st_size
                 except OSError:
                     continue
+
                 if total_bytes > CLI_EXTRACT_MAX_BYTES:
                     return total_bytes, members
-
-            if members > CLI_EXTRACT_MAX_MEMBERS:
-                return total_bytes, members
 
         return total_bytes, members
 
@@ -867,12 +871,18 @@ class LegendasdivxProvider(Provider):
                     return None
 
                 # No specific member was asked for, so drop anything the wanted
-                # episode contradicts before falling back to the first one.
+                # episode contradicts before falling back to the first one. The
+                # member's path inside the archive is what gets matched, not its
+                # basename: some packs put the episode in the directory and call
+                # every file the same thing, and matching the basename alone
+                # would accept every one of them.
                 found_files = [f for f in found_files
-                               if name_matches_wanted_episode(video, os.path.split(f)[-1])]
+                               if name_matches_wanted_episode(video, os.path.relpath(f, outdir))]
 
-                if found_files:
-                    with open(found_files[0], "rb") as sf:
+                # Sorted, because os.walk yields whatever order the filesystem
+                # hands back and "the first one" has to mean something stable.
+                for candidate in sorted(found_files):
+                    with open(candidate, "rb") as sf:
                         return sf.read()
 
                 logger.error("Legendasdivx.pt :: No usable subtitle in the extracted archive")

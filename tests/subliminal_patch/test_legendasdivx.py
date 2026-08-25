@@ -702,3 +702,67 @@ def test_legendasdivx_absolute_numbering_does_not_override_a_stated_season():
     provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
 
     assert provider._get_subtitle_from_archive(archive, content, _episode_subtitle(video)) is None
+
+
+def test_legendasdivx_member_budget_stops_inside_the_directory_it_is_reading(monkeypatch, tmp_path):
+    """The count exists to cut a running extractor short. Reading a whole
+    directory of a million entries before noticing the cap was crossed leaves
+    the extractor alive for the entire scan, spending an inode per entry."""
+    from subliminal_patch.providers import legendasdivx as mod
+
+    stated = []
+    real_lstat = os.lstat
+
+    def counting_lstat(path):
+        # mod.os is the os module itself, so this patch is global: hold the real
+        # one or the stand-in calls itself.
+        stated.append(path)
+        return real_lstat(__file__)
+
+    monkeypatch.setattr(mod.os, "lstat", counting_lstat)
+    monkeypatch.setattr(mod.os, "walk", lambda top: iter(
+        [("/root", [], [f"f{i}" for i in range(mod.CLI_EXTRACT_MAX_MEMBERS * 10)])]
+    ))
+    monkeypatch.setattr(mod, "CLI_EXTRACT_MAX_BYTES", 10 ** 12)
+
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
+    assert provider._over_extraction_budget(str(tmp_path), "unzip") is True
+    assert len(stated) <= mod.CLI_EXTRACT_MAX_MEMBERS + 1, (
+        f"the whole directory was read: {len(stated)} entries stat'ed"
+    )
+
+
+def test_legendasdivx_cli_extraction_reads_the_episode_from_the_directory(monkeypatch, tmp_path):
+    """Some packs put the episode in the directory and call every file the
+    same thing. Matching the basename alone accepts both, so a request for E02
+    silently gets E01."""
+    def lay_down(d):
+        for episode in ("S01E01", "S01E02"):
+            folder = d / f"Show.{episode}"
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "subtitle.srt").write_bytes(f"{episode} subtitle\n".encode())
+
+    _fake_extractor(monkeypatch, tmp_path, lay_down)
+
+    # os.walk hands back filesystem order, so pin it: E01 first is the order
+    # that makes a basename-only match hand over the wrong episode.
+    from subliminal_patch.providers import legendasdivx as mod
+    real_walk = os.walk
+
+    def ordered_walk(top):
+        for root, dirs, files in real_walk(top):
+            # In place: os.walk recurses through this very list, so replacing it
+            # with a sorted copy would leave the traversal order untouched.
+            dirs.sort()
+            files.sort()
+            yield root, dirs, files
+
+    monkeypatch.setattr(mod.os, "walk", ordered_walk)
+
+    video = Episode("Show.S01E02.mkv", "Show", 1, 2)
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
+    out = provider._extract_via_cli(b"archive-bytes", None, video)
+
+    assert out == b"S01E02 subtitle\n"
