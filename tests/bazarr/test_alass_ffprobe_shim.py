@@ -306,3 +306,45 @@ def test_no_launcher_at_all_when_nothing_can_execute(monkeypatch, tmp_path):
     monkeypatch.setattr(shim.subprocess, "run", run)
 
     assert shim.ensure_launcher() is None
+
+
+def test_an_operator_configured_ffprobe_override_is_kept(recorded_alass_run, monkeypatch, tmp_path):
+    """ALASS_FFPROBE_PATH in the environment is someone's deliberate choice of
+    ffprobe, and alass honoured it before the shim existed. The shim runs it
+    rather than replacing it."""
+    monkeypatch.setenv("ALASS_FFPROBE_PATH", "/opt/custom/ffprobe")
+    syncer, calls = recorded_alass_run
+
+    syncer._run_external_engine(engine="alass", output_path=tmp_path / "out.srt",
+                                video_path=str(tmp_path / "video.mkv"))
+
+    env = _alass_call(calls)["env"]
+    assert env["BAZARR_ALASS_REAL_FFPROBE"] == "/opt/custom/ffprobe"
+    assert env["ALASS_FFPROBE_PATH"] != "/opt/custom/ffprobe", "the shim never got in front of it"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the launcher is a POSIX shell script")
+def test_the_self_test_needs_no_external_program(tmp_path):
+    """/bin/true is not where macOS keeps it, and a self-test that depends on
+    a program that is not there rejects every candidate directory and quietly
+    disables the shim on a whole platform."""
+    launcher = _shim().ensure_launcher()
+
+    done = subprocess.run([launcher, _shim().SELFTEST_ARG], capture_output=True, text=True,
+                          env={k: v for k, v in os.environ.items() if k != "PATH"})
+
+    assert done.returncode == 0, done.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the launcher is a POSIX shell script")
+def test_a_failed_install_leaves_no_directory_behind(monkeypatch, tmp_path):
+    """Nothing caches a failure, so every sync retries the install. Each retry
+    leaving a private directory behind is an inode leak on a noexec host."""
+    shim = _shim()
+    monkeypatch.setattr(shim, "_LAUNCHER_PATH", None, raising=False)
+    monkeypatch.setattr(shim, "_writable_directories", lambda: [str(tmp_path)])
+    monkeypatch.setattr(shim.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(PermissionError(13, "denied")))
+
+    assert shim.ensure_launcher() is None
+    assert list(tmp_path.iterdir()) == []

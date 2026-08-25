@@ -35,6 +35,11 @@ UNKNOWN_CODEC = "unknown"
 
 REAL_FFPROBE_ENV = "BAZARR_ALASS_REAL_FFPROBE"
 
+# Proves the launcher can be executed without depending on any other program:
+# /bin/true is not where macOS keeps it, and a self-test that needs a program
+# that is not there would disable the shim across a whole platform.
+SELFTEST_ARG = "--bazarr-shim-selftest"
+
 logger = logging.getLogger(__name__)
 
 
@@ -103,25 +108,27 @@ def _writable_directories():
     return directories
 
 
-def _install_launcher(parent, content):
-    """Write the launcher under ``parent`` and prove it can actually run."""
+def _ensure(parent):
     os.makedirs(parent, exist_ok=True)
-    # mkdtemp gives us 0700 ownership of a name nobody could have guessed.
-    directory = tempfile.mkdtemp(prefix="bazarr-alass-shim-", dir=parent)
+    return parent
+
+
+def _install_launcher(directory, content):
+    """Write the launcher in ``directory`` and prove it can actually run.
+
+    The directory comes from mkdtemp, which gives us 0700 ownership of a name
+    nobody could have guessed.
+    """
     launcher = os.path.join(directory, "ffprobe")
     with open(launcher, "w", encoding="utf-8") as handle:
         handle.write(content)
     os.chmod(launcher, 0o700)
 
-    # Run it once against a program that ignores its arguments and succeeds. A
-    # noexec mount fails here rather than in the middle of a subtitle sync.
-    probe = subprocess.run(
-        [launcher], capture_output=True,
-        env=dict(os.environ, **{REAL_FFPROBE_ENV: "/bin/true"}),
-        timeout=30,
-    )
+    # Run it once. A noexec mount fails here rather than in the middle of a
+    # subtitle sync.
+    probe = subprocess.run([launcher, SELFTEST_ARG], capture_output=True, timeout=30)
     if probe.returncode != 0:
-        raise OSError(f"the launcher in {parent} exited {probe.returncode}")
+        raise OSError(f"the launcher in {directory} exited {probe.returncode}")
 
     return launcher
 
@@ -151,10 +158,16 @@ def ensure_launcher():
 
     content = launcher_script(sys.executable, os.path.abspath(__file__))
     for parent in _writable_directories():
+        directory = None
         try:
-            _LAUNCHER_PATH = _install_launcher(parent, content)
+            directory = tempfile.mkdtemp(prefix="bazarr-alass-shim-", dir=_ensure(parent))
+            _LAUNCHER_PATH = _install_launcher(directory, content)
         except Exception:
             logger.debug("Could not install the alass ffprobe shim in %s", parent, exc_info=True)
+            # Nothing remembers the failure, so every sync retries this. Each
+            # retry leaving its private directory behind would leak inodes.
+            if directory:
+                shutil.rmtree(directory, ignore_errors=True)
             continue
 
         return _LAUNCHER_PATH
@@ -168,6 +181,10 @@ def real_ffprobe():
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+
+    if argv == [SELFTEST_ARG]:
+        # Only ever run by ensure_launcher, to prove this file can be executed.
+        return 0
 
     executable = real_ffprobe()
     if not executable:

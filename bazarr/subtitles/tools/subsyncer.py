@@ -328,6 +328,18 @@ class SubSyncer:
         """
         environment = dict(os.environ)
 
+        # An ALASS_FFPROBE_PATH already in the environment is somebody's
+        # deliberate choice of ffprobe, which alass honoured before this shim
+        # existed. The shim runs it rather than replacing it.
+        configured = os.environ.get('ALASS_FFPROBE_PATH')
+        if configured:
+            launcher = alass_ffprobe_shim.ensure_launcher()
+            if not launcher:
+                return environment
+            environment[alass_ffprobe_shim.REAL_FFPROBE_ENV] = configured
+            environment['ALASS_FFPROBE_PATH'] = launcher
+            return environment
+
         try:
             ffprobe_exe = get_binary('ffprobe')
         except Exception:
