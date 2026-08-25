@@ -108,6 +108,11 @@ def test_a_group_the_subtitle_really_names_still_matches():
     "S01E2.1080p.WEB-DL",
     "S1E2.1080p.WEB-DL",
     "1x2.1080p.WEB-DL",
+    # Multi-episode releases name this episode too, in every spelling of it.
+    "S01E01-E02.1080p.WEB-DL",
+    "S01E01E02.1080p.WEB-DL",
+    "S01E01-02.1080p.WEB-DL",
+    "1x01-02.1080p.WEB-DL",
 ])
 def test_a_release_that_already_names_the_episode_is_never_duplicated(version):
     """Underscores separate release tokens as surely as dots do, but they are
@@ -116,3 +121,18 @@ def test_a_release_that_already_names_the_episode_is_never_duplicated(version):
     sub = _subtitle(version, series="Show", season=1, episode=2)
 
     assert sub.release_info == version
+
+
+@pytest.mark.parametrize("version", [
+    "S01E03.1080p.WEB-DL",
+    "S02E02.1080p.WEB-DL",
+    "S01E03-E04.1080p.WEB-DL",
+    "2x02.1080p.WEB-DL",
+    "1920x1080.WEB-DL",
+])
+def test_a_release_naming_another_episode_still_gets_the_scene_style_name(version):
+    """The other half of the same rule: only a name that really says S01E02 is
+    left alone, or the prefix stops being a reliable label."""
+    sub = _subtitle(version, series="Show", season=1, episode=2)
+
+    assert sub.release_info == f"Show.S01E02.{version}"

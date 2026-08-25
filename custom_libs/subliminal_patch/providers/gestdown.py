@@ -43,6 +43,26 @@ def _token_boundaries(token):
     return rf"(?<![a-z0-9]){token}(?![a-z0-9])"
 
 
+# One season tag and every episode hanging off it, so a multi-episode release
+# such as S01E01-E02 or S01E01E02 is recognised as naming both of them. The 0*
+# on each number is what accepts the unpadded spellings, S01E2 and 1x2.
+_SEASON_EPISODES = re.compile(r"(?<![a-z0-9])s0*(\d+)((?:[-_. ]?e?0*\d+)+)(?![a-z0-9])")
+# The same in the NxMM spelling, ranges included.
+_SEASON_X_EPISODES = re.compile(r"(?<![a-z0-9])0*(\d+)x((?:[-_. ]?0*\d+)+)(?![a-z0-9])")
+
+
+def _already_names_the_episode(lowered, season, episode):
+    """True when the release name already says which episode this is."""
+    for pattern in (_SEASON_EPISODES, _SEASON_X_EPISODES):
+        for match in pattern.finditer(lowered):
+            if int(match.group(1)) != season:
+                continue
+            if episode in [int(number) for number in re.findall(r"\d+", match.group(2))]:
+                return True
+
+    return False
+
+
 def _format_release(version_item, series, season, episode):
     """Display-only scene-style name: ``Series.SxxEyy.version``.
 
@@ -54,12 +74,7 @@ def _format_release(version_item, series, season, episode):
         return version_item
 
     lowered = version_item.lower()
-    # 0* on each number: S01E2, S1E02 and 1x2 all name this episode as surely
-    # as the zero-padded spelling does, and a name that already says which
-    # episode it is must not get a second copy prefixed onto it.
-    if re.search(_token_boundaries(rf"s0*{season}e0*{episode}"), lowered) or re.search(
-        _token_boundaries(rf"0*{season}x0*{episode}"), lowered
-    ):
+    if _already_names_the_episode(lowered, season, episode):
         return version_item
 
     clean_version = version_item.replace(" ", ".")
