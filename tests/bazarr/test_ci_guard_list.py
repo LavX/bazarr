@@ -20,6 +20,7 @@ import pathlib
 import re
 
 import pytest
+import yaml
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
@@ -84,39 +85,70 @@ EXCLUDED = {
 }
 
 
-def _workflow_runnable_text() -> str:
-    """Workflow text with comments stripped.
+# A line whose COMMAND is pytest, allowing leading VAR=value assignments.
+# Substring matching is not enough: "echo pytest ...", a step name mentioning
+# pytest, or a step disabled with `if:` would all count as coverage.
+_PYTEST_COMMAND = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*pytest\b")
+_TEST_PATH = re.compile(r"tests/[\w./-]+\.py")
 
-    Scraping the raw YAML counts a path mentioned in a comment, or commented
-    out, as enumerated. That is the exact rot this guard exists to prevent: drop
-    a file from the run list, leave the comment behind, and the guard stays green
-    while the file stops running.
+
+def _workflow() -> dict:
+    return yaml.safe_load(WORKFLOW.read_text())
+
+
+def _unconditional_run_scripts() -> list:
+    """Every `run:` script that always executes.
+
+    A step carrying an `if:` is skipped deliberately. It may not run, so it
+    cannot be counted as guaranteed coverage: disabling a pytest step with
+    `if: false` would otherwise leave the guard green while the tests stopped.
     """
-    return "\n".join(re.sub(r"#.*$", "", line) for line in WORKFLOW.read_text().splitlines())
+    scripts = []
+    for job in (_workflow().get("jobs") or {}).values():
+        for step in job.get("steps") or []:
+            if not isinstance(step, dict) or "if" in step:
+                continue
+            script = step.get("run")
+            if isinstance(script, str):
+                scripts.append(script)
+    return scripts
+
+
+def _paths_in_script(script: str) -> set:
+    """Paths that a pytest command in this script actually receives.
+
+    Argument lists continue while lines end in a backslash, which is how the
+    workflow spells its multi-line invocations. `for f in ... ; do pytest "$f"`
+    counts too, since that list is what pytest iterates.
+    """
+    paths = set()
+    collecting = False
+    for raw in script.splitlines():
+        line = re.sub(r"#.*$", "", raw).strip()
+        if _PYTEST_COMMAND.match(line) or line.startswith("for f in"):
+            collecting = True
+        if collecting:
+            paths.update(_TEST_PATH.findall(line))
+            if not line.endswith("\\"):
+                collecting = False
+    return paths
 
 
 def _enumerated_paths() -> set:
-    """Every tests/... path actually handed to pytest.
-
-    Scanning the whole workflow, even with comments stripped, still counts a path
-    that merely appears somewhere: in an echo, an environment variable, or a
-    disabled line. Only paths inside a pytest invocation, or inside the shell
-    list that a pytest loop iterates, mean the file is collected.
-
-    A command's argument list continues while lines end in a backslash, which is
-    how the workflow spells these multi-line invocations.
-    """
+    """Every tests/... path actually handed to pytest by a step that always runs."""
     paths = set()
-    in_command = False
-    for line in _workflow_runnable_text().splitlines():
-        stripped = line.strip()
-        if "pytest" in stripped or stripped.startswith("for f in"):
-            in_command = True
-        if in_command:
-            paths.update(re.findall(r"tests/[\w./-]+\.py", stripped))
-            if not stripped.endswith("\\"):
-                in_command = False
+    for script in _unconditional_run_scripts():
+        paths |= _paths_in_script(script)
     return paths
+
+
+def _directory_is_run(directory: str) -> bool:
+    return any(
+        directory in re.sub(r"#.*$", "", line)
+        for script in _unconditional_run_scripts()
+        for line in script.splitlines()
+        if _PYTEST_COMMAND.match(re.sub(r"#.*$", "", line).strip())
+    )
 
 
 def _all_test_files() -> set:
@@ -142,7 +174,7 @@ def test_directory_runs_are_still_in_the_workflow(directory):
     """Files under these directories are covered only because CI runs the whole
     directory. If that step is deleted, they would silently stop running while
     this guard still counted them as covered."""
-    assert directory in _workflow_runnable_text(), (
+    assert _directory_is_run(directory), (
         f"CI no longer runs {directory} wholesale, so the files under it are "
         "not covered. Enumerate them or restore the directory run."
     )
