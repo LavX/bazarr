@@ -337,6 +337,16 @@ _ALWAYS_RUNS = {True, "true", "always()", "${{ always() }}", "${{always()}}"}
 # Shells whose semantics the grammar below describes.
 _SAFE_SHELLS = {None, "bash", "sh", "bash -e {0}"}
 
+# A step writing to $GITHUB_ENV or $GITHUB_PATH changes the environment of every
+# later step in the same job. The step doing it need not mention pytest or a
+# tests/ path, so it is invisible to _MENTIONS_TESTS: `echo
+# "PYTEST_ADDOPTS=--collect-only" >> $GITHUB_ENV` in a step called "Configure
+# environment" silences the suite three steps further down. That is the fourth
+# way into the same hole PYTEST_ADDOPTS already closes at workflow, job, step and
+# inline-assignment scope, so it is refused wherever it appears in a job that
+# runs tests.
+_EXPORTS_ENVIRONMENT = re.compile(r"\bGITHUB_(ENV|PATH)\b")
+
 # Every shell operator, all of them refused inside a test-bearing script. Each
 # one is a way for a command to name a path without running it, or to run it
 # without its exit status binding.
@@ -753,6 +763,76 @@ def _scope_problem(kind: str, name: str, scope: dict, safe_keys: set) -> str:
     return ""
 
 
+def _exported_environment_problems(job_name: str, steps: list) -> list:
+    """Steps that hand a changed environment to the steps after them.
+
+    Every other check here looks only at steps that mention pytest or a tests/
+    path, which is right for shell: a step that runs no tests cannot run them
+    wrong. $GITHUB_ENV is the exception, because its effect outlives the step.
+    """
+    problems = []
+    for position, step in enumerate(steps or []):
+        script = step.get("run") if isinstance(step, dict) else None
+        if not isinstance(script, str) or not _EXPORTS_ENVIRONMENT.search(script):
+            continue
+        label = f"{job_name!r} step {step.get('name') or position!r}"
+        problems.append(
+            f"{label} writes to GITHUB_ENV or GITHUB_PATH, which GitHub applies "
+            "to every later step in the job. The guard cannot see what value "
+            "lands there, and PYTEST_ADDOPTS=--collect-only put there from a "
+            "step that mentions neither pytest nor tests/ silences the suite "
+            "while every command still looks like it runs the tests. No step in "
+            "this job counts while that line is here"
+        )
+    return problems
+
+
+def _dependency_problems(job_name: str, jobs: dict) -> list:
+    """The job-scope checks, applied over the whole `needs:` closure.
+
+    Checking only the job that carries the pytest steps leaves the hole one
+    level up: GitHub skips a job whose dependency was skipped, and a skipped job
+    does not fail the workflow. So `if: false` on a job that runs no tests at
+    all, but that the test job waits on, stops the tests as dead as putting it
+    on the test job itself. The same goes for a `needs:` naming a job that does
+    not exist, which GitHub never schedules.
+    """
+    problems = []
+    seen = {job_name}
+    queue = [job_name]
+    while queue:
+        current = queue.pop()
+        job = jobs.get(current)
+        needs = job.get("needs") if isinstance(job, dict) else None
+        if needs is None:
+            continue
+        names = [needs] if isinstance(needs, str) else needs
+        if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+            problems.append(
+                f"job {current} carries a `needs:` the guard cannot read: "
+                f"{needs!r}. It decides whether this job runs at all"
+            )
+            continue
+        for name in names:
+            if name in seen:
+                continue
+            seen.add(name)
+            if name not in jobs:
+                problems.append(
+                    f"job {current} needs {name}, which this workflow does not "
+                    "define, so GitHub never schedules it and the tests "
+                    "downstream of it never run"
+                )
+                continue
+            problem = _scope_problem(
+                "job", f"{name}, which {current} needs,", jobs[name], _SAFE_JOB_KEYS
+            )
+            if problem:
+                problems.append(problem)
+            queue.append(name)
+    return problems
+
+
 def _read_workflow() -> tuple:
     """(files CI really runs, problems that stop the guard vouching for a step)."""
     workflow = _workflow()
@@ -763,7 +843,8 @@ def _read_workflow() -> tuple:
     if top:
         return covered, [top]
 
-    for job_name, job in (workflow.get("jobs") or {}).items():
+    jobs = workflow.get("jobs") or {}
+    for job_name, job in jobs.items():
         steps = (job or {}).get("steps") if isinstance(job, dict) else None
         bearing = []
         for position, step in enumerate(steps or []):
@@ -778,6 +859,12 @@ def _read_workflow() -> tuple:
         job_problem = _scope_problem("job", job_name, job, _SAFE_JOB_KEYS)
         if job_problem:
             problems.append(job_problem)
+            continue
+
+        scope_problems = _dependency_problems(job_name, jobs)
+        scope_problems += _exported_environment_problems(job_name, steps)
+        if scope_problems:
+            problems.extend(scope_problems)
             continue
 
         for position, step, script in bearing:
@@ -1225,6 +1312,95 @@ def test_unknown_step_key_stops_the_guard_vouching(constructed_workflow):
     covered, problems = _read_workflow()
     assert covered == {_OTHER}
     assert any("some-new-key" in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
+    "case,script",
+    [
+        ("GITHUB_ENV", 'echo "PYTEST_ADDOPTS=--collect-only" >> $GITHUB_ENV\n'),
+        ("GITHUB_PATH", 'echo "$PWD/fake-bin" >> $GITHUB_PATH\n'),
+    ],
+)
+def test_environment_exported_by_an_earlier_step_is_not_coverage(
+    constructed_workflow, case, script
+):
+    """The step doing this mentions neither pytest nor tests/, and still decides.
+
+    GitHub applies a line written to $GITHUB_ENV to every later step in the job,
+    so this is PYTEST_ADDOPTS delivered by a route that no test-bearing step
+    check can see. It was the fourth way into a hole the guard had already
+    closed three times.
+    """
+    constructed_workflow(
+        _one_job(
+            {"name": "Configure environment", "run": script},
+            {"run": f"pytest {_REAL}\n"},
+        )
+    )
+    covered, problems = _read_workflow()
+    assert not covered, f"a job containing a {case} write was counted as coverage"
+    assert any(case in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
+    "case,upstream",
+    [
+        ("if", {"if": "false"}),
+        ("if", {"if": "github.event_name == 'schedule'"}),
+        ("some-new-key", {"some-new-key": 1}),
+    ],
+)
+def test_job_reached_through_needs_is_checked_too(constructed_workflow, case, upstream):
+    """`if: false` one job away skips the test job just as dead.
+
+    The job-scope checks used to run only on jobs that carry a test-bearing step
+    themselves. Frontend carries none, so `if: false` on Frontend skipped
+    Frontend, which skipped Backend through its `needs:`, and a skipped job does
+    not fail the workflow. The guard credited every path Backend named.
+    """
+    constructed_workflow(
+        {
+            "jobs": {
+                "Frontend": dict(
+                    upstream, **{"runs-on": "ubuntu-latest", "steps": [{"run": "npm run build\n"}]}
+                ),
+                "Backend": {
+                    "runs-on": "ubuntu-latest",
+                    "needs": "Frontend",
+                    "steps": [{"run": f"pytest {_REAL}\n"}],
+                },
+            }
+        }
+    )
+    covered, problems = _read_workflow()
+    assert not covered, f"a job needing a {case} job was counted as coverage"
+    assert any(case in problem for problem in problems)
+
+
+def test_needs_naming_a_job_that_does_not_exist_is_not_coverage(constructed_workflow):
+    """GitHub never schedules a job whose dependency is missing."""
+    constructed_workflow(_one_job({"run": f"pytest {_REAL}\n"}, needs="NoSuchJob"))
+    covered, problems = _read_workflow()
+    assert not covered
+    assert any("NoSuchJob" in problem for problem in problems)
+
+
+def test_needs_a_healthy_job_is_still_coverage(constructed_workflow):
+    """The real workflow's Backend needs Frontend, so this must not false-alarm."""
+    constructed_workflow(
+        {
+            "jobs": {
+                "Frontend": {"runs-on": "ubuntu-latest", "steps": [{"run": "npm run build\n"}]},
+                "Backend": {
+                    "runs-on": "ubuntu-latest",
+                    "needs": ["Frontend"],
+                    "steps": [{"run": f"pytest {_REAL}\n"}],
+                },
+            }
+        }
+    )
+    covered, problems = _read_workflow()
+    assert covered == {_REAL} and not problems
 
 
 def test_non_test_steps_are_left_alone(constructed_workflow):
