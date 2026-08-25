@@ -85,6 +85,9 @@ import yaml
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+# This file, repo-relative. Every check below runs only because CI enumerates
+# this path, so the path itself is part of what has to be guarded.
+SELF = pathlib.Path(__file__).resolve().relative_to(REPO_ROOT).as_posix()
 
 # Files deliberately kept out of CI, grouped by cause, each with the reason it
 # cannot run. Every reason below was verified by running the file twice, once
@@ -333,11 +336,6 @@ _CHECKED_KEYS = {"if", "continue-on-error", "working-directory", "shell"}
 _ALWAYS_RUNS = {True, "true", "always()", "${{ always() }}", "${{always()}}"}
 # Shells whose semantics the grammar below describes.
 _SAFE_SHELLS = {None, "bash", "sh", "bash -e {0}"}
-
-# A bare `$VAR` or `${VAR}`, the only expansion shape the loop grammar needs.
-_VARIABLE_REFERENCE = re.compile(
-    r"^\$([A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$"
-)
 
 # Every shell operator, all of them refused inside a test-bearing script. Each
 # one is a way for a command to name a path without running it, or to run it
@@ -821,6 +819,26 @@ def _all_test_files() -> set:
 
 def test_workflow_exists():
     assert WORKFLOW.is_file(), f"CI workflow not found at {WORKFLOW}"
+
+
+def test_this_guard_runs_in_ci_and_is_not_excluded():
+    """The guard has to guard itself, or two edits switch off all of the rest.
+
+    Everything else in this file runs only because the workflow enumerates this
+    path. Delete that one line, add one EXCLUDED entry for this file, and the
+    whole guard stops running in CI, stays green locally, and never reports
+    another unrun test file again. Nothing else here would notice, because
+    nothing else here runs.
+    """
+    disabled = (
+        f"{SELF} must be enumerated in {WORKFLOW.name} and must not be in "
+        "EXCLUDED. Removing it from the workflow, or excluding it, disables "
+        "EVERY other check in this file: the guard only ever runs because CI "
+        "hands pytest this path, so an excluded guard reports nothing while "
+        "looking exactly as green as a working one."
+    )
+    assert SELF not in EXCLUDED, disabled
+    assert SELF in _enumerated_paths(), disabled
 
 
 def test_every_test_bearing_step_is_verifiable():
