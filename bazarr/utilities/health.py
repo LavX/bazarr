@@ -66,10 +66,20 @@ def _any_instance_default_profile(kind):
         from arr_instances.media_defaults import instance_default_profile, read_media_defaults
         from arr_instances.repository import ArrInstanceRepository
 
-        for row in ArrInstanceRepository(database).list(kind=kind):
+        # enabled_only: a disabled instance never syncs, so its override supplies
+        # nothing and counting it would hide a real misconfiguration.
+        for row in ArrInstanceRepository(database).list(kind=kind, enabled_only=True):
             has_override, profile = instance_default_profile(read_media_defaults(row.options))
-            if has_override and profile is not None:
-                return True
+            if not has_override or profile is None:
+                continue
+            # And the profile has to still exist: it can be deleted after the
+            # override was saved, in which case resolve_default_profile falls
+            # back to the global default, so this check has to agree with it.
+            if database.execute(
+                    select(TableLanguagesProfiles.profileId)
+                    .where(TableLanguagesProfiles.profileId == profile)).first() is None:
+                continue
+            return True
     except Exception:
         logging.exception("BAZARR could not read the per-instance default language profiles")
 

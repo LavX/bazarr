@@ -1,5 +1,7 @@
 # coding=utf-8
 
+import logging
+
 from flask import request
 from flask_restx import Namespace, Resource, reqparse
 
@@ -180,13 +182,22 @@ class ArrInstanceApplyDefaultProfile(Resource):
         # for minutes and can outlive a proxy timeout.
         upstream_ids = body.get("upstream_ids") or []
         if upstream_ids:
-            jobs_queue.feed_jobs_pending_queue(
-                job_name=f"Refreshing missing subtitles for {len(upstream_ids)} items",
-                module="arr_instances.service",
-                func="reindex_after_default_profile",
-                kwargs={"kind": body.get("kind"), "upstream_ids": upstream_ids,
-                        "arr_instance_id": instance_id},
-                is_progress=False)
+            try:
+                jobs_queue.feed_jobs_pending_queue(
+                    job_name=f"Refreshing missing subtitles for {len(upstream_ids)} items",
+                    module="arr_instances.service",
+                    func="reindex_after_default_profile",
+                    kwargs={"kind": body.get("kind"), "upstream_ids": upstream_ids,
+                            "arr_instance_id": instance_id},
+                    is_progress=False)
+            except Exception:
+                # The profiles are already committed. Failing the request here
+                # would report that Apply did nothing while the library was in
+                # fact updated, and invite a retry that finds nothing to do. The
+                # scheduled indexer picks the refresh up regardless.
+                logging.exception(
+                    "BAZARR could not queue the missing-subtitles refresh after applying "
+                    "the default language profile of instance %s", instance_id)
 
         # upstream_ids is an implementation detail of the refresh above.
         return {"updated": body["updated"], "profileId": body["profileId"]}, 200

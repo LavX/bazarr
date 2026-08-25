@@ -943,3 +943,69 @@ def test_the_queued_reindex_does_the_work_the_request_no_longer_does(monkeypatch
 class _CommitOnly:
     def commit(self):
         return None
+
+
+def test_a_disabled_instance_default_does_not_count_as_configured(schema_session, monkeypatch):
+    """A disabled instance never syncs, so its override supplies nothing. Taking
+    it as proof that a profile is configured hides a real misconfiguration."""
+    from app.config import settings
+    from utilities import health
+
+    monkeypatch.setattr(settings.general, "serie_default_enabled", True)
+    monkeypatch.setattr(settings.general, "serie_default_profile", "")
+    monkeypatch.setattr(health, "database", schema_session)
+
+    from sqlalchemy import update as sa_update
+
+    from app.database import TableArrInstances
+
+    _profile(schema_session, 2, "Anime")
+    instance = _instance(schema_session, "sonarr", "Anime", 8990,
+                         {"default_enabled": True, "default_profile": 2})
+    # is_default has to go with it: a default instance is required to be
+    # enabled, which is a constraint in the schema.
+    schema_session.execute(
+        sa_update(TableArrInstances).values(enabled=0, is_default=0)
+        .where(TableArrInstances.id == instance.id))
+
+    assert health.series_default_profile_is_missing() is True
+
+
+def test_an_override_naming_a_deleted_profile_does_not_count(schema_session, monkeypatch):
+    """The profile was deleted after the override was saved. resolve_default_profile
+    already falls back to the global default in that case, so the health check
+    has to agree with it."""
+    from app.config import settings
+    from utilities import health
+
+    monkeypatch.setattr(settings.general, "serie_default_enabled", True)
+    monkeypatch.setattr(settings.general, "serie_default_profile", "")
+    monkeypatch.setattr(health, "database", schema_session)
+
+    _instance(schema_session, "sonarr", "Anime", 8990,
+              {"default_enabled": True, "default_profile": 99})
+
+    assert health.series_default_profile_is_missing() is True
+
+
+def test_a_failed_reindex_enqueue_does_not_fail_the_apply(monkeypatch):
+    """The profiles are committed before the queue is touched. Raising here
+    tells the client Apply failed while the library was in fact mutated, which
+    invites a retry that then finds nothing left to do."""
+    import api.system.arr_instances as endpoint_module
+
+    class _BrokenQueue:
+        def feed_jobs_pending_queue(self, *args, **kwargs):
+            raise RuntimeError("queue is down")
+
+    monkeypatch.setattr(endpoint_module.service, "apply_default_profile",
+                        lambda *a, **k: ({"updated": 2, "profileId": 2, "kind": "sonarr",
+                                          "upstream_ids": [10, 11]}, 200))
+    monkeypatch.setattr(endpoint_module, "database", _CommitOnly())
+    monkeypatch.setattr(endpoint_module, "jobs_queue", _BrokenQueue())
+
+    resource = endpoint_module.ArrInstanceApplyDefaultProfile()
+    body, status = resource.post.__wrapped__(resource, 4)
+
+    assert status == 200
+    assert body == {"updated": 2, "profileId": 2}
