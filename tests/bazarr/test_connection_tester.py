@@ -150,10 +150,32 @@ def _build_app():
     return app
 
 
+TEST_API_KEY = "test-api-key"
+
+
+@pytest.fixture(autouse=True)
+def _configure_api_key(monkeypatch):
+    """Give the server a known API key for every test in this module."""
+    monkeypatch.setattr("app.config.settings.auth.apikey", TEST_API_KEY)
+
+
 def _login(client):
-    """Pre-populate the session so @check_login passes."""
+    """Authenticate the client the way the frontend does.
+
+    Two independent gates apply. @check_login covers settings.auth.type, and
+    the /test proxies additionally require the global API key regardless of
+    that setting, because they forward a server-side request to a user-supplied
+    host and must never be reachable unauthenticated.
+
+    The query string's `apikey` is the TARGET arr's key. Note that the gate
+    accepts an api key from either the header OR that query parameter, so a
+    query value that happens to equal Bazarr's own key WOULD satisfy it. That
+    dual use is a real gap, characterised below and tracked for a separate fix;
+    the harness deliberately authenticates by header, as the frontend does.
+    """
     with client.session_transaction() as sess:
         sess["logged_in"] = True
+    client.environ_base["HTTP_X_API_KEY"] = TEST_API_KEY
 
 
 def test_proxy_service_rejects_unknown_service(monkeypatch):
@@ -451,3 +473,60 @@ def test_proxy_service_pins_for_https_when_verify_disabled(monkeypatch):
         assert "203.0.113.42" in called_url
         assert called_headers.get("Host") == "sonarr.example.com"
         assert fake_get.call_args_list[0].kwargs["verify"] is False
+
+
+def test_proxy_service_rejects_an_unauthenticated_request(monkeypatch):
+    """The hardening itself, which had no coverage.
+
+    These endpoints forward a server-side request to a user-supplied host, so
+    they were an unauthenticated reconnaissance surface before the API key was
+    required. Without this test, a regression that dropped the requirement
+    would look identical to a passing suite.
+    """
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    app = _build_app()
+    client = app.test_client()
+    # Deliberately not authenticated: no X-API-KEY header.
+    r = client.get("/test/sonarr?url=http://127.0.0.1:8989&apikey=k")
+    assert r.status_code == 401
+
+
+def test_proxy_service_rejects_a_target_key_that_is_not_bazarrs(monkeypatch):
+    """A target arr key that differs from Bazarr's own does not authenticate.
+
+    Note what this does and does not prove. It passes because the VALUE differs,
+    not because query parameters are excluded from the gate. See the
+    characterisation test below for the case that is genuinely wrong.
+    """
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    app = _build_app()
+    client = app.test_client()
+    with client.session_transaction() as sess:
+        sess["logged_in"] = True
+    r = client.get("/test/sonarr?url=http://127.0.0.1:8989&apikey=some-arr-key")
+    assert r.status_code == 401
+
+
+def test_proxy_service_currently_accepts_the_api_key_from_the_query_string(monkeypatch):
+    """Characterises a known gap, so it cannot regress unnoticed and so the fix
+    has a test to flip.
+
+    The gate reads the key from the X-API-KEY header OR the `apikey` query
+    parameter. On these routes that same parameter is also the target arr's key,
+    which the endpoint forwards to the user-supplied host it probes. So a caller
+    who authenticates by putting Bazarr's key in the query string has that key
+    sent onward to an arbitrary address, and an operator who reuses one key for
+    Sonarr and Bazarr inverts the intended separation.
+
+    The fix is to accept the key from the header only on these two routes. When
+    that lands, this test should be inverted to assert a 401.
+    """
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    app = _build_app()
+    client = app.test_client()
+    # No session, no header: authenticated purely by the query string.
+    r = client.get(f"/test/sonarr?url=http://127.0.0.1:8989&apikey={TEST_API_KEY}")
+    assert r.status_code != 401, (
+        "if this now returns 401 the header-only fix has landed; invert this "
+        "test and delete this note"
+    )

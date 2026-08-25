@@ -163,6 +163,7 @@ jobs:
         run: |
           pytest \
             tests/bazarr/test_pretty_date.py \
+            tests/bazarr/test_connection_tester.py \
             tests/bazarr/test_database_sqlite_maintenance.py \
             tests/bazarr/test_dependency_loading.py \
             tests/bazarr/test_signalrcore_compat.py \

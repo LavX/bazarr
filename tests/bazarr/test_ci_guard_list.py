@@ -235,12 +235,6 @@ EXCLUDED = {
         "en and pl. Two of the four that pass do so vacuously, one asserting "
         "only isinstance(subs, list) and one looping over a list that is empty."
     ),
-    "tests/subliminal_patch/test_hosszupuska.py": (
-        "hosszupuskasub.com is dead, so the provider is being retired. Until "
-        "that lands: replays recorded HTTP, touches no network, and both cases "
-        "fail because the recorded page now yields adf.ly-wrapped links while "
-        "the assertions expect bare download URLs."
-    ),
     "tests/subliminal_patch/test_napiprojekt.py": (
         "replays recorded HTTP and touches no network, but subliminal 2.6.0 "
         "moved server_url to https while the cassettes were recorded against "
@@ -261,18 +255,6 @@ EXCLUDED = {
     # Currently failing for reasons that are not network flakiness. Each needs a
     # fix, not an exemption; the reason names what is wrong so it cannot be
     # forgotten again.
-    "tests/bazarr/test_connection_tester.py": (
-        "stale harness, 14 failed and 28 passed. /test gained a second guard, "
-        "_require_proxy_api_key() at bazarr/app/ui.py:74, which aborts 401 "
-        "before any handler code runs unless the request carries the global API "
-        "key. The session-injection helper still gets past @check_login but not "
-        "past that, so the 14 test_proxy_service_* cases read a non-JSON 401 "
-        "body and die on it. Give the helper the API key, then remove this "
-        "entry. The other 28 cases pass deterministically and are this "
-        "repository's only coverage for _resolve_and_validate_constrained and "
-        "the DNS-rebinding pinning cases, so they are worth splitting out if "
-        "the helper is not fixed soon."
-    ),
     "tests/subliminal_patch/test_video.py": (
         "three failures, none of them a network problem, and none of them what "
         "this entry claimed until now. test_video_fromguess_episode and "
