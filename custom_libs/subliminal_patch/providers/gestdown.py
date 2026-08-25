@@ -14,6 +14,7 @@
 # A pull request against this file will most likely be asked to move.
 
 import logging
+import re
 import time
 
 from requests import HTTPError
@@ -32,6 +33,32 @@ logger = logging.getLogger(__name__)
 _BASE_URL = "https://api.gestdown.info"
 
 
+def _format_release(version_item, series, season, episode):
+    """Display-only scene-style name: ``Series.SxxEyy.version``.
+
+    Left alone when the version already names the episode, so a proper release
+    name is never mangled. The season/episode test is anchored rather than a
+    bare substring: an unanchored series test matches far too eagerly on short
+    titles.
+    """
+    if season is None or episode is None:
+        return version_item
+
+    lowered = version_item.lower()
+    if re.search(rf"\bs{season:02d}e{episode:02d}\b", lowered) or re.search(
+        rf"\b{season}x{episode:02d}\b", lowered
+    ):
+        return version_item
+
+    clean_version = version_item.replace(" ", ".")
+    clean_series = series.strip().replace(" ", ".") if series else ""
+    if clean_series and re.search(rf"\b{re.escape(clean_series)}\b", clean_version, re.I):
+        return clean_version
+    if clean_series:
+        return f"{clean_series}.S{season:02d}E{episode:02d}.{clean_version}"
+    return f"S{season:02d}E{episode:02d}.{clean_version}"
+
+
 class GestdownSubtitle(Subtitle):
     provider_name = "gestdown"
     hash_verifiable = False
@@ -41,27 +68,20 @@ class GestdownSubtitle(Subtitle):
         super().__init__(language, hearing_impaired=data["hearingImpaired"])
         self.page_link = _BASE_URL + data["downloadUri"]
         self._id = data["subtitleId"]
-        raw_releases = [v.strip() for v in data["version"].split(",") if v.strip()]
-        self.releases = []
-        for v in raw_releases:
-            if season is not None and episode is not None and not (
-                f"s{season:02d}" in v.lower()
-                or f"{season}x" in v.lower()
-                or (series and series.lower() in v.lower())
-            ):
-                clean_ver = v.replace(" ", ".")
-                clean_series = series.strip().replace(" ", ".") if series else ""
-                formatted = (
-                    f"{clean_series}.S{season:02d}E{episode:02d}.{clean_ver}"
-                    if clean_series
-                    else f"S{season:02d}E{episode:02d}.{clean_ver}"
-                )
-                self.releases.append(formatted)
-            else:
-                self.releases.append(v)
+        # `releases` stays RAW. get_matches below searches it for the video's
+        # release group, so injecting the series title here would let a group
+        # name that occurs inside the show's own title score a match it did not
+        # earn. Only release_info, which is display text, gets the scene-style
+        # name.
+        self.releases = [v.strip() for v in data["version"].split(",") if v.strip()]
         self.qualities = data.get("qualities") or []
-        self.release_info = "\n".join(self.releases) if self.releases else data.get("version", "")
+        formatted = [
+            _format_release(release, series, season, episode)
+            for release in self.releases
+        ]
+        self.release_info = "\n".join(formatted) if formatted else data.get("version", "")
         self.matches = set()
+
     def get_matches(self, video):
         self.matches = {"title", "series", "season", "episode", "tvdb_id"}
 

@@ -100,7 +100,11 @@ def test_subtitle_formatted_with_series_and_episode():
         season=1,
         episode=4,
     )
-    assert sub.releases == ["Breaking.Bad.S01E04.LOL", "Breaking.Bad.S01E04.DVDRip.ORPHEUS"]
+    # releases stays raw: get_matches searches it for the video's release group,
+    # and "LOL" here is both a real group and a substring of many show titles.
+    # The scene-style name is display text, so it belongs to release_info.
+    assert sub.releases == ["LOL", "DVDRip ORPHEUS"]
+    assert sub.release_info == "Breaking.Bad.S01E04.LOL\nBreaking.Bad.S01E04.DVDRip.ORPHEUS"
     assert sub.release_info == "Breaking.Bad.S01E04.LOL\nBreaking.Bad.S01E04.DVDRip.ORPHEUS"
 def test_subtitle_get_matches_release_group(episodes):
     sub = GestdownSubtitle(

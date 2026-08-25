@@ -165,6 +165,7 @@ jobs:
             tests/bazarr/test_pretty_date.py \
             tests/bazarr/test_connection_tester.py \
             tests/bazarr/test_database_sqlite_maintenance.py \
+            tests/bazarr/test_gestdown_release_matching.py \
             tests/bazarr/test_dependency_loading.py \
             tests/bazarr/test_signalrcore_compat.py \
             tests/bazarr/test_app_get_providers.py \
