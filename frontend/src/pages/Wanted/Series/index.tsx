@@ -12,7 +12,11 @@ import {
   useSeriesAction,
 } from "@/apis/hooks";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
-import { AudioList, InstanceBadge } from "@/components/bazarr";
+import {
+  AudioList,
+  InstanceBadge,
+  ReleaseMismatchBadge,
+} from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
 import { WantedItem } from "@/components/forms/MassTranslateForm";
 import WantedView from "@/pages/views/WantedView";
@@ -117,18 +121,25 @@ const WantedSeriesView: FunctionComponent = () => {
         accessorKey: "seriesTitle",
         cell: ({
           row: {
-            original: { series_id: seriesId, seriesTitle },
+            original: {
+              series_id: seriesId,
+              seriesTitle,
+              release_mismatch: releaseMismatch,
+            },
           },
         }) => {
           const target = `/series/${seriesId}`;
           return (
-            <Anchor
-              className={`table-primary ${tableStyles.episodeTitle}`}
-              component={Link}
-              to={target}
-            >
-              {seriesTitle}
-            </Anchor>
+            <Group gap="xs" wrap="nowrap">
+              <Anchor
+                className={`table-primary ${tableStyles.episodeTitle}`}
+                component={Link}
+                to={target}
+              >
+                {seriesTitle}
+              </Anchor>
+              {releaseMismatch ? <ReleaseMismatchBadge /> : null}
+            </Group>
           );
         },
       },

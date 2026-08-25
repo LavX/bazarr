@@ -559,6 +559,38 @@ class TableSubsyncEngineFailure(Base):
     updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
 
 
+class TableReleaseTypeMismatch(Base):
+    """One recorded release-type mismatch: the item's own release type had no
+    acceptable subtitle while another release type did.
+
+    The row exists so a repeated scheduled pass does not re-notify, and so the
+    wanted view can flag the item. ``media_id`` is the LOCAL id (#156) and
+    ``arr_instance_id`` the owning instance, because upstream ids are not
+    unique across instances. ``video_release_type`` is part of the identity: if
+    the user re-grabs the item as another release type, that is a new situation
+    and may be reported once more.
+    """
+
+    __tablename__ = 'release_type_mismatches'
+    __table_args__ = (
+        Index('ix_release_type_mismatches_item',
+              'media_type', 'media_id', 'arr_instance_id', 'language', 'video_release_type',
+              unique=True),
+    )
+
+    id = mapped_column(Integer, primary_key=True)
+    media_type = mapped_column(Text, nullable=False)
+    media_id = mapped_column(Integer, nullable=False)
+    arr_instance_id = mapped_column(Integer)
+    language = mapped_column(Text, nullable=False)
+    video_release_type = mapped_column(Text, nullable=False)
+    subtitle_release_type = mapped_column(Text, nullable=False)
+    provider = mapped_column(Text)
+    release_info = mapped_column(Text)
+    score = mapped_column(Integer)
+    detected_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
 class TableSettingsLanguages(Base):
     __tablename__ = 'table_settings_languages'
 

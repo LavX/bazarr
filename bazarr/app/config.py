@@ -105,6 +105,9 @@ validators = [
     Validator('general.single_language', must_exist=True, default=False, is_type_of=bool),
     Validator('general.minimum_score', must_exist=True, default=80, is_type_of=int, gte=0, lte=100),
     Validator('general.use_scenename', must_exist=True, default=True, is_type_of=bool),
+    # Off by default: it notifies, and an unasked-for notification stream is
+    # worse than the problem it reports.
+    Validator('general.detect_release_type_mismatch', must_exist=True, default=False, is_type_of=bool),
     Validator('general.use_postprocessing', must_exist=True, default=False, is_type_of=bool),
     Validator('general.postprocessing_cmd', must_exist=True, default='', is_type_of=str),
     Validator('general.postprocessing_threshold', must_exist=True, default=90, is_type_of=int, gte=0, lte=100),

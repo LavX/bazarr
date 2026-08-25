@@ -208,6 +208,9 @@ declare namespace Wanted {
     SceneNameType & {
       hearing_impaired: boolean;
       missing_subtitles: Subtitle[];
+      // Set when a release-type mismatch was recorded for the item: its own
+      // release type has no acceptable subtitle while another one does.
+      release_mismatch?: boolean;
     };
 
   type Episode = Base &
