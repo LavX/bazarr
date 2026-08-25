@@ -266,7 +266,6 @@ export const ProviderList: Readonly<ProviderInfo[]> = [
       },
     ],
   },
-  { key: "hosszupuska", description: "Hungarian Subtitles Provider" },
   {
     key: "karagarga",
     name: "Karagarga.in",
