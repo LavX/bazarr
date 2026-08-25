@@ -13,10 +13,12 @@ from subtitles.processing import ProcessSubtitlesResult
 from subtitles.tools import alass_ffprobe_shim
 from subtitles.tools.subsync_engines import (
     DEFAULT_ENABLED_ENGINES,
+    ENGINE_LABELS,
     OUTPUT_MODE_OVERWRITE,
     UNCONSTRAINED_MAX_OFFSET_SECONDS,
     SubsyncEngineRunner,
     MissingSyncEngineError,
+    SyncEngineDeclinedError,
     normalize_enabled_engines,
     normalize_output_mode,
     validate_engine_result,
@@ -28,13 +30,6 @@ from app.config import settings
 from app.database import TableMovies, TableShows, database, select
 from app.get_args import args
 from arr_instances.resolution import scoped, default_instance_id
-
-
-ENGINE_LABELS = {
-    'ffsubsync': 'FFsubsync',
-    'autosubsync': 'Autosubsync',
-    'alass': 'ALASS',
-}
 
 
 def _autosubsync_model_file():
@@ -318,7 +313,7 @@ class SubSyncer:
         except subprocess.CalledProcessError as exc:
             details = (getattr(exc, 'stderr', None) or getattr(exc, 'stdout', None) or str(exc)).strip()
             raise RuntimeError(
-                f'{engine} failed with exit code {exc.returncode}: {details}'
+                f'{engine} exited with code {exc.returncode}: {details}'
             ) from exc
         return {
             'stdout': completed.stdout,
@@ -383,7 +378,10 @@ class SubSyncer:
             raise
 
         if not success:
-            raise RuntimeError('autosubsync completed but did not meet the quality threshold.')
+            # autosubsync's own quality check said no. That is a verdict, not a
+            # fault, so it is reported as a decline rather than an engine failure.
+            raise SyncEngineDeclinedError(
+                'autosubsync', 'autosubsync completed but did not meet its quality threshold.')
 
         return {
             'success': success,
