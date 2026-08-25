@@ -11,8 +11,13 @@ transaction and commits on success.
 """
 import logging
 
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
+from app.database import TableLanguagesProfiles, TableMovies, TableShows
+
+from .media_defaults import (instance_default_profile, merge_media_defaults_into_options,
+                             read_media_defaults, validate_media_defaults)
 from .repository import VALID_KINDS, ArrInstanceRepository, to_safe_dict
 from .subtitle_settings import merge_subtitle_settings_into_options, validate_subtitle_settings
 
@@ -113,8 +118,11 @@ def refresh_runtime(kind, instance_id=None, removed=False):
     # Per-instance subtitle settings may have changed; drop the resolver cache
     # so the next read reflects the edit (#227). Cheap and kind-agnostic, so do
     # it before the kind guard returns.
-    from .resolution import clear_subtitle_settings_cache
+    from .resolution import clear_media_defaults_cache, clear_subtitle_settings_cache
     clear_subtitle_settings_cache()
+    # Same for the per-instance default language profile: an edited override
+    # must take effect on the next sync, not on the next restart.
+    clear_media_defaults_cache()
 
     if kind not in VALID_KINDS:
         return
@@ -286,7 +294,13 @@ def create_instance(session, args):
         ss_blob = validate_subtitle_settings(args.get("subtitle_settings"))
     except ValueError as exc:
         return {"error": "invalid", "message": str(exc)}, 400
-    options = merge_subtitle_settings_into_options(None, ss_blob)
+    try:
+        md_blob = validate_media_defaults(
+            args.get("media_defaults"), known_profile_ids=_known_profile_ids(session))
+    except ValueError as exc:
+        return {"error": "invalid", "message": str(exc)}, 400
+    options = merge_media_defaults_into_options(
+        merge_subtitle_settings_into_options(None, ss_blob), md_blob)
     repo = ArrInstanceRepository(session)
     try:
         row = repo.create(
@@ -337,6 +351,17 @@ def update_instance(session, instance_id, args):
             return {"error": "invalid", "message": str(exc)}, 400
         kwargs["options"] = merge_subtitle_settings_into_options(existing.options, ss_blob)
 
+    if args.get("media_defaults") is not None:
+        try:
+            md_blob = validate_media_defaults(
+                args.get("media_defaults"), known_profile_ids=_known_profile_ids(session))
+        except ValueError as exc:
+            return {"error": "invalid", "message": str(exc)}, 400
+        # Merge onto whatever the subtitle_settings edit above already produced,
+        # so a request carrying both blobs does not drop one of them.
+        kwargs["options"] = merge_media_defaults_into_options(
+            kwargs.get("options", existing.options), md_blob)
+
     try:
         row = repo.update(instance_id, **kwargs)
     except ValueError as exc:
@@ -356,3 +381,61 @@ def delete_instance(session, instance_id):
     if not ok:
         return {"error": "not_found"}, 404
     return "", 204
+
+
+def _known_profile_ids(session):
+    """The set of language profile ids that currently exist.
+
+    Used to reject an override naming a profile that is not there, so a dangling
+    ``profileId`` is never persisted in the first place. The sync still guards
+    against a profile deleted AFTER the override was saved.
+    """
+    return {row.profileId for row in session.execute(
+        select(TableLanguagesProfiles.profileId)).all()}
+
+
+def apply_default_profile(session, instance_id):
+    """Assign this instance's default language profile to its media that has no
+    profile yet. Opt-in, and deliberately narrow.
+
+    Only rows owned by ``instance_id`` whose ``profileId`` is NULL are touched,
+    so hand-picked profiles are never overwritten: a silent bulk reassignment is
+    not recoverable, and wholesale reassignment already exists as the mass-edit
+    profile selector in the Series and Movies views.
+
+    Returns ``(body, status)``. The body carries the upstream ids that changed so
+    the HTTP layer can re-run the missing-subtitles indexer for exactly those
+    items.
+    """
+    repo = ArrInstanceRepository(session)
+    row = repo.get(instance_id)
+    if row is None:
+        return {"error": "not_found"}, 404
+
+    has_override, profile = instance_default_profile(read_media_defaults(row.options))
+    if not has_override or profile is None:
+        return {"error": "invalid",
+                "message": "This instance has no default language profile to apply."}, 400
+    if profile not in _known_profile_ids(session):
+        return {"error": "invalid",
+                "message": f"Language profile {profile} no longer exists."}, 400
+
+    table = TableShows if row.kind == "sonarr" else TableMovies
+    upstream_column = TableShows.sonarrSeriesId if row.kind == "sonarr" else TableMovies.radarrId
+
+    # Collect the targets before the write: the UPDATE's own WHERE stops
+    # matching them once profileId is set, and the caller needs the ids.
+    targets = session.execute(
+        select(upstream_column)
+        .where(table.arr_instance_id == instance_id, table.profileId.is_(None))).all()
+    upstream_ids = [t[0] for t in targets]
+    if upstream_ids:
+        session.execute(
+            update(table)
+            .values(profileId=profile)
+            .where(table.arr_instance_id == instance_id, table.profileId.is_(None)))
+
+    logging.info("Assigned language profile %s to %s unprofiled %s items on instance %s",
+                 profile, len(upstream_ids), row.kind, instance_id)
+    return {"updated": len(upstream_ids), "profileId": profile, "kind": row.kind,
+            "upstream_ids": upstream_ids}, 200
