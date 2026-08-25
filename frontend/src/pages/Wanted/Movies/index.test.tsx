@@ -43,6 +43,36 @@ describe("Wanted Movies", () => {
     expect(movieLink).toHaveAttribute("href", "/movies/901");
   });
 
+  it("should flag a movie with a release type mismatch", async () => {
+    server.use(
+      http.get("/api/movies/wanted", () => {
+        return HttpResponse.json({
+          data: [
+            {
+              title: "The Shawshank Redemption",
+              id: 901,
+              radarrId: 1,
+              missing_subtitles: [],
+              release_mismatch: true,
+            },
+            {
+              title: "The Godfather",
+              id: 902,
+              radarrId: 2,
+              missing_subtitles: [],
+              release_mismatch: false,
+            },
+          ],
+        });
+      }),
+    );
+
+    customRender(<WantedMoviesView />);
+
+    await screen.findByText("The Shawshank Redemption");
+    expect(screen.getAllByText("Release mismatch")).toHaveLength(1);
+  });
+
   it("should render empty state when no wanted movies", async () => {
     server.use(
       http.get("/api/movies/wanted", () => {

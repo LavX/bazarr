@@ -12,7 +12,11 @@ import {
   useMovieWantedPagination,
 } from "@/apis/hooks";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
-import { AudioList, InstanceBadge } from "@/components/bazarr";
+import {
+  AudioList,
+  InstanceBadge,
+  ReleaseMismatchBadge,
+} from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
 import { WantedItem } from "@/components/forms/MassTranslateForm";
 import WantedView from "@/pages/views/WantedView";
@@ -117,18 +121,21 @@ const WantedMoviesView: FunctionComponent = () => {
         accessorKey: "title",
         cell: ({
           row: {
-            original: { id, title },
+            original: { id, title, release_mismatch: releaseMismatch },
           },
         }) => {
           const target = `/movies/${id}`;
           return (
-            <Anchor
-              className={`table-primary ${tableStyles.episodeTitle}`}
-              component={Link}
-              to={target}
-            >
-              {title}
-            </Anchor>
+            <Group gap="xs" wrap="nowrap">
+              <Anchor
+                className={`table-primary ${tableStyles.episodeTitle}`}
+                component={Link}
+                to={target}
+              >
+                {title}
+              </Anchor>
+              {releaseMismatch ? <ReleaseMismatchBadge /> : null}
+            </Group>
           );
         },
       },

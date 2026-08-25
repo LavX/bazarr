@@ -175,6 +175,7 @@ jobs:
             tests/bazarr/test_subsync_engines.py \
             tests/bazarr/test_sync_instance_overrides.py \
             tests/bazarr/test_subzero_keep_lyrics.py \
+            tests/bazarr/test_release_type_mismatch.py \
             tests/bazarr/test_archive_extraction.py \
             tests/bazarr/test_security_guards.py \
             tests/bazarr/test_login_backdrops.py \
@@ -222,7 +223,8 @@ jobs:
             tests/bazarr/test_files_browse_instance_scope.py \
             tests/bazarr/test_path_mappings_instance.py \
             tests/bazarr/test_threading_followup.py \
-            tests/bazarr/test_mass_operations.py ; do
+            tests/bazarr/test_mass_operations.py \
+            tests/bazarr/test_release_type_mismatch_migration.py ; do
             echo "::group::$f"
             pytest "$f" -p no:cacheprovider -q
             echo "::endgroup::"

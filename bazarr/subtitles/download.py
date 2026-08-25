@@ -17,6 +17,7 @@ from utilities.path_mappings import path_mappings
 from utilities.helper import get_target_folder, force_unicode
 from languages.get_languages import alpha3_from_alpha2
 
+from .mismatch import report_release_type_mismatch
 from .pool import update_pools, _get_pool
 from .utils import get_video, _get_lang_obj, _get_scores, _set_forced_providers
 from .processing import process_subtitle
@@ -89,6 +90,12 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                   f"has been reached during this search.")
                     continue
                 else:
+                    # Every candidate this search scores lands in the sink,
+                    # including the ones the download loop rejects. When the
+                    # search comes back empty they are the only evidence of what
+                    # the providers actually have, and looking at them costs no
+                    # extra provider request.
+                    candidate_sink = []
                     try:
                         downloaded_subtitles = download_best_subtitles(videos={video},
                                                                        languages={language},
@@ -97,10 +104,25 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                                        hearing_impaired=hi_required,
                                                                        use_original_format=original_format in (1, "1", "True", True),
                                                                        use_provider_priority=settings.general.use_provider_priority,
-                                                                       fallback_allowed=fallback_allowed)
+                                                                       fallback_allowed=fallback_allowed,
+                                                                       candidate_sink=candidate_sink)
                     except Exception as e:
                         logging.exception(f'BAZARR Error downloading Subtitles for this file {path}: {repr(e)}')  # noqa: G004
                         return None
+
+                    # An upgrade search raises the minimum above the score of
+                    # the subtitle the user already has, so every candidate is
+                    # "rejected" by construction and nothing is actually
+                    # missing. Reporting a mismatch there would be pure noise.
+                    if not downloaded_subtitles.get(video) and not is_upgrade \
+                            and not forced_minimum_score:
+                        try:
+                            report_release_type_mismatch(video, media_type, language,
+                                                         candidate_sink, int(min_score))
+                        except Exception:
+                            # A report must never cost the user a search.
+                            logging.exception('BAZARR Error checking for a release type '
+                                              'mismatch for this file %s', path)
 
                 if downloaded_subtitles:
                     for video, subtitles in downloaded_subtitles.items():
