@@ -39,6 +39,11 @@ path to that script has to be on a safe list, which deliberately excludes `if`,
 anything else, and the script is reported as UNVERIFIABLE and grants no
 coverage whatsoever.
 
+Refusal has to be applied all the way down, not only to the shapes that look
+dangerous. `set` takes only -e, -u and -x, because `set -n` makes bash read a
+whole script without executing a line of it and still exit 0, and `set +e` lets
+a failing pytest leave the step green.
+
 The consequence of a shape nobody anticipated is therefore a red build asking a
 human to look at it, not a green build hiding a suite that stopped running.
 That is the whole design: the failure mode is refusal, never a guess in the
@@ -234,8 +239,15 @@ _ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 # not are left alone: `ruff check .` and `npm run build` are not this guard's
 # business, and holding them to a shell grammar would be pointless friction.
 _MENTIONS_TESTS = re.compile(r"(?<![\w./-])pytest\b|(?<![\w./-])tests/")
-# `set -e`, and nothing more elaborate.
-_SET_FLAGS = re.compile(r"^[-+][A-Za-z]+$")
+# The only `set` modes the guard has reasoned about. `-e` exits on the first
+# failure, `-u` aborts on an unset variable, `-x` only traces: each of the three
+# either leaves every later command running or stops the script loudly. Every
+# other mode is refused, because a mode that changes whether commands run at all
+# is precisely how a script can name every test file and execute none. `set -n`
+# makes bash read the rest of the script without executing it and still exit 0,
+# and any `+` form turns a mode back off, so `set +e` lets a failing pytest
+# leave the step green.
+_SET_MODES = frozenset("eux")
 
 # Options pytest takes that consume the following token. A test path sitting in
 # one of these positions is an argument to the option, not something pytest
@@ -477,7 +489,8 @@ def _script_coverage(script: str) -> set:
             continue
         head = tokens[0]
 
-        if head == "set" and len(tokens) == 2 and _SET_FLAGS.match(tokens[1]):
+        if head == "set":
+            _check_set_modes(tokens, line)
             continue
         if head in {"pip", "pip3"} and tokens[1:2] == ["install"]:
             _reject_operators(tokens, line)
@@ -505,6 +518,19 @@ def _script_coverage(script: str) -> set:
             "readable without interpreting shell"
         )
     return covered
+
+
+def _check_set_modes(tokens: list, line: str) -> None:
+    """`set` carrying only modes that leave every later command running."""
+    mode = tokens[1] if len(tokens) == 2 else ""
+    if not (mode.startswith("-") and len(mode) > 1 and set(mode[1:]) <= _SET_MODES):
+        raise _Unverifiable(
+            f"{line!r} uses a `set` mode the guard has not modelled. Only -e, "
+            "-u and -x are accepted, in any combination: `set -n` reads the rest "
+            "of the script without executing a line of it and still exits 0, and "
+            "any `+` form turns a mode back off, so `set +e` leaves a failing "
+            "pytest unable to fail the step"
+        )
 
 
 def _for_header(tokens: list, line: str) -> tuple:
@@ -840,6 +866,12 @@ _SCRIPT_REFUSALS = {
     "the path names a test file that was deleted": (
         "pytest tests/bazarr/test_deleted_in_some_other_branch.py\n"
     ),
+    # `set -n` makes bash read the script and execute none of it, exiting 0, so
+    # every file the script names would be credited by a step that ran nothing.
+    # `set +e` leaves a failing pytest unable to fail the step.
+    "execution is switched off by set -n": f"set -n\npytest {_REAL}\n",
+    "a set mode is turned back off": f"set +e\npytest {_REAL}\n",
+    "an unmodelled set mode is used": f"set -o pipefail\npytest {_REAL}\n",
 }
 
 
