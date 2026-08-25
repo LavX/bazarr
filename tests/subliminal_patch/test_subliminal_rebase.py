@@ -18,7 +18,6 @@ EXPECTED_PROVIDER_NAMES = [
     "greeksubs",
     "greeksubtitles",
     "hdbits",
-    "hosszupuska",
     "jimaku",
     "karagarga",
     "ktuvit",

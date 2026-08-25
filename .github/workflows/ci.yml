@@ -150,6 +150,7 @@ jobs:
             tests/bazarr/test_dependency_loading.py \
             tests/bazarr/test_signalrcore_compat.py \
             tests/bazarr/test_app_get_providers.py \
+            tests/bazarr/test_retired_provider_config_compat.py \
             tests/bazarr/test_provider_hub.py \
             tests/bazarr/test_provider_hub_auto_install_optin.py \
             tests/bazarr/test_provider_hub_archive_select.py \

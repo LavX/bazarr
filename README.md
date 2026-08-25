@@ -538,7 +538,6 @@ Includes all upstream providers plus fork additions:
 - GreekSubs
 - GreekSubtitles
 - HDBits.org
-- Hosszupuska
 - Karagarga.in
 - Ktuvit (Get `hashed_password` using method described [here](https://github.com/XBMCil/service.subtitles.ktuvit))
 - LegendasDivx
