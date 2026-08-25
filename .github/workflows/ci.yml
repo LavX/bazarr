@@ -217,6 +217,7 @@ jobs:
             tests/subliminal_patch/test_provider_pool.py \
             tests/subliminal_patch/test_mods.py \
             tests/subliminal_patch/test_mods_keep_lyrics.py \
+            tests/subliminal_patch/test_video.py \
             -v --tb=short
 
       - name: pytest previously unguarded bazarr suites
