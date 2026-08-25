@@ -221,11 +221,11 @@ def init_binaries():
     # that already have them on PATH; they are no longer in binaries.json, so
     # get_binary never attempts a (read-only, failing) self-download for them.
     try:
-        exe = get_binary("7z")
-        rarfile.UNRAR_TOOL = None
+        exe = get_binary("unrar")
+        rarfile.UNRAR_TOOL = exe
         rarfile.UNAR_TOOL = None
-        rarfile.SEVENZIP_TOOL = exe
-        rarfile.tool_setup(unrar=False, unar=False, bsdtar=False, sevenzip=True, force=True)
+        rarfile.SEVENZIP_TOOL = None
+        rarfile.tool_setup(unrar=True, unar=False, bsdtar=False, sevenzip=False, force=True)
     except (BinaryNotFound, rarfile.RarCannotExec):
         try:
             exe = get_binary("unar")
@@ -235,22 +235,22 @@ def init_binaries():
             rarfile.tool_setup(unrar=False, unar=True, bsdtar=False, sevenzip=False, force=True)
         except (BinaryNotFound, rarfile.RarCannotExec):
             try:
-                exe = get_binary("unrar")
-                rarfile.UNRAR_TOOL = exe
+                exe = get_binary("7z")
+                rarfile.UNRAR_TOOL = None
                 rarfile.UNAR_TOOL = None
-                rarfile.SEVENZIP_TOOL = None
-                rarfile.tool_setup(unrar=True, unar=False, bsdtar=False, sevenzip=False, force=True)
+                rarfile.SEVENZIP_TOOL = exe
+                rarfile.tool_setup(unrar=False, unar=False, bsdtar=False, sevenzip=True, force=True)
             except (BinaryNotFound, rarfile.RarCannotExec):
-                logging.exception("BAZARR requires a rar archive extraction utility (7z, unar, or unrar) and none could be found.")
+                logging.exception("BAZARR requires a rar archive extraction utility (unrar, unar, or 7z) and none could be found.")
                 raise BinaryNotFound
             else:
-                logging.debug("Using UnRAR from: %s", exe)
+                logging.debug("Using 7zip from: %s", exe)
                 return exe
         else:
             logging.debug("Using unar from: %s", exe)
             return exe
     else:
-        logging.debug("Using 7zip from: %s", exe)
+        logging.debug("Using UnRAR from: %s", exe)
         return exe
 
 
