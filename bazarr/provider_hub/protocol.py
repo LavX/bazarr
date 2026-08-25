@@ -13,6 +13,11 @@ from subliminal_patch.subtitle import Subtitle
 
 logger = logging.getLogger(__name__)
 
+# What counts as a subtitle member of a provider archive. One list, read by both the
+# member listing a plugin language-pins from and the selector that picks among them:
+# the two used to filter for themselves and disagree about the same archive.
+ARCHIVE_MEMBER_EXTENSIONS = (".srt", ".sub", ".ssa", ".ass", ".vtt")
+
 
 class WorkerProtocolError(ValueError):
     """Raised when a provider worker response violates the V1 ABI."""
@@ -319,16 +324,15 @@ def _guard_archive_members(archive) -> None:
 
 
 def _list_archive_members(archive):
-    """Member names offered to the worker for language selection: subtitle files only,
-    excluding dotfiles. Extraction guards (_guard_archive_members) still apply on read."""
-    names = []
-    for name in archive.namelist():
-        base = name.rsplit("/", 1)[-1]
-        if not base or base.startswith("."):
-            continue
-        if name.lower().endswith((".srt", ".sub", ".ssa", ".ass", ".vtt")):
-            names.append(name)
-    return names
+    """Member names offered to the worker for language selection.
+
+    Deliberately the same call the selector uses, so the list a plugin pins from and
+    the list the picker chooses from can never disagree about a given archive.
+    Extraction guards (_guard_archive_members) still apply on read.
+    """
+    from subliminal_patch.providers.utils import list_subtitle_members
+
+    return list_subtitle_members(archive, ARCHIVE_MEMBER_EXTENSIONS)
 
 
 _SEVEN_ZIP_MAGIC = b"7z\xbc\xaf\x27\x1c"
@@ -437,7 +441,7 @@ def _worker_archive_to_content(
             episode=episode,
             episode_title=payload.get("episode_title"),
             get_first_subtitle=bool(payload.get("first_subtitle")),
-            extensions=(".srt", ".sub", ".ssa", ".ass", ".vtt"),
+            extensions=ARCHIVE_MEMBER_EXTENSIONS,
         )
         if picked is None:
             raise WorkerProtocolError("download.archive_b64 has no usable subtitle member")
