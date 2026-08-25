@@ -108,9 +108,41 @@ def _writable_directories():
     return directories
 
 
+LAUNCHER_PREFIX = "bazarr-alass-shim-"
+
+
 def _ensure(parent):
     os.makedirs(parent, exist_ok=True)
+    _sweep(parent)
     return parent
+
+
+def _sweep(parent):
+    """Remove launcher directories we left behind on earlier runs.
+
+    The current one is only remembered in memory and Bazarr exits through
+    os._exit, so nothing cleans up on the way out and every restart that syncs
+    with alass would leave another directory here. Only directories this user
+    owns are touched, and a running process that loses its launcher this way
+    simply installs another one.
+    """
+    try:
+        entries = os.listdir(parent)
+    except OSError:
+        return
+
+    for entry in entries:
+        if not entry.startswith(LAUNCHER_PREFIX):
+            continue
+
+        path = os.path.join(parent, entry)
+        try:
+            if os.stat(path).st_uid != os.getuid():
+                continue
+        except OSError:
+            continue
+
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _install_launcher(directory, content):
@@ -160,7 +192,7 @@ def ensure_launcher():
     for parent in _writable_directories():
         directory = None
         try:
-            directory = tempfile.mkdtemp(prefix="bazarr-alass-shim-", dir=_ensure(parent))
+            directory = tempfile.mkdtemp(prefix=LAUNCHER_PREFIX, dir=_ensure(parent))
             _LAUNCHER_PATH = _install_launcher(directory, content)
         except Exception:
             logger.debug("Could not install the alass ffprobe shim in %s", parent, exc_info=True)

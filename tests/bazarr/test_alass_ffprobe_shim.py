@@ -308,6 +308,7 @@ def test_no_launcher_at_all_when_nothing_can_execute(monkeypatch, tmp_path):
     assert shim.ensure_launcher() is None
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Windows installs no launcher, so the override is left untouched")
 def test_an_operator_configured_ffprobe_override_is_kept(recorded_alass_run, monkeypatch, tmp_path):
     """ALASS_FFPROBE_PATH in the environment is someone's deliberate choice of
     ffprobe, and alass honoured it before the shim existed. The shim runs it
@@ -348,3 +349,37 @@ def test_a_failed_install_leaves_no_directory_behind(monkeypatch, tmp_path):
 
     assert shim.ensure_launcher() is None
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the launcher is a POSIX shell script")
+def test_installing_reclaims_the_launcher_directories_we_left_behind(monkeypatch, tmp_path):
+    """The path lives in process memory and Bazarr exits with os._exit, so
+    nothing removes the directory on shutdown. Without a sweep, every restart
+    that syncs with alass leaves another one under config/cache forever."""
+    shim = _shim()
+    monkeypatch.setattr(shim, "_LAUNCHER_PATH", None, raising=False)
+    monkeypatch.setattr(shim, "_writable_directories", lambda: [str(tmp_path)])
+
+    installed = []
+    for _ in range(3):
+        # A fresh process each time: nothing carries over but the directory.
+        shim._LAUNCHER_PATH = None
+        installed.append(shim.ensure_launcher())
+
+    assert all(installed), "the launcher could not be installed at all"
+    remaining = [entry for entry in tmp_path.iterdir() if entry.is_dir()]
+    assert len(remaining) == 1, f"three installs left {len(remaining)} directories behind"
+    assert os.path.dirname(installed[-1]) == str(remaining[0])
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the launcher is a POSIX shell script")
+def test_the_sweep_leaves_directories_that_are_not_ours_alone(monkeypatch, tmp_path):
+    shim = _shim()
+    monkeypatch.setattr(shim, "_LAUNCHER_PATH", None, raising=False)
+    monkeypatch.setattr(shim, "_writable_directories", lambda: [str(tmp_path)])
+    someone_else = tmp_path / "not-ours"
+    someone_else.mkdir()
+
+    shim.ensure_launcher()
+
+    assert someone_else.is_dir()
