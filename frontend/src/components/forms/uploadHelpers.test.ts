@@ -10,6 +10,18 @@ const ep = (season: number, episode: number, id: number) =>
   ({ season, episode, sonarrEpisodeId: id }) as unknown as Item.Episode;
 const info = (filename: string, season: number, episode: number) =>
   ({ filename, season, episode }) as SubtitleInfo;
+const epOf = (
+  seriesLocalId: number,
+  season: number,
+  episode: number,
+  id: number,
+) =>
+  ({
+    series_id: seriesLocalId,
+    season,
+    episode,
+    sonarrEpisodeId: id,
+  }) as unknown as Item.Episode;
 
 describe("matchEpisode", () => {
   const episodes = [ep(1, 1, 11), ep(1, 2, 12)];
@@ -70,23 +82,39 @@ describe("shouldAutoCloseUpload", () => {
 });
 
 describe("episodeBelongsToSeries", () => {
-  const episodes = [ep(1, 1, 11), ep(1, 2, 12)];
+  // An episode carries the local id of the series that owns it, so ownership is
+  // decided against the opened series rather than against the list the form
+  // happened to fetch. Checking membership of that list cannot catch the bug
+  // this guard exists for: if the wrong list is fetched, the matcher picks from
+  // the wrong list and the episode is a member of it.
+  const owned = epOf(560, 1, 1, 11);
+  const foreign = epOf(559, 1, 1, 99);
 
-  it("accepts an episode present in the series' episode list", () => {
-    expect(episodeBelongsToSeries(episodes[0], episodes)).toBe(true);
+  it("accepts an episode owned by the opened series", () => {
+    expect(episodeBelongsToSeries(owned, 560)).toBe(true);
   });
 
-  it("rejects an episode from a different series", () => {
-    // Same season and episode numbers, different upstream episode id: this is
-    // exactly the shape a wrong-series lookup produces.
-    expect(episodeBelongsToSeries(ep(1, 1, 99), episodes)).toBe(false);
+  it("rejects an episode owned by a different series", () => {
+    expect(episodeBelongsToSeries(foreign, 560)).toBe(false);
   });
 
-  it("rejects any episode when the series has no episodes loaded", () => {
-    expect(episodeBelongsToSeries(episodes[0], [])).toBe(false);
+  it("rejects an episode from another series that shares season and episode numbers", () => {
+    // The exact shape a wrong-series lookup produces: same S01E01, different owner.
+    expect(foreign.season).toBe(owned.season);
+    expect(foreign.episode).toBe(owned.episode);
+    expect(episodeBelongsToSeries(foreign, 560)).toBe(false);
   });
 
   it("treats a null episode as not belonging", () => {
-    expect(episodeBelongsToSeries(null, episodes)).toBe(false);
+    expect(episodeBelongsToSeries(null, 560)).toBe(false);
+  });
+
+  it("rejects when the episode carries no owning series id", () => {
+    const orphan = {
+      season: 1,
+      episode: 1,
+      sonarrEpisodeId: 11,
+    } as Item.Episode;
+    expect(episodeBelongsToSeries(orphan, 560)).toBe(false);
   });
 });

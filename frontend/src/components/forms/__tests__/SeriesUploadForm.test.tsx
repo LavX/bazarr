@@ -100,6 +100,13 @@ function makeSeries(): Item.Series {
   } as unknown as Item.Series;
 }
 
+/** The row status cell renders a FontAwesome icon; "xmark" is the error state. */
+function errorIcons() {
+  return screen
+    .queryAllByRole("img", { hidden: true })
+    .filter((el) => el.getAttribute("data-icon") === "xmark");
+}
+
 function makeFile() {
   return new File(["1\n00:00:01,000 --> 00:00:02,000\nhi\n"], "S01E01.srt", {
     type: "application/x-subrip",
@@ -211,5 +218,47 @@ describe("SeriesUploadForm episode resolution", () => {
     // submission only rejects an unset episode, so a wrong one uploads silently.
     expect(screen.queryByDisplayValue(/Ralphie/)).not.toBeInTheDocument();
     expect(screen.queryByDisplayValue(/Pizza Boy/)).not.toBeInTheDocument();
+  });
+
+  it("flags a row whose episode is owned by a different series", async () => {
+    await setupHooks();
+
+    // Simulate the identifier regression this guard exists for: the form
+    // fetches the WRONG series' episodes. The auto-matcher then selects from
+    // that wrong list, so a membership check would pass. Ownership is decided
+    // against the opened series' own id, so this must still be rejected.
+    const { useEpisodesBySeriesId } = await import("@/apis/hooks");
+    vi.mocked(useEpisodesBySeriesId).mockImplementation(
+      () =>
+        ({
+          data: ROOM_104_EPISODES,
+        }) as unknown as ReturnType<typeof useEpisodesBySeriesId>,
+    );
+
+    customRender(
+      <SeriesUploadForm series={makeSeries()} files={[makeFile()]} />,
+    );
+
+    // The wrong-series episode is auto-selected, exactly as it would be after a
+    // regression, and the row is marked invalid rather than silently uploaded.
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("(1x1) Ralphie")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(errorIcons()).toHaveLength(1);
+    });
+  });
+
+  it("does not flag a row whose episode is owned by the opened series", async () => {
+    await setupHooks();
+
+    customRender(
+      <SeriesUploadForm series={makeSeries()} files={[makeFile()]} />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("(1x1) First Sight")).toBeInTheDocument();
+    });
+    expect(errorIcons()).toHaveLength(0);
   });
 });
