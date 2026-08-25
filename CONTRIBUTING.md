@@ -36,9 +36,9 @@ users as a plugin release, instead of waiting for a Bazarr+ release, and a provi
 cannot take the application down with it, because the Hub runs plugins out of process.
 
 The built-in providers under `custom_libs/subliminal_patch/providers/` are **legacy**. They are
-deprecated and will be removed after v3.0.0, they are not maintained, and each one carries a header
-saying so. A pull request that patches one will most likely be asked to move to the catalog, which
-is wasted effort for you, so please start there.
+deprecated and will be removed after v3.0.0, and they are not maintained. Each portable one carries
+a header saying so. A pull request that patches one will most likely be asked to move to the
+catalog, which is wasted effort for you, so please start there.
 
 One exception to the release-independence above, worth knowing before you port anything: the
 Provider Hub only lets an official catalog plugin take over a built-in provider id that is listed in
