@@ -66,5 +66,41 @@ if not getattr(subliminal.video.Episode, '_bazarr_episode_init_patched', False):
     subliminal.video.Episode.episode = property(get_episode, set_episode)
     subliminal.video.Episode._bazarr_episode_init_patched = True
 
+# subliminal's Episode.fromguess and Movie.fromguess predate the extra fields
+# this fork's Video carries, so they build the video without them and throw away
+# work guessit already did. Two of the dropped fields are used for matching:
+# `edition`, which is worth 30 points when a movie is scored, and `other`, which
+# guess_matches compares but does not score. Both were always unset on the video
+# side, and guess_matches counts "neither side names one" as a match, so an
+# edition-less subtitle matched the edition of every edition-tagged movie.
+#
+# The builders are patched here rather than overridden on
+# subliminal_patch.video.Video, because Video.fromguess only dispatches, and it
+# dispatches to the subliminal.video module globals. An override on the subclass
+# is never reached from scan_video, which imports Video from subliminal.video.
+_GUESS_ATTRS_DROPPED_BY_FROMGUESS = ('edition', 'other')
+
+
+def _patch_fromguess(video_cls):
+    original_fromguess = video_cls.__dict__['fromguess'].__func__
+
+    def fromguess(cls, name, guess):
+        video = original_fromguess(cls, name, guess)
+        for attr in _GUESS_ATTRS_DROPPED_BY_FROMGUESS:
+            value = guess.get(attr)
+            if value is not None:
+                setattr(video, attr, value)
+        return video
+
+    video_cls.fromguess = classmethod(fromguess)
+    video_cls._bazarr_fromguess_patched = True
+
+
+for _video_cls in (subliminal.video.Episode, subliminal.video.Movie):
+    # Checked on the class itself, not through inheritance: Episode and Movie
+    # share a base, so getattr would report the second one as already patched.
+    if not _video_cls.__dict__.get('_bazarr_fromguess_patched', False):
+        _patch_fromguess(_video_cls)
+
 # add our own list_all_subtitles
 subliminal.list_all_subtitles = subliminal.core.list_all_subtitles = list_all_subtitles
