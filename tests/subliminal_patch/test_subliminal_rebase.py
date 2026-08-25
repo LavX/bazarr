@@ -29,7 +29,6 @@ EXPECTED_PROVIDER_NAMES = [
     "opensubtitles",
     "opensubtitlescom",
     "pipocas",
-    "podnapisi",
     "prijevodionline",
     "regielive",
     "shooter",
@@ -40,7 +39,6 @@ EXPECTED_PROVIDER_NAMES = [
     "subs4free",
     "subs4series",
     "subsarr",
-    "subscenter",
     "subsource",
     "subsro",
     "subssabbz",
@@ -59,12 +57,16 @@ EXPECTED_PROVIDER_NAMES = [
     "tvsubtitles",
     "whisperai",
     "wizdom",
-    "xsubs",
     "yavkanet",
     "yifysubtitles",
     "zimuku",
 ]
 
+# Vanilla upstream 2.6 entry points. podnapisi stays on this list even though
+# Bazarr retired its own podnapisi wrapper: upstream still ships and registers
+# the provider, and this list exists to prove Bazarr does not mutate upstream's
+# registry. Bazarr's own registry is EXPECTED_PROVIDER_NAMES above, and
+# podnapisi is deliberately absent from it.
 EXPECTED_SUBLIMINAL_PROVIDER_NAMES = [
     "addic7ed",
     "bsplayer",
@@ -435,97 +437,6 @@ def test_tvsubtitles_patch_converts_upstream_languages_for_bazarr_filtering():
     assert len(subtitles) == 1
     assert subtitles[0].language == Language("eng")
     assert type(subtitles[0].language) is Language
-
-
-def test_podnapisi_patch_uses_upstream_26_json_search_endpoint():
-    from subliminal_patch.providers.podnapisi import PodnapisiProvider
-
-    class Response:
-        text = (
-            '{"data": [], "page": 1, "all_pages": 1}'
-        )
-
-        def raise_for_status(self):
-            return None
-
-    class Session:
-        def __init__(self):
-            self.calls = []
-
-        def get(self, url, params, timeout):
-            self.calls.append((url, dict(params), timeout))
-            return Response()
-
-    provider = PodnapisiProvider()
-    provider.session = Session()
-
-    assert provider.query(Language("eng"), "Upstream Probe", season=1, episode=2, year=2024) == []
-    assert provider.session.calls == [
-        (
-            "https://www.podnapisi.net/subtitles/search/advanced",
-            {
-                "keywords": "Upstream Probe",
-                "language": "en",
-                "seasons": 1,
-                "episodes": 2,
-                "movie_type": ["tv-series", "mini-series"],
-                "year": 2024,
-            },
-            10,
-        )
-    ]
-
-
-def test_podnapisi_patch_maps_429_status_to_too_many_requests():
-    from subliminal_patch.exceptions import TooManyRequests
-    from subliminal_patch.providers.podnapisi import PodnapisiProvider
-
-    class Response:
-        status_code = 429
-        text = "Too Many Requests"
-
-        def raise_for_status(self):
-            raise AssertionError("429 should be handled before generic HTTP errors")
-
-    class Session:
-        def get(self, url, params, timeout):
-            return Response()
-
-    provider = PodnapisiProvider()
-    provider.session = Session()
-
-    try:
-        provider.query(Language("eng"), "Upstream Probe", season=1, episode=2, year=2024)
-    except TooManyRequests:
-        pass
-    else:
-        raise AssertionError("Expected TooManyRequests")
-
-
-def test_podnapisi_patch_maps_429_text_to_too_many_requests():
-    from subliminal_patch.exceptions import TooManyRequests
-    from subliminal_patch.providers.podnapisi import PodnapisiProvider
-
-    class Response:
-        status_code = 200
-        text = "429 Too Many Requests"
-
-        def raise_for_status(self):
-            return None
-
-    class Session:
-        def get(self, url, params, timeout):
-            return Response()
-
-    provider = PodnapisiProvider()
-    provider.session = Session()
-
-    try:
-        provider.query(Language("eng"), "Upstream Probe", season=1, episode=2, year=2024)
-    except TooManyRequests:
-        pass
-    else:
-        raise AssertionError("Expected TooManyRequests")
 
 
 def test_subtitulamostv_patch_keeps_bazarr_id_with_upstream_language_catalog():
