@@ -207,12 +207,31 @@ def test_acceptable_results_are_not_rejected(raw_result, max_offset_seconds):
     [
         ({'sync_was_successful': True, 'offset_seconds': 60.1}, '60'),
         ({'sync_was_successful': True, 'offset_seconds': -60.1}, 60),
+    ],
+)
+def test_an_offset_past_the_maximum_is_rejected(raw_result, max_offset_seconds):
+    """Bazarr overruling an engine that claimed success. That is a rejection."""
+    from subtitles.tools.subsync_engines import SyncResultRejectedError, validate_engine_result
+
+    with pytest.raises(SyncResultRejectedError):
+        validate_engine_result('ffsubsync', raw_result, max_offset_seconds)
+
+
+@pytest.mark.parametrize(
+    'raw_result,max_offset_seconds',
+    [
         ({'sync_was_successful': False, 'offset_seconds': 0.0}, '60'),
         ({'success': False}, '60'),
     ],
 )
-def test_unacceptable_results_are_rejected(raw_result, max_offset_seconds):
-    from subtitles.tools.subsync_engines import SyncResultRejectedError, validate_engine_result
+def test_an_engine_reporting_its_own_failure_is_a_decline(raw_result, max_offset_seconds):
+    """The engine's own verdict on its own output, not Bazarr overruling it.
 
-    with pytest.raises(SyncResultRejectedError):
+    ffsubsync setting sync_was_successful False is the same act as autosubsync's
+    quality check refusing its own result, which is routine rather than a fault,
+    so the two must carry the same reason code and the same non-alarming wording.
+    """
+    from subtitles.tools.subsync_engines import SyncEngineDeclinedError, validate_engine_result
+
+    with pytest.raises(SyncEngineDeclinedError):
         validate_engine_result('ffsubsync', raw_result, max_offset_seconds)

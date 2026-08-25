@@ -202,6 +202,7 @@ jobs:
             tests/bazarr/test_subsync_engines.py \
             tests/bazarr/test_sync_offset_acceptance.py \
             tests/bazarr/test_sync_instance_overrides.py \
+            tests/bazarr/test_sync_outcome_reporting.py \
             tests/bazarr/test_subzero_keep_lyrics.py \
             tests/bazarr/test_combine_aligner.py \
             tests/bazarr/test_combine_api_dto.py \

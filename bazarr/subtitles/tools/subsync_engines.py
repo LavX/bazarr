@@ -28,6 +28,31 @@ RESULT_SUCCESS = 'success'
 RESULT_FAILED = 'failed'
 RESULT_SKIPPED = 'skipped'
 
+# Why an engine produced no output. This is reporting vocabulary: every code here is
+# rendered into a sentence for the user in subtitles/sync.py, so the four ways a run
+# can come back empty stay distinguishable without opening System > Logs.
+#
+#   generated_source  the source subtitle is itself a generated sync output
+#   output_exists     a current output for this engine was already on disk
+#   missing_engine    the executable or Python package is absent
+#   failure_threshold the engine was skipped after repeated failures on this file
+#   engine_declined   the engine ran to completion and rejected its own result
+#   result_rejected   the engine returned a result Bazarr refused to accept
+#   engine_failed     the engine errored out
+REASON_GENERATED_SOURCE = 'generated_source'
+REASON_OUTPUT_EXISTS = 'output_exists'
+REASON_MISSING_ENGINE = 'missing_engine'
+REASON_FAILURE_THRESHOLD = 'failure_threshold'
+REASON_ENGINE_DECLINED = 'engine_declined'
+REASON_RESULT_REJECTED = 'result_rejected'
+REASON_ENGINE_FAILED = 'engine_failed'
+
+ENGINE_LABELS = {
+    'ffsubsync': 'FFsubsync',
+    'autosubsync': 'Autosubsync',
+    'alass': 'ALASS',
+}
+
 
 class MissingSyncEngineError(RuntimeError):
     def __init__(self, engine, message):
@@ -37,6 +62,20 @@ class MissingSyncEngineError(RuntimeError):
 
 class SyncResultRejectedError(RuntimeError):
     """An engine produced an output the host refuses to accept."""
+
+    def __init__(self, engine, message):
+        super().__init__(message)
+        self.engine = engine
+
+
+class SyncEngineDeclinedError(RuntimeError):
+    """An engine ran to completion and rejected its own result.
+
+    Distinct from a crash: nothing went wrong, the engine simply could not align this
+    file and said so. autosubsync does this routinely, its ``synchronize`` returns
+    False when its own quality check fails. Reporting that as a failure with a
+    traceback tells the user to go fix an installation that is not broken.
+    """
 
     def __init__(self, engine, message):
         super().__init__(message)
@@ -79,7 +118,11 @@ def validate_engine_result(engine, raw_result, max_offset_seconds):
 
     for key in ('sync_was_successful', 'success'):
         if key in raw_result and not raw_result[key]:
-            raise SyncResultRejectedError(
+            # The engine's own verdict on its own output, which is a decline
+            # rather than a rejection: ffsubsync saying no here is the same act
+            # as autosubsync's quality check saying no. Only the offset limit
+            # below is Bazarr overruling an engine that claimed success.
+            raise SyncEngineDeclinedError(
                 engine, f'{engine} reported the synchronization as unsuccessful.')
 
     limit = acceptance_limit_seconds(max_offset_seconds)
@@ -368,7 +411,7 @@ class SubsyncEngineRunner:
             result.results.append(SyncEngineResult(
                 engine='all',
                 status=RESULT_SKIPPED,
-                reason='generated_source',
+                reason=REASON_GENERATED_SOURCE,
                 message='Generated sync output is not used as a source subtitle.',
             ))
             return result
@@ -385,7 +428,7 @@ class SubsyncEngineRunner:
                     engine=engine,
                     status=RESULT_SKIPPED,
                     output_path=str(final_engine_output_path),
-                    reason='failure_threshold',
+                    reason=REASON_FAILURE_THRESHOLD,
                     message=f'{engine} skipped after {self.failure_threshold} consecutive failures.',
                 ))
                 continue
@@ -396,7 +439,7 @@ class SubsyncEngineRunner:
                         engine=engine,
                         status=RESULT_SKIPPED,
                         output_path=str(final_engine_output_path),
-                        reason='output_exists',
+                        reason=REASON_OUTPUT_EXISTS,
                         message='Generated sync output already exists.',
                     ))
                     continue
@@ -436,20 +479,57 @@ class SubsyncEngineRunner:
                     engine=engine,
                     status=RESULT_SKIPPED,
                     output_path=str(final_engine_output_path),
-                    reason='missing_engine',
+                    reason=REASON_MISSING_ENGINE,
                     message=str(exc),
                 ))
-            except Exception as exc:
-                logging.exception('BAZARR %s sync engine failed for %s', engine, srt_path)
-                if output_path.is_file():
-                    output_path.unlink()
-                self.failure_store.record_failure(srt_path, engine, str(exc)[:500])
+            except SyncEngineDeclinedError as exc:
+                # The engine ran and rejected its own result. Nothing is broken, so
+                # this is logged as a plain warning: a traceback here reads like a
+                # crash and sends users hunting for a missing dependency.
+                logging.warning('BAZARR %s declined its own sync result for %s: %s', engine, srt_path, exc)
+                self._discard_engine_output(srt_path, engine, output_path, exc)
                 result.results.append(SyncEngineResult(
                     engine=engine,
                     status=RESULT_FAILED,
                     output_path=str(final_engine_output_path),
-                    reason='engine_failed',
+                    reason=REASON_ENGINE_DECLINED,
+                    message=str(exc),
+                ))
+
+            except SyncResultRejectedError as exc:
+                # The engine reported success but Bazarr refused the result, so the
+                # engine is not at fault either. Same reasoning as above.
+                logging.warning('BAZARR rejected the %s sync result for %s: %s', engine, srt_path, exc)
+                self._discard_engine_output(srt_path, engine, output_path, exc)
+                result.results.append(SyncEngineResult(
+                    engine=engine,
+                    status=RESULT_FAILED,
+                    output_path=str(final_engine_output_path),
+                    reason=REASON_RESULT_REJECTED,
+                    message=str(exc),
+                ))
+
+            except Exception as exc:
+                logging.exception('BAZARR %s sync engine failed for %s', engine, srt_path)
+                self._discard_engine_output(srt_path, engine, output_path, exc)
+                result.results.append(SyncEngineResult(
+                    engine=engine,
+                    status=RESULT_FAILED,
+                    output_path=str(final_engine_output_path),
+                    reason=REASON_ENGINE_FAILED,
                     message=str(exc),
                 ))
 
         return result
+
+    def _discard_engine_output(self, srt_path, engine, output_path, exc):
+        """Drop whatever the engine left behind and count the attempt against it.
+
+        Shared by every outcome that produced no usable output. A decline and a
+        rejection differ from a crash only in how they are reported: they still cost
+        the engine a strike towards the failure threshold, and they still must not
+        leave a half-written file next to the subtitle.
+        """
+        if output_path.is_file():
+            output_path.unlink()
+        self.failure_store.record_failure(srt_path, engine, str(exc)[:500])
