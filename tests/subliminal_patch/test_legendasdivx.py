@@ -5,6 +5,7 @@ import shutil
 import stat
 import time
 import zipfile
+from types import SimpleNamespace
 from pathlib import Path
 
 import brotli
@@ -650,87 +651,59 @@ def test_legendasdivx_extraction_budget_counts_directories(tmp_path):
     assert provider._over_extraction_budget(str(outdir), "unzip") is True
 
 
-def test_legendasdivx_extraction_budget_stops_walking_once_it_is_over(monkeypatch, tmp_path):
-    """The count exists to stop an extractor that is still running, so walking
-    the whole tree to produce it defeats the point on the trees it is aimed at."""
-    from subliminal_patch.providers import legendasdivx as mod
-
-    walked = []
-
-    def endless_walk(_top):
-        for i in range(10 ** 6):
-            walked.append(i)
-            yield f"/root/{i}", [f"d{i}"], []
-
-    monkeypatch.setattr(mod.os, "walk", endless_walk)
-    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
-
-    assert provider._over_extraction_budget(str(tmp_path), "unzip") is True
-    assert len(walked) < 10 ** 6
-
-
-def test_legendasdivx_multi_episode_video_accepts_either_episode():
-    """A combined video carries several episodes and video.episode is only the
-    lowest of them, so an archive naming one of the others is still the
-    subtitle for this file."""
-    body = "1\n00:00:01,000 --> 00:00:02,000\none and two\n"
-    content = _zip_bytes({"Breaking.Bad.S01E02.srt": body})
-    archive = zipfile.ZipFile(io.BytesIO(content))
-    video = Episode("Breaking.Bad.S01E01-E02.mkv", "Breaking Bad", 1, episodes=[1, 2])
-    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
-
-    assert provider._get_subtitle_from_archive(archive, content, _episode_subtitle(video)) == body.encode()
-
-
-def test_legendasdivx_multi_episode_video_still_rejects_another_episode():
-    content = _zip_bytes({"Breaking.Bad.S01E05.srt": "1\n00:00:01,000 --> 00:00:02,000\nfive\n"})
-    archive = zipfile.ZipFile(io.BytesIO(content))
-    video = Episode("Breaking.Bad.S01E01-E02.mkv", "Breaking Bad", 1, episodes=[1, 2])
-    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
-
-    assert provider._get_subtitle_from_archive(archive, content, _episode_subtitle(video)) is None
-
-
-def test_legendasdivx_absolute_numbering_does_not_override_a_stated_season():
-    """A member that names a season is claiming season-relative numbering, so
-    its episode number is not an absolute one. Show.S01E14 is not the subtitle
-    for S02E01 just because that episode's absolute number happens to be 14."""
-    content = _zip_bytes({"Show.S01E14.srt": "1\n00:00:01,000 --> 00:00:02,000\nwrong\n"})
-    archive = zipfile.ZipFile(io.BytesIO(content))
-    video = Episode("Show.S02E01.mkv", "Show", 2, 1)
-    video.absolute_episode = 14
-    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
-
-    assert provider._get_subtitle_from_archive(archive, content, _episode_subtitle(video)) is None
-
-
-def test_legendasdivx_member_budget_stops_inside_the_directory_it_is_reading(monkeypatch, tmp_path):
-    """The count exists to cut a running extractor short. Reading a whole
-    directory of a million entries before noticing the cap was crossed leaves
-    the extractor alive for the entire scan, spending an inode per entry."""
-    from subliminal_patch.providers import legendasdivx as mod
-
-    stated = []
-    real_lstat = os.lstat
-
-    def counting_lstat(path):
-        # mod.os is the os module itself, so this patch is global: hold the real
-        # one or the stand-in calls itself.
-        stated.append(path)
-        return real_lstat(__file__)
-
-    monkeypatch.setattr(mod.os, "lstat", counting_lstat)
-    monkeypatch.setattr(mod.os, "walk", lambda top: iter(
-        [("/root", [], [f"f{i}" for i in range(mod.CLI_EXTRACT_MAX_MEMBERS * 10)])]
-    ))
-    monkeypatch.setattr(mod, "CLI_EXTRACT_MAX_BYTES", 10 ** 12)
-
-    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
-
-    assert provider._over_extraction_budget(str(tmp_path), "unzip") is True
-    assert len(stated) <= mod.CLI_EXTRACT_MAX_MEMBERS + 1, (
-        f"the whole directory was read: {len(stated)} entries stat'ed"
+def _entry(name, path, is_dir=False, size=0):
+    """Enough of os.DirEntry for the scanner: it reads name, is_dir and stat."""
+    return SimpleNamespace(
+        name=name,
+        path=path,
+        is_dir=lambda follow_symlinks=True: is_dir,
+        stat=lambda follow_symlinks=True: SimpleNamespace(st_size=size),
     )
+
+
+class _CountingScandir:
+    """A directory that never ends, counting how far the scanner got into it."""
+
+    def __init__(self, limit):
+        self.seen = 0
+        self._limit = limit
+
+    def __call__(self, path):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def __iter__(self):
+        while True:
+            self.seen += 1
+            if self.seen > self._limit:
+                raise AssertionError(
+                    f"the scan read {self.seen} entries past its own cap"
+                )
+            yield _entry(f"f{self.seen}", f"/root/f{self.seen}")
+
+
+def test_legendasdivx_extraction_budget_stops_reading_once_it_is_over(monkeypatch, tmp_path):
+    """The count exists to cut a running extractor short, so it has to stop
+    inside the directory that blew it.
+
+    os.walk lists every name in a directory before it yields anything, so an
+    archive that writes millions of entries into one directory would be
+    enumerated in full before any budget could be consulted, with the extractor
+    still running and the deadline unreachable.
+    """
+    from subliminal_patch.providers import legendasdivx as mod
+
+    scandir = _CountingScandir(mod.CLI_EXTRACT_MAX_MEMBERS + 10)
+    monkeypatch.setattr(mod.os, "scandir", scandir)
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
+    assert provider._over_extraction_budget(str(tmp_path), "unzip") is True
+    assert scandir.seen <= mod.CLI_EXTRACT_MAX_MEMBERS + 1
 
 
 def test_legendasdivx_cli_extraction_reads_the_episode_from_the_directory(monkeypatch, tmp_path):

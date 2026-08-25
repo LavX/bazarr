@@ -700,32 +700,44 @@ class LegendasdivxProvider(Provider):
         Directories count as members: an archive of nothing but empty
         directories writes no bytes and no files, so a files-only count would
         sit at zero while the extractor spends one inode per member until the
-        timeout. The walk stops as soon as either budget is blown, because the
-        count exists to cut a running extractor short and walking a tree built
-        to be enormous would defeat that.
+        timeout.
 
-        lstat, not stat: a symlink member must not be charged the size of
-        whatever it points at, and _is_safe_extracted_file drops those anyway.
+        scandir rather than os.walk, and counted entry by entry: os.walk builds
+        the whole list of names in a directory before it yields anything, so a
+        directory with millions of entries would be enumerated in full before
+        any budget could be consulted, with the extractor still running and the
+        deadline unreachable. scandir hands entries back as it reads them, so
+        the scan stops within the directory that blew the budget.
+
+        Sizes come from the entry itself without following symlinks: a symlink
+        member must not be charged the size of whatever it points at, and
+        _is_safe_extracted_file drops those anyway.
         """
         total_bytes = 0
         members = 0
-        for root, dirs, files in os.walk(outdir):
-            members += len(dirs)
-            if members > CLI_EXTRACT_MAX_MEMBERS:
-                return total_bytes, members
+        pending = [outdir]
 
-            for f in files:
-                members += 1
-                if members > CLI_EXTRACT_MAX_MEMBERS:
-                    return total_bytes, members
+        while pending:
+            current = pending.pop()
+            try:
+                with os.scandir(current) as entries:
+                    for entry in entries:
+                        members += 1
+                        if members > CLI_EXTRACT_MAX_MEMBERS:
+                            return total_bytes, members
 
-                try:
-                    total_bytes += os.lstat(os.path.join(root, f)).st_size
-                except OSError:
-                    continue
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                pending.append(entry.path)
+                                continue
+                            total_bytes += entry.stat(follow_symlinks=False).st_size
+                        except OSError:
+                            continue
 
-                if total_bytes > CLI_EXTRACT_MAX_BYTES:
-                    return total_bytes, members
+                        if total_bytes > CLI_EXTRACT_MAX_BYTES:
+                            return total_bytes, members
+            except OSError:
+                continue
 
         return total_bytes, members
 
