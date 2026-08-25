@@ -5,5 +5,10 @@ pytest-cov
 pytest-vcr
 pytest-mock
 requests-mock
+# Imported directly by tests/subliminal_patch/test_http.py and
+# test_legendasdivx.py to build brotli-encoded fixtures. It reaches the
+# runtime image transitively via Flask-Compress and py7zr, but a test that
+# imports it deserves its own declaration.
+brotli==1.2.0
 ruff==0.15.20
 setuptools
