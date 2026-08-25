@@ -240,19 +240,26 @@ _PYTEST_NEUTERING = {
     "--markers", "--help", "-h", "-k", "-m",
 }
 
-# Workflow, job and step keys the guard has reasoned about. `if`,
-# `continue-on-error` and `working-directory` are absent on purpose: the first
-# two decide whether a step's result binds, the third changes what its paths
-# mean. Anything else absent is absent because nobody has reasoned about it yet,
-# which is exactly when the guard should stop rather than assume.
+# Workflow, job and step keys the guard has reasoned about. A key that is on
+# neither this list nor _CHECKED_KEYS below is absent because nobody has
+# reasoned about it yet, which is exactly when the guard should stop rather than
+# assume.
 _SAFE_WORKFLOW_KEYS = {"name", "run-name", "on", True, "permissions", "env", "jobs"}
 _SAFE_JOB_KEYS = {
     "name", "runs-on", "needs", "permissions", "strategy", "services", "steps",
     "env", "timeout-minutes",
 }
-_SAFE_STEP_KEYS = {"name", "id", "run", "env", "shell", "timeout-minutes"}
+_SAFE_STEP_KEYS = {"name", "id", "run", "env", "timeout-minutes"}
+# Keys whose value decides, rather than their presence. `if` and
+# `continue-on-error` say whether the result binds, `working-directory` changes
+# what the paths mean, `shell` changes what the script means.
+_CHECKED_KEYS = {"if", "continue-on-error", "working-directory", "shell"}
+# `if` values that are exactly, unconditionally true. An exact literal match, not
+# an expression evaluator: anything else is refused, `always()` included in the
+# form GitHub also accepts it.
+_ALWAYS_RUNS = {True, "true", "always()", "${{ always() }}", "${{always()}}"}
 # Shells whose semantics the grammar below describes.
-_SAFE_SHELLS = {"bash", "sh", "bash -e {0}"}
+_SAFE_SHELLS = {None, "bash", "sh", "bash -e {0}"}
 
 # Every shell operator, all of them refused inside a test-bearing script. Each
 # one is a way for a command to name a path without running it, or to run it
@@ -549,16 +556,42 @@ def _loop_body(lines: list, index: int, variable: str) -> tuple:
 
 
 def _scope_problem(kind: str, name: str, scope: dict, safe_keys: set) -> str:
+    """Why this workflow, job or step cannot be counted as guaranteed coverage."""
     if not isinstance(scope, dict):
         return f"{kind} {name} is not a mapping"
-    unknown = sorted(str(key) for key in scope if key not in safe_keys)
+
+    unknown = sorted(str(key) for key in scope if key not in safe_keys | _CHECKED_KEYS)
     if unknown:
         return (
             f"{kind} {name} uses {', '.join(unknown)}, which the guard has not "
-            "reasoned about. `if` and `continue-on-error` decide whether the "
-            "step's result binds, `working-directory` changes what its paths "
-            "mean. Decide which it is, then add the key to the safe list"
+            "reasoned about. Work out whether it changes what runs or whether "
+            "the result binds, then add it to the safe list or check its value"
         )
+
+    condition = scope.get("if")
+    if condition is not None and condition not in _ALWAYS_RUNS:
+        return (
+            f"{kind} {name} carries `if: {condition}`, so it may not run and "
+            "cannot count as guaranteed coverage. Only an exactly unconditional "
+            "`if` counts, such as always()"
+        )
+    if scope.get("continue-on-error"):
+        return (
+            f"{kind} {name} sets continue-on-error, so it runs but its failures "
+            "cannot fail the workflow. Its assertions gate nothing, which is the "
+            "state this guard exists to prevent"
+        )
+    if scope.get("working-directory"):
+        return (
+            f"{kind} {name} sets working-directory, so the guard cannot tell "
+            "which files its paths name"
+        )
+    if scope.get("shell") not in _SAFE_SHELLS:
+        return (
+            f"{kind} {name} runs under shell {scope['shell']!r}, whose semantics "
+            "the guard does not model"
+        )
+
     neutering = sorted(
         str(key) for key in (scope.get("env") or {}) if str(key).startswith("PYTEST_")
     )
@@ -567,9 +600,6 @@ def _scope_problem(kind: str, name: str, scope: dict, safe_keys: set) -> str:
             f"{kind} {name} sets {', '.join(neutering)}, which can silence pytest "
             "while every command still looks like it runs the tests"
         )
-    shell = scope.get("shell")
-    if shell is not None and shell not in _SAFE_SHELLS:
-        return f"{kind} {name} runs under shell {shell!r}, whose semantics the guard does not model"
     return ""
 
 
@@ -950,6 +980,18 @@ def test_workflow_level_pytest_addopts_is_not_coverage(constructed_workflow):
     constructed_workflow(workflow)
     covered, problems = _read_workflow()
     assert not covered and problems
+
+
+@pytest.mark.parametrize("condition", ["always()", "${{ always() }}", True])
+def test_step_that_always_runs_is_still_coverage(constructed_workflow, condition):
+    """`if: always()` really does always run, so refusing it would be a false alarm.
+
+    An exact literal match on a tiny set, not an expression evaluator: anything
+    the guard cannot read off by sight is still refused.
+    """
+    constructed_workflow(_one_job({"if": condition, "run": f"pytest {_REAL}\n"}))
+    covered, problems = _read_workflow()
+    assert covered == {_REAL} and not problems
 
 
 def test_unknown_job_key_stops_the_guard_vouching(constructed_workflow):
