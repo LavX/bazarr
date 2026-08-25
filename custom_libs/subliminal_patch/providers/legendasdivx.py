@@ -46,6 +46,14 @@ from dogpile.cache.api import NO_VALUE
 
 logger = logging.getLogger(__name__)
 
+# Upper bound for a single CLI extractor invocation. A malformed or
+# password-protected archive can make unar/7z/unrar sit on stdin forever,
+# and _extract_via_cli runs inside the download worker, so an unbounded
+# subprocess.run() would block that worker indefinitely. Mirrors
+# FILEBOT_XATTR_TIMEOUT in subliminal_patch.refiners.filebot.
+CLI_EXTRACT_TIMEOUT = 60
+
+
 def clean_release_line(text):
     # Separate glued keywords like versãoThe or releaseThe
     text = re.sub(r"(vers[aã]o|release|filme)([A-Z0-9])", r"\1 \2", text, flags=re.I)
@@ -618,7 +626,12 @@ class LegendasdivxProvider(Provider):
                 ("unrar", ["unrar", "x", "-y", tmparc, tmpdir]),
             ]:
                 if shutil.which(tool):
-                    p = subprocess.run(cmd, capture_output=True)
+                    try:
+                        p = subprocess.run(cmd, capture_output=True, timeout=CLI_EXTRACT_TIMEOUT)
+                    except subprocess.TimeoutExpired:
+                        logger.warning("Legendasdivx.pt :: %s timed out after %ss extracting archive, "
+                                       "trying next extractor", tool, CLI_EXTRACT_TIMEOUT)
+                        continue
                     if p.returncode == 0:
                         extracted = True
                         break
