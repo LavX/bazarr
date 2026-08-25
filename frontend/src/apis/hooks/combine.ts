@@ -33,9 +33,10 @@ export function useCombineSubtitles() {
     onSuccess: (_data, variables) => {
       switch (variables.scope.kind) {
         case "movie":
-          void qc.invalidateQueries({
-            queryKey: [QueryKeys.Movies, variables.scope.radarrId],
-          });
+          // The prefix alone. Movie queries are cached under the canonical
+          // LOCAL id while the scope carries the upstream radarrId, so a key
+          // built from it matched nothing, and the prefix below covers every
+          // movie query anyway.
           void qc.invalidateQueries({ queryKey: [QueryKeys.Movies] });
           break;
         case "episode":
@@ -51,9 +52,8 @@ export function useCombineSubtitles() {
           void qc.invalidateQueries({ queryKey: [QueryKeys.Series] });
           break;
         case "series":
-          void qc.invalidateQueries({
-            queryKey: [QueryKeys.Series, variables.scope.seriesId],
-          });
+          // Likewise: the scope carries the upstream sonarrSeriesId and series
+          // queries are cached under the local id.
           void qc.invalidateQueries({ queryKey: [QueryKeys.Series] });
           break;
       }
