@@ -311,7 +311,13 @@ class SZProviderPool(ProviderPool):
 
     def __getitem__(self, name):
         if name not in self.providers:
-            raise KeyError
+            if name in provider_registry:
+                if isinstance(self.providers, set):
+                    self.providers.add(name)
+                else:
+                    self.providers.append(name)
+            else:
+                raise KeyError(name)
         if name not in self.initialized_providers:
             logger.info('Initializing provider %s', name)
             provider = provider_registry[name](**self.provider_configs.get(name, {}))
