@@ -600,7 +600,12 @@ const SettingsSubtitlesView: FunctionComponent = () => {
               defaultValue={60}
             ></Selector>
             <Message>
-              The max allowed offset seconds for any subtitle segment.
+              Acceptance threshold: a synchronization that has to shift the
+              subtitles further than this is rejected, and the next enabled
+              engine is tried with the original subtitles. Engines search
+              without a limit, so the offset checked here is the one they
+              actually settled on. Only FFsubsync reports an offset, so the
+              threshold applies to FFsubsync.
             </Message>
             <Check
               label="Generate Debug File Instead of Synchronizing"

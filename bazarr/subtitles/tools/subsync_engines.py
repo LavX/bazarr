@@ -16,6 +16,14 @@ OUTPUT_MODE_KEEP_ALL = 'keep_all'
 SUPPORTED_OUTPUT_MODES = (OUTPUT_MODE_OVERWRITE, OUTPUT_MODE_KEEP_ALL)
 FAILURE_THRESHOLD = 3
 
+# Handed to ffsubsync in place of the user's maximum offset so it searches without a
+# window. ffsubsync masks out-of-window candidates in MaxScoreAligner.transform, i.e.
+# after the full correlation is computed, so a window never saves work: it only hides
+# the alignment the engine would otherwise have chosen, and makes it return the best
+# in-window candidate instead. A day is beyond any real audio/subtitle offset, so the
+# mask is a no-op while still exercising ffsubsync's normal (non-None) code path.
+UNCONSTRAINED_MAX_OFFSET_SECONDS = 86400.0
+
 RESULT_SUCCESS = 'success'
 RESULT_FAILED = 'failed'
 RESULT_SKIPPED = 'skipped'
@@ -25,6 +33,68 @@ class MissingSyncEngineError(RuntimeError):
     def __init__(self, engine, message):
         super().__init__(message)
         self.engine = engine
+
+
+class SyncResultRejectedError(RuntimeError):
+    """An engine produced an output the host refuses to accept."""
+
+    def __init__(self, engine, message):
+        super().__init__(message)
+        self.engine = engine
+
+
+def acceptance_limit_seconds(max_offset_seconds):
+    """Normalize the configured maximum offset into a positive float, or None.
+
+    None means "no limit": an unset, unparsable or non-positive setting must not
+    silently reject every alignment.
+    """
+    if max_offset_seconds is None:
+        return None
+    try:
+        limit = abs(float(max_offset_seconds))
+    except (TypeError, ValueError):
+        return None
+    return limit or None
+
+
+def validate_engine_result(engine, raw_result, max_offset_seconds):
+    """Accept or reject what an engine returned. Raises SyncResultRejectedError.
+
+    The engines search without an offset window, so the configured maximum is applied
+    here, on the host, as an acceptance threshold. Two things get rejected:
+
+    1. A run the engine itself reports as unsuccessful. ffsubsync writes an output file
+       even then (an anti-correlated alignment, or the untouched subtitles when it
+       declines to shift them), so "a non-empty file exists" is not evidence of a sync.
+    2. An alignment whose absolute offset is larger than the configured maximum.
+
+    Only ffsubsync reports an offset, so only ffsubsync is held to the maximum. That is
+    a knowing inconsistency: autosubsync and alass report success or failure and nothing
+    measurable, and there is no way to bound their shift short of re-deriving it from
+    their output. They are still held to condition 1.
+    """
+    if not isinstance(raw_result, dict):
+        return
+
+    for key in ('sync_was_successful', 'success'):
+        if key in raw_result and not raw_result[key]:
+            raise SyncResultRejectedError(
+                engine, f'{engine} reported the synchronization as unsuccessful.')
+
+    limit = acceptance_limit_seconds(max_offset_seconds)
+    offset_seconds = raw_result.get('offset_seconds')
+    if limit is None or offset_seconds is None:
+        return
+    try:
+        offset_seconds = float(offset_seconds)
+    except (TypeError, ValueError):
+        return
+    if abs(offset_seconds) > limit:
+        raise SyncResultRejectedError(
+            engine,
+            f'{engine} aligned the subtitles by {abs(offset_seconds):.3f} seconds, '
+            f'more than the {limit:g} second maximum offset.')
 
 
 @dataclass
