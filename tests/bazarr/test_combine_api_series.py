@@ -13,6 +13,8 @@ from unittest.mock import MagicMock, patch
 
 # Snapshot sys.modules so we can fully restore it after importing the module
 # under test, preventing mock/transitive-import leakage into later test files.
+from tests.bazarr import _module_isolation
+
 _SYS_BEFORE = dict(sys.modules)
 
 
@@ -132,11 +134,7 @@ import api.series.series as series_module  # noqa: E402
 
 # Fully restore sys.modules to its pre-import state: drop everything this module
 # added (mocks + transitive imports) and put back any originals we replaced.
-for _k in list(sys.modules):
-    if _k not in _SYS_BEFORE:
-        del sys.modules[_k]
-for _k, _v in _SYS_BEFORE.items():
-    sys.modules[_k] = _v
+_module_isolation.restore(_SYS_BEFORE)
 
 
 # ---------------------------------------------------------------------------

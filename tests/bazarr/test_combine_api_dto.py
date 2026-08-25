@@ -7,17 +7,15 @@
 # so importing the real `api`/`api.utils` here does not leak into later tests.
 import sys
 
+from tests.bazarr import _module_isolation
+
 _SYS_BEFORE = dict(sys.modules)
 sys.modules.pop("api.utils", None)
 sys.modules.pop("api", None)
 
 from api.utils import _subtitle_language_details  # noqa: E402
 
-for _k in list(sys.modules):
-    if _k not in _SYS_BEFORE:
-        del sys.modules[_k]
-for _k, _v in _SYS_BEFORE.items():
-    sys.modules[_k] = _v
+_module_isolation.restore(_SYS_BEFORE)
 
 
 def test_plain_language_has_no_modifier():

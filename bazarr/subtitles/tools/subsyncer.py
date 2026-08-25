@@ -13,11 +13,15 @@ from subtitles.processing import ProcessSubtitlesResult
 from subtitles.tools import alass_ffprobe_shim
 from subtitles.tools.subsync_engines import (
     DEFAULT_ENABLED_ENGINES,
+    ENGINE_LABELS,
     OUTPUT_MODE_OVERWRITE,
+    UNCONSTRAINED_MAX_OFFSET_SECONDS,
     SubsyncEngineRunner,
     MissingSyncEngineError,
+    SyncEngineDeclinedError,
     normalize_enabled_engines,
     normalize_output_mode,
+    validate_engine_result,
 )
 from languages.get_languages import audio_language_from_name, language_from_alpha2
 from utilities.path_mappings import path_mappings
@@ -26,13 +30,6 @@ from app.config import settings
 from app.database import TableMovies, TableShows, database, select
 from app.get_args import args
 from arr_instances.resolution import scoped, default_instance_id
-
-
-ENGINE_LABELS = {
-    'ffsubsync': 'FFsubsync',
-    'autosubsync': 'Autosubsync',
-    'alass': 'ALASS',
-}
 
 
 def _autosubsync_model_file():
@@ -203,15 +200,24 @@ class SubSyncer:
         self.ffmpeg_path = os.path.dirname(ffmpeg_exe)
         return self.ffmpeg_path
 
-    def _build_ffsubsync_args(self, output_path, max_offset_seconds, no_fix_framerate, gss, reference=None,
+    def _build_ffsubsync_args(self, output_path, no_fix_framerate, gss, reference=None,
                               sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None, force_sync=False,
                               arr_instance_id=None):
+        """Build the ffsubsync argument namespace.
+
+        The configured maximum offset is deliberately NOT passed as
+        ``--max-offset-seconds``: that flag is a search window, and a window makes
+        ffsubsync return the best alignment *inside* it rather than the one it would
+        really have picked, so a subtitle that is further out than the maximum comes
+        back looking synchronized. The engine searches unconstrained and the host
+        applies the maximum afterwards, in ``validate_engine_result``.
+        """
         from ffsubsync.ffsubsync import make_parser
 
         ffmpeg_path = self._ensure_ffmpeg_path()
         unparsed_args = [self.reference, '-i', self.srtin, '-o', str(output_path), '--ffmpegpath', ffmpeg_path,
                          '--vad', self.vad, '--log-dir-path', self.log_dir_path, '--max-offset-seconds',
-                         max_offset_seconds, '--output-encoding', 'same']
+                         str(UNCONSTRAINED_MAX_OFFSET_SECONDS), '--output-encoding', 'same']
 
         if no_fix_framerate:
             unparsed_args.append('--no-fix-framerate')
@@ -264,14 +270,13 @@ class SubSyncer:
         parser = make_parser()
         return parser.parse_args(args=unparsed_args)
 
-    def _run_ffsubsync_engine(self, output_path, max_offset_seconds, no_fix_framerate, gss, reference=None,
+    def _run_ffsubsync_engine(self, output_path, no_fix_framerate, gss, reference=None,
                               sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None, force_sync=False,
                               arr_instance_id=None):
         from ffsubsync.ffsubsync import run
 
         self.args = self._build_ffsubsync_args(
             output_path=output_path,
-            max_offset_seconds=max_offset_seconds,
             no_fix_framerate=no_fix_framerate,
             gss=gss,
             reference=reference,
@@ -308,7 +313,7 @@ class SubSyncer:
         except subprocess.CalledProcessError as exc:
             details = (getattr(exc, 'stderr', None) or getattr(exc, 'stdout', None) or str(exc)).strip()
             raise RuntimeError(
-                f'{engine} failed with exit code {exc.returncode}: {details}'
+                f'{engine} exited with code {exc.returncode}: {details}'
             ) from exc
         return {
             'stdout': completed.stdout,
@@ -373,7 +378,10 @@ class SubSyncer:
             raise
 
         if not success:
-            raise RuntimeError('autosubsync completed but did not meet the quality threshold.')
+            # autosubsync's own quality check said no. That is a verdict, not a
+            # fault, so it is reported as a decline rather than an engine failure.
+            raise SyncEngineDeclinedError(
+                'autosubsync', 'autosubsync completed but did not meet its quality threshold.')
 
         return {
             'success': success,
@@ -458,7 +466,6 @@ class SubSyncer:
             if engine == 'ffsubsync':
                 raw_result = self._run_ffsubsync_engine(
                     output_path=output_path,
-                    max_offset_seconds=max_offset_seconds,
                     no_fix_framerate=no_fix_framerate,
                     gss=gss,
                     reference=reference,
@@ -470,6 +477,10 @@ class SubSyncer:
                 )
             else:
                 raw_result = self._run_external_engine(engine=engine, output_path=output_path, video_path=video_path)
+            # The engines search unconstrained, so the maximum offset is enforced here.
+            # Raising leaves the runner to delete the engine output, keep the original
+            # subtitle and move on to the next engine.
+            validate_engine_result(engine, raw_result, max_offset_seconds)
             self._report_progress(
                 f'Finished {engine_label} ({engine_position}/{progress_total})',
                 engine_position,
