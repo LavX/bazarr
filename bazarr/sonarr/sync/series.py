@@ -14,7 +14,8 @@ from app.database import TableShows, TableLanguagesProfiles, database, insert, u
 from utilities.path_mappings import path_mappings
 from app.event_handler import event_stream
 from app.jobs_queue import jobs_queue
-from arr_instances.resolution import client_for_instance, default_instance_id, scoped, stamp_owner
+from arr_instances.resolution import (client_for_instance, default_instance_id,
+                                      resolve_default_profile, scoped, stamp_owner)
 
 from .episodes import sync_episodes
 from .parser import seriesParser
@@ -269,13 +270,6 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
         event_stream(type='series', action='delete', payload=int(series_id))
         return
 
-    if settings.general.serie_default_enabled is True:
-        serie_default_profile = settings.general.serie_default_profile
-        if serie_default_profile == '':
-            serie_default_profile = None
-    else:
-        serie_default_profile = None
-
     # Fetch invariants only when the bulk caller didn't pre-load them.
     if audio_profiles is None:
         audio_profiles = get_profile_list()
@@ -308,6 +302,17 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
     # preserving legacy NULL behaviour.
     instance_id = arr_instance_id if arr_instance_id is not None \
         else default_instance_id(database, 'sonarr')
+
+    # Default languages profile for a series this pass INSERTS: the owning
+    # instance's override when it has one, otherwise the global default exactly
+    # as before. An instance without an override changes nothing, which is what
+    # keeps single-instance installs on the profile they already have. A tag
+    # match still wins over both, inside seriesParser.
+    serie_default_profile = resolve_default_profile(
+        instance_id,
+        settings.general.serie_default_enabled,
+        settings.general.serie_default_profile,
+        session=database)
 
     if action == 'updated' and existing_in_db:
         # Update existing series in DB

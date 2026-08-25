@@ -16,6 +16,8 @@ The session is passed in by the caller (the sync orchestrators already hold the
 scoped ``database`` session) so these helpers never reach for a global and stay
 trivially testable against an in-memory session.
 """
+import logging
+
 from sqlalchemy import select
 
 from app.database import TableShows
@@ -161,3 +163,84 @@ def resolve_subtitle_setting(arr_instance_id, dotted_key, global_default, sessio
     if isinstance(section_blob, dict) and key in section_blob:
         return section_blob[key]
     return global_default
+
+
+# --- Per-instance default language profile resolution ----------------------
+# instance_id -> parsed media_defaults blob. Same lifecycle as the
+# subtitle_settings cache above: populated lazily, cleared by
+# service.refresh_runtime on any instance create/update/delete so an edited
+# override never keeps serving a stale value until restart.
+_media_defaults_cache = {}
+
+
+def clear_media_defaults_cache(arr_instance_id=None):
+    """Drop the cached media_defaults for one instance, or all of them."""
+    if arr_instance_id is None:
+        _media_defaults_cache.clear()
+    else:
+        _media_defaults_cache.pop(arr_instance_id, None)
+
+
+def _instance_media_defaults(arr_instance_id, session=None):
+    if arr_instance_id in _media_defaults_cache:
+        return _media_defaults_cache[arr_instance_id]
+    if session is None:
+        from app.database import database
+        session = database
+    from app.database import TableArrInstances
+    from .media_defaults import read_media_defaults
+    row = session.execute(
+        select(TableArrInstances.options).where(TableArrInstances.id == arr_instance_id)
+    ).first()
+    blob = read_media_defaults(row.options if row else None)
+    _media_defaults_cache[arr_instance_id] = blob
+    return blob
+
+
+def _language_profile_exists(profile_id, session=None):
+    from app.database import TableLanguagesProfiles
+    if session is None:
+        from app.database import database
+        session = database
+    return session.execute(
+        select(TableLanguagesProfiles.profileId)
+        .where(TableLanguagesProfiles.profileId == profile_id)
+    ).first() is not None
+
+
+def resolve_default_profile(arr_instance_id, global_enabled, global_profile, session=None):
+    """Return the language profile id to stamp on media a sync INSERTS, or None.
+
+    ``global_enabled``/``global_profile`` are the raw
+    ``settings.general.<noun>_default_enabled`` / ``_default_profile`` pair; the
+    same reduction the sync sites did inline is applied here.
+
+    The instance override is consulted ONLY when the instance actually has one.
+    An instance with no ``media_defaults`` block, a missing instance context
+    (``arr_instance_id`` None, i.e. a pre-backfill install), or an unparseable
+    options blob all return the global value unchanged. That conditionality is
+    the whole point: resolving an override where none is set would move profile
+    assignment for every single-instance install on its next sync.
+
+    A stored override naming a profile that no longer exists (the profile was
+    deleted after the override was saved; the API rejects unknown ids at write
+    time) falls back to the global default rather than writing a dangling
+    ``profileId``. The existence check costs one indexed lookup and runs only
+    when an override is actually set.
+    """
+    from .media_defaults import global_default_profile, instance_default_profile
+
+    global_value = global_default_profile(global_enabled, global_profile)
+    if arr_instance_id is None:
+        return global_value
+
+    has_override, profile = instance_default_profile(
+        _instance_media_defaults(arr_instance_id, session=session))
+    if not has_override:
+        return global_value
+    if profile is not None and not _language_profile_exists(profile, session=session):
+        logging.warning(
+            "BAZARR arr instance %s has a default language profile (%s) that no longer "
+            "exists; falling back to the global default.", arr_instance_id, profile)
+        return global_value
+    return profile

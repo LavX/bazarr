@@ -1,4 +1,4 @@
-import { FunctionComponent, useEffect, useState } from "react";
+import { FunctionComponent, useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Badge,
@@ -9,6 +9,7 @@ import {
   NumberInput,
   PasswordInput,
   SegmentedControl,
+  Select,
   Stack,
   Switch,
   Text,
@@ -21,10 +22,13 @@ import {
   faCircleXmark,
   faPlugCircleBolt,
   faShieldHalved,
+  faWandMagicSparkles,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
+  useApplyArrInstanceDefaultProfile,
   useCreateArrInstance,
+  useLanguageProfiles,
   useTestArrInstanceById,
   useTestArrInstanceConnection,
   useUpdateArrInstance,
@@ -34,8 +38,16 @@ import type {
   ArrInstanceTest,
   ArrInstanceUpdate,
   ArrKind,
+  ArrMediaDefaults,
   ArrSubtitleSettings,
 } from "@/apis/raw/arrInstances";
+import {
+  GLOBAL_DEFAULT,
+  hasMediaDefaultProfile,
+  mediaDefaultsToValue,
+  NO_PROFILE,
+  valueToMediaDefaults,
+} from "./mediaDefaults";
 import {
   ARR_META,
   buildArrInstanceCreateBody,
@@ -61,6 +73,7 @@ interface FormValues {
   enabled: boolean;
   isDefault: boolean;
   subtitleSettings: ArrSubtitleSettings;
+  mediaDefaults: ArrMediaDefaults;
 }
 
 function initialValues(
@@ -81,6 +94,7 @@ function initialValues(
       enabled: instance.enabled,
       isDefault: instance.is_default,
       subtitleSettings: instance.subtitle_settings ?? {},
+      mediaDefaults: instance.media_defaults ?? {},
     };
   }
   return {
@@ -96,6 +110,7 @@ function initialValues(
     enabled: true,
     isDefault: false,
     subtitleSettings: {},
+    mediaDefaults: {},
   };
 }
 
@@ -118,6 +133,8 @@ const InstanceFormModal: FunctionComponent<Props> = ({
   // `testById` uses the instance's stored key server-side (keep current key).
   const test = useTestArrInstanceConnection();
   const testById = useTestArrInstanceById();
+  const applyDefaultProfile = useApplyArrInstanceDefaultProfile();
+  const { data: languageProfiles } = useLanguageProfiles();
 
   const [keyMode, setKeyMode] = useState<KeyMode>("keep");
   const hasStoredKey = instance !== null && instance.api_key_set;
@@ -163,6 +180,31 @@ const InstanceFormModal: FunctionComponent<Props> = ({
   }, [opened, kind, instance]);
 
   const meta = ARR_META[form.values.kind];
+  const listLabel = form.values.kind === "sonarr" ? "Series" : "Movies";
+
+  // "Use the global default" is a real, selectable choice rather than a blank
+  // field: an instance that has not opted in must READ as inheriting.
+  const profileOptions = useMemo(
+    () => [
+      { value: GLOBAL_DEFAULT, label: "Use the global default" },
+      { value: NO_PROFILE, label: "No profile" },
+      ...(languageProfiles ?? []).map((profile) => ({
+        value: String(profile.profileId),
+        label: profile.name,
+      })),
+    ],
+    [languageProfiles],
+  );
+
+  // The apply action works off the SAVED override, so it stays disabled while
+  // the selector holds an unsaved value.
+  const savedProfileChoice = mediaDefaultsToValue(instance?.media_defaults);
+  const profileChoiceDirty =
+    mediaDefaultsToValue(form.values.mediaDefaults) !== savedProfileChoice;
+  const canApplyDefaultProfile =
+    instance !== null &&
+    !profileChoiceDirty &&
+    hasMediaDefaultProfile(instance.media_defaults);
 
   const changeKind = (next: ArrKind) => {
     const previousDefault = ARR_META[form.values.kind].defaultPort;
@@ -243,6 +285,7 @@ const InstanceFormModal: FunctionComponent<Props> = ({
         // Always sent so clearing every override (an empty object) removes the
         // stored block server-side; an absent key would instead preserve it.
         subtitle_settings: values.subtitleSettings,
+        media_defaults: values.mediaDefaults,
       };
       if (hasStoredKey) {
         if (keyMode === "replace" && typed.length) {
@@ -279,6 +322,7 @@ const InstanceFormModal: FunctionComponent<Props> = ({
         isDefault: values.isDefault,
         apiKey: typed.length ? typed : undefined,
         subtitleSettings: values.subtitleSettings,
+        mediaDefaults: values.mediaDefaults,
       });
       create.mutate(body, {
         onSuccess: () => {
@@ -461,6 +505,50 @@ const InstanceFormModal: FunctionComponent<Props> = ({
               {...form.getInputProps("isDefault", { type: "checkbox" })}
             />
           </Group>
+
+          <Divider label="Default language profile" labelPosition="left" />
+
+          <Select
+            label={`Profile for newly synced ${meta.media}`}
+            description={
+              `Assigned to ${meta.media} this instance adds from now on. A matching ` +
+              `${meta.label} tag still wins over this, and this wins over the global ` +
+              `default set in Settings, Languages. ${meta.media} already in the ` +
+              `database keep the profile they have.`
+            }
+            data={profileOptions}
+            allowDeselect={false}
+            value={mediaDefaultsToValue(form.values.mediaDefaults)}
+            onChange={(value) =>
+              form.setFieldValue(
+                "mediaDefaults",
+                valueToMediaDefaults(value ?? GLOBAL_DEFAULT),
+              )
+            }
+          />
+
+          {instance !== null && (
+            <Group justify="space-between" align="center" wrap="nowrap">
+              <Text size="xs" c="dimmed">
+                {profileChoiceDirty
+                  ? "Save the instance to use this profile."
+                  : `Optional: fill this profile in on ${meta.media} from this ` +
+                    `instance that have no profile yet. Items that already have ` +
+                    `one are left alone; to change those, use the profile ` +
+                    `selector in the ${listLabel} list.`}
+              </Text>
+              <Button
+                type="button"
+                variant="light"
+                leftSection={<FontAwesomeIcon icon={faWandMagicSparkles} />}
+                disabled={!canApplyDefaultProfile}
+                loading={applyDefaultProfile.isPending}
+                onClick={() => applyDefaultProfile.mutate(instance.id)}
+              >
+                Apply to unset
+              </Button>
+            </Group>
+          )}
 
           <Divider label="Subtitle settings (optional)" labelPosition="left" />
 
