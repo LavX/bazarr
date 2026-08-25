@@ -136,3 +136,35 @@ def test_a_release_naming_another_episode_still_gets_the_scene_style_name(versio
     sub = _subtitle(version, series="Show", season=1, episode=2)
 
     assert sub.release_info == f"Show.S01E02.{version}"
+
+
+@pytest.mark.parametrize("version,season,episode", [
+    ("S01E01-E10.1080p.WEB-DL", 1, 5),
+    ("S01E01-10.1080p.WEB-DL", 1, 5),
+    ("1x01-10.1080p.WEB-DL", 1, 5),
+])
+def test_a_ranged_release_covers_the_episodes_between_its_endpoints(version, season, episode):
+    sub = _subtitle(version, series="Show", season=season, episode=episode)
+
+    assert sub.release_info == version
+
+
+def test_a_title_ending_in_its_own_separator_is_recognised():
+    """S.W.A.T. ends in the dot that also separates release tokens, so the
+    title and the rest of the name share it and a naive boundary test looks
+    past it at the W of WEB."""
+    sub = _subtitle("S.W.A.T.WEB-DL.x264", series="S.W.A.T.", season=8, episode=2)
+
+    assert sub.release_info == "S.W.A.T.WEB-DL.x264"
+
+
+def test_a_pathological_episode_token_is_rejected_quickly():
+    """A malformed token must not make the matcher backtrack exponentially: one
+    Gestdown result would stall the whole subtitle listing."""
+    import time
+
+    started = time.monotonic()
+    sub = _subtitle("S01E00000000000000000000000000x", series="Show", season=1, episode=2)
+    assert sub.release_info
+
+    assert time.monotonic() - started < 1.0

@@ -43,21 +43,38 @@ def _token_boundaries(token):
     return rf"(?<![a-z0-9]){token}(?![a-z0-9])"
 
 
-# One season tag and every episode hanging off it, so a multi-episode release
-# such as S01E01-E02 or S01E01E02 is recognised as naming both of them. The 0*
-# on each number is what accepts the unpadded spellings, S01E2 and 1x2.
-_SEASON_EPISODES = re.compile(r"(?<![a-z0-9])s0*(\d+)((?:[-_. ]?e?0*\d+)+)(?![a-z0-9])")
-# The same in the NxMM spelling, ranges included.
-_SEASON_X_EPISODES = re.compile(r"(?<![a-z0-9])0*(\d+)x((?:[-_. ]?0*\d+)+)(?![a-z0-9])")
+# A season tag and everything hanging off it, so a multi-episode release such
+# as S01E01-E02, S01E01E02 or S01E01-10 is recognised as naming all of them.
+# The tail is one flat character class rather than a repeated group of
+# quantifiers: a nested one backtracks exponentially on a malformed token like
+# S01E0000000000000000x, and one such Gestdown result would stall the listing.
+_SEASON_EPISODES = re.compile(r"(?<![a-z0-9])s(\d+)((?:[-_. ]|e|\d)*)(?![a-z0-9])")
+# The same in the NxMM spelling.
+_SEASON_X_EPISODES = re.compile(r"(?<![a-z0-9])(\d+)x((?:[-_. ]|\d)*)(?![a-z0-9])")
+
+
+def _tail_covers(tail, episode):
+    """True when ``tail`` names ``episode``, expanding ranges as it goes."""
+    parts = re.findall(r"\d+|-", tail)
+    for index, part in enumerate(parts):
+        if part != "-":
+            if int(part) == episode:
+                return True
+            continue
+
+        if 0 < index < len(parts) - 1 and parts[index - 1] != "-" and parts[index + 1] != "-":
+            first, last = int(parts[index - 1]), int(parts[index + 1])
+            if first <= episode <= last:
+                return True
+
+    return False
 
 
 def _already_names_the_episode(lowered, season, episode):
     """True when the release name already says which episode this is."""
     for pattern in (_SEASON_EPISODES, _SEASON_X_EPISODES):
         for match in pattern.finditer(lowered):
-            if int(match.group(1)) != season:
-                continue
-            if episode in [int(number) for number in re.findall(r"\d+", match.group(2))]:
+            if int(match.group(1)) == season and _tail_covers(match.group(2), episode):
                 return True
 
     return False
@@ -78,7 +95,11 @@ def _format_release(version_item, series, season, episode):
         return version_item
 
     clean_version = version_item.replace(" ", ".")
-    clean_series = series.strip().replace(" ", ".") if series else ""
+    # Trailing separator punctuation goes: a title like "S.W.A.T." ends in the
+    # dot that also separates release tokens, and the two share it, so keeping
+    # it would make the boundary test look past it at the W of WEB-DL and
+    # prefix a second copy of the title.
+    clean_series = series.strip().replace(" ", ".").strip("._-") if series else ""
     if clean_series and re.search(
         _token_boundaries(re.escape(clean_series.lower())), clean_version.lower()
     ):
