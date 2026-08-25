@@ -136,7 +136,9 @@ python3 docker/supervisor.py --config ./data --port 6767
 **System dependencies** (install via your package manager):
 - `ffmpeg` (subtitle sync, video analysis)
 - `mediainfo` (media file metadata)
-- `unrar` (compressed subtitle extraction)
+- `unar` or `unrar` (compressed subtitle extraction). Bazarr+ tries `unrar`,
+  then `unar`, then `7z`. `p7zip` alone is often not enough: several
+  distributions build 7-Zip without a RAR decoder.
 
 **Notes:**
 - The `--config` flag sets where the database, logs, and settings are stored

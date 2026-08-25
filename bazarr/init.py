@@ -189,11 +189,17 @@ if not hasattr(settings.general, 'provider_priorities') or not settings.general.
 
 
 def init_binaries():
-    # RAR archives are extracted with p7zip's 7z, matching the Dockerfile
-    # (installs p7zip-full; no unrar/unar package or self-download). 7z is tried
-    # first. unar/unrar remain only as a best-effort fallback for environments
-    # that already have them on PATH; they are no longer in binaries.json, so
+    # RAR extractors are tried in descending order of RAR5 and solid-archive
+    # reliability: unrar first, then unar, then p7zip's 7z. The runtime image
+    # ships unar (Debian main) and p7zip-full; unrar is picked up only where an
+    # operator installed it, since it is not redistributable from Debian main.
+    #
+    # Every one of these is looked up with get_binary(), which returns the
+    # binary from PATH when it is there, and otherwise raises BinaryNotFound
+    # straight away: none of the three has an entry in binaries.json, so
     # get_binary never attempts a (read-only, failing) self-download for them.
+    # Do not re-add unrar/unar/7z entries to binaries.json, that would turn a
+    # cheap PATH miss into a download attempt against a read-only bin/ tree.
     try:
         exe = get_binary("unrar")
         rarfile.UNRAR_TOOL = exe
