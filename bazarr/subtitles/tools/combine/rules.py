@@ -128,22 +128,27 @@ def _extract_code_and_priority(base, path):
     if len(segments) > 2:
         return None
 
-    code = _language_code_from_tag(segments[0])
+    if len(segments) == 1:
+        modifier, priority = None, _PLAIN
+    else:
+        modifier = segments[1].lower()
+        if modifier in ("hi", "sdh", "cc"):
+            priority = _HI
+        elif modifier == "forced":
+            priority = _FORCED
+        else:
+            return None
+
+    # The modifier goes down with the tag: some custom-language aliases exist
+    # only in the forced or HI lists, so the bare tag alone resolves to nothing.
+    code = _language_code_from_tag(segments[0], modifier)
     if code is None:
         return None
 
-    if len(segments) == 1:
-        return code, _PLAIN
-
-    modifier = segments[1].lower()
-    if modifier in ("hi", "sdh", "cc"):
-        return code, _HI
-    if modifier == "forced":
-        return code, _FORCED
-    return None
+    return code, priority
 
 
-def _language_code_from_tag(tag):
+def _language_code_from_tag(tag, modifier=None):
     """Map one isolated filename tag to a language code2, or None.
 
     A 2-letter tag that really is an ISO 639-1 code is taken as-is, so
@@ -159,9 +164,19 @@ def _language_code_from_tag(tag):
     .es.ar, is deliberately not honoured: accepting a two-segment tag would
     also read Movie.en.pt.srt as Portuguese, since ".en.pt" ends in ".pt".
     """
-    if len(tag) == 2 and tag.isalpha() and tag.islower() and _is_iso_639_1(tag):
+    plain_two_letter = len(tag) == 2 and tag.isalpha() and tag.islower()
+    if plain_two_letter and _is_iso_639_1(tag):
         return tag
-    return _custom_language_code(tag)
+
+    code = _custom_language_code(tag, modifier)
+    if code is not None:
+        return code
+
+    # Not ISO and not a custom alias, but Bazarr registers synthetic 2-letter
+    # codes of its own: "me" is Montenegrin, which has no ISO 639-1 code, and a
+    # profile really can ask for it. Taking the tag at face value is what the
+    # settings vocabulary means, so fall back to it last rather than first.
+    return tag if plain_two_letter else None
 
 
 @lru_cache(maxsize=None)
@@ -185,7 +200,7 @@ _custom_language_cls = None
 _custom_language_unavailable = False
 
 
-def _custom_language_code(tag):
+def _custom_language_code(tag, modifier=None):
     """Map a CustomLanguage filename tag (zh-TW, pt-BR, cht, ...) to its code2.
 
     The tag is matched in isolation, as ".<tag>.srt", because
@@ -214,6 +229,11 @@ def _custom_language_code(tag):
     # subtitle_path is deliberately None: it only feeds CustomLanguage's fuzzy
     # whole-path checks, and the video path must not influence the tag.
     custom_code = _custom_language_cls.found_external(f".{tag}.srt", None)
+    if not custom_code and modifier:
+        # Aliases such as 繁體中文 are listed only under forced or HI, so the
+        # bare tag finds nothing. The modifier was validated by the caller, so
+        # this is still a tag matched in isolation, not a whole filename.
+        custom_code = _custom_language_cls.found_external(f".{tag}.{modifier}.srt", None)
     if not custom_code:
         return None
     code = custom_code.split(":", 1)[0]

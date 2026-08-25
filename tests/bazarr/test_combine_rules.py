@@ -557,3 +557,50 @@ def test_a_non_iso_two_letter_tag_keeps_its_hi_variant(tmp_path):
     )
     assert result is not None
     assert result.primary == str(base / "Movie.tc.hi.srt")
+
+
+def test_montenegrin_keeps_its_synthetic_two_letter_code(tmp_path):
+    """'me' is not ISO 639-1. Bazarr registers it as Montenegrin's synthetic
+    selectable code2 because cnr has none, so a profile really can request it
+    and Movie.me.srt really is the source for it."""
+    base = make_video_dir(tmp_path, [
+        "Movie.mkv",
+        "Movie.me.srt",
+        "Movie.en.srt",
+    ])
+    result = resolve_source_paths(
+        video_path=str(base / "Movie.mkv"),
+        languages=["me", "en"],
+    )
+    assert result is not None
+    assert result.primary == str(base / "Movie.me.srt")
+
+
+def test_a_modifier_only_custom_alias_still_resolves(tmp_path):
+    """繁體中文 appears only in CustomLanguage's forced and HI lists, never in
+    the plain one, so looking the bare tag up on its own finds nothing."""
+    base = make_video_dir(tmp_path, [
+        "Movie.mkv",
+        "Movie.繁體中文.forced.srt",
+        "Movie.en.srt",
+    ])
+    result = resolve_source_paths(
+        video_path=str(base / "Movie.mkv"),
+        languages=["zt", "en"],
+    )
+    assert result is not None
+    assert result.primary == str(base / "Movie.繁體中文.forced.srt")
+
+
+def test_a_modifier_only_simplified_alias_still_resolves(tmp_path):
+    base = make_video_dir(tmp_path, [
+        "Movie.mkv",
+        "Movie.简体中文.hi.srt",
+        "Movie.en.srt",
+    ])
+    result = resolve_source_paths(
+        video_path=str(base / "Movie.mkv"),
+        languages=["zh", "en"],
+    )
+    assert result is not None
+    assert result.primary == str(base / "Movie.简体中文.hi.srt")
