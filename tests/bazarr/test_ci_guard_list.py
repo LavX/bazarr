@@ -261,18 +261,6 @@ EXCLUDED = {
     # Currently failing for reasons that are not network flakiness. Each needs a
     # fix, not an exemption; the reason names what is wrong so it cannot be
     # forgotten again.
-    "tests/bazarr/test_connection_tester.py": (
-        "stale harness, 14 failed and 28 passed. /test gained a second guard, "
-        "_require_proxy_api_key() at bazarr/app/ui.py:74, which aborts 401 "
-        "before any handler code runs unless the request carries the global API "
-        "key. The session-injection helper still gets past @check_login but not "
-        "past that, so the 14 test_proxy_service_* cases read a non-JSON 401 "
-        "body and die on it. Give the helper the API key, then remove this "
-        "entry. The other 28 cases pass deterministically and are this "
-        "repository's only coverage for _resolve_and_validate_constrained and "
-        "the DNS-rebinding pinning cases, so they are worth splitting out if "
-        "the helper is not fixed soon."
-    ),
     "tests/subliminal_patch/test_video.py": (
         "three failures, none of them a network problem, and none of them what "
         "this entry claimed until now. test_video_fromguess_episode and "
