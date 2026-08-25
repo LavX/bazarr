@@ -1,3 +1,9 @@
+import io
+import os
+import shutil
+import stat
+import zipfile
+
 import brotli
 from guessit import guessit
 import pytest
@@ -219,3 +225,58 @@ def test_legendasdivx_cli_extraction_skips_extractor_that_times_out(monkeypatch,
     # a hung unar must not abort the whole fallback: 7z still gets its turn
     assert provider._extract_via_cli(b"not-a-real-archive") is not None
     assert tried == ["unar", "7z"]
+
+
+def _fake_extractor(monkeypatch, tmp_path, lay_down):
+    """Point _extract_via_cli at a stub extractor that writes lay_down(tmp_path)."""
+
+    class Proc:
+        returncode = 0
+
+    def fake_run(cmd, **kwargs):
+        lay_down(tmp_path)
+        return Proc()
+
+    monkeypatch.setattr(legendasdivx.tempfile, "mkdtemp", lambda: str(tmp_path))
+    monkeypatch.setattr(legendasdivx.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(legendasdivx.shutil, "rmtree", lambda *args, **kwargs: None)
+    monkeypatch.setattr(legendasdivx.subprocess, "run", fake_run)
+
+
+def test_legendasdivx_cli_extraction_skips_symlink_members(monkeypatch, tmp_path):
+    secret = tmp_path.parent / "legendasdivx_host_file.txt"
+    secret.write_bytes(b"host file content that must never be returned\n")
+
+    def lay_down(d):
+        os.symlink(str(secret), str(d / "innocent.srt"))
+
+    _fake_extractor(monkeypatch, tmp_path, lay_down)
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
+    # unar restores symlink members verbatim, absolute targets included, and the
+    # os.walk loop below it used to open whatever the link pointed at
+    assert provider._extract_via_cli(b"archive") is None
+
+
+@pytest.mark.skipif(shutil.which("unar") is None, reason="needs a real unar to restore symlink members")
+def test_legendasdivx_cli_extraction_skips_symlink_members_from_a_real_archive(tmp_path):
+    # The test above pins our guard. This one pins the premise: unar really does
+    # restore a symlink member, absolute target included.
+    secret = tmp_path / "host_file.txt"
+    secret.write_bytes(b"host file content that must never be returned\n")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        info = zipfile.ZipInfo("innocent.srt")
+        info.create_system = 3
+        info.external_attr = (stat.S_IFLNK | 0o777) << 16
+        zf.writestr(info, str(secret))
+        zf.writestr("real.srt", "1\n00:00:01,000 --> 00:00:02,000\ngenuine subtitle\n")
+    payload = buf.getvalue()
+
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+    out = provider._extract_via_cli(payload)
+
+    assert out is not None
+    assert b"host file content" not in out
+    assert b"genuine subtitle" in out

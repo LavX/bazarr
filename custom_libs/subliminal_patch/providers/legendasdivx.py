@@ -598,6 +598,31 @@ class LegendasdivxProvider(Provider):
             logger.warning("Legendasdivx.pt :: Direct archive.read failed (%s), attempting CLI extraction fallback", e)
             return self._extract_via_cli(content, target_name)
 
+    @staticmethod
+    def _is_safe_extracted_file(full_path, safe_root):
+        """Reject anything that is not a regular file inside the temp directory.
+
+        unar restores symlink members verbatim, absolute targets included, so an
+        archive can ship a link named like a subtitle and have the extractor
+        point it at any file the process can read. os.walk() does not descend
+        into symlinked directories, but a symlinked file still shows up in
+        files, and opening it reads the link target.
+        """
+        if os.path.islink(full_path):
+            logger.warning("Legendasdivx.pt :: Skipping symlink member in archive: %s", full_path)
+            return False
+
+        real_path = os.path.realpath(full_path)
+        if real_path != safe_root and not real_path.startswith(safe_root + os.sep):
+            logger.warning("Legendasdivx.pt :: Skipping archive member escaping the temp directory: %s", full_path)
+            return False
+
+        if not os.path.isfile(real_path):
+            logger.warning("Legendasdivx.pt :: Skipping non-regular archive member: %s", full_path)
+            return False
+
+        return True
+
     def _extract_via_cli(self, content, target_name=None):
         tmpdir = tempfile.mkdtemp()
         try:
@@ -629,15 +654,21 @@ class LegendasdivxProvider(Provider):
                 _subtitle_extensions = tuple(_tmp)
 
                 target_base = os.path.split(target_name)[-1].lower() if target_name else None
+                safe_root = os.path.realpath(tmpdir)
                 found_files = []
                 for root, _, files in os.walk(tmpdir):
                     for f in files:
-                        if f != "archive.rar" and f.lower().endswith(_subtitle_extensions):
-                            full_path = os.path.join(root, f)
-                            if target_base and f.lower() == target_base:
-                                with open(full_path, "rb") as sf:
-                                    return sf.read()
-                            found_files.append(full_path)
+                        if f == "archive.rar" or not f.lower().endswith(_subtitle_extensions):
+                            continue
+
+                        full_path = os.path.join(root, f)
+                        if not self._is_safe_extracted_file(full_path, safe_root):
+                            continue
+
+                        if target_base and f.lower() == target_base:
+                            with open(full_path, "rb") as sf:
+                                return sf.read()
+                        found_files.append(full_path)
 
                 if found_files:
                     with open(found_files[0], "rb") as sf:
