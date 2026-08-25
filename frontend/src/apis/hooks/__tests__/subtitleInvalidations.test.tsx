@@ -151,8 +151,13 @@ describe("useSubtitleAction – movie", () => {
     expect(keys).toContainEqual([QueryKeys.Movies]);
     expect(keys).not.toContainEqual([QueryKeys.Movies, 99]);
 
-    // Must have invalidated [Movies, History] to refresh movie history page
-    expect(keys).toContainEqual([QueryKeys.Movies, QueryKeys.History]);
+    // And exactly once: react-query matches by prefix, so [Movies] already
+    // covers [Movies, History]. Invalidating both refetches the history query
+    // twice for one action.
+    expect(keys).not.toContainEqual([QueryKeys.Movies, QueryKeys.History]);
+    expect(
+      keys.filter((k: unknown[]) => k[0] === QueryKeys.Movies),
+    ).toHaveLength(1);
 
     // Must NOT have touched Episodes or Series
     const touchedEpisodes = keys.some(

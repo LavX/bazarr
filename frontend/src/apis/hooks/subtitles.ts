@@ -36,13 +36,12 @@ export function useSubtitleAction() {
         // built from it matches nothing once the two diverge, which is any
         // install with a second Radarr. Worse than a no-op: it can match a
         // different movie that happens to hold that local id.
+        // One call: react-query matches by key prefix, so [Movies] already
+        // covers [Movies, History] and every per-movie entry. The separate
+        // history invalidation this replaces was needed only while the first
+        // key was [Movies, id].
         client.invalidateQueries({
           queryKey: [QueryKeys.Movies],
-        });
-        // Movie history lives under [Movies, History] and is not covered by
-        // the per-movie invalidation above.
-        client.invalidateQueries({
-          queryKey: [QueryKeys.Movies, QueryKeys.History],
         });
       }
     },
