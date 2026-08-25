@@ -17,10 +17,20 @@ on:
   # No branches filter on purpose. A stacked pull request, one whose base is
   # another feature branch rather than development, got no CI at all under
   # `branches: [master, development]`: GitHub simply did not trigger, and the
-  # pull request sat green-looking with zero checks. Running on every pull
-  # request costs one extra run per stacked branch and removes a whole class of
-  # silently unverified change.
+  # pull request sat green-looking with zero checks.
+  #
+  # What that costs is a run per opened / synchronize / reopened event on every
+  # pull request against any base, not one run per stacked branch: pushing ten
+  # times to each branch of a three-deep stack is thirty runs, and each one is a
+  # three-way Python matrix plus a Postgres service. The concurrency group below
+  # is what keeps it bounded, cancelling a pull request's superseded runs as soon
+  # as the next push lands. Pushes to master and development are deliberately not
+  # cancelled: those runs are the record of what the branch does.
   pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -100,7 +110,8 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_PASSWORD: postgres
+          # Throwaway password for the ephemeral CI service container.
+          POSTGRES_PASSWORD: postgres  # pragma: allowlist secret
           POSTGRES_DB: bazarr_test
         ports:
           - 5432:5432
@@ -203,7 +214,8 @@ jobs:
         # them in ONE process, so each runs in its OWN pytest process. The PG
         # cutover test needs a driver + the postgres service (env below).
         env:
-          BAZARR_PG_TEST_URL: postgresql+psycopg://postgres:postgres@localhost:5432/bazarr_test
+          # Same throwaway credentials, in URL form.
+          BAZARR_PG_TEST_URL: postgresql+psycopg://postgres:postgres@localhost:5432/bazarr_test  # pragma: allowlist secret
         run: |
           set -e
           pip install "psycopg[binary]"
