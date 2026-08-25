@@ -337,6 +337,20 @@ _ALWAYS_RUNS = {True, "true", "always()", "${{ always() }}", "${{always()}}"}
 # Shells whose semantics the grammar below describes.
 _SAFE_SHELLS = {None, "bash", "sh", "bash -e {0}"}
 
+# Environment names that decide what a pytest run does before pytest is in a
+# position to be asked. PYTEST_* is read by pytest itself. The three PYTHON*
+# names sit one step further back: PYTHONPATH puts a directory ahead of
+# site-packages, and a sitecustomize.py found anywhere on that path is imported
+# by the interpreter before pytest parses its first argument, so it can set
+# PYTEST_ADDOPTS from inside the repository. PYTHONSTARTUP and PYTHONHOME reach
+# the same place by other routes. Refused wherever PYTEST_* is refused: workflow,
+# job and step `env:`, and a leading assignment on the command itself.
+_NEUTERING_ENV_NAMES = frozenset({"PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME"})
+# The only `env:` key a job or step that runs tests needs in this repo. An env
+# key is as good as a command-line option for deciding what a run does, so a new
+# one is a decision, not a detail: name it here once you have made it.
+_ALLOWED_TEST_ENV = frozenset({"BAZARR_PG_TEST_URL"})
+
 # A step writing to $GITHUB_ENV or $GITHUB_PATH changes the environment of every
 # later step in the same job. The step doing it need not mention pytest or a
 # tests/ path, so it is invisible to _MENTIONS_TESTS: `echo
@@ -554,10 +568,14 @@ def _strip_assignments(tokens: list, line: str) -> list:
         match = _ASSIGNMENT.match(tokens[index])
         if not match:
             break
-        if match.group(1).startswith("PYTEST_"):
+        if _neuters_pytest(match.group(1)):
             raise _Unverifiable(
-                f"{match.group(1)} is set on {line!r}; it can silence pytest "
-                "while the command still looks like it runs the tests"
+                f"{match.group(1)} is set on {line!r}; it decides what pytest "
+                "does before pytest can be asked, while the command still looks "
+                "like it runs the tests. PYTEST_* is read by pytest itself, and "
+                "PYTHONPATH puts a directory ahead of site-packages where a "
+                "committed sitecustomize.py runs before pytest parses its first "
+                "argument"
             )
         # The value too: `FOO="$(...)" pytest X` keeps the substitution inside a
         # single token, so nothing else would look at it.
@@ -715,7 +733,14 @@ def _loop_body(lines: list, index: int, variable: str) -> tuple:
 # ---------------------------------------------------------------------------
 
 
-def _scope_problem(kind: str, name: str, scope: dict, safe_keys: set) -> str:
+def _neuters_pytest(name: str) -> bool:
+    """Whether setting this environment variable can decide what pytest does."""
+    return name.startswith("PYTEST_") or name in _NEUTERING_ENV_NAMES
+
+
+def _scope_problem(
+    kind: str, name: str, scope: dict, safe_keys: set, restrict_env: bool = False
+) -> str:
     """Why this workflow, job or step cannot be counted as guaranteed coverage."""
     if not isinstance(scope, dict):
         return f"{kind} {name} is not a mapping"
@@ -752,14 +777,26 @@ def _scope_problem(kind: str, name: str, scope: dict, safe_keys: set) -> str:
             "the guard does not model"
         )
 
-    neutering = sorted(
-        str(key) for key in (scope.get("env") or {}) if str(key).startswith("PYTEST_")
-    )
+    environment = [str(key) for key in (scope.get("env") or {})]
+    neutering = sorted(key for key in environment if _neuters_pytest(key))
     if neutering:
         return (
-            f"{kind} {name} sets {', '.join(neutering)}, which can silence pytest "
-            "while every command still looks like it runs the tests"
+            f"{kind} {name} sets {', '.join(neutering)}, which decides what "
+            "pytest does before pytest can be asked, while every command still "
+            "looks like it runs the tests. PYTEST_* is read by pytest itself; "
+            "PYTHONPATH puts a directory ahead of site-packages, where a "
+            "committed sitecustomize.py is imported before pytest parses its "
+            "first argument and can set PYTEST_ADDOPTS from there"
         )
+    if restrict_env:
+        unknown = sorted(key for key in environment if key not in _ALLOWED_TEST_ENV)
+        if unknown:
+            return (
+                f"{kind} {name} sets {', '.join(unknown)}, which the guard has "
+                "not reasoned about. An env key reaches the run as surely as a "
+                "command-line option does, so decide what this one does and add "
+                "it to _ALLOWED_TEST_ENV"
+            )
     return ""
 
 
@@ -856,7 +893,9 @@ def _read_workflow() -> tuple:
         if not bearing:
             continue
 
-        job_problem = _scope_problem("job", job_name, job, _SAFE_JOB_KEYS)
+        job_problem = _scope_problem(
+            "job", job_name, job, _SAFE_JOB_KEYS, restrict_env=True
+        )
         if job_problem:
             problems.append(job_problem)
             continue
@@ -869,7 +908,9 @@ def _read_workflow() -> tuple:
 
         for position, step, script in bearing:
             label = f"{job_name!r} step {step.get('name') or position!r}"
-            step_problem = _scope_problem("step", label, step, _SAFE_STEP_KEYS)
+            step_problem = _scope_problem(
+                "step", label, step, _SAFE_STEP_KEYS, restrict_env=True
+            )
             if step_problem:
                 problems.append(step_problem)
                 continue
@@ -1114,6 +1155,19 @@ _SCRIPT_REFUSALS = {
     "execution is switched off by set -n": f"set -n\npytest {_REAL}\n",
     "a set mode is turned back off": f"set +e\npytest {_REAL}\n",
     "an unmodelled set mode is used": f"set -o pipefail\npytest {_REAL}\n",
+    # This one was blessed as legitimate by the guard's own test data until now,
+    # as a leading `PYTHONPATH=. pytest "${f}"` in the loop-body cases. It is not
+    # legitimate: `PYTHONPATH=.` puts a repository directory ahead of
+    # site-packages, and a sitecustomize.py committed anywhere on that path is
+    # imported before pytest parses its first argument, so it can set
+    # PYTEST_ADDOPTS without the workflow ever spelling it. The workflow does not
+    # use the shape, so refusing it costs nothing today.
+    "the interpreter's import path is set on the command": (
+        f"PYTHONPATH=. pytest {_REAL}\n"
+    ),
+    "an interpreter startup file is set on the command": (
+        f"PYTHONSTARTUP=tests/helpers/start.py pytest {_REAL}\n"
+    ),
 }
 
 
@@ -1150,7 +1204,7 @@ def test_script_the_guard_cannot_read_is_refused(case, script):
         'pytest "$f"',
         "pytest $f",
         'pytest -q "$f" -p no:cacheprovider',
-        'PYTHONPATH=. pytest "${f}"',
+        'pytest "${f}"',
     ],
 )
 def test_loop_list_with_pytest_on_the_variable_is_coverage(body):
@@ -1231,6 +1285,9 @@ def test_path_only_in_a_step_name_is_not_coverage(constructed_workflow):
         ("continue-on-error", {"continue-on-error": True, "run": f"pytest {_OTHER}\n"}),
         ("working-directory", {"working-directory": "tests", "run": f"pytest {_OTHER}\n"}),
         ("PYTEST_ADDOPTS", {"env": {"PYTEST_ADDOPTS": "--collect-only"}, "run": f"pytest {_OTHER}\n"}),
+        ("PYTHONPATH", {"env": {"PYTHONPATH": "tests/helpers"}, "run": f"pytest {_OTHER}\n"}),
+        ("PYTHONSTARTUP", {"env": {"PYTHONSTARTUP": "s.py"}, "run": f"pytest {_OTHER}\n"}),
+        ("SOME_NEW_VAR", {"env": {"SOME_NEW_VAR": "1"}, "run": f"pytest {_OTHER}\n"}),
     ],
 )
 def test_step_that_may_not_bind_is_not_coverage(constructed_workflow, case, step):
@@ -1257,6 +1314,8 @@ def test_step_that_may_not_bind_is_not_coverage(constructed_workflow, case, step
         ("if", {"if": "false"}),
         ("continue-on-error", {"continue-on-error": True}),
         ("PYTEST_ADDOPTS", {"env": {"PYTEST_ADDOPTS": "--collect-only"}}),
+        ("PYTHONPATH", {"env": {"PYTHONPATH": "tests/helpers"}}),
+        ("SOME_NEW_VAR", {"env": {"SOME_NEW_VAR": "1"}}),
     ],
 )
 def test_job_that_may_not_bind_is_not_coverage(constructed_workflow, case, job):
@@ -1272,12 +1331,52 @@ def test_job_that_may_not_bind_is_not_coverage(constructed_workflow, case, job):
     assert any(case in problem for problem in problems)
 
 
-def test_workflow_level_pytest_addopts_is_not_coverage(constructed_workflow):
+@pytest.mark.parametrize("name", ["PYTEST_ADDOPTS", "PYTHONPATH", "PYTHONHOME"])
+def test_workflow_level_environment_that_neuters_pytest_is_not_coverage(
+    constructed_workflow, name
+):
+    """PYTHONPATH reaches the same place PYTEST_ADDOPTS does, one step earlier.
+
+    The interpreter imports sitecustomize.py from the first directory on
+    PYTHONPATH before pytest parses an argument, and a repository is a place
+    where a file like that can be committed. Screening env keys for a PYTEST_
+    prefix alone left that route open at all three scopes.
+    """
     workflow = _one_job({"run": f"pytest {_REAL}\n"})
-    workflow["env"] = {"PYTEST_ADDOPTS": "--collect-only"}
+    workflow["env"] = {name: "whatever"}
     constructed_workflow(workflow)
     covered, problems = _read_workflow()
-    assert not covered and problems
+    assert not covered
+    assert any(name in problem for problem in problems)
+
+
+def test_workflow_level_unrelated_environment_is_still_coverage(constructed_workflow):
+    """The env allowlist binds test-bearing jobs and steps, not the whole file.
+
+    The real workflow sets four UI paths at workflow scope, which have nothing to
+    do with the backend suite. Forcing those through a backend allowlist would be
+    friction with no safety behind it, so only the scopes that carry the tests
+    are restricted; the dangerous names are refused everywhere.
+    """
+    workflow = _one_job({"run": f"pytest {_REAL}\n"})
+    workflow["env"] = {"UI_DIRECTORY": "./frontend"}
+    constructed_workflow(workflow)
+    covered, problems = _read_workflow()
+    assert covered == {_REAL} and not problems
+
+
+def test_the_one_allowed_test_environment_key_still_counts(constructed_workflow):
+    """The Postgres URL the cutover migration test needs is the allowlist."""
+    constructed_workflow(
+        _one_job(
+            {
+                "env": {"BAZARR_PG_TEST_URL": "postgresql+psycopg://postgres@localhost/x"},
+                "run": f"pytest {_REAL}\n",
+            }
+        )
+    )
+    covered, problems = _read_workflow()
+    assert covered == {_REAL} and not problems
 
 
 @pytest.mark.parametrize("condition", ["always()", "${{ always() }}", True])
