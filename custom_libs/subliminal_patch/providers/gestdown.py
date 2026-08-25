@@ -85,7 +85,11 @@ class GestdownSubtitle(Subtitle):
     def get_matches(self, video):
         self.matches = {"title", "series", "season", "episode", "tvdb_id"}
 
-        update_matches(self.matches, video, self.release_info)
+        # Raw versions, never release_info. update_matches searches whatever it
+        # is handed for the video's release group, so display text prefixed with
+        # the series title would score the same unearned match the loop below is
+        # careful to avoid.
+        update_matches(self.matches, video, self.releases or [self.release_info])
 
         # release_group
         if (

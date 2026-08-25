@@ -65,3 +65,33 @@ def test_without_episode_context_the_version_is_untouched(season, episode):
     sub = _subtitle("WEB-DL, HDTV", series="Show", season=season, episode=episode)
 
     assert sub.releases == ["WEB-DL", "HDTV"]
+
+
+def _episode(release_group):
+    from subliminal_patch.core import Episode
+
+    return Episode(
+        "LOL.Last.One.Laughing.S01E02.1080p.WEB-DL.mkv",
+        "LOL Last One Laughing",
+        1,
+        2,
+        release_group=release_group,
+    )
+
+
+def test_a_group_named_after_the_show_scores_no_release_group_match():
+    """The whole point of keeping ``releases`` raw, checked end to end.
+
+    ``update_matches`` searches whatever string it is handed for the video's
+    release group, so handing it the title-prefixed display text scores the
+    match just as surely as the explicit loop below it would have.
+    """
+    sub = _subtitle("WEB-DL", series="LOL Last One Laughing", season=1, episode=2)
+
+    assert "release_group" not in sub.get_matches(_episode("LOL"))
+
+
+def test_a_group_the_subtitle_really_names_still_matches():
+    sub = _subtitle("Bluray.x264-DEFLATE", series="LOL Last One Laughing", season=1, episode=2)
+
+    assert "release_group" in sub.get_matches(_episode("DEFLATE"))
