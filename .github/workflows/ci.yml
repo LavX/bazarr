@@ -136,10 +136,15 @@ jobs:
           name: ${{ env.UI_ARTIFACT_NAME }}
           path: "${{ env.UI_DIRECTORY }}/build"
 
-      - name: Install ffmpeg
+      - name: Install ffmpeg and unar
         # test_embeddedsubtitles uses real .mkv fixtures that require ffprobe to
         # extract stream metadata. Ubuntu runners ship without it.
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ffmpeg
+        #
+        # unar matches what the image installs, and init_binaries() prefers it
+        # over 7z for RAR. Without it the runner falls through to its own 7z,
+        # whose distro build has the RAR decoder stripped for licensing, so the
+        # RAR3 fixture fails to open and CI would diverge from production.
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ffmpeg unar
 
       - name: Install Python dependencies
         run: |
@@ -226,30 +231,13 @@ jobs:
             tests/subliminal_patch/test_video.py \
             -v --tb=short
 
-      - name: pytest previously unguarded bazarr suites
-        # These existed but were never collected by CI, so their assertions protected
-        # nothing. Backfilled wholesale; test_ci_guard_list.py fails if a new test file
-        # is added without being enumerated here or excluded with a reason.
-        #
-        # Kept separate from the subliminal_patch step below, and this is a
-        # WORKAROUND, not a structural choice. Co-collecting the two trees makes
-        # tests/subliminal_patch/test_utils.py::test_get_subtitle_from_archive_season_pack
-        # fail, and that failure is real. Exactly five of the files below load the
-        # api package transitively: test_combine_api_dto, test_combine_main,
-        # test_secret_store_e2e, test_subtitle_content_sync_outputs and
-        # test_upgrade_embedded_history. api/system/status.py does
-        # `from init import startTime`, and bazarr/init.py calls init_binaries() at
-        # module scope, which globally repoints rarfile at 7z exactly as production
-        # does. get_binary() resolves that through which(), so the binary in play
-        # here is the runner's own 7z, not anything in the Docker image, and it
-        # cannot decode the RAR fixture that test reads. The co-collected run was
-        # detecting the shipped RAR bug and this split hides it.
-        #
-        # Do not go looking for those five by grepping for `import api`: one of them
-        # gets there through importlib.import_module on a string, two import neither
-        # api nor app by name, and three files that DO import api.* are inert because
-        # they stub `init` in sys.modules before importing. Remove the split once RAR
-        # extraction is fixed in the image.
+      - name: pytest previously unguarded suites
+        # One process. These used to be split in two, because init_binaries()
+        # repoints rarfile at 7z at import time and the 7z in the image could not
+        # decode the RAR fixture, so a co-collected run caught a real product bug
+        # and the split hid it. The extractor order now prefers unrar and unar,
+        # the image installs unar, and so does this workflow, so the split has
+        # nothing left to work around.
         run: |
           pytest \
             tests/bazarr/test_app_notifier.py \
@@ -295,13 +283,6 @@ jobs:
             tests/bazarr/test_tracemalloc_dumper.py \
             tests/bazarr/test_translator_auth.py \
             tests/bazarr/test_upgrade_embedded_history.py \
-            -v --tb=short
-
-      - name: pytest previously unguarded subliminal_patch suites
-        # Separate process from the bazarr step above. See the note there: this
-        # masks a real product bug and should not outlive it.
-        run: |
-          pytest \
             tests/subliminal_patch/test_animetosho.py \
             tests/subliminal_patch/test_core_persistent.py \
             tests/subliminal_patch/test_opensubtitles_scraper.py \
