@@ -13,13 +13,16 @@ from subzero.language import Language
 from subliminal.video import Movie
 from subliminal_patch.core import Episode
 
-
 # Retired built-in ids that were still shipping when they were retired, so the
-# claim/adoption behavior around them is what an upgrading install actually meets.
-# The older entries in RETIRED_BUILT_IN_PROVIDER_IDS (argenteamdump, subdivx,
-# subscene...) were deleted long before that set existed and are covered by the
-# set-membership assertions instead.
-RETIRED_PROVIDER_IDS_UNDER_TEST = ["hosszupuska", "podnapisi", "subscenter", "xsubs"]
+# claim/adoption behavior around them is what an upgrading install actually meets,
+# plus the older ones that were deleted before RETIRED_BUILT_IN_PROVIDER_IDS
+# existed. Shared with test_retired_provider_config_compat.py so the ids live in
+# one place; test_retired_id_lists_partition_the_production_set below anchors both
+# lists to the production set.
+from retired_providers import (
+    LEGACY_RETIRED_PROVIDER_IDS,
+    RETIRED_PROVIDER_IDS_UNDER_TEST,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -938,12 +941,26 @@ def test_untrusted_install_cannot_replace_registered_migrated_provider():
             provider_registry.register(provider_id, original_cls)
 
 
+def test_retired_id_lists_partition_the_production_set():
+    # The two test lists together must BE the production set, not merely live inside
+    # it. A retirement that adds an id to RETIRED_BUILT_IN_PROVIDER_IDS and forgets to
+    # list it turns this red, instead of silently leaving that id with no coverage in
+    # either this file or the config-compat boot.
+    from provider_hub.migration import RETIRED_BUILT_IN_PROVIDER_IDS
+
+    assert set(RETIRED_PROVIDER_IDS_UNDER_TEST).isdisjoint(LEGACY_RETIRED_PROVIDER_IDS)
+    assert (
+        set(RETIRED_PROVIDER_IDS_UNDER_TEST) | set(LEGACY_RETIRED_PROVIDER_IDS)
+        == set(RETIRED_BUILT_IN_PROVIDER_IDS)
+    )
+
+
 def test_dead_origin_providers_are_not_builtin_replacements():
     # Providers whose upstream origin is dead must never be on the trusted-replacement
     # allowlist, so a catalog cannot resurrect them by shadowing a (removed) built-in.
     from provider_hub.migration import MIGRATED_BUILT_IN_PROVIDER_IDS
 
-    assert {"hosszupuska", "podnapisi", "subscenter", "xsubs"}.isdisjoint(
+    assert set(RETIRED_PROVIDER_IDS_UNDER_TEST).isdisjoint(
         MIGRATED_BUILT_IN_PROVIDER_IDS
     )
 
@@ -960,7 +977,7 @@ def test_retired_built_in_ids_stay_claimed_and_are_trusted_only():
     )
     from subliminal_patch.extensions import provider_registry
 
-    for provider_id in ("hosszupuska", "podnapisi", "subscenter", "xsubs"):
+    for provider_id in RETIRED_PROVIDER_IDS_UNDER_TEST:
         assert provider_id in RETIRED_BUILT_IN_PROVIDER_IDS
     assert RETIRED_BUILT_IN_PROVIDER_IDS.isdisjoint(MIGRATED_BUILT_IN_PROVIDER_IDS)
     for provider_id in RETIRED_BUILT_IN_PROVIDER_IDS:
@@ -971,16 +988,15 @@ def test_retired_built_in_ids_stay_claimed_and_are_trusted_only():
 
 @pytest.mark.parametrize(
     "provider_id,trusted,expected",
+    # Retired ids: a trusted catalog entry may adopt one, an untrusted one may not.
+    # Generated from the shared list rather than spelled out, so the matrix cannot
+    # drift from the ids the rest of the file (and the config-compat boot) drives.
     [
-        # Retired ids: a trusted catalog entry may adopt one, an untrusted one may not.
-        ("hosszupuska", True, True),
-        ("hosszupuska", False, False),
-        ("podnapisi", True, True),
-        ("podnapisi", False, False),
-        ("subscenter", True, True),
-        ("subscenter", False, False),
-        ("xsubs", True, True),
-        ("xsubs", False, False),
+        (provider_id, trusted, trusted)
+        for provider_id in RETIRED_PROVIDER_IDS_UNDER_TEST + LEGACY_RETIRED_PROVIDER_IDS
+        for trusted in (True, False)
+    ]
+    + [
         # Migrated id: unchanged in both directions.
         ("gestdown", True, True),
         ("gestdown", False, False),
