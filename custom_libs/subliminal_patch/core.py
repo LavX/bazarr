@@ -110,10 +110,25 @@ class _ProviderConfigs(dict):
             registered_val.update(val)
 
             logger.debug("Config changed. Restarting provider: %s", key)
+
+            # Tear the old instance down before building its replacement.
+            # Dropping the reference releases nothing it owns, and a Provider
+            # Hub provider owns a worker process and the threads pumping its
+            # stdio, so a settings save that touched a config used to leak one
+            # for the life of the process. Order matters as much as the call
+            # does: EmbeddedSubtitles.terminate() removes a cache directory
+            # every instance of it shares, so tearing the old one down last
+            # would delete what the replacement had just created.
+            self._pool.retire_provider(key)
+
             try:
                 provider = provider_registry[key](**registered_val)  # type: ignore
                 provider.initialize()
             except Exception as error:
+                # Nothing is installed. The pool initializes on next access, so
+                # a provider that is merely unreachable right now comes back on
+                # its own, with the new config rather than the one the user
+                # just changed away from.
                 self._pool.throttle_callback(key, error)
             else:
                 self._pool.initialized_providers[key] = provider
@@ -325,6 +340,24 @@ class SZProviderPool(ProviderPool):
             self.initialized_providers[name] = provider
 
         return self.initialized_providers[name]
+
+    def retire_provider(self, name):
+        """Terminate an initialized provider without throttling its name.
+
+        Teardown failures are logged rather than routed to throttle_callback:
+        that takes the provider out of the rotation for the throttle interval,
+        and the instance being discarded misbehaving on its way out is no
+        reason to do that to the one replacing it.
+        """
+        provider = self.initialized_providers.pop(name, None)
+        if provider is None:
+            return
+
+        try:
+            logger.info('Terminating provider %s', name)
+            provider.terminate()
+        except Exception:
+            logger.exception('Provider %r terminated unexpectedly', name)
 
     def __delitem__(self, name):
         if name not in self.initialized_providers:
