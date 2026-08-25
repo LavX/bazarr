@@ -12,6 +12,8 @@ from unittest.mock import MagicMock, patch
 # Snapshot sys.modules so we can fully restore it after importing the module
 # under test. Without this, the mocks and transitively-imported modules leak
 # into later test files (e.g. test_editor_api) and break them.
+from tests.bazarr import _module_isolation
+
 _SYS_BEFORE = dict(sys.modules)
 
 
@@ -107,11 +109,7 @@ import api.movies.movies_subtitles as movies_subtitles_module  # noqa: E402
 # Fully restore sys.modules to its pre-import state: drop everything this module
 # added (mocks + transitive imports) and put back any originals we replaced.
 # The captured `movies_subtitles_module` reference stays valid for our tests.
-for _k in list(sys.modules):
-    if _k not in _SYS_BEFORE:
-        del sys.modules[_k]
-for _k, _v in _SYS_BEFORE.items():
-    sys.modules[_k] = _v
+_module_isolation.restore(_SYS_BEFORE)
 
 
 # ---------------------------------------------------------------------------
