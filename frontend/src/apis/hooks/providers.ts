@@ -89,10 +89,10 @@ export function useDownloadEpisodeSubtitles() {
         param.arrInstanceId,
       ),
 
-    onSuccess: (_, param) => {
-      client.invalidateQueries({
-        queryKey: [QueryKeys.Series, param.seriesId],
-      });
+    onSuccess: () => {
+      // Invalidate by prefix. Series queries are cached under the canonical
+      // LOCAL series id, while seriesId here is the upstream one, so a key
+      // built from it never matched a series cache entry.
       client.invalidateQueries({
         queryKey: [QueryKeys.Series],
       });

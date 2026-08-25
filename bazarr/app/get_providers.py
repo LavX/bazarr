@@ -147,7 +147,7 @@ def provider_throttle_map():
 
 
 PROVIDERS_FORCED_OFF = ["addic7ed", "tvsubtitles", "legendasdivx", "napiprojekt", "shooter",
-                        "hosszupuska", "supersubtitles", "titlovi", "assrt"]
+                        "supersubtitles", "titlovi", "assrt"]
 
 throttle_count = {}
 
@@ -348,11 +348,6 @@ def get_providers_auth():
                              },
         'napiprojekt': {'only_authors': settings.napiprojekt.only_authors,
                         'only_real_names': settings.napiprojekt.only_real_names},
-        'podnapisi': {
-            'only_foreign': False,  # fixme
-            'also_foreign': False,  # fixme
-            'verify_ssl': settings.podnapisi.verify_ssl
-        },
         'legendasdivx': {
             'username': settings.legendasdivx.username,
             'password': settings.legendasdivx.password,
@@ -365,10 +360,6 @@ def get_providers_auth():
         'pipocas': {
             'username': settings.pipocas.username,
             'password': settings.pipocas.password,
-        },
-        'xsubs': {
-            'username': settings.xsubs.username,
-            'password': settings.xsubs.password,
         },
         'assrt': {
             'token': settings.assrt.token,

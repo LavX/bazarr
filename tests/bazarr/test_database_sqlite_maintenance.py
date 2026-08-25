@@ -1,3 +1,6 @@
+import sqlite3
+
+
 class _Cursor:
     def __init__(self):
         self.statements = []
@@ -68,20 +71,75 @@ def test_log_sqlite_runtime_version_skips_non_sqlite(caplog):
     assert "SQLite runtime version" not in caplog.text
 
 
-def test_configure_sqlite_connection_sets_wal_once():
+def test_configure_sqlite_connection_applies_the_maintenance_pragmas():
+    """Assert the resulting connection state, not the statements issued.
+
+    This used to pass a stand-in object and compare the recorded SQL. The
+    function now guards on the connection really being a sqlite3 one, because it
+    is registered globally and must not fire PRAGMA at a PostgreSQL connection
+    living in the same process. The stand-in fails that guard, so the function
+    returned immediately and the test asserted against an empty list without
+    anyone noticing: the file was never collected by CI.
+
+    Checking the pragmas actually took effect is also the stronger assertion. It
+    survives a rewrite of how the statements are issued, and it would catch a
+    pragma that is sent but rejected.
+    """
+    from app import database as db_module
+
+    connection = sqlite3.connect(":memory:")
+    try:
+        # sqlite already defaults synchronous to FULL, so asserting it after the
+        # fact proves nothing: the assertion passes even with that pragma
+        # deleted. Move it off the default first so the check is real.
+        connection.execute("PRAGMA synchronous=OFF")
+
+        db_module.configure_sqlite_connection(connection, None)
+
+        cursor = connection.cursor()
+        try:
+            def value(pragma):
+                cursor.execute(f"PRAGMA {pragma}")
+                return cursor.fetchone()[0]
+
+            # An in-memory database cannot use WAL, so journal_mode is asserted
+            # against a file-backed database below instead.
+            assert value("synchronous") == 2, "expected FULL"
+            assert value("foreign_keys") == 1
+            assert value("busy_timeout") == 60000
+        finally:
+            cursor.close()
+    finally:
+        connection.close()
+
+
+def test_configure_sqlite_connection_enables_wal_on_a_file_database(tmp_path):
+    """WAL is the one pragma an in-memory database cannot take."""
+    from app import database as db_module
+
+    connection = sqlite3.connect(str(tmp_path / "bazarr.db"))
+    try:
+        db_module.configure_sqlite_connection(connection, None)
+        cursor = connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode")
+            assert cursor.fetchone()[0].lower() == "wal"
+        finally:
+            cursor.close()
+    finally:
+        connection.close()
+
+
+def test_configure_sqlite_connection_leaves_a_non_sqlite_connection_alone():
+    """The guard exists because this listener is registered globally: firing
+    PRAGMA at a PostgreSQL connection in the same process is invalid SQL."""
     from app import database as db_module
 
     dbapi_connection = _DbapiConnection()
 
     db_module.configure_sqlite_connection(dbapi_connection, None)
 
-    assert dbapi_connection.cursor_obj.statements == [
-        "PRAGMA journal_mode=WAL",
-        "PRAGMA synchronous=FULL",
-        "PRAGMA foreign_keys=ON",
-        "PRAGMA busy_timeout=60000",
-    ]
-    assert dbapi_connection.cursor_obj.closed is True
+    assert dbapi_connection.cursor_obj.statements == []
 
 
 def test_optimize_sqlite_database_is_skipped_for_non_sqlite(monkeypatch):

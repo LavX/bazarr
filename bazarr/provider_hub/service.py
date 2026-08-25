@@ -22,7 +22,11 @@ from subliminal_patch.extensions import provider_registry
 
 from .manifest import validate_manifest
 from .bundle import verify_bundle_tree
-from .migration import MIGRATED_BUILT_IN_PROVIDER_IDS, validation_built_in_provider_ids
+from .migration import (
+    MIGRATED_BUILT_IN_PROVIDER_IDS,
+    RETIRED_BUILT_IN_PROVIDER_IDS,
+    validation_built_in_provider_ids,
+)
 from .state import (
     OFFICIAL_CATALOG_SOURCE_ID,
     OFFICIAL_CATALOG_URL,
@@ -944,7 +948,9 @@ def _built_in_provider_ids() -> set[str]:
         pass
     # Keep migrated built-in ids in the denylist even after a hub provider has
     # registered one, so an untrusted install of the same id can never shadow it.
-    return provider_ids | MIGRATED_BUILT_IN_PROVIDER_IDS
+    # Retired built-in ids stay on the denylist forever: their module is gone, so
+    # nothing else keeps the id claimed.
+    return provider_ids | MIGRATED_BUILT_IN_PROVIDER_IDS | RETIRED_BUILT_IN_PROVIDER_IDS
 
 
 def _manifest_provider_id(manifest: dict[str, Any]) -> str:

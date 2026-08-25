@@ -538,7 +538,6 @@ Includes all upstream providers plus fork additions:
 - GreekSubs
 - GreekSubtitles
 - HDBits.org
-- Hosszupuska
 - Karagarga.in
 - Ktuvit (Get `hashed_password` using method described [here](https://github.com/XBMCil/service.subtitles.ktuvit))
 - LegendasDivx
@@ -549,7 +548,6 @@ Includes all upstream providers plus fork additions:
 - OpenSubtitles.com
 - **OpenSubtitles.org (Bazarr+ native Provider Hub plugin, no API needed)**
 - Pipocas.tv
-- Podnapisi
 - Prijevodi-Online
 - RegieLive
 - Sous-Titres.eu
@@ -560,7 +558,6 @@ Includes all upstream providers plus fork additions:
 - Subs4Free
 - Subs4Series
 - Subscene
-- Subscenter
 - SubsRo
 - Subsunacs.net
 - SubSynchro
@@ -576,7 +573,6 @@ Includes all upstream providers plus fork additions:
 - TVSubtitles
 - Whisper (requires [whisper-asr-webservice](https://github.com/ahmetoner/whisper-asr-webservice))
 - Wizdom
-- XSubs
 - Yavka.net
 - YIFY Subtitles
 - Zimuku

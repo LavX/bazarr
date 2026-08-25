@@ -266,7 +266,6 @@ export const ProviderList: Readonly<ProviderInfo[]> = [
       },
     ],
   },
-  { key: "hosszupuska", description: "Hungarian Subtitles Provider" },
   {
     key: "karagarga",
     name: "Karagarga.in",
@@ -447,18 +446,6 @@ export const ProviderList: Readonly<ProviderInfo[]> = [
     ],
   },
   {
-    key: "podnapisi",
-    name: "Podnapisi",
-    inputs: [
-      {
-        type: "switch",
-        key: "verify_ssl",
-        name: "Verify SSL certificate (disabling this introduces a MitM attack risk)",
-        defaultValue: true,
-      },
-    ],
-  },
-  {
     key: "prijevodionline",
     name: "Prijevodi Online",
     description: "Prijevodi Online website. No need for login or cookies.",
@@ -552,7 +539,6 @@ export const ProviderList: Readonly<ProviderInfo[]> = [
     description:
       "Greek Subtitles Provider.\nRequires anti-captcha provider to solve captchas for each download.",
   },
-  { key: "subscenter", description: "Hebrew Subtitles Provider" },
   {
     key: "subsro",
     name: "Subs.ro",
@@ -716,21 +702,6 @@ export const ProviderList: Readonly<ProviderInfo[]> = [
     ],
   },
   { key: "wizdom", description: "Wizdom.xyz Subtitles Provider" },
-  {
-    key: "xsubs",
-    name: "XSubs",
-    description: "Greek Subtitles Provider",
-    inputs: [
-      {
-        type: "text",
-        key: "username",
-      },
-      {
-        type: "password",
-        key: "password",
-      },
-    ],
-  },
   {
     key: "yavkanet",
     name: "Yavka.net",

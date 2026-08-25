@@ -14,6 +14,7 @@ from subliminal_patch.providers import Provider
 from .manifest import ManifestValidationError, validate_manifest
 from .migration import (
     MIGRATED_BUILT_IN_PROVIDER_IDS,
+    RETIRED_BUILT_IN_PROVIDER_IDS,
     can_shadow_built_in_provider,
     validation_built_in_provider_ids,
 )
@@ -221,9 +222,14 @@ def register_active_provider_classes(installations=None) -> list[str]:
     # (adding the id to _REGISTERED_PROVIDER_HUB_IDS and dropping it from the dynamic
     # set), a later UNTRUSTED install of the same id would no longer count as shadowing
     # a built-in and could silently replace the migrated provider.
+    #
+    # Retired built-in ids are included for the mirror-image reason: their module is
+    # gone, so the dynamic set no longer carries them and the gate would otherwise let
+    # any plugin claim the freed id.
     built_in_provider_ids = (
         (set(provider_registry.names()) - _REGISTERED_PROVIDER_HUB_IDS)
         | MIGRATED_BUILT_IN_PROVIDER_IDS
+        | RETIRED_BUILT_IN_PROVIDER_IDS
     )
     installations = installations if installations is not None else active_installations()
 

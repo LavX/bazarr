@@ -174,6 +174,32 @@ existing_providers = provider_registry.names()
 enabled_providers = settings.general.enabled_providers
 if provider_hub_registration_ok:
     settings.general.enabled_providers = [x for x in enabled_providers if x in existing_providers]
+
+    # Drop the config section a retired built-in provider left behind.
+    #
+    # A retired id has no provider class, no validators and no secret_store
+    # paths left, so its section is unreachable settings: the Settings card went
+    # with the provider and nothing reads the values. It is still serialized
+    # into config.yaml and into every /api/system/settings response though, and
+    # a credential written there by a build older than the secret store stays in
+    # clear text forever, because the encrypt-at-rest walk only visits
+    # registered paths. Unsetting the section is what closes that, and it is the
+    # same treatment app.config already gives series_scores / movie_scores.
+    #
+    # Skipped for any retired id a trusted catalog plugin has adopted: Provider
+    # Hub reads that plugin's credentials out of exactly this section, and the
+    # registration above is what puts the id back in existing_providers.
+    from provider_hub.migration import RETIRED_BUILT_IN_PROVIDER_IDS
+    stale_provider_sections = sorted(
+        provider_id for provider_id in RETIRED_BUILT_IN_PROVIDER_IDS
+        if provider_id not in existing_providers and hasattr(settings, provider_id)
+    )
+    for stale_provider_section in stale_provider_sections:
+        settings.unset(stale_provider_section.upper())
+    if stale_provider_sections:
+        logging.info("Removed leftover config sections of retired providers: %s",
+                     ", ".join(stale_provider_sections))
+
     write_config()
 else:
     logging.warning("Skipping enabled_providers cleanup because Provider Hub registration failed")
@@ -195,11 +221,11 @@ def init_binaries():
     # that already have them on PATH; they are no longer in binaries.json, so
     # get_binary never attempts a (read-only, failing) self-download for them.
     try:
-        exe = get_binary("7z")
-        rarfile.UNRAR_TOOL = None
+        exe = get_binary("unrar")
+        rarfile.UNRAR_TOOL = exe
         rarfile.UNAR_TOOL = None
-        rarfile.SEVENZIP_TOOL = exe
-        rarfile.tool_setup(unrar=False, unar=False, bsdtar=False, sevenzip=True, force=True)
+        rarfile.SEVENZIP_TOOL = None
+        rarfile.tool_setup(unrar=True, unar=False, bsdtar=False, sevenzip=False, force=True)
     except (BinaryNotFound, rarfile.RarCannotExec):
         try:
             exe = get_binary("unar")
@@ -209,22 +235,22 @@ def init_binaries():
             rarfile.tool_setup(unrar=False, unar=True, bsdtar=False, sevenzip=False, force=True)
         except (BinaryNotFound, rarfile.RarCannotExec):
             try:
-                exe = get_binary("unrar")
-                rarfile.UNRAR_TOOL = exe
+                exe = get_binary("7z")
+                rarfile.UNRAR_TOOL = None
                 rarfile.UNAR_TOOL = None
-                rarfile.SEVENZIP_TOOL = None
-                rarfile.tool_setup(unrar=True, unar=False, bsdtar=False, sevenzip=False, force=True)
+                rarfile.SEVENZIP_TOOL = exe
+                rarfile.tool_setup(unrar=False, unar=False, bsdtar=False, sevenzip=True, force=True)
             except (BinaryNotFound, rarfile.RarCannotExec):
-                logging.exception("BAZARR requires a rar archive extraction utility (7z, unar, or unrar) and none could be found.")
+                logging.exception("BAZARR requires a rar archive extraction utility (unrar, unar, or 7z) and none could be found.")
                 raise BinaryNotFound
             else:
-                logging.debug("Using UnRAR from: %s", exe)
+                logging.debug("Using 7zip from: %s", exe)
                 return exe
         else:
             logging.debug("Using unar from: %s", exe)
             return exe
     else:
-        logging.debug("Using 7zip from: %s", exe)
+        logging.debug("Using UnRAR from: %s", exe)
         return exe
 
 

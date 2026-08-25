@@ -1,9 +1,26 @@
 # -*- coding: utf-8 -*-
+# LEGACY PROVIDER. Do not fix subtitle providers here.
+#
+# Built-in providers are deprecated and will be removed after Bazarr+ v3.0.0.
+# Providers now ship as plugins in the Bazarr+ provider catalog and are
+# installed at runtime through the Provider Hub, so a fix reaches users as a
+# plugin release instead of waiting for a Bazarr+ release, and a broken
+# provider can no longer take the application down with it.
+#
+# Send provider fixes here instead:
+#   https://github.com/LavX/bazarr-provider-catalog
+#   docs/writing-a-scraper-provider.md in that repo explains how to port one.
+#
+# A pull request against this file will most likely be asked to move.
+
 import logging
 import io
 import os
 import re
 import zipfile
+import tempfile
+import subprocess
+import shutil
 from time import sleep
 from urllib.parse import quote
 from urllib.parse import parse_qs
@@ -29,6 +46,71 @@ from dogpile.cache.api import NO_VALUE
 
 logger = logging.getLogger(__name__)
 
+def clean_release_line(text):
+    # Separate glued keywords like versãoThe or releaseThe
+    text = re.sub(r"(vers[aã]o|release|filme)([A-Z0-9])", r"\1 \2", text, flags=re.I)
+    # Strip common Portuguese subtitle upload prefixes
+    prefix_pattern = (
+        r"^(legendas?\s*(anteriormente\s*)?(enviadas?\s*(por|pelo|do)?\s*[\w\d_]+\s*)?"
+        r"|sincronizadas?|ressincronizadas?|sinc|sync|traduzidas?|ripadas?\s*(por\s*mim)?|ajustad[ao]s?|ajustei\s*(a\s*)?sincronia)?"
+        r"\s*(do\s*dvd\.?|de\s*raiz\s*)?(para\s*(a|o|as|os)?\s*)?(vers[aã]o|release[s]?|filme|nomes?)?\s*[:\-–]?\s*"
+    )
+    return re.sub(prefix_pattern, "", text, flags=re.I).strip().strip("*").strip("`").strip()
+
+
+def extract_release_info(title, year, desc):
+    default_name = f"{title} ({year})" if year and title else (title or "")
+    if not desc or desc.strip().lower() in (
+        "não há descrição disponível",
+        "nao ha descricao disponivel",
+        "n/a",
+        "none",
+        "",
+    ):
+        return default_name
+
+    lines = [line.strip().strip("*").strip("`") for line in desc.splitlines() if line.strip()]
+    candidates = []
+    release_re = re.compile(
+        r"(2160p|1080p|720p|480p|4k|bluray|blu-ray|bdrip|brrip|web-dl|webdl|web-rip|webrip|web|dvdrip|dvd|hdtv|x264|x265|hevc|h\.264|h\.265|xvid|divx|remastered|proper|internal|repack)",
+        re.I,
+    )
+    conversational_re = re.compile(
+        r"^(legenda[s]?|ripada[s]?|enviada[s]?|postada[s]?|corrigido[s]?|feita[s]?|fiz\s|peguei\s|são\s|sao\s|não\s|nao\s|avisem|cumps|enjoy|obrigado|duração|duracao)",
+        re.I,
+    )
+
+    for line in lines:
+        cleaned = clean_release_line(line)
+        if not cleaned:
+            continue
+        if release_re.search(cleaned):
+            match = re.search(
+                r"([\w\.\-_]+(?:2160p|1080p|720p|480p|4k|bluray|blu-ray|bdrip|brrip|web-dl|webdl|dvdrip|dvd|x264|x265|hevc|xvid|divx)[\w\.\-_]*)",
+                cleaned,
+                re.I,
+            )
+            if match and len(match.group(1)) > 10:
+                candidates.append(match.group(1).strip("."))
+            elif not conversational_re.search(cleaned) and len(cleaned) > 5:
+                candidates.append(cleaned)
+        elif title and title.lower() in cleaned.lower() and len(cleaned) > len(title) and not conversational_re.search(cleaned):
+            candidates.append(cleaned)
+
+    if candidates:
+        def candidate_quality(cand):
+            score = len(cand)
+            if title and title.lower() in cand.lower():
+                score += 100
+            if "." in cand or "-" in cand:
+                score += 50
+            return score
+
+        best = max(candidates, key=candidate_quality)
+        return best
+
+    return default_name
+
 
 class LegendasdivxSubtitle(Subtitle):
     """Legendasdivx Subtitle."""
@@ -39,15 +121,16 @@ class LegendasdivxSubtitle(Subtitle):
         self.page_link = data['link']
         self.hits = data['hits']
         self.exact_match = data['exact_match']
+        self.title = data.get('title', '')
+        self.year = data.get('year')
         self.description = data['description']
         self.video = video
         self.sub_frame_rate = data['frame_rate']
         self.uploader = data['uploader']
         self.wrong_fps = False
         self.skip_wrong_fps = skip_wrong_fps
-        self.release_info = self.description
+        self.release_info = data.get('release_info') or self.description
         self.matches = set()
-
     @property
     def id(self):
         try:
@@ -77,53 +160,49 @@ class LegendasdivxSubtitle(Subtitle):
 
         description = sanitize(self.description)
 
-        video_filename = video.name
-        video_filename = os.path.basename(video_filename)
-        video_filename, _ = os.path.splitext(video_filename)
-        video_filename = sanitize_release_group(video_filename)
+        # Match title
+        if video.title:
+            for movie_name in [video.title] + getattr(video, 'alternative_titles', []):
+                if sanitize(movie_name) == sanitize(self.title) or sanitize(movie_name) in description:
+                    self.matches.update(['title'])
 
-        if sanitize(video_filename) in description:
-            self.matches.update(['title'])
-            # relying people won' use just S01E01 for the file name
-            if isinstance(video, Episode):
-                self.matches.update(['series'])
-                self.matches.update(['season'])
-                self.matches.update(['episode'])
-
-        # can match both movies and series
-        if video.year and '{:04d}'.format(video.year) in description:
-            self.matches.update(['year'])
+        # Match year
+        if video.year:
+            if self.year and video.year == self.year:
+                self.matches.update(['year'])
+            elif '{:04d}'.format(video.year) in description:
+                self.matches.update(['year'])
 
         type_ = "movie" if isinstance(video, Movie) else "episode"
-        # match movie title (include alternative movie names)
-        if type_ == "movie":
-            if video.title:
-                for movie_name in [video.title] + video.alternative_titles:
-                    if sanitize(movie_name) in description:
-                        self.matches.update(['title'])
 
+        if isinstance(video, Movie):
+            if video.imdb_id:
+                self.matches.update(['imdb_id'])
         else:
-            if video.title and sanitize(video.title) in description:
-                self.matches.update(['title'])
             if video.series:
-                for series_name in [video.series] + video.alternative_series:
-                    if sanitize(series_name) in description:
+                for series_name in [video.series] + getattr(video, 'alternative_series', []):
+                    if sanitize(series_name) == sanitize(self.title) or sanitize(series_name) in description:
                         self.matches.update(['series'])
+            if video.series_imdb_id:
+                self.matches.update(['series', 'series_imdb_id', 'season', 'episode'])
             if video.season and 's{:02d}'.format(video.season) in description:
                 self.matches.update(['season'])
             if video.episode and 'e{:02d}'.format(video.episode) in description:
                 self.matches.update(['episode'])
-            # All the search is already based on the series_imdb_id when present in the video and controlled via the
-            # the legendasdivx backend it, so if there is a result, it matches, either inside of a pack or a specific
-            # series and episode, so we can assume the season and episode matches.
-            if video.series_imdb_id:
-                self.matches.update(['series', 'series_imdb_id', 'season', 'episode'])
 
-        # release_group
-        if video.release_group and sanitize_release_group(video.release_group) in sanitize_release_group(description):
+        # release_group matching
+        if video.release_group and sanitize_release_group(video.release_group) in sanitize_release_group(self.description):
             self.matches.update(['release_group'])
 
-        self.matches |= guess_matches(video, guessit(description, {"type": type_}))
+        # Guess matches from release_info
+        if self.release_info:
+            self.matches |= guess_matches(video, guessit(self.release_info, {"type": type_}))
+
+        # Also guess matches across description candidate lines
+        for line in self.description.splitlines():
+            cleaned_line = clean_release_line(line)
+            if len(cleaned_line) > 5 and cleaned_line != self.release_info:
+                self.matches |= guess_matches(video, guessit(cleaned_line, {"type": type_}))
 
         return self.matches
 
@@ -180,7 +259,7 @@ class LegendasdivxProvider(Provider):
             res.raise_for_status()
             bsoup = ParserBeautifulSoup(res.content, ['lxml'])
 
-            _allinputs = bsoup.findAll('input')
+            _allinputs = bsoup.find_all('input')
             data = {}
             # necessary to set 'sid' for POST request
             for field in _allinputs:
@@ -193,17 +272,24 @@ class LegendasdivxProvider(Provider):
             res = self.session.post(self.loginpage, data)
             res.raise_for_status()
             # make sure we're logged in
-            logger.debug('Legendasdivx.pt :: Logged in successfully: PHPSESSID: %s',
-                         self.session.cookies.get_dict()['PHPSESSID'])
+            uid = self.session.cookies.get('phpbb3_2z8zs_u')
+            session_id = self.session.cookies.get('PHPSESSID') or self.session.cookies.get('phpbb3_2z8zs_sid')
+            if uid == '1' or not session_id:
+                logger.error("Legendasdivx.pt :: Couldn't get session ID, check your credentials")
+                raise AuthenticationError("Legendasdivx.pt :: Couldn't get session ID, check your credentials")
+
+            logger.debug('Legendasdivx.pt :: Logged in successfully: session: %s', session_id)
             cj = self.session.cookies.copy()
             store_cks = ("PHPSESSID", "phpbb3_2z8zs_sid", "phpbb3_2z8zs_k", "phpbb3_2z8zs_u", "lang")
-            for cn in iter(self.session.cookies.keys()):
+            for cn in list(self.session.cookies.keys()):
                 if cn not in store_cks:
                     del cj[cn]
             # store session cookies on cache
             logger.debug("Legendasdivx.pt :: Storing legendasdivx session cookies: %r", cj)
             region.set("legendasdivx_cookies2", cj)
 
+        except (AuthenticationError, ConfigurationError, IPAddressBlocked, TooManyRequests):
+            raise
         except KeyError:
             logger.error("Legendasdivx.pt :: Couldn't get session ID, check your credentials")
             raise AuthenticationError("Legendasdivx.pt :: Couldn't get session ID, check your credentials")
@@ -220,17 +306,16 @@ class LegendasdivxProvider(Provider):
         except Exception as e:
             logger.error("LegendasDivx.pt :: Uncaught error: %r", e)
             raise ServiceUnavailable("LegendasDivx.pt :: Uncaught error: %r", e)
-
     def _process_page(self, video, bsoup):
 
         subtitles = []
 
-        _allsubs = bsoup.findAll("div", {"class": "sub_box"})
+        _allsubs = bsoup.find_all("div", {"class": "sub_box"})
 
         for _subbox in _allsubs:
 
             hits = 0
-            for th in _subbox.findAll("th"):
+            for th in _subbox.find_all("th"):
                 if th.text == 'Hits:':
                     hits = int(th.find_next("td").text)
                 if th.text == 'Idioma:':
@@ -259,9 +344,24 @@ class LegendasdivxProvider(Provider):
                 logger.debug("Legendasdivx.pt :: Couldn't find download link. Trying next...")
                 continue
 
-            # get subtitle uploader
+            # get title and year from sub_header
+            title = ''
+            year = None
             sub_header = _subbox.find("div", {"class": "sub_header"})
-            uploader = sub_header.find("a").text if sub_header else 'anonymous'
+            if sub_header:
+                title_elem = sub_header.find("b")
+                if title_elem:
+                    title = title_elem.get_text().strip()
+                header_text = sub_header.get_text()
+                year_match = re.search(r'\((\d{4})\)', header_text)
+                if year_match:
+                    try:
+                        year = int(year_match.group(1))
+                    except ValueError:
+                        pass
+
+            uploader = sub_header.find("a").text if sub_header and sub_header.find("a") else 'anonymous'
+            release_info = extract_release_info(title, year, description)
 
             exact_match = False
             if video.name.lower() in description.lower():
@@ -272,6 +372,9 @@ class LegendasdivxProvider(Provider):
                     'hits': hits,
                     'uploader': uploader,
                     'frame_rate': frame_rate,
+                    'title': title,
+                    'year': year,
+                    'release_info': release_info,
                     'description': description
                     }
             subtitles.append(
@@ -393,6 +496,8 @@ class LegendasdivxProvider(Provider):
                             else:
                                 if searches_count >= self.SAFE_SEARCH_LIMIT:
                                     searchLimitReached = True
+            except (AuthenticationError, ConfigurationError, IPAddressBlocked, TooManyRequests, SearchLimitReached):
+                raise
             except HTTPError as e:
                 if "bloqueado" in res.text.lower():
                     logger.error("LegendasDivx.pt :: Your IP is blocked on this server.")
@@ -449,6 +554,8 @@ class LegendasdivxProvider(Provider):
             sleep(1)
             res = self.session.get(subtitle.page_link)
             res.raise_for_status()
+        except (AuthenticationError, ConfigurationError, IPAddressBlocked, TooManyRequests, DownloadLimitExceeded):
+            raise
         except HTTPError as e:
             if "bloqueado" in res.text.lower():
                 logger.error("LegendasDivx.pt :: Your IP is blocked on this server.")
@@ -465,13 +572,15 @@ class LegendasdivxProvider(Provider):
             raise DownloadLimitExceeded("Legendasdivx.pt :: Daily download limit reached!")
 
         archive = self._get_archive(res.content)
-        # extract the subtitle
         if archive:
-            subtitle_content = self._get_subtitle_from_archive(archive, subtitle)
-            if subtitle_content:
-                subtitle.content = fix_line_ending(subtitle_content)
-                subtitle.normalize()
-                return subtitle
+            subtitle_content = self._get_subtitle_from_archive(archive, res.content, subtitle)
+        else:
+            subtitle_content = self._extract_via_cli(res.content)
+
+        if subtitle_content:
+            subtitle.content = fix_line_ending(subtitle_content)
+            subtitle.normalize()
+            return subtitle
         return
 
     def _get_archive(self, content):
@@ -488,48 +597,125 @@ class LegendasdivxProvider(Provider):
             return None
         return archive
 
-    def _get_subtitle_from_archive(self, archive, subtitle):
+    def _read_from_archive(self, archive, content, target_name):
+        try:
+            return archive.read(target_name)
+        except Exception as e:
+            logger.warning("Legendasdivx.pt :: Direct archive.read failed (%s), attempting CLI extraction fallback", e)
+            return self._extract_via_cli(content, target_name)
+
+    def _extract_via_cli(self, content, target_name=None):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            tmparc = os.path.join(tmpdir, "archive.rar")
+            with open(tmparc, "wb") as f:
+                f.write(content)
+
+            extracted = False
+            for tool, cmd in [
+                ("unar", ["unar", "-o", tmpdir, "-f", tmparc]),
+                ("7z", ["7z", "x", "-y", f"-o{tmpdir}", tmparc]),
+                ("unrar", ["unrar", "x", "-y", tmparc, tmpdir]),
+            ]:
+                if shutil.which(tool):
+                    p = subprocess.run(cmd, capture_output=True)
+                    if p.returncode == 0:
+                        extracted = True
+                        break
+
+            if extracted:
+                _tmp = list(SUBTITLE_EXTENSIONS)
+                if ".txt" in _tmp:
+                    _tmp.remove(".txt")
+                _subtitle_extensions = tuple(_tmp)
+
+                target_base = os.path.split(target_name)[-1].lower() if target_name else None
+                found_files = []
+                for root, _, files in os.walk(tmpdir):
+                    for f in files:
+                        if f != "archive.rar" and f.lower().endswith(_subtitle_extensions):
+                            full_path = os.path.join(root, f)
+                            if target_base and f.lower() == target_base:
+                                with open(full_path, "rb") as sf:
+                                    return sf.read()
+                            found_files.append(full_path)
+
+                if found_files:
+                    with open(found_files[0], "rb") as sf:
+                        return sf.read()
+        except Exception as err:
+            logger.error("Legendasdivx.pt :: CLI extraction fallback failed: %s", err)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        return None
+
+    def _get_subtitle_from_archive(self, archive, content, subtitle):
         # some files have a non subtitle with .txt extension
         _tmp = list(SUBTITLE_EXTENSIONS)
-        _tmp.remove('.txt')
+        if '.txt' in _tmp:
+            _tmp.remove('.txt')
         _subtitle_extensions = tuple(_tmp)
-        _max_score = 0
+        _max_score = -1
+        _max_name = None
         _scores = get_scores(subtitle.video)
 
+        candidate_files = []
         for name in archive.namelist():
-            # discard hidden files
-            if os.path.split(name)[-1].startswith('.'):
+            # discard hidden files and directories
+            if os.path.split(name)[-1].startswith('.') or name.endswith('/'):
                 continue
 
             # discard non-subtitle files
             if not name.lower().endswith(_subtitle_extensions):
                 continue
 
+            candidate_files.append(name)
+
+        if not candidate_files:
+            logger.error("Legendasdivx.pt :: No subtitle file found in archive")
+            return self._extract_via_cli(content)
+
+        # If archive contains only 1 subtitle file, return it directly
+        if len(candidate_files) == 1:
+            logger.debug("Legendasdivx.pt :: Only 1 subtitle in archive, returning: %s", candidate_files[0])
+            return self._read_from_archive(archive, content, candidate_files[0])
+
+        for name in candidate_files:
             _guess = guessit(name)
             if isinstance(subtitle.video, Episode):
-                if all(key in _guess for key in ('season', 'episode')):
-                    logger.debug("Legendasdivx.pt :: guessing %s", name)
-                    logger.debug("Legendasdivx.pt :: subtitle S%sE%s video S%sE%s", _guess['season'], _guess['episode'],
-                                 subtitle.video.season, subtitle.video.episode)
+                ep = _guess.get('episode')
+                season = _guess.get('season')
 
-                    if subtitle.video.episode != _guess['episode'] or subtitle.video.season != _guess['season']:
-                        logger.debug('Legendasdivx.pt :: subtitle does not match video, skipping')
+                # Check episode number
+                if ep is not None:
+                    if isinstance(ep, list):
+                        if subtitle.video.episode not in ep:
+                            continue
+                    elif ep != subtitle.video.episode:
                         continue
-                else:
-                    logger.debug('Legendasdivx.pt :: no "season" and/or "episode" on "_guess" , skipping')
-                    continue
+
+                # Check season number if present in filename
+                if season is not None:
+                    if isinstance(season, list):
+                        if subtitle.video.season not in season:
+                            continue
+                    elif season != subtitle.video.season:
+                        continue
+
             matches = set()
             matches |= guess_matches(subtitle.video, _guess)
-            logger.debug('Legendasdivx.pt :: sub matches: %s', matches)
             _score = sum((_scores.get(match, 0) for match in matches))
+            if isinstance(subtitle.video, Episode) and _guess.get('episode') == subtitle.video.episode:
+                _score += 10
+
             if _score > _max_score:
                 _max_name = name
                 _max_score = _score
-                logger.debug("Legendasdivx.pt :: new max: %s %s", name, _score)
+                logger.debug("Legendasdivx.pt :: candidate %s scored %s", name, _score)
 
-        if _max_score > 0:
-            logger.debug("Legendasdivx.pt :: returning from archive: %s scored %s", _max_name, _max_score)
-            return archive.read(_max_name)
+        if _max_name:
+            logger.debug("Legendasdivx.pt :: returning from archive: %s (score %s)", _max_name, _max_score)
+            return self._read_from_archive(archive, content, _max_name)
 
-        logger.error("Legendasdivx.pt :: No subtitle found on compressed file. Max score was 0")
-        return None
+        return self._read_from_archive(archive, content, candidate_files[0])

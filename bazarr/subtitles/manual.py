@@ -28,7 +28,7 @@ from subtitles.processing import ProcessSubtitlesResult  # noqa: F401
 
 from .cache import subtitle_cache
 from .pool import update_pools, _get_pool
-from .utils import get_video, _get_lang_obj, _get_scores, _set_forced_providers
+from .utils import get_video, _get_lang_obj, _get_scores
 from .processing import process_subtitle
 
 
@@ -44,7 +44,6 @@ def manual_search(path, profile_id, providers, sceneName, title, media_type):
     also_forced = any([x.forced for x in language_set])
     forced_required = all([x.forced for x in language_set])
     normal = not also_forced and not forced_required and all([not x.hi for x in language_set])
-    _set_forced_providers(pool=pool, also_forced=also_forced, forced_required=forced_required)
 
     if providers:
         video = get_video(force_unicode(path), title, sceneName, providers=providers, media_type=media_type)
