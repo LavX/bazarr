@@ -273,14 +273,6 @@ EXCLUDED = {
         "the DNS-rebinding pinning cases, so they are worth splitting out if "
         "the helper is not fixed soon."
     ),
-    "tests/bazarr/test_database_sqlite_maintenance.py": (
-        "one stale case out of six, test_configure_sqlite_connection_sets_wal_once. "
-        "configure_sqlite_connection gained an isinstance(dbapi_connection, "
-        "sqlite3.Connection) guard at bazarr/app/database.py:49, and the test "
-        "passes a plain stub object, so the function returns before issuing any "
-        "PRAGMA. The pragmas did not regress; the stub needs to be a real "
-        "sqlite3 connection."
-    ),
     "tests/subliminal_patch/test_video.py": (
         "three failures, none of them a network problem, and none of them what "
         "this entry claimed until now. test_video_fromguess_episode and "
