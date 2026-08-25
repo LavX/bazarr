@@ -12,8 +12,8 @@ provider used to validate) long after the module is gone.
 That upgrade must be a non-event: Bazarr boots, silently drops the unknown id,
 and keeps every other provider and every unrelated setting.
 
-Two independent production filters make that true, and this test exercises both
-of them rather than a copy of either:
+Three production filters make that true, and this test exercises all of them
+rather than a copy of any:
 
 * the startup strip in ``bazarr/init.py``, which runs after Provider Hub
   registration and persists the cleaned list. The child imports ``init`` itself,
@@ -21,8 +21,14 @@ of them rather than a copy of either:
 * the runtime filter in ``app.get_providers.get_providers()``, which covers the
   window before the strip persists. The child re-dirties ``enabled_providers``
   in memory after startup so this filter has something left to drop.
+* the stale-section scrub in ``bazarr/init.py``, which unsets the ``[<provider>]``
+  section of a retired id that no longer resolves to a provider class. Without
+  it the section survives every rewrite: it has no validators, no secret_store
+  paths and no Settings card left, so a credential in it can never be edited,
+  cleared or (if it predates the secret store) encrypted, while
+  ``/api/system/settings`` keeps serving it.
 
-Neutering either one has to turn this file red, for every id in
+Neutering any one of them has to turn this file red, for every id in
 ``RETIRED_PROVIDERS``.
 
 The boot is shared (module-scoped fixture) because it costs seconds and every
@@ -44,22 +50,40 @@ import sys
 
 import pytest
 
+from retired_providers import RETIRED_PROVIDER_IDS_UNDER_TEST
+
 REPO_ROOT = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 # The ids this test guards. None of them may resolve to a registered provider
-# class. Keep in step with provider_hub.migration.RETIRED_BUILT_IN_PROVIDER_IDS
-# for the ids that were still shipping when they were retired: the ones removed
-# long before that set existed have no config left to be compatible with.
-RETIRED_PROVIDERS = ["hosszupuska", "podnapisi", "subscenter", "xsubs"]
+# class. Shared with test_provider_hub.py, which anchors the list to
+# provider_hub.migration.RETIRED_BUILT_IN_PROVIDER_IDS so a later retirement
+# cannot add an id to production and skip the compat boot.
+RETIRED_PROVIDERS = list(RETIRED_PROVIDER_IDS_UNDER_TEST)
 
 SURVIVING_PROVIDERS = ["opensubtitlescom", "embeddedsubtitles"]
 
-# A leftover at-rest credential from the secret store. It carries the marker
-# prefix but is NOT decryptable, which is the point: once the retired provider's
-# paths leave USER_VISIBLE_SECRETS nothing tries to decrypt it, so it survives
-# verbatim. While the paths were still registered this same value made the boot
-# log a decrypt failure and the rewrite replace it.
-INERT_AT_REST_VALUE = "enc:v1:not-a-real-cipher-payload"
+# A retired id that a trusted catalog plugin has adopted, which is the intended
+# path for a dead built-in (provider_hub.migration keeps the ids claimed for
+# exactly this). Adoption puts the id back in the provider registry, and
+# Provider Hub reads the plugin's credentials out of the same `[<id>]` section,
+# so this one is the negative control for the scrub: it must survive.
+ADOPTED_RETIRED_PROVIDER = "subscene"
+
+# Credentials for the stale sections. All three are inventions and none of them
+# opens anything: the child echoes its result through stdout, and stdout lands in
+# CI logs on failure.
+#
+# Two shapes on purpose, because the scrub has to cover both:
+# * cleartext, what an install carries when it predates the secret store. Once
+#   the provider's paths left USER_VISIBLE_SECRETS nothing would ever encrypt
+#   this again, so leaving the section in place would leave a readable password
+#   in config.yaml and in /api/system/settings permanently.
+# * at rest, what a post-secret-store install carries. This particular value is
+#   deliberately not decryptable, so a boot that still tried to decrypt it would
+#   log a failure rather than silently produce a plausible plaintext.
+CLEARTEXT_CREDENTIAL = "not-a-real-password"  # pragma: allowlist secret
+AT_REST_CREDENTIAL = "enc:v1:not-a-real-cipher-payload"  # pragma: allowlist secret
+ADOPTED_CREDENTIAL = "not-a-real-adopted-password"  # pragma: allowlist secret
 
 
 def _legacy_config_ini():
@@ -74,17 +98,25 @@ def _legacy_config_ini():
     languages["opensubtitlescom"] = ["eng"]
     blacklisted = RETIRED_PROVIDERS + ["opensubtitlescom"]
 
-    # Stale sections, shaped like the ones the retired providers really had.
-    # podnapisi.verify_ssl is a non-default value so a validator that came back
-    # from the dead would show up as a VALIDATOR RESET. xsubs carried a login
-    # pair, and its password was a secret_store path, so it gets the at-rest
-    # form. No real credential goes in here: the child ships this config back
-    # out through stdout, and stdout lands in CI logs on failure.
+    # Stale sections. Only two of the four are shapes a real install can carry:
+    # podnapisi had verify_ssl (set to a non-default value here, so a validator
+    # that came back from the dead would show up as a VALIDATOR RESET) and xsubs
+    # had the username / password pair, whose password was a secret_store path.
+    # hosszupuska and subscenter never had a config section, a validator or a
+    # credential input anywhere in this repo's history; they get a synthetic one
+    # so the per-id assertions below hold every retired id to the same standard,
+    # including one a hand-edited config could have invented.
+    #
+    # The adopted id's section is the negative control and stays out of the
+    # parametrised assertions: the child registers a provider class for it, so
+    # the scrub must leave it alone.
     sections = [
-        "[hosszupuska]\nusername = someuser\npassword = somepass\n",
+        "[hosszupuska]\nusername = someuser\npassword = %s\n" % CLEARTEXT_CREDENTIAL,
         "[podnapisi]\nverify_ssl = False\n",
-        "[subscenter]\nusername = someuser\npassword = somepass\n",
-        "[xsubs]\nusername = someuser\npassword = %s\n" % INERT_AT_REST_VALUE,
+        "[subscenter]\nusername = someuser\npassword = %s\n" % AT_REST_CREDENTIAL,
+        "[xsubs]\nusername = someuser\npassword = %s\n" % CLEARTEXT_CREDENTIAL,
+        "[%s]\nusername = someuser\npassword = %s\n"
+        % (ADOPTED_RETIRED_PROVIDER, ADOPTED_CREDENTIAL),
     ]
 
     return (
@@ -124,6 +156,7 @@ ROOT = os.environ["BAZARR_REPO_ROOT"]
 EXPECTED_CONFIG_DIR = os.environ["EXPECTED_CONFIG_DIR"]
 RETIRED = json.loads(os.environ["RETIRED_PROVIDERS"])
 SURVIVING = json.loads(os.environ["SURVIVING_PROVIDERS"])
+ADOPTED = os.environ["ADOPTED_RETIRED_PROVIDER"]
 
 sys.path.insert(0, os.path.join(ROOT, "bazarr"))
 sys.path.insert(0, os.path.join(ROOT, "custom_libs"))
@@ -140,13 +173,27 @@ assert os.path.realpath(args.config_dir) == os.path.realpath(EXPECTED_CONFIG_DIR
     % (args.config_dir, EXPECTED_CONFIG_DIR)
 )
 
+# Stand in for a trusted catalog plugin that has adopted a retired id: adoption
+# is a provider class registered under that id, which is exactly what
+# register_active_provider_classes() ends up doing. Registering it BEFORE init
+# runs matches the real ordering, where the strip and the scrub both run after
+# Provider Hub registration.
+from subliminal_patch.extensions import provider_registry  # noqa: E402
+
+
+class _AdoptedProvider:
+    pass
+
+
+provider_registry.register(ADOPTED, _AdoptedProvider)
+
 # The real startup path, not a copy of it: registers Provider Hub plugins, strips
-# ids with no provider class out of enabled_providers, and persists the result.
+# ids with no provider class out of enabled_providers, drops the config sections
+# of the retired ids that are left, and persists the result.
 import init  # noqa: E402,F401
 
-from app.config import settings, sync_checker, validators  # noqa: E402
+from app.config import get_settings, settings, sync_checker, validators  # noqa: E402
 from secret_store.registry import USER_VISIBLE_SECRET_LISTS, USER_VISIBLE_SECRETS  # noqa: E402
-from subliminal_patch.extensions import provider_registry  # noqa: E402
 
 
 class _Subtitle:
@@ -161,6 +208,9 @@ def _retired_section(path):
 
 
 after_startup = list(settings.general.enabled_providers)
+# What /api/system/settings would serve. A section still in here is a section the
+# UI and every support bundle keep carrying, credentials included.
+api_settings = get_settings()
 side_tables = {
     "provider_priorities": dict(settings.general.provider_priorities or {}),
     "provider_languages": dict(settings.general.provider_languages or {}),
@@ -199,6 +249,10 @@ result = {
         for path in (USER_VISIBLE_SECRETS | USER_VISIBLE_SECRET_LISTS)
         if _retired_section(path)
     ),
+    "api_settings_sections": sorted(
+        name for name in api_settings if name in RETIRED or name == ADOPTED
+    ),
+    "api_settings_adopted_section": api_settings.get(ADOPTED),
     "enabled_providers_after_startup": after_startup,
     "runtime_input": runtime_input,
     "active_providers": get_providers.get_providers() or [],
@@ -247,6 +301,7 @@ def legacy_install(tmp_path_factory):
         "EXPECTED_CONFIG_DIR": str(tmp_path),
         "RETIRED_PROVIDERS": json.dumps(RETIRED_PROVIDERS),
         "SURVIVING_PROVIDERS": json.dumps(SURVIVING_PROVIDERS),
+        "ADOPTED_RETIRED_PROVIDER": ADOPTED_RETIRED_PROVIDER,
         "SZ_USER_AGENT": "test",
         "BAZARR_VERSION": "test",
         "NO_CLI": "false",
@@ -310,8 +365,11 @@ def test_runtime_filter_keeps_exactly_the_surviving_providers(legacy_install):
 def test_retired_provider_keeps_no_credential_plumbing(legacy_install, retired):
     # A retirement that deleted the module but left the provider's entry in
     # get_providers_auth(), its config validators, or its secret_store paths
-    # would boot fine and still be wrong: the auth entry crashes pool
-    # construction, and the other two keep a dead provider's settings alive.
+    # would boot fine and still be wrong. None of the three is fatal on its own
+    # (the pool skips a config entry for an id it does not have), but each keeps
+    # a dead provider's plumbing alive: the validators recreate the section this
+    # test asserts is gone, and the secret_store paths keep walking a credential
+    # nothing can reach any more.
     result, _ = legacy_install
     assert retired not in result["retired_provider_auth_keys"]
     assert not [
@@ -383,16 +441,57 @@ def test_config_rewrite_keeps_the_surviving_providers_and_other_sections(legacy_
     assert on_disk["sonarr"]["ip"] == "192.0.2.9"
 
 
-def test_stale_retired_sections_survive_untouched_on_disk(legacy_install):
-    # The rewrite persists settings.as_dict(), so a section for a provider that
-    # no longer has validators rides along as inert data. It must not be reset to
-    # a default, and the leftover at-rest credential must not be decrypted,
-    # re-encrypted or dropped now that its secret_store paths are gone.
+@pytest.mark.parametrize("retired", RETIRED_PROVIDERS)
+def test_stale_retired_section_is_dropped_from_disk(legacy_install, retired):
+    # Guards the stale-section scrub in bazarr/init.py. The section was in the
+    # config the fixture wrote, and the rewrite persists settings.as_dict(), so
+    # without the scrub it rides along forever: no validators to reset it, no
+    # Settings card to clear it, and no secret_store path to encrypt a credential
+    # in it.
     import yaml
 
     _, tmp_path = legacy_install
     on_disk = yaml.safe_load((tmp_path / "config" / "config.yaml").read_text(encoding="utf-8"))
 
-    assert on_disk["podnapisi"]["verify_ssl"] is False
-    assert on_disk["xsubs"]["username"] == "someuser"
-    assert on_disk["xsubs"]["password"] == INERT_AT_REST_VALUE
+    assert retired not in on_disk
+
+
+@pytest.mark.parametrize("retired", RETIRED_PROVIDERS)
+def test_stale_retired_section_is_not_served_by_the_settings_api(legacy_install, retired):
+    # get_settings() walks every section in settings.as_dict(), so a section that
+    # survives startup is one /api/system/settings keeps handing out, credential
+    # and all, with no UI left to clear it.
+    result, _ = legacy_install
+    assert retired not in result["api_settings_sections"]
+
+
+def test_retired_credentials_leave_no_trace_in_the_config_file(legacy_install):
+    # Byte level, not key level: the point of the scrub is that the credential
+    # stops being on disk, in either shape. The cleartext one is the shape a
+    # pre-secret-store install carries, and it is the one nothing else can reach
+    # any more, since encrypt-at-rest only visits registered paths.
+    _, tmp_path = legacy_install
+    raw = (tmp_path / "config" / "config.yaml").read_text(encoding="utf-8")
+
+    assert CLEARTEXT_CREDENTIAL not in raw
+    assert AT_REST_CREDENTIAL not in raw
+    # The control: the scrub is targeted, not a blanket credential wipe.
+    assert ADOPTED_CREDENTIAL in raw
+
+
+def test_adopted_retired_section_survives_with_its_credentials(legacy_install):
+    # A retired id whose provider class is back (a trusted catalog plugin adopted
+    # it) is a live provider again, and Provider Hub overlays its config from this
+    # very section. Scrubbing it would silently wipe the plugin's credentials on
+    # the next boot.
+    import yaml
+
+    result, tmp_path = legacy_install
+    on_disk = yaml.safe_load((tmp_path / "config" / "config.yaml").read_text(encoding="utf-8"))
+
+    assert on_disk[ADOPTED_RETIRED_PROVIDER]["username"] == "someuser"
+    assert on_disk[ADOPTED_RETIRED_PROVIDER]["password"] == ADOPTED_CREDENTIAL
+    assert result["api_settings_adopted_section"] == {
+        "username": "someuser",
+        "password": ADOPTED_CREDENTIAL,
+    }
