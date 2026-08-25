@@ -8,6 +8,8 @@ one provider's config leaked a worker for the life of the process. Bazarr saves
 settings often enough that this accumulates.
 """
 
+import shutil
+
 import pytest
 
 from subliminal_patch.core import SZProviderPool
@@ -77,7 +79,11 @@ def test_an_unchanged_config_leaves_the_running_provider_alone(registered):
     assert pool["fake"] is first
 
 
-def test_a_failed_replacement_keeps_the_running_provider(registered, monkeypatch):
+def test_a_failed_replacement_leaves_nothing_installed_and_is_retried(registered, monkeypatch):
+    """The stale-config instance goes either way. Leaving it installed would
+    keep serving the configuration the user just changed, and the pool
+    re-initializes on next access, so a provider that is merely unreachable
+    right now recovers on its own with the new config."""
     pool, first = _pool_with_initialized_provider(registered)
 
     class _Broken(_FakeProvider):
@@ -91,5 +97,54 @@ def test_a_failed_replacement_keeps_the_running_provider(registered, monkeypatch
     pool.provider_configs.update({"fake": {"token": "new"}})
 
     assert throttled == ["fake"]
-    assert not first.terminated, "the working provider was torn down for a replacement that never started"
-    assert pool.initialized_providers["fake"] is first
+    assert first.terminated
+    assert "fake" not in pool.initialized_providers
+
+    monkeypatch.setitem(provider_registry.providers, "fake", _FakeProvider)
+    assert pool["fake"].config["token"] == "new"
+
+
+def test_the_replacement_is_built_after_the_old_one_is_torn_down(registered, tmp_path):
+    """Ordering, and it is not academic: EmbeddedSubtitles.terminate() rmtree's
+    a cache directory shared by every instance of it, and initialize() creates
+    that same directory. Tearing the old one down last therefore deletes what
+    the replacement just set up, and embedded extraction fails until something
+    reinitializes the provider."""
+    shared = tmp_path / "cache"
+
+    class _OwnsSharedState(_FakeProvider):
+        def initialize(self):
+            shared.mkdir(exist_ok=True)
+            super().initialize()
+
+        def terminate(self):
+            shutil.rmtree(shared, ignore_errors=True)
+            super().terminate()
+
+    provider_registry.providers["fake"] = _OwnsSharedState
+    pool = SZProviderPool(providers=["fake"], provider_configs={"fake": {"token": "old"}})
+    assert pool["fake"].initialized
+
+    pool.provider_configs.update({"fake": {"token": "new"}})
+
+    assert shared.is_dir(), "the replacement's shared state was destroyed by the teardown that followed it"
+
+
+def test_a_teardown_failure_does_not_throttle_the_healthy_replacement(registered, monkeypatch):
+    """throttle_callback takes the provider name out of the rotation for the
+    throttle interval. The instance being discarded misbehaving on the way out
+    is no reason to do that to the one that just started cleanly."""
+    class _BadTerminate(_FakeProvider):
+        def terminate(self):
+            raise RuntimeError("teardown blew up")
+
+    monkeypatch.setitem(provider_registry.providers, "fake", _BadTerminate)
+    pool = SZProviderPool(providers=["fake"], provider_configs={"fake": {"token": "old"}})
+    assert pool["fake"].initialized
+    throttled = []
+    pool.throttle_callback = lambda name, error: throttled.append(name)
+
+    pool.provider_configs.update({"fake": {"token": "new"}})
+
+    assert throttled == []
+    assert pool.initialized_providers["fake"].config["token"] == "new"
