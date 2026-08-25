@@ -175,6 +175,18 @@ jobs:
             tests/bazarr/test_subsync_engines.py \
             tests/bazarr/test_sync_instance_overrides.py \
             tests/bazarr/test_subzero_keep_lyrics.py \
+            tests/bazarr/test_combine_aligner.py \
+            tests/bazarr/test_combine_api_dto.py \
+            tests/bazarr/test_combine_api_episodes.py \
+            tests/bazarr/test_combine_api_movies.py \
+            tests/bazarr/test_combine_api_series.py \
+            tests/bazarr/test_combine_composer.py \
+            tests/bazarr/test_combine_hook.py \
+            tests/bazarr/test_combine_indexer.py \
+            tests/bazarr/test_combine_main.py \
+            tests/bazarr/test_combine_naming.py \
+            tests/bazarr/test_combine_profile.py \
+            tests/bazarr/test_combine_rules.py \
             tests/bazarr/test_archive_extraction.py \
             tests/bazarr/test_security_guards.py \
             tests/bazarr/test_login_backdrops.py \
