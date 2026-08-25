@@ -292,6 +292,8 @@ jobs:
             tests/subliminal_patch/test_score.py \
             tests/subliminal_patch/test_subdl_anime_mode.py \
             tests/subliminal_patch/test_subtitle.py \
+            tests/subliminal_patch/test_http.py \
+            tests/subliminal_patch/test_legendasdivx.py \
             tests/subliminal_patch/test_utils.py \
             -v --tb=short
 
