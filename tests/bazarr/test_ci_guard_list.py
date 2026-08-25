@@ -75,10 +75,12 @@ substring, so a single-file run, or even `--ignore=tests/compat/`, credited all
 55 files under it.
 """
 
+import configparser
 import pathlib
 import re
 import shlex
 import sys
+import tomllib
 
 import pytest
 import yaml
@@ -316,6 +318,37 @@ _PYTEST_REFUSED = {
     ),
 }
 
+# Whitelisted options whose value the guard does inspect, rather than refusing
+# the option outright. `-p` loads a pytest plugin, and a plugin decides what
+# collection returns: `pytest -p neuter tests/...` can empty the run and still
+# exit 0, which is the hole -o, --override-ini and -c are refused for, reached
+# through an option the guard was letting past with its value unread. Only the
+# `no:` forms named here are accepted; the workflow uses one of them.
+_PYTEST_INSPECTED_VALUES = {
+    "-p": (
+        frozenset({"no:cacheprovider"}),
+        "loads a pytest plugin, and a plugin can empty collection while the "
+        "command still exits 0. Only a `no:` form the guard has reasoned about "
+        "is accepted",
+    ),
+}
+
+# The configuration files pytest itself reads, and the section each one keeps
+# its settings in. They are searched from the common ancestor of the arguments
+# upward, and every path CI passes is under tests/, so both directories count.
+# Nothing in the repo defines any of them today, which is the point: `-o
+# addopts=--collect-only` is refused on the command line, and committing the
+# same setting to a file pytest loads by itself would have been invisible.
+_PYTEST_CONFIG_SECTIONS = {
+    "pytest.ini": "pytest",
+    ".pytest.ini": "pytest",
+    "tox.ini": "pytest",
+    "setup.cfg": "tool:pytest",
+}
+_PYTEST_CONFIG_DIRECTORIES = (".", "tests")
+# Settings in those files that decide what a run collects and what it asserts.
+_NEUTERING_INI_KEYS = ("addopts", "testpaths")
+
 # Workflow, job and step keys the guard has reasoned about. A key that is on
 # neither this list nor _CHECKED_KEYS below is absent because nobody has
 # reasoned about it yet, which is exactly when the guard should stop rather than
@@ -473,6 +506,55 @@ def _reject_expansions(
         )
 
 
+def _inside_repo(path: pathlib.Path) -> bool:
+    """Whether a match really lives in the repository, with symlinks resolved.
+
+    The check on the token itself is lexical, so it cannot see a committed
+    symlink: `tests/linkdir/test_outside.py` reads as a repo-relative path and
+    is a file somewhere else on disk. Crediting it would vouch for a file the
+    repository does not contain, and does not run.
+    """
+    try:
+        return path.resolve().is_relative_to(REPO_ROOT.resolve())
+    except (ValueError, OSError):
+        return False
+
+
+def _glob(pattern: str) -> list:
+    """REPO_ROOT.glob with symlink recursion off on every version CI runs.
+
+    `recurse_symlinks` arrived in 3.13, and the default changed with it: 3.12
+    follows a directory symlink inside a `**` and 3.13 onward does not. CI runs
+    3.12, 3.13 and 3.14, so the argument is passed where it exists, and
+    _inside_repo covers the version that has no such argument. Without both, the
+    same workflow means different things on different rows of the matrix.
+
+    Errors are turned into a refusal rather than an exception: a NUL byte in a
+    path makes glob raise ValueError, and the guard reporting a stack trace
+    instead of a reason is the failure mode this file exists to avoid.
+    """
+    try:
+        try:
+            matches = REPO_ROOT.glob(pattern, recurse_symlinks=False)
+        except TypeError:  # Python 3.12 has no recurse_symlinks argument
+            matches = REPO_ROOT.glob(pattern)
+        return sorted(match for match in matches if _inside_repo(match))
+    except (ValueError, OSError) as error:
+        raise _Unverifiable(
+            f"{pattern!r} cannot be matched against the repository: {error}"
+        )
+
+
+def _path_kind(path: pathlib.Path) -> str:
+    """"dir", "file" or "", refusing rather than raising out of the guard."""
+    try:
+        if path.is_dir():
+            return "dir"
+        return "file" if path.is_file() else ""
+    except (ValueError, OSError) as error:
+        raise _Unverifiable(f"{str(path)!r} cannot be read: {error}")
+
+
 def _expand(token: str, allow_node_selector: bool = False) -> set:
     """The repo-relative test files a pytest path argument really names.
 
@@ -498,15 +580,28 @@ def _expand(token: str, allow_node_selector: bool = False) -> set:
         return set()
     if path.startswith("/") or ".." in pathlib.PurePosixPath(path).parts:
         raise _Unverifiable(f"path {token!r} escapes the repository")
+    if "\x00" in path:
+        raise _Unverifiable(
+            f"path {token!r} contains a NUL byte, which nothing in this "
+            "repository is named. Matching it raises out of the filesystem "
+            "rather than answering"
+        )
     glob = any(char in path for char in "*?[")
-    matches = sorted(REPO_ROOT.glob(path)) if glob else [REPO_ROOT / path]
+    matches = _glob(path) if glob else [REPO_ROOT / path]
     found = set()
     for match in matches:
-        if match.is_dir():
+        kind = _path_kind(match)
+        if kind and not _inside_repo(match):
+            raise _Unverifiable(
+                f"{token!r} resolves outside the repository, through a symlink. "
+                "The repository does not contain that file, so nothing here can "
+                "vouch for what it asserts"
+            )
+        if kind == "dir":
             relative = match.relative_to(REPO_ROOT).as_posix()
             prefix = "" if relative == "." else relative + "/"
             found |= {name for name in _all_test_files() if name.startswith(prefix)}
-        elif match.is_file() and match.suffix == ".py":
+        elif kind == "file" and match.suffix == ".py":
             found.add(match.relative_to(REPO_ROOT).as_posix())
         elif not glob and re.fullmatch(r"tests/.*\.py", path):
             raise _Unverifiable(
@@ -553,6 +648,12 @@ def _pytest_command(tokens: list, line: str) -> tuple:
                 raise _Unverifiable(f"{name} in {line!r} has no value")
             if name in _PYTEST_SUBTRACTING:
                 subtracted |= _expand(value, allow_node_selector=True)
+            inspected = _PYTEST_INSPECTED_VALUES.get(name)
+            if inspected and value not in inspected[0]:
+                raise _Unverifiable(
+                    f"{name} {value!r} in {line!r} {inspected[1]}, so the "
+                    "command cannot be read as coverage"
+                )
             continue
         if name in _PYTEST_FLAGS and not separator:
             continue
@@ -876,6 +977,69 @@ def _dependency_problems(job_name: str, jobs: dict) -> list:
     return problems
 
 
+def _ini_settings(path: pathlib.Path, section: str) -> dict:
+    """The pytest section of an ini-style file, or {} if it has none."""
+    parser = configparser.ConfigParser()
+    try:
+        parser.read_string(path.read_text(), source=str(path))
+    except (configparser.Error, OSError, UnicodeDecodeError) as error:
+        raise _Unverifiable(f"{path.name} cannot be parsed: {error}")
+    return dict(parser[section]) if parser.has_section(section) else {}
+
+
+def _toml_settings(path: pathlib.Path) -> dict:
+    try:
+        data = tomllib.loads(path.read_text())
+    except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError) as error:
+        raise _Unverifiable(f"{path.name} cannot be parsed: {error}")
+    section = (data.get("tool") or {}).get("pytest") or {}
+    return section.get("ini_options") or {}
+
+
+def _pytest_configuration_problems() -> list:
+    """Settings committed to a file pytest reads, that decide what a run does.
+
+    `-o addopts=--collect-only` is refused on the command line, and so is `-c`,
+    because either can stop pytest asserting anything. Both were refused while
+    the files pytest loads on its own went unread, so committing `addopts` to a
+    pytest.ini did the same thing with nothing on the command line to see. The
+    repository defines none of these files today.
+
+    `testpaths` is here for the same reason: it replaces the arguments pytest
+    collects when none are given, and it is the setting a future `pytest` with
+    no path would silently obey.
+    """
+    problems = []
+    for directory in _PYTEST_CONFIG_DIRECTORIES:
+        for name, section in _PYTEST_CONFIG_SECTIONS.items():
+            path = REPO_ROOT / directory / name
+            if not path.is_file():
+                continue
+            settings = _ini_settings(path, section)
+            problems += _neutering_settings(directory, name, f"[{section}]", settings)
+        path = REPO_ROOT / directory / "pyproject.toml"
+        if path.is_file():
+            problems += _neutering_settings(
+                directory,
+                "pyproject.toml",
+                "[tool.pytest.ini_options]",
+                _toml_settings(path),
+            )
+    return problems
+
+
+def _neutering_settings(directory: str, name: str, section: str, settings: dict) -> list:
+    where = name if directory == "." else f"{directory}/{name}"
+    return [
+        f"{where} sets {section} {key} = {settings[key]!r}. pytest reads that "
+        "file by itself, so the setting applies to every run in CI without "
+        "appearing on any command line the guard can read, and it can stop "
+        "pytest asserting anything at all"
+        for key in _NEUTERING_INI_KEYS
+        if key in settings
+    ]
+
+
 def _trigger_problem(workflow: dict) -> str:
     """Whether the workflow really fires on the pull requests it is meant to gate.
 
@@ -993,7 +1157,7 @@ def _all_test_files() -> set:
     return {
         path.relative_to(REPO_ROOT).as_posix()
         for pattern in ("test_*.py", "*_test.py")
-        for path in (REPO_ROOT / "tests").rglob(pattern)
+        for path in _glob("tests/**/" + pattern)
     }
 
 
@@ -1060,6 +1224,21 @@ def test_every_test_file_runs_in_ci_or_is_excluded():
             "refused to read:\n  " + "\n  ".join(problems)
         )
     assert not unaccounted, message
+
+
+def test_no_committed_pytest_config_changes_what_ci_runs():
+    """The guard refuses -o and -c, so it has to read the files pytest loads.
+
+    Both options are refused because either can carry addopts, and the same
+    setting committed to a pytest.ini, a tox.ini, a setup.cfg or a pyproject
+    reaches every run without appearing on a command line at all. The repository
+    defines none of those files, and this is what keeps it that way.
+    """
+    problems = _pytest_configuration_problems()
+    assert not problems, (
+        "Configuration pytest reads by itself decides what CI runs:\n  "
+        + "\n  ".join(problems)
+    )
 
 
 def test_exclusions_still_exist():
@@ -1225,6 +1404,19 @@ _SCRIPT_REFUSALS = {
     "an interpreter startup file is set on the command": (
         f"PYTHONSTARTUP=tests/helpers/start.py pytest {_REAL}\n"
     ),
+    # -p was whitelisted with its value never read, which is the same hole -o,
+    # --override-ini and -c are refused for: a plugin decides what collection
+    # returns, so `-p neuter` can empty the run and still exit 0.
+    "a plugin is loaded whose behaviour nobody inspected": (
+        f"pytest -p neuter {_REAL}\n"
+    ),
+    "a plugin disable the guard has not reasoned about": (
+        f"pytest -p no:python {_REAL}\n"
+    ),
+    # A NUL byte used to raise ValueError out of glob, so the guard died with a
+    # stack trace instead of reporting a refusal a human could act on.
+    "a path carries a NUL byte": f"pytest {_REAL}\x00\n",
+    "a glob carries a NUL byte": "pytest tests/bazarr/*\x00/test_ui.py\n",
 }
 
 
@@ -1267,6 +1459,11 @@ def test_script_the_guard_cannot_read_is_refused(case, script):
 def test_loop_list_with_pytest_on_the_variable_is_coverage(body):
     script = f"for f in \\\n  {_REAL} \\\n  ; do\n  {body}\ndone\n"
     assert _script_coverage(script) == {_REAL}
+
+
+def test_the_plugin_disable_the_workflow_uses_is_still_coverage():
+    """`-p no:cacheprovider` is the one -p value CI needs, and it must survive."""
+    assert _script_coverage(f"pytest {_REAL} -p no:cacheprovider -q\n") == {_REAL}
 
 
 def test_wholesale_directory_run_covers_the_tree():
@@ -1319,6 +1516,85 @@ def constructed_workflow(tmp_path, monkeypatch):
         return path
 
     return build
+
+
+@pytest.fixture
+def constructed_repo(tmp_path, monkeypatch):
+    """Run the guard against a repository built in the test, not this one.
+
+    The same seam the workflow fixture uses: REPO_ROOT is read off the module,
+    so pointing it somewhere else is enough to exercise the filesystem rules
+    without committing a symlink or a pytest.ini to the real repository to prove
+    they are caught.
+    """
+
+    def build(files: dict) -> pathlib.Path:
+        for name, content in files.items():
+            path = tmp_path / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+        return tmp_path
+
+    return build
+
+
+@pytest.mark.parametrize(
+    "name,body",
+    [
+        ("pytest.ini", "[pytest]\naddopts = --collect-only\n"),
+        (".pytest.ini", "[pytest]\naddopts = -k nothing_matches\n"),
+        ("tox.ini", "[pytest]\ntestpaths = docs\n"),
+        ("setup.cfg", "[tool:pytest]\naddopts = --collect-only\n"),
+        ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "--collect-only"\n'),
+        # pytest searches upward from the common ancestor of its arguments, and
+        # every path CI passes is under tests/, so a file there is read first.
+        ("tests/pytest.ini", "[pytest]\naddopts = --collect-only\n"),
+    ],
+)
+def test_committed_pytest_config_is_reported(constructed_repo, name, body):
+    """The setting -o and -c are refused for, arriving in a file instead.
+
+    Nothing about the workflow changes: the steps still enumerate every path and
+    still parse. pytest reads the file on its own and collects nothing.
+    """
+    constructed_repo({name: body})
+    problems = _pytest_configuration_problems()
+    assert any(name in problem for problem in problems), (
+        f"{name} can stop pytest asserting anything and the guard did not say so"
+    )
+
+
+def test_pytest_config_without_the_dangerous_settings_is_fine(constructed_repo):
+    """Refusing every config file outright would be friction with no safety."""
+    constructed_repo(
+        {
+            "pyproject.toml": '[tool.pytest.ini_options]\nmarkers = ["slow"]\n',
+            "setup.cfg": "[metadata]\nname = bazarr\n",
+        }
+    )
+    assert not _pytest_configuration_problems()
+
+
+def test_symlink_out_of_the_repository_is_not_coverage(constructed_repo, tmp_path):
+    """The escape check is lexical, so only resolving the path catches this one.
+
+    A committed symlink under tests/ is a repo-relative path by inspection and a
+    file somewhere else on disk in fact. Crediting it vouches for assertions the
+    repository does not contain. It also read differently across the CI matrix:
+    3.12 follows directory symlinks inside a recursive glob and 3.13 onward does
+    not, so the same workflow meant two things on two rows.
+    """
+    root = constructed_repo({"tests/bazarr/test_real.py": ""})
+    outside = tmp_path.parent / "outside_of_the_repository"
+    outside.mkdir(exist_ok=True)
+    (outside / "test_away.py").write_text("")
+    (root / "tests" / "linkdir").symlink_to(outside, target_is_directory=True)
+
+    assert _all_test_files() == {"tests/bazarr/test_real.py"}
+    with pytest.raises(_Unverifiable):
+        _expand("tests/linkdir/test_away.py")
+    assert _expand("tests/") == {"tests/bazarr/test_real.py"}
 
 
 def _one_job(*steps: dict, **job) -> dict:
