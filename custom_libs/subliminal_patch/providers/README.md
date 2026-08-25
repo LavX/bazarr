@@ -26,12 +26,13 @@ So a broken module here is not necessarily an oversight. CI runs a short, explic
 that list are not run at all, so a provider test that fails locally is not by itself evidence that
 anyone intends to repair it. Before spending time on one, open an issue and ask.
 
-The Provider Hub keeps its own record of which built-ins may be replaced by an official catalog
-plugin: `MIGRATED_BUILT_IN_PROVIDER_IDS` in `bazarr/provider_hub/migration.py`. Built-in provider
-ids missing from that set are excluded on purpose, because their sites are gone. `podnapisi`,
-`subscenter` and `xsubs` are the current examples: `podnapisi.net` and `subscenter.info` no longer
-resolve, and `xsubs.tv` now serves an unrelated site. Those follow rule 2 above, deletion, rather
-than a catalog port.
+The Provider Hub keeps its own record of which built-ins an official catalog plugin may replace, in
+`bazarr/provider_hub/migration.py`. An id missing from it is missing on purpose, and a plugin
+claiming one is skipped at registration, so check that file before porting.
+
+The current omissions are providers whose sites are gone: `podnapisi.net` and `subscenter.info` no
+longer resolve, and `xsubs.tv` now serves an unrelated site. Those are rule 2 cases, deletion, and
+there is nothing left to port for any of them.
 
 ## What is not legacy
 
