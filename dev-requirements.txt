@@ -1,9 +1,9 @@
 sympy
-vcrpy>=8.2.1
+vcrpy>=8.3.0
 pytest
 pytest-cov
 pytest-vcr
 pytest-mock
 requests-mock
-ruff==0.15.20
+ruff==0.16.4
 setuptools
