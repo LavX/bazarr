@@ -609,3 +609,61 @@ def test_legendasdivx_cli_extraction_skips_symlink_members_from_a_real_archive(t
     assert out is not None
     assert b"host file content" not in out
     assert b"genuine subtitle" in out
+
+
+def test_legendasdivx_anime_absolute_numbering_is_accepted():
+    """Anime archives are numbered absolutely while Sonarr stores the video as
+    season-relative, with the absolute number on video.absolute_episode. The
+    episode guard has to honour both or every anime download is rejected."""
+    body = "1\n00:00:01,000 --> 00:00:02,000\nepisode three ten\n"
+    content = _zip_bytes({"[HorribleSubs] One Piece - 310 [1080p].srt": body})
+    archive = zipfile.ZipFile(io.BytesIO(content))
+    video = Episode("One.Piece.S10E14.mkv", "One Piece", 10, 14)
+    video.absolute_episode = 310
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
+    assert provider._get_subtitle_from_archive(archive, content, _episode_subtitle(video)) == body.encode()
+
+
+def test_legendasdivx_absolute_numbering_does_not_accept_any_episode():
+    content = _zip_bytes({"[HorribleSubs] One Piece - 311 [1080p].srt": "1\n00:00:01,000 --> 00:00:02,000\nwrong\n"})
+    archive = zipfile.ZipFile(io.BytesIO(content))
+    video = Episode("One.Piece.S10E14.mkv", "One Piece", 10, 14)
+    video.absolute_episode = 310
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
+    assert provider._get_subtitle_from_archive(archive, content, _episode_subtitle(video)) is None
+
+
+def test_legendasdivx_extraction_budget_counts_directories(tmp_path):
+    """An archive of nothing but empty directories writes no bytes and no
+    files, so a files-only count leaves the budget at zero while the extractor
+    eats one inode per member until the timeout."""
+    from subliminal_patch.providers.legendasdivx import CLI_EXTRACT_MAX_MEMBERS
+
+    outdir = tmp_path / "out"
+    for i in range(CLI_EXTRACT_MAX_MEMBERS + 5):
+        (outdir / f"d{i}").mkdir(parents=True)
+
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
+    assert provider._over_extraction_budget(str(outdir), "unzip") is True
+
+
+def test_legendasdivx_extraction_budget_stops_walking_once_it_is_over(monkeypatch, tmp_path):
+    """The count exists to stop an extractor that is still running, so walking
+    the whole tree to produce it defeats the point on the trees it is aimed at."""
+    from subliminal_patch.providers import legendasdivx as mod
+
+    walked = []
+
+    def endless_walk(_top):
+        for i in range(10 ** 6):
+            walked.append(i)
+            yield f"/root/{i}", [f"d{i}"], []
+
+    monkeypatch.setattr(mod.os, "walk", endless_walk)
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
+    assert provider._over_extraction_budget(str(tmp_path), "unzip") is True
+    assert len(walked) < 10 ** 6

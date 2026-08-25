@@ -76,15 +76,24 @@ def guess_matches_wanted_episode(video, guess):
         return True
 
     episode = guess.get('episode')
+    matched_absolutely = False
     if episode is not None:
-        if isinstance(episode, list):
-            if video.episode not in episode:
-                return False
-        elif episode != video.episode:
+        candidates = episode if isinstance(episode, list) else [episode]
+        # Anime archives number episodes absolutely while Sonarr stores the
+        # video as season-relative and carries the absolute number separately,
+        # so both spellings of the same episode have to be accepted.
+        absolute = getattr(video, 'absolute_episode', None)
+        if video.episode in candidates:
+            pass
+        elif absolute is not None and absolute in candidates:
+            matched_absolutely = True
+        else:
             return False
 
     season = guess.get('season')
-    if season is not None:
+    # Absolute numbering runs straight through the seasons, so a name that
+    # matched that way must not then be rejected over a season it never meant.
+    if season is not None and not matched_absolutely:
         if isinstance(season, list):
             if video.season not in season:
                 return False
@@ -672,18 +681,31 @@ class LegendasdivxProvider(Provider):
     def _extracted_usage(outdir):
         """(bytes, member count) written below outdir so far.
 
+        Directories count as members: an archive of nothing but empty
+        directories writes no bytes and no files, so a files-only count would
+        sit at zero while the extractor spends one inode per member until the
+        timeout. The walk stops as soon as either budget is blown, because the
+        count exists to cut a running extractor short and walking a tree built
+        to be enormous would defeat that.
+
         lstat, not stat: a symlink member must not be charged the size of
         whatever it points at, and _is_safe_extracted_file drops those anyway.
         """
         total_bytes = 0
         members = 0
-        for root, _, files in os.walk(outdir):
+        for root, dirs, files in os.walk(outdir):
+            members += len(dirs)
             for f in files:
                 members += 1
                 try:
                     total_bytes += os.lstat(os.path.join(root, f)).st_size
                 except OSError:
                     continue
+                if total_bytes > CLI_EXTRACT_MAX_BYTES:
+                    return total_bytes, members
+
+            if members > CLI_EXTRACT_MAX_MEMBERS:
+                return total_bytes, members
 
         return total_bytes, members
 
