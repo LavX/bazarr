@@ -5,11 +5,13 @@ import stat
 import zipfile
 
 import brotli
+import rarfile
 from guessit import guessit
 import pytest
 from subliminal.cache import region
 from subliminal.exceptions import AuthenticationError, ConfigurationError
 from subliminal.video import Movie
+from subliminal_patch.core import Episode
 from subliminal_patch.providers import legendasdivx
 from subliminal_patch.providers.legendasdivx import LegendasdivxProvider, LegendasdivxSubtitle, extract_release_info
 from subzero.language import Language
@@ -227,6 +229,97 @@ def test_legendasdivx_cli_extraction_skips_extractor_that_times_out(monkeypatch,
     assert tried == ["unar", "7z"]
 
 
+# ---------------------------------------------------------------------------
+# Wrong-episode guards.
+#
+# Three separate paths used to hand back a subtitle for an episode nobody asked
+# for, where the base implementation returned None. That is silent misfiling:
+# the file lands in the library, the episode is marked done, and nothing logs an
+# error. One test per path, plus a positive control so "always return None" can
+# never pass for the fix.
+# ---------------------------------------------------------------------------
+
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+SEASON_PACK_RAR = os.path.join(DATA_DIR, "archive_2.rar")
+
+
+def _episode_subtitle(video):
+    data = {
+        "link": "https://www.legendasdivx.pt/modules.php?lid=1",
+        "hits": 1,
+        "exact_match": False,
+        "title": "Breaking Bad",
+        "year": 2008,
+        "description": "Breaking Bad primeira temporada",
+        "frame_rate": "0",
+        "uploader": "uploader",
+        "release_info": "Breaking.Bad.S01",
+    }
+    return LegendasdivxSubtitle(Language("por"), video, data, skip_wrong_fps=False)
+
+
+def _zip_bytes(members):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, body in members.items():
+            zf.writestr(name, body)
+    return buf.getvalue()
+
+
+def test_legendasdivx_season_pack_returns_none_when_no_episode_matches():
+    # archive_2.rar holds S01E01 to S01E07. Listing a rar needs no external
+    # extractor, and nothing here reads a member, so this runs anywhere.
+    content = open(SEASON_PACK_RAR, "rb").read()
+    archive = rarfile.RarFile(io.BytesIO(content))
+    assert len(archive.namelist()) == 7
+
+    video = Episode("Breaking.Bad.S01E08.mkv", "Breaking Bad", 1, 8)
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
+    # every candidate is filtered out, so there is nothing to return
+    assert provider._get_subtitle_from_archive(archive, content, _episode_subtitle(video)) is None
+
+
+def test_legendasdivx_season_pack_still_returns_the_wanted_episode():
+    content = open(SEASON_PACK_RAR, "rb").read()
+    archive = rarfile.RarFile(io.BytesIO(content))
+    video = Episode("Breaking.Bad.S01E03.mkv", "Breaking Bad", 1, 3)
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
+    reads = []
+
+    def fake_read(name):
+        reads.append(name)
+        return b"1\n00:00:01,000 --> 00:00:02,000\nepisode three\n"
+
+    archive.read = fake_read
+
+    out = provider._get_subtitle_from_archive(archive, content, _episode_subtitle(video))
+
+    assert out is not None
+    assert reads == ["103 - ...And the Bag's in the River.srt"]
+
+
+def test_legendasdivx_single_subtitle_archive_still_checks_the_episode():
+    content = _zip_bytes({"Breaking.Bad.S01E01.srt": "1\n00:00:01,000 --> 00:00:02,000\nepisode one\n"})
+    archive = zipfile.ZipFile(io.BytesIO(content))
+    video = Episode("Breaking.Bad.S01E05.mkv", "Breaking Bad", 1, 5)
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
+    # the shortcut for one-subtitle archives must not skip the episode check
+    assert provider._get_subtitle_from_archive(archive, content, _episode_subtitle(video)) is None
+
+
+def test_legendasdivx_single_subtitle_archive_returns_the_wanted_episode():
+    body = "1\n00:00:01,000 --> 00:00:02,000\nepisode five\n"
+    content = _zip_bytes({"Breaking.Bad.S01E05.srt": body})
+    archive = zipfile.ZipFile(io.BytesIO(content))
+    video = Episode("Breaking.Bad.S01E05.mkv", "Breaking Bad", 1, 5)
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
+    assert provider._get_subtitle_from_archive(archive, content, _episode_subtitle(video)) == body.encode()
+
+
 def _fake_extractor(monkeypatch, tmp_path, lay_down):
     """Point _extract_via_cli at a stub extractor that writes lay_down(tmp_path)."""
 
@@ -243,6 +336,18 @@ def _fake_extractor(monkeypatch, tmp_path, lay_down):
     monkeypatch.setattr(legendasdivx.subprocess, "run", fake_run)
 
 
+def test_legendasdivx_cli_extraction_never_substitutes_another_member(monkeypatch, tmp_path):
+    def lay_down(d):
+        (d / "107 - A No-Rough-Stuff-Type Deal.srt").write_bytes(b"wrong episode\n")
+
+    _fake_extractor(monkeypatch, tmp_path, lay_down)
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
+    # the caller named the member the scoring loop picked; it is not there, so
+    # the answer is nothing, not whatever else happens to be in the archive
+    assert provider._extract_via_cli(b"archive", target_name="108 - Wanted.srt") is None
+
+
 def test_legendasdivx_cli_extraction_skips_symlink_members(monkeypatch, tmp_path):
     secret = tmp_path.parent / "legendasdivx_host_file.txt"
     secret.write_bytes(b"host file content that must never be returned\n")
@@ -253,15 +358,28 @@ def test_legendasdivx_cli_extraction_skips_symlink_members(monkeypatch, tmp_path
     _fake_extractor(monkeypatch, tmp_path, lay_down)
     provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
 
-    # unar restores symlink members verbatim, absolute targets included, and the
-    # os.walk loop below it used to open whatever the link pointed at
+    # unar restores symlink members verbatim, absolute targets included
     assert provider._extract_via_cli(b"archive") is None
+
+
+def test_legendasdivx_cli_extraction_filters_untargeted_members_by_episode(monkeypatch, tmp_path):
+    def lay_down(d):
+        (d / "107 - A No-Rough-Stuff-Type Deal.srt").write_bytes(b"wrong episode\n")
+
+    _fake_extractor(monkeypatch, tmp_path, lay_down)
+    provider = LegendasdivxProvider.__new__(LegendasdivxProvider)
+
+    video = Episode("Breaking.Bad.S01E08.mkv", "Breaking Bad", 1, 8)
+    assert provider._extract_via_cli(b"archive", video=video) is None
+
+    video = Episode("Breaking.Bad.S01E07.mkv", "Breaking Bad", 1, 7)
+    assert provider._extract_via_cli(b"archive", video=video) == b"wrong episode\n"
 
 
 @pytest.mark.skipif(shutil.which("unar") is None, reason="needs a real unar to restore symlink members")
 def test_legendasdivx_cli_extraction_skips_symlink_members_from_a_real_archive(tmp_path):
-    # The test above pins our guard. This one pins the premise: unar really does
-    # restore a symlink member, absolute target included.
+    # The fake-extractor test above pins our guard. This one pins the premise:
+    # unar really does restore a symlink member, absolute target included.
     secret = tmp_path / "host_file.txt"
     secret.write_bytes(b"host file content that must never be returned\n")
 
