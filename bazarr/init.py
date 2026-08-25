@@ -174,6 +174,32 @@ existing_providers = provider_registry.names()
 enabled_providers = settings.general.enabled_providers
 if provider_hub_registration_ok:
     settings.general.enabled_providers = [x for x in enabled_providers if x in existing_providers]
+
+    # Drop the config section a retired built-in provider left behind.
+    #
+    # A retired id has no provider class, no validators and no secret_store
+    # paths left, so its section is unreachable settings: the Settings card went
+    # with the provider and nothing reads the values. It is still serialized
+    # into config.yaml and into every /api/system/settings response though, and
+    # a credential written there by a build older than the secret store stays in
+    # clear text forever, because the encrypt-at-rest walk only visits
+    # registered paths. Unsetting the section is what closes that, and it is the
+    # same treatment app.config already gives series_scores / movie_scores.
+    #
+    # Skipped for any retired id a trusted catalog plugin has adopted: Provider
+    # Hub reads that plugin's credentials out of exactly this section, and the
+    # registration above is what puts the id back in existing_providers.
+    from provider_hub.migration import RETIRED_BUILT_IN_PROVIDER_IDS
+    stale_provider_sections = sorted(
+        provider_id for provider_id in RETIRED_BUILT_IN_PROVIDER_IDS
+        if provider_id not in existing_providers and hasattr(settings, provider_id)
+    )
+    for stale_provider_section in stale_provider_sections:
+        settings.unset(stale_provider_section.upper())
+    if stale_provider_sections:
+        logging.info("Removed leftover config sections of retired providers: %s",
+                     ", ".join(stale_provider_sections))
+
     write_config()
 else:
     logging.warning("Skipping enabled_providers cleanup because Provider Hub registration failed")

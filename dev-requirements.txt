@@ -1,6 +1,7 @@
 sympy
 vcrpy>=8.2.1
 pytest
+pytest-asyncio>=1.4.0
 pytest-cov
 pytest-vcr
 pytest-mock

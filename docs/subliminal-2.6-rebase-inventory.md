@@ -67,25 +67,24 @@ behavior now belongs in `custom_libs/subliminal_patch`.
 - Provider registry: Bazarr must continue registering all `subliminal_patch.providers` modules into
   `provider_registry`; upstream provider removals must not remove Bazarr providers.
 - Legacy provider behavior is no longer preserved by modifying upstream `subliminal`. Providers Bazarr still
-  registers but upstream removed, currently including `shooter` and `subscenter`, are owned by
-  `subliminal_patch`.
+  registers but upstream removed, currently including `shooter`, are owned by `subliminal_patch`.
 
 ## Provider Wrapper Policy
+
+- `podnapisi`, `subscenter` and `xsubs` were retired after this inventory was taken: their sites are gone,
+  so the wrapper notes they used to have no longer describe anything Bazarr ships.
 
 - Prefer upstream `subliminal 2.6.0` provider protocol code when a provider exists upstream. Bazarr patch
   wrappers should keep only Bazarr-specific behavior: extra language variants, HI/forced language handling,
   release metadata, custom score matches, throttling/auth behavior, and archive selection.
 - `tvsubtitles`: upstream 2.6 owns most protocol code. Bazarr keeps the working `search1.php` search endpoint,
   subtitle wrapper for `release_info`, mutable `matches`, and multi-episode normalization.
-- `podnapisi`: upstream 2.6 owns the JSON `/subtitles/search/advanced` protocol. Bazarr keeps `only_foreign`,
-  `also_foreign`, HI/forced language rebuilding, inconsistent title normalization, relaxed TLS compatibility,
-  release metadata, and archive member selection.
 - `subtitulamostv`: upstream 2.6 owns the search, show/season/episode navigation, language converter,
   matching, and download flow. Bazarr keeps the existing `subtitulamostv` provider id, `release_info`, mutable
   `matches`, legacy full-download-link subtitle id, and the exact series-name guard from the old wrapper.
 - Providers with larger Bazarr-specific behavior still require dedicated wrappers for now:
   `addic7ed`, `opensubtitles`, `opensubtitlescom`, `gestdown`, `bsplayer`, `subtis`, `napiprojekt`,
-  `shooter`, and `subscenter`.
+  and `shooter`.
 - The patched `Subtitle` base accepts the upstream 2.6 constructor shape while preserving legacy Bazarr provider
   calls that pass `hearing_impaired` and `page_link` positionally.
 

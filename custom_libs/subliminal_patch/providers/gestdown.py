@@ -1,4 +1,17 @@
 # -*- coding: utf-8 -*-
+# LEGACY PROVIDER. Do not fix subtitle providers here.
+#
+# Built-in providers are deprecated and will be removed after Bazarr+ v3.0.0.
+# Providers now ship as plugins in the Bazarr+ provider catalog and are
+# installed at runtime through the Provider Hub, so a fix reaches users as a
+# plugin release instead of waiting for a Bazarr+ release, and a broken
+# provider can no longer take the application down with it.
+#
+# Send provider fixes here instead:
+#   https://github.com/LavX/bazarr-provider-catalog
+#   docs/writing-a-scraper-provider.md in that repo explains how to port one.
+#
+# A pull request against this file will most likely be asked to move.
 
 import logging
 import time
@@ -24,15 +37,31 @@ class GestdownSubtitle(Subtitle):
     hash_verifiable = False
     hearing_impaired_verifiable = True
 
-    def __init__(self, language, data: dict):
+    def __init__(self, language, data: dict, series=None, season=None, episode=None):
         super().__init__(language, hearing_impaired=data["hearingImpaired"])
         self.page_link = _BASE_URL + data["downloadUri"]
         self._id = data["subtitleId"]
-        self.releases = [v.strip() for v in data["version"].split(",")]
+        raw_releases = [v.strip() for v in data["version"].split(",") if v.strip()]
+        self.releases = []
+        for v in raw_releases:
+            if season is not None and episode is not None and not (
+                f"s{season:02d}" in v.lower()
+                or f"{season}x" in v.lower()
+                or (series and series.lower() in v.lower())
+            ):
+                clean_ver = v.replace(" ", ".")
+                clean_series = series.strip().replace(" ", ".") if series else ""
+                formatted = (
+                    f"{clean_series}.S{season:02d}E{episode:02d}.{clean_ver}"
+                    if clean_series
+                    else f"S{season:02d}E{episode:02d}.{clean_ver}"
+                )
+                self.releases.append(formatted)
+            else:
+                self.releases.append(v)
         self.qualities = data.get("qualities") or []
-        self.release_info = "\n".join(self.releases)
+        self.release_info = "\n".join(self.releases) if self.releases else data.get("version", "")
         self.matches = set()
-
     def get_matches(self, video):
         self.matches = {"title", "series", "season", "episode", "tvdb_id"}
 
@@ -92,12 +121,12 @@ class GestdownProvider(Provider):
     video_types = (Episode,)
 
     # fmt: off
-    languages = {Language('por', 'BR')} | {Language(l) for l in [
+    languages = {Language('por', 'BR')} | {Language(lang) for lang in [
         'ara', 'aze', 'ben', 'bos', 'bul', 'cat', 'ces', 'dan', 'deu', 'ell', 'eng', 'eus', 'fas', 'fin', 'fra', 'glg',
         'heb', 'hrv', 'hun', 'hye', 'ind', 'ita', 'jpn', 'kor', 'mkd', 'msa', 'nld', 'nor', 'pol', 'por', 'ron', 'rus',
         'slk', 'slv', 'spa', 'sqi', 'srp', 'swe', 'tha', 'tur', 'ukr', 'vie', 'zho'
-    ]} | {Language.fromietf(l) for l in ["sr-Latn", "sr-Cyrl"]}
-    languages.update(set(Language.rebuild(l, hi=True) for l in languages))
+    ]} | {Language.fromietf(lang) for lang in ["sr-Latn", "sr-Cyrl"]}
+    languages.update(set(Language.rebuild(lang, hi=True) for lang in languages))
     # fmt: on
 
     _converter = PatchedAddic7edConverter()
@@ -117,21 +146,31 @@ class GestdownProvider(Provider):
 
         # TODO: implement rate limiting
         response.raise_for_status()
-
-        matching_subtitles = response.json()["matchingSubtitles"]
+        resp_json = response.json()
+        matching_subtitles = resp_json.get("matchingSubtitles")
 
         if not matching_subtitles:
             logger.debug("No episodes found for '%s' language", language)
             return None
 
+        episode_info = resp_json.get("episode") or {}
+        series_name = episode_info.get("show") or getattr(video, "series", None)
+        season_num = episode_info.get("season") or getattr(video, "season", None)
+        episode_num = episode_info.get("number") or getattr(video, "episode", None)
+
         for subtitle_dict in matching_subtitles:
             if not subtitle_dict["completed"]:
                 continue
 
-            sub = GestdownSubtitle(language, subtitle_dict)
+            sub = GestdownSubtitle(
+                language,
+                subtitle_dict,
+                series=series_name,
+                season=season_num,
+                episode=episode_num,
+            )
             logger.debug("Found subtitle: %s", sub)
             yield sub
-
     def _search_show(self, video):
         try:
             response = self._session.get(

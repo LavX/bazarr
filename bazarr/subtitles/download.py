@@ -18,7 +18,7 @@ from utilities.helper import get_target_folder, force_unicode
 from languages.get_languages import alpha3_from_alpha2
 
 from .pool import update_pools, _get_pool
-from .utils import get_video, _get_lang_obj, _get_scores, _set_forced_providers
+from .utils import get_video, _get_lang_obj, _get_scores
 from .processing import process_subtitle
 
 
@@ -44,9 +44,6 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
     profile = get_profiles_list(profile_id=profile_id)
     original_format = profile['originalFormat']
     hi_required = "force HI" if all([x.hi for x in language_set]) else "don't prefer"
-    also_forced = any([x.forced for x in language_set])
-    forced_required = all([x.forced for x in language_set])
-    _set_forced_providers(pool=pool, also_forced=also_forced, forced_required=forced_required)
 
     try:
         video = get_video(force_unicode(path), title, sceneName, providers=providers, media_type=media_type)

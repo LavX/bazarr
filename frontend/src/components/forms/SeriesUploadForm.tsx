@@ -33,7 +33,10 @@ import {
 } from "@/apis/hooks";
 import api from "@/apis/raw";
 import { subtitlesTypeOptions } from "@/components/forms/uploadFormSelectorTypes";
-import { matchEpisode } from "@/components/forms/uploadHelpers";
+import {
+  episodeBelongsToSeries,
+  matchEpisode,
+} from "@/components/forms/uploadHelpers";
 import { Action, DropContent, Selector } from "@/components/inputs";
 import SimpleTable from "@/components/tables/SimpleTable";
 import TextPopover from "@/components/TextPopover";
@@ -61,7 +64,10 @@ type SubtitleValidateResult = {
   messages?: string;
 };
 
-const validator = (file: SubtitleFile): SubtitleValidateResult => {
+const validator = (
+  file: SubtitleFile,
+  seriesLocalId: number,
+): SubtitleValidateResult => {
   if (file.language === null) {
     return {
       state: "error",
@@ -71,6 +77,11 @@ const validator = (file: SubtitleFile): SubtitleValidateResult => {
     return {
       state: "error",
       messages: "Episode is not selected",
+    };
+  } else if (!episodeBelongsToSeries(file.episode, seriesLocalId)) {
+    return {
+      state: "error",
+      messages: "Episode does not belong to this series",
     };
   } else {
     const { subtitles } = file.episode;
@@ -102,7 +113,13 @@ const SeriesUploadForm: FunctionComponent<Props> = ({
   onComplete,
 }) => {
   const modals = useModals();
-  const episodes = useEpisodesBySeriesId(series.sonarrSeriesId);
+  // Resolve episodes by the canonical local id, not the upstream sonarrSeriesId
+  // (see SeriesIdType): upstream ids are not unique across arr instances and
+  // drift from the local id for anything added after the local-id cutover, so
+  // reading by the upstream id can return another series' episodes.
+  const episodes = useEpisodesBySeriesId(series.id);
+  // Stable reference for the auto-match effect's dependency array.
+  const episodeList = useMemo(() => episodes.data ?? [], [episodes.data]);
   const episodeOptions = useSelectorOptions(
     episodes.data ?? [],
     (v) => `(${v.season}x${v.episode}) ${v.title}`,
@@ -131,9 +148,9 @@ const SeriesUploadForm: FunctionComponent<Props> = ({
         hi: defaultLanguage?.hi ?? false,
         episode: null,
       };
-      return { ...row, validateResult: validator(row) };
+      return { ...row, validateResult: validator(row, series.id) };
     },
-    [defaultLanguage],
+    [defaultLanguage, series.id],
   );
 
   const [processing, setProcessing] = useState(false);
@@ -206,7 +223,7 @@ const SeriesUploadForm: FunctionComponent<Props> = ({
     form.setValues((values) => {
       const newFiles = fn(values.files ?? []);
       newFiles.forEach((v) => {
-        v.validateResult = validator(v);
+        v.validateResult = validator(v, series.id);
       });
       return { ...values, files: newFiles };
     });
@@ -226,7 +243,6 @@ const SeriesUploadForm: FunctionComponent<Props> = ({
   useEffect(() => {
     if (infos.data !== undefined) {
       const infoList = infos.data;
-      const episodeList = episodes.data ?? [];
       action.update((item) => {
         if (item.episode) {
           return item;
@@ -235,7 +251,7 @@ const SeriesUploadForm: FunctionComponent<Props> = ({
         return matched ? { ...item, episode: matched } : item;
       });
     }
-  }, [action, episodes.data, infos.data]);
+  }, [action, episodeList, infos.data]);
 
   const ValidateResultCell = ({
     validateResult,

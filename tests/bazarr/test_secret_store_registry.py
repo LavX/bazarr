@@ -82,7 +82,6 @@ def test_provider_login_pairs_are_both_classified():
         ("addic7ed.username", "addic7ed.password"),
         ("legendasdivx.username", "legendasdivx.password"),
         ("legendasnet.username", "legendasnet.password"),
-        ("xsubs.username", "xsubs.password"),
         ("deathbycaptcha.username", "deathbycaptcha.password"),
         ("napisy24.username", "napisy24.password"),
         ("titlovi.username", "titlovi.password"),

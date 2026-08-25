@@ -69,13 +69,18 @@ export function useEpisodeAddBlacklist() {
       return api.episodes.addBlacklist(seriesId, episodeId, form);
     },
 
-    onSuccess: (_, { seriesId }) => {
+    onSuccess: () => {
       void client.invalidateQueries({
         queryKey: [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.Blacklist],
       });
 
+      // Prefix, not [Series, seriesId]. Series queries are cached under the
+      // canonical LOCAL id while seriesId here is the upstream one, so the old
+      // key matched nothing and the series detail kept showing a blacklisted
+      // subtitle until something else happened to refresh it. Unlike the
+      // sibling hooks there is no other broad invalidation here to cover it.
       void client.invalidateQueries({
-        queryKey: [QueryKeys.Series, seriesId],
+        queryKey: [QueryKeys.Series],
       });
     },
   });
