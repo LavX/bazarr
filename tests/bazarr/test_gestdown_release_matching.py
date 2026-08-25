@@ -95,3 +95,17 @@ def test_a_group_the_subtitle_really_names_still_matches():
     sub = _subtitle("Bluray.x264-DEFLATE", series="LOL Last One Laughing", season=1, episode=2)
 
     assert "release_group" in sub.get_matches(_episode("DEFLATE"))
+
+
+@pytest.mark.parametrize("version", [
+    "Show_S01E02_1080p_WEB-DL",
+    "Show S01E02 1080p WEB-DL",
+    "Show.1x02.1080p.WEB-DL",
+])
+def test_a_release_that_already_names_the_episode_is_never_duplicated(version):
+    """Underscores separate release tokens as surely as dots do, but they are
+    regex word characters, so a plain \\b boundary reads _S01E02_ as no episode
+    at all and prefixes a second copy of the name onto the display string."""
+    sub = _subtitle(version, series="Show", season=1, episode=2)
+
+    assert sub.release_info == version

@@ -33,26 +33,37 @@ logger = logging.getLogger(__name__)
 _BASE_URL = "https://api.gestdown.info"
 
 
+def _token_boundaries(token):
+    """``token`` surrounded by release-name separators, or by nothing.
+
+    Not ``\\b``: the underscore is a regex word character but a release-name
+    separator, so ``Show_S01E02_1080p`` would read as naming no episode at all
+    and get a second copy of the name prefixed onto it.
+    """
+    return rf"(?<![a-z0-9]){token}(?![a-z0-9])"
+
+
 def _format_release(version_item, series, season, episode):
     """Display-only scene-style name: ``Series.SxxEyy.version``.
 
     Left alone when the version already names the episode, so a proper release
-    name is never mangled. The season/episode test is anchored rather than a
-    bare substring: an unanchored series test matches far too eagerly on short
-    titles.
+    name is never mangled. The tests are anchored rather than bare substrings:
+    an unanchored series test matches far too eagerly on short titles.
     """
     if season is None or episode is None:
         return version_item
 
     lowered = version_item.lower()
-    if re.search(rf"\bs{season:02d}e{episode:02d}\b", lowered) or re.search(
-        rf"\b{season}x{episode:02d}\b", lowered
+    if re.search(_token_boundaries(rf"s{season:02d}e{episode:02d}"), lowered) or re.search(
+        _token_boundaries(rf"{season}x{episode:02d}"), lowered
     ):
         return version_item
 
     clean_version = version_item.replace(" ", ".")
     clean_series = series.strip().replace(" ", ".") if series else ""
-    if clean_series and re.search(rf"\b{re.escape(clean_series)}\b", clean_version, re.I):
+    if clean_series and re.search(
+        _token_boundaries(re.escape(clean_series.lower())), clean_version.lower()
+    ):
         return clean_version
     if clean_series:
         return f"{clean_series}.S{season:02d}E{episode:02d}.{clean_version}"
