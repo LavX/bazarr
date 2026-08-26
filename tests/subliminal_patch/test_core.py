@@ -6,19 +6,28 @@ import pytest
 from subliminal_patch import core
 
 
-def test_scan_video_movie(tmpdir):
-    video_path = Path(tmpdir, "Taxi Driver 1976 Bluray 720p x264.mkv")
-    video_path.touch()
+def _library(tmpdir, name):
+    """A file under a directory we name ourselves.
 
-    result = core.scan_video(str(video_path))
+    guessit parses the parent directory as well as the filename, and pytest's
+    own tmpdir carries a run counter (pytest-849). From pytest-10 onward that
+    counter makes guessit drop the title and raise GuessingError, so the test
+    passes on a fresh machine and fails on one that has run pytest ten times.
+    """
+    library = Path(tmpdir, "Media")
+    library.mkdir(exist_ok=True)
+    video_path = library / name
+    video_path.touch()
+    return str(video_path)
+
+
+def test_scan_video_movie(tmpdir):
+    result = core.scan_video(_library(tmpdir, "Taxi Driver 1976 Bluray 720p x264.mkv"))
     assert isinstance(result, core.Movie)
 
 
 def test_scan_video_episode(tmpdir):
-    video_path = Path(tmpdir, "The Wire S01E01 Bluray 720p x264.mkv")
-    video_path.touch()
-
-    result = core.scan_video(str(video_path))
+    result = core.scan_video(_library(tmpdir, "The Wire S01E01 Bluray 720p x264.mkv"))
     assert isinstance(result, core.Episode)
 
 
@@ -27,20 +36,32 @@ def pool_instance():
     yield core.SZProviderPool({"opensubtitlescom"}, {})
 
 
+def _names(pool):
+    """The pool's provider names as a set.
+
+    SZProviderPool.providers is an ordered list here, not the set upstream used:
+    provider priority reads that order. These tests are about membership, and
+    test_pool_keeps_its_providers_ordered_and_unique covers the rest.
+    """
+    assert len(set(pool.providers)) == len(pool.providers), \
+        f"duplicate provider names: {pool.providers}"
+    return set(pool.providers)
+
+
 def test_pool_update_w_nothing(pool_instance):
     pool_instance.update({}, {}, [], {})
-    assert pool_instance.providers == set()
+    assert _names(pool_instance) == set()
     assert pool_instance.discarded_providers == set()
 
 
 def test_pool_update_w_multiple_providers(pool_instance):
-    assert pool_instance.providers == {"opensubtitlescom"}
+    assert _names(pool_instance) == {"opensubtitlescom"}
     pool_instance.update({"opensubtitlescom", "subf2m"}, {}, [], {})
-    assert pool_instance.providers == {"opensubtitlescom", "subf2m"}
+    assert _names(pool_instance) == {"opensubtitlescom", "subf2m"}
 
 
 def test_pool_update_discarded_providers(pool_instance):
-    assert pool_instance.providers == {"opensubtitlescom"}
+    assert _names(pool_instance) == {"opensubtitlescom"}
 
     # Provider was discarded internally
     pool_instance.discarded_providers = {"opensubtitlescom"}
@@ -50,14 +71,14 @@ def test_pool_update_discarded_providers(pool_instance):
     # Provider is set to be used again
     pool_instance.update({"opensubtitlescom", "subf2m"}, {}, [], {})
 
-    assert pool_instance.providers == {"subf2m", "opensubtitlescom"}
+    assert _names(pool_instance) == {"subf2m", "opensubtitlescom"}
 
     # Provider should disappear from discarded providers
     assert pool_instance.discarded_providers == set()
 
 
 def test_pool_update_discarded_providers_2(pool_instance):
-    assert pool_instance.providers == {"opensubtitlescom"}
+    assert _names(pool_instance) == {"opensubtitlescom"}
 
     # Provider was discarded internally
     pool_instance.discarded_providers = {"opensubtitlescom"}
@@ -67,7 +88,7 @@ def test_pool_update_discarded_providers_2(pool_instance):
     # Provider is not set to be used again
     pool_instance.update({"subf2m"}, {}, [], {})
 
-    assert pool_instance.providers == {"subf2m"}
+    assert _names(pool_instance) == {"subf2m"}
 
     # Provider should not disappear from discarded providers
     assert pool_instance.discarded_providers == {"opensubtitlescom"}
@@ -114,59 +135,111 @@ def test_language_equals_check_set_do_nothing_w_forced():
     assert equals.check_set(lang_set) == {core.Language("spa")}
 
 
+class _StubSubtitle:
+    """Only what the pool's language handling touches."""
+
+    provider_name = "stub"
+
+    def __init__(self, language):
+        self.language = language
+        self.id = f"stub-{language}"
+        # The pool reads these off every subtitle it collects.
+        self.release_info = "Dune.2021.1080p.WEBRip.DD5.1.x264-SHITBOX"
+        self.matches = set()
+        self.hearing_impaired = False
+
+
+class _StubProvider:
+    """Returns one subtitle per language it is asked for.
+
+    These tests are about the pool mapping languages through language_equals,
+    not about any real provider. They used to drive opensubtitlescom, which
+    needs credentials, so they failed with ConfigurationError on every machine
+    that has none: a test that cannot pass in CI protects nothing.
+    """
+
+    languages = {core.Language("spa"), core.Language("spa", "MX")}
+    video_types = (core.Movie, core.Episode)
+    subtitle_class = _StubSubtitle
+
+    def __init__(self, **kwargs):
+        self.initialized = False
+
+    def initialize(self):
+        self.initialized = True
+
+    def terminate(self):
+        self.initialized = False
+
+    @staticmethod
+    def check(video):
+        return True
+
+    def list_subtitles(self, video, languages):
+        return [_StubSubtitle(language) for language in languages]
+
+
 @pytest.fixture
-def language_equals_pool_intance():
-    equals = [(core.Language("spa"), core.Language("spa", "MX"))]
-    yield core.SZProviderPool({"opensubtitlescom"}, language_equals=equals)
+def stub_provider(monkeypatch):
+    from subliminal_patch.extensions import provider_registry
+
+    monkeypatch.setitem(provider_registry.providers, "stub", _StubProvider)
+    return _StubProvider
 
 
-def test_language_equals_pool_intance_list_subtitles(
-    language_equals_pool_intance, movies
-):
-    subs = language_equals_pool_intance.list_subtitles(
-        movies["dune"], {core.Language("spa")}
-    )
+def _pool(equals):
+    return core.SZProviderPool({"stub"}, language_equals=equals)
+
+
+def test_language_equals_maps_the_requested_language(stub_provider, movies):
+    """spa is asked for, spa-MX is what the pool must come back with."""
+    pool = _pool([(core.Language("spa"), core.Language("spa", "MX"))])
+
+    subs = pool.list_subtitles(movies["dune"], {core.Language("spa")})
+
     assert subs
     assert all(sub.language == core.Language("spa", "MX") for sub in subs)
 
 
-def test_language_equals_pool_intance_list_subtitles_reversed(movies):
-    equals = [(core.Language("spa", "MX"), core.Language("spa"))]
-    language_equals_pool_intance = core.SZProviderPool(
-        {"opensubtitlescom"}, language_equals=equals
-    )
-    subs = language_equals_pool_intance.list_subtitles(
-        movies["dune"], {core.Language("spa")}
-    )
+def test_language_equals_maps_in_the_other_direction(stub_provider, movies):
+    pool = _pool([(core.Language("spa", "MX"), core.Language("spa"))])
+
+    subs = pool.list_subtitles(movies["dune"], {core.Language("spa")})
+
     assert subs
     assert all(sub.language == core.Language("spa") for sub in subs)
 
 
-def test_language_equals_pool_intance_list_subtitles_empty_lang_equals(movies):
-    language_equals_pool_intance = core.SZProviderPool(
-        {"opensubtitlescom"}, language_equals=None
-    )
-    subs = language_equals_pool_intance.list_subtitles(
-        movies["dune"], {core.Language("spa")}
-    )
+def test_without_language_equals_the_language_is_left_alone(stub_provider, movies):
+    pool = _pool(None)
+
+    subs = pool.list_subtitles(movies["dune"], {core.Language("spa")})
+
     assert subs
-    assert not all(sub.language == core.Language("spa", "MX") for sub in subs)
+    assert all(sub.language == core.Language("spa") for sub in subs)
 
 
-def test_language_equals_pool_intance_list_subtitles_return_nothing(movies):
-    equals = [
+def test_pool_keeps_its_providers_ordered_and_unique():
+    """The fork stores providers as an ordered list rather than the set upstream
+    used, because provider priority reads that order. Deduplicated on the way in,
+    since a name arriving twice would be searched twice."""
+    pool = core.SZProviderPool(["b", "a", "b", "c"], {})
+
+    assert pool.providers == ["b", "a", "c"]
+
+
+def test_a_subtitle_mapped_to_another_language_is_not_downloaded(stub_provider, movies):
+    """spa was requested and language_equals maps it to eng, so what comes back
+    is an English subtitle. download_best_subtitles must not hand that to a
+    caller who asked for Spanish, whatever it scores."""
+    pool = _pool([
         (core.Language("spa", "MX"), core.Language("eng")),
         (core.Language("spa"), core.Language("eng")),
-    ]
-    language_equals_pool_intance = core.SZProviderPool(
-        {"opensubtitlescom"}, language_equals=equals
-    )
-    subs = language_equals_pool_intance.list_subtitles(
-        movies["dune"], {core.Language("spa")}
-    )
-    assert not language_equals_pool_intance.download_best_subtitles(
-        subs, movies["dune"], {core.Language("spa")}
-    )
+    ])
+
+    subs = pool.list_subtitles(movies["dune"], {core.Language("spa")})
+
+    assert not pool.download_best_subtitles(subs, movies["dune"], {core.Language("spa")})
 
 
 def test_language_hook_none_keeps_requested_languages(monkeypatch, movies):
