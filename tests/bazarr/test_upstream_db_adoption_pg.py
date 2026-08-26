@@ -85,7 +85,7 @@ def test_a_postgres_database_from_upstream_is_adopted(pg_engine):
             'INSERT INTO table_episodes_subtitles '
             '("sonarrEpisodeId", "sonarrSeriesId", language, hi, forced, path, '
             'size, embedded_track_id) '
-            "VALUES (41, 4, 'fr', false, false, '/m/e.mkv', NULL, '2')"))
+            "VALUES (41, 4, 'fr', false, true, NULL, NULL, '2')"))
         connection.execute(sa.text(
             'INSERT INTO table_movies ("radarrId", path) VALUES (7, \'/m/m.mkv\')'))
         connection.execute(sa.text(
@@ -99,10 +99,11 @@ def test_a_postgres_database_from_upstream_is_adopted(pg_engine):
     with pg_engine.connect() as connection:
         assert connection.execute(
             sa.text('SELECT version_num FROM alembic_version')).scalar() == '309dc062d2e4'
-        # The boolean columns are real booleans here, not the 0/1 SQLite stores.
+        # The boolean columns are real booleans here, not the 0/1 SQLite stores,
+        # and the embedded track survives the conversion alongside the file.
         assert connection.execute(sa.text(
             'SELECT subtitles FROM table_episodes WHERE "sonarrEpisodeId" = 41')).scalar() == \
-            str([['en:hi', '/m/e.en.hi.srt', 500]])
+            str([['en:hi', '/m/e.en.hi.srt', 500], ['fr:forced', None, None]])
         assert connection.execute(sa.text(
             'SELECT subtitles FROM table_movies WHERE "radarrId" = 7')).scalar() == \
             str([['es:forced', '/m/m.es.forced.srt', 12]])

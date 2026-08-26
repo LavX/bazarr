@@ -48,26 +48,38 @@ _REVISION_ASSIGNMENT = re.compile(r"^revision = ['\"]([^'\"]+)['\"]", re.M)
 
 
 def legacy_subtitle_value(rows):
-    """Build the value ``store_subtitles`` writes, from upstream's split rows.
+    """Build the value the indexer writes, from upstream's split rows.
 
     ``rows`` are mappings with ``language``, ``hi``, ``forced``, ``path`` and
     ``size``, optionally ``embedded_track_id``. The result is the repr of a
     list of ``[language, path, size]``, which is what the indexer reads back
     with ``ast.literal_eval``.
+
+    A row with no file is an in-container track, which the fork records as
+    ``[language, None, None]`` and whose file checks short-circuit on the falsy
+    path. Those have to survive the conversion: dropping them would make
+    migrated media look as if it had lost its embedded languages, and set off
+    searches for subtitles that are already inside the file.
     """
     subtitles = []
     for row in rows:
-        # Upstream keeps in-container tracks in the same table. The fork's
-        # legacy column only ever held files on disk, and the indexer stats
-        # every path in it, so an embedded row has no place here.
-        if row.get('embedded_track_id') is not None:
-            continue
         path = row.get('path')
-        if not path:
+        embedded = row.get('embedded_track_id') is not None or not path
+        language = row.get('language') or ''
+
+        if embedded:
+            # The embedded pass goes through normalize_subtitle_language_variant,
+            # which puts hi first and can emit both variants.
+            variants = []
+            if row.get('hi'):
+                variants.append('hi')
+            if row.get('forced'):
+                variants.append('forced')
+            subtitles.append([':'.join([language] + variants), None, None])
             continue
 
-        language = row.get('language') or ''
-        # store_subtitles tests forced first, so a row flagged both is forced.
+        # store_subtitles picks a single suffix and tests forced first, so a
+        # file flagged both is forced.
         if row.get('forced'):
             language = f'{language}:forced'
         elif row.get('hi'):

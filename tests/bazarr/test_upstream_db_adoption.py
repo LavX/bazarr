@@ -97,26 +97,42 @@ def test_forced_wins_over_hearing_impaired_the_way_the_indexer_decides_it():
     ]) == str([['en:forced', '/m/a.srt', 1]])
 
 
-def test_a_row_without_a_file_is_not_an_external_subtitle():
+def test_a_row_with_no_file_is_an_embedded_track():
+    """The fork's indexer records an in-container track as [language, None,
+    None] and its file checks short-circuit on the falsy path. Upstream keeps
+    those tracks in the same table with no path, so dropping them would make
+    migrated media look as if it had lost its embedded languages and set off
+    searches for subtitles that are already in the file."""
     from app.upstream_adoption import legacy_subtitle_value
 
     assert legacy_subtitle_value([
         {'language': 'en', 'hi': False, 'forced': False, 'path': None, 'size': None},
-        {'language': 'en', 'hi': False, 'forced': False, 'path': '', 'size': None},
-    ]) == str([])
+        {'language': 'de', 'hi': False, 'forced': False, 'path': '', 'size': None},
+    ]) == str([['en', None, None], ['de', None, None]])
 
 
-def test_an_embedded_track_is_not_an_external_subtitle():
-    """Upstream keeps in-container tracks in the same table. The fork's legacy
-    column only ever held files on disk, so an embedded row must not appear in
-    it or the indexer would report a file that does not exist."""
+def test_a_row_carrying_a_track_id_is_embedded_whatever_its_path_says():
     from app.upstream_adoption import legacy_subtitle_value
 
     assert legacy_subtitle_value([
         {'language': 'en', 'hi': False, 'forced': False, 'path': '/m/video.mkv',
          'size': None, 'embedded_track_id': '3'},
         {'language': 'fr', 'hi': False, 'forced': False, 'path': '/m/a.fr.srt', 'size': 7},
-    ]) == str([['fr', '/m/a.fr.srt', 7]])
+    ]) == str([['en', None, None], ['fr', '/m/a.fr.srt', 7]])
+
+
+def test_an_embedded_track_uses_the_variant_order_the_embedded_indexer_writes():
+    """The two paths disagree and both are load-bearing. store_subtitles picks
+    one suffix, forced first. normalize_subtitle_language_variant, which the
+    embedded pass uses, emits hi first and can emit both."""
+    from app.upstream_adoption import legacy_subtitle_value
+
+    assert legacy_subtitle_value([
+        {'language': 'en', 'hi': True, 'forced': True, 'path': None, 'size': None},
+        {'language': 'fr', 'hi': True, 'forced': False, 'path': None, 'size': None},
+        {'language': 'de', 'hi': False, 'forced': True, 'path': None, 'size': None},
+    ]) == str([['en:hi:forced', None, None], ['fr:hi', None, None],
+               ['de:forced', None, None]])
 
 
 def test_a_missing_size_becomes_zero_rather_than_none():
