@@ -41,14 +41,70 @@ def _autosubsync_model_file():
 def _run_autosubsync_api(reference, subtitle_file, output_file, model_file, parallelism):
     from autosubsync.main import synchronize
 
-    return synchronize(
-        reference,
-        subtitle_file,
-        output_file,
-        verbose=False,
-        model_file=model_file,
-        parallelism=parallelism,
-    )
+    # return_parameters gets the numbers out: (success, quality, skew, shift).
+    # Without it the call answers a bare bool, and the user is told only that
+    # the run "did not meet the quality threshold", with no way to tell a near
+    # miss from a total mismatch. Older builds do not accept the argument, so a
+    # TypeError falls back to the plain call rather than failing the sync.
+    try:
+        return synchronize(
+            reference,
+            subtitle_file,
+            output_file,
+            verbose=False,
+            model_file=model_file,
+            parallelism=parallelism,
+            return_parameters=True,
+        )
+    except TypeError as exc:
+        # Only a signature mismatch. autosubsync does minutes of work and writes
+        # its output before returning, so re-running the whole synchronization
+        # for any internal TypeError would repeat that work and rewrite the file.
+        if 'return_parameters' not in str(exc):
+            raise
+        logging.debug('BAZARR autosubsync does not support return_parameters; '
+                      'synchronising without diagnostics')
+        return synchronize(
+            reference,
+            subtitle_file,
+            output_file,
+            verbose=False,
+            model_file=model_file,
+            parallelism=parallelism,
+        )
+
+
+def _distinguishable(measured, threshold, minimum=2, maximum=6):
+    """Format two nearby numbers so the pair does not read as one number.
+
+    A near miss is the case this message exists to explain, and two decimals
+    turn 0.749 against 0.75 into "0.75, below its 0.75 threshold", which
+    contradicts itself. Precision grows only until the two differ, so an
+    ordinary number keeps its two decimals instead of a tail of zeros.
+    """
+    for places in range(minimum, maximum + 1):
+        left, right = f'{measured:.{places}f}', f'{threshold:.{places}f}'
+        if left != right:
+            return left, right
+
+    # Closer than six decimals. Quoting one number twice would contradict
+    # itself, and quoting seventeen would be unreadable, so the caller says it
+    # in words instead.
+    return None, f'{threshold:.{minimum}f}'
+
+
+def _autosubsync_quality_threshold():
+    """The threshold autosubsync judges its own work against, or None.
+
+    Hard-coded upstream at 0.75. Read rather than copied, so a message quoting
+    it cannot drift from what the engine actually applied.
+    """
+    try:
+        from autosubsync import quality_of_fit
+
+        return float(quality_of_fit.threshold)
+    except Exception:
+        return None
 
 
 class SubSyncer:
@@ -365,7 +421,7 @@ class SubSyncer:
     def _run_autosubsync_engine(self, output_path, video_path):
         reference = self.reference if self.reference and os.path.isfile(self.reference) else video_path
         try:
-            success = _run_autosubsync_api(
+            raw = _run_autosubsync_api(
                 reference=reference,
                 subtitle_file=self.srtin,
                 output_file=str(output_path),
@@ -377,14 +433,47 @@ class SubSyncer:
                 raise MissingSyncEngineError('autosubsync', 'autosubsync Python package not installed') from exc
             raise
 
+        # (success, quality, skew, shift) with return_parameters, a bare bool
+        # without it.
+        if isinstance(raw, tuple):
+            success, quality, skew, shift = (list(raw) + [None, None, None])[:4]
+        else:
+            success, quality, skew, shift = raw, None, None, None
+
         if not success:
             # autosubsync's own quality check said no. That is a verdict, not a
             # fault, so it is reported as a decline rather than an engine failure.
-            raise SyncEngineDeclinedError(
-                'autosubsync', 'autosubsync completed but did not meet its quality threshold.')
+            threshold = _autosubsync_quality_threshold()
+            if quality is not None and threshold is not None:
+                measured, limit = _distinguishable(quality, threshold)
+                if measured is None:
+                    message = (f'autosubsync measured a quality of fit just below its {limit} '
+                               f'threshold; the subtitle may not match this audio.')
+                else:
+                    message = (f'autosubsync measured a quality of fit of {measured}, below its '
+                               f'{limit} threshold; the subtitle may not match this audio.')
+            elif quality is not None:
+                message = (f'autosubsync measured a quality of fit of {quality:.2f} and rejected '
+                           f'its own result.')
+            else:
+                message = 'autosubsync completed but did not meet its quality threshold.'
+            raise SyncEngineDeclinedError('autosubsync', message)
+
+        logging.debug('BAZARR autosubsync aligned %s with quality %s, skew %s, shift %s',
+                      self.srtin, quality, skew, shift)
 
         return {
             'success': success,
+            # The measured shift, under the same key ffsubsync reports, so the
+            # acceptance threshold applies to autosubsync too instead of it
+            # being exempt for want of a number.
+            'offset_seconds': shift,
+            'quality_of_fit': quality,
+            'skew': skew,
+            # The same quantity ffsubsync calls framerate_scale_factor, under
+            # the key the history entry reads: without it a run with a real
+            # skew was recorded as a scale factor of 0.00.
+            'framerate_scale_factor': skew,
             'stdout': '',
             'stderr': '',
             'returncode': 0,
@@ -400,6 +489,14 @@ class SubSyncer:
                    f"{success_result.engine} ({output_mode}) ended with an offset of "
                    f"{offset_seconds} seconds and a framerate scale factor of "
                    f"{f'{framerate_scale_factor:.2f}'}.")
+
+        # Whatever confidence the engine measured, where it measures one. Without
+        # it a recorded sync says how far it moved the subtitle but nothing about
+        # how sure it was, which is the question a user asks when the result
+        # looks wrong.
+        quality_of_fit = raw_result.get('quality_of_fit')
+        if quality_of_fit is not None:
+            message += f' Quality of fit: {quality_of_fit:.2f}.'
 
         if sonarr_series_id:
             prr = path_mappings.path_replace_reverse
