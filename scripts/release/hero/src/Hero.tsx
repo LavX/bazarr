@@ -14,6 +14,7 @@
 
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
+  cancelRender,
   continueRender,
   delayRender,
   staticFile,
@@ -73,12 +74,28 @@ export const Hero: React.FC<HeroProps> = ({ version, codename, seed, loopFrames 
 
   useEffect(() => {
     let live = true;
-    const done = () => {
-      if (!live) return;
-      setFontReady(true);
-      continueRender(handle);
-    };
-    ensureFont().then(done, done);
+    ensureFont().then(
+      () => {
+        if (!live) return;
+        setFontReady(true);
+        continueRender(handle);
+      },
+      (error: unknown) => {
+        if (!live) return;
+        // Fail the render rather than carrying on. Continuing here would fall
+        // back to a system sans and quietly produce typography that differs by
+        // machine, which is the exact failure loading Geist explicitly exists to
+        // prevent, and it would look like a successful render. The likeliest
+        // cause is that `public/` has not been populated: it is gitignored, and
+        // the font is copied in from site/fonts/ by render.sh or `npm run font`.
+        cancelRender(
+          new Error(
+            `Could not load the Geist brand font. Run "npm run font" to copy it ` +
+              `from site/fonts/ into public/, then render again. Cause: ${String(error)}`,
+          ),
+        );
+      },
+    );
     return () => {
       live = false;
     };

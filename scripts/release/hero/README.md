@@ -62,10 +62,15 @@ pixel-identical. Note that the motif is driven by the raw frame on purpose: fold
 it into the period and this test passes by construction while proving nothing.
 
 ```bash
+npm run font   # public/ is gitignored, so populate it before any direct remotion call
 npx remotion still src/index.ts LoopCheck out/a.png --frame=0   --overwrite
 npx remotion still src/index.ts LoopCheck out/b.png --frame=150 --overwrite
 # compare a.png and b.png; any difference is a real seam
 ```
+
+`render.sh` and the `studio` and `still` npm scripts do that copy for you; a bare
+`npx remotion` call does not. Forgetting it fails the render with an explicit
+message rather than quietly substituting a system font.
 
 **The encode.** A seamless source is not a seamless file. libwebp builds an
 animation by blending each frame over the last, so lossy error accumulates in one
