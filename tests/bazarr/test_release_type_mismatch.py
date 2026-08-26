@@ -9,6 +9,8 @@ situation from the candidates the search ALREADY listed, and, at least as
 firmly, the situations where it must stay silent.
 """
 
+import types
+
 import pytest
 
 
@@ -999,7 +1001,16 @@ def test_the_search_clears_the_record_when_the_language_finally_lands(search):
     search.monkeypatch.setattr(search.module, "download_best_subtitles",
                                lambda **kwargs: {search.video: [_FakeSubtitle(
                                    "othersubs", WEB_RELEASE, {"series"})]})
-    search.monkeypatch.setattr(search.module, "save_subtitles", lambda *args, **kwargs: [])
+    # A saved subtitle carries the path it was written to; that is the evidence
+    # the clear waits for.
+    class _Written:
+        language = "en"
+        storage_path = "/tv/show/s01e01.en.srt"
+        matches = set()
+
+    search.monkeypatch.setattr(search.module, "save_subtitles",
+                               lambda *args, **kwargs: [_Written()])
+    search.monkeypatch.setattr(search.module, "process_subtitle", lambda **kwargs: None)
 
     search.run()
 
@@ -1149,3 +1160,121 @@ def test_a_failed_save_keeps_the_recorded_mismatch(search):
     search.run()
 
     assert cleared == []
+
+
+def test_a_save_that_wrote_no_file_keeps_the_recorded_mismatch(search):
+    """save_subtitles can return normally without writing anything: when
+    get_modified_content() yields nothing it logs and still appends the subtitle
+    to its result. Nothing landed, so the language is still missing."""
+    cleared = []
+    search.monkeypatch.setattr(
+        search.module, "clear_mismatch_for_video",
+        lambda *args, **kwargs: cleared.append(args))
+    search.monkeypatch.setattr(search.module, "download_best_subtitles",
+                               lambda **kwargs: {search.video: [_FakeSubtitle(
+                                   "othersubs", WEB_RELEASE, {"series"})]})
+
+    class _NeverWritten:
+        language = "en"
+        storage_path = None
+        matches = set()
+
+    search.monkeypatch.setattr(search.module, "save_subtitles",
+                               lambda *args, **kwargs: [_NeverWritten()])
+    search.monkeypatch.setattr(search.module, "process_subtitle",
+                               lambda **kwargs: None)
+
+    search.run()
+
+    assert cleared == []
+
+
+def test_the_badge_lookup_survives_the_legacy_sqlite_variable_ceiling(schema_session):
+    """A Wanted page may legitimately ask for 1000 rows.
+
+    Modern SQLite allows 32k bound variables, so one IN list that long works on
+    this machine. Builds with the legacy 999 ceiling reject it with "too many
+    SQL variables" and the whole page 500s, so the ceiling is lowered here to
+    reproduce that build rather than trusting this one.
+    """
+    import sqlite3
+
+    from subtitles.mismatch import flagged_media_ids
+
+    raw = schema_session.connection().connection.driver_connection
+    if not hasattr(raw, "setlimit"):
+        pytest.skip("this Python cannot lower the SQLite variable limit")
+
+    previous = raw.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+    raw.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+    try:
+        assert flagged_media_ids(schema_session, "series", list(range(1, 1501))) == set()
+    finally:
+        raw.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, previous)
+
+
+def test_the_chunked_lookup_still_finds_every_flagged_item(schema_session):
+    from subtitles.mismatch import flagged_media_ids, record_mismatch
+
+    _seed_episode(schema_session, 101, 2)
+    _seed_episode(schema_session, 1400, 2, sonarr_episode_id=21)
+    record_mismatch(schema_session, "series", 101, 2, "en", _mismatch())
+    record_mismatch(schema_session, "series", 1400, 2, "en", _mismatch())
+
+    found = flagged_media_ids(schema_session, "series", list(range(1, 1501)))
+
+    assert found == {101, 1400}
+
+
+def test_a_manual_download_clears_the_record_too(monkeypatch, tmp_path):
+    """A language satisfied by hand is satisfied. Clearing only on the automatic
+    path leaves the badge up for a subtitle the user can see on disk."""
+    from subtitles import manual as manual_module
+
+    cleared = []
+    monkeypatch.setattr(manual_module, "clear_mismatch_for_video",
+                        lambda video, media_type, language, arr_instance_id=None:
+                        cleared.append((media_type, str(language), arr_instance_id)))
+
+    video = _episode_video()
+    written = types.SimpleNamespace(language="en", storage_path=str(tmp_path / "s.srt"))
+
+    manual_module.clear_mismatch_after_manual_save(video, "series", [written], 3)
+
+    assert cleared == [("series", "en", 3)]
+
+
+def test_a_manual_save_that_wrote_nothing_clears_nothing(monkeypatch):
+    from subtitles import manual as manual_module
+
+    cleared = []
+    monkeypatch.setattr(manual_module, "clear_mismatch_for_video",
+                        lambda *args, **kwargs: cleared.append(args))
+
+    nothing_written = types.SimpleNamespace(language="en", storage_path=None)
+
+    manual_module.clear_mismatch_after_manual_save(_episode_video(), "series",
+                                                   [nothing_written], 3)
+
+    assert cleared == []
+
+
+def test_an_upload_clears_the_record_for_the_language_it_wrote(monkeypatch, tmp_path):
+    """The upload path has no Video object, only the ids, which is all the media
+    resolver reads. It still has to clear."""
+    from subtitles import manual as manual_module
+
+    cleared = []
+    monkeypatch.setattr(manual_module, "clear_mismatch_for_video",
+                        lambda video, media_type, language, arr_instance_id=None:
+                        cleared.append((getattr(video, "sonarrEpisodeId", None),
+                                        media_type, str(language), arr_instance_id)))
+
+    identity = types.SimpleNamespace(sonarrEpisodeId=20, radarrId=None,
+                                     original_path="/tv/show/s01e01.mkv",
+                                     arr_instance_id=2)
+    written = types.SimpleNamespace(language="hu", storage_path=str(tmp_path / "s.hu.srt"))
+
+    manual_module.clear_mismatch_after_manual_save(identity, "series", [written], 2)
+
+    assert cleared == [(20, "series", "hu", 2)]

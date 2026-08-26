@@ -170,7 +170,18 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                             pass
                         else:
                             saved_any = True
+                            # Only for a subtitle that really reached disk.
+                            # save_subtitles returns normally without writing
+                            # anything when get_modified_content yields nothing:
+                            # it logs and still appends the subtitle to its
+                            # result, so its return value is not evidence of a
+                            # file. storage_path is set where the write happens.
+                            written = {str(getattr(saved, 'language', None))
+                                       for saved in saved_subtitles
+                                       if getattr(saved, 'storage_path', None)}
                             for landed_video, landed_language in languages_that_landed:
+                                if str(landed_language) not in written:
+                                    continue
                                 clear_mismatch_for_video(landed_video, media_type, landed_language,
                                                          arr_instance_id=arr_instance_id)
                             languages_that_landed = []

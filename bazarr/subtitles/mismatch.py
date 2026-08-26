@@ -487,10 +487,11 @@ def forget_media(session, media_type, media_ids):
     if not media_ids:
         return
 
-    session.execute(
-        delete(TableReleaseTypeMismatch)
-        .where(TableReleaseTypeMismatch.media_type == media_type)
-        .where(TableReleaseTypeMismatch.media_id.in_(media_ids)))
+    for chunk in _in_chunks(media_ids):
+        session.execute(
+            delete(TableReleaseTypeMismatch)
+            .where(TableReleaseTypeMismatch.media_type == media_type)
+            .where(TableReleaseTypeMismatch.media_id.in_(chunk)))
 
 
 def forget_media_by_upstream(media_type, upstream_ids, arr_instance_id=None,
@@ -525,6 +526,17 @@ def forget_media_by_upstream(media_type, upstream_ids, arr_instance_id=None,
         logger.exception('BAZARR could not forget the release-type mismatches of deleted media')
 
 
+# One page of Wanted may legitimately be 1000 rows, and SQLite builds carrying
+# the legacy limit reject a statement binding more than 999 variables with "too
+# many SQL variables". Leave room for the other bound values in the statement.
+_MAX_IN_CLAUSE = 900
+
+
+def _in_chunks(values):
+    for start in range(0, len(values), _MAX_IN_CLAUSE):
+        yield values[start:start + _MAX_IN_CLAUSE]
+
+
 def flagged_media_ids(session, media_type, media_ids):
     """Local ids, out of ``media_ids``, that carry a recorded mismatch.
 
@@ -536,8 +548,12 @@ def flagged_media_ids(session, media_type, media_ids):
     if not media_ids:
         return set()
 
-    rows = session.execute(
-        select(TableReleaseTypeMismatch.media_id)
-        .where(TableReleaseTypeMismatch.media_type == media_type)
-        .where(TableReleaseTypeMismatch.media_id.in_(media_ids))).all()
-    return {row.media_id for row in rows}
+    flagged = set()
+    for chunk in _in_chunks(media_ids):
+        rows = session.execute(
+            select(TableReleaseTypeMismatch.media_id)
+            .where(TableReleaseTypeMismatch.media_type == media_type)
+            .where(TableReleaseTypeMismatch.media_id.in_(chunk))).all()
+        flagged.update(row.media_id for row in rows)
+
+    return flagged

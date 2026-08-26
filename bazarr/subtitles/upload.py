@@ -149,6 +149,18 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
         logging.exception(f'BAZARR Error saving Subtitles file to disk for this file: {path}')  # noqa: G004
         return
 
+    # An uploaded subtitle satisfies the language as surely as a downloaded one,
+    # so whatever mismatch was recorded for it no longer describes anything. This
+    # path has no Video object, only the ids, which is all the resolver reads.
+    from types import SimpleNamespace
+
+    from .manual import clear_mismatch_after_manual_save
+
+    clear_mismatch_after_manual_save(
+        SimpleNamespace(sonarrEpisodeId=sonarrEpisodeId, radarrId=radarrId,
+                        original_path=path, arr_instance_id=arr_instance_id),
+        media_type, saved_subtitles, arr_instance_id)
+
     subtitle_path = saved_subtitles[0].storage_path
 
     if hi:
