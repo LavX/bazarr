@@ -1,8 +1,16 @@
 # Bazarr+ Release Hero Generators
 
-p5.js sketches that render the cinematic hero image for each release. One
+Canvas sketches that render the cinematic hero image for each release. One
 file per release, frozen alongside its tag so the artwork stays
 reproducible.
+
+> **From v2.6.0 a feature release ships an ANIMATED hero instead**, rendered by
+> the Remotion project in [`scripts/release/hero/`](../../scripts/release/hero).
+> It reuses the palette, atmosphere and title block documented below verbatim, so
+> the conventions in this file still govern how a hero looks; what changed is
+> that the motif moves and the output is a GIF, an animated WebP and a WebP
+> poster rather than a single PNG. These sketches remain the record of how the
+> v2.2.0 to v2.5.0 heroes were made, and are still the right tool for a still.
 
 ## Inventory
 
