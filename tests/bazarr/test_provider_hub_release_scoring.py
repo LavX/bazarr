@@ -131,3 +131,12 @@ def test_release_information_is_what_separates_the_candidates(release_info, expe
     matches = subtitle.get_matches(video)
 
     assert ("release_group" in matches) is expected
+
+
+def test_a_worker_cannot_switch_the_capability_off_through_display():
+    """The display dictionary is cosmetic worker-supplied data. A plugin that
+    happened to send matches_need_video=False would put the scoring bug back for
+    itself, silently, and the host would have no idea."""
+    from provider_hub import protocol
+
+    assert "matches_need_video" in protocol._RESERVED_DISPLAY_ATTRS

@@ -186,6 +186,9 @@ def video_to_payload(video) -> dict[str, Any]:
 # setattr raises and discards the provider's entire result set.
 _RESERVED_DISPLAY_ATTRS = frozenset({
     "language",
+    # Host scoring policy, not something a worker gets to set: sending False
+    # would put the release-scoring bug back for that plugin alone, silently.
+    "matches_need_video",
     "language_type",
     "id",
     "numeric_id",
