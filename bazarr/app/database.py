@@ -21,6 +21,8 @@ from flask_sqlalchemy import SQLAlchemy
 
 from .config import settings
 from .get_args import args
+from .upstream_adoption import (adopt_upstream_database, explain_unknown_revision,
+                               known_revisions, stamped_revision)
 
 logger = logging.getLogger(__name__)
 
@@ -828,6 +830,26 @@ def migrate_db(app):
     alembic_temp_tables_list = [x for x in insp.get_table_names() if x.startswith('_alembic_tmp_')]
     for table in alembic_temp_tables_list:
         database.execute(text(f"DROP TABLE IF EXISTS {table}"))
+
+    # A database created by upstream Bazarr carries a revision this fork has no
+    # script for, and has had the columns the indexer reads dropped out from
+    # under it. Alembic cannot start against it at all, so this runs first.
+    try:
+        with engine.begin() as connection:
+            adopt_upstream_database(connection)
+    except Exception:
+        logging.exception("Upstream database adoption failed; continuing to the normal upgrade")
+
+    # Alembic's own account of a revision it has no script for is one line with
+    # no hint of where such a database comes from, and it exits before anything
+    # else is logged. Say it plainly first.
+    try:
+        with engine.connect() as connection:
+            pending = stamped_revision(connection)
+        if pending and pending not in known_revisions(migrations_directory):
+            logging.error(explain_unknown_revision(pending))
+    except Exception:
+        logging.exception("Could not check the database migration revision before upgrading")
 
     with app.app_context():
         flask_migrate.Migrate(app, db, render_as_batch=True)

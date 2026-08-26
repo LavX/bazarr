@@ -336,7 +336,9 @@ jobs:
             tests/bazarr/test_path_mappings_instance.py \
             tests/bazarr/test_threading_followup.py \
             tests/bazarr/test_mass_operations.py \
-            tests/bazarr/test_release_type_mismatch_migration.py ; do
+            tests/bazarr/test_release_type_mismatch_migration.py \
+            tests/bazarr/test_upstream_db_adoption.py \
+            tests/bazarr/test_upstream_db_adoption_pg.py ; do
             echo "::group::$f"
             pytest "$f" -p no:cacheprovider -q
             echo "::endgroup::"
