@@ -541,6 +541,25 @@ class SZProviderPool(ProviderPool):
 
         return subtitles
 
+    @staticmethod
+    def _episode_candidate_is_valid(subtitle, orig_matches, matches):
+        """Whether an episode candidate identifies the episode it claims to.
+
+        download_best_subtitles refuses one that does not, so the prioritized
+        listing has to apply the same rule before it calls a language satisfied
+        and stops asking the remaining providers. Otherwise the search ends on
+        a candidate the download then throws away and nothing is downloaded.
+
+        ``orig_matches`` is the set as the provider reported it; ``matches`` is
+        what compute_score left behind, which is where the hash decision lives.
+        """
+        if not getattr(subtitle, 'hash_verifiable', False) and "hash" in matches:
+            # The provider cannot vouch for its own hash, so there is nothing
+            # to verify the episode against and the candidate is not held to it.
+            return True
+        return ({"season", "episode"}.issubset(orig_matches)
+                and ("series" in orig_matches or "imdb_id" in orig_matches))
+
     def list_subtitles_prioritized(self, video, languages, min_score=0, provider_order=None, compute_score=None,
                                    exhaustive=False):
         """List subtitles with priority-based provider search.
@@ -597,9 +616,17 @@ class SZProviderPool(ProviderPool):
                 except AttributeError:
                     logger.error("%r: Match computation failed: %s", subtitle, traceback.format_exc())
                     continue
+                orig_matches = matches.copy()
                 score, _ = compute_score(matches, subtitle, video, False)
-                if score >= min_score:
-                    satisfied_languages.add(subtitle.language.alpha3)
+                if score < min_score:
+                    continue
+                if isinstance(video, Episode) and not self._episode_candidate_is_valid(
+                        subtitle, orig_matches, matches):
+                    logger.debug("%r: Score %d clears the minimum but the candidate does not "
+                                 "identify the episode, so it does not satisfy the language",
+                                 subtitle, score)
+                    continue
+                satisfied_languages.add(subtitle.language.alpha3)
 
             all_subtitles.extend(valid_subtitles)
 
@@ -792,20 +819,10 @@ class SZProviderPool(ProviderPool):
                              score, hearing_impaired)
                 continue
 
-            if is_episode:
-                can_verify_series = True
-                if not subtitle.hash_verifiable and "hash" in matches:
-                    can_verify_series = False
-
-                matches_series = False
-                if {"season", "episode"}.issubset(orig_matches) and \
-                        ("series" in orig_matches or "imdb_id" in orig_matches):
-                    matches_series = True
-
-                if can_verify_series and not matches_series:
-                    logger.debug("%r: Skipping subtitle with score %d, because it doesn't match our series/episode",
-                                 subtitle, score)
-                    continue
+            if is_episode and not self._episode_candidate_is_valid(subtitle, orig_matches, matches):
+                logger.debug("%r: Skipping subtitle with score %d, because it doesn't match our series/episode",
+                             subtitle, score)
+                continue
 
             # make sure to preserve original subtitles format if requested
             subtitle.use_original_format = use_original_format

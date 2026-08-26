@@ -2,6 +2,7 @@
 
 from __future__ import absolute_import
 import logging
+import math
 
 from subliminal.video import Episode, Movie
 from subliminal.score import get_scores
@@ -225,10 +226,18 @@ class ComputeScore:
         if not provider_name:
             return 0
         try:
-            return self.modifier(provider_name) or 0
+            modifier = self.modifier(provider_name) or 0
         except Exception:
             logger.exception("Provider score modifier failed for %r", provider_name)
             return 0
+        # NaN and the infinities are floats, so a type check upstream lets them
+        # through, and round() raises on both. That would happen outside this
+        # guard and take the whole search down with it.
+        if not isinstance(modifier, (int, float)) or isinstance(modifier, bool) \
+                or not math.isfinite(modifier):
+            logger.warning("Ignoring unusable score modifier %r for %r", modifier, provider_name)
+            return 0
+        return modifier
 
 
 def _episode_checks(video, eq_matches, matches):

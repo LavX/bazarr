@@ -1,5 +1,6 @@
 # coding=utf-8
 
+import math
 import os
 import json
 import datetime
@@ -19,7 +20,7 @@ from subliminal_patch.exceptions import (TooManyRequests, APIThrottled, ParseRes
 from subliminal.exceptions import DownloadLimitExceeded, ServiceUnavailable, AuthenticationError, ConfigurationError
 from subliminal import region as subliminal_cache_region
 from subliminal_patch.extensions import provider_registry
-from subliminal_patch.score import compute_score
+from subliminal_patch.score import ComputeScore
 
 from app.get_args import args
 from app.config import settings
@@ -318,14 +319,19 @@ def get_provider_score_modifier(provider_name):
     value = modifiers.get(provider_name, 0)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0
+    # NaN and the infinities pass the type check and then raise inside round().
+    if not math.isfinite(value):
+        return 0
     return value
 
 
-# Install the reader on the shared scorer. Every search path -- automatic
-# download, the priority-ordered listing's early-exit, manual search -- goes
-# through that one instance, so this is the only place the wiring exists and no
-# call site can be forgotten.
-compute_score.modifier = get_provider_score_modifier
+# Install the reader on the scorer class, not on the shared instance. Every
+# native search path -- automatic download, the priority-ordered listing's
+# early-exit, manual search -- goes through the shared one, but the compat
+# endpoint builds its own ComputeScore to project scores for external clients,
+# and that surface has to agree with the rest. staticmethod keeps it a plain
+# function rather than binding self over the provider name.
+ComputeScore.modifier = staticmethod(get_provider_score_modifier)
 
 
 _FFPROBE_BINARY = get_binary("ffprobe")

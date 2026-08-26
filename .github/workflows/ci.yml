@@ -293,6 +293,7 @@ jobs:
             tests/bazarr/test_upgrade_embedded_history.py \
             tests/subliminal_patch/test_animetosho.py \
             tests/subliminal_patch/test_core.py \
+            tests/subliminal_patch/test_prioritized_satisfaction.py \
             tests/subliminal_patch/test_core_persistent.py \
             tests/subliminal_patch/test_opensubtitles_scraper.py \
             tests/subliminal_patch/test_score.py \

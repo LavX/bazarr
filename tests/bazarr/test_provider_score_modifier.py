@@ -231,3 +231,41 @@ def test_the_shared_scorer_asks_the_settings_for_the_modifier(monkeypatch):
     assert compute_score.modifier is not None
     assert compute_score.modifier('whisperai') == 15
     assert compute_score.modifier('opensubtitles') == 0
+
+
+# --- the hook has to reach every scorer, not just the shared one ----------
+
+def test_a_freshly_built_scorer_also_carries_the_modifier(monkeypatch):
+    """The compat endpoint builds its own ComputeScore to project scores for
+    external clients. A hook installed only on the shared instance would leave
+    that surface disagreeing with every native search path."""
+    from app.config import settings
+    import app.get_providers  # noqa: F401  installs the hook
+    from subliminal_patch.score import ComputeScore
+
+    monkeypatch.setattr(settings.general, 'provider_score_modifiers',
+                        {'whisperai': 15}, raising=False)
+
+    assert ComputeScore().modifier('whisperai') == 15
+
+
+def test_a_not_a_number_modifier_does_not_take_the_scorer_down(scorer, episode_video):
+    """NaN and the infinities are floats, so a type check lets them past, and
+    round() then raises on them outside the hook's own guard."""
+    subtitle = _Subtitle('whisperai')
+    matches = {'series', 'season', 'episode'}
+
+    plain = scorer(set(matches), subtitle, episode_video)
+    for bad in (float('nan'), float('inf'), float('-inf')):
+        scorer.modifier = lambda provider, value=bad: value
+        assert scorer(set(matches), subtitle, episode_video) == plain
+
+
+def test_the_setting_reader_rejects_a_not_a_number_value(monkeypatch):
+    from app.config import settings
+    from app.get_providers import get_provider_score_modifier
+
+    for bad in (float('nan'), float('inf'), float('-inf')):
+        monkeypatch.setattr(settings.general, 'provider_score_modifiers',
+                            {'whisperai': bad}, raising=False)
+        assert get_provider_score_modifier('whisperai') == 0
