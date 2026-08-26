@@ -251,8 +251,17 @@ MAX_STORED_RELEASE_INFO = 512
 
 
 def _language_key(language):
-    """Stable string form of the searched language, used as record identity."""
-    return str(language)
+    """Stable string form of the searched language, used as record identity.
+
+    str(Language) carries the forced suffix but not the hi flag, so it would
+    collapse a plain search and a hearing-impaired one for the same language:
+    a recorded English mismatch would then stand in for an English HI search
+    and suppress its notification. The flag is appended explicitly.
+    """
+    key = str(language)
+    if getattr(language, 'hi', False):
+        key += ':hi'
+    return key
 
 
 def _language_label(language):

@@ -1358,3 +1358,34 @@ def test_a_manual_save_with_a_path_but_no_file_clears_nothing(monkeypatch, tmp_p
                                                    [never_written], 3)
 
     assert cleared == []
+
+
+def test_hearing_impaired_is_part_of_the_record_identity():
+    """str(Language) carries the forced suffix but not hi, so a plain English
+    record would silently stand in for a hearing-impaired English search and
+    suppress its notification."""
+    from subzero.language import Language
+
+    from subtitles.mismatch import _language_key
+
+    plain = Language("eng")
+    hi = Language.rebuild(Language("eng"), hi=True)
+
+    assert _language_key(plain) != _language_key(hi)
+
+
+def test_a_hearing_impaired_search_is_recorded_separately(schema_session):
+    from subzero.language import Language
+
+    from subtitles.mismatch import record_mismatch
+
+    _seed_episode(schema_session, 101, 2)
+    plain = Language("eng")
+    hi = Language.rebuild(Language("eng"), hi=True)
+
+    from subtitles.mismatch import _language_key
+
+    assert record_mismatch(schema_session, "series", 101, 2, _language_key(plain),
+                           _mismatch()) is True
+    assert record_mismatch(schema_session, "series", 101, 2, _language_key(hi),
+                           _mismatch()) is True
