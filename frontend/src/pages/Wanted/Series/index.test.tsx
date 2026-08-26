@@ -54,6 +54,47 @@ describe("Wanted Series", () => {
     expect(screen.getByText("Pilot")).toBeInTheDocument();
   });
 
+  it("should flag an episode with a release type mismatch", async () => {
+    server.use(
+      http.get("/api/episodes/wanted", () => {
+        return HttpResponse.json({
+          data: [
+            {
+              id: 101,
+              series_id: 201,
+              sonarrSeriesId: 1,
+              sonarrEpisodeId: 101,
+              seriesTitle: "Breaking Bad",
+              episode_number: "S01E01",
+              episodeTitle: "Pilot",
+              missing_subtitles: [],
+              release_mismatch: true,
+            },
+            {
+              id: 102,
+              series_id: 201,
+              sonarrSeriesId: 1,
+              sonarrEpisodeId: 102,
+              seriesTitle: "Better Call Saul",
+              episode_number: "S01E01",
+              episodeTitle: "Uno",
+              missing_subtitles: [],
+              release_mismatch: false,
+            },
+          ],
+          total: 2,
+          page: 1,
+          per_page: 10,
+        });
+      }),
+    );
+
+    customRender(<WantedSeriesView />);
+
+    await screen.findByText("Breaking Bad");
+    expect(screen.getAllByText("Release mismatch")).toHaveLength(1);
+  });
+
   it("should render empty state when no wanted series", async () => {
     server.use(
       http.get("/api/episodes/wanted", () => {

@@ -685,13 +685,14 @@ class SZProviderPool(ProviderPool):
         return True
 
     def download_best_subtitles(self, subtitles, video, languages, min_score=0, hearing_impaired=False, only_one=False,
-                                use_original_format=False, fallback_allowed=False):
+                                use_original_format=False, fallback_allowed=False, candidate_sink=None):
         """Download the best matching subtitles.
 
         patch:
             - hearing_impaired is now string
             - add .score to subtitle
             - move all languages check further to the top (still necessary?)
+            - optional candidate_sink reporting every scored candidate
 
         :param subtitles: the subtitles to use.
         :type subtitles: list of :class:`~subliminal.subtitle.Subtitle`
@@ -703,6 +704,13 @@ class SZProviderPool(ProviderPool):
         :param bool hearing_impaired: hearing impaired preference.
         :param bool only_one: download only one subtitle, not one per language.
         :param bool use_original_format: preserve original subtitles format
+        :param list candidate_sink: when given, receives one record per scored
+            candidate: provider name, release description, score and whether it
+            was downloaded. The loop below stops at the first candidate under
+            ``min_score``, so the rejected candidates a caller may want to
+            inspect are exactly the ones it never visits; they are collected
+            from the scored list instead. Purely a report: no provider is
+            contacted for it.
         :return: downloaded subtitles.
         :rtype: list of :class:`~subliminal.subtitle.Subtitle`
 
@@ -813,6 +821,23 @@ class SZProviderPool(ProviderPool):
                         subtitle.score = score
                         downloaded_subtitles.append(subtitle)
                         break
+
+        if candidate_sink is not None:
+            # Identity, not equality: Subtitle equality is provider-defined and
+            # two distinct candidates can compare equal.
+            downloaded_ids = {id(s) for s in downloaded_subtitles}
+            for subtitle, score, _score_without_hash, _matches, orig_matches in scored_subtitles:
+                candidate_sink.append({
+                    'provider_name': subtitle.provider_name,
+                    'release_info': getattr(subtitle, 'release_info', None),
+                    'score': score,
+                    'downloaded': id(subtitle) in downloaded_ids,
+                    # The loop above rejects an episode subtitle that does not
+                    # match the series and episode however high it scores, so a
+                    # consumer reasoning about "would this have been downloaded"
+                    # needs the same matches the loop tested.
+                    'matches': sorted(orig_matches or ()),
+                })
 
         return downloaded_subtitles
 

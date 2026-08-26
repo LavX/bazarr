@@ -7,6 +7,7 @@ from functools import reduce
 
 from app.database import get_exclusion_clause, TableEpisodes, TableShows, database, select, func
 from api.swaggerui import subtitles_language_model, audio_language_model
+from subtitles.mismatch import flagged_media_ids
 
 from ..utils import authenticate, postprocess
 
@@ -40,6 +41,9 @@ class EpisodesWanted(Resource):
         'sceneName': fields.String(),
         'tags': fields.List(fields.String),
         'seriesType': fields.String(),
+        # True when a release-type mismatch was recorded for this episode: its
+        # own release type has no acceptable subtitle while another one does.
+        'release_mismatch': fields.Boolean(),
     })
 
     get_response_model = api_ns_episodes_wanted.model('EpisodeWantedGetResponse', {
@@ -88,6 +92,9 @@ class EpisodesWanted(Resource):
         if length > 0:
             stmt = stmt.order_by(TableEpisodes.sonarrEpisodeId.desc()).limit(length).offset(start)
 
+        rows = database.execute(stmt).all()
+        mismatched = flagged_media_ids(database, 'series', [x.id for x in rows])
+
         results = [postprocess({
             'audio_language': x.audio_language,
             'id': x.id,
@@ -102,7 +109,8 @@ class EpisodesWanted(Resource):
             'sceneName': x.sceneName,
             'tags': x.tags,
             'seriesType': x.seriesType,
-        }) for x in database.execute(stmt).all()]
+            'release_mismatch': x.id in mismatched,
+        }) for x in rows]
 
         count = database.execute(
             select(func.count())

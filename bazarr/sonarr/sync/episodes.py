@@ -16,6 +16,7 @@ from utilities.path_mappings import path_mappings
 from subtitles.indexer.series import store_subtitles, series_full_scan_subtitles  # noqa: F401
 from subtitles.mass_download import episode_download_subtitles  # noqa: F401
 from app.event_handler import event_stream
+from subtitles.mismatch import forget_media_by_upstream
 from sonarr.info import get_sonarr_info
 from app.jobs_queue import jobs_queue
 from app.notifier import send_notifications
@@ -218,6 +219,9 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
         owner_instance_id = arr_instance_id
 
     if len(episodes_to_delete):
+        # Before the row goes: the mismatch record points at the local id with
+        # no foreign key to enforce it, and SQLite reuses a deleted id.
+        forget_media_by_upstream('series', episodes_to_delete, arr_instance_id)
         try:
             database.execute(scoped(delete(TableEpisodes).where(TableEpisodes.sonarrEpisodeId.in_(episodes_to_delete)),
                                     TableEpisodes.arr_instance_id, arr_instance_id))
@@ -419,6 +423,7 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
                    .where(TableEpisodes.sonarrEpisodeId == episode_id),
                    TableEpisodes.arr_instance_id, arr_instance_id)).first()
         local_episode_id = local_id_row.id if local_id_row else int(episode_id)
+        forget_media_by_upstream('series', [episode_id], arr_instance_id)
         try:
             database.execute(
                 scoped(delete(TableEpisodes)
