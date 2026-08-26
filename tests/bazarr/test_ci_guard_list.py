@@ -241,17 +241,6 @@ EXCLUDED = {
         "http, and vcrpy matches on scheme and port, so every request misses. "
         "Both cases also burn 30 seconds each of ProviderRetryMixin sleep."
     ),
-    "tests/subliminal_patch/test_core.py": (
-        "no network at all: 8 failed, 14 passed in under a fifth of a second, "
-        "identical online and offline. Four pool tests compare SZProviderPool.providers against a "
-        "set, but it became an ordered list in af95a58bf. Three language-equals "
-        "tests build the pool with an empty opensubtitlescom config, so it "
-        "raises ConfigurationError before any request. test_scan_video_episode "
-        "depends on the pytest tmpdir counter: guessit parses the parent "
-        "directory, and from pytest-10 onward it drops the title and subliminal "
-        "raises GuessingError, so it passes on a fresh runner and fails on any "
-        "machine that has run pytest more than ten times."
-    ),
     # Currently failing for reasons that are not network flakiness. Each needs a
     # fix, not an exemption; the reason names what is wrong so it cannot be
     # forgotten again.

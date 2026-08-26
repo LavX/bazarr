@@ -49,9 +49,24 @@ def _archive_payload(body, **extra):
 
 
 def test_list_archive_members_filters_to_subtitles():
+    # Design note: ".txt" IS one of the extensions the hub accepts, because
+    # several providers ship MicroDVD subtitles under it, and the worker is the
+    # thing that can tell a Serbian subtitle from a release-info file by looking
+    # at the language tag. So it is offered, ordered last: the guard that a
+    # release-info file can never be picked ahead of a real subtitle comes from
+    # that ordering, not from withholding the member. Dot-files stay out.
     body = _zip(["a.eng.srt", "b.fre.srt", ".hidden.srt", "notes.txt"])
     archive = get_archive_from_bytes(body)
-    assert sorted(proto._list_archive_members(archive)) == ["a.eng.srt", "b.fre.srt"]
+    members = proto._list_archive_members(archive)
+    assert members == ["a.eng.srt", "b.fre.srt", "notes.txt"]
+
+
+def test_list_archive_members_offers_text_member_when_it_is_all_there_is():
+    # The other half of the same rule: with no unambiguous member the ".txt" is
+    # what the archive has, so the worker must get the chance to pin it.
+    body = _zip(["film.txt"])
+    archive = get_archive_from_bytes(body)
+    assert proto._list_archive_members(archive) == ["film.txt"]
 
 
 def test_select_member_pin_extracts_named_member():
@@ -141,12 +156,15 @@ def test_worker_runner_select_archive_member_coerces_bad_decision():
 
 
 def test_select_member_callback_receives_listed_members():
+    # Design note: see test_list_archive_members_filters_to_subtitles. The worker
+    # gets every member it could reasonably pin, ".txt" included and ordered
+    # last, because only the worker can tell movie.sr.txt from notes.txt.
     body = _zip(["show.eng.srt", "show.fre.srt", "notes.txt"])
     seen = {}
 
     def cb(members):
-        seen["members"] = sorted(members)
+        seen["members"] = list(members)
         return {"member": "show.eng.srt", "decision": "pin"}
 
     _run(body, _archive_payload(body, select_member=True), cb)
-    assert seen["members"] == ["show.eng.srt", "show.fre.srt"]
+    assert seen["members"] == ["show.eng.srt", "show.fre.srt", "notes.txt"]

@@ -172,3 +172,31 @@ def test_optimize_sqlite_database_runs_on_sqlite_346_or_newer(monkeypatch):
 
     assert db_module.optimize_sqlite_database(engine) is True
     assert engine.calls == ["PRAGMA optimize"]
+
+
+def test_the_registered_listener_applies_the_pragmas_to_a_new_engine(tmp_path):
+    """The tests above call the listener directly, which proves what it does
+    but not that anything calls it.
+
+    Whether a running Bazarr gets WAL and a busy timeout at all depends on the
+    listener being registered, and that registration sits behind the SQLite
+    branch of a module-level if in app.database. It is registered on the Engine
+    class rather than on one engine, so a fresh SQLite engine in this process
+    picks it up exactly the way the application's own does, and asserting
+    against one keeps the test off the suite's config directory.
+    """
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.pool import NullPool
+
+    import app.database  # noqa: F401  registers the connect listener
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'bazarr.db'}",
+                           poolclass=NullPool, isolation_level="AUTOCOMMIT")
+    try:
+        with engine.connect() as connection:
+            assert connection.execute(text("PRAGMA journal_mode")).scalar().lower() == "wal"
+            assert connection.execute(text("PRAGMA synchronous")).scalar() == 2  # FULL
+            assert connection.execute(text("PRAGMA foreign_keys")).scalar() == 1
+            assert connection.execute(text("PRAGMA busy_timeout")).scalar() == 60000
+    finally:
+        engine.dispose()

@@ -19,7 +19,14 @@ import { renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useEpisodeAddBlacklist } from "@/apis/hooks/episodes";
 import { useMovieAddBlacklist } from "@/apis/hooks/movies";
-import { useEpisodeSubtitleModification } from "@/apis/hooks/subtitles";
+import {
+  useDownloadEpisodeSubtitles,
+  useDownloadMovieSubtitles,
+} from "@/apis/hooks/providers";
+import {
+  useEpisodeSubtitleModification,
+  useMovieSubtitleModification,
+} from "@/apis/hooks/subtitles";
 import { QueryKeys } from "@/apis/queries/keys";
 
 vi.mock("@/apis/raw", () => ({
@@ -32,6 +39,13 @@ vi.mock("@/apis/raw", () => ({
     },
     movies: {
       addBlacklist: vi.fn().mockResolvedValue(undefined),
+      downloadSubtitles: vi.fn().mockResolvedValue(undefined),
+      deleteSubtitles: vi.fn().mockResolvedValue(undefined),
+      uploadSubtitles: vi.fn().mockResolvedValue(undefined),
+    },
+    providers: {
+      downloadEpisodeSubtitle: vi.fn().mockResolvedValue(undefined),
+      downloadMovieSubtitle: vi.fn().mockResolvedValue(undefined),
     },
   },
 }));
@@ -218,5 +232,94 @@ describe("useMovieAddBlacklist", () => {
       QueryKeys.Movies,
       UPSTREAM_MOVIE_ID,
     ]);
+  });
+});
+
+describe("useMovieSubtitleModification", () => {
+  let spy: ReturnType<typeof vi.spyOn>;
+  let wrapper: ReturnType<typeof makeClientAndWrapper>["wrapper"];
+
+  beforeEach(() => {
+    ({ spy, wrapper } = makeClientAndWrapper());
+  });
+
+  it.each([
+    ["download", { form: { language: "en", hi: false, forced: false } }],
+    [
+      "remove",
+      { form: { language: "en", hi: false, forced: false, path: "/m.srt" } },
+    ],
+    [
+      "upload",
+      {
+        form: {
+          language: "en",
+          hi: false,
+          forced: false,
+          file: new File([], "m.srt"),
+        },
+      },
+    ],
+  ])(
+    "%s refreshes the movie views without an upstream-keyed invalidation",
+    async (which, extra) => {
+      const { result } = renderHook(() => useMovieSubtitleModification(), {
+        wrapper,
+      });
+
+      (
+        result.current as unknown as Record<
+          string,
+          { mutate: (p: unknown) => void }
+        >
+      )[which].mutate({ radarrId: UPSTREAM_MOVIE_ID, ...extra });
+
+      await waitFor(() => expect(spy).toHaveBeenCalled());
+
+      const keys = capturedKeys(spy);
+      expect(keys).toContainEqual([QueryKeys.Movies]);
+      expect(keys).not.toContainEqual([QueryKeys.Movies, UPSTREAM_MOVIE_ID]);
+    },
+  );
+});
+
+describe("manual-search downloads", () => {
+  let spy: ReturnType<typeof vi.spyOn>;
+  let wrapper: ReturnType<typeof makeClientAndWrapper>["wrapper"];
+
+  beforeEach(() => {
+    ({ spy, wrapper } = makeClientAndWrapper());
+  });
+
+  it("an episode download refreshes the series views by prefix", async () => {
+    const { result } = renderHook(() => useDownloadEpisodeSubtitles(), {
+      wrapper,
+    });
+
+    result.current.mutate({
+      seriesId: UPSTREAM_SERIES_ID,
+      episodeId: 1,
+      form: {} as never,
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    const keys = capturedKeys(spy);
+    expect(keys).toContainEqual([QueryKeys.Series]);
+    expect(keys).not.toContainEqual([QueryKeys.Series, UPSTREAM_SERIES_ID]);
+  });
+
+  it("a movie download refreshes the movie views by prefix", async () => {
+    const { result } = renderHook(() => useDownloadMovieSubtitles(), {
+      wrapper,
+    });
+
+    result.current.mutate({ radarrId: UPSTREAM_MOVIE_ID, form: {} as never });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    const keys = capturedKeys(spy);
+    expect(keys).toContainEqual([QueryKeys.Movies]);
+    expect(keys).not.toContainEqual([QueryKeys.Movies, UPSTREAM_MOVIE_ID]);
   });
 });
