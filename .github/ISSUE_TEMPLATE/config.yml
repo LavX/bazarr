@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: 📗 Wiki
-    url: https://wiki.bazarr.media
-    about: The Bazarr wiki should help guide you through installation and setup as well as help resolve common problems and answer frequently asked questions.
-  - name: 🚀 Feature suggestions
-    url: https://github.com/LavX/bazarr/issues
-    about: Share your suggestions or ideas to make Bazarr+ better!
+    url: https://lavx.github.io/bazarr/guides/
+    about: Installation, setup and the guides for each feature.
+  - name: 💬 Discord
+    url: https://discord.gg/fpp5JXmB8f
+    about: Questions, help with a setup, and anything that is not yet a bug or a request.
