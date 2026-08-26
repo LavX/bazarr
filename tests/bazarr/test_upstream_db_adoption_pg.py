@@ -47,7 +47,7 @@ def pg_engine():
         cleanup.dispose()
 
 
-def _upstream_shape(engine):
+def _upstream_shape(engine, stamp='0124f9e278fb'):
     """A PostgreSQL database in the shape upstream leaves one at 0124f9e278fb."""
     with engine.begin() as connection:
         connection.execute(sa.text(
@@ -66,7 +66,17 @@ def _upstream_shape(engine):
         connection.execute(sa.text(
             'CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)'))
         connection.execute(sa.text(
-            "INSERT INTO alembic_version (version_num) VALUES ('0124f9e278fb')"))
+            'INSERT INTO alembic_version (version_num) VALUES (:stamp)'), {'stamp': stamp})
+
+
+def test_an_unknown_revision_is_adopted_on_postgres_too(pg_engine):
+    """The second reporter on the inbound issue was on PostgreSQL, after
+    pgloader carried the alembic_version row across with everything else."""
+    from app.upstream_adoption import adopt_upstream_database
+
+    _upstream_shape(pg_engine, stamp='537e9b4d10e3')
+    with pg_engine.begin() as connection:
+        assert adopt_upstream_database(connection) == '309dc062d2e4'
 
 
 def test_a_postgres_database_from_upstream_is_adopted(pg_engine):
@@ -108,6 +118,12 @@ def test_a_postgres_database_from_upstream_is_adopted(pg_engine):
             'SELECT subtitles FROM table_movies WHERE "radarrId" = 7')).scalar() == \
             str([['es:forced', '/m/m.es.forced.srt', 12]])
 
+    # The split tables go once their rows are across: on PostgreSQL their
+    # foreign keys would block the local-id PK cutover outright.
+    tables = set(sa.inspect(pg_engine).get_table_names())
+    assert 'table_episodes_subtitles' not in tables
+    assert 'table_movies_subtitles' not in tables
+
 
 def test_adopting_a_postgres_database_twice_changes_nothing(pg_engine):
     from app.upstream_adoption import adopt_upstream_database
@@ -131,3 +147,61 @@ def test_adopting_a_postgres_database_twice_changes_nothing(pg_engine):
         assert connection.execute(sa.text(
             'SELECT subtitles FROM table_episodes WHERE "sonarrEpisodeId" = 42')).scalar() == \
             str([['de', '/m/f.de.srt', 3]])
+
+
+# --- the cutover's own index creation, on PostgreSQL ----------------------
+#
+# Found while adopting an upstream database on PostgreSQL, but it is not an
+# adoption bug. The local-id PK cutover short-circuits on a fresh install,
+# where create_all has already built the final shape. Any database whose tables
+# predate the cutover runs the body instead, and by then 4bb94a033f93 has
+# created ix_table_episodes_episode_file_id, which the cutover's PostgreSQL
+# branch then creates again. The SQLite branch never noticed: it rebuilds each
+# table, so the old indexes go with it.
+
+def _cutover_module():
+    import importlib.util
+    import os
+
+    path = os.path.join(os.path.dirname(__file__), '..', '..', 'migrations', 'versions',
+                        'e7f4c9d80abc_arr_local_id_pk_cutover.py')
+    spec = importlib.util.spec_from_file_location('cutover_under_test', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_every_cutover_index_can_be_created_when_it_is_already_there():
+    """A shape assertion covering all six tables at once. Executing every DDL
+    against a real server would mean rebuilding six pre-cutover schemas; this
+    catches the same class of failure for the ones the test below does not."""
+    module = _cutover_module()
+
+    for table, _pk, _nn, _du, index_ddls, _fks in module._PG_SPECS:
+        for ddl in index_ddls:
+            assert 'IF NOT EXISTS' in ddl, f'{table}: {ddl}'
+
+
+def test_the_episodes_cutover_indexes_survive_one_already_existing(pg_engine):
+    """The collision that actually happens: 4bb94a033f93 creates
+    ix_table_episodes_episode_file_id, and the cutover then creates it again."""
+    module = _cutover_module()
+
+    with pg_engine.begin() as connection:
+        connection.execute(sa.text(
+            'CREATE TABLE table_episodes (id INTEGER, arr_instance_id INTEGER, '
+            '"sonarrEpisodeId" INTEGER, "sonarrSeriesId" INTEGER, series_id INTEGER, '
+            'episode_file_id INTEGER)'))
+        # exactly what the hot-path index migration leaves behind
+        connection.execute(sa.text(
+            'CREATE INDEX ix_table_episodes_episode_file_id ON table_episodes (episode_file_id)'))
+
+    episodes = next(spec for spec in module._PG_SPECS if spec[0] == 'table_episodes')
+
+    with pg_engine.begin() as connection:
+        for ddl in episodes[4]:
+            connection.execute(sa.text(ddl))
+
+    indexes = {index['name'] for index in sa.inspect(pg_engine).get_indexes('table_episodes')}
+    assert 'ix_table_episodes_episode_file_id' in indexes
+    assert 'ix_table_episodes_series_id' in indexes

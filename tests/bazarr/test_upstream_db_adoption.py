@@ -450,6 +450,12 @@ def test_an_upstream_database_migrates_to_the_fork_head_through_startup(tmp_path
 
     _looks_like_upstream(engine)
 
+    # A column this fork models that upstream dropped and no migration of ours
+    # adds back, because it predates the point the two chains diverged. Only
+    # the post-upgrade repair can restore this one.
+    with engine.begin() as connection:
+        connection.execute(sa.text('ALTER TABLE table_shows DROP COLUMN overview'))
+
     with engine.begin() as connection:
         connection.execute(sa.text(
             'INSERT INTO table_episodes_subtitles '
@@ -466,5 +472,176 @@ def test_an_upstream_database_migrates_to_the_fork_head_through_startup(tmp_path
 
     assert _stamp(engine) == _chain_head()
     assert _subtitles_of(engine, 31) == str([['en', '/m/s05e14.en.srt', 31613]])
+    assert 'overview' in {c['name'] for c in
+                          sa.inspect(engine).get_columns('table_shows')}
 
     engine.dispose()
+
+
+# --- a revision nobody has reviewed yet -----------------------------------
+
+def test_an_unknown_upstream_revision_is_adopted_as_well(tmp_path):
+    """Upstream's nightly line adds revisions continuously. 537e9b4d10e3 is the
+    one a user actually reported, and it did not exist when the first pass of
+    this was written. Waiting for a release each time upstream stamps a new
+    revision means every nightly user is locked out in the meantime, so an
+    unrecognised revision is adopted too rather than left to crash-loop."""
+    from app.upstream_adoption import adopt_upstream_database
+
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'nightly.db'}")
+    _upstream_database(engine, stamp='537e9b4d10e3')
+    try:
+        with engine.begin() as connection:
+            assert adopt_upstream_database(connection) == '309dc062d2e4'
+        assert _stamp(engine) == '309dc062d2e4'
+    finally:
+        engine.dispose()
+
+
+def test_a_revision_from_some_other_database_entirely_is_left_alone(tmp_path):
+    """The stamp being unrecognised is not on its own a reason to rewrite it.
+    Without the tables Bazarr recognises there is nothing to adopt, and
+    guessing would do more harm than refusing to start."""
+    from app.upstream_adoption import adopt_upstream_database
+
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'stranger.db'}")
+    try:
+        with engine.begin() as connection:
+            connection.execute(sa.text('CREATE TABLE widgets (id INTEGER PRIMARY KEY)'))
+            connection.execute(sa.text(
+                'CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)'))
+            connection.execute(sa.text(
+                "INSERT INTO alembic_version (version_num) VALUES ('aaaaaaaaaaaa')"))
+        with engine.begin() as connection:
+            assert adopt_upstream_database(connection) is None
+        assert _stamp(engine) == 'aaaaaaaaaaaa'
+    finally:
+        engine.dispose()
+
+
+# --- restoring whatever else upstream dropped -----------------------------
+
+def test_a_column_this_fork_still_models_is_restored_generically(tmp_path):
+    """The subtitles column is the one upstream dropped so far. Naming it
+    explicitly would mean shipping a patch for the next one, so the repair
+    works from the ORM: any column the model declares and the table lacks is
+    added back."""
+    from app.database import Base
+    from app.upstream_adoption import restore_missing_model_columns
+
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'gap.db'}")
+    try:
+        Base.metadata.create_all(engine)
+        with engine.begin() as connection:
+            connection.execute(sa.text('ALTER TABLE table_shows DROP COLUMN overview'))
+        assert 'overview' not in {c['name'] for c in
+                                  sa.inspect(engine).get_columns('table_shows')}
+
+        with engine.begin() as connection:
+            restored = restore_missing_model_columns(connection)
+
+        assert ('table_shows', 'overview') in restored
+        assert 'overview' in {c['name'] for c in
+                              sa.inspect(engine).get_columns('table_shows')}
+    finally:
+        engine.dispose()
+
+
+def test_a_table_the_fork_does_not_have_yet_is_not_touched(tmp_path):
+    """create_all makes the missing tables; this only fills gaps in the ones
+    that are already there."""
+    from app.upstream_adoption import restore_missing_model_columns
+
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'empty.db'}")
+    try:
+        with engine.begin() as connection:
+            assert restore_missing_model_columns(connection) == []
+    finally:
+        engine.dispose()
+
+
+def test_a_required_column_with_no_default_is_reported_not_forced(tmp_path):
+    """Adding a NOT NULL column with no default to a table that already has
+    rows fails outright. Better to leave it, say so, and let the rest of the
+    adoption succeed than to abort the whole startup."""
+    from app.upstream_adoption import restore_missing_model_columns
+
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'strict.db'}")
+    try:
+        with engine.begin() as connection:
+            connection.execute(sa.text(
+                'CREATE TABLE table_shows ("sonarrSeriesId" INTEGER PRIMARY KEY, '
+                'path TEXT NOT NULL)'))
+            connection.execute(sa.text(
+                'INSERT INTO table_shows VALUES (1, \'/tv/Show\')'))
+
+        with engine.begin() as connection:
+            restored = restore_missing_model_columns(connection)
+
+        # title is NOT NULL in the model and the table already has a row, so it
+        # cannot be added; the nullable ones around it still are.
+        assert ('table_shows', 'title') not in restored
+        assert ('table_shows', 'overview') in restored
+    finally:
+        engine.dispose()
+
+
+# --- retiring the tables whose contents have been folded across -----------
+
+def test_the_split_tables_are_dropped_once_their_rows_are_folded_across(upstream_engine):
+    """They carry a foreign key into table_movies, and this fork's local-id PK
+    cutover rebuilds that table, so the constraint fails its own
+    foreign_key_check and aborts the migration. Nothing in Bazarr+ reads these
+    tables; their contents live in the legacy column by the time they go."""
+    from app.upstream_adoption import adopt_upstream_database
+
+    with upstream_engine.begin() as connection:
+        connection.execute(sa.text(
+            'INSERT INTO table_episodes ("sonarrEpisodeId", "sonarrSeriesId", path) '
+            "VALUES (51, 5, '/m/z.mkv')"))
+        connection.execute(sa.text(
+            'INSERT INTO table_episodes_subtitles '
+            '("sonarrEpisodeId", "sonarrSeriesId", language, hi, forced, path, size) '
+            "VALUES (51, 5, 'en', 0, 0, '/m/z.en.srt', 6)"))
+
+    with upstream_engine.begin() as connection:
+        adopt_upstream_database(connection)
+
+    tables = set(sa.inspect(upstream_engine).get_table_names())
+    assert 'table_episodes_subtitles' not in tables
+    assert 'table_movies_subtitles' not in tables
+    # and only after the rows reached the column this fork reads
+    assert _subtitles_of(upstream_engine, 51) == str([['en', '/m/z.en.srt', 6]])
+
+
+def test_a_split_table_is_kept_when_its_rows_could_not_be_folded(upstream_engine, monkeypatch):
+    """Dropping is only safe because the data has already been copied. If the
+    copy did not happen, the table stays and the user keeps their rows."""
+    import app.upstream_adoption as adoption
+
+    monkeypatch.setattr(adoption, 'restore_legacy_subtitle_columns', lambda connection: [])
+
+    with upstream_engine.begin() as connection:
+        adoption.adopt_upstream_database(connection)
+
+    tables = set(sa.inspect(upstream_engine).get_table_names())
+    assert 'table_episodes_subtitles' in tables
+    assert 'table_movies_subtitles' in tables
+
+
+def test_no_table_outside_the_known_upstream_pair_is_ever_dropped(upstream_engine):
+    """The restore side works from the ORM and is additive, so it can afford to
+    be general. Dropping cannot, so it is limited to the two tables upstream's
+    split created and whose contents this fork keeps elsewhere."""
+    from app.upstream_adoption import adopt_upstream_database
+
+    with upstream_engine.begin() as connection:
+        connection.execute(sa.text('CREATE TABLE somebody_elses_table (id INTEGER PRIMARY KEY)'))
+        connection.execute(sa.text('INSERT INTO somebody_elses_table VALUES (1)'))
+
+    with upstream_engine.begin() as connection:
+        adopt_upstream_database(connection)
+
+    with upstream_engine.connect() as connection:
+        assert connection.execute(
+            sa.text('SELECT count(*) FROM somebody_elses_table')).scalar() == 1

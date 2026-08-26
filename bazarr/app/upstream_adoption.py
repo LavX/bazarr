@@ -26,17 +26,34 @@ import re
 
 import sqlalchemy as sa
 
-# Upstream-only revisions, each mapped to the newest revision in this fork's
-# chain all of whose ancestors that database has provably applied.
+# The newest revision in this fork's chain that upstream also has, and so the
+# revision to stamp a database from upstream back to.
 #
-# For 0124f9e278fb that is 309dc062d2e4 rather than 7e9a2b1c4d5f. Both are in
-# upstream's chain and an upstream database has run both, but in this fork's
-# chain 7e9a2b1c4d5f sits behind 4bb94a033f93 and f2f74f2d6d0a, which that
-# database has never seen. Alembic walks a line, not a set, so claiming
-# 7e9a2b1c4d5f would silently claim those two as well.
-UPSTREAM_REVISION_EQUIVALENTS = {
-    '0124f9e278fb': '309dc062d2e4',
+# Every upstream revision descends from it, and it is the last point where the
+# two chains agree. It is not 7e9a2b1c4d5f, which upstream also has and an
+# upstream database has also run: in this fork's chain that revision sits
+# behind 4bb94a033f93 and f2f74f2d6d0a, which such a database has never seen,
+# and Alembic walks a line rather than a set, so claiming it would silently
+# claim those two as well.
+FORK_SHARED_ANCESTOR = '309dc062d2e4'
+
+# Upstream revisions whose contents have actually been read. Adoption does not
+# depend on this: an unrecognised revision is adopted too, because upstream's
+# nightly line stamps new ones continuously and every nightly user would
+# otherwise be locked out until this fork shipped a release naming it. The set
+# only decides how loudly it is logged.
+REVIEWED_UPSTREAM_REVISIONS = {
+    # Moves the subtitle lists into their own tables, drops the source columns,
+    # and creates a large set of indexes.
+    '0124f9e278fb',
+    # Indexes on the tables the revision above created. Nightly only.
+    '537e9b4d10e3',
 }
+
+# Tables that say this is a Bazarr database rather than something else that
+# happens to use Alembic. An unrecognised stamp is not on its own a reason to
+# start rewriting a database nobody asked us about.
+_BAZARR_MARKER_TABLES = ('table_shows', 'table_episodes', 'table_movies')
 
 # (item table, split table, the column joining them)
 _SPLIT_SUBTITLE_TABLES = (
@@ -156,6 +173,113 @@ def restore_legacy_subtitle_columns(connection):
     return written
 
 
+def restore_missing_model_columns(connection):
+    """Add back any column this fork's models declare that a table is missing.
+
+    Upstream dropped ``subtitles`` from ``table_episodes`` and
+    ``table_movies``; naming those two would mean shipping a patch the next
+    time upstream drops something else. Working from the ORM instead makes the
+    repair cover whatever the gap turns out to be.
+
+    ``create_all()`` handles missing tables but never touches an existing one,
+    which is the whole reason this is needed. Only tables that are already
+    there are considered, and only columns that can be added without a value:
+    a NOT NULL column with no default cannot go onto a table that has rows, so
+    it is reported rather than forced, and the rest of the adoption goes ahead.
+
+    Returns the ``(table, column)`` pairs it added.
+    """
+    from app.database import Base
+
+    inspector = sa.inspect(connection)
+    existing_tables = set(inspector.get_table_names())
+    dialect = connection.engine.dialect
+    restored = []
+
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing_tables:
+            continue
+
+        present = {column['name'] for column in inspector.get_columns(table.name)}
+        for column in table.columns:
+            if column.name in present:
+                continue
+
+            if not column.nullable and column.server_default is None and column.default is None:
+                logging.warning(
+                    'BAZARR cannot restore the required column %s.%s, it has no default. '
+                    'Bazarr+ will start, but that column stays missing.', table.name, column.name)
+                continue
+
+            try:
+                type_sql = column.type.compile(dialect)
+                connection.execute(sa.text(
+                    f'ALTER TABLE {table.name} ADD COLUMN "{column.name}" {type_sql}'))
+            except Exception:
+                logging.exception('BAZARR could not restore the column %s.%s',
+                                  table.name, column.name)
+                continue
+
+            restored.append((table.name, column.name))
+            logging.info('BAZARR restored the missing column %s.%s', table.name, column.name)
+
+    return restored
+
+
+def retire_split_subtitle_tables(connection, folded_tables):
+    """Drop the tables upstream's split created, once their rows are folded across.
+
+    They have to go rather than sit there inertly: each carries a foreign key
+    into table_movies or table_episodes, and this fork's local-id PK cutover
+    rebuilds both, so the constraint fails the cutover's own
+    foreign_key_check and aborts the migration. Renaming does not help, since
+    the child keeps its constraint.
+
+    Nothing in Bazarr+ reads these tables. By the time this runs their contents
+    are in the column the indexer does read, which is the only reason dropping
+    them is acceptable, so a table whose fold did not happen is left alone. The
+    pair is named rather than derived: the restore side is additive and can
+    afford to work from the ORM, this cannot.
+    """
+    dropped = []
+    existing_tables = set(sa.inspect(connection).get_table_names())
+
+    for item_table, split_table, _join_column in _SPLIT_SUBTITLE_TABLES:
+        if split_table not in existing_tables:
+            continue
+        if item_table not in folded_tables:
+            logging.warning('BAZARR keeping %s: its rows were not folded into %s.subtitles',
+                            split_table, item_table)
+            continue
+        connection.execute(sa.text(f'DROP TABLE {split_table}'))
+        dropped.append(split_table)
+        logging.info('BAZARR dropped %s, its contents are now in %s.subtitles',
+                     split_table, item_table)
+
+    return dropped
+
+
+def repair_missing_columns_after_upgrade(connection):
+    """The safety net, run once the migration chain has finished.
+
+    Upstream dropped ``subtitles``; the next thing it drops will be something
+    else, and this fork would be back to shipping a patch for each one. The
+    models say what every table should have, so anything still missing after
+    the chain has run gets added back from them.
+
+    Deliberately after the upgrade rather than before. Creating columns this
+    fork's own migrations are about to create changes what they see, and on
+    PostgreSQL the local-id PK cutover in particular wants to build its own.
+    """
+    return restore_missing_model_columns(connection)
+
+
+def looks_like_a_bazarr_database(connection):
+    """Whether this is a Bazarr database at all."""
+    tables = set(sa.inspect(connection).get_table_names())
+    return any(marker in tables for marker in _BAZARR_MARKER_TABLES)
+
+
 def stamped_revision(connection):
     """The revision in ``alembic_version``, or None on a database without one."""
     if 'alembic_version' not in sa.inspect(connection).get_table_names():
@@ -163,31 +287,61 @@ def stamped_revision(connection):
     return connection.execute(sa.text('SELECT version_num FROM alembic_version')).scalar()
 
 
-def adopt_upstream_database(connection):
-    """Make an upstream database one this codebase can migrate.
+def adopt_upstream_database(connection, migrations_directory=None):
+    """Make a database from upstream Bazarr one this codebase can migrate.
 
     Returns the revision it rewrote the stamp to, or None when there was
     nothing to adopt. Runs before Alembic, and does nothing at all to a
     database already on one of this fork's revisions.
     """
+    if migrations_directory is None:
+        from app.database import migrations_directory as default_directory
+
+        migrations_directory = default_directory
+
     revision = stamped_revision(connection)
-    if revision not in UPSTREAM_REVISION_EQUIVALENTS:
+    if revision is None:
         return None
 
-    equivalent = UPSTREAM_REVISION_EQUIVALENTS[revision]
-    logging.warning('BAZARR this database was created by upstream Bazarr (revision %s). '
-                    'Adopting it: restoring the subtitle columns upstream dropped, then '
-                    'continuing this fork\'s migrations from %s.', revision, equivalent)
+    ours = known_revisions(migrations_directory)
+    if not ours or revision in ours:
+        # An empty set means the scripts could not be read. Rewriting a stamp
+        # on that basis would be a guess, so nothing is touched.
+        return None
 
-    # The column has to be back before the stamp changes. A stamp this fork
-    # understands with the column still missing would start and then fail in
-    # the indexer, which is a worse failure than not starting.
-    restore_legacy_subtitle_columns(connection)
+    if not looks_like_a_bazarr_database(connection):
+        logging.error('BAZARR this database is stamped with the unknown migration revision %s '
+                      'and does not look like a Bazarr database. Leaving it alone.', revision)
+        return None
 
-    connection.execute(sa.text('UPDATE alembic_version SET version_num = :equivalent '
+    if revision in REVIEWED_UPSTREAM_REVISIONS:
+        logging.warning('BAZARR this database was created by upstream Bazarr (revision %s). '
+                        'Adopting it and continuing this fork\'s migrations from %s.',
+                        revision, FORK_SHARED_ANCESTOR)
+    else:
+        logging.warning(
+            'BAZARR this database is stamped with migration revision %s, which Bazarr+ has no '
+            'script for. It looks like a Bazarr database from a newer upstream than this fork '
+            'has adopted, so Bazarr+ is adopting it and continuing its own migrations from %s. '
+            'Please report revision %s at https://github.com/LavX/bazarr/issues, and keep a '
+            'backup of the database file.', revision, FORK_SHARED_ANCESTOR, revision)
+
+    # Only the subtitle columns are touched here, not every gap the models
+    # know about. This runs before Alembic, and pre-creating columns that this
+    # fork's own migrations are about to add changes what those migrations see.
+    # The general repair happens afterwards instead, once the chain has had its
+    # turn: see repair_missing_columns_after_upgrade.
+    #
+    # These two cannot wait, though. The split tables have to be gone before
+    # the local-id PK cutover, whose foreign keys they break, and their
+    # contents have to be folded across before they go.
+    folded = restore_legacy_subtitle_columns(connection)
+    retire_split_subtitle_tables(connection, folded)
+
+    connection.execute(sa.text('UPDATE alembic_version SET version_num = :ancestor '
                                'WHERE version_num = :revision'),
-                       {'equivalent': equivalent, 'revision': revision})
-    return equivalent
+                       {'ancestor': FORK_SHARED_ANCESTOR, 'revision': revision})
+    return FORK_SHARED_ANCESTOR
 
 
 def known_revisions(migrations_directory):
@@ -228,11 +382,16 @@ def explain_unknown_revision(revision):
 
 
 __all__ = [
-    'UPSTREAM_REVISION_EQUIVALENTS',
+    'FORK_SHARED_ANCESTOR',
+    'REVIEWED_UPSTREAM_REVISIONS',
     'adopt_upstream_database',
     'explain_unknown_revision',
     'known_revisions',
     'legacy_subtitle_value',
+    'looks_like_a_bazarr_database',
+    'repair_missing_columns_after_upgrade',
+    'restore_missing_model_columns',
+    'retire_split_subtitle_tables',
     'restore_legacy_subtitle_columns',
     'stamped_revision',
 ]
