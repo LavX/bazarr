@@ -15,6 +15,7 @@ import {
   Drawer,
   Group,
   MultiSelect,
+  NumberInput,
   Stack,
   Text as MantineText,
   TextInput,
@@ -172,6 +173,99 @@ const resolveProviderPriorities = (
   }
 
   return {};
+};
+
+const parseProviderScoreModifiers = (
+  value: unknown,
+): Record<string, number> | null => {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === "string") {
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parseProviderScoreModifiers(parsed);
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  if (typeof value === "object" && !Array.isArray(value)) {
+    const out: Record<string, number> = {};
+    for (const [provider, modifier] of Object.entries(value)) {
+      // The value arrives as JSON from a hand-edited config as easily as from
+      // this form. An entry that is not a number is dropped rather than
+      // carried through to the scorer.
+      if (typeof modifier === "number" && Number.isFinite(modifier)) {
+        out[provider] = modifier;
+      }
+    }
+    return out;
+  }
+
+  return null;
+};
+
+/**
+ * Read the per-provider score modifiers, preferring this settings session's
+ * staged value over what is saved.
+ */
+export const resolveProviderScoreModifiers = (
+  staged: LooseObject | undefined,
+  settings: Settings | null,
+): Record<string, number> => {
+  const fromStaged = parseProviderScoreModifiers(
+    staged?.["settings-general-provider_score_modifiers"],
+  );
+  if (fromStaged) {
+    return { ...fromStaged };
+  }
+
+  const fromSettings = parseProviderScoreModifiers(
+    settings?.general?.provider_score_modifiers,
+  );
+  if (fromSettings) {
+    return { ...fromSettings };
+  }
+
+  return {};
+};
+
+/**
+ * Put one provider's modifier into the map that gets saved.
+ *
+ * Zero and an emptied field both mean "no modifier", and are stored as the
+ * absence of an entry rather than as a zero, so the saved settings only ever
+ * carry the providers the user has actually adjusted. Values are clamped to
+ * the percentage scale the minimum-score setting uses.
+ */
+export const foldScoreModifier = (
+  modifiers: Record<string, number>,
+  provider: string,
+  value: unknown,
+): Record<string, number> => {
+  const next = { ...modifiers };
+
+  if (value === "" || value === null || value === undefined) {
+    delete next[provider];
+    return next;
+  }
+
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return next;
+  }
+
+  if (value === 0) {
+    delete next[provider];
+    return next;
+  }
+
+  next[provider] = Math.max(-100, Math.min(100, Math.round(value)));
+  return next;
 };
 
 const resolveProviderLanguageExclusions = (
@@ -753,6 +847,7 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
     staged,
     settings,
   );
+  const seededScoreModifiers = resolveProviderScoreModifiers(staged, settings);
 
   const form = useForm<FormValues>({
     initialValues: {
@@ -769,6 +864,8 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
                 seededPriorities[info.key] ?? 100,
               [`settings-general-provider_languages-${info.key}`]:
                 seededProviderLanguageExclusions[info.key] ?? [],
+              [`settings-general-provider_score_modifiers-${info.key}`]:
+                seededScoreModifiers[info.key] ?? 0,
             }
           : {}),
       },
@@ -790,6 +887,11 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
       const languageValue =
         resolveProviderLanguageExclusions(staged, settings)[info.key] ?? [];
       form.setFieldValue(`settings.${languagesKey}`, languageValue);
+
+      const modifierKey = `settings-general-provider_score_modifiers-${info.key}`;
+      const modifierValue =
+        resolveProviderScoreModifiers(staged, settings)[info.key] ?? 0;
+      form.setFieldValue(`settings.${modifierKey}`, modifierValue);
     }
   }, [info?.key]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -819,6 +921,14 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
           delete nextProviderLanguageExclusions[payload.key];
           changes["settings-general-provider_languages"] = JSON.stringify(
             nextProviderLanguageExclusions,
+          );
+
+          const scoreModifiers = resolveProviderScoreModifiers(
+            staged,
+            settings,
+          );
+          changes["settings-general-provider_score_modifiers"] = JSON.stringify(
+            foldScoreModifier(scoreModifiers, payload.key, 0),
           );
         }
 
@@ -879,6 +989,19 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
           changes["settings-general-provider_languages"] = JSON.stringify(
             providerLanguageExclusions,
           );
+
+          const modifierKey = `settings-general-provider_score_modifiers-${info.key}`;
+          const scoreModifiers = resolveProviderScoreModifiers(
+            values.settings,
+            settings,
+          );
+          changes["settings-general-provider_score_modifiers"] = JSON.stringify(
+            foldScoreModifier(
+              scoreModifiers,
+              info.key,
+              values.settings[modifierKey],
+            ),
+          );
         }
 
         // The per-provider priority/language helper keys are UI-local: their
@@ -892,7 +1015,8 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
         for (const changeKey of Object.keys(changes)) {
           if (
             changeKey.startsWith("settings-general-provider_priorities-") ||
-            changeKey.startsWith("settings-general-provider_languages-")
+            changeKey.startsWith("settings-general-provider_languages-") ||
+            changeKey.startsWith("settings-general-provider_score_modifiers-")
           ) {
             delete changes[changeKey];
           }
@@ -1175,6 +1299,27 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
                       maxDropdownHeight={240}
                       comboboxProps={{ withinPortal: true }}
                       leftSection={<FontAwesomeIcon icon={faLanguage} />}
+                    />
+                    <NumberInput
+                      label="Score modifier"
+                      description="Percentage added to this provider's scores before the minimum-score check. Use a negative value to demote a provider, or a positive one to let a provider that structurally cannot score well through a high threshold."
+                      value={
+                        (form.values.settings[
+                          `settings-general-provider_score_modifiers-${info.key}`
+                        ] as number) ?? 0
+                      }
+                      onChange={(value) =>
+                        form.setFieldValue(
+                          `settings.settings-general-provider_score_modifiers-${info.key}`,
+                          value,
+                        )
+                      }
+                      min={-100}
+                      max={100}
+                      step={5}
+                      clampBehavior="strict"
+                      allowDecimal={false}
+                      suffix="%"
                     />
                   </Stack>
                 )}

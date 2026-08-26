@@ -157,6 +157,7 @@ validators = [
     Validator('general.enabled_providers', must_exist=True, default=[], is_type_of=list),
     Validator('general.provider_priorities', must_exist=True, default={}, is_type_of=dict),
     Validator('general.provider_languages', must_exist=True, default={}, is_type_of=dict),
+    Validator('general.provider_score_modifiers', must_exist=True, default={}, is_type_of=dict),
     Validator('general.use_provider_priority', must_exist=True, default=True, is_type_of=bool),
     Validator('general.enabled_integrations', must_exist=True, default=[], is_type_of=list),
     Validator('general.multithreading', must_exist=True, default=True, is_type_of=bool),
@@ -896,6 +897,7 @@ def save_settings(settings_items):
     reset_providers = False
     reset_fanout_pool = False
     reset_compat_pool = False
+    invalidate_compat_cache = False
     active_provider_hub_provider_ids = None
 
     # Subzero Mods
@@ -939,7 +941,8 @@ def save_settings(settings_items):
             value = False
 
         # Handle JSON strings for dict settings
-        if settings_keys[-1] in ['provider_priorities', 'provider_languages', 'tiers'] and isinstance(value, str):
+        if settings_keys[-1] in ['provider_priorities', 'provider_languages',
+                                'provider_score_modifiers', 'tiers'] and isinstance(value, str):
             try:
                 value = json.loads(value)
             except ValueError:
@@ -1077,6 +1080,12 @@ def save_settings(settings_items):
             if value != settings.subsource.apikey:
                 reset_providers = True
 
+        if key == 'settings-general-provider_score_modifiers':
+            # A cached compat envelope carries the projected scores in it, so
+            # an edited modifier would leave external clients on the old
+            # numbers until the entry expires, up to a day later.
+            invalidate_compat_cache = True
+
         if key in ('settings-general-enabled_providers',
                    'settings-general-provider_languages'):
             # Defer the reset until AFTER all values in this batch are
@@ -1185,6 +1194,15 @@ def save_settings(settings_items):
         try:
             from compat.service import reset_compat_pool as _reset_compat
             _reset_compat()
+        except Exception:
+            pass
+
+    if invalidate_compat_cache:
+        # Same reasoning: after the writes, so the next request rebuilds
+        # against the new values rather than the ones being replaced.
+        try:
+            from compat.cache import invalidate_all as _invalidate_compat_cache
+            _invalidate_compat_cache()
         except Exception:
             pass
 
