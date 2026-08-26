@@ -185,6 +185,16 @@ def detect_release_type_mismatch(video_release_type, candidates, min_score,
         if subtitle_type is None or release_type_group(subtitle_type) == video_group:
             continue
 
+        # The projection promises the points guess_matches would award once the
+        # item is re-grabbed as this release type. It awards 'source' only when
+        # both sides map through MERGED_FORMATS: a source the map does not know
+        # leaves the video side None and the candidate side a literal string,
+        # which never compare equal. So for a type outside the map the points
+        # can never be earned, and adding them would advertise a regrab that
+        # changes nothing.
+        if normalize_release_type(subtitle_type) not in MERGED_FORMATS_REV:
+            continue
+
         score = int(candidate.get('score') or 0)
         projected_score = score + release_type_points
         if projected_score < min_score:

@@ -176,9 +176,14 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                             # it logs and still appends the subtitle to its
                             # result, so its return value is not evidence of a
                             # file. storage_path is set where the write happens.
+                            # The file, not the attribute: save_subtitles sets
+                            # storage_path before it writes, so a subtitle whose
+                            # content came back empty still carries a path to a
+                            # file that was never created.
                             written = {str(getattr(saved, 'language', None))
                                        for saved in saved_subtitles
-                                       if getattr(saved, 'storage_path', None)}
+                                       if getattr(saved, 'storage_path', None)
+                                       and os.path.isfile(saved.storage_path)}
                             for landed_video, landed_language in languages_that_landed:
                                 if str(landed_language) not in written:
                                     continue

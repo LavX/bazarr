@@ -990,7 +990,7 @@ def test_recording_a_movie_mismatch_tells_an_open_wanted_page(detection, monkeyp
                for args, kwargs in events), events
 
 
-def test_the_search_clears_the_record_when_the_language_finally_lands(search):
+def test_the_search_clears_the_record_when_the_language_finally_lands(search, tmp_path):
     """The end-to-end half of the clearing rule: the download path itself has to
     call it, or the badge only ever clears in a unit test."""
     cleared = []
@@ -1003,9 +1003,12 @@ def test_the_search_clears_the_record_when_the_language_finally_lands(search):
                                    "othersubs", WEB_RELEASE, {"series"})]})
     # A saved subtitle carries the path it was written to; that is the evidence
     # the clear waits for.
+    written_file = tmp_path / "s01e01.en.srt"
+    written_file.write_text("1\n")
+
     class _Written:
         language = "en"
-        storage_path = "/tv/show/s01e01.en.srt"
+        storage_path = str(written_file)
         matches = set()
 
     search.monkeypatch.setattr(search.module, "save_subtitles",
@@ -1278,3 +1281,58 @@ def test_an_upload_clears_the_record_for_the_language_it_wrote(monkeypatch, tmp_
     manual_module.clear_mismatch_after_manual_save(identity, "series", [written], 2)
 
     assert cleared == [(20, "series", "hu", 2)]
+
+
+def test_a_release_type_the_scorer_cannot_credit_is_never_projected():
+    """The projection promises the points guess_matches would award after a
+    regrab. It awards 'source' only when both sides map through MERGED_FORMATS:
+    a source the map does not know leaves the video side None and the candidate
+    side a literal string, which never compare equal. So for a release type
+    outside the map the points can never be earned, and adding them here would
+    advertise a regrab that changes nothing.
+    """
+    from subtitles.mismatch import detect_release_type_mismatch
+
+    candidate = _candidate(release_info="Show.S01E01.TELESYNC.x264-GRP", score=270)
+    candidate["matches"] = ["series", "season", "episode"]
+
+    assert detect_release_type_mismatch(
+        video_release_type="Camera", candidates=[candidate],
+        min_score=MIN_SCORE, media_type="series") is None
+
+
+def test_a_release_type_the_scorer_knows_is_still_projected():
+    from subtitles.mismatch import detect_release_type_mismatch
+
+    candidate = _candidate(release_info=BLURAY_RELEASE, score=270)
+    candidate["matches"] = ["series", "season", "episode"]
+
+    assert detect_release_type_mismatch(
+        video_release_type="Web", candidates=[candidate],
+        min_score=MIN_SCORE, media_type="series") is not None
+
+
+def test_a_written_file_is_what_clears_the_record(search, tmp_path):
+    """save_subtitles sets storage_path before it writes, so the attribute alone
+    is not evidence: a subtitle whose content came back empty still carries a
+    path to a file that was never created."""
+    cleared = []
+    search.monkeypatch.setattr(
+        search.module, "clear_mismatch_for_video",
+        lambda *args, **kwargs: cleared.append(args))
+    search.monkeypatch.setattr(search.module, "download_best_subtitles",
+                               lambda **kwargs: {search.video: [_FakeSubtitle(
+                                   "othersubs", WEB_RELEASE, {"series"})]})
+
+    class _PathButNoFile:
+        language = "en"
+        storage_path = str(tmp_path / "never-written.srt")
+        matches = set()
+
+    search.monkeypatch.setattr(search.module, "save_subtitles",
+                               lambda *args, **kwargs: [_PathButNoFile()])
+    search.monkeypatch.setattr(search.module, "process_subtitle", lambda **kwargs: None)
+
+    search.run()
+
+    assert cleared == []
