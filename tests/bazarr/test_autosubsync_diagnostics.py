@@ -249,3 +249,36 @@ def test_the_measured_skew_reaches_the_history_entry(monkeypatch, tmp_path):
     assert recorded
     assert "1.04" in recorded[0], f"the measured skew is missing from: {recorded[0]}"
     assert "0.91" in recorded[0], f"the quality of fit is missing from: {recorded[0]}"
+
+
+@pytest.mark.parametrize("quality", [0.749, 0.7499, 0.74999])
+def test_a_near_miss_does_not_read_as_equal_to_the_threshold(monkeypatch, tmp_path, quality):
+    """Two decimals turn 0.749 into "0.75, below its 0.75 threshold", which
+    contradicts itself, and the near miss is exactly the case this message
+    exists to explain."""
+    from subtitles.tools.subsync_engines import SyncEngineDeclinedError
+
+    syncer, _module = _syncer(monkeypatch, tmp_path, (False, quality, 1.0, -2.5))
+
+    with pytest.raises(SyncEngineDeclinedError) as raised:
+        syncer._run_autosubsync_engine(output_path=tmp_path / "out.srt",
+                                       video_path=str(tmp_path / "Movie.mkv"))
+
+    message = str(raised.value)
+    measured, threshold = message.split("quality of fit of ")[1].split(", below its ")
+    threshold = threshold.split(" ")[0]
+    assert measured != threshold, message
+
+
+def test_a_clear_miss_stays_readable(monkeypatch, tmp_path):
+    """Precision is only spent where it is needed: an ordinary number keeps its
+    two decimals rather than growing a tail of zeros."""
+    from subtitles.tools.subsync_engines import SyncEngineDeclinedError
+
+    syncer, _module = _syncer(monkeypatch, tmp_path, (False, 0.43, 1.0, -2.5))
+
+    with pytest.raises(SyncEngineDeclinedError) as raised:
+        syncer._run_autosubsync_engine(output_path=tmp_path / "out.srt",
+                                       video_path=str(tmp_path / "Movie.mkv"))
+
+    assert "0.43," in str(raised.value)

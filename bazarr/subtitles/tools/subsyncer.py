@@ -74,6 +74,21 @@ def _run_autosubsync_api(reference, subtitle_file, output_file, model_file, para
         )
 
 
+def _distinguishable(measured, threshold, minimum=2, maximum=6):
+    """Format two nearby numbers so the pair does not read as one number.
+
+    A near miss is the case this message exists to explain, and two decimals
+    turn 0.749 against 0.75 into "0.75, below its 0.75 threshold", which
+    contradicts itself. Precision grows only until the two differ, so an
+    ordinary number keeps its two decimals instead of a tail of zeros.
+    """
+    for places in range(minimum, maximum + 1):
+        left, right = f'{measured:.{places}f}', f'{threshold:.{places}f}'
+        if left != right:
+            return left, right
+    return f'{measured:.{maximum}f}', f'{threshold:.{maximum}f}'
+
+
 def _autosubsync_quality_threshold():
     """The threshold autosubsync judges its own work against, or None.
 
@@ -426,8 +441,9 @@ class SubSyncer:
             # fault, so it is reported as a decline rather than an engine failure.
             threshold = _autosubsync_quality_threshold()
             if quality is not None and threshold is not None:
-                message = (f'autosubsync measured a quality of fit of {quality:.2f}, below its '
-                           f'{threshold:.2f} threshold; the subtitle may not match this audio.')
+                measured, limit = _distinguishable(quality, threshold)
+                message = (f'autosubsync measured a quality of fit of {measured}, below its '
+                           f'{limit} threshold; the subtitle may not match this audio.')
             elif quality is not None:
                 message = (f'autosubsync measured a quality of fit of {quality:.2f} and rejected '
                            f'its own result.')
