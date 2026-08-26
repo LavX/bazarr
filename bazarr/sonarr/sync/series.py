@@ -14,7 +14,8 @@ from app.database import TableShows, TableLanguagesProfiles, database, insert, u
 from utilities.path_mappings import path_mappings
 from app.event_handler import event_stream
 from app.jobs_queue import jobs_queue
-from arr_instances.resolution import client_for_instance, default_instance_id, scoped, stamp_owner
+from arr_instances.resolution import (client_for_instance, default_instance_id,
+                                      resolve_default_profile, scoped, stamp_owner)
 
 from .episodes import sync_episodes
 from .parser import seriesParser
@@ -55,6 +56,11 @@ def get_series_monitored_table(arr_instance_id=None):
     return series_dict
 
 
+# None is a legitimate resolution ("no default profile"), so it cannot double as
+# "the caller did not resolve one".
+_UNRESOLVED = object()
+
+
 def update_series(job_id=None, wait_for_completion=False, arr_instance_id=None, arr_client=None):
     # arr_instance_id/arr_client thread an instance identity through the sync.
     # Both None = today's exact default-instance path (byte-identical): the leaf
@@ -85,6 +91,18 @@ def update_series(job_id=None, wait_for_completion=False, arr_instance_id=None, 
         audio_profiles = get_profile_list()
         tags_dict = get_tags(arr_client=arr_client)
         language_profiles = get_language_profiles()
+
+        # One more invariant off the per-series path: resolving the default
+        # language profile costs an indexed query per series whenever the
+        # instance has an override, and every one of them returns the same
+        # answer. A tag match still wins over it, inside seriesParser.
+        bulk_instance_id = arr_instance_id if arr_instance_id is not None \
+            else default_instance_id(database, 'sonarr')
+        serie_default_profile = resolve_default_profile(
+            bulk_instance_id,
+            settings.general.serie_default_enabled,
+            settings.general.serie_default_profile,
+            session=database)
 
         # Get current shows in DB (scoped to this instance when instance-synced,
         # so removed-series computation never sees another instance's shows).
@@ -168,7 +186,8 @@ def update_series(job_id=None, wait_for_completion=False, arr_instance_id=None, 
                                   language_profiles=language_profiles,
                                   existing_in_db=show['id'] in current_shows_db,
                                   skip_episode_sync=True,
-                                  arr_instance_id=arr_instance_id, arr_client=arr_client)
+                                  arr_instance_id=arr_instance_id, arr_client=arr_client,
+                                  serie_default_profile=serie_default_profile)
 
                 try:
                     episodes_data = episode_futures[show['id']].result()
@@ -231,7 +250,8 @@ def update_one_series_for_instance(arr_instance_id, series_id, action, **kwargs)
 def update_one_series(series_id, action, is_signalr=False, series_data=None,
                       audio_profiles=None, tags_dict=None, language_profiles=None,
                       existing_in_db=None, skip_episode_sync=False,
-                      arr_instance_id=None, arr_client=None):
+                      arr_instance_id=None, arr_client=None,
+                      serie_default_profile=_UNRESOLVED):
     """Update or delete one series in the DB.
 
     Optional injected arguments let the bulk `update_series()` caller
@@ -269,13 +289,6 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
         event_stream(type='series', action='delete', payload=int(series_id))
         return
 
-    if settings.general.serie_default_enabled is True:
-        serie_default_profile = settings.general.serie_default_profile
-        if serie_default_profile == '':
-            serie_default_profile = None
-    else:
-        serie_default_profile = None
-
     # Fetch invariants only when the bulk caller didn't pre-load them.
     if audio_profiles is None:
         audio_profiles = get_profile_list()
@@ -308,6 +321,23 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
     # preserving legacy NULL behaviour.
     instance_id = arr_instance_id if arr_instance_id is not None \
         else default_instance_id(database, 'sonarr')
+
+    # Default languages profile for a series this pass INSERTS: the owning
+    # instance's override when it has one, otherwise the global default exactly
+    # as before. An instance without an override changes nothing, which is what
+    # keeps single-instance installs on the profile they already have. A tag
+    # match still wins over both, inside seriesParser.
+    # Resolved by the bulk caller when there is one: the lookup issues an
+    # indexed query whenever an instance override is set, and the answer is the
+    # same for every series in a sync. Single-series callers (signalr, the
+    # manual refresh buttons) keep resolving it here, like the other invariants
+    # this function still fetches lazily for them.
+    if serie_default_profile is _UNRESOLVED:
+        serie_default_profile = resolve_default_profile(
+            instance_id,
+            settings.general.serie_default_enabled,
+            settings.general.serie_default_profile,
+            session=database)
 
     if action == 'updated' and existing_in_db:
         # Update existing series in DB

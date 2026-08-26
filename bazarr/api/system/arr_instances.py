@@ -1,9 +1,12 @@
 # coding=utf-8
 
+import logging
+
 from flask import request
 from flask_restx import Namespace, Resource, reqparse
 
 from app.database import database
+from app.jobs_queue import jobs_queue
 from arr_instances import service
 
 from ..utils import authenticate
@@ -26,6 +29,7 @@ _create_parser.add_argument("http_timeout", type=int, location="json")
 _create_parser.add_argument("enabled", type=bool, location="json")
 _create_parser.add_argument("is_default", type=bool, location="json")
 _create_parser.add_argument("subtitle_settings", type=dict, location="json")
+_create_parser.add_argument("media_defaults", type=dict, location="json")
 
 _update_parser = reqparse.RequestParser()
 _update_parser.add_argument("name", type=str, location="json")
@@ -40,6 +44,7 @@ _update_parser.add_argument("http_timeout", type=int, location="json")
 _update_parser.add_argument("enabled", type=bool, location="json")
 _update_parser.add_argument("is_default", type=bool, location="json")
 _update_parser.add_argument("subtitle_settings", type=dict, location="json")
+_update_parser.add_argument("media_defaults", type=dict, location="json")
 
 _test_parser = reqparse.RequestParser()
 _test_parser.add_argument("kind", type=str, required=True, location="json")
@@ -151,3 +156,48 @@ class ArrInstanceTestById(Resource):
         args = _test_by_id_parser.parse_args()
         body, status = service.test_connection_for_instance(database, instance_id, args)
         return body, status
+
+
+@api_ns_system_arr_instances.route(
+    "/system/arr-instances/<int:instance_id>/apply-default-profile")
+class ArrInstanceApplyDefaultProfile(Resource):
+    @authenticate
+    def post(self, instance_id):
+        """Assign this instance's default language profile to its media that has
+        none yet.
+
+        Opt-in and one-way: only rows with no profile are filled in, so
+        hand-picked profiles survive. Reassigning media that already has a
+        profile stays with the mass-edit profile selector in the Series and
+        Movies views, where it is explicit and reviewable.
+        """
+        body, status = service.apply_default_profile(database, instance_id)
+        if status >= 400:
+            return body, status
+        database.commit()
+
+        # Recompute what is missing for exactly the items that changed, in the
+        # background. Each pass scans every episode of an item and emits events,
+        # so doing a whole library inside this request would hold a web worker
+        # for minutes and can outlive a proxy timeout.
+        upstream_ids = body.get("upstream_ids") or []
+        if upstream_ids:
+            try:
+                jobs_queue.feed_jobs_pending_queue(
+                    job_name=f"Refreshing missing subtitles for {len(upstream_ids)} items",
+                    module="arr_instances.service",
+                    func="reindex_after_default_profile",
+                    kwargs={"kind": body.get("kind"), "upstream_ids": upstream_ids,
+                            "arr_instance_id": instance_id},
+                    is_progress=False)
+            except Exception:
+                # The profiles are already committed. Failing the request here
+                # would report that Apply did nothing while the library was in
+                # fact updated, and invite a retry that finds nothing to do. The
+                # scheduled indexer picks the refresh up regardless.
+                logging.exception(
+                    "BAZARR could not queue the missing-subtitles refresh after applying "
+                    "the default language profile of instance %s", instance_id)
+
+        # upstream_ids is an implementation detail of the refresh above.
+        return {"updated": body["updated"], "profileId": body["profileId"]}, 200
