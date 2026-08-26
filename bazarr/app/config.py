@@ -157,6 +157,7 @@ validators = [
     Validator('general.enabled_providers', must_exist=True, default=[], is_type_of=list),
     Validator('general.provider_priorities', must_exist=True, default={}, is_type_of=dict),
     Validator('general.provider_languages', must_exist=True, default={}, is_type_of=dict),
+    Validator('general.provider_score_modifiers', must_exist=True, default={}, is_type_of=dict),
     Validator('general.use_provider_priority', must_exist=True, default=True, is_type_of=bool),
     Validator('general.enabled_integrations', must_exist=True, default=[], is_type_of=list),
     Validator('general.multithreading', must_exist=True, default=True, is_type_of=bool),
@@ -939,7 +940,8 @@ def save_settings(settings_items):
             value = False
 
         # Handle JSON strings for dict settings
-        if settings_keys[-1] in ['provider_priorities', 'provider_languages', 'tiers'] and isinstance(value, str):
+        if settings_keys[-1] in ['provider_priorities', 'provider_languages',
+                                'provider_score_modifiers', 'tiers'] and isinstance(value, str):
             try:
                 value = json.loads(value)
             except ValueError:

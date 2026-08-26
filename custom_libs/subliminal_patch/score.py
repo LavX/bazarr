@@ -64,6 +64,26 @@ MAX_SCORES = {
 }
 
 
+def apply_score_modifier(score, max_score, modifier_percent):
+    """Adjust a raw score by a signed percentage of the maximum.
+
+    The percentage is the scale the minimum-score setting uses, which is the
+    scale the user thinks in, so a modifier of 20 means "count this provider as
+    twenty points of percentage better than it scored".
+
+    The ceiling is the higher of the maximum and the score handed in. A hash
+    match scores above the maximum by design, because MAX_SCORES leaves the
+    hash out, and a modifier has no business collapsing such a score down to
+    the ceiling. What the ceiling does prevent is a positive modifier inventing
+    a score above 100% for a subtitle that did not earn one.
+    """
+    if not modifier_percent:
+        return score
+
+    adjusted = score + round(modifier_percent * max_score / 100)
+    return max(0, min(max(max_score, score), adjusted))
+
+
 def _check_hash_sum(scores: dict):
     hash_val = scores["hash"]
     rest_sum = sum(val for key, val in scores.items() if key != "hash")
@@ -72,6 +92,20 @@ def _check_hash_sum(scores: dict):
 
 
 class ComputeScore:
+    """The scorer every search path goes through.
+
+    ``modifier`` is a hook the host installs: given a provider name it returns
+    a signed percentage to apply to that provider's candidates. Applying it
+    here rather than at the call sites is deliberate. The automatic download,
+    the priority-ordered listing's early-exit and the manual search all compute
+    scores separately, and the minimum-score gate, the search listing and the
+    recorded history percentage have to agree or the interface contradicts
+    itself. subliminal_patch on its own has no such policy, so the hook stays
+    None and nothing changes.
+    """
+
+    modifier = None
+
     def __init__(self, scores=None):
         if scores:
             valid = True
@@ -168,7 +202,33 @@ class ComputeScore:
             )
         )
 
+        modifier_percent = self._modifier_for(subtitle)
+        if modifier_percent:
+            max_score = MAX_SCORES[video.__class__.__name__.lower()]
+            score = apply_score_modifier(score, max_score, modifier_percent)
+            score_without_hash = apply_score_modifier(
+                score_without_hash, max_score, modifier_percent)
+            logger.info("%r: Provider modifier %r%% applied, score is now %r",
+                        subtitle, modifier_percent, score)
+
         return score, score_without_hash
+
+    def _modifier_for(self, subtitle):
+        """The modifier for this subtitle's provider, or nothing.
+
+        The hook reads live settings, so a value the user has just broken must
+        cost them a modifier rather than every search on the instance.
+        """
+        if self.modifier is None:
+            return 0
+        provider_name = getattr(subtitle, "provider_name", None)
+        if not provider_name:
+            return 0
+        try:
+            return self.modifier(provider_name) or 0
+        except Exception:
+            logger.exception("Provider score modifier failed for %r", provider_name)
+            return 0
 
 
 def _episode_checks(video, eq_matches, matches):

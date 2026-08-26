@@ -19,6 +19,7 @@ from subliminal_patch.exceptions import (TooManyRequests, APIThrottled, ParseRes
 from subliminal.exceptions import DownloadLimitExceeded, ServiceUnavailable, AuthenticationError, ConfigurationError
 from subliminal import region as subliminal_cache_region
 from subliminal_patch.extensions import provider_registry
+from subliminal_patch.score import compute_score
 
 from app.get_args import args
 from app.config import settings
@@ -303,6 +304,28 @@ def get_provider_priority(provider_name):
     """Get priority for a specific provider"""
     priorities = settings.general.provider_priorities or {}
     return priorities.get(provider_name, priorities.get('default', 100))
+
+
+def get_provider_score_modifier(provider_name):
+    """The signed percentage to add to this provider's candidate scores.
+
+    Read fresh on every scoring call rather than cached, so editing the setting
+    takes effect on the next search without a restart. The value comes back
+    from the browser as JSON, so anything that is not a number is treated as no
+    modifier at all instead of taking the search down.
+    """
+    modifiers = settings.general.provider_score_modifiers or {}
+    value = modifiers.get(provider_name, 0)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return value
+
+
+# Install the reader on the shared scorer. Every search path -- automatic
+# download, the priority-ordered listing's early-exit, manual search -- goes
+# through that one instance, so this is the only place the wiring exists and no
+# call site can be forgotten.
+compute_score.modifier = get_provider_score_modifier
 
 
 _FFPROBE_BINARY = get_binary("ffprobe")

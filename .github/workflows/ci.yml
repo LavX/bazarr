@@ -275,6 +275,7 @@ jobs:
             tests/bazarr/test_provider_hub_install_serialization.py \
             tests/bazarr/test_provider_hub_language_fallback.py \
             tests/bazarr/test_provider_hub_release_scoring.py \
+            tests/bazarr/test_provider_score_modifier.py \
             tests/bazarr/test_scheduler_session_cleanup.py \
             tests/bazarr/test_secret_store_crypto.py \
             tests/bazarr/test_secret_store_e2e.py \

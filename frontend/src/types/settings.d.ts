@@ -87,6 +87,7 @@ declare namespace Settings {
     utf8_encode: boolean;
     provider_priorities?: string;
     provider_languages?: Record<string, string[]> | string;
+    provider_score_modifiers?: Record<string, number> | string;
     wanted_search_frequency: number;
     wanted_search_frequency_movie: number;
     use_external_webhook?: boolean;
