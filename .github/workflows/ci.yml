@@ -136,10 +136,13 @@ jobs:
           name: ${{ env.UI_ARTIFACT_NAME }}
           path: "${{ env.UI_DIRECTORY }}/build"
 
-      - name: Install ffmpeg
-        # test_embeddedsubtitles uses real .mkv fixtures that require ffprobe to
-        # extract stream metadata. Ubuntu runners ship without it.
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Install ffmpeg and a RAR extractor
+        # ffmpeg: test_embeddedsubtitles uses real .mkv fixtures that require
+        # ffprobe to extract stream metadata, and Ubuntu runners ship without it.
+        # unar: the RAR fixtures cannot be read without it. 7z is present on the
+        # runner and recognises RAR as a format, but carries no RAR
+        # decompression codec, which is the same trap the image once shipped.
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ffmpeg unar
 
       - name: Install Python dependencies
         run: |
@@ -173,6 +176,7 @@ jobs:
             tests/bazarr/test_jellyfin_apikey_location.py \
             tests/bazarr/test_provider_hub.py \
             tests/bazarr/test_provider_pool_config_reload.py \
+            tests/bazarr/test_rar_extraction_production_config.py \
             tests/bazarr/test_provider_hub_auto_install_optin.py \
             tests/bazarr/test_provider_hub_archive_select.py \
             tests/bazarr/test_archive_member_matching.py \
@@ -204,6 +208,7 @@ jobs:
             tests/bazarr/test_sync_instance_overrides.py \
             tests/bazarr/test_sync_outcome_reporting.py \
             tests/bazarr/test_subzero_keep_lyrics.py \
+            tests/bazarr/test_release_type_mismatch.py \
             tests/bazarr/test_archive_extraction.py \
             tests/bazarr/test_security_guards.py \
             tests/bazarr/test_login_backdrops.py \
@@ -223,30 +228,21 @@ jobs:
             tests/subliminal_patch/test_video.py \
             -v --tb=short
 
-      - name: pytest previously unguarded bazarr suites
+      - name: pytest previously unguarded suites
         # These existed but were never collected by CI, so their assertions protected
         # nothing. Backfilled wholesale; test_ci_guard_list.py fails if a new test file
         # is added without being enumerated here or excluded with a reason.
         #
-        # Kept separate from the subliminal_patch step below, and this is a
-        # WORKAROUND, not a structural choice. Co-collecting the two trees makes
+        # One process for both trees. They used to be split, because
         # tests/subliminal_patch/test_utils.py::test_get_subtitle_from_archive_season_pack
-        # fail, and that failure is real. Exactly five of the files below load the
-        # api package transitively: test_combine_api_dto, test_combine_main,
-        # test_secret_store_e2e, test_subtitle_content_sync_outputs and
-        # test_upgrade_embedded_history. api/system/status.py does
-        # `from init import startTime`, and bazarr/init.py calls init_binaries() at
-        # module scope, which globally repoints rarfile at 7z exactly as production
-        # does. get_binary() resolves that through which(), so the binary in play
-        # here is the runner's own 7z, not anything in the Docker image, and it
-        # cannot decode the RAR fixture that test reads. The co-collected run was
-        # detecting the shipped RAR bug and this split hides it.
-        #
-        # Do not go looking for those five by grepping for `import api`: one of them
-        # gets there through importlib.import_module on a string, two import neither
-        # api nor app by name, and three files that DO import api.* are inert because
-        # they stub `init` in sys.modules before importing. Remove the split once RAR
-        # extraction is fixed in the image.
+        # failed when co-collected: any file that imports the app runs
+        # init_binaries(), which repoints rarfile at whatever extractor is
+        # installed, exactly as production does, and the image shipped only an
+        # archiver that recognises RAR without being able to decompress it. The
+        # split hid a real product bug. The image ships unar now and discovery
+        # prefers the extractors that work, so the trees run together again and
+        # test_rar_extraction_production_config.py asserts the configuration
+        # directly rather than leaving it to collection order.
         run: |
           pytest \
             tests/bazarr/test_app_notifier.py \
@@ -277,6 +273,7 @@ jobs:
             tests/bazarr/test_logging_filters.py \
             tests/bazarr/test_provider_hub_install_serialization.py \
             tests/bazarr/test_provider_hub_language_fallback.py \
+            tests/bazarr/test_provider_hub_release_scoring.py \
             tests/bazarr/test_scheduler_session_cleanup.py \
             tests/bazarr/test_secret_store_crypto.py \
             tests/bazarr/test_secret_store_e2e.py \
@@ -292,14 +289,8 @@ jobs:
             tests/bazarr/test_tracemalloc_dumper.py \
             tests/bazarr/test_translator_auth.py \
             tests/bazarr/test_upgrade_embedded_history.py \
-            -v --tb=short
-
-      - name: pytest previously unguarded subliminal_patch suites
-        # Separate process from the bazarr step above. See the note there: this
-        # masks a real product bug and should not outlive it.
-        run: |
-          pytest \
             tests/subliminal_patch/test_animetosho.py \
+            tests/subliminal_patch/test_core.py \
             tests/subliminal_patch/test_core_persistent.py \
             tests/subliminal_patch/test_opensubtitles_scraper.py \
             tests/subliminal_patch/test_score.py \
@@ -343,7 +334,8 @@ jobs:
             tests/bazarr/test_files_browse_instance_scope.py \
             tests/bazarr/test_path_mappings_instance.py \
             tests/bazarr/test_threading_followup.py \
-            tests/bazarr/test_mass_operations.py ; do
+            tests/bazarr/test_mass_operations.py \
+            tests/bazarr/test_release_type_mismatch_migration.py ; do
             echo "::group::$f"
             pytest "$f" -p no:cacheprovider -q
             echo "::endgroup::"

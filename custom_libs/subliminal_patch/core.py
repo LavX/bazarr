@@ -684,35 +684,10 @@ class SZProviderPool(ProviderPool):
 
         return True
 
-    def download_best_subtitles(self, subtitles, video, languages, min_score=0, hearing_impaired=False, only_one=False,
-                                use_original_format=False, fallback_allowed=False):
-        """Download the best matching subtitles.
-
-        patch:
-            - hearing_impaired is now string
-            - add .score to subtitle
-            - move all languages check further to the top (still necessary?)
-
-        :param subtitles: the subtitles to use.
-        :type subtitles: list of :class:`~subliminal.subtitle.Subtitle`
-        :param video: video to download subtitles for.
-        :type video: :class:`~subliminal.video.Video`
-        :param languages: languages to download.
-        :type languages: set of :class:`~babelfish.language.Language`
-        :param int min_score: minimum score for a subtitle to be downloaded.
-        :param bool hearing_impaired: hearing impaired preference.
-        :param bool only_one: download only one subtitle, not one per language.
-        :param bool use_original_format: preserve original subtitles format
-        :return: downloaded subtitles.
-        :rtype: list of :class:`~subliminal.subtitle.Subtitle`
-
-        """
+    @classmethod
+    def _score_subtitles(cls, subtitles, video, languages, hearing_impaired):
+        """(subtitle, score, score_without_hash, matches, orig_matches) tuples, best first."""
         use_hearing_impaired = hearing_impaired in ("prefer", "force HI")
-
-        is_episode = isinstance(video, Episode)
-        max_score = MAX_SCORES['episode' if is_episode else 'movie']
-
-        # sort subtitles by score
         unsorted_subtitles = []
 
         for s in subtitles:
@@ -722,8 +697,22 @@ class SZProviderPool(ProviderPool):
                 continue
 
             try:
-                matches = s.matches if hasattr(s, 'matches') and isinstance(s.matches, set) and len(s.matches) \
-                        else s.get_matches(video)
+                cached = s.matches if hasattr(s, 'matches') and isinstance(s.matches, set) \
+                    and len(s.matches) else None
+                # A candidate may declare that its match set is only complete once it
+                # has seen the video. Provider Hub candidates arrive from the worker
+                # with a lean set of identifier matches already populated, so reusing
+                # it here scored every one of them identically and the first listed
+                # won, handing a user searching for a 2160p WEB release a Blu-ray
+                # subtitle for another release group. Declared on the candidate rather
+                # than sniffed from its class name, which a rename or a subclass would
+                # silently defeat. Recomputation is idempotent: the augmented set is
+                # derived from a frozen base, so the priority-ordered listing path,
+                # which already computed it, gets the same answer twice.
+                if cached is None or getattr(s, 'matches_need_video', False):
+                    matches = s.get_matches(video)
+                else:
+                    matches = cached
 
             except AttributeError:
                 logger.error("%r: Match computation failed: %s", s, traceback.format_exc())
@@ -736,8 +725,45 @@ class SZProviderPool(ProviderPool):
             unsorted_subtitles.append(
                 (s, score, score_without_hash, matches, orig_matches))
 
-        # sort subtitles by score
-        scored_subtitles = sorted(unsorted_subtitles, key=operator.itemgetter(1, 2), reverse=True)
+        return sorted(unsorted_subtitles, key=operator.itemgetter(1, 2), reverse=True)
+
+    def download_best_subtitles(self, subtitles, video, languages, min_score=0, hearing_impaired=False, only_one=False,
+                                use_original_format=False, fallback_allowed=False, candidate_sink=None):
+        """Download the best matching subtitles.
+
+        patch:
+            - hearing_impaired is now string
+            - add .score to subtitle
+            - move all languages check further to the top (still necessary?)
+            - optional candidate_sink reporting every scored candidate
+
+        :param subtitles: the subtitles to use.
+        :type subtitles: list of :class:`~subliminal.subtitle.Subtitle`
+        :param video: video to download subtitles for.
+        :type video: :class:`~subliminal.video.Video`
+        :param languages: languages to download.
+        :type languages: set of :class:`~babelfish.language.Language`
+        :param int min_score: minimum score for a subtitle to be downloaded.
+        :param bool hearing_impaired: hearing impaired preference.
+        :param bool only_one: download only one subtitle, not one per language.
+        :param bool use_original_format: preserve original subtitles format
+        :param list candidate_sink: when given, receives one record per scored
+            candidate: provider name, release description, score and whether it
+            was downloaded. The loop below stops at the first candidate under
+            ``min_score``, so the rejected candidates a caller may want to
+            inspect are exactly the ones it never visits; they are collected
+            from the scored list instead. Purely a report: no provider is
+            contacted for it.
+        :return: downloaded subtitles.
+        :rtype: list of :class:`~subliminal.subtitle.Subtitle`
+
+        """
+        use_hearing_impaired = hearing_impaired in ("prefer", "force HI")
+
+        is_episode = isinstance(video, Episode)
+        max_score = MAX_SCORES['episode' if is_episode else 'movie']
+
+        scored_subtitles = self._score_subtitles(subtitles, video, languages, hearing_impaired)
 
         # download best subtitles, falling back on the next on error
         downloaded_subtitles = []
@@ -813,6 +839,23 @@ class SZProviderPool(ProviderPool):
                         subtitle.score = score
                         downloaded_subtitles.append(subtitle)
                         break
+
+        if candidate_sink is not None:
+            # Identity, not equality: Subtitle equality is provider-defined and
+            # two distinct candidates can compare equal.
+            downloaded_ids = {id(s) for s in downloaded_subtitles}
+            for subtitle, score, _score_without_hash, _matches, orig_matches in scored_subtitles:
+                candidate_sink.append({
+                    'provider_name': subtitle.provider_name,
+                    'release_info': getattr(subtitle, 'release_info', None),
+                    'score': score,
+                    'downloaded': id(subtitle) in downloaded_ids,
+                    # The loop above rejects an episode subtitle that does not
+                    # match the series and episode however high it scores, so a
+                    # consumer reasoning about "would this have been downloaded"
+                    # needs the same matches the loop tested.
+                    'matches': sorted(orig_matches or ()),
+                })
 
         return downloaded_subtitles
 

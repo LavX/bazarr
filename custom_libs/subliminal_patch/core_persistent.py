@@ -61,8 +61,14 @@ def download_best_subtitles(
     use_original_format=False,
     use_provider_priority=True,
     fallback_allowed=False,
+    candidate_sink=None,
     **kwargs
 ):
+    """``candidate_sink``, when given, is a list that receives one record per
+    scored candidate (see ``SZProviderPool.download_best_subtitles``). It is
+    filled from the results the search already produced, so passing it costs no
+    additional provider request. With more than one video the records of every
+    video land in the same list."""
     downloaded_subtitles = defaultdict(list)
 
     # check videos
@@ -100,6 +106,7 @@ def download_best_subtitles(
             only_one=only_one,
             use_original_format=use_original_format,
             fallback_allowed=fallback_allowed,
+            candidate_sink=candidate_sink,
         )
         logger.info("Downloaded %d subtitle(s)", len(subtitles))
         downloaded_subtitles[video].extend(subtitles)

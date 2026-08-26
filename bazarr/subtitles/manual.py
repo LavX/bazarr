@@ -29,6 +29,7 @@ from subtitles.processing import ProcessSubtitlesResult  # noqa: F401
 from .cache import subtitle_cache
 from .pool import update_pools, _get_pool
 from .utils import get_video, _get_lang_obj, _get_scores
+from .mismatch import clear_mismatch_for_video
 from .processing import process_subtitle
 
 
@@ -207,6 +208,8 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
                 return 'Error saving Subtitles file to disk'
             else:
                 if saved_subtitles:
+                    clear_mismatch_after_manual_save(video, media_type, saved_subtitles,
+                                                     arr_instance_id)
                     _, max_score, _ = _get_scores(media_type)
                     for saved_subtitle in saved_subtitles:
                         processed_subtitle = process_subtitle(subtitle=saved_subtitle, media_type=media_type,
@@ -369,3 +372,24 @@ def _get_language_obj(profile_id):
         language_set.add(lang_obj)
 
     return language_set, original_format
+
+
+def clear_mismatch_after_manual_save(video, media_type, saved_subtitles, arr_instance_id=None):
+    """Clear recorded mismatches for the languages a manual save actually wrote.
+
+    A language satisfied by hand is satisfied: clearing only on the automatic
+    download path would leave the badge up for a subtitle the user can see on
+    disk. storage_path is the evidence a file was written, since save_subtitles
+    returns a subtitle even when it wrote nothing.
+    """
+    for saved in saved_subtitles or []:
+        storage_path = getattr(saved, 'storage_path', None)
+        # The file, not the attribute: save_subtitles assigns storage_path
+        # before it writes, so a subtitle whose content came back empty carries
+        # a path to a file that was never created.
+        if not storage_path or not os.path.isfile(storage_path):
+            continue
+        language = getattr(saved, 'language', None)
+        if language is None:
+            continue
+        clear_mismatch_for_video(video, media_type, language, arr_instance_id=arr_instance_id)

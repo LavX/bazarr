@@ -10,6 +10,7 @@ from functools import reduce
 from app.config import settings
 from app.database import TableMovies, TableLanguagesProfiles, database, insert, update, delete, select, get_exclusion_clause
 from app.event_handler import event_stream
+from subtitles.mismatch import forget_media_by_upstream
 from app.jobs_queue import jobs_queue
 from app.notifier import send_notifications_movie
 from constants import MINIMUM_VIDEO_SIZE
@@ -238,6 +239,7 @@ def update_movies(job_id=None, wait_for_completion=False, arr_instance_id=None, 
             movies_to_delete = list(set(current_movies_id_db) - set(current_movies_radarr))
             movies_deleted = []
             if len(movies_to_delete):
+                forget_media_by_upstream('movie', movies_to_delete, arr_instance_id)
                 try:
                     database.execute(scoped(delete(TableMovies).where(TableMovies.radarrId.in_(movies_to_delete)),
                                             TableMovies.arr_instance_id, arr_instance_id))
@@ -358,6 +360,7 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False,
     # Remove movie from DB
     if action == 'deleted':
         if existing_movie:
+            forget_media_by_upstream('movie', [movie_id], arr_instance_id)
             try:
                 database.execute(
                     scoped(delete(TableMovies)
@@ -412,6 +415,7 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False,
 
     # Remove movie from DB
     if not movie and existing_movie:
+        forget_media_by_upstream('movie', [movie_id], arr_instance_id)
         try:
             database.execute(
                 scoped(delete(TableMovies)
