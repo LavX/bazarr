@@ -237,7 +237,10 @@ class ComputeScore:
                 or not math.isfinite(modifier):
             logger.warning("Ignoring unusable score modifier %r for %r", modifier, provider_name)
             return 0
-        return modifier
+        # A finite value can still be large enough that multiplying it by the
+        # maximum score overflows to infinity, and round() raises on that a
+        # frame above this guard. The scale only goes to a hundred either way.
+        return max(-100, min(100, modifier))
 
 
 def _episode_checks(video, eq_matches, matches):

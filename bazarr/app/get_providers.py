@@ -322,7 +322,9 @@ def get_provider_score_modifier(provider_name):
     # NaN and the infinities pass the type check and then raise inside round().
     if not math.isfinite(value):
         return 0
-    return value
+    # The scale only goes to a hundred, and a finite value large enough to
+    # overflow the multiplication would raise rather than degrade.
+    return max(-100, min(100, value))
 
 
 # Install the reader on the scorer class, not on the shared instance. Every

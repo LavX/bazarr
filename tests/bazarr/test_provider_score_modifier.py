@@ -35,10 +35,17 @@ def episode_video():
 
 @pytest.fixture
 def scorer():
-    """A ComputeScore with no modifier installed, restored afterwards."""
+    """A ComputeScore with no modifier on it.
+
+    The settings-backed hook lives on the class, so a bare instance would carry
+    whatever the live configuration happens to say. Shadowing it per instance
+    keeps these tests about the scorer rather than about the settings.
+    """
     from subliminal_patch.score import ComputeScore
 
-    return ComputeScore()
+    instance = ComputeScore()
+    instance.modifier = None
+    return instance
 
 
 # --- the arithmetic -------------------------------------------------------
@@ -269,3 +276,33 @@ def test_the_setting_reader_rejects_a_not_a_number_value(monkeypatch):
         monkeypatch.setattr(settings.general, 'provider_score_modifiers',
                             {'whisperai': bad}, raising=False)
         assert get_provider_score_modifier('whisperai') == 0
+
+
+def test_a_huge_but_finite_modifier_does_not_overflow_the_arithmetic(scorer, episode_video):
+    """1e306 is finite, so the non-finite guards let it past, and multiplying
+    it by the maximum score overflows to infinity inside round()."""
+    subtitle = _Subtitle('whisperai')
+    matches = {'series', 'season', 'episode'}
+
+    plain, _ = scorer(set(matches), subtitle, episode_video)
+    scorer.modifier = lambda provider: 1e306
+    huge, _ = scorer(set(matches), subtitle, episode_video)
+
+    from subliminal_patch.score import MAX_SCORES
+    # Bounded to the percentage scale, so the most it can do is reach the top.
+    assert huge == MAX_SCORES['episode']
+    assert huge > plain
+
+    scorer.modifier = lambda provider: -1e306
+    assert scorer(set(matches), subtitle, episode_video)[0] == 0
+
+
+def test_the_setting_reader_bounds_a_value_beyond_the_percentage_scale(monkeypatch):
+    from app.config import settings
+    from app.get_providers import get_provider_score_modifier
+
+    monkeypatch.setattr(settings.general, 'provider_score_modifiers',
+                        {'whisperai': 1e306, 'subdl': -400}, raising=False)
+
+    assert get_provider_score_modifier('whisperai') == 100
+    assert get_provider_score_modifier('subdl') == -100

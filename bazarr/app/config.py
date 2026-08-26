@@ -897,6 +897,7 @@ def save_settings(settings_items):
     reset_providers = False
     reset_fanout_pool = False
     reset_compat_pool = False
+    invalidate_compat_cache = False
     active_provider_hub_provider_ids = None
 
     # Subzero Mods
@@ -1079,6 +1080,12 @@ def save_settings(settings_items):
             if value != settings.subsource.apikey:
                 reset_providers = True
 
+        if key == 'settings-general-provider_score_modifiers':
+            # A cached compat envelope carries the projected scores in it, so
+            # an edited modifier would leave external clients on the old
+            # numbers until the entry expires, up to a day later.
+            invalidate_compat_cache = True
+
         if key in ('settings-general-enabled_providers',
                    'settings-general-provider_languages'):
             # Defer the reset until AFTER all values in this batch are
@@ -1187,6 +1194,15 @@ def save_settings(settings_items):
         try:
             from compat.service import reset_compat_pool as _reset_compat
             _reset_compat()
+        except Exception:
+            pass
+
+    if invalidate_compat_cache:
+        # Same reasoning: after the writes, so the next request rebuilds
+        # against the new values rather than the ones being replaced.
+        try:
+            from compat.cache import invalidate_all as _invalidate_compat_cache
+            _invalidate_compat_cache()
         except Exception:
             pass
 
