@@ -169,8 +169,8 @@ POST /api/series/&lt;id&gt;/subtitles/combine</code></pre>
       <p><strong>Nothing to install.</strong> If you run the Docker image, all three engines and ffmpeg are already inside it. There is no separate download, no manual step, and no setting to point at a binary.</p>
 
       <ul>
-        <li><strong>ffsubsync</strong> aligns against the <strong>audio track</strong>. Best on a subtitle that is uniformly early or late, and on one whose framerate does not match the video.</li>
-        <li><strong>autosubsync</strong> also aligns against the <strong>audio track</strong>, using a different speech model, so it often succeeds where ffsubsync does not, and the reverse.</li>
+        <li><strong>ffsubsync</strong> aligns against the video, using the audio track or an embedded subtitle stream depending on your <strong>Force audio</strong> and original-language settings. Best on a subtitle that is uniformly early or late, and on one whose framerate does not match the video.</li>
+        <li><strong>autosubsync</strong> always aligns against the <strong>audio track</strong>, using a different speech model, so it often succeeds where ffsubsync does not, and the reverse.</li>
         <li><strong>ALASS</strong> aligns against the <strong>reference itself</strong>. Best on timing that drifts in blocks: adverts cut out, a different edit, or a subtitle that is right at the start and progressively wrong later. This is usually the one that rescues a file the other two cannot.</li>
       </ul>
 
@@ -180,11 +180,11 @@ POST /api/series/&lt;id&gt;/subtitles/combine</code></pre>
 
       <ul>
         <li><strong>Overwrite</strong> replaces the subtitle with the result of the first engine that succeeds, and stops there. The remaining engines are not run.</li>
-        <li><strong>Keep all engine outputs</strong> runs every enabled engine and writes each result beside the original as <code>&lt;name&gt;.&lt;engine&gt;.srt</code>. Compare them and delete the ones you do not want.</li>
+        <li><strong>Keep all engine outputs</strong> runs every enabled engine and writes each result beside the original as <code>&lt;name&gt;.&lt;engine&gt;.&lt;ext&gt;</code>, keeping the source file's extension: an ASS subtitle produces <code>.alass.ass</code>, not <code>.alass.srt</code>. Compare them and delete the ones you do not want.</li>
       </ul>
 
       <div class="note">
-        <strong>A sync output is never synced again.</strong> A subtitle a sync engine produced is not used as the source for another sync, so running a sync twice cannot compound one alignment on top of another.
+        <strong>Keep-all outputs are never used as a sync source.</strong> The <code>&lt;name&gt;.&lt;engine&gt;.&lt;ext&gt;</code> files a keep-all run leaves behind are recognised as engine output and skipped when a later sync looks for something to align, so those results cannot be stacked on each other. Overwrite mode is different: it replaces the subtitle in place with no marker in the name, so syncing that file again re-aligns the already-aligned subtitle, which is what you want when the first attempt was wrong and worth knowing about when it was not.
       </div>
 
       <h3 id="sync-failures">When an engine declines</h3>
@@ -193,11 +193,11 @@ POST /api/series/&lt;id&gt;/subtitles/combine</code></pre>
 
       <p>autosubsync is the most visible case: it judges its own result against a confidence threshold and reports failure when it does not trust the alignment, rather than handing back a subtitle it believes is wrong. Sparse dialogue, a heavy musical score, or audio in a language its model handles poorly all lower that confidence even when the file itself is fine.</p>
 
-      <p>The sync report gives one line per engine, so you can tell the three outcomes apart:</p>
+      <p>What the job report tells you depends on the outcome. An overwrite run that succeeds says only <em>Sync complete</em>, because it stops at the first engine that works and the ones behind it were never asked. A keep-all run that some engines declined says how many produced output and then gives a line for each that did not, and a run where nothing worked lists them all. Those lines distinguish three outcomes:
 
       <ul>
         <li><strong>declined</strong> &mdash; the engine ran and rejected its own result. Nothing is wrong with your installation. Where the engine measures a number, the line quotes it and the threshold it was judged against.</li>
-        <li><strong>rejected</strong> &mdash; the engine claimed success but Bazarr+ refused the result, because the alignment it produced was further out than your configured maximum offset.</li>
+        <li><strong>rejected</strong> &mdash; the engine claimed success but Bazarr+ refused the result, because the alignment it produced was further out than your configured maximum offset. This can only be applied to an engine that reports the offset it measured, which ALASS does not, so the maximum offset does not constrain it.</li>
         <li><strong>not installed</strong> &mdash; the engine could not be found at all. On Docker this should never appear; on a bare-metal install it usually means ALASS is not on <code>PATH</code>.</li>
       </ul>
 
