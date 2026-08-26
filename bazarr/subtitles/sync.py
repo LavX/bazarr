@@ -31,8 +31,11 @@ _ENGINE_OUTCOME_SENTENCES = {
     REASON_MISSING_ENGINE: "{label} is not installed.",
     REASON_FAILURE_THRESHOLD: "{label} was skipped after repeated failures.",
     REASON_OUTPUT_EXISTS: "{label} output already existed and was kept.",
+    # {message} carries whatever the engine measured, e.g. the quality of fit
+    # and the threshold it was judged against. Without it the card said only
+    # that the engine declined, which is the report this text exists to answer.
     REASON_ENGINE_DECLINED: ("{label} rejected its own result as unreliable, which is normal "
-                             "when it cannot confidently align a file."),
+                             "when it cannot confidently align a file. {message}"),
     REASON_RESULT_REJECTED: "{label} result rejected: {message}",
     REASON_ENGINE_FAILED: "{label} failed: {message}",
 }
@@ -68,7 +71,9 @@ def _engine_outcome_sentence(engine_result):
         return f"{label} produced no output."
 
     message = _short_engine_message(engine_result.message, engine_result.engine)
-    sentence = template.format(label=label, message=message)
+    # A template may carry an optional {message}: an engine that measured nothing
+    # would otherwise leave a dangling space or a stray fragment in the card.
+    sentence = " ".join(template.format(label=label, message=message).split())
     return sentence if sentence.endswith((".", "...")) else f"{sentence}."
 
 

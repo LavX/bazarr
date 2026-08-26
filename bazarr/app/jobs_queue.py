@@ -530,11 +530,22 @@ class JobsQueue:
         :return: A boolean value indicating whether the job was successfully initiated.
         :rtype: bool
         """
-        for job in self.jobs_pending_queue:
-            if job.job_id == job_id and job.status == 'pending':
-                self._run_job(job_instance=job)
-                return True
-        return False
+        with self._queue_lock:
+            job = next((item for item in self.jobs_pending_queue
+                        if item.job_id == job_id and item.status == 'pending'), None)
+            if job is None:
+                return False
+
+            # Deliberately without a capacity check: forcing a job is an
+            # explicit user action. It still reserves the same way, so the job
+            # is counted exactly once and never sits in neither queue.
+            self.jobs_pending_queue.remove(job)
+            self.jobs_running_queue.append(job)
+
+        job_thread = Thread(target=self._run_job, args=(job,))
+        job_thread.daemon = True
+        job_thread.start()
+        return True
 
     def empty_jobs_queue(self, queue_name: str):
         """
@@ -566,34 +577,61 @@ class JobsQueue:
         """
         while True:
             try:
-                if self.jobs_pending_queue:
-                    with self._queue_lock:
-                        next_job = self.jobs_pending_queue[0] if self.jobs_pending_queue else None
-                        if next_job:
-                            is_translation = 'translat' in (next_job.job_name or '').lower()
-                            if is_translation:
-                                # Translation jobs respect their own concurrency limit
-                                running_translations = sum(
-                                    1 for j in self.jobs_running_queue
-                                    if 'translat' in (j.job_name or '').lower()
-                                )
-                                max_translations = settings.translator.openrouter_max_concurrent
-                                can_run_job = running_translations < max_translations
-                            else:
-                                can_run_job = len(self.jobs_running_queue) < settings.general.concurrent_jobs
-                        else:
-                            can_run_job = False
-
-                    if can_run_job:
-                        job_thread = Thread(target=self._run_job)
-                        job_thread.daemon = True
-                        job_thread.start()
-                    else:
-                        sleep(0.5)
-                else:
+                job = self._reserve_next_job()
+                if job is None:
                     sleep(0.5)
+                    continue
+
+                job_thread = Thread(target=self._run_job, args=(job,))
+                job_thread.daemon = True
+                job_thread.start()
             except (KeyboardInterrupt, SystemExit):
                 break
+
+    def _has_capacity_for(self, job) -> bool:
+        """Whether ``job`` may start now. Call with ``_queue_lock`` held.
+
+        The general limit applies to every job. The translation lane is a
+        sub-limit inside it, not a parallel gate: the settings field says
+        "Number of concurrent jobs allowed in the jobs manager", and a
+        translation admitted purely against its own lane meant a translation
+        plus a general job ran under a configured limit of 1.
+        """
+        if len(self.jobs_running_queue) >= settings.general.concurrent_jobs:
+            return False
+
+        if 'translat' not in (job.job_name or '').lower():
+            return True
+
+        running_translations = sum(
+            1 for running in self.jobs_running_queue
+            if 'translat' in (running.job_name or '').lower()
+        )
+        return running_translations < settings.translator.openrouter_max_concurrent
+
+    def _reserve_next_job(self):
+        """Take the next runnable job off pending and put it on running, or None.
+
+        One critical section for the whole decision. The check and the act used
+        to be separate: capacity was compared under the lock, the lock was
+        released, a worker was spawned, and only that worker appended the job to
+        the running queue. In between, the job was in neither queue, so the
+        consumer's next iteration read a running count that was one too low and
+        started another worker. With a limit of 1 and a backlog, the loop has no
+        sleep on that path and won the race essentially every time, which is why
+        two jobs ran and stayed at two.
+        """
+        with self._queue_lock:
+            if not self.jobs_pending_queue:
+                return None
+
+            job = self.jobs_pending_queue[0]
+            if not self._has_capacity_for(job):
+                return None
+
+            self.jobs_pending_queue.popleft()
+            self.jobs_running_queue.append(job)
+            return job
 
     def _run_job(self, job_instance=None) -> bool:
         """
@@ -608,15 +646,10 @@ class JobsQueue:
             True if the job was successfully completed, otherwise False.
         :rtype: bool
         """
-        with self._queue_lock:
-            if job_instance:
-                job = job_instance
-                self.jobs_pending_queue.remove(job)
-            else:
-                if not self.jobs_pending_queue:
-                    return False
-                job = self.jobs_pending_queue.popleft()
-    
+        # The caller reserved this job: it is already off pending and on
+        # running, which is what keeps the capacity check honest. This method
+        # only runs it.
+        job = job_instance
         if not job:
             sleep(0.1)
             return False
@@ -625,7 +658,6 @@ class JobsQueue:
             job.last_run_time = datetime.now()
             if 'job_id' not in job.kwargs or not job.kwargs['job_id']:
                 job.kwargs['job_id'] = job.job_id
-            self.jobs_running_queue.append(job)
 
             # sending event to update the status of progress jobs
             payload = {"job_id": job.job_id, "status": job.status}
@@ -648,20 +680,23 @@ class JobsQueue:
             job.status = 'completed'
             job.progress_message = "Cancelled by user"
             job.last_run_time = datetime.now()
-            self.jobs_running_queue.remove(job)
+            with self._queue_lock:
+                self.jobs_running_queue.remove(job)
             self.jobs_completed_queue.append(job)
             return False
         except Exception as e:
             logging.exception(f"Exception raised while running function: {e}")  # noqa: G004
             job.status = 'failed'
             job.last_run_time = datetime.now()
-            self.jobs_running_queue.remove(job)
+            with self._queue_lock:
+                self.jobs_running_queue.remove(job)
             self.jobs_failed_queue.append(job)
             return False
         else:
             job.status = 'completed'
             job.last_run_time = datetime.now()
-            self.jobs_running_queue.remove(job)
+            with self._queue_lock:
+                self.jobs_running_queue.remove(job)
             self.jobs_completed_queue.append(job)
             return True
         finally:
