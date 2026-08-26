@@ -133,3 +133,119 @@ def test_the_history_entry_carries_the_quality_it_measured(monkeypatch, tmp_path
     message = recorded[0]
     assert "-2.5" in message
     assert "0.91" in message, f"the quality of fit is missing from: {message}"
+
+
+def test_the_decline_notification_carries_the_numbers():
+    """The whole point of measuring them: they have to reach the user, not just
+    the log. The reason template had no {message} slot, so the sentence in the
+    job card was the same fixed line whatever the engine measured."""
+    from types import SimpleNamespace
+
+    from subtitles.sync import _engine_outcome_sentence
+    from subtitles.tools.subsync_engines import REASON_ENGINE_DECLINED
+
+    sentence = _engine_outcome_sentence(SimpleNamespace(
+        engine="autosubsync",
+        reason=REASON_ENGINE_DECLINED,
+        message=("autosubsync measured a quality of fit of 0.43, below its 0.75 "
+                 "threshold; the subtitle may not match this audio."),
+        success=False,
+    ))
+
+    assert "0.43" in sentence
+    assert "0.75" in sentence
+
+
+def test_a_decline_with_nothing_to_add_still_reads_as_a_sentence():
+    """Not every engine measures a number, and the old wording is what those
+    still need."""
+    from types import SimpleNamespace
+
+    from subtitles.sync import _engine_outcome_sentence
+    from subtitles.tools.subsync_engines import REASON_ENGINE_DECLINED
+
+    sentence = _engine_outcome_sentence(SimpleNamespace(
+        engine="alass", reason=REASON_ENGINE_DECLINED, message="", success=False))
+
+    assert sentence.endswith(".")
+    assert "alass" in sentence.lower()
+
+
+def test_the_fallback_is_only_for_an_unsupported_keyword(monkeypatch, tmp_path):
+    """autosubsync does long work and writes its output before returning, so
+    re-running the whole synchronization on any internal TypeError would repeat
+    that work and rewrite the file. Only the signature mismatch is a reason."""
+    from subtitles.tools import subsyncer as module
+
+    calls = []
+
+    def exploding(*args, **kwargs):
+        calls.append(kwargs)
+        raise TypeError("unsupported operand type(s) for +: 'int' and 'str'")
+
+    monkeypatch.setattr(module, "synchronize", exploding, raising=False)
+
+    import autosubsync.main
+    monkeypatch.setattr(autosubsync.main, "synchronize", exploding)
+
+    with pytest.raises(TypeError):
+        module._run_autosubsync_api(reference="v.mkv", subtitle_file="s.srt",
+                                    output_file="o.srt", model_file="m.bin",
+                                    parallelism=1)
+
+    assert len(calls) == 1, "the whole synchronization was run a second time"
+
+
+def test_an_unsupported_keyword_does_fall_back(monkeypatch):
+    from subtitles.tools import subsyncer as module
+
+    calls = []
+
+    def picky(*args, **kwargs):
+        calls.append(kwargs)
+        if "return_parameters" in kwargs:
+            raise TypeError("synchronize() got an unexpected keyword argument "
+                            "'return_parameters'")
+        return True
+
+    import autosubsync.main
+    monkeypatch.setattr(autosubsync.main, "synchronize", picky)
+
+    assert module._run_autosubsync_api(reference="v.mkv", subtitle_file="s.srt",
+                                       output_file="o.srt", model_file="m.bin",
+                                       parallelism=1) is True
+    assert len(calls) == 2
+
+
+def test_the_measured_skew_reaches_the_history_entry(monkeypatch, tmp_path):
+    """End to end from the engine, because the two halves speak different
+    vocabularies: autosubsync measures a skew, the history entry reads
+    framerate_scale_factor and defaults it to zero. A run with a real skew was
+    recorded as a scale factor of 0.00.
+    """
+    from types import SimpleNamespace
+
+    from subtitles.tools import subsyncer as module
+
+    syncer, _module = _syncer(monkeypatch, tmp_path, (True, 0.91, 1.04, -2.5))
+    raw_result = syncer._run_autosubsync_engine(output_path=tmp_path / "out.srt",
+                                                video_path=str(tmp_path / "Movie.mkv"))
+
+    recorded = []
+    monkeypatch.setattr(module, "language_from_alpha2", lambda code: "English")
+    monkeypatch.setattr(module, "history_log",
+                        lambda **kwargs: recorded.append(kwargs["result"].message))
+    monkeypatch.setattr(module, "path_mappings",
+                        SimpleNamespace(path_replace_reverse=lambda p: p,
+                                        path_replace_reverse_movie=lambda p: p))
+    syncer.reference = str(tmp_path / "Movie.mkv")
+
+    syncer._log_sync_history(
+        SimpleNamespace(engine="autosubsync",
+                        output_path=str(tmp_path / "Movie.en.srt"),
+                        raw_result=raw_result),
+        "overwrite", "en", False, False, sonarr_series_id=1, sonarr_episode_id=2)
+
+    assert recorded
+    assert "1.04" in recorded[0], f"the measured skew is missing from: {recorded[0]}"
+    assert "0.91" in recorded[0], f"the quality of fit is missing from: {recorded[0]}"

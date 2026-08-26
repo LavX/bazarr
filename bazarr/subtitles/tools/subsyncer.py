@@ -56,7 +56,12 @@ def _run_autosubsync_api(reference, subtitle_file, output_file, model_file, para
             parallelism=parallelism,
             return_parameters=True,
         )
-    except TypeError:
+    except TypeError as exc:
+        # Only a signature mismatch. autosubsync does minutes of work and writes
+        # its output before returning, so re-running the whole synchronization
+        # for any internal TypeError would repeat that work and rewrite the file.
+        if 'return_parameters' not in str(exc):
+            raise
         logging.debug('BAZARR autosubsync does not support return_parameters; '
                       'synchronising without diagnostics')
         return synchronize(
@@ -441,6 +446,10 @@ class SubSyncer:
             'offset_seconds': shift,
             'quality_of_fit': quality,
             'skew': skew,
+            # The same quantity ffsubsync calls framerate_scale_factor, under
+            # the key the history entry reads: without it a run with a real
+            # skew was recorded as a scale factor of 0.00.
+            'framerate_scale_factor': skew,
             'stdout': '',
             'stderr': '',
             'returncode': 0,
