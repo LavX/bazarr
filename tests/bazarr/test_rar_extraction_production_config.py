@@ -17,6 +17,7 @@ configured the way that image was.
 """
 
 import os
+import pathlib
 import shutil
 
 import pytest
@@ -39,10 +40,32 @@ def test_a_rar_archive_extracts_after_init_binaries_has_configured_the_tools():
         assert utils.get_subtitle_from_archive(archive, episode=4) is not None
 
 
-def test_the_image_ships_a_tool_that_can_actually_decompress_rar():
+def test_this_machine_has_a_tool_that_can_actually_decompress_rar():
     """p7zip recognises RAR as a format but cannot decompress it, so finding it
-    is not the same as being able to read an archive. Name the tools that can."""
+    is not the same as being able to read an archive.
+
+    This covers whatever machine the suite runs on, which is what makes the test
+    above meaningful. The image is a separate question, covered below.
+    """
     assert shutil.which("unrar") or shutil.which("unar"), (
         "neither unrar nor unar is installed; 7z alone cannot decompress RAR, "
         "which is exactly the state that made every RAR subtitle fail"
+    )
+
+
+def test_the_dockerfile_installs_a_tool_that_can_decompress_rar():
+    """The image is what users run, and the test above only sees this machine.
+
+    The Dockerfile is the artefact that decides, so it is read directly: an edit
+    dropping unar would otherwise sail through a CI run whose runner installs it
+    separately, and ship the exact bug this file exists for.
+    """
+    dockerfile = (pathlib.Path(__file__).resolve().parents[2] / "Dockerfile").read_text()
+
+    installed = {line.strip().rstrip(" \\")
+                 for line in dockerfile.splitlines()}
+
+    assert "unar" in installed or "unrar" in installed, (
+        "the Dockerfile installs neither unar nor unrar; p7zip alone cannot "
+        "decompress RAR, so every RAR-delivered subtitle would fail in the image"
     )
