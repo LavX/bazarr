@@ -1240,7 +1240,9 @@ def test_a_manual_download_clears_the_record_too(monkeypatch, tmp_path):
                         cleared.append((media_type, str(language), arr_instance_id)))
 
     video = _episode_video()
-    written = types.SimpleNamespace(language="en", storage_path=str(tmp_path / "s.srt"))
+    written_file = tmp_path / "s.srt"
+    written_file.write_text("1\n")
+    written = types.SimpleNamespace(language="en", storage_path=str(written_file))
 
     manual_module.clear_mismatch_after_manual_save(video, "series", [written], 3)
 
@@ -1276,7 +1278,9 @@ def test_an_upload_clears_the_record_for_the_language_it_wrote(monkeypatch, tmp_
     identity = types.SimpleNamespace(sonarrEpisodeId=20, radarrId=None,
                                      original_path="/tv/show/s01e01.mkv",
                                      arr_instance_id=2)
-    written = types.SimpleNamespace(language="hu", storage_path=str(tmp_path / "s.hu.srt"))
+    written_file = tmp_path / "s.hu.srt"
+    written_file.write_text("1\n")
+    written = types.SimpleNamespace(language="hu", storage_path=str(written_file))
 
     manual_module.clear_mismatch_after_manual_save(identity, "series", [written], 2)
 
@@ -1334,5 +1338,23 @@ def test_a_written_file_is_what_clears_the_record(search, tmp_path):
     search.monkeypatch.setattr(search.module, "process_subtitle", lambda **kwargs: None)
 
     search.run()
+
+    assert cleared == []
+
+
+def test_a_manual_save_with_a_path_but_no_file_clears_nothing(monkeypatch, tmp_path):
+    """The same trap as the automatic path: save_subtitles assigns storage_path
+    before it writes, so the attribute alone is not evidence of a file."""
+    from subtitles import manual as manual_module
+
+    cleared = []
+    monkeypatch.setattr(manual_module, "clear_mismatch_for_video",
+                        lambda *args, **kwargs: cleared.append(args))
+
+    never_written = types.SimpleNamespace(language="en",
+                                          storage_path=str(tmp_path / "absent.srt"))
+
+    manual_module.clear_mismatch_after_manual_save(_episode_video(), "series",
+                                                   [never_written], 3)
 
     assert cleared == []

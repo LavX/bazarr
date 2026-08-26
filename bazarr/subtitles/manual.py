@@ -383,7 +383,11 @@ def clear_mismatch_after_manual_save(video, media_type, saved_subtitles, arr_ins
     returns a subtitle even when it wrote nothing.
     """
     for saved in saved_subtitles or []:
-        if not getattr(saved, 'storage_path', None):
+        storage_path = getattr(saved, 'storage_path', None)
+        # The file, not the attribute: save_subtitles assigns storage_path
+        # before it writes, so a subtitle whose content came back empty carries
+        # a path to a file that was never created.
+        if not storage_path or not os.path.isfile(storage_path):
             continue
         language = getattr(saved, 'language', None)
         if language is None:
