@@ -51,6 +51,10 @@ class HubWorkerSubtitle(Subtitle):
         self.score_without_hash = None
         self.score_out_of = None
 
+    # The worker sends a lean set of identifier matches, so the download scorer
+    # must recompute against the video instead of reusing it: see get_matches.
+    matches_need_video = True
+
     @property
     def id(self):
         return f"{self.source_provider}:{self.worker_id}"
@@ -182,6 +186,9 @@ def video_to_payload(video) -> dict[str, Any]:
 # setattr raises and discards the provider's entire result set.
 _RESERVED_DISPLAY_ATTRS = frozenset({
     "language",
+    # Host scoring policy, not something a worker gets to set: sending False
+    # would put the release-scoring bug back for that plugin alone, silently.
+    "matches_need_video",
     "language_type",
     "id",
     "numeric_id",
