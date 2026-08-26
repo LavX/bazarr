@@ -197,6 +197,7 @@ jobs:
             tests/bazarr/test_arr_rootfolder.py \
             tests/bazarr/test_arr_local_id_cutover_migration.py \
             tests/bazarr/test_jobs_queue_progress.py \
+            tests/bazarr/test_jobs_concurrency_limit.py \
             tests/bazarr/test_processing_sync_substep.py \
             tests/bazarr/test_mass_download_path_mapping.py \
             tests/bazarr/test_processing_postprocessing.py \
