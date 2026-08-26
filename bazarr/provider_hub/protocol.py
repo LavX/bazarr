@@ -51,6 +51,10 @@ class HubWorkerSubtitle(Subtitle):
         self.score_without_hash = None
         self.score_out_of = None
 
+    # The worker sends a lean set of identifier matches, so the download scorer
+    # must recompute against the video instead of reusing it: see get_matches.
+    matches_need_video = True
+
     @property
     def id(self):
         return f"{self.source_provider}:{self.worker_id}"

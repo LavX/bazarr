@@ -684,6 +684,49 @@ class SZProviderPool(ProviderPool):
 
         return True
 
+    @classmethod
+    def _score_subtitles(cls, subtitles, video, languages, hearing_impaired):
+        """(subtitle, score, score_without_hash, matches, orig_matches) tuples, best first."""
+        use_hearing_impaired = hearing_impaired in ("prefer", "force HI")
+        unsorted_subtitles = []
+
+        for s in subtitles:
+            # get the matches
+            if s.language.basename not in [x.basename for x in languages]:
+                logger.debug("%r: Skipping, language not searched for", s)
+                continue
+
+            try:
+                cached = s.matches if hasattr(s, 'matches') and isinstance(s.matches, set) \
+                    and len(s.matches) else None
+                # A candidate may declare that its match set is only complete once it
+                # has seen the video. Provider Hub candidates arrive from the worker
+                # with a lean set of identifier matches already populated, so reusing
+                # it here scored every one of them identically and the first listed
+                # won, handing a user searching for a 2160p WEB release a Blu-ray
+                # subtitle for another release group. Declared on the candidate rather
+                # than sniffed from its class name, which a rename or a subclass would
+                # silently defeat. Recomputation is idempotent: the augmented set is
+                # derived from a frozen base, so the priority-ordered listing path,
+                # which already computed it, gets the same answer twice.
+                if cached is None or getattr(s, 'matches_need_video', False):
+                    matches = s.get_matches(video)
+                else:
+                    matches = cached
+
+            except AttributeError:
+                logger.error("%r: Match computation failed: %s", s, traceback.format_exc())
+                continue
+
+            orig_matches = matches.copy()
+
+            logger.debug('%r: Found matches %r', s, matches)
+            score, score_without_hash = compute_score(matches, s, video, use_hearing_impaired)
+            unsorted_subtitles.append(
+                (s, score, score_without_hash, matches, orig_matches))
+
+        return sorted(unsorted_subtitles, key=operator.itemgetter(1, 2), reverse=True)
+
     def download_best_subtitles(self, subtitles, video, languages, min_score=0, hearing_impaired=False, only_one=False,
                                 use_original_format=False, fallback_allowed=False):
         """Download the best matching subtitles.
@@ -712,32 +755,7 @@ class SZProviderPool(ProviderPool):
         is_episode = isinstance(video, Episode)
         max_score = MAX_SCORES['episode' if is_episode else 'movie']
 
-        # sort subtitles by score
-        unsorted_subtitles = []
-
-        for s in subtitles:
-            # get the matches
-            if s.language.basename not in [x.basename for x in languages]:
-                logger.debug("%r: Skipping, language not searched for", s)
-                continue
-
-            try:
-                matches = s.matches if hasattr(s, 'matches') and isinstance(s.matches, set) and len(s.matches) \
-                        else s.get_matches(video)
-
-            except AttributeError:
-                logger.error("%r: Match computation failed: %s", s, traceback.format_exc())
-                continue
-
-            orig_matches = matches.copy()
-
-            logger.debug('%r: Found matches %r', s, matches)
-            score, score_without_hash = compute_score(matches, s, video, use_hearing_impaired)
-            unsorted_subtitles.append(
-                (s, score, score_without_hash, matches, orig_matches))
-
-        # sort subtitles by score
-        scored_subtitles = sorted(unsorted_subtitles, key=operator.itemgetter(1, 2), reverse=True)
+        scored_subtitles = self._score_subtitles(subtitles, video, languages, hearing_impaired)
 
         # download best subtitles, falling back on the next on error
         downloaded_subtitles = []
