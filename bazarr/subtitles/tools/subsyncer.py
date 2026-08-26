@@ -86,7 +86,11 @@ def _distinguishable(measured, threshold, minimum=2, maximum=6):
         left, right = f'{measured:.{places}f}', f'{threshold:.{places}f}'
         if left != right:
             return left, right
-    return f'{measured:.{maximum}f}', f'{threshold:.{maximum}f}'
+
+    # Closer than six decimals. Quoting one number twice would contradict
+    # itself, and quoting seventeen would be unreadable, so the caller says it
+    # in words instead.
+    return None, f'{threshold:.{minimum}f}'
 
 
 def _autosubsync_quality_threshold():
@@ -442,8 +446,12 @@ class SubSyncer:
             threshold = _autosubsync_quality_threshold()
             if quality is not None and threshold is not None:
                 measured, limit = _distinguishable(quality, threshold)
-                message = (f'autosubsync measured a quality of fit of {measured}, below its '
-                           f'{limit} threshold; the subtitle may not match this audio.')
+                if measured is None:
+                    message = (f'autosubsync measured a quality of fit just below its {limit} '
+                               f'threshold; the subtitle may not match this audio.')
+                else:
+                    message = (f'autosubsync measured a quality of fit of {measured}, below its '
+                               f'{limit} threshold; the subtitle may not match this audio.')
             elif quality is not None:
                 message = (f'autosubsync measured a quality of fit of {quality:.2f} and rejected '
                            f'its own result.')

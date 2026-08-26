@@ -251,7 +251,7 @@ def test_the_measured_skew_reaches_the_history_entry(monkeypatch, tmp_path):
     assert "0.91" in recorded[0], f"the quality of fit is missing from: {recorded[0]}"
 
 
-@pytest.mark.parametrize("quality", [0.749, 0.7499, 0.74999])
+@pytest.mark.parametrize("quality", [0.749, 0.7499, 0.74999, 0.7499999])
 def test_a_near_miss_does_not_read_as_equal_to_the_threshold(monkeypatch, tmp_path, quality):
     """Two decimals turn 0.749 into "0.75, below its 0.75 threshold", which
     contradicts itself, and the near miss is exactly the case this message
@@ -265,9 +265,13 @@ def test_a_near_miss_does_not_read_as_equal_to_the_threshold(monkeypatch, tmp_pa
                                        video_path=str(tmp_path / "Movie.mkv"))
 
     message = str(raised.value)
-    measured, threshold = message.split("quality of fit of ")[1].split(", below its ")
-    threshold = threshold.split(" ")[0]
-    assert measured != threshold, message
+    if "quality of fit of " in message:
+        measured, threshold = message.split("quality of fit of ")[1].split(", below its ")
+        assert measured != threshold.split(" ")[0], message
+    else:
+        # Too close to separate at any sane precision, so the message says so
+        # in words rather than quoting one number twice.
+        assert "just below" in message, message
 
 
 def test_a_clear_miss_stays_readable(monkeypatch, tmp_path):
