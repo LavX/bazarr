@@ -28,6 +28,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 
 # What a stream whose codec ffprobe could not identify gets called. alass only
 # needs the field to exist: it reads codec_type to pick the audio stream.
@@ -74,6 +75,11 @@ def patch_ffprobe_json(text):
 
 
 _LAUNCHER_PATH = None
+
+# Jobs are threads in one process, so two syncs starting together race here:
+# both would install, and the loser's sweep would delete the winner's
+# directory out from under an alass that is already running against it.
+_LAUNCHER_LOCK = threading.Lock()
 
 
 def launcher_script(python, shim):
@@ -131,11 +137,18 @@ def _sweep(parent):
     except OSError:
         return
 
+    # Never the one in use. It is being handed to alass, which execs it
+    # directly, and a sweep that removes it mid-sync fails that sync and spends
+    # one of the engine's three strikes on a self-inflicted error.
+    in_use = os.path.dirname(_LAUNCHER_PATH) if _LAUNCHER_PATH else None
+
     for entry in entries:
         if not entry.startswith(LAUNCHER_PREFIX):
             continue
 
         path = os.path.join(parent, entry)
+        if in_use and os.path.abspath(path) == os.path.abspath(in_use):
+            continue
         try:
             if os.stat(path).st_uid != os.getuid():
                 continue
@@ -188,21 +201,27 @@ def ensure_launcher():
     if _LAUNCHER_PATH and os.path.isfile(_LAUNCHER_PATH):
         return _LAUNCHER_PATH
 
-    content = launcher_script(sys.executable, os.path.abspath(__file__))
-    for parent in _writable_directories():
-        directory = None
-        try:
-            directory = tempfile.mkdtemp(prefix=LAUNCHER_PREFIX, dir=_ensure(parent))
-            _LAUNCHER_PATH = _install_launcher(directory, content)
-        except Exception:
-            logger.debug("Could not install the alass ffprobe shim in %s", parent, exc_info=True)
-            # Nothing remembers the failure, so every sync retries this. Each
-            # retry leaving its private directory behind would leak inodes.
-            if directory:
-                shutil.rmtree(directory, ignore_errors=True)
-            continue
+    with _LAUNCHER_LOCK:
+        # Checked again inside: the thread that held the lock may have just
+        # installed the launcher this one was about to duplicate.
+        if _LAUNCHER_PATH and os.path.isfile(_LAUNCHER_PATH):
+            return _LAUNCHER_PATH
 
-        return _LAUNCHER_PATH
+        content = launcher_script(sys.executable, os.path.abspath(__file__))
+        for parent in _writable_directories():
+            directory = None
+            try:
+                directory = tempfile.mkdtemp(prefix=LAUNCHER_PREFIX, dir=_ensure(parent))
+                _LAUNCHER_PATH = _install_launcher(directory, content)
+            except Exception:
+                logger.debug("Could not install the alass ffprobe shim in %s", parent, exc_info=True)
+                # Nothing remembers the failure, so every sync retries this. Each
+                # retry leaving its private directory behind would leak inodes.
+                if directory:
+                    shutil.rmtree(directory, ignore_errors=True)
+                continue
+
+            return _LAUNCHER_PATH
 
     return None
 
