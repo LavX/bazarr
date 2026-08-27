@@ -7,12 +7,14 @@ import re
 import subprocess
 import uuid
 from app.database import TableEpisodes, TableMovies, TableShows, database, select
+from app.config import settings
 from app.jobs_queue import jobs_queue
 from app.event_handler import event_stream
 from arr_instances.resolution import scoped
 from utilities.path_mappings import path_mappings
 from utilities.binaries import get_binary
-from utilities.video_analyzer import parse_video_metadata, _handle_alpha3, _title_is_forced
+from utilities.video_analyzer import (parse_video_metadata, _title_is_forced,
+                                      embedded_track_language)
 from languages.get_languages import alpha3_from_alpha2
 from subtitles.indexer.series import store_subtitles
 from subtitles.indexer.movies import store_subtitles_movie
@@ -460,6 +462,9 @@ def extract_embedded_subtitle(
     # Pass 1: exact match on language + hi + forced disposition flags.
     # Pass 2: fall back to first language-only match if no exact match found,
     # so extraction never silently returns the wrong track.
+    und_setting = settings.general.default_und_embedded_subtitles_lang
+    und_default_language = alpha3_from_alpha2(und_setting) if und_setting else None
+
     exact_track = None
     fallback_track = None
     track_id = 0
@@ -469,11 +474,15 @@ def extract_embedded_subtitle(
             track_id += 1
             continue
 
-        if "language" not in track:
+        # Exactly the rule indexing used to decide this track exists. Walking
+        # the stream list a second time with different rules is how extraction
+        # ends up on a commentary track the user was never offered, or refuses
+        # a track the user was.
+        track_alpha3 = embedded_track_language(track, und_default_language)
+        if track_alpha3 is None:
             track_id += 1
             continue
 
-        track_alpha3 = _handle_alpha3(track)
         if track_alpha3 == target_alpha3:
             # knowit only reports forced from the disposition flag, so apply the
             # same title heuristic used at indexing time, otherwise a forced

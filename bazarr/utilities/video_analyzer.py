@@ -54,6 +54,30 @@ def _handle_alpha3(detected_language: dict):
     return alpha3
 
 
+def embedded_track_language(track, und_default_language=None):
+    """The language the indexer files this track under, or None to ignore it.
+
+    One place for the two rules that decide whether an in-container subtitle
+    exists as far as Bazarr is concerned, because indexing and extraction both
+    have to reach the same answer. When they disagree the user is offered a
+    track that can never be extracted, or gets a different track than the one
+    they picked, and neither says anything in the log.
+
+    Commentary is excluded by title: it is a different programme, not a
+    different language, and translating it produces confident nonsense. A track
+    with no language of its own takes the configured undefined-language default
+    when there is one, and is otherwise not a subtitle we can name.
+    """
+    name = (track.get("name") or "").lower()
+    if "commentary" in name:
+        return None
+
+    language = _handle_alpha3(track) if "language" in track else None
+    if not language and und_default_language:
+        language = und_default_language
+    return language or None
+
+
 def embedded_subs_reader(file, file_size, episode_file_id=None, movie_file_id=None, use_cache=True,
                          arr_instance_id=None):
     data = parse_video_metadata(file, file_size, episode_file_id, movie_file_id, use_cache=use_cache,
@@ -73,22 +97,10 @@ def embedded_subs_reader(file, file_size, episode_file_id=None, movie_file_id=No
 
     if cache_provider:
         for detected_language in data[cache_provider]["subtitle"]:
-            # Avoid commentary subtitles
             name = detected_language.get("name", "").lower()
-            if "commentary" in name:
-                logging.debug(f"Ignoring commentary subtitle: {name}")  # noqa: G004
-                continue
-
-            if "language" not in detected_language:
-                language = None
-            else:
-                language = _handle_alpha3(detected_language)
-
-            if not language and und_default_language:
-                logging.debug(f"Undefined language embedded subtitles track treated as {language}")  # noqa: G004
-                language = und_default_language
-
+            language = embedded_track_language(detected_language, und_default_language)
             if not language:
+                logging.debug("Ignoring embedded subtitle track: %s", name or "unnamed")
                 continue
 
             forced = detected_language.get("forced", False) or _title_is_forced(name)
