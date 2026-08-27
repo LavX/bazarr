@@ -60,7 +60,7 @@ export const whatsNew: Record<string, WhatsNewSlide[]> = {
     },
     {
       title: "Weight one provider up or down",
-      body: "Each provider can carry a score modifier of up to 100 points, applied before the minimum-score gate. Built for keeping something like WhisperAI as a genuine last resort without lowering the bar for everyone else.",
+      body: "Each provider can carry a score modifier from -100% to +100%, applied before the minimum-score check. It is a percentage of the maximum score rather than raw points, so 25% on an episode is worth roughly 90. Built for keeping something like WhisperAI as a genuine last resort without lowering the bar for everyone else.",
       icon: faSliders,
       cta: { label: "Open Providers", to: "/settings/providers" },
     },
