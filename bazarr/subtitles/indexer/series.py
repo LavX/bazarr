@@ -24,6 +24,7 @@ from subtitles.utils import _get_scores
 from sonarr.history import history_log
 from app.jobs_queue import jobs_queue
 from subtitles.adaptive_searching import is_search_given_up
+from subtitles.mismatch import prune_mismatches_for_media
 from arr_instances.resolution import scoped
 
 gc.enable()
@@ -420,6 +421,12 @@ def list_missing_subtitles(no=None, epno=None, arr_instance_id=None):
                    .values(missing_subtitles=missing_subtitles_text)
                    .where(TableEpisodes.sonarrEpisodeId == episode_subtitles.sonarrEpisodeId),
                    TableEpisodes.arr_instance_id, arr_instance_id))
+
+        # Every way a subtitle can arrive ends here, which is what makes this
+        # the right place to retire a release-type mismatch: a scan, a sync, a
+        # translation or a file the user dropped next to the video never touch
+        # the download path where clearing used to live.
+        prune_mismatches_for_media('series', episode_subtitles.id, missing_subtitles_text)
 
         # Emit the LOCAL episode id (#156): the frontend caches episode detail
         # by local id (QueryKeys.Episodes, <local id>), and in multi-instance the

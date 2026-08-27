@@ -1389,3 +1389,130 @@ def test_a_hearing_impaired_search_is_recorded_separately(schema_session):
                            _mismatch()) is True
     assert record_mismatch(schema_session, "series", 101, 2, _language_key(hi),
                            _mismatch()) is True
+
+
+# ---------------------------------------------------------------------------
+# The indexer is the only path every subtitle arrival goes through
+# ---------------------------------------------------------------------------
+# Clearing happened on the automatic download and manual save paths only. A full
+# scan, a sync, a translation, a combined output or a file the user dropped next
+# to the video all reach the database through store_subtitles, which recomputes
+# missing_subtitles and never touched the mismatch rows. The badge then outlived
+# the problem: the item kept advertising "grab the Blu-ray release" for a
+# language that had been sitting on disk since the last scan.
+
+
+def test_pruning_drops_the_languages_that_are_no_longer_missing(schema_session):
+    from sqlalchemy import select as sa_select
+
+    from app.database import TableReleaseTypeMismatch
+    from subtitles.mismatch import prune_mismatches, record_mismatch
+
+    record_mismatch(schema_session, "series", 101, 2, "en", _mismatch())
+    record_mismatch(schema_session, "series", 101, 2, "hu", _mismatch())
+
+    prune_mismatches(schema_session, "series", 101, ["hu"])
+
+    remaining = schema_session.execute(
+        sa_select(TableReleaseTypeMismatch.language)).scalars().all()
+    assert remaining == ["hu"], (
+        f'english was satisfied and should have been dropped; kept {remaining!r}')
+
+
+def test_pruning_keeps_variants_apart(schema_session):
+    """`en` and `en:hi` are different records and different wanted entries."""
+    from sqlalchemy import select as sa_select
+
+    from app.database import TableReleaseTypeMismatch
+    from subtitles.mismatch import prune_mismatches, record_mismatch
+
+    record_mismatch(schema_session, "series", 101, 2, "en", _mismatch())
+    record_mismatch(schema_session, "series", 101, 2, "en:hi", _mismatch())
+
+    prune_mismatches(schema_session, "series", 101, ["en:hi"])
+
+    assert schema_session.execute(
+        sa_select(TableReleaseTypeMismatch.language)).scalars().all() == ["en:hi"]
+
+
+def test_pruning_an_item_with_nothing_missing_clears_it(schema_session):
+    from sqlalchemy import select as sa_select
+
+    from app.database import TableReleaseTypeMismatch
+    from subtitles.mismatch import prune_mismatches, record_mismatch
+
+    record_mismatch(schema_session, "series", 101, 2, "en", _mismatch())
+
+    prune_mismatches(schema_session, "series", 101, [])
+
+    assert schema_session.execute(
+        sa_select(TableReleaseTypeMismatch.id)).scalars().all() == []
+
+
+def test_pruning_leaves_other_media_alone(schema_session):
+    from sqlalchemy import select as sa_select
+
+    from app.database import TableReleaseTypeMismatch
+    from subtitles.mismatch import prune_mismatches, record_mismatch
+
+    record_mismatch(schema_session, "series", 101, 2, "en", _mismatch())
+    record_mismatch(schema_session, "series", 102, 2, "en", _mismatch())
+    record_mismatch(schema_session, "movie", 101, 2, "en", _mismatch())
+
+    prune_mismatches(schema_session, "series", 101, [])
+
+    kept = schema_session.execute(
+        sa_select(TableReleaseTypeMismatch.media_type,
+                  TableReleaseTypeMismatch.media_id)).all()
+    assert sorted(tuple(row) for row in kept) == [("movie", 101), ("series", 102)]
+
+
+def test_indexing_an_externally_added_subtitle_retires_the_badge(schema_session, monkeypatch):
+    """The whole point of pruning from the indexer rather than the download path.
+
+    Nothing here goes near a provider: the episode simply has an English file on
+    disk the next time it is indexed, which is what a full scan, a sync, a
+    translation or a hand-copied file all look like from the database's side."""
+    from sqlalchemy import select as sa_select, update as sa_update
+
+    from app.database import TableEpisodes, TableReleaseTypeMismatch
+    from subtitles import mismatch
+    from subtitles.indexer import series as series_indexer
+    from subtitles.mismatch import record_mismatch
+
+    from sqlalchemy import insert as sa_insert
+
+    from app.database import TableLanguagesProfiles
+
+    _seed_episode(schema_session, 101, 2)
+    schema_session.execute(sa_insert(TableLanguagesProfiles).values(
+        profileId=1, name='Test', items="[]", cutoff=None))
+    schema_session.execute(sa_update(TableEpisodes)
+                           .where(TableEpisodes.id == 101)
+                           .values(subtitles="[['en', '/series/2/101.en.srt', 10]]"))
+    schema_session.execute(sa_update(series_indexer.TableShows)
+                           .where(series_indexer.TableShows.id == 1010)
+                           .values(profileId=1))
+    record_mismatch(schema_session, "series", 101, 2, "en", _mismatch())
+    record_mismatch(schema_session, "series", 101, 2, "hu", _mismatch())
+
+    monkeypatch.setattr(series_indexer, "database", schema_session)
+    monkeypatch.setattr(mismatch, "database", schema_session)
+    monkeypatch.setattr(series_indexer, "get_profiles_list", lambda profile_id=None: {
+        "items": [
+            {"language": "en", "forced": "False", "hi": "False",
+             "audio_exclude": "False", "audio_only_include": "False"},
+            {"language": "hu", "forced": "False", "hi": "False",
+             "audio_exclude": "False", "audio_only_include": "False"},
+        ]})
+    monkeypatch.setattr(series_indexer, "get_profile_cutoff", lambda profile_id=None: None)
+    monkeypatch.setattr(series_indexer, "is_search_given_up", lambda *a, **kw: False)
+    monkeypatch.setattr(series_indexer, "event_stream", lambda *a, **kw: None)
+
+    series_indexer.list_missing_subtitles(epno=20, arr_instance_id=2)
+
+    remaining = schema_session.execute(
+        sa_select(TableReleaseTypeMismatch.language)).scalars().all()
+    assert remaining == ["hu"], (
+        'the english subtitle is on disk and the indexer knows it, so its '
+        f'release-type badge should be gone; kept {remaining!r}')

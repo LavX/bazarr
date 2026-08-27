@@ -34,6 +34,7 @@ protects nothing. Every rule below is therefore biased towards silence:
   above the score of the subtitle the user already has.
 """
 
+import ast
 import logging
 
 from datetime import datetime
@@ -408,6 +409,45 @@ def clear_mismatch(session, media_type, media_id, language=None):
         stmt = stmt.where(TableReleaseTypeMismatch.language == _language_key(language))
 
     session.execute(stmt)
+
+
+def prune_mismatches(session, media_type, media_id, still_missing):
+    """Drop every recorded mismatch for an item except the languages still missing.
+
+    Clearing used to happen only where a download or a manual save landed. Every
+    other way a subtitle arrives, a full scan, a sync, a translation, a combined
+    output, a file dropped next to the video, reaches the database through the
+    indexer instead, which recomputes missing_subtitles and left the mismatch
+    rows untouched. The badge then outlived the problem it described, and a
+    stale flag is worse than none because the user cannot tell it from a live
+    one.
+
+    ``still_missing`` is what the indexer just wrote to missing_subtitles, in
+    the same 'en' / 'en:hi' / 'en:forced' form the records are keyed by. A
+    language that adaptive searching has given up on is absent from it and is
+    pruned here too: it is no longer wanted, so it is no longer flagged.
+    """
+    stmt = (delete(TableReleaseTypeMismatch)
+            .where(TableReleaseTypeMismatch.media_type == media_type)
+            .where(TableReleaseTypeMismatch.media_id == media_id))
+    if still_missing:
+        stmt = stmt.where(TableReleaseTypeMismatch.language.notin_(list(still_missing)))
+
+    session.execute(stmt)
+
+
+def prune_mismatches_for_media(media_type, media_id, missing_subtitles_text):
+    """``prune_mismatches`` for an indexer that has the stored text form in hand.
+
+    Never raises: indexing a file must not fail because a cleanup did.
+    """
+    try:
+        if media_id is None:
+            return
+        still_missing = ast.literal_eval(missing_subtitles_text or '[]')
+        prune_mismatches(database, media_type, media_id, still_missing)
+    except Exception:
+        logger.exception('BAZARR could not prune the release-type mismatch records')
 
 
 def clear_mismatch_for_video(video, media_type, language, arr_instance_id=None):
