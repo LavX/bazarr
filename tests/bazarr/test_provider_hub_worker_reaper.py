@@ -381,3 +381,25 @@ def test_a_stop_survivor_is_retained_for_later_sweeps(group_signals):
     finally:
         if ref is not None:
             worker_mod._unreaped_survivors.discard(ref)
+
+
+def test_a_survivor_whose_process_dies_later_is_released(group_signals):
+    """A held survivor must not be pinned forever once its process finally
+    exits on its own: the next sweep finds it dead and lets it go."""
+    import subprocess
+
+    from provider_hub import worker as worker_mod
+
+    client = _client(idle_for=3600)
+    process = client.process
+    process.poll.return_value = None
+    process.wait.side_effect = subprocess.TimeoutExpired(cmd="worker", timeout=0.01)
+    worker_mod._live_clients.add(client)
+
+    assert client.stop_if_idle(idle_seconds=60, grace_seconds=0.01) is False
+    assert client in worker_mod._unreaped_survivors
+
+    process.poll.return_value = 0  # it finally died on its own
+    assert client.stop_if_idle(idle_seconds=60, grace_seconds=0.01) is False
+    assert client not in worker_mod._unreaped_survivors, (
+        'a dead survivor stayed pinned in the strong set')

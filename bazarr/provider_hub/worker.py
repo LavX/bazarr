@@ -304,6 +304,10 @@ class ProviderWorkerClient:
         """
         process = self.process
         if process is None or process.poll() is not None:
+            # Nothing to reap. Mirrors stop(): a held survivor whose process
+            # finally exited on its own must not stay pinned in the strong
+            # set; start() re-registers on the next spawn either way.
+            self._deregister()
             return False
         if not self._lock.acquire(blocking=False):
             return False
