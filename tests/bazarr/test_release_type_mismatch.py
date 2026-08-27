@@ -1575,3 +1575,23 @@ def test_a_normally_scored_candidate_is_still_reported():
                      "scored_matches": ["episode", "hearing_impaired", "season", "series"]}],
         min_score=280,
         media_type="series") is not None
+
+
+def test_the_record_key_and_the_indexer_agree_on_every_variant():
+    """The prune compares these two spellings, so they cannot be allowed to drift.
+
+    A record written as "en:forced:hi" while the indexer serialises the same
+    still-missing profile item as "en:forced" is deleted as satisfied on the next
+    indexing pass, taking away a badge for a variant that is still missing.
+    """
+    from subzero.language import Language
+
+    from subtitles.mismatch import _language_key
+
+    for forced, hi in ((False, False), (True, False), (False, True), (True, True)):
+        language = Language.rebuild(Language('eng'), forced=forced, hi=hi)
+        # Exactly what list_missing_subtitles writes: forced first, then hi.
+        expected = 'en' + (':forced' if forced else (':hi' if hi else ''))
+        assert _language_key(language) == expected, (
+            f'forced={forced} hi={hi}: record key {_language_key(language)!r} '
+            f'does not match the indexer spelling {expected!r}')

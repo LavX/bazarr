@@ -269,9 +269,18 @@ def _language_key(language):
     collapse a plain search and a hearing-impaired one for the same language:
     a recorded English mismatch would then stand in for an English HI search
     and suppress its notification. The flag is appended explicitly.
+
+    Forced wins over hearing-impaired, exactly as the indexers decide it when
+    they serialise a still-missing profile item ("if forced ... elif hi"). The
+    two have to agree: prune_mismatches compares these keys against that list,
+    so a record written as "en:forced:hi" while the indexer wrote "en:forced"
+    would be deleted as satisfied while the variant is still missing. The
+    profile editor offers the three as one exclusive choice, so both flags
+    together is not reachable through the UI, but the API takes the profile
+    JSON as given and the two spellings must not be able to drift.
     """
     key = str(language)
-    if getattr(language, 'hi', False):
+    if not getattr(language, 'forced', False) and getattr(language, 'hi', False):
         key += ':hi'
     return key
 
