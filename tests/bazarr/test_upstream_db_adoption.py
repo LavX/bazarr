@@ -933,3 +933,61 @@ def test_a_foreign_key_column_is_not_restored_bare(tmp_path):
                                    sa.inspect(engine).get_columns('children')}
     finally:
         engine.dispose()
+
+
+def test_a_column_a_pending_migration_indexes_does_not_crash_the_upgrade(tmp_path, monkeypatch):
+    """The repair runs after the chain, so the chain has to survive the gap.
+
+    An upstream build that dropped a column this fork indexes reaches
+    4bb94a033f93, which creates an index on it and aborts. Nothing after that
+    runs, including the repair that would have put the column back, so the
+    install crash-loops exactly as it did before adoption existed.
+    """
+    import sqlite3
+
+    from flask import Flask
+    from sqlalchemy.orm import scoped_session, sessionmaker
+
+    import app.database as db_module
+
+    if sqlite3.sqlite_version_info < (3, 35, 0):
+        pytest.skip('DROP COLUMN needs SQLite 3.35; cannot build the upstream shape')
+
+    db_path = tmp_path / 'bazarr.db'
+    engine = sa.create_engine(f'sqlite:///{db_path}')
+    db_module.Base.metadata.create_all(engine)
+
+    with engine.begin() as connection:
+        connection.execute(sa.text('CREATE TABLE IF NOT EXISTS alembic_version '
+                                   '(version_num VARCHAR(32) NOT NULL)'))
+        connection.execute(sa.text(
+            'INSERT INTO table_shows ("sonarrSeriesId", title, path) '
+            'VALUES (3, \'Breaking Bad\', \'/m/Breaking Bad\')'))
+        connection.execute(sa.text(
+            'INSERT INTO table_episodes ("sonarrEpisodeId", "sonarrSeriesId", title, path, '
+            'season, episode) VALUES (31, 3, \'Ozymandias\', \'/m/s05e14.mkv\', 5, 14)'))
+
+    _looks_like_upstream(engine)
+
+    with engine.begin() as connection:
+        connection.execute(sa.text('DROP INDEX IF EXISTS ix_table_episodes_episode_file_id'))
+        connection.execute(sa.text('ALTER TABLE table_episodes DROP COLUMN episode_file_id'))
+
+    monkeypatch.setattr(db_module, 'engine', engine)
+    monkeypatch.setattr(db_module, 'url', f'sqlite:///{db_path}')
+    monkeypatch.setattr(db_module, 'database', scoped_session(sessionmaker(bind=engine)))
+
+    application = Flask(__name__)
+    application.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+    db_module.migrate_db(application)
+
+    assert _stamp(engine) == _chain_head(), 'the chain did not finish'
+    inspector = sa.inspect(engine)
+    assert 'episode_file_id' in {c['name'] for c in
+                                 inspector.get_columns('table_episodes')}
+    assert 'ix_table_episodes_episode_file_id' in {
+        index['name'] for index in inspector.get_indexes('table_episodes')}, (
+        'the column came back but the index the migration meant to create did '
+        'not, so the hot-path query it exists for stays unindexed')
+
+    engine.dispose()
