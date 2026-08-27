@@ -238,7 +238,6 @@ class TestCollectSubtitleItems:
         movie.subtitles = subtitles
         return movie
 
-    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
     @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
     @patch('subtitles.mass_operations.path_mappings')
     @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
@@ -246,7 +245,7 @@ class TestCollectSubtitleItems:
     @patch('subtitles.mass_operations.database')
     @patch('subtitles.mass_operations.settings')
     def test_collects_episode_subtitles(self, mock_settings, mock_db, mock_synced_mov,
-                                         mock_synced_ep, mock_path_map, mock_isfile, mock_lang):
+                                         mock_synced_ep, mock_path_map, mock_isfile):
         from subtitles.mass_operations import _collect_subtitle_items
 
         mock_settings.subsync.max_offset_seconds = 60
@@ -256,7 +255,6 @@ class TestCollectSubtitleItems:
         mock_path_map.path_replace_reverse.side_effect = lambda x: x
         mock_path_map.path_replace_instance.side_effect = lambda p, *a, **kw: p
         mock_path_map.path_replace_reverse_instance.side_effect = lambda p, *a, **kw: p
-        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
 
         episode = self._make_episode()
         mock_db.execute.return_value.all.return_value = [episode]
@@ -269,7 +267,6 @@ class TestCollectSubtitleItems:
         assert items[0]['sonarr_series_id'] == 10
         assert items[0]['srt_path'] == '/subs/ep1.en.srt'
 
-    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
     @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
     @patch('subtitles.mass_operations.path_mappings')
     @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
@@ -277,7 +274,7 @@ class TestCollectSubtitleItems:
     @patch('subtitles.mass_operations.database')
     @patch('subtitles.mass_operations.settings')
     def test_collects_movie_subtitles(self, mock_settings, mock_db, mock_synced_mov,
-                                       mock_synced_ep, mock_path_map, mock_isfile, mock_lang):
+                                       mock_synced_ep, mock_path_map, mock_isfile):
         from subtitles.mass_operations import _collect_subtitle_items
 
         mock_settings.subsync.max_offset_seconds = 60
@@ -287,7 +284,6 @@ class TestCollectSubtitleItems:
         mock_path_map.path_replace_reverse_movie.side_effect = lambda x: x
         mock_path_map.path_replace_instance.side_effect = lambda p, *a, **kw: p
         mock_path_map.path_replace_reverse_instance.side_effect = lambda p, *a, **kw: p
-        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
 
         movie = self._make_movie()
         mock_db.execute.return_value.all.return_value = [movie]
@@ -299,7 +295,6 @@ class TestCollectSubtitleItems:
         assert items[0]['radarr_id'] == 10
         assert items[0]['srt_path'] == '/subs/movie.en.srt'
 
-    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
     @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
     @patch('subtitles.mass_operations.path_mappings')
     @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
@@ -307,8 +302,7 @@ class TestCollectSubtitleItems:
     @patch('subtitles.mass_operations.database')
     @patch('subtitles.mass_operations.settings')
     def test_collects_duplicate_movie_upstream_ids_by_instance(self, mock_settings, mock_db, mock_synced_mov,
-                                                               mock_synced_ep, mock_path_map, mock_isfile,
-                                                               mock_lang):
+                                                               mock_synced_ep, mock_path_map, mock_isfile):
         from subtitles.mass_operations import _collect_subtitle_items
 
         mock_settings.subsync.max_offset_seconds = 60
@@ -318,7 +312,6 @@ class TestCollectSubtitleItems:
         mock_path_map.path_replace_reverse_movie.side_effect = lambda x: x
         mock_path_map.path_replace_instance.side_effect = lambda p, *a, **kw: p
         mock_path_map.path_replace_reverse_instance.side_effect = lambda p, *a, **kw: p
-        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
 
         movie_a = self._make_movie(path="/movies/a.mkv", subtitles="[['en', '/subs/a.en.srt']]")
         movie_a.arr_instance_id = 1
@@ -336,7 +329,6 @@ class TestCollectSubtitleItems:
         assert [item['arr_instance_id'] for item in items] == [1, 2]
         assert [item['srt_path'] for item in items] == ['/subs/a.en.srt', '/subs/b.en.srt']
 
-    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
     @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
     @patch('subtitles.mass_operations.path_mappings')
     @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
@@ -344,8 +336,7 @@ class TestCollectSubtitleItems:
     @patch('subtitles.mass_operations.database')
     @patch('subtitles.mass_operations.settings')
     def test_collects_duplicate_episode_upstream_ids_by_instance(self, mock_settings, mock_db, mock_synced_mov,
-                                                                 mock_synced_ep, mock_path_map, mock_isfile,
-                                                                 mock_lang):
+                                                                 mock_synced_ep, mock_path_map, mock_isfile):
         from subtitles.mass_operations import _collect_subtitle_items
 
         mock_settings.subsync.max_offset_seconds = 60
@@ -355,7 +346,6 @@ class TestCollectSubtitleItems:
         mock_path_map.path_replace_reverse.side_effect = lambda x: x
         mock_path_map.path_replace_instance.side_effect = lambda p, *a, **kw: p
         mock_path_map.path_replace_reverse_instance.side_effect = lambda p, *a, **kw: p
-        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
 
         episode_a = self._make_episode(path="/series/a.mkv", subtitles="[['en', '/subs/a.en.srt']]")
         episode_a.arr_instance_id = 1
@@ -373,7 +363,6 @@ class TestCollectSubtitleItems:
         assert [item['arr_instance_id'] for item in items] == [1, 2]
         assert [item['srt_path'] for item in items] == ['/subs/a.en.srt', '/subs/b.en.srt']
 
-    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
     @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
     @patch('subtitles.mass_operations.path_mappings')
     @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
@@ -381,8 +370,7 @@ class TestCollectSubtitleItems:
     @patch('subtitles.mass_operations.database')
     @patch('subtitles.mass_operations.settings')
     def test_collects_duplicate_series_upstream_ids_by_instance(self, mock_settings, mock_db, mock_synced_mov,
-                                                                mock_synced_ep, mock_path_map, mock_isfile,
-                                                                mock_lang):
+                                                                mock_synced_ep, mock_path_map, mock_isfile):
         from subtitles.mass_operations import _collect_subtitle_items
 
         mock_settings.subsync.max_offset_seconds = 60
@@ -390,7 +378,6 @@ class TestCollectSubtitleItems:
         mock_settings.subsync.no_fix_framerate = True
         mock_path_map.path_replace.side_effect = lambda x: x
         mock_path_map.path_replace_reverse.side_effect = lambda x: x
-        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
 
         episode_a = self._make_episode(ep_id=1, series_id=42, path="/series/a.mkv",
                                        subtitles="[['en', '/subs/a.en.srt']]")
@@ -410,7 +397,6 @@ class TestCollectSubtitleItems:
         assert [item['arr_instance_id'] for item in items] == [1, 2]
         assert [item['sonarr_episode_id'] for item in items] == [1, 2]
 
-    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
     @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
     @patch('subtitles.mass_operations.path_mappings')
     @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
@@ -418,14 +404,13 @@ class TestCollectSubtitleItems:
     @patch('subtitles.mass_operations.database')
     @patch('subtitles.mass_operations.settings')
     def test_skips_forced_subtitles(self, mock_settings, mock_db, mock_synced_mov,
-                                     mock_synced_ep, mock_path_map, mock_isfile, mock_lang):
+                                     mock_synced_ep, mock_path_map, mock_isfile):
         from subtitles.mass_operations import _collect_subtitle_items
 
         mock_settings.subsync.max_offset_seconds = 60
         mock_settings.subsync.gss = True
         mock_settings.subsync.no_fix_framerate = True
         mock_path_map.path_replace.side_effect = lambda x: x
-        mock_lang.return_value = {'language': 'en', 'forced': True, 'hi': False}
 
         episode = self._make_episode(subtitles="[['en:forced', '/subs/ep1.en.forced.srt']]")
         mock_db.execute.return_value.all.return_value = [episode]
@@ -436,7 +421,6 @@ class TestCollectSubtitleItems:
         assert len(items) == 0
         assert skipped == 1
 
-    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
     @patch('subtitles.mass_operations.os.path.isfile', return_value=False)
     @patch('subtitles.mass_operations.path_mappings')
     @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
@@ -444,14 +428,13 @@ class TestCollectSubtitleItems:
     @patch('subtitles.mass_operations.database')
     @patch('subtitles.mass_operations.settings')
     def test_skips_missing_files(self, mock_settings, mock_db, mock_synced_mov,
-                                  mock_synced_ep, mock_path_map, mock_isfile, mock_lang):
+                                  mock_synced_ep, mock_path_map, mock_isfile):
         from subtitles.mass_operations import _collect_subtitle_items
 
         mock_settings.subsync.max_offset_seconds = 60
         mock_settings.subsync.gss = True
         mock_settings.subsync.no_fix_framerate = True
         mock_path_map.path_replace.side_effect = lambda x: x
-        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
 
         episode = self._make_episode()
         mock_db.execute.return_value.all.return_value = [episode]
@@ -462,7 +445,6 @@ class TestCollectSubtitleItems:
         assert len(items) == 0
         assert skipped == 1
 
-    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
     @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
     @patch('subtitles.mass_operations.path_mappings')
     @patch('subtitles.mass_operations._get_synced_episode_paths')
@@ -470,7 +452,7 @@ class TestCollectSubtitleItems:
     @patch('subtitles.mass_operations.database')
     @patch('subtitles.mass_operations.settings')
     def test_skips_already_synced_episodes(self, mock_settings, mock_db, mock_synced_mov,
-                                            mock_synced_ep, mock_path_map, mock_isfile, mock_lang):
+                                            mock_synced_ep, mock_path_map, mock_isfile):
         from subtitles.mass_operations import _collect_subtitle_items
 
         mock_settings.subsync.max_offset_seconds = 60
@@ -480,7 +462,6 @@ class TestCollectSubtitleItems:
         mock_path_map.path_replace_reverse.side_effect = lambda x: x
         mock_path_map.path_replace_instance.side_effect = lambda p, *a, **kw: p
         mock_path_map.path_replace_reverse_instance.side_effect = lambda p, *a, **kw: p
-        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
         mock_synced_ep.return_value = {'/subs/ep1.en.srt'}
 
         episode = self._make_episode()
@@ -492,7 +473,6 @@ class TestCollectSubtitleItems:
         assert len(items) == 0
         assert skipped == 1
 
-    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
     @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
     @patch('subtitles.mass_operations.path_mappings')
     @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
@@ -500,7 +480,7 @@ class TestCollectSubtitleItems:
     @patch('subtitles.mass_operations.database')
     @patch('subtitles.mass_operations.settings')
     def test_skips_already_synced_movies(self, mock_settings, mock_db, mock_synced_mov,
-                                          mock_synced_ep, mock_path_map, mock_isfile, mock_lang):
+                                          mock_synced_ep, mock_path_map, mock_isfile):
         from subtitles.mass_operations import _collect_subtitle_items
 
         mock_settings.subsync.max_offset_seconds = 60
@@ -510,7 +490,6 @@ class TestCollectSubtitleItems:
         mock_path_map.path_replace_reverse_movie.side_effect = lambda x: x
         mock_path_map.path_replace_instance.side_effect = lambda p, *a, **kw: p
         mock_path_map.path_replace_reverse_instance.side_effect = lambda p, *a, **kw: p
-        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
         mock_synced_mov.return_value = {'/subs/movie.en.srt'}
 
         movie = self._make_movie()
@@ -522,7 +501,6 @@ class TestCollectSubtitleItems:
         assert len(items) == 0
         assert skipped == 1
 
-    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
     @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
     @patch('subtitles.mass_operations.path_mappings')
     @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
@@ -530,14 +508,13 @@ class TestCollectSubtitleItems:
     @patch('subtitles.mass_operations.database')
     @patch('subtitles.mass_operations.settings')
     def test_skips_forced_movie_subtitles(self, mock_settings, mock_db, mock_synced_mov,
-                                           mock_synced_ep, mock_path_map, mock_isfile, mock_lang):
+                                           mock_synced_ep, mock_path_map, mock_isfile):
         from subtitles.mass_operations import _collect_subtitle_items
 
         mock_settings.subsync.max_offset_seconds = 60
         mock_settings.subsync.gss = True
         mock_settings.subsync.no_fix_framerate = True
         mock_path_map.path_replace_movie.side_effect = lambda x: x
-        mock_lang.return_value = {'language': 'en', 'forced': True, 'hi': False}
 
         movie = self._make_movie(subtitles="[['en:forced', '/subs/movie.en.forced.srt']]")
         mock_db.execute.return_value.all.return_value = [movie]
@@ -548,7 +525,6 @@ class TestCollectSubtitleItems:
         assert len(items) == 0
         assert skipped == 1
 
-    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
     @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
     @patch('subtitles.mass_operations.path_mappings')
     @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
@@ -556,7 +532,7 @@ class TestCollectSubtitleItems:
     @patch('subtitles.mass_operations.database')
     @patch('subtitles.mass_operations.settings')
     def test_forced_subs_allowed_for_mod_actions(self, mock_settings, mock_db, mock_synced_mov,
-                                                  mock_synced_ep, mock_path_map, mock_isfile, mock_lang):
+                                                  mock_synced_ep, mock_path_map, mock_isfile):
         """Forced subtitles should be processed by mod actions like OCR_fixes, not skipped."""
         from subtitles.mass_operations import _collect_subtitle_items
 
@@ -564,7 +540,6 @@ class TestCollectSubtitleItems:
         mock_settings.subsync.gss = True
         mock_settings.subsync.no_fix_framerate = True
         mock_path_map.path_replace.side_effect = lambda x: x
-        mock_lang.return_value = {'language': 'en', 'forced': True, 'hi': False}
 
         episode = self._make_episode(subtitles="[['en:forced', '/subs/ep1.en.forced.srt']]")
         mock_db.execute.return_value.all.return_value = [episode]
@@ -576,7 +551,6 @@ class TestCollectSubtitleItems:
         assert skipped == 0
         assert items[0]['forced'] is True
 
-    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
     @patch('subtitles.mass_operations.os.path.isfile', return_value=False)
     @patch('subtitles.mass_operations.path_mappings')
     @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
@@ -584,14 +558,13 @@ class TestCollectSubtitleItems:
     @patch('subtitles.mass_operations.database')
     @patch('subtitles.mass_operations.settings')
     def test_skips_missing_movie_files(self, mock_settings, mock_db, mock_synced_mov,
-                                        mock_synced_ep, mock_path_map, mock_isfile, mock_lang):
+                                        mock_synced_ep, mock_path_map, mock_isfile):
         from subtitles.mass_operations import _collect_subtitle_items
 
         mock_settings.subsync.max_offset_seconds = 60
         mock_settings.subsync.gss = True
         mock_settings.subsync.no_fix_framerate = True
         mock_path_map.path_replace_movie.side_effect = lambda x: x
-        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
 
         movie = self._make_movie()
         mock_db.execute.return_value.all.return_value = [movie]
@@ -602,7 +575,6 @@ class TestCollectSubtitleItems:
         assert len(items) == 0
         assert skipped == 1
 
-    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
     @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
     @patch('subtitles.mass_operations.path_mappings')
     @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
@@ -610,7 +582,7 @@ class TestCollectSubtitleItems:
     @patch('subtitles.mass_operations.database')
     @patch('subtitles.mass_operations.settings')
     def test_series_type_collects_episodes(self, mock_settings, mock_db, mock_synced_mov,
-                                            mock_synced_ep, mock_path_map, mock_isfile, mock_lang):
+                                            mock_synced_ep, mock_path_map, mock_isfile):
         """Passing type='series' with sonarrSeriesId collects all episodes for that series."""
         from subtitles.mass_operations import _collect_subtitle_items
 
@@ -619,7 +591,6 @@ class TestCollectSubtitleItems:
         mock_settings.subsync.no_fix_framerate = True
         mock_path_map.path_replace.side_effect = lambda x: x
         mock_path_map.path_replace_reverse.side_effect = lambda x: x
-        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
 
         episode = self._make_episode(ep_id=5, series_id=42)
         mock_db.execute.return_value.all.return_value = [episode]
@@ -806,7 +777,6 @@ class TestForceResync:
         ep.subtitles = subtitles
         return ep
 
-    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
     @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
     @patch('subtitles.mass_operations.path_mappings')
     @patch('subtitles.mass_operations._get_synced_episode_paths')
@@ -814,7 +784,7 @@ class TestForceResync:
     @patch('subtitles.mass_operations.database')
     @patch('subtitles.mass_operations.settings')
     def test_force_resync_collects_already_synced(self, mock_settings, mock_db, mock_synced_mov,
-                                                   mock_synced_ep, mock_path_map, mock_isfile, mock_lang):
+                                                   mock_synced_ep, mock_path_map, mock_isfile):
         from subtitles.mass_operations import _collect_subtitle_items
 
         mock_settings.subsync.max_offset_seconds = 60
@@ -822,7 +792,6 @@ class TestForceResync:
         mock_settings.subsync.no_fix_framerate = True
         mock_path_map.path_replace.side_effect = lambda x: x
         mock_path_map.path_replace_reverse.side_effect = lambda x: x
-        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
         mock_synced_ep.return_value = {'/subs/ep1.en.srt'}
 
         episode = self._make_episode()
@@ -835,7 +804,6 @@ class TestForceResync:
         assert len(items) == 1
         assert skipped == 0
 
-    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
     @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
     @patch('subtitles.mass_operations.path_mappings')
     @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
@@ -843,7 +811,7 @@ class TestForceResync:
     @patch('subtitles.mass_operations.database')
     @patch('subtitles.mass_operations.settings')
     def test_force_resync_still_skips_generated_sync_outputs(self, mock_settings, mock_db, mock_synced_mov,
-                                                             mock_synced_ep, mock_path_map, mock_isfile, mock_lang):
+                                                             mock_synced_ep, mock_path_map, mock_isfile):
         from subtitles.mass_operations import _collect_subtitle_items
 
         mock_settings.subsync.max_offset_seconds = 60
@@ -853,7 +821,6 @@ class TestForceResync:
         mock_path_map.path_replace_reverse.side_effect = lambda x: x
         mock_path_map.path_replace_instance.side_effect = lambda p, *a, **kw: p
         mock_path_map.path_replace_reverse_instance.side_effect = lambda p, *a, **kw: p
-        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
 
         episode = self._make_episode(subtitles="[['en:sync-ffsubsync', '/subs/ep1.en.ffsubsync.srt']]")
         mock_db.execute.return_value.all.return_value = [episode]
@@ -885,13 +852,12 @@ class TestTranslateSkipsExistingLang:
         movie.subtitles = subtitles
         return movie
 
-    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
     @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
     @patch('subtitles.mass_operations.path_mappings')
     @patch('subtitles.mass_operations.database')
     @patch('subtitles.mass_operations.settings')
     def test_skips_episode_when_target_lang_exists(self, mock_settings, mock_db,
-                                                    mock_path_map, mock_isfile, mock_lang):
+                                                    mock_path_map, mock_isfile):
         from subtitles.mass_operations import _collect_subtitle_items
 
         mock_settings.subsync.max_offset_seconds = 60
@@ -900,7 +866,6 @@ class TestTranslateSkipsExistingLang:
         mock_settings.general.use_sonarr = False
         mock_settings.general.use_radarr = False
         mock_path_map.path_replace.side_effect = lambda x: x
-        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
 
         # Episode already has 'hu' subtitle
         episode = self._make_episode()
@@ -913,13 +878,12 @@ class TestTranslateSkipsExistingLang:
         assert len(collected) == 0
         assert skipped == 1
 
-    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
     @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
     @patch('subtitles.mass_operations.path_mappings')
     @patch('subtitles.mass_operations.database')
     @patch('subtitles.mass_operations.settings')
     def test_collects_episode_when_target_lang_missing(self, mock_settings, mock_db,
-                                                        mock_path_map, mock_isfile, mock_lang):
+                                                        mock_path_map, mock_isfile):
         from subtitles.mass_operations import _collect_subtitle_items
 
         mock_settings.subsync.max_offset_seconds = 60
@@ -928,7 +892,6 @@ class TestTranslateSkipsExistingLang:
         mock_settings.general.use_sonarr = False
         mock_settings.general.use_radarr = False
         mock_path_map.path_replace.side_effect = lambda x: x
-        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
 
         # Episode has 'en' but NOT 'hu'
         episode = self._make_episode(subtitles="[['en', '/subs/ep1.en.srt']]")
@@ -940,13 +903,12 @@ class TestTranslateSkipsExistingLang:
         assert len(collected) == 1
         assert skipped == 0
 
-    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
     @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
     @patch('subtitles.mass_operations.path_mappings')
     @patch('subtitles.mass_operations.database')
     @patch('subtitles.mass_operations.settings')
     def test_skips_movie_when_target_lang_exists(self, mock_settings, mock_db,
-                                                  mock_path_map, mock_isfile, mock_lang):
+                                                  mock_path_map, mock_isfile):
         from subtitles.mass_operations import _collect_subtitle_items
 
         mock_settings.subsync.max_offset_seconds = 60
@@ -955,7 +917,6 @@ class TestTranslateSkipsExistingLang:
         mock_settings.general.use_sonarr = False
         mock_settings.general.use_radarr = False
         mock_path_map.path_replace_movie.side_effect = lambda x: x
-        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
 
         movie = self._make_movie()
         mock_db.execute.return_value.all.return_value = [movie]
@@ -987,13 +948,12 @@ class TestTranslateSourceLanguageFilter:
         movie.subtitles = subtitles
         return movie
 
-    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
     @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
     @patch('subtitles.mass_operations.path_mappings')
     @patch('subtitles.mass_operations.database')
     @patch('subtitles.mass_operations.settings')
     def test_translate_only_queues_source_language_episodes(self, mock_settings, mock_db,
-                                                            mock_path_map, mock_isfile, mock_lang):
+                                                            mock_path_map, mock_isfile):
         from subtitles.mass_operations import _collect_subtitle_items
 
         mock_settings.subsync.max_offset_seconds = 60
@@ -1002,7 +962,6 @@ class TestTranslateSourceLanguageFilter:
         mock_settings.general.use_sonarr = False
         mock_settings.general.use_radarr = False
         mock_path_map.path_replace.side_effect = lambda x: x
-        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
 
         # Episode has both EN and FR subtitles
         episode = self._make_episode()
@@ -1016,13 +975,12 @@ class TestTranslateSourceLanguageFilter:
         assert collected[0]['srt_lang'] == 'en'
         assert skipped == 1  # FR subtitle skipped
 
-    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
     @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
     @patch('subtitles.mass_operations.path_mappings')
     @patch('subtitles.mass_operations.database')
     @patch('subtitles.mass_operations.settings')
     def test_translate_only_queues_source_language_movies(self, mock_settings, mock_db,
-                                                          mock_path_map, mock_isfile, mock_lang):
+                                                          mock_path_map, mock_isfile):
         from subtitles.mass_operations import _collect_subtitle_items
 
         mock_settings.subsync.max_offset_seconds = 60
@@ -1031,7 +989,6 @@ class TestTranslateSourceLanguageFilter:
         mock_settings.general.use_sonarr = False
         mock_settings.general.use_radarr = False
         mock_path_map.path_replace_movie.side_effect = lambda x: x
-        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
 
         # Movie has both EN and FR subtitles
         movie = self._make_movie()
@@ -1045,13 +1002,12 @@ class TestTranslateSourceLanguageFilter:
         assert collected[0]['srt_lang'] == 'en'
         assert skipped == 1  # FR skipped
 
-    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
     @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
     @patch('subtitles.mass_operations.path_mappings')
     @patch('subtitles.mass_operations.database')
     @patch('subtitles.mass_operations.settings')
     def test_translate_without_source_lang_queues_all(self, mock_settings, mock_db,
-                                                       mock_path_map, mock_isfile, mock_lang):
+                                                       mock_path_map, mock_isfile):
         from subtitles.mass_operations import _collect_subtitle_items
 
         mock_settings.subsync.max_offset_seconds = 60
@@ -1060,7 +1016,6 @@ class TestTranslateSourceLanguageFilter:
         mock_settings.general.use_sonarr = False
         mock_settings.general.use_radarr = False
         mock_path_map.path_replace.side_effect = lambda x: x
-        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
 
         episode = self._make_episode()
         mock_db.execute.return_value.all.return_value = [episode]
@@ -1187,7 +1142,6 @@ class TestCollectPerInstancePathMapping:
         movie.arr_instance_id = arr_instance_id
         return movie
 
-    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
     @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
     @patch('subtitles.mass_operations.path_mappings')
     @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
@@ -1196,16 +1150,16 @@ class TestCollectPerInstancePathMapping:
     @patch('subtitles.mass_operations.settings')
     def test_collect_episodes_calls_path_replace_instance_with_owner_id(
             self, mock_settings, mock_db, mock_synced_mov, mock_synced_ep,
-            mock_path_map, mock_isfile, mock_lang):
+            mock_path_map, mock_isfile):
         """path_replace_instance must be called with the row's arr_instance_id."""
         from subtitles.mass_operations import _collect_subtitle_items
 
         mock_settings.subsync.max_offset_seconds = 60
         mock_settings.subsync.gss = True
         mock_settings.subsync.no_fix_framerate = True
+        mock_settings.general.use_embedded_subs = True
         mock_path_map.path_replace_instance.side_effect = lambda p, *a, **kw: p.replace('/remote', '/local')
         mock_path_map.path_replace_reverse_instance.side_effect = lambda p, *a, **kw: p
-        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
 
         episode = self._make_episode(arr_instance_id=7)
         mock_db.execute.return_value.all.return_value = [episode]
@@ -1226,7 +1180,6 @@ class TestCollectPerInstancePathMapping:
         assert any(c.args[1] == 7 for c in calls), \
             "path_replace_instance must be called with the owning arr_instance_id=7"
 
-    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
     @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
     @patch('subtitles.mass_operations.path_mappings')
     @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
@@ -1235,16 +1188,16 @@ class TestCollectPerInstancePathMapping:
     @patch('subtitles.mass_operations.settings')
     def test_collect_movies_calls_path_replace_instance_with_owner_id(
             self, mock_settings, mock_db, mock_synced_mov, mock_synced_ep,
-            mock_path_map, mock_isfile, mock_lang):
+            mock_path_map, mock_isfile):
         """path_replace_instance must be called with the movie row's arr_instance_id."""
         from subtitles.mass_operations import _collect_subtitle_items
 
         mock_settings.subsync.max_offset_seconds = 60
         mock_settings.subsync.gss = True
         mock_settings.subsync.no_fix_framerate = True
+        mock_settings.general.use_embedded_subs = True
         mock_path_map.path_replace_instance.side_effect = lambda p, *a, **kw: p.replace('/remote', '/local')
         mock_path_map.path_replace_reverse_instance.side_effect = lambda p, *a, **kw: p
-        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
 
         movie = self._make_movie(arr_instance_id=8)
         mock_db.execute.return_value.all.return_value = [movie]
@@ -1368,3 +1321,477 @@ class TestMassBatchOperationProcessing:
         assert result['queued'] == 3
         assert result['skipped'] == 2  # the 2 skipped from _collect_subtitle_items
         assert mock_process.call_count == 3
+
+
+class TestMassTranslateFromEmbeddedTracks:
+    """Mass translate sourcing from an embedded track.
+
+    A user with anime libraries whose only English subtitles are inside the
+    container could translate one episode at a time but not a series: the
+    collector kept only entries carrying a path, and the indexer records an
+    embedded track as ``[language, None, None]``.
+    """
+
+    def _episode(self, ep_id=1, series_id=10, path='/video/ep1.mkv', subtitles=None):
+        ep = MagicMock()
+        ep.sonarrEpisodeId = ep_id
+        ep.sonarrSeriesId = series_id
+        ep.path = path
+        ep.subtitles = subtitles if subtitles is not None else "[['en', None, None]]"
+        return ep
+
+    def _collect(self, mock_db, episode, action='translate', options=None):
+        from subtitles.mass_operations import _collect_subtitle_items
+
+        mock_db.execute.return_value.all.return_value = [episode]
+        return _collect_subtitle_items(
+            [{'type': 'episode', 'sonarrEpisodeId': episode.sonarrEpisodeId}],
+            action=action,
+            options=options if options is not None else {'from_lang': 'en', 'to_lang': 'nl'})
+
+    @staticmethod
+    def _wire(mock_settings, mock_path_map):
+        mock_settings.subsync.max_offset_seconds = 60
+        mock_settings.subsync.gss = True
+        mock_settings.subsync.no_fix_framerate = True
+        mock_settings.general.use_embedded_subs = True
+        mock_path_map.path_replace_instance.side_effect = lambda p, *a, **kw: p
+        mock_path_map.path_replace_reverse_instance.side_effect = lambda p, *a, **kw: p
+
+    # --- collecting -------------------------------------------------------
+
+    @patch('subtitles.mass_operations.os.path.isfile', return_value=False)
+    @patch('subtitles.mass_operations.path_mappings')
+    @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
+    @patch('subtitles.mass_operations._get_synced_movie_paths', return_value=set())
+    @patch('subtitles.mass_operations.database')
+    @patch('subtitles.mass_operations.settings')
+    def test_an_embedded_track_becomes_a_translate_source(
+            self, mock_settings, mock_db, _sm, _se, mock_path_map, _isfile):
+        self._wire(mock_settings, mock_path_map)
+
+        items, skipped = self._collect(mock_db, self._episode())
+
+        assert len(items) == 1
+        assert items[0]['embedded'] is True
+        assert items[0]['srt_path'] is None
+        assert items[0]['srt_lang'] == 'en'
+        assert items[0]['video_path'] == '/video/ep1.mkv'
+
+    @patch('subtitles.mass_operations.os.path.isfile', return_value=False)
+    @patch('subtitles.mass_operations.path_mappings')
+    @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
+    @patch('subtitles.mass_operations._get_synced_movie_paths', return_value=set())
+    @patch('subtitles.mass_operations.database')
+    @patch('subtitles.mass_operations.settings')
+    def test_sync_never_sees_an_embedded_track_at_all(
+            self, mock_settings, mock_db, _sm, _se, mock_path_map, _isfile):
+        """There is no file to sync and no useful one to produce, so an
+        embedded track is not a candidate. It must not reach the skipped tally
+        either: counting every in-container track of every episode would make
+        a mass sync report thousands of skips it never had before."""
+        self._wire(mock_settings, mock_path_map)
+
+        items, skipped = self._collect(mock_db, self._episode(), action='sync', options={})
+
+        assert items == []
+        assert skipped == 0
+
+    @patch('subtitles.mass_operations.os.path.isfile', return_value=False)
+    @patch('subtitles.mass_operations.path_mappings')
+    @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
+    @patch('subtitles.mass_operations._get_synced_movie_paths', return_value=set())
+    @patch('subtitles.mass_operations.database')
+    @patch('subtitles.mass_operations.settings')
+    def test_a_mod_action_never_sees_an_embedded_track_either(
+            self, mock_settings, mock_db, _sm, _se, mock_path_map, _isfile):
+        self._wire(mock_settings, mock_path_map)
+
+        items, skipped = self._collect(mock_db, self._episode(),
+                                       action='remove_HI', options={})
+
+        assert items == []
+        assert skipped == 0
+
+    @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
+    @patch('subtitles.mass_operations.path_mappings')
+    @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
+    @patch('subtitles.mass_operations._get_synced_movie_paths', return_value=set())
+    @patch('subtitles.mass_operations.database')
+    @patch('subtitles.mass_operations.settings')
+    def test_a_real_file_wins_over_the_embedded_track_of_the_same_language(
+            self, mock_settings, mock_db, _sm, _se, mock_path_map, _isfile):
+        """Queueing both would run the same translation twice into one output."""
+        self._wire(mock_settings, mock_path_map)
+        episode = self._episode(
+            subtitles="[['en', None, None], ['en', '/subs/ep1.en.srt', 100]]")
+
+        items, _skipped = self._collect(mock_db, episode)
+
+        assert len(items) == 1
+        assert items[0]['srt_path'] == '/subs/ep1.en.srt'
+        assert not items[0].get('embedded')
+
+    @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
+    @patch('subtitles.mass_operations.path_mappings')
+    @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
+    @patch('subtitles.mass_operations._get_synced_movie_paths', return_value=set())
+    @patch('subtitles.mass_operations.database')
+    @patch('subtitles.mass_operations.settings')
+    def test_an_existing_target_language_file_still_skips_the_item(
+            self, mock_settings, mock_db, _sm, _se, mock_path_map, _isfile):
+        self._wire(mock_settings, mock_path_map)
+        episode = self._episode(
+            subtitles="[['en', None, None], ['nl', '/subs/ep1.nl.srt', 12]]")
+
+        items, skipped = self._collect(mock_db, episode)
+
+        assert items == []
+        assert skipped == 1
+
+    @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
+    @patch('subtitles.mass_operations.path_mappings')
+    @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
+    @patch('subtitles.mass_operations._get_synced_movie_paths', return_value=set())
+    @patch('subtitles.mass_operations.database')
+    @patch('subtitles.mass_operations.settings')
+    def test_an_embedded_track_in_the_target_language_does_not_skip_the_item(
+            self, mock_settings, mock_db, _sm, _se, mock_path_map, _isfile):
+        """The user asked for a subtitle file. An in-container Dutch track,
+        which may be signs-only or a bitmap the player cannot restyle, is not
+        that, and before embedded entries were visible here it never blocked
+        the run."""
+        self._wire(mock_settings, mock_path_map)
+        episode = self._episode(subtitles="[['en', None, None], ['nl', None, None]]")
+
+        items, _skipped = self._collect(mock_db, episode)
+
+        assert len(items) == 1
+        assert items[0]['srt_lang'] == 'en'
+
+    @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
+    @patch('subtitles.mass_operations.path_mappings')
+    @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
+    @patch('subtitles.mass_operations._get_synced_movie_paths', return_value=set())
+    @patch('subtitles.mass_operations.database')
+    @patch('subtitles.mass_operations.settings')
+    def test_embedded_tracks_are_ignored_when_the_user_turned_them_off(
+            self, mock_settings, mock_db, _sm, _se, mock_path_map, _isfile):
+        """The rows outlive the setting until the next index, so consuming
+        them has to check it too."""
+        self._wire(mock_settings, mock_path_map)
+        mock_settings.general.use_embedded_subs = False
+
+        items, _skipped = self._collect(mock_db, self._episode())
+
+        assert items == []
+
+    # --- processing -------------------------------------------------------
+
+    def _embedded_item(self, **overrides):
+        item = {
+            'video_path': '/video/ep1.mkv',
+            'srt_path': None,
+            'srt_lang': 'en',
+            'embedded': True,
+            'forced': False,
+            'hi': False,
+            'sonarr_series_id': 10,
+            'sonarr_episode_id': 1,
+            'radarr_id': None,
+            'arr_instance_id': None,
+            'metadata': MagicMock(),
+        }
+        item.update(overrides)
+        return item
+
+    @patch('subtitles.tools.translate.main.translate_subtitles_file', return_value=True)
+    @patch('subtitles.tools.translate.batch.extract_embedded_subtitle',
+           return_value='/config/extracted_subs/ep1.en.srt')
+    def test_the_track_is_extracted_when_the_item_runs_not_when_it_is_collected(
+            self, mock_extract, mock_translate):
+        """A whole-library batch must not extract every track up front."""
+        from subtitles.mass_operations import _process_subtitle_item
+
+        assert _process_subtitle_item(self._embedded_item(), 'translate',
+                                      {'from_lang': 'en', 'to_lang': 'nl'}, 'job') is True
+
+        mock_extract.assert_called_once_with('/video/ep1.mkv', 'en', 'episode',
+                                             hi=False, forced=False, arr_instance_id=None)
+        assert mock_translate.call_args[1]['source_srt_file'] == \
+            '/config/extracted_subs/ep1.en.srt'
+        assert mock_translate.call_args[1]['to_lang'] == 'nl'
+
+    @patch('subtitles.tools.translate.main.translate_subtitles_file')
+    @patch('subtitles.tools.translate.batch.extract_embedded_subtitle', return_value=None)
+    def test_a_track_that_cannot_be_extracted_fails_only_its_own_item(
+            self, mock_extract, mock_translate):
+        """A bitmap track such as PGS cannot become an SRT. That is this item's
+        problem, not the batch's."""
+        from subtitles.mass_operations import _process_subtitle_item
+
+        assert _process_subtitle_item(self._embedded_item(), 'translate',
+                                      {'from_lang': 'en', 'to_lang': 'nl'}, 'job') is False
+        mock_translate.assert_not_called()
+
+    @patch('subtitles.tools.translate.main.translate_subtitles_file', return_value=True)
+    @patch('subtitles.tools.translate.batch.extract_embedded_subtitle',
+           return_value='/config/extracted_subs/movie.en.srt')
+    def test_a_movie_track_is_extracted_as_a_movie(self, mock_extract, mock_translate):
+        from subtitles.mass_operations import _process_subtitle_item
+
+        item = self._embedded_item(sonarr_series_id=None, sonarr_episode_id=None,
+                                   radarr_id=5, video_path='/video/movie.mkv')
+
+        assert _process_subtitle_item(item, 'translate',
+                                      {'from_lang': 'en', 'to_lang': 'nl'}, 'job') is True
+
+        mock_extract.assert_called_once_with('/video/movie.mkv', 'en', 'movies',
+                                             hi=False, forced=False, arr_instance_id=None)
+
+    @patch('subtitles.tools.translate.main.translate_subtitles_file', return_value=True)
+    @patch('subtitles.tools.translate.batch.extract_embedded_subtitle',
+           return_value='/config/extracted_subs/ep1.en.hi.srt')
+    def test_the_source_variant_flags_reach_the_extractor(self, mock_extract, _translate):
+        """The cache key encodes hi and forced, and the wrong track would be a
+        silently different subtitle."""
+        from subtitles.mass_operations import _process_subtitle_item
+
+        item = self._embedded_item(hi=True, forced=False)
+        _process_subtitle_item(item, 'translate', {'from_lang': 'en', 'to_lang': 'nl'}, 'job')
+
+        mock_extract.assert_called_once_with('/video/ep1.mkv', 'en', 'episode',
+                                             hi=True, forced=False, arr_instance_id=None)
+
+    @patch('subtitles.tools.translate.main.translate_subtitles_file', return_value=True)
+    @patch('subtitles.tools.translate.batch.extract_embedded_subtitle')
+    def test_an_ordinary_file_item_never_reaches_the_extractor(
+            self, mock_extract, mock_translate):
+        from subtitles.mass_operations import _process_subtitle_item
+
+        item = self._embedded_item(embedded=False, srt_path='/subs/ep1.en.srt')
+
+        assert _process_subtitle_item(item, 'translate',
+                                      {'from_lang': 'en', 'to_lang': 'nl'}, 'job') is True
+        mock_extract.assert_not_called()
+        assert mock_translate.call_args[1]['source_srt_file'] == '/subs/ep1.en.srt'
+
+
+class TestMassBatchOperationWithEmbeddedItems:
+    """The batch driver, run against an item that has no subtitle file.
+
+    The collector and the per-item processor were both covered, and the loop
+    between them was not, which is where an embedded item's srt_path of None
+    reached os.path.basename and took the whole job down.
+    """
+
+    @patch('subtitles.mass_operations.jobs_queue')
+    @patch('subtitles.mass_operations._process_subtitle_item', return_value=True)
+    @patch('subtitles.mass_operations._collect_subtitle_items')
+    def test_a_batch_of_embedded_items_runs_to_completion(
+            self, mock_collect, mock_process, mock_jq):
+        from subtitles.mass_operations import mass_batch_operation
+
+        mock_collect.return_value = ([
+            {'srt_path': None, 'embedded': True, 'srt_lang': 'en',
+             'video_path': '/video/ep1.mkv'},
+            {'srt_path': None, 'embedded': True, 'srt_lang': 'en',
+             'video_path': '/video/ep2.mkv'},
+        ], 0)
+
+        result = mass_batch_operation(items=[{'type': 'episode', 'sonarrEpisodeId': 1}],
+                                      action='translate', job_id='test')
+
+        assert result['queued'] == 2
+        assert mock_process.call_count == 2
+
+    @patch('subtitles.mass_operations.jobs_queue')
+    @patch('subtitles.mass_operations._process_subtitle_item', return_value=True)
+    @patch('subtitles.mass_operations._collect_subtitle_items')
+    def test_the_progress_message_names_the_video_for_an_embedded_item(
+            self, mock_collect, mock_process, mock_jq):
+        """There is no subtitle file to name, so the video plus the track's
+        language is the only thing that identifies what is being worked on."""
+        from subtitles.mass_operations import mass_batch_operation
+
+        mock_collect.return_value = ([
+            {'srt_path': None, 'embedded': True, 'srt_lang': 'en',
+             'video_path': '/video/Show.S01E01.mkv'},
+        ], 0)
+
+        mass_batch_operation(items=[{'type': 'episode', 'sonarrEpisodeId': 1}],
+                             action='translate', job_id='test')
+
+        messages = [c.kwargs.get('progress_message', '')
+                    for c in mock_jq.update_job_progress.call_args_list]
+        assert any('Show.S01E01.mkv' in m and 'en' in m for m in messages), messages
+        assert not any('None' in m for m in messages), messages
+
+    @patch('subtitles.mass_operations.jobs_queue')
+    @patch('subtitles.mass_operations._process_subtitle_item', return_value=True)
+    @patch('subtitles.mass_operations._collect_subtitle_items')
+    def test_a_file_item_still_names_the_subtitle(self, mock_collect, mock_process, mock_jq):
+        from subtitles.mass_operations import mass_batch_operation
+
+        mock_collect.return_value = ([
+            {'srt_path': '/subs/ep1.en.srt', 'video_path': '/video/ep1.mkv'},
+        ], 0)
+
+        mass_batch_operation(items=[{'type': 'episode', 'sonarrEpisodeId': 1}],
+                             action='sync', job_id='test')
+
+        messages = [c.kwargs.get('progress_message', '')
+                    for c in mock_jq.update_job_progress.call_args_list]
+        assert any('ep1.en.srt' in m for m in messages), messages
+
+    @patch('subtitles.mass_operations.jobs_queue')
+    @patch('subtitles.mass_operations._process_subtitle_item', side_effect=RuntimeError('boom'))
+    @patch('subtitles.mass_operations._collect_subtitle_items')
+    def test_an_embedded_item_that_raises_is_counted_not_fatal(
+            self, mock_collect, mock_process, mock_jq):
+        from subtitles.mass_operations import mass_batch_operation
+
+        mock_collect.return_value = ([
+            {'srt_path': None, 'embedded': True, 'srt_lang': 'en',
+             'video_path': '/video/ep1.mkv'},
+            {'srt_path': None, 'embedded': True, 'srt_lang': 'en',
+             'video_path': '/video/ep2.mkv'},
+        ], 0)
+
+        result = mass_batch_operation(items=[{'type': 'episode', 'sonarrEpisodeId': 1}],
+                                      action='translate', job_id='test')
+
+        assert mock_process.call_count == 2
+        assert len(result['errors']) == 2
+
+
+class TestSubtitleVariantParsing:
+    """A track can be both hearing-impaired and forced.
+
+    The indexer writes `en:hi:forced` for one, appending hi and then forced.
+    `languages_from_colon_seperated_string` reads only the first modifier, so
+    it reports such a track as hi and not forced, which both lets it past the
+    forced guard and mis-selects the stream at extraction time.
+    """
+
+    def test_both_modifiers_are_read_not_just_the_first(self):
+        from subtitles.mass_operations import _subtitle_variant_key
+
+        assert _subtitle_variant_key('en:hi:forced') == ('en', True, True)
+        assert _subtitle_variant_key('en:forced:hi') == ('en', True, True)
+
+    def test_a_single_modifier_still_reads_the_way_it_always_did(self):
+        from subtitles.mass_operations import _subtitle_variant_key
+
+        assert _subtitle_variant_key('en') == ('en', False, False)
+        assert _subtitle_variant_key('en:hi') == ('en', True, False)
+        assert _subtitle_variant_key('en:forced') == ('en', False, True)
+
+    def test_an_unrelated_modifier_does_not_set_a_flag(self):
+        from subtitles.mass_operations import _subtitle_variant_key
+
+        assert _subtitle_variant_key('en:sync-ffsubsync') == ('en', False, False)
+        assert _subtitle_variant_key('en:combined-hu') == ('en', False, False)
+
+    def test_a_forced_and_hi_embedded_track_is_not_queued_for_translation(self):
+        """The forced guard has to fire for it, the same as a plainly forced
+        track: a forced subtitle is signs and songs, not dialogue."""
+        from unittest.mock import MagicMock, patch
+
+        with patch('subtitles.mass_operations.settings') as settings, \
+             patch('subtitles.mass_operations.database') as db, \
+             patch('subtitles.mass_operations.path_mappings') as paths, \
+             patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set()), \
+             patch('subtitles.mass_operations._get_synced_movie_paths', return_value=set()):
+            from subtitles.mass_operations import _collect_subtitle_items
+
+            settings.subsync.max_offset_seconds = 60
+            settings.subsync.gss = True
+            settings.subsync.no_fix_framerate = True
+            settings.general.use_embedded_subs = True
+            paths.path_replace_instance.side_effect = lambda p, *a, **kw: p
+
+            ep = MagicMock()
+            ep.sonarrEpisodeId, ep.sonarrSeriesId = 1, 10
+            ep.path = '/video/ep1.mkv'
+            ep.subtitles = "[['en:hi:forced', None, None]]"
+            db.execute.return_value.all.return_value = [ep]
+
+            items, skipped = _collect_subtitle_items(
+                [{'type': 'episode', 'sonarrEpisodeId': 1}], action='translate',
+                options={'from_lang': 'en', 'to_lang': 'nl'})
+
+        assert items == []
+        assert skipped == 1
+
+
+class TestEmbeddedExtractionCarriesTheOwningInstance:
+    """#156: the collector maps forward per instance, so extraction must
+    reverse with the same one. Without it every embedded item on a secondary
+    instance fails, and the warning blames a bitmap codec."""
+
+    @patch('subtitles.tools.translate.main.translate_subtitles_file', return_value=True)
+    @patch('subtitles.tools.translate.batch.extract_embedded_subtitle',
+           return_value='/config/extracted_subs/ep.srt')
+    def test_the_owning_instance_reaches_the_extractor(self, mock_extract, _translate):
+        from subtitles.mass_operations import _process_subtitle_item
+
+        item = {
+            'video_path': '/media4k/Show/ep.mkv', 'srt_path': None, 'srt_lang': 'en',
+            'embedded': True, 'forced': False, 'hi': False,
+            'sonarr_series_id': 10, 'sonarr_episode_id': 1, 'radarr_id': None,
+            'arr_instance_id': 4, 'metadata': MagicMock(),
+        }
+
+        _process_subtitle_item(item, 'translate', {'from_lang': 'en', 'to_lang': 'nl'}, 'job')
+
+        assert mock_extract.call_args.kwargs['arr_instance_id'] == 4
+
+
+class TestDuplicateEmbeddedTracks:
+    """A container often carries the same language twice.
+
+    The indexer appends one entry per track with no de-duplication, so two
+    English tracks become two identical pathless entries. Both would extract
+    the same stream, translate it twice and overwrite one output, which on a
+    paid translator is billed twice.
+    """
+
+    def test_identical_embedded_entries_collapse_to_one(self):
+        from subtitles.mass_operations import _drop_embedded_duplicates
+
+        subtitles = [('en', None), ('en', None), ('fr', None)]
+
+        kept = _drop_embedded_duplicates(subtitles, lambda lang, path: True)
+
+        assert kept == [('en', None), ('fr', None)]
+
+    def test_different_variants_of_one_language_both_survive(self):
+        """en and en:hi extract different streams and write different files."""
+        from subtitles.mass_operations import _drop_embedded_duplicates
+
+        subtitles = [('en', None), ('en:hi', None)]
+
+        kept = _drop_embedded_duplicates(subtitles, lambda lang, path: True)
+
+        assert kept == [('en', None), ('en:hi', None)]
+
+    def test_a_file_still_beats_the_embedded_track_it_covers(self):
+        from subtitles.mass_operations import _drop_embedded_duplicates
+
+        subtitles = [('en', None), ('en', '/subs/a.en.srt'), ('en', None)]
+
+        kept = _drop_embedded_duplicates(subtitles, lambda lang, path: True)
+
+        assert kept == [('en', '/subs/a.en.srt')]
+
+    def test_duplicate_files_are_left_alone(self):
+        """Only the embedded side is de-duplicated here; two real files are
+        somebody else's problem and were never touched by this."""
+        from subtitles.mass_operations import _drop_embedded_duplicates
+
+        subtitles = [('en', '/subs/a.en.srt'), ('en', '/subs/b.en.srt')]
+
+        kept = _drop_embedded_duplicates(subtitles, lambda lang, path: True)
+
+        assert len(kept) == 2

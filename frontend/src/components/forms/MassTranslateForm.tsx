@@ -382,8 +382,8 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
 
         <Alert variant="light" color="blue">
           <Text size="xs">
-            Each item must have an existing subtitle in the source language.
-            Items without matching subtitles will be skipped.
+            Each item needs a subtitle in the source language, either a file or
+            a text track inside the video. Items with neither are skipped.
           </Text>
         </Alert>
 
