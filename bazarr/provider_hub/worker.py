@@ -71,6 +71,11 @@ class WorkerResult:
 _live_clients: "weakref.WeakSet[ProviderWorkerClient]" = weakref.WeakSet()
 _live_clients_lock = threading.Lock()
 
+# Clients whose process survived a kill. The weak set alone would let garbage
+# collection drop such a client once its pool does, and with it the only handle
+# to the still-running subprocess; held strongly until a later sweep wins.
+_unreaped_survivors: "set[ProviderWorkerClient]" = set()
+
 # Resolved once: signal.SIGKILL does not exist on Windows, and referencing it
 # at a call site raises AttributeError before _signal_group's own guards can
 # report False, breaking the process.kill() fallback.
@@ -211,6 +216,11 @@ class ProviderWorkerClient:
     def _deregister(self) -> None:
         with _live_clients_lock:
             _live_clients.discard(self)
+            _unreaped_survivors.discard(self)
+
+    def _retain_survivor(self) -> None:
+        with _live_clients_lock:
+            _unreaped_survivors.add(self)
 
     @staticmethod
     def _signal_group(process, sig) -> bool:
@@ -312,8 +322,10 @@ class ProviderWorkerClient:
 
         if not ended:
             # Both attempts left it running. Deregistering now would make it
-            # permanently unreapable; keep it listed so a later sweep retries.
+            # permanently unreapable; keep it listed, and strongly, so a later
+            # sweep retries even after the pool drops its own reference.
             logger.warning("idle provider worker survived termination; keeping it registered")
+            self._retain_survivor()
             return False
 
         self._deregister()
@@ -347,6 +359,11 @@ class ProviderWorkerClient:
         # worker that registered itself, and discarding here would strand it.
         if self.process is process and process.poll() is not None:
             self._deregister()
+        elif self.process is process:
+            # stop() could not end it. The pool is about to drop this client,
+            # and the weak registry alone would let it be collected with the
+            # process still running; hold it until a sweep succeeds.
+            self._retain_survivor()
 
     def _read_line_with_deadline(self, timeout: float) -> str:
         """Read one NDJSON line from the worker, honoring ``timeout`` seconds.
@@ -400,11 +417,6 @@ class ProviderWorkerClient:
         )
 
     def request(self, op: str, payload: dict[str, Any] | None = None, timeout: float = 30.0) -> WorkerResult:
-        self.start()
-        self.last_used = time.monotonic()
-        if self.process is None or self.process.stdin is None or self.process.stdout is None:
-            raise WorkerError("worker process did not start")
-
         request_id = str(uuid.uuid4())
         message = {
             "abi": WORKER_ABI_VERSION,
@@ -415,6 +427,15 @@ class ProviderWorkerClient:
         }
 
         with self._lock:
+            # Startup and the freshness stamp live under the request lock:
+            # outside it, the sweep can acquire the lock after start() returns,
+            # read the old timestamp, and kill the worker this request is
+            # about to write to.
+            self.start()
+            self.last_used = time.monotonic()
+            if self.process is None or self.process.stdin is None or self.process.stdout is None:
+                raise WorkerError("worker process did not start")
+
             self.process.stdin.write(
                 json.dumps(message, separators=(",", ":"), default=_json_default)
                 + "\n"

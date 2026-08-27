@@ -308,3 +308,76 @@ def test_a_worker_surviving_the_kill_stays_registered(group_signals):
 
     assert client.stop_if_idle(idle_seconds=60, grace_seconds=0.01) is False
     assert client in worker_mod._live_clients
+
+
+def test_request_startup_is_serialized_with_the_sweep():
+    """start() and the last_used stamp must happen under the request lock:
+    outside it, the sweep can acquire the lock after start() returns, read the
+    old timestamp, and kill the worker the request is about to write to."""
+    import json as json_mod
+    import queue
+
+    from provider_hub.worker import WORKER_ABI_VERSION
+
+    client = _client(idle_for=0)
+    client.process.stdin = MagicMock()
+    client._stdout_queue = queue.Queue()
+    client._stdout_thread = None
+    client._stderr_thread = None
+
+    seen = {}
+
+    def probe_start():
+        seen["locked_during_start"] = client._lock.locked()
+
+    client.start = probe_start
+
+    def canned_line(timeout):
+        seen["locked_during_read"] = client._lock.locked()
+        return json_mod.dumps({
+            "abi": WORKER_ABI_VERSION,
+            "id": seen.setdefault("request_id", None) or _last_request_id(client),
+            "ok": True,
+            "payload": {},
+            "events": [],
+        })
+
+    def _last_request_id(c):
+        # The id is embedded in the message written to stdin.
+        written = c.process.stdin.write.call_args[0][0]
+        return json_mod.loads(written)["id"]
+
+    client._read_line_with_deadline = canned_line
+    result = client.request("ping", {})
+    assert result.ok
+    assert seen["locked_during_start"] is True
+
+
+def test_a_stop_survivor_is_retained_for_later_sweeps(group_signals):
+    """A worker stop() could not kill must stay strongly reachable: the weak
+    registry alone lets garbage collection drop the client once the pool does,
+    and with it the only handle to the still-running process."""
+    import gc
+    import subprocess
+
+    from provider_hub import worker as worker_mod
+
+    client = _client(idle_for=3600)
+    process = client.process
+    process.poll.return_value = None
+    process.wait.side_effect = subprocess.TimeoutExpired(cmd="worker", timeout=0.01)
+    client.request = MagicMock(side_effect=RuntimeError("no shutdown channel"))
+    worker_mod._live_clients.add(client)
+
+    client.stop(grace_seconds=0.01)
+    ref = None
+    try:
+        assert client in worker_mod._live_clients
+        ref = client
+        del client
+        gc.collect()
+        assert len(list(worker_mod._live_clients)) == 1, (
+            "the surviving client fell out of the weak registry")
+    finally:
+        if ref is not None:
+            worker_mod._unreaped_survivors.discard(ref)
