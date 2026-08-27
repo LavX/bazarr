@@ -147,7 +147,7 @@ RUNTIME_REQUIREMENTS = {
     "pysrt": ("pysrt", "==1.1.2"),
     "pysubs2": ("pysubs2", "==1.8.0"),
     "python_anticaptcha": ("python-anticaptcha", "==2.0.0"),
-    "rarfile": ("rarfile", "==4.2"),
+    "rarfile": ("rarfile", "==4.5"),
     "requests": ("requests", "==2.34.2"),
     "retry": ("retry", "==0.9.2"),
     "semver": ("semver", "==3.0.4"),
