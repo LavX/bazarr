@@ -1,4 +1,4 @@
-setuptools>=82.0.1
+setuptools>=84.0.0
 
 # Bazarr runtime dependencies
 aiohttp>=3.14.1
