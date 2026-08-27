@@ -645,3 +645,85 @@ def test_no_table_outside_the_known_upstream_pair_is_ever_dropped(upstream_engin
     with upstream_engine.connect() as connection:
         assert connection.execute(
             sa.text('SELECT count(*) FROM somebody_elses_table')).scalar() == 1
+
+
+# --- restoring a column faithfully, not just by name ----------------------
+
+def test_a_restored_column_keeps_its_server_default_and_not_null(tmp_path):
+    """Adding the name and the type only produces a column the model does not
+    describe: nullable, no default, NULL in every existing row."""
+    import sqlalchemy as sa_
+    from app.upstream_adoption import restore_missing_model_columns
+
+    metadata = sa_.MetaData()
+    sa_.Table('widgets', metadata,
+              sa_.Column('id', sa_.Integer, primary_key=True),
+              sa_.Column('kept', sa_.Integer, nullable=False, server_default='7'))
+
+    engine = sa_.create_engine(f"sqlite:///{tmp_path / 'sd.db'}")
+    try:
+        with engine.begin() as connection:
+            connection.execute(sa_.text('CREATE TABLE widgets (id INTEGER PRIMARY KEY)'))
+            connection.execute(sa_.text('INSERT INTO widgets (id) VALUES (1)'))
+
+        with engine.begin() as connection:
+            restore_missing_model_columns(connection, metadata=metadata)
+
+        column = next(c for c in sa.inspect(engine).get_columns('widgets')
+                      if c['name'] == 'kept')
+        assert column['nullable'] is False
+        with engine.connect() as connection:
+            assert connection.execute(sa.text('SELECT kept FROM widgets WHERE id=1')).scalar() == 7
+    finally:
+        engine.dispose()
+
+
+def test_a_required_column_with_only_a_client_side_default_is_not_restored(tmp_path):
+    """SQLAlchemy applies a Python-side default on insert, so the database
+    would take the column as nullable with no default and leave every existing
+    row NULL. That is a schema the model does not describe, and the rows would
+    read back as None. Better to leave it out and say so."""
+    import sqlalchemy as sa_
+    from datetime import datetime
+
+    from app.upstream_adoption import restore_missing_model_columns
+
+    metadata = sa_.MetaData()
+    sa_.Table('gadgets', metadata,
+              sa_.Column('id', sa_.Integer, primary_key=True),
+              sa_.Column('created', sa_.DateTime, nullable=False, default=datetime.now))
+
+    engine = sa_.create_engine(f"sqlite:///{tmp_path / 'cd.db'}")
+    try:
+        with engine.begin() as connection:
+            connection.execute(sa_.text('CREATE TABLE gadgets (id INTEGER PRIMARY KEY)'))
+            connection.execute(sa_.text('INSERT INTO gadgets (id) VALUES (1)'))
+
+        with engine.begin() as connection:
+            restored = restore_missing_model_columns(connection, metadata=metadata)
+
+        assert ('gadgets', 'created') not in restored
+        assert 'created' not in {c['name'] for c in sa.inspect(engine).get_columns('gadgets')}
+    finally:
+        engine.dispose()
+
+
+def test_a_nullable_column_is_still_restored_plainly(tmp_path):
+    import sqlalchemy as sa_
+
+    from app.upstream_adoption import restore_missing_model_columns
+
+    metadata = sa_.MetaData()
+    sa_.Table('doodads', metadata,
+              sa_.Column('id', sa_.Integer, primary_key=True),
+              sa_.Column('note', sa_.Text))
+
+    engine = sa_.create_engine(f"sqlite:///{tmp_path / 'nl.db'}")
+    try:
+        with engine.begin() as connection:
+            connection.execute(sa_.text('CREATE TABLE doodads (id INTEGER PRIMARY KEY)'))
+        with engine.begin() as connection:
+            restored = restore_missing_model_columns(connection, metadata=metadata)
+        assert ('doodads', 'note') in restored
+    finally:
+        engine.dispose()

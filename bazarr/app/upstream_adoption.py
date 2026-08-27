@@ -173,7 +173,7 @@ def restore_legacy_subtitle_columns(connection):
     return written
 
 
-def restore_missing_model_columns(connection):
+def restore_missing_model_columns(connection, metadata=None):
     """Add back any column this fork's models declare that a table is missing.
 
     Upstream dropped ``subtitles`` from ``table_episodes`` and
@@ -182,21 +182,29 @@ def restore_missing_model_columns(connection):
     repair cover whatever the gap turns out to be.
 
     ``create_all()`` handles missing tables but never touches an existing one,
-    which is the whole reason this is needed. Only tables that are already
-    there are considered, and only columns that can be added without a value:
-    a NOT NULL column with no default cannot go onto a table that has rows, so
-    it is reported rather than forced, and the rest of the adoption goes ahead.
+    which is the whole reason this is needed.
+
+    A column is only restored when it can be restored faithfully. Adding the
+    name and the type alone would produce a column the model does not describe:
+    nullable, with no default, and NULL in every row that already exists. So a
+    NOT NULL column is added only when it carries a server default the database
+    can apply to those rows. One whose default is Python-side is left out and
+    reported: SQLAlchemy fills that in on insert, which does nothing for rows
+    already there, and SQLite cannot add the constraint afterwards either.
 
     Returns the ``(table, column)`` pairs it added.
     """
-    from app.database import Base
+    if metadata is None:
+        from app.database import Base
+
+        metadata = Base.metadata
 
     inspector = sa.inspect(connection)
     existing_tables = set(inspector.get_table_names())
     dialect = connection.engine.dialect
     restored = []
 
-    for table in Base.metadata.sorted_tables:
+    for table in metadata.sorted_tables:
         if table.name not in existing_tables:
             continue
 
@@ -205,16 +213,25 @@ def restore_missing_model_columns(connection):
             if column.name in present:
                 continue
 
-            if not column.nullable and column.server_default is None and column.default is None:
+            if not column.nullable and column.server_default is None:
+                reason = ('its default is applied by the application rather than the database'
+                          if column.default is not None else 'it has no default')
                 logging.warning(
-                    'BAZARR cannot restore the required column %s.%s, it has no default. '
-                    'Bazarr+ will start, but that column stays missing.', table.name, column.name)
+                    'BAZARR cannot restore the required column %s.%s, %s. '
+                    'Bazarr+ will start, but that column stays missing.',
+                    table.name, column.name, reason)
                 continue
 
+            clause = f'"{column.name}" {column.type.compile(dialect)}'
+            if column.server_default is not None:
+                default_sql = getattr(column.server_default, 'arg', None)
+                default_sql = getattr(default_sql, 'text', default_sql)
+                clause += f' DEFAULT {default_sql}'
+            if not column.nullable:
+                clause += ' NOT NULL'
+
             try:
-                type_sql = column.type.compile(dialect)
-                connection.execute(sa.text(
-                    f'ALTER TABLE {table.name} ADD COLUMN "{column.name}" {type_sql}'))
+                connection.execute(sa.text(f'ALTER TABLE {table.name} ADD COLUMN {clause}'))
             except Exception:
                 logging.exception('BAZARR could not restore the column %s.%s',
                                   table.name, column.name)
