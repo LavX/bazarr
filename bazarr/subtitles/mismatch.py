@@ -197,6 +197,16 @@ def detect_release_type_mismatch(video_release_type, candidates, min_score,
         if normalize_release_type(subtitle_type) not in MERGED_FORMATS_REV:
             continue
 
+        # A hash in the SCORED matches means compute_score applied its
+        # hash collapse and threw every release-derived match away
+        # (subliminal_patch/score.py). What is left is the hash points, so the
+        # candidate's score is not a base the source points can be added to:
+        # the sum describes a number this subtitle would never score. Providers
+        # that cannot verify their hashes, RegieLive among them, hit this on
+        # every result they return with one.
+        if 'hash' in (candidate.get('scored_matches') or ()):
+            continue
+
         score = int(candidate.get('score') or 0)
         projected_score = score + release_type_points
         if projected_score < min_score:

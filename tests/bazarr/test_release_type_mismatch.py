@@ -325,10 +325,12 @@ def test_download_best_subtitles_reports_every_scored_candidate():
     assert sink == [
         {"provider_name": "acceptable", "release_info": WEB_RELEASE,
          "score": 311, "downloaded": True,
-         "matches": ["episode", "season", "series", "year"]},
+         "matches": ["episode", "season", "series", "year"],
+         "scored_matches": ["episode", "hearing_impaired", "season", "series", "year"]},
         {"provider_name": "rejected", "release_info": BLURAY_RELEASE,
          "score": 221, "downloaded": False,
-         "matches": ["episode", "season", "series"]},
+         "matches": ["episode", "season", "series"],
+         "scored_matches": ["episode", "hearing_impaired", "season", "series"]},
     ]
 
 
@@ -1516,3 +1518,60 @@ def test_indexing_an_externally_added_subtitle_retires_the_badge(schema_session,
     assert remaining == ["hu"], (
         'the english subtitle is on disk and the indexer knows it, so its '
         f'release-type badge should be gone; kept {remaining!r}')
+
+
+# ---------------------------------------------------------------------------
+# A hash-only score is not a base you can add points to
+# ---------------------------------------------------------------------------
+# When a provider that cannot verify its hashes reports one, the scorer keeps
+# the hash and discards every other match (subliminal_patch/score.py). The
+# candidate's score is then the hash points and nothing else, so adding the
+# source points on top describes a number the subtitle would never actually
+# score. The projection promised a re-grab that fixes nothing.
+
+
+def test_the_sink_records_the_matches_the_score_was_computed_from():
+    from subzero.language import Language
+
+    collapsed = _FakeSubtitle("hashy", BLURAY_RELEASE,
+                              {"hash", "series", "season", "episode"})
+    sink = []
+
+    _pool().download_best_subtitles([collapsed], _episode_video(),
+                                    {Language("eng")}, min_score=1000,
+                                    candidate_sink=sink)
+
+    assert sink[0]["matches"] == ["episode", "hash", "season", "series"], (
+        'the pre-score matches are what the download loop tested and must stay')
+    assert sink[0]["scored_matches"] == ["hash", "hearing_impaired"], (
+        'the scorer discarded every release-derived match and kept the hash, '
+        'and the detector cannot see that without this')
+
+
+def test_a_hash_collapsed_candidate_is_not_reported_as_a_release_mismatch():
+    from subtitles.mismatch import detect_release_type_mismatch
+
+    assert detect_release_type_mismatch(
+        video_release_type="WEB-DL",
+        candidates=[{"provider_name": "regielive", "release_info": BLURAY_RELEASE,
+                     "score": 359, "downloaded": False,
+                     "matches": ["episode", "hash", "season", "series"],
+                     "scored_matches": ["hash", "hearing_impaired"]}],
+        min_score=360,
+        media_type="series") is None, (
+        'this candidate scored 359 from its hash alone. Adding the source '
+        'points describes a score it would never reach, so the user would be '
+        'told to re-grab the Blu-ray for nothing')
+
+
+def test_a_normally_scored_candidate_is_still_reported():
+    from subtitles.mismatch import detect_release_type_mismatch
+
+    assert detect_release_type_mismatch(
+        video_release_type="WEB-DL",
+        candidates=[{"provider_name": "goodsubs", "release_info": BLURAY_RELEASE,
+                     "score": 270, "downloaded": False,
+                     "matches": ["episode", "season", "series"],
+                     "scored_matches": ["episode", "hearing_impaired", "season", "series"]}],
+        min_score=280,
+        media_type="series") is not None
