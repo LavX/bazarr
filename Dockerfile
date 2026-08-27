@@ -128,7 +128,18 @@ COPY frontend/build ./frontend/build
 # Set environment variables
 ENV HOME="/config" \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    MALLOC_ARENA_MAX=2
+
+# glibc gives every thread its own malloc arena, up to 8 per core, and each one
+# reserves address space that shows up as RSS as it is touched. The web server
+# alone parks a thread per open browser tab for its event stream, so a normal
+# session runs well over a hundred threads and pays for a heap arena on most of
+# them. Two arenas is the usual server setting: it costs a little allocator
+# contention under heavy concurrent allocation, which this workload does not do,
+# and it stops resident memory scaling with thread count.
+#
+# Override it at runtime if you are profiling and want glibc's default back.
 
 # Volume for persistent data
 VOLUME /config
