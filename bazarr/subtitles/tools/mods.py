@@ -116,9 +116,9 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
     from utilities.path_mappings import path_mappings
 
     if media_type == 'episode':
-        store_subtitles(path_mappings.path_replace_reverse(video_path), video_path)
+        store_subtitles(path_mappings.path_replace_reverse(video_path), video_path, arr_instance_id=arr_instance_id)
     elif media_type == 'movie':
-        store_subtitles_movie(path_mappings.path_replace_reverse_movie(video_path), video_path)
+        store_subtitles_movie(path_mappings.path_replace_reverse_movie(video_path), video_path, arr_instance_id=arr_instance_id)
 
     if media_id and media_type:
         if media_type == 'episode':

@@ -128,7 +128,8 @@ def episode_download_subtitles(no, job_id=None, job_sub_function=False, provider
     elif episode.subtitles is None:
         # subtitles indexing for this episode is incomplete, we'll do it again
         store_subtitles(episode.path,
-                        path_mappings.path_replace_instance(episode.path, episode.arr_instance_id, 'series'))
+                        path_mappings.path_replace_instance(episode.path, episode.arr_instance_id, 'series'),
+                        arr_instance_id=episode.arr_instance_id)
         episode = database.execute(stmt).first()
     elif episode.missing_subtitles is None:
         # missing subtitles calculation for this episode is incomplete, we'll do it again
@@ -183,7 +184,8 @@ def episode_download_subtitles(no, job_id=None, job_sub_function=False, provider
                         result = result[0]
                     store_subtitles(episode.path,
                                     path_mappings.path_replace_instance(episode.path, episode.arr_instance_id,
-                                                                        'series'))
+                                                                        'series'),
+                                    arr_instance_id=episode.arr_instance_id)
                     history_log(1, episode.sonarrSeriesId, episode.sonarrEpisodeId, result,
                                 arr_instance_id=arr_instance_id)
                     send_notifications(episode.sonarrSeriesId, episode.sonarrEpisodeId, result.message,
@@ -265,7 +267,7 @@ def episode_download_specific_subtitles(sonarr_series_id, sonarr_episode_id, lan
             history_log(1, sonarr_series_id, sonarr_episode_id, result, arr_instance_id=arr_instance_id)
             send_notifications(sonarr_series_id, sonarr_episode_id, result.message,
                                arr_instance_id=arr_instance_id)
-            store_subtitles(result.path, episodePath)
+            store_subtitles(result.path, episodePath, arr_instance_id=arr_instance_id)
             jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
                                            progress_message="Subtitle downloaded")
         else:

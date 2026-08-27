@@ -10,7 +10,7 @@ from guessit.jsonutils import GuessitEncoder
 from utilities.path_mappings import path_mappings
 from app.database import TableEpisodes, TableMovies, database, select
 from arr_instances.resolution import scoped
-from utilities.video_analyzer import parse_video_metadata
+from utilities.video_analyzer import alpha3_from_language_value, parse_video_metadata
 
 
 def refine_from_ffprobe(path, video):
@@ -89,11 +89,12 @@ def refine_from_ffprobe(path, video):
                 video.audio_codec = parser_data['audio'][0]['codec']
         for track in parser_data['audio']:
             if 'language' in track:
-                if isinstance(track['language'], str):
+                alpha3 = alpha3_from_language_value(track['language'])
+                if alpha3 is None:
                     logging.debug(
-                        'BAZARR ffprobe returned a string for audio language,'
+                        'BAZARR ffprobe returned an unusable audio language,'
                         ' skipping: %s', track['language'])
                     continue
-                video.audio_languages.add(track['language'].alpha3)
+                video.audio_languages.add(alpha3)
 
     return video

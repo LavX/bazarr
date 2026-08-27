@@ -70,7 +70,8 @@ class ProviderEpisodes(Resource):
             return 'Episode not found', 404
         elif episodeInfo.subtitles is None:
             # subtitles indexing for this episode is incomplete, we'll do it again
-            store_subtitles(episodeInfo.path, path_mappings.path_replace(episodeInfo.path))
+            store_subtitles(episodeInfo.path, path_mappings.path_replace(episodeInfo.path),
+                            arr_instance_id=episodeInfo.arr_instance_id)
             episodeInfo = database.execute(stmt).first()
         elif episodeInfo.missing_subtitles is None:
             # missing subtitles calculation for this episode is incomplete, we'll do it again

@@ -136,6 +136,7 @@ def _wanted_movie(movie, providers_list, job_id=None):
                             sonarr_episode_id=None,
                             radarr_id=movie.radarrId,
                             metadata=metadata,
+                            arr_instance_id=arr_instance_id,
                         )
                         # Guard: skip if an identical translate job is already
                         # pending or running. Why: history guard (action=6) only
@@ -189,7 +190,7 @@ def _wanted_movie(movie, providers_list, job_id=None):
             found_any = True
             if isinstance(result, tuple) and len(result):
                 result = result[0]
-            store_subtitles_movie(movie.path, path_mappings.path_replace_movie(movie.path))
+            store_subtitles_movie(movie.path, path_mappings.path_replace_movie(movie.path), arr_instance_id=arr_instance_id)
             history_log_movie(1, movie.radarrId, result, arr_instance_id=arr_instance_id)
             event_stream(type='movie-wanted', action='delete', payload=movie.radarrId)
             send_notifications_movie(movie.radarrId, result.message, arr_instance_id=arr_instance_id)
@@ -228,7 +229,7 @@ def wanted_download_subtitles_movie(radarr_id, job_id=None, arr_instance_id=None
         return
     elif movie.subtitles is None:
         # subtitles indexing for this movie is incomplete, we'll do it again
-        store_subtitles_movie(movie.path, path_mappings.path_replace_movie(movie.path))
+        store_subtitles_movie(movie.path, path_mappings.path_replace_movie(movie.path), arr_instance_id=arr_instance_id)
         movie = database.execute(stmt).first()
     elif movie.missing_subtitles is None:
         # missing subtitles calculation for this movie is incomplete, we'll do it again
@@ -254,7 +255,8 @@ def wanted_scan_subtitles_movies(job_id=None):
     movies = database.execute(
         select(TableMovies.radarrId,
                TableMovies.path,
-               TableMovies.title)
+               TableMovies.title,
+               TableMovies.arr_instance_id)
         .where(reduce(operator.and_, conditions))) \
         .all()
 
@@ -266,7 +268,10 @@ def wanted_scan_subtitles_movies(job_id=None):
 
     for i, movie in enumerate(movies, start=1):
         jobs_queue.update_job_progress(job_id=job_id, progress_value=i, progress_message=movie.title)
-        store_subtitles_movie(movie.path, path_mappings.path_replace_movie(movie.path), use_cache=False)
+        store_subtitles_movie(movie.path,
+                              path_mappings.path_replace_instance(movie.path,
+                                                                  movie.arr_instance_id, 'movie'),
+                              use_cache=False, arr_instance_id=movie.arr_instance_id)
 
     jobs_queue.update_job_progress(job_id=job_id, progress_message="Scan completed")
 

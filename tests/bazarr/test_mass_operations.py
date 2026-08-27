@@ -132,6 +132,7 @@ class TestProcessSubtitleItem:
             sonarr_episode_id=1,
             radarr_id=None,
             metadata=item['metadata'],
+            arr_instance_id=None,
         )
 
     @patch('subtitles.tools.translate.main.translate_subtitles_file', return_value=True)

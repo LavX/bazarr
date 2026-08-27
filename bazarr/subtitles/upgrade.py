@@ -79,6 +79,18 @@ def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, sonarr_serie
     elif sonarr_series_ids:
         query = query.where(TableHistory.sonarrSeriesId.in_(sonarr_series_ids))
 
+    # Streamed rather than .all(): the Row objects and the dicts built from them
+    # would otherwise both be held at once, over a history table that is never
+    # pruned.
+    #
+    # The video_path filter deliberately stays in Python rather than moving into
+    # the join. SQL equality is not NULL safe, so a NULL on either side drops the
+    # row instead of comparing equal, and this file already works around exactly
+    # that elsewhere with is_not_distinct_from. Today TableEpisodes.path is NOT
+    # NULL so the two agree, but that is a constraint sixty lines away in another
+    # module, and it keeps the episode side symmetrical with the movie side below,
+    # where the same comparison has to stay in Python so a dropped candidate can
+    # be explained in the log.
     episodes_data = [{
         'id': x.id,
         'seriesTitle': x.seriesTitle,
@@ -98,8 +110,8 @@ def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, sonarr_serie
         'profileId': x.profileId,
         'external_subtitles': [y[1] for y in ast.literal_eval(x.external_subtitles) if y[1]],
     } for x in database.execute(query)
-    .all() if _language_still_desired(x.language, x.profileId) and
-              x.video_path == x.path
+    if _language_still_desired(x.language, x.profileId) and
+       x.video_path == x.path
     ]
 
     for item in episodes_data:
@@ -171,7 +183,8 @@ def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, sonarr_serie
                 result = result[0]
             if isinstance(result, tuple) and len(result):
                 result = result[0]
-            store_subtitles(episode['video_path'], path_mappings.path_replace(episode['video_path']))
+            store_subtitles(episode['video_path'], path_mappings.path_replace(episode['video_path']),
+                            arr_instance_id=episode['arr_instance_id'])
             history_log(3, episode['sonarrSeriesId'], episode['sonarrEpisodeId'], result,
                         upgraded_from_id=episode['original_id'],
                         arr_instance_id=episode['arr_instance_id'])
@@ -216,9 +229,12 @@ def upgrade_movies_subtitles(job_id=None, radarr_ids=None, radarr_filters=None, 
     elif radarr_ids:
         query = query.where(TableHistoryMovie.radarrId.in_(radarr_ids))
 
-    all_rows = database.execute(query).all()
+    # Streamed rather than .all(): the diagnostics below explain why each
+    # candidate was dropped, so the filtering stays in Python, but there is no
+    # reason to hold every Row of the history join in memory at once while the
+    # dicts for the survivors are being built alongside them.
     movies_data = []
-    for x in all_rows:
+    for x in database.execute(query):
         if not _language_still_desired(x.language, x.profileId):
             if x.id in movies_to_upgrade:
                 logging.debug(f"Upgrade candidate {x.id} ({x.title}) dropped: language {x.language} no longer desired "  # noqa: G004
@@ -315,7 +331,8 @@ def upgrade_movies_subtitles(job_id=None, radarr_ids=None, radarr_filters=None, 
             if isinstance(result, tuple) and len(result):
                 result = result[0]
             store_subtitles_movie(movie['video_path'],
-                                  path_mappings.path_replace_movie(movie['video_path']))
+                                  path_mappings.path_replace_movie(movie['video_path']),
+                                  arr_instance_id=movie['arr_instance_id'])
             history_log_movie(3, movie['radarrId'], result, upgraded_from_id=movie['original_id'],
                               arr_instance_id=movie['arr_instance_id'])
             send_notifications_movie(movie['radarrId'], result.message,
