@@ -122,8 +122,22 @@ def _drop_embedded_duplicates(subtitles, usable):
     """
     covered = {_subtitle_variant_key(lang) for lang, path in subtitles
                if path and usable(lang, path)}
-    return [(lang, path) for lang, path in subtitles
-            if path or _subtitle_variant_key(lang) not in covered]
+
+    kept = []
+    for lang, path in subtitles:
+        if path:
+            kept.append((lang, path))
+            continue
+        key = _subtitle_variant_key(lang)
+        if key in covered:
+            continue
+        # A container often carries one language twice, and the indexer writes
+        # an entry per track without de-duplicating, so the same variant can
+        # appear more than once. Every copy selects the same stream and writes
+        # the same output, which on a paid translator is billed twice.
+        covered.add(key)
+        kept.append((lang, path))
+    return kept
 
 
 def _add_instance_filter(mapping, upstream_id, arr_instance_id):

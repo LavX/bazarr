@@ -195,3 +195,27 @@ class TestExtractionIsAtomic:
         cmd = seen['cmd']
         assert '-f' in cmd and cmd[cmd.index('-f') + 1] == 'srt', cmd
         assert cmd[-1].endswith('.srt'), cmd[-1]
+
+    def test_two_concurrent_extractions_do_not_share_a_temporary_path(
+            self, monkeypatch, tmp_path):
+        """Jobs run as threads inside one process, so the pid is the same for
+        both. Two extractions of the same variant would then write one file
+        and the first os.replace would pull it out from under the second."""
+        import subtitles.tools.translate.batch as batch
+
+        seen = []
+
+        def fake_run(cmd, **kwargs):
+            seen.append(cmd[-1])
+            with open(cmd[-1], 'w', encoding='utf-8') as handle:
+                handle.write('1\n00:00:01,000 --> 00:00:02,000\nhi\n')
+            return MagicMock(returncode=0, stderr='')
+
+        self._prepare(monkeypatch, tmp_path, fake_run)
+
+        first = batch.extract_embedded_subtitle('/media/ep.mkv', 'en', 'episode')
+        os.remove(first)  # force a second cache miss for the same variant
+        batch.extract_embedded_subtitle('/media/ep.mkv', 'en', 'episode')
+
+        assert len(seen) == 2
+        assert seen[0] != seen[1], seen

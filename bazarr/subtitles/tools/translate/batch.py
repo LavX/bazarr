@@ -5,6 +5,7 @@ import os
 import ast
 import re
 import subprocess
+import uuid
 from app.database import TableEpisodes, TableMovies, TableShows, database, select
 from app.jobs_queue import jobs_queue
 from app.event_handler import event_stream
@@ -510,9 +511,11 @@ def extract_embedded_subtitle(
     # place, so output_path either does not exist or is complete. Writing
     # straight to it meant a second caller arriving mid-write saw a non-empty
     # file, took it as a cache hit, and translated a truncated subtitle. The
-    # temporary name carries the pid so two processes cannot share one, and
-    # keeps the .srt extension because ffmpeg picks its muxer from it.
-    temp_path = f"{output_path}.{os.getpid()}.part.srt"
+    # The temporary name is unique per call, not per process: jobs run as
+    # threads inside one process, so a pid would be the same for both and the
+    # first os.replace would pull the file out from under the second. It keeps
+    # the .srt extension because ffmpeg picks its muxer from it.
+    temp_path = f"{output_path}.{uuid.uuid4().hex}.part.srt"
 
     # Extract using ffmpeg
     try:

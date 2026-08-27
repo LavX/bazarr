@@ -1746,3 +1746,52 @@ class TestEmbeddedExtractionCarriesTheOwningInstance:
         _process_subtitle_item(item, 'translate', {'from_lang': 'en', 'to_lang': 'nl'}, 'job')
 
         assert mock_extract.call_args.kwargs['arr_instance_id'] == 4
+
+
+class TestDuplicateEmbeddedTracks:
+    """A container often carries the same language twice.
+
+    The indexer appends one entry per track with no de-duplication, so two
+    English tracks become two identical pathless entries. Both would extract
+    the same stream, translate it twice and overwrite one output, which on a
+    paid translator is billed twice.
+    """
+
+    def test_identical_embedded_entries_collapse_to_one(self):
+        from subtitles.mass_operations import _drop_embedded_duplicates
+
+        subtitles = [('en', None), ('en', None), ('fr', None)]
+
+        kept = _drop_embedded_duplicates(subtitles, lambda lang, path: True)
+
+        assert kept == [('en', None), ('fr', None)]
+
+    def test_different_variants_of_one_language_both_survive(self):
+        """en and en:hi extract different streams and write different files."""
+        from subtitles.mass_operations import _drop_embedded_duplicates
+
+        subtitles = [('en', None), ('en:hi', None)]
+
+        kept = _drop_embedded_duplicates(subtitles, lambda lang, path: True)
+
+        assert kept == [('en', None), ('en:hi', None)]
+
+    def test_a_file_still_beats_the_embedded_track_it_covers(self):
+        from subtitles.mass_operations import _drop_embedded_duplicates
+
+        subtitles = [('en', None), ('en', '/subs/a.en.srt'), ('en', None)]
+
+        kept = _drop_embedded_duplicates(subtitles, lambda lang, path: True)
+
+        assert kept == [('en', '/subs/a.en.srt')]
+
+    def test_duplicate_files_are_left_alone(self):
+        """Only the embedded side is de-duplicated here; two real files are
+        somebody else's problem and were never touched by this."""
+        from subtitles.mass_operations import _drop_embedded_duplicates
+
+        subtitles = [('en', '/subs/a.en.srt'), ('en', '/subs/b.en.srt')]
+
+        kept = _drop_embedded_duplicates(subtitles, lambda lang, path: True)
+
+        assert len(kept) == 2
