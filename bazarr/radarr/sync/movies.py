@@ -404,11 +404,11 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False,
             if action == 'updated' and existing_movie:
                 movie = movieParser(movie_data, action='update', tags_dict=tagsDict, language_profiles=language_profiles,
                                     movie_default_profile=movie_default_profile, audio_profiles=audio_profiles,
-                                    arr_instance_id=arr_instance_id)
+                                    arr_instance_id=instance_id)
             elif action == 'updated' and not existing_movie:
                 movie = movieParser(movie_data, action='insert', tags_dict=tagsDict, language_profiles=language_profiles,
                                     movie_default_profile=movie_default_profile, audio_profiles=audio_profiles,
-                                    arr_instance_id=arr_instance_id)
+                                    arr_instance_id=instance_id)
     except Exception:
         logging.exception('BAZARR cannot get movie returned by SignalR feed from Radarr API.')
         return

@@ -340,6 +340,8 @@ jobs:
             tests/bazarr/test_mass_operations.py \
             tests/bazarr/test_embedded_extraction_instance_scope.py \
             tests/bazarr/test_ffprobe_cache_instance_scope.py \
+            tests/bazarr/test_parser_owner_threading.py \
+            tests/bazarr/test_embedded_translate_api_scope.py \
             tests/bazarr/test_release_type_mismatch_migration.py \
             tests/bazarr/test_upstream_db_adoption.py \
             tests/bazarr/test_upstream_db_adoption_pg.py ; do

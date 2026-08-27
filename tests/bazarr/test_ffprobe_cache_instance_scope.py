@@ -78,14 +78,34 @@ def test_the_cache_read_is_scoped_to_the_owning_instance(two_instances, monkeypa
     assert data['ffprobe']['subtitle'][0]['name'] == 'second-instance'
 
 
-def test_probing_one_instance_leaves_the_other_cache_alone(two_instances, monkeypatch):
+def test_probing_one_instance_leaves_the_other_cache_alone(two_instances, monkeypatch,
+                                                          tmp_path):
+    """The write half of the scoping, which is the half that corrupts data.
+
+    Two things this test has to get right or it asserts nothing at all.
+    ``get_binary`` is imported INSIDE ``parse_video_metadata``, so patching the
+    name on ``video_analyzer`` has no effect; it has to be patched on
+    ``utilities.binaries``. And the function returns early when the video file
+    does not exist, before it ever probes or writes. Miss either and the
+    "other instance untouched" assertion passes because nothing was written to
+    anything, which is why the probed row is asserted too.
+    """
+    import utilities.binaries as binaries
     import utilities.video_analyzer as va
 
-    monkeypatch.setattr(va, 'know', lambda *a, **kw: {'subtitle': [{'name': 'freshly-probed'}]})
-    monkeypatch.setattr(va, 'get_binary', lambda name: '/usr/bin/ffprobe', raising=False)
+    video = tmp_path / 'e.mkv'
+    video.write_bytes(b'stand-in, knowit is stubbed out')
 
-    va.parse_video_metadata('/a/e.mkv', 999, episode_file_id=500,
+    monkeypatch.setattr(va, 'know', lambda *a, **kw: {'subtitle': [{'name': 'freshly-probed'}]})
+    monkeypatch.setattr(binaries, 'get_binary', lambda name: '/usr/bin/ffprobe')
+
+    va.parse_video_metadata(str(video), 999, episode_file_id=500,
                             arr_instance_id=1, use_cache=False)
+
+    probed = two_instances.execute(
+        select(TableEpisodes.ffprobe_cache).where(TableEpisodes.id == 1)).scalar()
+    assert pickle.loads(probed)['ffprobe']['subtitle'][0]['name'] == 'freshly-probed', \
+        'the probe never reached the cache write, so this test proves nothing'
 
     untouched = two_instances.execute(
         select(TableEpisodes.ffprobe_cache).where(TableEpisodes.id == 2)).scalar()
