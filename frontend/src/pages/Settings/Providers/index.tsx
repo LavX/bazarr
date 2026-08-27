@@ -244,6 +244,14 @@ const AntiCaptchaSection: FunctionComponent = () => (
       <Anchor href="https://www.deathbycaptcha.com">DeathByCaptcha.com</Anchor>
       <Message>Link to subscribe</Message>
     </CollapseBox>
+    <CollapseBox
+      settingKey="settings-general-anti_captcha_provider"
+      on={(value) => value === "captchaai"}
+    >
+      <Text label="API Key" settingKey="settings-captchaai-captchaai_key" />
+      <Anchor href="https://captchaai.com">CaptchaAI.com</Anchor>
+      <Message>Link to subscribe</Message>
+    </CollapseBox>
   </Stack>
 );
 
