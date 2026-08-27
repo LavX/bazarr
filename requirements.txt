@@ -1,7 +1,7 @@
 setuptools>=84.0.0
 
 # Bazarr runtime dependencies
-aiohttp>=3.14.1
+aiohttp>=3.14.3
 alembic==1.19.1
 apprise==1.13.0
 apscheduler==3.11.3
