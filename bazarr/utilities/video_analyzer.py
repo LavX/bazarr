@@ -54,8 +54,10 @@ def _handle_alpha3(detected_language: dict):
     return alpha3
 
 
-def embedded_subs_reader(file, file_size, episode_file_id=None, movie_file_id=None, use_cache=True):
-    data = parse_video_metadata(file, file_size, episode_file_id, movie_file_id, use_cache=use_cache)
+def embedded_subs_reader(file, file_size, episode_file_id=None, movie_file_id=None, use_cache=True,
+                         arr_instance_id=None):
+    data = parse_video_metadata(file, file_size, episode_file_id, movie_file_id, use_cache=use_cache,
+                                arr_instance_id=arr_instance_id)
     und_default_language = alpha3_from_alpha2(settings.general.default_und_embedded_subtitles_lang)
 
     subtitles_list = []
@@ -97,8 +99,10 @@ def embedded_subs_reader(file, file_size, episode_file_id=None, movie_file_id=No
     return subtitles_list
 
 
-def embedded_audio_reader(file, file_size, episode_file_id=None, movie_file_id=None, use_cache=True):
-    data = parse_video_metadata(file, file_size, episode_file_id, movie_file_id, use_cache=use_cache)
+def embedded_audio_reader(file, file_size, episode_file_id=None, movie_file_id=None, use_cache=True,
+                          arr_instance_id=None):
+    data = parse_video_metadata(file, file_size, episode_file_id, movie_file_id, use_cache=use_cache,
+                                arr_instance_id=arr_instance_id)
 
     audio_list = []
 
@@ -150,7 +154,7 @@ def subtitles_sync_references(subtitles_path, sonarr_episode_id=None, radarr_mov
         mapped_path = path_mappings.path_replace(media_data.path)
 
         data = parse_video_metadata(mapped_path, media_data.file_size, media_data.episode_file_id, None,
-                                    use_cache=True)
+                                    use_cache=True, arr_instance_id=arr_instance_id)
     elif radarr_movie_id:
         media_data = database.execute(
             scoped(
@@ -165,7 +169,7 @@ def subtitles_sync_references(subtitles_path, sonarr_episode_id=None, radarr_mov
         mapped_path = path_mappings.path_replace_movie(media_data.path)
 
         data = parse_video_metadata(mapped_path, media_data.file_size, None, media_data.movie_file_id,
-                                    use_cache=True)
+                                    use_cache=True, arr_instance_id=arr_instance_id)
 
     if not data:
         return references_dict
@@ -244,7 +248,8 @@ def subtitles_sync_references(subtitles_path, sonarr_episode_id=None, radarr_mov
     return references_dict
 
 
-def parse_video_metadata(file, file_size, episode_file_id=None, movie_file_id=None, use_cache=True):
+def parse_video_metadata(file, file_size, episode_file_id=None, movie_file_id=None, use_cache=True,
+                         arr_instance_id=None):
     """
     This function return the video file properties as parsed by knowit using ffprobe or mediainfo using the cached
     value by default.
@@ -259,6 +264,11 @@ def parse_video_metadata(file, file_size, episode_file_id=None, movie_file_id=No
     @param movie_file_id: movie ID of the video file from Radarr (or None if it's an episode)
     @type use_cache: bool
     @param use_cache:
+    @type arr_instance_id: int or None
+    @param arr_instance_id: the instance that owns the media (#156). The file ids come from
+        the arr server, so two instances can hand out the same one for different files; without
+        this the cache read can return the other instance's stream list and the write can
+        overwrite its row. None means no filter, which is what a single-instance install passes.
 
     @rtype: dict or None
     @return: return a dictionary including the video file properties as parsed by ffprobe or mediainfo
@@ -278,13 +288,17 @@ def parse_video_metadata(file, file_size, episode_file_id=None, movie_file_id=No
         # Get the actual cache value form database
         if episode_file_id:
             cache_key = database.execute(
-                select(TableEpisodes.ffprobe_cache)
-                .where(TableEpisodes.episode_file_id == episode_file_id)) \
+                scoped(
+                    select(TableEpisodes.ffprobe_cache)
+                    .where(TableEpisodes.episode_file_id == episode_file_id),
+                    TableEpisodes.arr_instance_id, arr_instance_id)) \
                 .first()
         elif movie_file_id:
             cache_key = database.execute(
-                select(TableMovies.ffprobe_cache)
-                .where(TableMovies.movie_file_id == movie_file_id)) \
+                scoped(
+                    select(TableMovies.ffprobe_cache)
+                    .where(TableMovies.movie_file_id == movie_file_id),
+                    TableMovies.arr_instance_id, arr_instance_id)) \
                 .first()
         else:
             cache_key = None
@@ -357,14 +371,18 @@ def parse_video_metadata(file, file_size, episode_file_id=None, movie_file_id=No
     # we write to db the result and return the newly cached ffprobe dict
     if episode_file_id:
         database.execute(
-            update(TableEpisodes)
-            .values(ffprobe_cache=pickle.dumps(data, pickle.HIGHEST_PROTOCOL))
-            .where(TableEpisodes.episode_file_id == episode_file_id))
+            scoped(
+                update(TableEpisodes)
+                .values(ffprobe_cache=pickle.dumps(data, pickle.HIGHEST_PROTOCOL))
+                .where(TableEpisodes.episode_file_id == episode_file_id),
+                TableEpisodes.arr_instance_id, arr_instance_id))
     elif movie_file_id:
         database.execute(
-            update(TableMovies)
-            .values(ffprobe_cache=pickle.dumps(data, pickle.HIGHEST_PROTOCOL))
-            .where(TableMovies.movie_file_id == movie_file_id))
+            scoped(
+                update(TableMovies)
+                .values(ffprobe_cache=pickle.dumps(data, pickle.HIGHEST_PROTOCOL))
+                .where(TableMovies.movie_file_id == movie_file_id),
+                TableMovies.arr_instance_id, arr_instance_id))
     return data
 
 

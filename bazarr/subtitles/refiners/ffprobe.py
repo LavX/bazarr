@@ -9,19 +9,30 @@ from guessit.jsonutils import GuessitEncoder
 
 from utilities.path_mappings import path_mappings
 from app.database import TableEpisodes, TableMovies, database, select
+from arr_instances.resolution import scoped
 from utilities.video_analyzer import parse_video_metadata
 
 
 def refine_from_ffprobe(path, video):
+    # The owning instance (#156), set on the video by the database layer. Two
+    # instances can index the same path and hand out the same file id, so both
+    # the row lookup and the metadata cache underneath it have to be scoped or
+    # this reads the other instance's streams.
+    arr_instance_id = getattr(video, 'arr_instance_id', None)
+
     if isinstance(video, Movie):
         file_id = database.execute(
-            select(TableMovies.movie_file_id, TableMovies.file_size)
-            .where(TableMovies.path == path_mappings.path_replace_reverse_movie(path))) \
+            scoped(
+                select(TableMovies.movie_file_id, TableMovies.file_size)
+                .where(TableMovies.path == path_mappings.path_replace_reverse_movie(path)),
+                TableMovies.arr_instance_id, arr_instance_id)) \
             .first()
     else:
         file_id = database.execute(
-            select(TableEpisodes.episode_file_id, TableEpisodes.file_size)
-            .where(TableEpisodes.path == path_mappings.path_replace_reverse(path)))\
+            scoped(
+                select(TableEpisodes.episode_file_id, TableEpisodes.file_size)
+                .where(TableEpisodes.path == path_mappings.path_replace_reverse(path)),
+                TableEpisodes.arr_instance_id, arr_instance_id))\
             .first()
 
     if not file_id:
@@ -29,10 +40,12 @@ def refine_from_ffprobe(path, video):
 
     if isinstance(video, Movie):
         data = parse_video_metadata(file=path, file_size=file_id.file_size,
-                                    movie_file_id=file_id.movie_file_id)
+                                    movie_file_id=file_id.movie_file_id,
+                                    arr_instance_id=arr_instance_id)
     else:
         data = parse_video_metadata(file=path, file_size=file_id.file_size,
-                                    episode_file_id=file_id.episode_file_id)
+                                    episode_file_id=file_id.episode_file_id,
+                                    arr_instance_id=arr_instance_id)
 
     if not data or ('ffprobe' not in data and 'mediainfo' not in data):
         logging.debug(f"No cache available for this file: {path}")  # noqa: G004

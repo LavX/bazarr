@@ -21,7 +21,8 @@ def get_matching_profile(tags, language_profiles):
     return matching_profile
 
 
-def movieParser(movie, action, tags_dict, language_profiles, movie_default_profile, audio_profiles):
+def movieParser(movie, action, tags_dict, language_profiles, movie_default_profile, audio_profiles,
+                arr_instance_id=None):
     if 'movieFile' in movie:
         try:
             overview = str(movie['overview'])
@@ -100,7 +101,8 @@ def movieParser(movie, action, tags_dict, language_profiles, movie_default_profi
             audio_language = embedded_audio_reader(path_mappings.path_replace_movie(movie['movieFile']['path']),
                                                    file_size=movie['movieFile']['size'],
                                                    movie_file_id=movie['movieFile']['id'],
-                                                   use_cache=True)
+                                                   use_cache=True,
+                                                   arr_instance_id=arr_instance_id)
         else:
             audio_language = []
             if get_radarr_info.is_legacy():

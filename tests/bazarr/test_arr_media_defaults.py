@@ -299,7 +299,7 @@ def _series_parser_stub(show, action, tags_dict, language_profiles,
 
 
 def _movie_parser_stub(movie, action, tags_dict, language_profiles,
-                       movie_default_profile, audio_profiles):
+                       movie_default_profile, audio_profiles, arr_instance_id=None):
     parsed = {"radarrId": int(movie["id"]), "path": f"/m/{movie['id']}",
               "title": "M", "tmdbId": f"t{movie['id']}", "year": "2020"}
     if action == "insert":
