@@ -27,6 +27,7 @@ from subtitles.wanted import wanted_search_missing_subtitles_series, wanted_sear
 from subtitles.upgrade import upgrade_subtitles
 from subtitles.mass_operations import mass_batch_operation
 from utilities.cache import cache_maintenance
+from provider_hub.worker import reap_idle_workers
 from utilities.health import check_health
 from utilities.backup import backup_to_zip
 from utilities.pretty_date import pretty_date
@@ -97,6 +98,16 @@ def _compat_usage_prune():
         logging.exception("BAZARR failed to prune Distribution Hub usage table")
 
 
+# How long a Hub worker may sit unused before it is reclaimed. Generous on
+# purpose: a search burst walks several providers with gaps between them, and
+# respawning mid-burst would trade memory for latency the user actually feels.
+PROVIDER_HUB_WORKER_IDLE_SECONDS = 30 * 60
+
+
+def _reap_idle_provider_hub_workers():
+    reap_idle_workers(PROVIDER_HUB_WORKER_IDLE_SECONDS)
+
+
 class Scheduler:
 
     def __init__(self):
@@ -134,6 +145,7 @@ class Scheduler:
 
         # configure all tasks
         self.__cache_cleanup_task()
+        self.__provider_hub_worker_reaper_task()
         self.__compat_usage_prune_task()
         self.__check_health_task()
         self.update_configurable_tasks()
@@ -274,6 +286,18 @@ class Scheduler:
                     id=f'update_movies_{inst.id}', name=f'Sync with Radarr ({inst.name})',
                     replace_existing=True,
                     kwargs=dict(arr_instance_id=inst.id, wait_for_completion=True))
+
+    def __provider_hub_worker_reaper_task(self):
+        # Hub workers are spawned lazily per pool and provider and nothing else
+        # reclaims them: the pool's own recycle only fires the next time that
+        # pool is searched, so on a quiet install the fleet sits at full size
+        # indefinitely at 17.6 to 44.6 MiB a process. Reaping is cheap because
+        # request() respawns a stopped worker, so the only cost of being wrong
+        # is a cold start on the next search, measured at 0.5 to 1.7 s.
+        self.aps_scheduler.add_job(
+            _reap_idle_provider_hub_workers, 'interval', minutes=10, max_instances=1,
+            coalesce=True, misfire_grace_time=60, id='provider_hub_worker_reaper',
+            name='Provider Hub Idle Worker Cleanup')
 
     def __cache_cleanup_task(self):
         self.aps_scheduler.add_job(cache_maintenance, 'interval', hours=24, max_instances=1, coalesce=True,

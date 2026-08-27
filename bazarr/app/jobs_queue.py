@@ -15,7 +15,21 @@ from threading import Thread, Lock, RLock
 from app.event_handler import event_stream
 from app.config import settings
 
-bazarr_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+# The package directory, i.e. the one holding subtitles/, sonarr/, app/ and the
+# rest. add_job_from_function derives a job's module from its filename relative
+# to this, and _run_job resolves that string with importlib, so it has to be the
+# name the module already has in this process.
+#
+# It used to be one dirname() higher, naming the repository root, so every job
+# was queued as "bazarr.<x>" while the running process had imported "<x>".
+# app/libs.py puts the parent on sys.path as well, so both names resolve and
+# Python keeps two module objects for the same file, each with its own
+# module-level state. subtitles/cache.py documents that split and works around
+# it, because the UUID a manual search stored in one copy was looked for in the
+# other. subtitles/pool.py holds _pools the same way, and Provider Hub spawns a
+# worker subprocess per pool and provider, so the split also bought a second
+# worker fleet on any warm install.
+bazarr_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class JobCancelled(Exception):
