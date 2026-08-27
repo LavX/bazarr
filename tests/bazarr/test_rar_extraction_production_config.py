@@ -60,12 +60,52 @@ def test_the_dockerfile_installs_a_tool_that_can_decompress_rar():
     dropping unar would otherwise sail through a CI run whose runner installs it
     separately, and ship the exact bug this file exists for.
     """
-    dockerfile = (pathlib.Path(__file__).resolve().parents[2] / "Dockerfile").read_text()
-
-    installed = {line.strip().rstrip(" \\")
-                 for line in dockerfile.splitlines()}
+    installed = _packages_in_stage("production")
 
     assert "unar" in installed or "unrar" in installed, (
-        "the Dockerfile installs neither unar nor unrar; p7zip alone cannot "
-        "decompress RAR, so every RAR-delivered subtitle would fail in the image"
+        "the production stage installs neither unar nor unrar; p7zip alone "
+        "cannot decompress RAR, so every RAR-delivered subtitle would fail in "
+        f"the image. It installs: {sorted(installed)}"
+    )
+
+
+def _dockerfile_lines():
+    return (pathlib.Path(__file__).resolve().parents[2] / "Dockerfile").read_text().splitlines()
+
+
+def _packages_in_stage(stage, lines=None):
+    """Package-looking tokens inside one build stage only.
+
+    The image has three stages. Reading the whole file would accept a package
+    installed in a builder and dropped from the final image, which is precisely
+    the state that ships a broken RAR extractor while the test stays green.
+    """
+    wanted = []
+    in_stage = False
+    for line in (lines if lines is not None else _dockerfile_lines()):
+        stripped = line.strip()
+        if stripped.upper().startswith("FROM "):
+            in_stage = stripped.rstrip().lower().endswith(f" as {stage}")
+            continue
+        if in_stage:
+            wanted.append(stripped.rstrip(" \\"))
+    return set(wanted)
+
+
+def test_a_package_only_in_a_builder_stage_does_not_count():
+    """The guard above is only worth anything if it reads the stage users run."""
+    lines = [
+        "FROM python:3.14-slim-trixie AS python-builder",
+        "RUN apt-get install -y \\",
+        "    unar \\",
+        "    build-essential",
+        "FROM python:3.14-slim-trixie AS production",
+        "RUN apt-get install -y \\",
+        "    p7zip-full",
+    ]
+
+    assert "unar" in _packages_in_stage("python-builder", lines)
+    assert "unar" not in _packages_in_stage("production", lines), (
+        "a package installed only in a builder stage was credited to the image "
+        "users actually run"
     )

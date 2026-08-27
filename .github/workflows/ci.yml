@@ -13,6 +13,7 @@ on:
       - bazarr.py
       - requirements.txt
       - dev-requirements.txt
+      - Dockerfile
       - .github/workflows/ci.yml
   # No branches filter on purpose. A stacked pull request, one whose base is
   # another feature branch rather than development, got no CI at all under
