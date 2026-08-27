@@ -68,7 +68,7 @@ semver==3.0.4
 six==1.17.0
 sqlalchemy==2.0.51
 srt==3.5.3
-subliminal[rar]==2.6.0
+subliminal[rar]==2.7.1
 textdistance==4.6.3
 tld==0.13.2
 tomlkit>=0.15.0
