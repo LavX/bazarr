@@ -216,6 +216,7 @@ def test_refresh_media_subtitles_episode_uses_instance_mapping(monkeypatch):
         "/remote/tv/show/s01e01.mkv",
         "/local/tv/show/s01e01.mkv",
         use_cache=False,
+        arr_instance_id=3,
     )
 
 
@@ -244,6 +245,7 @@ def test_refresh_media_subtitles_movie_uses_instance_mapping(monkeypatch):
         "/remote/movies/film.mkv",
         "/local/movies/film.mkv",
         use_cache=False,
+        arr_instance_id=4,
     )
 
 

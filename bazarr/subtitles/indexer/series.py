@@ -29,19 +29,27 @@ from arr_instances.resolution import scoped
 gc.enable()
 
 
-def store_subtitles(original_path, reversed_path, use_cache=True):
+def store_subtitles(original_path, reversed_path, use_cache=True, arr_instance_id=None):
     logging.debug(f'BAZARR started subtitles indexing for this file: {reversed_path}')  # noqa: G004
     actual_subtitles = []
-    # Resolve the owning instance for this file up front (#156) so every
-    # path_replace* below honours the owning instance's per-instance
-    # path_mappings instead of the global singleton. A media row owned by a
-    # secondary instance with a different on-disk prefix would otherwise be
-    # read/written at the wrong path. owner_instance_id None => global mapping
-    # (the default/single-instance path), byte-identical to legacy behaviour.
-    owner_row = database.execute(
-        select(TableEpisodes.arr_instance_id)
-        .where(TableEpisodes.path == original_path)).first()
-    owner_instance_id = owner_row.arr_instance_id if owner_row else None
+    # The owning instance decides everything below: which per-instance
+    # path_mappings resolve the paths, which ffprobe cache row the embedded pass
+    # reads and overwrites, and which row receives the listing (#156).
+    #
+    # Take it from the caller when it knows, which is nearly always, because
+    # resolving it here from the path cannot be done reliably: path is not
+    # unique across instances, and per-instance mappings can point the same
+    # remote path at two different local files. An unscoped first() would then
+    # index this file's result into the other instance's row and probe the other
+    # instance's file id. Falling back to the lookup keeps the default and
+    # single-instance path byte-identical to legacy behaviour.
+    if arr_instance_id is not None:
+        owner_instance_id = arr_instance_id
+    else:
+        owner_row = database.execute(
+            select(TableEpisodes.arr_instance_id)
+            .where(TableEpisodes.path == original_path)).first()
+        owner_instance_id = owner_row.arr_instance_id if owner_row else None
 
     def _pr(p):
         return path_mappings.path_replace_instance(p, owner_instance_id, "series")
@@ -55,8 +63,9 @@ def store_subtitles(original_path, reversed_path, use_cache=True):
         if settings.general.use_embedded_subs:
             logging.debug("BAZARR is trying to index embedded subtitles.")
             item = database.execute(
-                select(TableEpisodes.episode_file_id, TableEpisodes.file_size)
-                .where(TableEpisodes.path == original_path))\
+                scoped(select(TableEpisodes.episode_file_id, TableEpisodes.file_size)
+                       .where(TableEpisodes.path == original_path),
+                       TableEpisodes.arr_instance_id, owner_instance_id))\
                 .first()
             if not item:
                 logging.exception(f"BAZARR error when trying to select this episode from database: {reversed_path}")  # noqa: G004
@@ -98,8 +107,9 @@ def store_subtitles(original_path, reversed_path, use_cache=True):
 
             # get previously indexed subtitles that haven't changed:
             item = database.execute(
-                select(TableEpisodes.subtitles)
-                .where(TableEpisodes.path == original_path)) \
+                scoped(select(TableEpisodes.subtitles)
+                       .where(TableEpisodes.path == original_path),
+                       TableEpisodes.arr_instance_id, owner_instance_id)) \
                 .first()
             if not item:
                 previously_indexed_subtitles_to_exclude = []
@@ -167,13 +177,15 @@ def store_subtitles(original_path, reversed_path, use_cache=True):
                                              subtitle_size])
 
         database.execute(
-            update(TableEpisodes)
-            .values(subtitles=str(actual_subtitles))
-            .where(TableEpisodes.path == original_path))
+            scoped(update(TableEpisodes)
+                   .values(subtitles=str(actual_subtitles))
+                   .where(TableEpisodes.path == original_path),
+                   TableEpisodes.arr_instance_id, owner_instance_id))
         matching_episodes = database.execute(
-            select(TableEpisodes.sonarrEpisodeId, TableEpisodes.sonarrSeriesId,
-                   TableEpisodes.arr_instance_id)
-            .where(TableEpisodes.path == original_path))\
+            scoped(select(TableEpisodes.sonarrEpisodeId, TableEpisodes.sonarrSeriesId,
+                          TableEpisodes.arr_instance_id)
+                   .where(TableEpisodes.path == original_path),
+                   TableEpisodes.arr_instance_id, owner_instance_id))\
             .all()
 
         for episode in matching_episodes:
@@ -428,8 +440,12 @@ def series_full_scan_subtitles(job_id=None, use_cache=None, wait_for_completion=
     if use_cache is None:
         use_cache = settings.sonarr.use_ffprobe_cache
 
+    # The owner comes along, because store_subtitles now scopes its write to it:
+    # without it every row sharing a path would resolve to the same arbitrary
+    # owner and the other instances would never be indexed at all.
     episodes = database.execute(
-        select(TableEpisodes.path, TableShows.title, TableEpisodes.title.label("episodeTitle"), TableEpisodes.season, TableEpisodes.episode)
+        select(TableEpisodes.path, TableShows.title, TableEpisodes.title.label("episodeTitle"),
+               TableEpisodes.season, TableEpisodes.episode, TableEpisodes.arr_instance_id)
         .select_from(TableEpisodes)
         .join(TableShows)
     ).all()
@@ -439,7 +455,10 @@ def series_full_scan_subtitles(job_id=None, use_cache=None, wait_for_completion=
         jobs_queue.update_job_progress(
             job_id=job_id, progress_value=i,
             progress_message=f"{episode.title} - S{episode.season:02d}E{episode.episode:02d} - {episode.episodeTitle}")
-        store_subtitles(episode.path, path_mappings.path_replace(episode.path), use_cache=use_cache)
+        store_subtitles(episode.path,
+                        path_mappings.path_replace_instance(episode.path,
+                                                            episode.arr_instance_id, 'series'),
+                        use_cache=use_cache, arr_instance_id=episode.arr_instance_id)
 
     logging.info('BAZARR All existing episode subtitles indexed from disk.')
 
@@ -451,11 +470,14 @@ def series_full_scan_subtitles(job_id=None, use_cache=None, wait_for_completion=
 def series_scan_subtitles(no, arr_instance_id=None):
     episodes = database.execute(
         scoped(
-            select(TableEpisodes.path)
+            select(TableEpisodes.path, TableEpisodes.arr_instance_id)
             .where(TableEpisodes.sonarrSeriesId == no)
             .order_by(TableEpisodes.sonarrEpisodeId),
             TableEpisodes.arr_instance_id, arr_instance_id))\
         .all()
 
     for episode in episodes:
-        store_subtitles(episode.path, path_mappings.path_replace(episode.path), use_cache=False)
+        store_subtitles(episode.path,
+                        path_mappings.path_replace_instance(episode.path,
+                                                            episode.arr_instance_id, 'series'),
+                        use_cache=False, arr_instance_id=episode.arr_instance_id)

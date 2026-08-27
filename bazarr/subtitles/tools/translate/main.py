@@ -16,7 +16,8 @@ from subtitles.indexer.utils import get_external_subtitles_path
 
 
 def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, forced, hi,
-                             media_type, sonarr_series_id, sonarr_episode_id, radarr_id, metadata, job_id=None):
+                             media_type, sonarr_series_id, sonarr_episode_id, radarr_id, metadata,
+                             job_id=None, arr_instance_id=None):
     if not job_id:
         # Build job label with media title. Note: no local variables can be
         # assigned here because add_job_from_function introspects the frame
@@ -78,7 +79,13 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
 
         from api.subtitles.subtitles import postprocess_subtitles
         # Call postprocess_subtitles after translation (handles chmod, re-indexing, events)
-        postprocess_subtitles(dest_srt_file, video_path, media_type, metadata, sonarr_episode_id if media_type == 'episode' else radarr_id)
+        # The owning instance goes with it (#156). postprocess_subtitles
+        # re-indexes the new file, and that write is scoped now, so without
+        # the owner the translated subtitle can land on a sibling instance's
+        # row and leave the one the user asked about showing nothing.
+        postprocess_subtitles(dest_srt_file, video_path, media_type, metadata,
+                              sonarr_episode_id if media_type == 'episode' else radarr_id,
+                              arr_instance_id=arr_instance_id)
 
         # The translated file is now on disk. The download-time combine ran before
         # this async translation finished (so it skipped, source missing); build or

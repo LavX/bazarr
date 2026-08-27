@@ -69,14 +69,15 @@ def process_episode_translation(
             new_job_name=f"Translating {ep_label} ({source_language.upper()} → {target_language.upper()})",
         )
 
-    video_path = path_mappings.path_replace(episode.path)
+    video_path = path_mappings.path_replace_instance(episode.path, arr_instance_id, 'episode')
 
     # Find source subtitle
     source_subtitle_path = subtitle_path
     detected_source_lang = None
     if not source_subtitle_path:
         source_subtitle_path, detected_source_lang = find_subtitle_by_language(
-            episode.subtitles, source_language, video_path, media_type="episode"
+            episode.subtitles, source_language, video_path, media_type="episode",
+            arr_instance_id=arr_instance_id
         )
 
     if not source_subtitle_path:
@@ -106,9 +107,12 @@ def process_episode_translation(
             radarr_id=None,
             metadata=episode,
             job_id=job_id,
+            arr_instance_id=arr_instance_id,
         )
         # Re-index subtitles so Bazarr's DB knows about the new translated file
-        store_subtitles(path_mappings.path_replace_reverse(video_path), video_path)
+        store_subtitles(
+            path_mappings.path_replace_reverse_instance(video_path, arr_instance_id, 'episode'),
+            video_path, arr_instance_id=arr_instance_id)
         # Notify frontend to refresh series and episode views. Emit the LOCAL
         # episode id (#156): the frontend caches episode detail by local id and
         # the upstream sonarrEpisodeId is not unique across instances.
@@ -125,16 +129,21 @@ def process_movie_translation(
 ):
     """Process a single movie for translation in background"""
     radarr_id = item.get("radarrId")
+    arr_instance_id = item.get("arr_instance_id")
 
     if not radarr_id:
         logger.error("Missing radarrId")
         return False
 
-    # Get movie info from database
+    # Get movie info from database, scoped to the owning instance (#156):
+    # radarrId is not unique across instances, so an unscoped lookup can return
+    # a sibling instance's movie and translate the wrong file.
     movie = database.execute(
-        select(TableMovies.path, TableMovies.subtitles, TableMovies.title).where(
-            TableMovies.radarrId == radarr_id
-        )
+        scoped(
+            select(TableMovies.path, TableMovies.subtitles, TableMovies.title).where(
+                TableMovies.radarrId == radarr_id
+            ),
+            TableMovies.arr_instance_id, arr_instance_id)
     ).first()
 
     if not movie:
@@ -148,14 +157,15 @@ def process_movie_translation(
             new_job_name=f"Translating {movie.title} ({source_language.upper()} → {target_language.upper()})",
         )
 
-    video_path = path_mappings.path_replace_movie(movie.path)
+    video_path = path_mappings.path_replace_instance(movie.path, arr_instance_id, 'movie')
 
     # Find source subtitle
     source_subtitle_path = subtitle_path
     detected_source_lang = None
     if not source_subtitle_path:
         source_subtitle_path, detected_source_lang = find_subtitle_by_language(
-            movie.subtitles, source_language, video_path, media_type="movie"
+            movie.subtitles, source_language, video_path, media_type="movie",
+            arr_instance_id=arr_instance_id
         )
 
     if not source_subtitle_path:
@@ -185,10 +195,12 @@ def process_movie_translation(
             radarr_id=radarr_id,
             metadata=movie,
             job_id=job_id,
+            arr_instance_id=arr_instance_id,
         )
         # Re-index subtitles so Bazarr's DB knows about the new translated file
         store_subtitles_movie(
-            path_mappings.path_replace_reverse_movie(video_path), video_path
+            path_mappings.path_replace_reverse_instance(video_path, arr_instance_id, 'movie'),
+            video_path, arr_instance_id=arr_instance_id
         )
         # Notify frontend to refresh movie view
         event_stream(type="movie", payload=radarr_id)
@@ -198,8 +210,15 @@ def process_movie_translation(
         return False
 
 
-def find_subtitle_by_language(subtitles, language_code, video_path, media_type="movie"):
-    """Find a subtitle file by language code from the subtitles list."""
+def find_subtitle_by_language(subtitles, language_code, video_path, media_type="movie",
+                             arr_instance_id=None):
+    """Find a subtitle file by language code from the subtitles list.
+
+    ``arr_instance_id`` is the instance that owns the media (#156). Extraction
+    reverses the video path with that instance's mapping and scopes its row
+    lookup by it, so a caller that resolved an owner has to pass it on or the
+    lookup runs unscoped and can select another instance's subtitle stream.
+    """
     available_subtitles = []
 
     if subtitles:
@@ -236,11 +255,12 @@ def find_subtitle_by_language(subtitles, language_code, video_path, media_type="
 
     # Helper function to resolve and validate subtitle path
     def resolve_subtitle_path(sub_path):
-        # Apply path mapping based on media type
-        if media_type == "episode":
-            mapped_path = path_mappings.path_replace(sub_path)
-        else:
-            mapped_path = path_mappings.path_replace_movie(sub_path)
+        # The owning instance's mapping, the same one the caller used for the
+        # video. Mixing them pairs a secondary instance's video with a default
+        # instance's subtitle when both paths happen to exist, or reports no
+        # subtitle at all when they do not.
+        kind = "episode" if media_type == "episode" else "movie"
+        mapped_path = path_mappings.path_replace_instance(sub_path, arr_instance_id, kind)
 
         # Check if file exists at mapped path
         if os.path.exists(mapped_path):
@@ -321,6 +341,7 @@ def find_subtitle_by_language(subtitles, language_code, video_path, media_type="
                     media_type,
                     hi=sub["hi"],
                     forced=sub["forced"],
+                    arr_instance_id=arr_instance_id,
                 )
                 if extracted_path:
                     return extracted_path, sub["code2"]

@@ -413,7 +413,7 @@ def test_find_subtitle_passes_hi_forced_to_extract():
         )
 
     mock_extract.assert_called_once_with(
-        "/fake/movie.mkv", "en", "movie", hi=True, forced=False
+        "/fake/movie.mkv", "en", "movie", hi=True, forced=False, arr_instance_id=None
     )
     assert result_path == "/fake/extracted.srt"
     assert result_lang == "en"

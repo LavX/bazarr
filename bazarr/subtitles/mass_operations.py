@@ -640,6 +640,7 @@ def _process_subtitle_item(item, action, options, job_id):
             sonarr_episode_id=item['sonarr_episode_id'],
             radarr_id=item['radarr_id'],
             metadata=item['metadata'],
+            arr_instance_id=item.get('arr_instance_id'),
         )
         return True
     elif action in MOD_ACTIONS:
