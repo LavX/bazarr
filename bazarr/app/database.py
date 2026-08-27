@@ -906,6 +906,16 @@ def migrate_db(app):
     except Exception:
         logging.exception("Scalar-config reconcile from default instances failed; continuing startup")
 
+    # And heal installs that deleted a language profile before deletion started
+    # clearing what pointed at it. A dangling reference makes every save of that
+    # instance fail validation with a 400, and it would silently adopt an
+    # unrelated profile the moment the editor reuses the id.
+    try:
+        from arr_instances.resolution import forget_dangling_language_profile_references
+        forget_dangling_language_profile_references(database)
+    except Exception:
+        logging.exception("Language profile reference reconcile failed; continuing startup")
+
     optimize_sqlite_database(engine)
 
     # Refresh the cached migration revision now that pending migrations have run. init_db()

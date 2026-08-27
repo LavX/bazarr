@@ -53,33 +53,49 @@ def check_health(job_id=None, wait_for_completion=False):
     jobs_queue.update_job_name(job_id=job_id, new_job_name="Checked Health")
 
 
-def _any_instance_default_profile(kind):
-    """True when some instance of ``kind`` supplies a default profile of its own.
+def _every_instance_settles_its_own_default(kind):
+    """True when no enabled instance of ``kind`` still depends on the global default.
 
     The global default is not the only source any more: media synced by an
     instance with an override gets that profile, so reporting "you must assign a
     profile" while one is configured sends the user to fix something that is
-    already set up. Never raises: a health check that throws takes the whole
-    page with it.
+    already set up.
+
+    Every instance has to answer for itself, though. Suppressing as soon as ONE
+    of them has an override hides the others: an instance with no override
+    resolves through the empty global and assigns nothing to everything it
+    syncs, which is exactly the misconfiguration this check exists to report.
+
+    Three ways an instance settles it: a valid profile override, an explicit
+    "assign no profile", or being disabled, since a disabled instance never
+    syncs. An install with no enabled instance at all is not settled: the
+    setting is still on with nothing behind it, and that is worth saying.
+
+    Never raises: a health check that throws takes the whole page with it.
     """
     try:
         from arr_instances.media_defaults import instance_default_profile, read_media_defaults
         from arr_instances.repository import ArrInstanceRepository
 
-        # enabled_only: a disabled instance never syncs, so its override supplies
-        # nothing and counting it would hide a real misconfiguration.
-        for row in ArrInstanceRepository(database).list(kind=kind, enabled_only=True):
+        rows = list(ArrInstanceRepository(database).list(kind=kind, enabled_only=True))
+        if not rows:
+            return False
+
+        for row in rows:
             has_override, profile = instance_default_profile(read_media_defaults(row.options))
-            if not has_override or profile is None:
+            if not has_override:
+                return False
+            if profile is None:
+                # "assign no profile" is a decision, and it needs no profile.
                 continue
-            # And the profile has to still exist: it can be deleted after the
-            # override was saved, in which case resolve_default_profile falls
-            # back to the global default, so this check has to agree with it.
+            # A profile can be deleted after the override was saved, in which
+            # case resolve_default_profile falls back to the global default, so
+            # this check has to agree with it.
             if database.execute(
                     select(TableLanguagesProfiles.profileId)
                     .where(TableLanguagesProfiles.profileId == profile)).first() is None:
-                continue
-            return True
+                return False
+        return True
     except Exception:
         logging.exception("BAZARR could not read the per-instance default language profiles")
 
@@ -92,7 +108,7 @@ def series_default_profile_is_missing():
         return False
     if settings.general.serie_default_profile != '':
         return False
-    return not _any_instance_default_profile('sonarr')
+    return not _every_instance_settles_its_own_default('sonarr')
 
 
 def movie_default_profile_is_missing():
@@ -100,7 +116,7 @@ def movie_default_profile_is_missing():
         return False
     if settings.general.movie_default_profile != '':
         return False
-    return not _any_instance_default_profile('radarr')
+    return not _every_instance_settles_its_own_default('radarr')
 
 
 def get_health_issues():

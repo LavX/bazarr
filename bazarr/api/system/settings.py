@@ -15,6 +15,7 @@ from app.scheduler import scheduler  # noqa: F401
 from subtitles.indexer.series import list_missing_subtitles
 from subtitles.indexer.movies import list_missing_subtitles_movies
 from subtitles.language_profiles import validate_combine_rule, CombineRuleError
+from arr_instances.resolution import forget_deleted_language_profiles
 
 from ..utils import authenticate
 
@@ -111,6 +112,13 @@ class SystemSettings(Resource):
                 database.execute(
                     delete(TableLanguagesProfiles)
                     .where(TableLanguagesProfiles.profileId == profileId))
+
+            # And every stored reference to them. The editor allocates a new id
+            # as max(existing) + 1, so deleting the highest-numbered profile and
+            # adding another reuses that id: a reference left behind would then
+            # point at an unrelated profile that does exist, which no amount of
+            # validation downstream can catch.
+            forget_deleted_language_profiles(existing)
 
             # invalidate cache
             update_profile_id_list.invalidate()

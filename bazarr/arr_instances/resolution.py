@@ -244,3 +244,118 @@ def resolve_default_profile(arr_instance_id, global_enabled, global_profile, ses
             "exists; falling back to the global default.", arr_instance_id, profile)
         return global_value
     return profile
+
+
+def forget_deleted_language_profiles(deleted_profile_ids, session=None):
+    """Drop every stored reference to language profiles that no longer exist.
+
+    The profile editor allocates a new id as ``max(existing) + 1``, so deleting
+    the highest-numbered profile and creating another reuses that exact id. A
+    reference left behind then resolves to an unrelated new profile, and newly
+    synced media receives one the user never chose. ``resolve_default_profile``
+    cannot defend against that: it checks the id exists, and it does again.
+
+    An instance loses its override entirely and falls back to the global
+    default, which is what it already resolved to while the id was dangling. The
+    global pair is turned off rather than pointed somewhere: guessing a
+    replacement profile for the whole install would be worse than asking.
+
+    Never raises. Losing this cleanup must not fail the settings save that
+    deleted the profile.
+    """
+    deleted = {int(profile_id) for profile_id in (deleted_profile_ids or [])}
+    if not deleted:
+        return
+
+    try:
+        from app.config import settings, write_config
+        from app.database import TableArrInstances, update
+
+        from .media_defaults import merge_media_defaults_into_options, read_media_defaults
+
+        if session is None:
+            from app.database import database
+            session = database
+
+        rows = session.execute(
+            select(TableArrInstances.id, TableArrInstances.options)).all()
+        for row in rows:
+            blob = read_media_defaults(row.options)
+            if blob.get("default_profile") not in deleted:
+                continue
+            session.execute(
+                update(TableArrInstances)
+                .values(options=merge_media_defaults_into_options(row.options, {}))
+                .where(TableArrInstances.id == row.id))
+            clear_media_defaults_cache(row.id)
+            logging.info(
+                "BAZARR arr instance %s defaulted to language profile %s, which was "
+                "deleted; the instance now inherits the global default.",
+                row.id, blob.get("default_profile"))
+
+        changed = False
+        for noun in ("serie", "movie"):
+            configured = getattr(settings.general, f"{noun}_default_profile", "")
+            try:
+                configured = int(configured)
+            except (TypeError, ValueError):
+                continue
+            if configured not in deleted:
+                continue
+            setattr(settings.general, f"{noun}_default_enabled", False)
+            setattr(settings.general, f"{noun}_default_profile", "")
+            changed = True
+            logging.info(
+                "BAZARR the global default %s language profile (%s) was deleted; "
+                "newly synced %ss will not receive one until another is chosen.",
+                noun, configured, noun)
+        if changed:
+            write_config()
+    except Exception:
+        logging.exception(
+            "BAZARR could not clear the references to the deleted language profiles")
+
+
+def forget_dangling_language_profile_references(session=None):
+    """Clear references to language profiles that no longer exist.
+
+    ``forget_deleted_language_profiles`` keeps this from happening again, but
+    installs that deleted a profile before it existed still carry the dangling
+    reference. That is not cosmetic: ``update_instance`` validates the stored
+    ``media_defaults`` it is sent back, so every save of that instance fails
+    with a 400 until the user happens to change the profile selector as well.
+
+    Runs at startup. Idempotent, and never raises.
+    """
+    try:
+        from app.config import settings
+        from app.database import TableArrInstances, TableLanguagesProfiles
+
+        from .media_defaults import read_media_defaults
+
+        if session is None:
+            from app.database import database
+            session = database
+
+        known = {row.profileId for row in session.execute(
+            select(TableLanguagesProfiles.profileId)).all()}
+
+        dangling = set()
+        for row in session.execute(select(TableArrInstances.options)).all():
+            profile = read_media_defaults(row.options).get("default_profile")
+            if isinstance(profile, int) and profile not in known:
+                dangling.add(profile)
+        for noun in ("serie", "movie"):
+            configured = getattr(settings.general, f"{noun}_default_profile", "")
+            try:
+                configured = int(configured)
+            except (TypeError, ValueError):
+                continue
+            if configured not in known:
+                dangling.add(configured)
+
+        if dangling:
+            forget_deleted_language_profiles(sorted(dangling), session=session)
+    except Exception:
+        logging.exception(
+            "BAZARR could not reconcile the stored language profile references")

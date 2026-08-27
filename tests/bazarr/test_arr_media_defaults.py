@@ -17,7 +17,7 @@ import json
 import pytest
 from sqlalchemy import insert, select
 
-from app.database import TableLanguagesProfiles, TableMovies, TableShows
+from app.database import TableArrInstances, TableLanguagesProfiles, TableMovies, TableShows
 from arr_instances.repository import ArrInstanceRepository
 from arr_instances.resolution import clear_media_defaults_cache, resolve_default_profile
 
@@ -1009,3 +1009,219 @@ def test_a_failed_reindex_enqueue_does_not_fail_the_apply(monkeypatch):
 
     assert status == 200
     assert body == {"updated": 2, "profileId": 2}
+
+
+# ---------------------------------------------------------------------------
+# Deleting a profile has to take its references with it
+# ---------------------------------------------------------------------------
+# The profile editor allocates a new id as max(existing) + 1, so deleting the
+# highest-numbered profile and creating another reuses that exact id. A stored
+# override naming the deleted profile then resolves to an unrelated new one, and
+# newly synced media quietly receives a profile the user never chose. The
+# resolver's existence check cannot see this: the id exists again.
+
+
+def test_deleting_a_profile_drops_the_instances_that_defaulted_to_it(schema_session):
+    from arr_instances.media_defaults import read_media_defaults
+    from arr_instances.resolution import forget_deleted_language_profiles
+
+    _profile(schema_session, 1, "Global")
+    _profile(schema_session, 3, "Anime")
+    anime = _instance(schema_session, "sonarr", "Anime", 8990,
+                      {"default_enabled": True, "default_profile": 3})
+
+    forget_deleted_language_profiles([3], session=schema_session)
+    clear_media_defaults_cache()
+
+    row = schema_session.execute(
+        select(TableArrInstances.options)
+        .where(TableArrInstances.id == anime.id)).first()
+    assert read_media_defaults(row.options) == {}, (
+        'the override still names the deleted profile, so recreating one at '
+        'that id would silently adopt it')
+    assert resolve_default_profile(anime.id, True, 1, session=schema_session) == 1
+
+
+def test_an_unrelated_instance_keeps_its_override(schema_session):
+    from arr_instances.resolution import forget_deleted_language_profiles
+
+    _profile(schema_session, 1, "Global")
+    _profile(schema_session, 2, "Anime")
+    _profile(schema_session, 3, "Doomed")
+    anime = _instance(schema_session, "sonarr", "Anime", 8990,
+                      {"default_enabled": True, "default_profile": 2})
+
+    forget_deleted_language_profiles([3], session=schema_session)
+    clear_media_defaults_cache()
+
+    assert resolve_default_profile(anime.id, True, 1, session=schema_session) == 2
+
+
+def test_an_instance_that_assigns_no_profile_is_untouched(schema_session):
+    """`default_enabled: False` carries no id, so no deletion can concern it."""
+    from arr_instances.media_defaults import read_media_defaults
+    from arr_instances.resolution import forget_deleted_language_profiles
+
+    _profile(schema_session, 3, "Doomed")
+    none_instance = _instance(schema_session, "sonarr", "NoProfile", 8991,
+                              {"default_enabled": False})
+
+    forget_deleted_language_profiles([3], session=schema_session)
+
+    row = schema_session.execute(
+        select(TableArrInstances.options)
+        .where(TableArrInstances.id == none_instance.id)).first()
+    assert read_media_defaults(row.options) == {"default_enabled": False}
+
+
+def test_the_global_default_forgets_a_deleted_profile_too(schema_session):
+    """The same reuse hazard, one level up and affecting every instance."""
+    from app.config import settings
+    from arr_instances.resolution import forget_deleted_language_profiles
+
+    settings.general.serie_default_enabled = True
+    settings.general.serie_default_profile = 3
+    settings.general.movie_default_enabled = True
+    settings.general.movie_default_profile = 4
+    try:
+        forget_deleted_language_profiles([3], session=schema_session)
+
+        assert settings.general.serie_default_enabled is False
+        assert settings.general.serie_default_profile in ('', None)
+        assert settings.general.movie_default_profile == 4, (
+            'only the deleted profile should have been forgotten')
+    finally:
+        settings.general.serie_default_enabled = False
+        settings.general.serie_default_profile = ''
+        settings.general.movie_default_enabled = False
+        settings.general.movie_default_profile = ''
+
+
+def test_one_configured_instance_does_not_cover_another_that_inherits(
+        schema_session, monkeypatch):
+    """Suppressing on "any instance has an override" hides a real problem.
+
+    The global default is on with no profile chosen. One instance overrides it,
+    another does not, so everything the second one syncs resolves through the
+    empty global and receives nothing. The health page has to keep saying so."""
+    from app.config import settings
+    from utilities import health
+
+    monkeypatch.setattr(settings.general, "serie_default_enabled", True)
+    monkeypatch.setattr(settings.general, "serie_default_profile", "")
+    monkeypatch.setattr(settings.general, "movie_default_enabled", False)
+    monkeypatch.setattr(health, "database", schema_session)
+
+    _profile(schema_session, 2, "Anime")
+    _instance(schema_session, "sonarr", "Anime", 8990,
+              {"default_enabled": True, "default_profile": 2})
+    _instance(schema_session, "sonarr", "Standard", 8989)  # inherits the empty global
+
+    assert health.series_default_profile_is_missing() is True, (
+        'the standard instance still assigns no profile to anything it syncs, '
+        'and the anime instance being configured does not change that')
+
+
+def test_every_instance_configured_does_suppress_the_warning(schema_session, monkeypatch):
+    from app.config import settings
+    from utilities import health
+
+    monkeypatch.setattr(settings.general, "serie_default_enabled", True)
+    monkeypatch.setattr(settings.general, "serie_default_profile", "")
+    monkeypatch.setattr(settings.general, "movie_default_enabled", False)
+    monkeypatch.setattr(health, "database", schema_session)
+
+    _profile(schema_session, 2, "Anime")
+    _profile(schema_session, 3, "Standard")
+    _instance(schema_session, "sonarr", "Anime", 8990,
+              {"default_enabled": True, "default_profile": 2})
+    _instance(schema_session, "sonarr", "Standard", 8989,
+              {"default_enabled": True, "default_profile": 3})
+
+    assert health.series_default_profile_is_missing() is False
+
+
+def test_an_instance_that_deliberately_assigns_no_profile_covers_itself(
+        schema_session, monkeypatch):
+    """`default_enabled: False` is a decision, not an omission: the user said
+    this instance assigns no profile. Nothing is misconfigured."""
+    from app.config import settings
+    from utilities import health
+
+    monkeypatch.setattr(settings.general, "serie_default_enabled", True)
+    monkeypatch.setattr(settings.general, "serie_default_profile", "")
+    monkeypatch.setattr(settings.general, "movie_default_enabled", False)
+    monkeypatch.setattr(health, "database", schema_session)
+
+    _profile(schema_session, 2, "Anime")
+    _instance(schema_session, "sonarr", "Anime", 8990,
+              {"default_enabled": True, "default_profile": 2})
+    _instance(schema_session, "sonarr", "Raw", 8989, {"default_enabled": False})
+
+    assert health.series_default_profile_is_missing() is False
+
+
+def test_a_disabled_instance_is_not_counted_either_way(schema_session, monkeypatch):
+    """A disabled instance never syncs, so it neither supplies a default nor
+    needs one."""
+    from app.config import settings
+    from arr_instances.repository import ArrInstanceRepository
+    from utilities import health
+
+    monkeypatch.setattr(settings.general, "serie_default_enabled", True)
+    monkeypatch.setattr(settings.general, "serie_default_profile", "")
+    monkeypatch.setattr(settings.general, "movie_default_enabled", False)
+    monkeypatch.setattr(health, "database", schema_session)
+
+    _profile(schema_session, 2, "Anime")
+    _instance(schema_session, "sonarr", "Anime", 8990,
+              {"default_enabled": True, "default_profile": 2})
+    idle = _instance(schema_session, "sonarr", "Idle", 8989)
+    ArrInstanceRepository(schema_session).update(idle.id, enabled=False)
+    schema_session.flush()
+
+    assert health.series_default_profile_is_missing() is False
+
+
+def test_startup_forgets_references_left_behind_by_an_older_build(schema_session):
+    """Installs that deleted a profile before the cleanup existed still carry
+    the dangling reference, and every save of that instance fails validation
+    with a 400 until the user happens to change the selector too."""
+    from app.config import settings
+    from arr_instances.media_defaults import read_media_defaults
+    from arr_instances.resolution import forget_dangling_language_profile_references
+
+    _profile(schema_session, 1, "Global")
+    stale = _instance(schema_session, "sonarr", "Anime", 8990,
+                      {"default_enabled": True, "default_profile": 7})
+    settings.general.movie_default_enabled = True
+    settings.general.movie_default_profile = 9
+    try:
+        forget_dangling_language_profile_references(session=schema_session)
+        clear_media_defaults_cache()
+
+        row = schema_session.execute(
+            select(TableArrInstances.options)
+            .where(TableArrInstances.id == stale.id)).first()
+        assert read_media_defaults(row.options) == {}
+        assert settings.general.movie_default_profile in ('', None)
+    finally:
+        settings.general.movie_default_enabled = False
+        settings.general.movie_default_profile = ''
+
+
+def test_startup_leaves_a_healthy_install_alone(schema_session):
+    from arr_instances.media_defaults import read_media_defaults
+    from arr_instances.resolution import forget_dangling_language_profile_references
+
+    _profile(schema_session, 2, "Anime")
+    healthy = _instance(schema_session, "sonarr", "Anime", 8990,
+                        {"default_enabled": True, "default_profile": 2})
+
+    forget_dangling_language_profile_references(session=schema_session)
+
+    row = schema_session.execute(
+        select(TableArrInstances.options)
+        .where(TableArrInstances.id == healthy.id)).first()
+    assert read_media_defaults(row.options) == {"default_enabled": True,
+                                                "default_profile": 2}
