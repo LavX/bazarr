@@ -282,7 +282,8 @@ def update_movies(job_id=None, wait_for_completion=False, arr_instance_id=None, 
                                                            tags_dict=tagsDict,
                                                            language_profiles=language_profiles,
                                                            movie_default_profile=movie_default_profile,
-                                                           audio_profiles=audio_profiles)
+                                                           audio_profiles=audio_profiles,
+                                                           arr_instance_id=instance_id)
                                 cached_db_row = current_movies_in_db_dict[movie['id']]
                                 if not (parsed_movie.items() <= cached_db_row.items()):
                                     # Stamp AFTER the subset-diff so the added
@@ -295,7 +296,8 @@ def update_movies(job_id=None, wait_for_completion=False, arr_instance_id=None, 
                                                            tags_dict=tagsDict,
                                                            language_profiles=language_profiles,
                                                            movie_default_profile=movie_default_profile,
-                                                           audio_profiles=audio_profiles)
+                                                           audio_profiles=audio_profiles,
+                                                           arr_instance_id=instance_id)
                                 stamp_owner(parsed_movie, instance_id)
                                 add_movie(parsed_movie)
                                 movies_added.append(parsed_movie['title'])
@@ -401,10 +403,12 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False,
         else:
             if action == 'updated' and existing_movie:
                 movie = movieParser(movie_data, action='update', tags_dict=tagsDict, language_profiles=language_profiles,
-                                    movie_default_profile=movie_default_profile, audio_profiles=audio_profiles)
+                                    movie_default_profile=movie_default_profile, audio_profiles=audio_profiles,
+                                    arr_instance_id=instance_id)
             elif action == 'updated' and not existing_movie:
                 movie = movieParser(movie_data, action='insert', tags_dict=tagsDict, language_profiles=language_profiles,
-                                    movie_default_profile=movie_default_profile, audio_profiles=audio_profiles)
+                                    movie_default_profile=movie_default_profile, audio_profiles=audio_profiles,
+                                    arr_instance_id=instance_id)
     except Exception:
         logging.exception('BAZARR cannot get movie returned by SignalR feed from Radarr API.')
         return

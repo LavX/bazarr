@@ -64,7 +64,8 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
                     subtitle_languages = embedded_subs_reader(reversed_path,
                                                               file_size=item.file_size,
                                                               movie_file_id=item.movie_file_id,
-                                                              use_cache=use_cache)
+                                                              use_cache=use_cache,
+                                                              arr_instance_id=owner_instance_id)
                     for subtitle_language, subtitle_forced, subtitle_hi, subtitle_codec in subtitle_languages:
                         try:
                             if (settings.general.ignore_pgs_subs and subtitle_codec.lower() == "pgs") or \

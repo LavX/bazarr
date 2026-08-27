@@ -275,7 +275,11 @@ class Subtitles(Resource):
                 ep_meta = database.execute(ep_stmt).first()
                 if not ep_meta:
                     return "Episode not found", 404
-                embedded_video_path = path_mappings.path_replace(ep_meta.path)
+                # The owning instance's mapping, not the global one: extraction
+                # reverses this path with path_replace_reverse_instance, and the
+                # two only round-trip when the same mapping made both.
+                embedded_video_path = path_mappings.path_replace_instance(
+                    ep_meta.path, arr_instance_id, 'episode')
             else:
                 mv_stmt = scoped(
                     select(TableMovies.path).where(TableMovies.radarrId == id),
@@ -285,7 +289,8 @@ class Subtitles(Resource):
                 mv_meta = database.execute(mv_stmt).first()
                 if not mv_meta:
                     return "Movie not found", 404
-                embedded_video_path = path_mappings.path_replace_movie(mv_meta.path)
+                embedded_video_path = path_mappings.path_replace_instance(
+                    mv_meta.path, arr_instance_id, 'movie')
 
             extracted = extract_embedded_subtitle(
                 embedded_video_path,
@@ -293,6 +298,7 @@ class Subtitles(Resource):
                 media_type,
                 hi=source_hi,
                 forced=source_forced,
+                arr_instance_id=arr_instance_id,
             )
             if not extracted:
                 return (

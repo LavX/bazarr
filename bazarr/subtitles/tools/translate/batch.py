@@ -391,7 +391,8 @@ def extract_embedded_subtitle(
         if not media:
             return None
         data = parse_video_metadata(
-            video_path, media.file_size, episode_file_id=media.episode_file_id
+            video_path, media.file_size, episode_file_id=media.episode_file_id,
+            arr_instance_id=arr_instance_id
         )
     else:
         db_path = path_mappings.path_replace_reverse_instance(
@@ -408,7 +409,8 @@ def extract_embedded_subtitle(
         if not media:
             return None
         data = parse_video_metadata(
-            video_path, media.file_size, movie_file_id=media.movie_file_id
+            video_path, media.file_size, movie_file_id=media.movie_file_id,
+            arr_instance_id=arr_instance_id
         )
 
     if not data:

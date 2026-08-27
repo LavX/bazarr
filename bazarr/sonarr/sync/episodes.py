@@ -141,6 +141,18 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
     else:
         episodes = episodes_data
     if episodes:
+        # Episodes inherit their owning instance (and local series ref) from
+        # their parent series. Resolved BEFORE parsing, not after: episodeParser
+        # reads the embedded audio track, and that metadata cache is keyed by
+        # the owning instance, so handing it the requested scope (None on every
+        # default-instance path) would leave the cache query unscoped. Falls
+        # back to the default instance when the parent is unstamped; leaves both
+        # unset for a pre-backfill install. When this sync is instance-scoped,
+        # the explicit instance owns the episodes.
+        owner_instance_id, parent_local_id = sonarr_series_owner(database, series_id, arr_instance_id)
+        if arr_instance_id is not None:
+            owner_instance_id = arr_instance_id
+
         sonarr_version = get_sonarr_info.semver()
         if sonarr_version and sonarr_version >= semver.Version(*(4, 0, 9, 2421)):
             # We skip this if the episodes already contain an episodeFile structure (added with Sonarr v4.0.9.2421)
@@ -191,11 +203,11 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
 
                     # Parse episode data
                     if episode['id'] in current_episodes_in_db_row_as_dict:
-                        parsed_episode = episodeParser(episode, arr_instance_id=arr_instance_id)
+                        parsed_episode = episodeParser(episode, arr_instance_id=owner_instance_id)
                         if not set(parsed_episode.items()).issubset(set(current_episodes_in_db_row_as_dict[episode['id']].items())):
                             episodes_to_update.append(parsed_episode)
                     else:
-                        episodes_to_add.append(episodeParser(episode, arr_instance_id=arr_instance_id))
+                        episodes_to_add.append(episodeParser(episode, arr_instance_id=owner_instance_id))
     else:
         return
 
@@ -209,14 +221,6 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
     episodes_to_delete = list(set(current_episodes_id_db_list) - set(current_episodes_sonarr))
 
     rows_changed = False
-
-    # Episodes inherit their owning instance (and local series ref) from their
-    # parent series, resolved once here. Falls back to the default instance when
-    # the parent is unstamped; leaves both unset for a pre-backfill install. When
-    # this sync is instance-scoped, the explicit instance owns the episodes.
-    owner_instance_id, parent_local_id = sonarr_series_owner(database, series_id, arr_instance_id)
-    if arr_instance_id is not None:
-        owner_instance_id = arr_instance_id
 
     if len(episodes_to_delete):
         # Before the row goes: the mismatch record points at the local id with
@@ -394,7 +398,23 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
                     get_episodesFiles_from_sonarr_api(apikey_sonarr=apikey_sonarr,
                                                       episode_file_id=episode_data['episodeFileId'],
                                                       arr_client=arr_client)
-            episode = episodeParser(episode_data, arr_instance_id=arr_instance_id)
+            # Resolve the owning instance (and local series ref) from the parent
+            # series BEFORE parsing. episodeParser reads the embedded audio
+            # track, and that metadata cache is keyed by the owning instance, so
+            # the requested scope (None on every default/legacy entry point)
+            # would leave the cache query unscoped. The upstream payload's
+            # seriesId is what the parser itself stores as sonarrSeriesId.
+            # seriesId is read defensively: a payload without it cannot be
+            # parsed into a writable episode anyway, and the delete path used to
+            # reach the parser without resolving an owner at all. Raising here
+            # would land in the except below and abort the sync silently.
+            owner_instance_id = parent_local_id = None
+            if episode_data.get('seriesId') is not None:
+                owner_instance_id, parent_local_id = sonarr_series_owner(
+                    database, episode_data['seriesId'], arr_instance_id)
+                if arr_instance_id is not None:
+                    owner_instance_id = arr_instance_id
+            episode = episodeParser(episode_data, arr_instance_id=owner_instance_id)
     except Exception:
         logging.exception('BAZARR cannot get episode returned by SignalR feed from Sonarr API.')
         return
@@ -402,15 +422,6 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
     # Drop useless events
     if not episode and not existing_episode:
         return
-
-    # Resolve the owning instance + local series ref from the parent series for
-    # the write branches below (episode is None only on the delete path, which
-    # needs neither). Guarded so a pre-backfill install stays NULL.
-    owner_instance_id = parent_local_id = None
-    if episode:
-        owner_instance_id, parent_local_id = sonarr_series_owner(database, episode['sonarrSeriesId'], arr_instance_id)
-        if arr_instance_id is not None:
-            owner_instance_id = arr_instance_id
 
     # Remove episode from DB
     if not episode and existing_episode:
