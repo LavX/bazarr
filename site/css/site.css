@@ -534,8 +534,14 @@ footer ul { display: flex; flex-wrap: wrap; gap: 8px 24px; list-style: none; mar
    visible by default and only lifts if the browser can animate it.
    --------------------------------------------------------------------------- */
 @media (prefers-reduced-motion: no-preference) {
-  .reveal { opacity: 0; transform: translateY(14px); transition: opacity 0.7s var(--ease), transform 0.7s var(--ease); }
-  .reveal.seen { opacity: 1; transform: none; }
+  /* Scoped to html.js on purpose. Only site.js ever adds .seen, so an
+     unconditional opacity:0 here left the entire page below the hero invisible
+     whenever JavaScript was off, blocked, or failed to load: the feature
+     explanation, screenshots, install instructions, FAQ and roadmap, all of it.
+     The marker is set inline before first paint, so there is no flash, and the
+     inline snippet drops it again if site.js never arrives. */
+  html.js .reveal { opacity: 0; transform: translateY(14px); transition: opacity 0.7s var(--ease), transform 0.7s var(--ease); }
+  html.js .reveal.seen { opacity: 1; transform: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

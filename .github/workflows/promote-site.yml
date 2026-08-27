@@ -86,6 +86,20 @@ jobs:
           git commit -m "site: promote site/ from development (${SHA})"
           git push origin HEAD:master
 
+      - name: Publish
+        if: steps.apply.outputs.changed == 'true' && inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # The push above used GITHUB_TOKEN, and GitHub suppresses workflow
+          # events for those pushes, so deploy-pages.yml will NOT fire on its
+          # own however its `paths` filter is written. site-stats.yml documents
+          # the same rule. An explicit dispatch through the API is not subject
+          # to it, so the deploy has to be asked for by name.
+          gh workflow run deploy-pages.yml --ref master
+          echo "deploy-pages dispatched"
+
       - name: Dry run summary
         if: steps.apply.outputs.changed == 'true' && inputs.dry_run == true
         run: |

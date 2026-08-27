@@ -175,6 +175,13 @@
   /* -------------------------------------------------------------------------
      Reveal and nav state
      ------------------------------------------------------------------------- */
+  /* site.js is here, so the no-JS failsafe in the document head must not fire */
+  var fallback = document.documentElement.dataset.revealFallback;
+  if (fallback) {
+    window.clearTimeout(Number(fallback));
+    delete document.documentElement.dataset.revealFallback;
+  }
+
   var revealables = document.querySelectorAll(".reveal");
   if (reduced || !("IntersectionObserver" in window)) {
     revealables.forEach(function (el) { el.classList.add("seen"); });

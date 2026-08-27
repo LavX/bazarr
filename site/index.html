@@ -107,7 +107,7 @@
 </script>
 </head>
 <body>
-<script>document.documentElement.className += " js";</script>
+<script>(function(d){d.className+=" js";/* If site.js never arrives, nothing will ever add .seen, so release    the content rather than leaving the page blank below the hero.    site.js clears this the moment it takes over. */d.dataset.revealFallback=setTimeout(function(){d.className=d.className.replace(/\bjs\b/,"");},3000);})(document.documentElement);</script>
 <!--
   DIRECTION CONTRACT  (seed cd17abb7 / re-roll 1 / card: multiplane)
 
