@@ -75,7 +75,7 @@ def update_movie(updated_movie, arr_instance_id=None):
                 previous_movie_path != updated_movie['path']):
             # Store subtitles for updated movie where path or movie_file_id changed
             logging.debug(f'BAZARR updating subtitles for movie {updated_movie["path"]}')  # noqa: G004
-            store_subtitles_movie(updated_movie['path'], path_mappings.path_replace_movie(updated_movie['path']), arr_instance_id=arr_instance_id)
+            store_subtitles_movie(updated_movie['path'], path_mappings.path_replace_instance(updated_movie['path'], arr_instance_id, 'movie'), arr_instance_id=arr_instance_id)
         else:
             logging.debug(f'BAZARR skipping subtitle update for movie {updated_movie["path"]} as path '  # noqa: G004
                           f'and movie_file_id unchanged')
@@ -106,7 +106,7 @@ def add_movie(added_movie):
         logging.error(f"BAZARR cannot insert movie {added_movie['path']} because of {e}")  # noqa: G004
     else:
         store_subtitles_movie(added_movie['path'],
-                              path_mappings.path_replace_movie(added_movie['path']),
+                              path_mappings.path_replace_instance(added_movie['path'], added_movie.get('arr_instance_id'), 'movie'),
                               arr_instance_id=added_movie.get('arr_instance_id'))
         event_stream(type='movie', action='update', payload=int(added_movie['radarrId']))
 
@@ -450,7 +450,7 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False,
             logging.error(f"BAZARR cannot update movie {path_mappings.path_replace_movie(movie['path'])} because "  # noqa: G004
                           f"of {e}")
         else:
-            store_subtitles_movie(movie['path'], path_mappings.path_replace_movie(movie['path']), arr_instance_id=arr_instance_id)
+            store_subtitles_movie(movie['path'], path_mappings.path_replace_instance(movie['path'], arr_instance_id, 'movie'), arr_instance_id=arr_instance_id)
             event_stream(type='movie', action='update', payload=int(movie_id))
             logging.debug(
                 'BAZARR updated this movie into the database:%s', path_mappings.path_replace_movie(movie["path"]))
@@ -467,7 +467,7 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False,
             logging.error(f"BAZARR cannot insert movie {path_mappings.path_replace_movie(movie['path'])} because "  # noqa: G004
                           f"of {e}")
         else:
-            store_subtitles_movie(movie['path'], path_mappings.path_replace_movie(movie['path']), arr_instance_id=arr_instance_id)
+            store_subtitles_movie(movie['path'], path_mappings.path_replace_instance(movie['path'], arr_instance_id, 'movie'), arr_instance_id=arr_instance_id)
             event_stream(type='movie', action='update', payload=int(movie_id))
             logging.debug(
                 'BAZARR inserted this movie into the database:%s', path_mappings.path_replace_movie(movie["path"]))

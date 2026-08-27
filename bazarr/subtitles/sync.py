@@ -188,7 +188,7 @@ def _index_keep_all_outputs(video_path, sonarr_series_id=None, sonarr_episode_id
         from utilities.media_ids import local_episode_id
         from utilities.path_mappings import path_mappings
 
-        store_subtitles(path_mappings.path_replace_reverse(video_path), video_path, arr_instance_id=arr_instance_id)
+        store_subtitles(path_mappings.path_replace_reverse_instance(video_path, arr_instance_id, 'episode'), video_path, arr_instance_id=arr_instance_id)
         if sonarr_series_id:
             event_stream(type='series', payload=sonarr_series_id)
         # Emit the LOCAL episode id (#156): the frontend caches episode detail by
@@ -201,7 +201,7 @@ def _index_keep_all_outputs(video_path, sonarr_series_id=None, sonarr_episode_id
         from subtitles.indexer.movies import store_subtitles_movie
         from utilities.path_mappings import path_mappings
 
-        store_subtitles_movie(path_mappings.path_replace_reverse_movie(video_path), video_path, arr_instance_id=arr_instance_id)
+        store_subtitles_movie(path_mappings.path_replace_reverse_instance(video_path, arr_instance_id, 'movie'), video_path, arr_instance_id=arr_instance_id)
         event_stream(type='movie', payload=radarr_id)
 
 

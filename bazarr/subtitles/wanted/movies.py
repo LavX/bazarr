@@ -190,7 +190,7 @@ def _wanted_movie(movie, providers_list, job_id=None):
             found_any = True
             if isinstance(result, tuple) and len(result):
                 result = result[0]
-            store_subtitles_movie(movie.path, path_mappings.path_replace_movie(movie.path), arr_instance_id=arr_instance_id)
+            store_subtitles_movie(movie.path, path_mappings.path_replace_instance(movie.path, arr_instance_id, 'movie'), arr_instance_id=arr_instance_id)
             history_log_movie(1, movie.radarrId, result, arr_instance_id=arr_instance_id)
             event_stream(type='movie-wanted', action='delete', payload=movie.radarrId)
             send_notifications_movie(movie.radarrId, result.message, arr_instance_id=arr_instance_id)
@@ -229,7 +229,7 @@ def wanted_download_subtitles_movie(radarr_id, job_id=None, arr_instance_id=None
         return
     elif movie.subtitles is None:
         # subtitles indexing for this movie is incomplete, we'll do it again
-        store_subtitles_movie(movie.path, path_mappings.path_replace_movie(movie.path), arr_instance_id=arr_instance_id)
+        store_subtitles_movie(movie.path, path_mappings.path_replace_instance(movie.path, arr_instance_id, 'movie'), arr_instance_id=arr_instance_id)
         movie = database.execute(stmt).first()
     elif movie.missing_subtitles is None:
         # missing subtitles calculation for this movie is incomplete, we'll do it again

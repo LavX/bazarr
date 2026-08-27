@@ -21,7 +21,7 @@ from app.database import TableEpisodes, TableMovies, TableShows
 
 
 @pytest.fixture
-def endpoint(schema_session, monkeypatch):
+def endpoint(schema_session, monkeypatch, tmp_path):
     from api.subtitles import subtitles as api_mod
 
     monkeypatch.setattr(api_mod, 'database', schema_session)
@@ -45,15 +45,27 @@ def endpoint(schema_session, monkeypatch):
     monkeypatch.setattr(api_mod.path_mappings, 'path_replace', _map_global)
     monkeypatch.setattr(api_mod.path_mappings, 'path_replace_movie', _map_global_movie)
 
+    extracted_file = tmp_path / 'e.en.srt'
+    extracted_file.write_text('1\n')
+
     def _extract(video_path, language_code2, media_type, hi=False, forced=False,
                  arr_instance_id=None):
         recorded['extracted'] = {
             'video_path': video_path, 'media_type': media_type,
             'arr_instance_id': arr_instance_id,
         }
-        return None  # short-circuits the handler right after the call
+        # None short-circuits the handler right here, which is all the
+        # extraction assertions need. Tests that follow the request further
+        # replace this with the real path.
+        return recorded.get('extraction_result')
 
     monkeypatch.setattr(api_mod, 'extract_embedded_subtitle', _extract)
+
+    def _translate(**kwargs):
+        recorded['translated'] = kwargs
+
+    monkeypatch.setattr(api_mod, 'translate_subtitles_file', _translate)
+    recorded['extracted_file'] = str(extracted_file)
 
     def _call(**overrides):
         args = {
@@ -113,3 +125,46 @@ def test_the_owner_reaches_movie_extraction(schema_session, endpoint):
 
     assert recorded['mapped'] == [('/movies/m.mkv', 3, 'movie')]
     assert recorded['extracted']['arr_instance_id'] == 3
+
+
+def test_the_queued_translation_keeps_the_instance_mapped_video_path(
+        schema_session, endpoint):
+    """The endpoint maps the video for extraction with the owning instance, then
+    rebuilt video_path with the global mapper for everything after it.
+
+    On a secondary instance with its own path mappings the two disagree, so the
+    translation is handed a path under another instance's library: it either
+    fails validation after the API has already answered 204, or writes the
+    output beside the wrong media."""
+    call, recorded = endpoint
+    recorded['extraction_result'] = recorded['extracted_file']
+    schema_session.add(TableShows(id=1, arr_instance_id=2, sonarrSeriesId=7,
+                                  title='S', path='/tv/s', profileId=None))
+    schema_session.flush()
+    schema_session.add(TableEpisodes(id=1, arr_instance_id=2, series_id=1, sonarrSeriesId=7,
+                                     sonarrEpisodeId=42, title='E', path='/tv/s/e.mkv',
+                                     season=1, episode=1))
+    schema_session.commit()
+
+    call()
+
+    assert ('/tv/s/e.mkv', 'GLOBAL', 'episode') not in recorded['mapped'], (
+        'the video path was remapped with the global mapping after extraction '
+        f'had already used the instance one; got {recorded["mapped"]!r}')
+    assert recorded['translated']['video_path'] == '/mapped/tv/s/e.mkv'
+    assert recorded['translated']['arr_instance_id'] == 2
+
+
+def test_the_queued_movie_translation_keeps_the_instance_mapped_video_path(
+        schema_session, endpoint):
+    call, recorded = endpoint
+    recorded['extraction_result'] = recorded['extracted_file']
+    schema_session.add(TableMovies(id=1, arr_instance_id=3, radarrId=9, title='M',
+                                   path='/movies/m.mkv', tmdbId='1'))
+    schema_session.commit()
+
+    call(type='movie', id=9, arr_instance_id=3)
+
+    assert ('/movies/m.mkv', 'GLOBAL', 'movie') not in recorded['mapped'], (
+        f'the movie path was remapped globally; got {recorded["mapped"]!r}')
+    assert recorded['translated']['video_path'] == '/mapped/movies/m.mkv'

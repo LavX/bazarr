@@ -57,7 +57,7 @@ def movies_download_subtitles(no, job_id=None, job_sub_function=False, arr_insta
         return
     elif movie.subtitles is None:
         # subtitles indexing for this movie is incomplete, we'll do it again
-        store_subtitles_movie(movie.path, path_mappings.path_replace_movie(movie.path), arr_instance_id=arr_instance_id)
+        store_subtitles_movie(movie.path, path_mappings.path_replace_instance(movie.path, arr_instance_id, 'movie'), arr_instance_id=arr_instance_id)
         movie = database.execute(stmt).first()
     elif movie.missing_subtitles is None:
         # missing subtitles calculation for this movie is incomplete, we'll do it again
