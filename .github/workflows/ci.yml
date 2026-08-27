@@ -289,6 +289,7 @@ jobs:
             tests/bazarr/test_sql_profiler.py \
             tests/bazarr/test_subtitle_content_sync_outputs.py \
             tests/bazarr/test_subtitles_pool.py \
+            tests/bazarr/test_swagger_static.py \
             tests/bazarr/test_supervisor_proxy.py \
             tests/bazarr/test_supervisor_stages.py \
             tests/bazarr/test_tracemalloc_dumper.py \

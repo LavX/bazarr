@@ -300,13 +300,24 @@ def backup_download(filename):
     return send_file(fullpath, max_age=0, as_attachment=True)
 
 
+def swaggerui_static_dir():
+    """Where flask_restx keeps the swagger UI assets.
+
+    Resolved from the installed package: the old vendored ``libs/flask_restx``
+    tree is gone since the library unvendoring, and pointing there made every
+    asset request 500 so the API documentation page rendered blank.
+    """
+    import flask_restx
+
+    return os.path.realpath(os.path.join(os.path.dirname(flask_restx.__file__), 'static'))
+
+
 @ui_bp.route('/api/swaggerui/static/<path:filename>', methods=['GET'])
 def swaggerui_static(filename):
-    basepath = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'libs', 'flask_restx',
-                            'static')
+    basepath = swaggerui_static_dir()
     fullpath = os.path.realpath(os.path.join(basepath, filename))
     # Use startswith to prevent path traversal
-    if not fullpath.startswith(os.path.realpath(basepath) + os.sep):
+    if not fullpath.startswith(basepath + os.sep):
         return '', 404
     else:
         return send_file(fullpath)
