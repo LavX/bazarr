@@ -108,21 +108,40 @@ def _usable_as_translate_source(lang_string, path):
     return not is_sync_engine_output(path)
 
 
-def _translate_target_satisfied(subtitles, target_lang, source_lang, usable):
-    """True when every subtitle this run would produce is already on disk.
+def _translate_output_present(subtitles, target_lang, hi, usable):
+    """True when the file this one source would produce is already on disk.
 
-    The old check asked only whether the base target language appeared anywhere
-    with a path, which is too coarse in both directions. A ``nl:forced`` file
-    suppressed a plain ``en`` to ``nl`` run even though the run would have
-    written a different file, and a row naming a file that has since been
-    deleted suppressed it too. Translation carries the source variant through,
-    so the comparison has to be against the variant, not the base.
+    Asked per source, not per item. An item with an ``en`` and an ``en:hi``
+    source and an existing ``nl`` file is not fully satisfied, because ``nl:hi``
+    is missing, but deciding that at the item level queues both sources and the
+    plain one then overwrites the ``nl`` file that was already there. On a paid
+    translator that is billed work for a file the user already had.
 
-    ``usable`` answers whether a path-bearing entry is a real subtitle on disk
-    rather than a stale row or a generated artifact. Embedded entries have no
-    path and are always available as sources.
+    Translation carries the source variant through and never produces a forced
+    subtitle, so the comparison is on base language plus the hearing-impaired
+    flag. ``usable`` rejects a row naming a file that is gone, and generated
+    sync or combined artifacts, which are not subtitles the user asked for.
     """
-    wanted = set()
+    for lang_string, path in subtitles:
+        if not path:
+            continue
+        base, existing_hi, forced = _subtitle_variant_key(lang_string)
+        if forced or base != target_lang or existing_hi != hi:
+            continue
+        if usable(lang_string, path):
+            return True
+    return False
+
+
+def _translate_item_satisfied(subtitles, target_lang, source_lang, usable):
+    """True when every source on this item already has its output on disk.
+
+    A fast path only. It exists so a fully covered item still reports as one
+    skipped item rather than one per subtitle entry, which is what the counter
+    meant before. The per-source check in the loop is what handles the partial
+    case, where some outputs exist and some do not.
+    """
+    wanted = []
     for lang_string, path in subtitles:
         base, hi, forced = _subtitle_variant_key(lang_string)
         if forced:
@@ -131,23 +150,12 @@ def _translate_target_satisfied(subtitles, target_lang, source_lang, usable):
             continue
         if path and not usable(lang_string, path):
             continue
-        wanted.add(hi)
+        wanted.append(hi)
 
     if not wanted:
         return False
-
-    present = set()
-    for lang_string, path in subtitles:
-        if not path:
-            continue
-        base, hi, forced = _subtitle_variant_key(lang_string)
-        if base != target_lang or forced:
-            continue
-        if not usable(lang_string, path):
-            continue
-        present.add(hi)
-
-    return wanted <= present
+    return all(_translate_output_present(subtitles, target_lang, hi, usable)
+               for hi in wanted)
 
 
 def _drop_embedded_duplicates(subtitles, usable):
@@ -402,11 +410,10 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
                 return False
             return not is_sync_engine_output(mapped)
 
-        if action == 'translate' and target_lang:
-            if _translate_target_satisfied(subtitles, target_lang, source_lang,
-                                           _target_usable):
-                skipped += 1
-                continue
+        if action == 'translate' and target_lang and _translate_item_satisfied(
+                subtitles, target_lang, source_lang, _target_usable):
+            skipped += 1
+            continue
 
         for lang_string, sub_path in subtitles:
             # Every modifier, not just the first: a track can be both hi and
@@ -421,6 +428,14 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
 
             # For translate: only queue subtitles matching the requested source language
             if action == 'translate' and source_lang and sub_lang != source_lang:
+                skipped += 1
+                continue
+
+            # And only when the file this source would produce is not already
+            # there. Per source, because two sources of the same language can
+            # produce different outputs: en gives nl, en:hi gives nl:hi.
+            if action == 'translate' and target_lang and _translate_output_present(
+                    subtitles, target_lang, sub_hi, _target_usable):
                 skipped += 1
                 continue
 
@@ -554,11 +569,10 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
                 return False
             return not is_sync_engine_output(mapped)
 
-        if action == 'translate' and target_lang:
-            if _translate_target_satisfied(subtitles, target_lang, source_lang,
-                                           _target_usable):
-                skipped += 1
-                continue
+        if action == 'translate' and target_lang and _translate_item_satisfied(
+                subtitles, target_lang, source_lang, _target_usable):
+            skipped += 1
+            continue
 
         for lang_string, sub_path in subtitles:
             # Every modifier, not just the first: a track can be both hi and
@@ -573,6 +587,14 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
 
             # For translate: only queue subtitles matching the requested source language
             if action == 'translate' and source_lang and sub_lang != source_lang:
+                skipped += 1
+                continue
+
+            # And only when the file this source would produce is not already
+            # there. Per source, because two sources of the same language can
+            # produce different outputs: en gives nl, en:hi gives nl:hi.
+            if action == 'translate' and target_lang and _translate_output_present(
+                    subtitles, target_lang, sub_hi, _target_usable):
                 skipped += 1
                 continue
 

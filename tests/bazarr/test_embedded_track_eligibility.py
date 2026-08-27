@@ -126,12 +126,10 @@ def test_a_forced_target_file_does_not_suppress_a_plain_translation():
     is not what this translation would produce."""
     from subtitles import mass_operations
 
-    subtitles = [('en', None, None), ('nl:forced', '/subs/m.nl.forced.srt', 10)]
-    parsed = [(lang, path) for lang, path, _size in subtitles]
+    parsed = [('en', None), ('nl:forced', '/subs/m.nl.forced.srt')]
 
-    assert not mass_operations._translate_target_satisfied(
-        parsed, target_lang='nl', source_lang='en',
-        usable=lambda lang, path: True)
+    assert not mass_operations._translate_output_present(
+        parsed, target_lang='nl', hi=False, usable=lambda lang, path: True)
 
 
 def test_a_plain_target_file_still_suppresses_the_translation():
@@ -139,9 +137,8 @@ def test_a_plain_target_file_still_suppresses_the_translation():
 
     parsed = [('en', None), ('nl', '/subs/m.nl.srt')]
 
-    assert mass_operations._translate_target_satisfied(
-        parsed, target_lang='nl', source_lang='en',
-        usable=lambda lang, path: True)
+    assert mass_operations._translate_output_present(
+        parsed, target_lang='nl', hi=False, usable=lambda lang, path: True)
 
 
 def test_a_missing_target_file_does_not_suppress_the_translation():
@@ -150,17 +147,95 @@ def test_a_missing_target_file_does_not_suppress_the_translation():
 
     parsed = [('en', None), ('nl', '/subs/gone.nl.srt')]
 
-    assert not mass_operations._translate_target_satisfied(
-        parsed, target_lang='nl', source_lang='en',
-        usable=lambda lang, path: False)
+    assert not mass_operations._translate_output_present(
+        parsed, target_lang='nl', hi=False, usable=lambda lang, path: False)
 
 
 def test_the_hi_variant_is_matched_not_only_the_base_language():
-    """en:hi translates to nl:hi, which a plain nl file does not satisfy."""
+    """An en:hi source produces nl:hi, which a plain nl file does not satisfy."""
     from subtitles import mass_operations
 
     parsed = [('en:hi', None), ('nl', '/subs/m.nl.srt')]
 
-    assert not mass_operations._translate_target_satisfied(
-        parsed, target_lang='nl', source_lang='en',
-        usable=lambda lang, path: True)
+    assert not mass_operations._translate_output_present(
+        parsed, target_lang='nl', hi=True, usable=lambda lang, path: True)
+
+
+# ------------------------------------- the skip has to be per source, not per item
+
+class TestPerVariantTargetSkip:
+    """Whole-item skipping over-produces when only some variants are missing.
+
+    An item with an ``en`` and an ``en:hi`` source and an existing ``nl`` file is
+    not fully satisfied, because ``nl:hi`` is missing. Deciding that at the item
+    level then queues BOTH English sources, so the plain one re-translates and
+    overwrites the ``nl`` file that was already there. On a paid translator that
+    is billed work for a file the user already had.
+    """
+
+    @staticmethod
+    def _episode(subtitles):
+        ep = MagicMock()
+        ep.sonarrEpisodeId = 1
+        ep.sonarrSeriesId = 10
+        ep.path = '/video/ep1.mkv'
+        ep.subtitles = subtitles
+        return ep
+
+    @staticmethod
+    def _wire(mock_settings, mock_path_map):
+        mock_settings.subsync.max_offset_seconds = 60
+        mock_settings.subsync.gss = True
+        mock_settings.subsync.no_fix_framerate = True
+        mock_settings.general.use_embedded_subs = True
+        mock_path_map.path_replace_instance.side_effect = lambda p, *a, **kw: p
+        mock_path_map.path_replace_reverse_instance.side_effect = lambda p, *a, **kw: p
+
+    @patch('subtitles.mass_operations.is_sync_engine_output', return_value=False)
+    @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
+    @patch('subtitles.mass_operations.path_mappings')
+    @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
+    @patch('subtitles.mass_operations._get_synced_movie_paths', return_value=set())
+    @patch('subtitles.mass_operations.database')
+    @patch('subtitles.mass_operations.settings')
+    def test_only_the_missing_variant_is_queued(self, mock_settings, mock_db, _sm, _se,
+                                                mock_path_map, _isfile, _sync):
+        from subtitles.mass_operations import _collect_subtitle_items
+
+        self._wire(mock_settings, mock_path_map)
+        episode = self._episode(
+            "[['en', '/subs/e.en.srt', 10], ['en:hi', '/subs/e.en.hi.srt', 11], "
+            "['nl', '/subs/e.nl.srt', 12]]")
+        mock_db.execute.return_value.all.return_value = [episode]
+
+        items, skipped = _collect_subtitle_items(
+            [{'type': 'episode', 'sonarrEpisodeId': 1}],
+            action='translate', options={'from_lang': 'en', 'to_lang': 'nl'})[:2]
+
+        queued = sorted((i['srt_lang'], i.get('hi', False)) for i in items)
+        assert queued == [('en', True)], (
+            'only the source whose output is missing should be queued; the plain '
+            f'en source would overwrite the existing nl file. got {queued!r}')
+
+    @patch('subtitles.mass_operations.is_sync_engine_output', return_value=False)
+    @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
+    @patch('subtitles.mass_operations.path_mappings')
+    @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
+    @patch('subtitles.mass_operations._get_synced_movie_paths', return_value=set())
+    @patch('subtitles.mass_operations.database')
+    @patch('subtitles.mass_operations.settings')
+    def test_nothing_is_queued_when_every_variant_exists(self, mock_settings, mock_db,
+                                                         _sm, _se, mock_path_map,
+                                                         _isfile, _sync):
+        from subtitles.mass_operations import _collect_subtitle_items
+
+        self._wire(mock_settings, mock_path_map)
+        episode = self._episode(
+            "[['en', '/subs/e.en.srt', 10], ['nl', '/subs/e.nl.srt', 12]]")
+        mock_db.execute.return_value.all.return_value = [episode]
+
+        items = _collect_subtitle_items(
+            [{'type': 'episode', 'sonarrEpisodeId': 1}],
+            action='translate', options={'from_lang': 'en', 'to_lang': 'nl'})[0]
+
+        assert items == [], f'nothing should be queued, got {items!r}'
