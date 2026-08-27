@@ -77,7 +77,7 @@ def test_text_codec_extraction_succeeds(tmp_path):
             "subtitles.tools.translate.batch.parse_video_metadata",
             return_value=metadata,
         ),
-        patch("subtitles.tools.translate.batch._handle_alpha3", return_value="eng"),
+        patch("utilities.video_analyzer._handle_alpha3", return_value="eng"),
         patch("subtitles.tools.translate.batch.alpha3_from_alpha2", return_value="eng"),
         patch(
             "subtitles.tools.translate.batch.get_binary", return_value="/usr/bin/ffmpeg"
@@ -120,7 +120,7 @@ def test_bitmap_codec_is_rejected(tmp_path):
             "subtitles.tools.translate.batch.parse_video_metadata",
             return_value=metadata,
         ),
-        patch("subtitles.tools.translate.batch._handle_alpha3", return_value="eng"),
+        patch("utilities.video_analyzer._handle_alpha3", return_value="eng"),
         patch("subtitles.tools.translate.batch.alpha3_from_alpha2", return_value="eng"),
         patch(
             "subtitles.tools.translate.batch.get_binary", return_value="/usr/bin/ffmpeg"
@@ -171,7 +171,7 @@ def test_hi_and_non_hi_use_different_cache_keys(tmp_path):
             "subtitles.tools.translate.batch.parse_video_metadata",
             return_value=metadata,
         ),
-        patch("subtitles.tools.translate.batch._handle_alpha3", return_value="eng"),
+        patch("utilities.video_analyzer._handle_alpha3", return_value="eng"),
         patch("subtitles.tools.translate.batch.alpha3_from_alpha2", return_value="eng"),
         patch(
             "subtitles.tools.translate.batch.get_binary", return_value="/usr/bin/ffmpeg"
@@ -236,7 +236,7 @@ def test_cache_hit_skips_ffmpeg(tmp_path):
             "subtitles.tools.translate.batch.parse_video_metadata",
             return_value=metadata,
         ),
-        patch("subtitles.tools.translate.batch._handle_alpha3", return_value="eng"),
+        patch("utilities.video_analyzer._handle_alpha3", return_value="eng"),
         patch("subtitles.tools.translate.batch.alpha3_from_alpha2", return_value="eng"),
         patch(
             "subtitles.tools.translate.batch.get_binary", return_value="/usr/bin/ffmpeg"
@@ -292,7 +292,7 @@ def test_forced_flag_uses_different_cache_key_from_hi(tmp_path):
             "subtitles.tools.translate.batch.parse_video_metadata",
             return_value=metadata,
         ),
-        patch("subtitles.tools.translate.batch._handle_alpha3", return_value="eng"),
+        patch("utilities.video_analyzer._handle_alpha3", return_value="eng"),
         patch("subtitles.tools.translate.batch.alpha3_from_alpha2", return_value="eng"),
         patch(
             "subtitles.tools.translate.batch.get_binary", return_value="/usr/bin/ffmpeg"
@@ -503,7 +503,7 @@ def test_multi_track_episode_selects_correct_stream(
             "subtitles.tools.translate.batch.parse_video_metadata",
             return_value=metadata,
         ),
-        patch("subtitles.tools.translate.batch._handle_alpha3", return_value="eng"),
+        patch("utilities.video_analyzer._handle_alpha3", return_value="eng"),
         patch("subtitles.tools.translate.batch.alpha3_from_alpha2", return_value="eng"),
         patch(
             "subtitles.tools.translate.batch.get_binary", return_value="/usr/bin/ffmpeg"
@@ -851,7 +851,7 @@ def test_path_mapped_install_extraction_location(monkeypatch, tmp_path):
             "subtitles.tools.translate.batch.parse_video_metadata",
             return_value=metadata,
         ),
-        patch("subtitles.tools.translate.batch._handle_alpha3", return_value="eng"),
+        patch("utilities.video_analyzer._handle_alpha3", return_value="eng"),
         patch("subtitles.tools.translate.batch.alpha3_from_alpha2", return_value="eng"),
         patch(
             "subtitles.tools.translate.batch.get_binary", return_value="/usr/bin/ffmpeg"
@@ -940,7 +940,7 @@ def test_forced_track_selected_by_title(tmp_path):
             "subtitles.tools.translate.batch.parse_video_metadata",
             return_value=metadata,
         ),
-        patch("subtitles.tools.translate.batch._handle_alpha3", return_value="eng"),
+        patch("utilities.video_analyzer._handle_alpha3", return_value="eng"),
         patch("subtitles.tools.translate.batch.alpha3_from_alpha2", return_value="eng"),
         patch(
             "subtitles.tools.translate.batch.get_binary", return_value="/usr/bin/ffmpeg"

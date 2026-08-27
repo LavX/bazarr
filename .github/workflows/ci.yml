@@ -343,6 +343,7 @@ jobs:
             tests/bazarr/test_triage_low_findings.py \
             tests/bazarr/test_indexer_owner_scope.py \
             tests/bazarr/test_translate_owner_threading.py \
+            tests/bazarr/test_embedded_track_eligibility.py \
             tests/bazarr/test_parser_owner_threading.py \
             tests/bazarr/test_embedded_translate_api_scope.py \
             tests/bazarr/test_release_type_mismatch_migration.py \
