@@ -38,7 +38,10 @@ permissions:
   contents: write
 
 concurrency:
-  group: site-stats
+  # Shared with the other workflow that pushes gh-pages. They must not
+  # run at once: both check out the branch and push it, and the loser of
+  # the race gets a non-fast-forward rejection.
+  group: gh-pages-write
   cancel-in-progress: false
 
 jobs:

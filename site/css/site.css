@@ -597,6 +597,18 @@ footer ul { display: flex; flex-wrap: wrap; gap: 8px 24px; list-style: none; mar
   .nav .container { height: 60px; }
 }
 
+/* Below about 380px even the four permanent links plus the wordmark do not fit
+   one row: they need 342px inside a container that has 40px of padding, so a
+   320px phone scrolled sideways on every page. GitHub and Discord fold away
+   first because the footer carries both on every page; Install and Guides are
+   the two a visitor on a phone is actually here for. */
+@media (max-width: 380px) {
+  .nav-offsite { display: none; }
+  .nav-sep { padding-left: 0; border-left: 0; }
+  .nav ul { gap: 20px; }
+  .container { padding-left: 16px; padding-right: 16px; }
+}
+
 /* Everything before this point is a place on this site; everything after it
    leaves. The rule says so without needing a word. */
 .nav-sep { padding-left: 28px; border-left: 1px solid var(--hair); }

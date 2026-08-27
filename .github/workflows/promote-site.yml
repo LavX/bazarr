@@ -55,7 +55,12 @@ jobs:
             exit 0
           fi
 
-          git checkout origin/development -- site/
+          # --no-overlay is required, not stylistic. Overlay is git's default
+          # for a path checkout: it updates and adds, but never deletes. A file
+          # removed on development would survive on master forever, the diff
+          # above would keep reporting a difference, and the next dispatch would
+          # reach git commit with nothing staged and fail.
+          git checkout --no-overlay origin/development -- site/
 
           # Belt and braces: whatever the checkout did, the staged diff must
           # touch nothing outside site/. If it does, something is wrong with the

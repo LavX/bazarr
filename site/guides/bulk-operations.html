@@ -63,8 +63,8 @@
   {
     "@context": "https://schema.org",
     "@type": "TechArticle",
-    "headline": "Getting Started",
-    "description": "Install Bazarr+ with Docker, connect to Sonarr and Radarr, and start downloading subtitles automatically.",
+    "headline": "Bulk Operations",
+    "description": "Run subtitle actions across many shows or films at once in Bazarr+: bulk sync, translate, combine, subtitle tools, scan disk, search missing and upgrade.",
     "url": "https://lavx.github.io/bazarr/guides/bulk-operations.html",
     "author": {
       "@type": "Person",
@@ -95,8 +95,8 @@
         <li class="nav-deep"><a href="../#faq">FAQ</a></li>
         <li class="nav-deep"><a href="../#next">Roadmap</a></li>
         <li class="nav-sep"><a href="./" aria-current="page">Guides</a></li>
-        <li><a href="https://github.com/LavX/bazarr" rel="noopener">GitHub</a></li>
-        <li><a href="https://discord.gg/fpp5JXmB8f" rel="noopener">Discord</a></li>
+        <li class="nav-offsite"><a href="https://github.com/LavX/bazarr" rel="noopener">GitHub</a></li>
+        <li class="nav-offsite"><a href="https://discord.gg/fpp5JXmB8f" rel="noopener">Discord</a></li>
       </ul>
     </nav>
   </div>
@@ -124,9 +124,11 @@
         table. Both pages offer the same actions.</p>
 
       <div class="note">
-        <p>Selection survives filtering and paging, so a common pattern is to filter first (by
-          language profile, by audio language, or by Sonarr/Radarr instance), then select all, then
-          act. There is no need to work a page at a time.</p>
+        <p><strong>Selection is per page.</strong> Changing page clears it, and the header checkbox
+          selects only the rows currently shown. To act on a whole filtered set at once, filter
+          first (by language profile, by audio language, or by Sonarr or Radarr instance), then set
+          the page size to <strong>All</strong> at the bottom of the table, then select all. The
+          sizes are 25, 50, 100, 250 and All.</p>
       </div>
 
       <h2 id="sync">Sync subtitles in bulk</h2>
@@ -189,9 +191,16 @@
       <h2 id="limits">Limits and what happens next</h2>
       <p>A single batch accepts up to <strong>10,000 items</strong>. Above that the request is
         refused rather than silently truncated, so split the selection and run it twice.</p>
-      <p>Every batch is queued as a background job rather than run in the browser, so you can leave
+      <p>Batches are queued as background jobs rather than run in the browser, so you can leave
         the page. Progress appears under <strong>System &rarr; Tasks</strong>, which is where you
         watch a run, not where you start one.</p>
+
+      <div class="note">
+        <p><strong>Combine is the exception.</strong> It runs in your browser, one item at a time,
+          rather than queueing a job. So it shows no progress under Tasks, and closing the tab or
+          navigating away stops whatever has not been done yet. Leave the page open until a combine
+          run finishes.</p>
+      </div>
 
       <div class="note">
         <p>Batch actions respect the language profile attached to each item, and on a multi-instance
@@ -229,7 +238,7 @@
       <li><a href="https://github.com/LavX/bazarr/releases" rel="noopener">Releases</a></li>
       <li><a href="https://github.com/LavX/bazarr/issues" rel="noopener">Issues</a></li>
       <li><a href="https://github.com/LavX/bazarr/wiki" rel="noopener">Wiki</a></li>
-      <li><a href="https://discord.gg/fpp5JXmB8f" rel="noopener">Discord</a></li>
+      <li class="nav-offsite"><a href="https://discord.gg/fpp5JXmB8f" rel="noopener">Discord</a></li>
     </ul>
   </div>
 </footer>
