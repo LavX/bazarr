@@ -607,8 +607,8 @@ This fork is maintained by **LavX**. Explore more projects and services:
 
 Where Bazarr+ is heading. Plans shift, but the direction is steady.
 
-- **v2.6.0**: universal providers and federation. Point Bazarr+ at any OpenSubtitles.com-compatible endpoint, including another Bazarr+ instance, and daisy-chain instances together over a loop-safe federation protocol.
-- **v3.0.0 "Subnet"**: peer-to-peer subtitle federation, a self-organizing mesh of Bazarr+ instances.
+- **v2.6.0 "Clockwork"**: correctness pass. Databases created by upstream Bazarr are adopted instead of crash-looping, sync results are checked against the offset you configured rather than merely bounded by it, Provider Hub candidates are scored on their release information, mass translate can work from an embedded subtitle track, and per-provider score modifiers let you weight a provider up or down.
+- **v3.0.0 "Galaxy"**: peer-to-peer subtitle sharing, a self-organizing mesh of Bazarr+ instances.
 
 ---
 
