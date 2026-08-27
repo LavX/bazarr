@@ -70,23 +70,25 @@ def episode_module(monkeypatch):
 def test_reindexing_an_episode_uses_the_series_path_mapping(episode_module, monkeypatch):
     module, unindexed = episode_module
     indexed = []
-    monkeypatch.setattr(module, "store_subtitles", lambda path, mapped: indexed.append((path, mapped)))
+    monkeypatch.setattr(module, "store_subtitles",
+                        lambda path, mapped, **kw: indexed.append((path, mapped, kw.get("arr_instance_id"))))
 
     # The episode file is not on this machine, so the call stops right after the
     # re-index. That is the whole region under test.
     with pytest.raises(OSError):
         module.episode_download_subtitles(1, job_id=1, job_sub_function=True)
 
-    assert indexed == [(unindexed.path, "/mnt/series/Show/Season 1/Show.S01E01.mkv")]
+    assert indexed == [(unindexed.path, "/mnt/series/Show/Season 1/Show.S01E01.mkv", None)]
 
 
 def test_the_owning_instance_path_mapping_wins(episode_module, monkeypatch):
     module, unindexed = episode_module
     unindexed.arr_instance_id = 7
     indexed = []
-    monkeypatch.setattr(module, "store_subtitles", lambda path, mapped: indexed.append((path, mapped)))
+    monkeypatch.setattr(module, "store_subtitles",
+                        lambda path, mapped, **kw: indexed.append((path, mapped, kw.get("arr_instance_id"))))
 
     with pytest.raises(OSError):
         module.episode_download_subtitles(1, job_id=1, job_sub_function=True)
 
-    assert indexed == [(unindexed.path, "/mnt/instance7/Show/Season 1/Show.S01E01.mkv")]
+    assert indexed == [(unindexed.path, "/mnt/instance7/Show/Season 1/Show.S01E01.mkv", 7)]

@@ -269,11 +269,11 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
                         del added_episode['created_at_timestamp']
                         episodes_to_update.append(added_episode)
                     else:
-                        store_subtitles(added_episode['path'], path_mappings.path_replace(added_episode['path']))
+                        store_subtitles(added_episode['path'], path_mappings.path_replace(added_episode['path']), arr_instance_id=arr_instance_id)
                         rows_changed = True
             else:
                 for added_episode in chunk:
-                    store_subtitles(added_episode['path'], path_mappings.path_replace(added_episode['path']))
+                    store_subtitles(added_episode['path'], path_mappings.path_replace(added_episode['path']), arr_instance_id=arr_instance_id)
                     rows_changed = True
 
     # Update existing episodes in DB
@@ -306,7 +306,7 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
                         previous_episode_path != updated_episode['path']):
                     # Store subtitles for updated episode where path or episode_file_id changed
                     logging.debug('BAZARR updating subtitles for episode %s', updated_episode["path"])
-                    store_subtitles(updated_episode['path'], path_mappings.path_replace(updated_episode['path']))
+                    store_subtitles(updated_episode['path'], path_mappings.path_replace(updated_episode['path']), arr_instance_id=arr_instance_id)
                 else:
                     logging.debug('BAZARR skipping subtitle update for episode %s as path '
                                   'and episode_file_id unchanged', updated_episode["path"])
@@ -463,7 +463,7 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
         except IntegrityError as e:
             logging.error(f"BAZARR cannot update episode {episode['path']} because of {e}")  # noqa: G004
         else:
-            store_subtitles(episode['path'], path_mappings.path_replace(episode['path']))
+            store_subtitles(episode['path'], path_mappings.path_replace(episode['path']), arr_instance_id=arr_instance_id)
             # Emit the LOCAL episode id (#156): the frontend caches episode
             # detail by local id, and the upstream sonarrEpisodeId is not unique
             # across instances. No-op scope for the default/single-instance path.
@@ -489,7 +489,7 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
         except IntegrityError as e:
             logging.error(f"BAZARR cannot insert episode {episode['path']} because of {e}")  # noqa: G004
         else:
-            store_subtitles(episode['path'], path_mappings.path_replace(episode['path']))
+            store_subtitles(episode['path'], path_mappings.path_replace(episode['path']), arr_instance_id=arr_instance_id)
             # Emit the LOCAL episode id (#156): see the update branch above.
             local_id_row = database.execute(
                 scoped(select(TableEpisodes.id)

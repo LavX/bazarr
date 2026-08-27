@@ -518,11 +518,11 @@ def _refresh_media_subtitles(media_type, media_id, metadata):
     # None (default/single-instance setup).
     arr_instance_id = metadata.get('arrInstanceId')
     if media_type == 'episode' and media_path:
-        store_subtitles(media_path, path_mappings.path_replace_instance(media_path, arr_instance_id, 'episode'), use_cache=False)
+        store_subtitles(media_path, path_mappings.path_replace_instance(media_path, arr_instance_id, 'episode'), use_cache=False, arr_instance_id=arr_instance_id)
         event_stream(type='series', payload=metadata.get('mediaId'))
         event_stream(type='episode', payload=metadata.get('episodeId', media_id))
     elif media_type == 'movie' and media_path:
-        store_subtitles_movie(media_path, path_mappings.path_replace_instance(media_path, arr_instance_id, 'movie'), use_cache=False)
+        store_subtitles_movie(media_path, path_mappings.path_replace_instance(media_path, arr_instance_id, 'movie'), use_cache=False, arr_instance_id=arr_instance_id)
         event_stream(type='movie', payload=metadata.get('mediaId', media_id))
 
 
@@ -1121,10 +1121,10 @@ def _create_subtitle(media_type, media_id, arr_instance_id=None):
 
     # Force re-scan subtitles from disk using the media (video) path
     if media_type == 'episode':
-        store_subtitles(row.path, video_path, use_cache=False)
+        store_subtitles(row.path, video_path, use_cache=False, arr_instance_id=arr_instance_id)
         event_stream(type='episode', payload=row.id)
     else:
-        store_subtitles_movie(row.path, video_path, use_cache=False)
+        store_subtitles_movie(row.path, video_path, use_cache=False, arr_instance_id=arr_instance_id)
         event_stream(type='movie', payload=row.id)
 
     # Build language with modifiers

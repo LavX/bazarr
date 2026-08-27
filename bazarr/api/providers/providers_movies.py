@@ -69,7 +69,8 @@ class ProviderMovies(Resource):
             return 'Movie not found', 404
         elif movieInfo.subtitles is None:
             # subtitles indexing for this movie is incomplete, we'll do it again
-            store_subtitles_movie(movieInfo.path, path_mappings.path_replace_movie(movieInfo.path))
+            store_subtitles_movie(movieInfo.path, path_mappings.path_replace_movie(movieInfo.path),
+                                  arr_instance_id=movieInfo.arr_instance_id)
             movieInfo = database.execute(stmt).first()
         elif movieInfo.missing_subtitles is None:
             # missing subtitles calculation for this movie is incomplete, we'll do it again

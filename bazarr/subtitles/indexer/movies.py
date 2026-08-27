@@ -30,17 +30,25 @@ from arr_instances.resolution import scoped
 gc.enable()
 
 
-def store_subtitles_movie(original_path, reversed_path, use_cache=True):
+def store_subtitles_movie(original_path, reversed_path, use_cache=True, arr_instance_id=None):
     logging.debug(f'BAZARR started subtitles indexing for this file: {reversed_path}')  # noqa: G004
     actual_subtitles = []
-    # Resolve the owning instance for this file up front (#156) so every
-    # path_replace* below honours the owning instance's per-instance
-    # path_mappings instead of the global singleton. owner_instance_id None =>
-    # global mapping (the default/single-instance path), byte-identical to legacy.
-    owner_row = database.execute(
-        select(TableMovies.arr_instance_id)
-        .where(TableMovies.path == original_path)).first()
-    owner_instance_id = owner_row.arr_instance_id if owner_row else None
+    # The owning instance decides everything below: which per-instance
+    # path_mappings resolve the paths, which ffprobe cache row the embedded pass
+    # reads and overwrites, and which row receives the listing (#156).
+    #
+    # Take it from the caller when it knows. Resolving it here from the path
+    # cannot be done reliably: path is not unique across instances, and
+    # per-instance mappings can point the same remote path at two different
+    # local files. Falling back to the lookup keeps the default and
+    # single-instance path byte-identical to legacy behaviour.
+    if arr_instance_id is not None:
+        owner_instance_id = arr_instance_id
+    else:
+        owner_row = database.execute(
+            select(TableMovies.arr_instance_id)
+            .where(TableMovies.path == original_path)).first()
+        owner_instance_id = owner_row.arr_instance_id if owner_row else None
 
     def _pr(p):
         return path_mappings.path_replace_instance(p, owner_instance_id, "movie")
@@ -54,8 +62,9 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
         if settings.general.use_embedded_subs:
             logging.debug("BAZARR is trying to index embedded subtitles.")
             item = database.execute(
-                select(TableMovies.movie_file_id, TableMovies.file_size)
-                .where(TableMovies.path == original_path)) \
+                scoped(select(TableMovies.movie_file_id, TableMovies.file_size)
+                       .where(TableMovies.path == original_path),
+                       TableMovies.arr_instance_id, owner_instance_id)) \
                 .first()
             if not item:
                 logging.exception(f"BAZARR error when trying to select this movie from database: {reversed_path}")  # noqa: G004
@@ -98,8 +107,9 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
 
             # get previously indexed subtitles that haven't changed:
             item = database.execute(
-                select(TableMovies.subtitles)
-                .where(TableMovies.path == original_path))\
+                scoped(select(TableMovies.subtitles)
+                       .where(TableMovies.path == original_path),
+                       TableMovies.arr_instance_id, owner_instance_id))\
                 .first()
             if not item:
                 previously_indexed_subtitles_to_exclude = []
@@ -168,12 +178,14 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True):
                                              subtitle_size])
 
         database.execute(
-            update(TableMovies)
-            .values(subtitles=str(actual_subtitles))
-            .where(TableMovies.path == original_path))
+            scoped(update(TableMovies)
+                   .values(subtitles=str(actual_subtitles))
+                   .where(TableMovies.path == original_path),
+                   TableMovies.arr_instance_id, owner_instance_id))
         matching_movies = database.execute(
-            select(TableMovies.radarrId, TableMovies.arr_instance_id)
-            .where(TableMovies.path == original_path))\
+            scoped(select(TableMovies.radarrId, TableMovies.arr_instance_id)
+                   .where(TableMovies.path == original_path),
+                   TableMovies.arr_instance_id, owner_instance_id))\
             .all()
 
         for movie in matching_movies:

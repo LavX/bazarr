@@ -513,7 +513,7 @@ def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id, 
                 subtitles_path)
 
     if media_type == "episode":
-        store_subtitles(path_mappings.path_replace_reverse(video_path), video_path)
+        store_subtitles(path_mappings.path_replace_reverse(video_path), video_path, arr_instance_id=arr_instance_id)
         event_stream(type="series", payload=metadata.sonarrSeriesId)
         # Emit the LOCAL episode id (#156): `id` is the upstream sonarrEpisodeId
         # (not unique across instances), but the frontend caches episode detail
@@ -539,7 +539,7 @@ def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id, 
     else:
         store_subtitles_movie(
             path_mappings.path_replace_reverse_movie(video_path), video_path
-        )
+        , arr_instance_id=arr_instance_id)
         event_stream(type="movie", payload=id)
 
         if settings.general.use_plex and settings.plex.update_movie_library:
