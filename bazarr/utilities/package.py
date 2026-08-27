@@ -39,3 +39,16 @@ def read_package_info(path=None):
             if sep:
                 info[key.lower()] = value.replace('\n', '')
     return info
+
+
+def updates_are_externally_managed(path=None, info=None):
+    """True when the packager set `updatemethod=External`.
+
+    That is the documented way a package says it owns updating: a container
+    image, a distribution package, an unRAID template. Honouring it is the
+    caller's job, and for a long time nobody did, so the setting only ever set
+    an environment variable nothing reads.
+    """
+    if info is None:
+        info = read_package_info(path)
+    return info.get('updatemethod', '') == 'External'

@@ -85,7 +85,9 @@ if os.path.isfile(package_info_file):
         # package author can force a branch to follow
         if 'branch' in package_info:
             settings.general.branch = package_info['branch']
-        # package author can disable update
+        # package author can disable update. The setting itself is applied in
+        # app.get_args, which runs early enough to gate every consumer; these
+        # two are published for anything outside the app that reads them.
         if package_info.get('updatemethod', '') == 'External':
             os.environ['BAZARR_UPDATE_ALLOWED'] = '0'
             os.environ['BAZARR_UPDATE_MESSAGE'] = package_info.get('updatemethodmessage', '')
