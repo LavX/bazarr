@@ -213,6 +213,18 @@ def restore_missing_model_columns(connection, metadata=None):
             if column.name in present:
                 continue
 
+            if column.foreign_keys:
+                # ALTER TABLE ADD COLUMN cannot carry a referential action on
+                # SQLite, and adding the column without one produces a schema
+                # that reports success and then orphans rows the next time a
+                # parent is deleted. Rebuilding the table to do it properly is
+                # more than a repair should attempt.
+                logging.warning(
+                    'BAZARR cannot restore the column %s.%s, it references another table '
+                    'and the constraint cannot be added afterwards. Bazarr+ will start, '
+                    'but that column stays missing.', table.name, column.name)
+                continue
+
             if not column.nullable and column.server_default is None:
                 reason = ('its default is applied by the application rather than the database'
                           if column.default is not None else 'it has no default')
@@ -261,13 +273,29 @@ def retire_split_subtitle_tables(connection, folded_tables):
     dropped = []
     existing_tables = set(sa.inspect(connection).get_table_names())
 
-    for item_table, split_table, _join_column in _SPLIT_SUBTITLE_TABLES:
+    for item_table, split_table, join_column in _SPLIT_SUBTITLE_TABLES:
         if split_table not in existing_tables:
             continue
         if item_table not in folded_tables:
             logging.warning('BAZARR keeping %s: its rows were not folded into %s.subtitles',
                             split_table, item_table)
             continue
+
+        # The fold walks the item table, so a row pointing at an item that is
+        # not there was never copied anywhere. Foreign keys should prevent it,
+        # and on SQLite they are not always enforced, so this is checked rather
+        # than assumed: dropping the table would destroy those rows for good.
+        orphans = connection.execute(sa.text(
+            f'SELECT count(*) FROM {split_table} WHERE "{join_column}" IS NULL '
+            f'OR "{join_column}" NOT IN (SELECT "{join_column}" FROM {item_table})')).scalar()
+        if orphans:
+            logging.warning(
+                'BAZARR keeping %s: %s of its rows point at an item that is not in %s, so they '
+                'were never folded across. Nothing reads this table, and it is left in place '
+                'rather than dropped so those rows are not lost.',
+                split_table, orphans, item_table)
+            continue
+
         connection.execute(sa.text(f'DROP TABLE {split_table}'))
         dropped.append(split_table)
         logging.info('BAZARR dropped %s, its contents are now in %s.subtitles',
@@ -295,6 +323,31 @@ def looks_like_a_bazarr_database(connection):
     """Whether this is a Bazarr database at all."""
     tables = set(sa.inspect(connection).get_table_names())
     return any(marker in tables for marker in _BAZARR_MARKER_TABLES)
+
+
+def came_from_this_fork(connection):
+    """Whether this database has already been through this fork's chain.
+
+    The local-id PK cutover is the tell. Upstream keys table_shows on the
+    Sonarr id and has no concept of a local one, so a table_shows keyed on its
+    own id can only have been produced here.
+
+    It matters because an unrecognised revision has two possible causes, and
+    only one of them is an upstream database. The other is an older Bazarr+
+    started against a database a newer release created, where adopting would
+    stamp the chain back to the shared ancestor, run the old migrations over a
+    newer schema, and leave the newer release re-running migrations whose
+    history had been erased. create_all() cannot blur this: it never alters a
+    table that already exists.
+    """
+    inspector = sa.inspect(connection)
+    if 'table_shows' not in inspector.get_table_names():
+        return False
+    try:
+        primary_key = inspector.get_pk_constraint('table_shows')
+    except Exception:
+        return False
+    return 'id' in (primary_key.get('constrained_columns') or [])
 
 
 def stamped_revision(connection):
@@ -329,6 +382,15 @@ def adopt_upstream_database(connection, migrations_directory=None):
     if not looks_like_a_bazarr_database(connection):
         logging.error('BAZARR this database is stamped with the unknown migration revision %s '
                       'and does not look like a Bazarr database. Leaving it alone.', revision)
+        return None
+
+    if came_from_this_fork(connection):
+        logging.error(
+            'BAZARR this database is stamped with migration revision %s, which this build has '
+            'no script for, but it has already been through Bazarr+\'s own migrations. It was '
+            'almost certainly created by a NEWER Bazarr+ than this one. Downgrading is not '
+            'supported: running these older migrations over it would corrupt it. Start the '
+            'newer version again, or restore a backup taken before the upgrade.', revision)
         return None
 
     if revision in REVIEWED_UPSTREAM_REVISIONS:

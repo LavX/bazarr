@@ -400,13 +400,58 @@ def _chain_head():
     return heads.pop()
 
 
+def _restore_the_upstream_primary_key(connection, table, upstream_id):
+    """Rebuild a table the way upstream keys it, on the arr id rather than a
+    local one.
+
+    create_all builds this fork's post-cutover shape, which adoption uses to
+    tell an upstream database from one a newer Bazarr+ produced. A fixture that
+    skipped this would be asking adoption to accept something no upstream
+    release can emit.
+    """
+    columns = connection.execute(sa.text(f'PRAGMA table_info({table})')).fetchall()
+    kept = [row[1] for row in columns if row[1] != 'id']
+    definitions = []
+    for row in columns:
+        name, column_type = row[1], row[2] or 'TEXT'
+        if name == 'id':
+            continue
+        if name == upstream_id:
+            definitions.append(f'"{name}" {column_type} NOT NULL PRIMARY KEY')
+        else:
+            definitions.append(f'"{name}" {column_type}')
+    column_list = ', '.join(f'"{name}"' for name in kept)
+    # Build the replacement first and rename it into place. Renaming the
+    # original out of the way instead would have SQLite rewrite every foreign
+    # key that points at it, which is not what a fixture wants.
+    connection.execute(sa.text(f'CREATE TABLE {table}__upstream ({", ".join(definitions)})'))
+    connection.execute(sa.text(
+        f'INSERT INTO {table}__upstream ({column_list}) SELECT {column_list} FROM {table}'))
+    connection.execute(sa.text(f'DROP TABLE {table}'))
+    connection.execute(sa.text(f'ALTER TABLE {table}__upstream RENAME TO {table}'))
+
+
 def _looks_like_upstream(engine):
     """Turn a fork-shaped database into the shape upstream leaves at 0124f9e278fb.
 
     Upstream's migration moves the subtitle lists into their own tables and
     drops the source columns, so that is what this does, and then stamps the
-    revision this codebase has no script for.
+    revision this codebase has no script for. The item tables are also keyed
+    back the way upstream keys them, because create_all built them in this
+    fork's post-cutover shape.
     """
+    # Rebuilding a table other tables reference trips the foreign-key check,
+    # and the pragma only takes effect outside a transaction.
+    rebuild = engine.connect().execution_options(isolation_level='AUTOCOMMIT')
+    try:
+        rebuild.execute(sa.text('PRAGMA foreign_keys=OFF'))
+        _restore_the_upstream_primary_key(rebuild, 'table_shows', 'sonarrSeriesId')
+        _restore_the_upstream_primary_key(rebuild, 'table_episodes', 'sonarrEpisodeId')
+        _restore_the_upstream_primary_key(rebuild, 'table_movies', 'radarrId')
+        rebuild.execute(sa.text('PRAGMA foreign_keys=ON'))
+    finally:
+        rebuild.close()
+
     with engine.begin() as connection:
         for item_table in ('table_episodes', 'table_movies'):
             connection.execute(sa.text(f'ALTER TABLE {item_table} DROP COLUMN subtitles'))
@@ -444,6 +489,10 @@ def test_an_upstream_database_migrates_to_the_fork_head_through_startup(tmp_path
     with engine.begin() as connection:
         connection.execute(sa.text('CREATE TABLE IF NOT EXISTS alembic_version '
                                    '(version_num VARCHAR(32) NOT NULL)'))
+        # The cutover checks referential integrity, so the episode needs a show.
+        connection.execute(sa.text(
+            'INSERT INTO table_shows ("sonarrSeriesId", title, path) '
+            'VALUES (3, \'Breaking Bad\', \'/m/Breaking Bad\')'))
         connection.execute(sa.text(
             'INSERT INTO table_episodes ("sonarrEpisodeId", "sonarrSeriesId", title, path, '
             'season, episode) VALUES (31, 3, \'Ozymandias\', \'/m/s05e14.mkv\', 5, 14)'))
@@ -725,5 +774,129 @@ def test_a_nullable_column_is_still_restored_plainly(tmp_path):
         with engine.begin() as connection:
             restored = restore_missing_model_columns(connection, metadata=metadata)
         assert ('doodads', 'note') in restored
+    finally:
+        engine.dispose()
+
+
+# --- telling an upstream database from a newer Bazarr+ one ----------------
+
+def _fork_shaped_database(engine, stamp):
+    """A database this fork has already migrated: the local-id PK cutover has
+    run, so table_shows is keyed on its own id rather than the upstream one."""
+    with engine.begin() as connection:
+        connection.execute(sa.text(
+            'CREATE TABLE table_shows (id INTEGER PRIMARY KEY, '
+            'arr_instance_id INTEGER, "sonarrSeriesId" INTEGER, path TEXT, title TEXT)'))
+        connection.execute(sa.text(
+            'CREATE TABLE table_episodes (id INTEGER PRIMARY KEY, '
+            '"sonarrEpisodeId" INTEGER, "sonarrSeriesId" INTEGER, path TEXT, subtitles TEXT)'))
+        connection.execute(sa.text(
+            'CREATE TABLE table_movies (id INTEGER PRIMARY KEY, "radarrId" INTEGER, '
+            'path TEXT, subtitles TEXT)'))
+        connection.execute(sa.text(
+            'CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)'))
+        connection.execute(sa.text(
+            'INSERT INTO alembic_version (version_num) VALUES (:v)'), {'v': stamp})
+
+
+def test_a_database_from_a_newer_bazarr_plus_is_left_alone(tmp_path):
+    """An older build started against a database a newer release created sees
+    a revision it has no script for, on a database carrying every table it
+    recognises. Adopting it would stamp the chain back to the shared ancestor
+    and run the old migrations over a newer schema, and the newer release
+    would then re-run migrations whose history had been erased.
+
+    The local-id PK cutover is the tell: upstream has no such concept, so a
+    table_shows keyed on its own id can only have come from this fork."""
+    from app.upstream_adoption import adopt_upstream_database
+
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'newer.db'}")
+    try:
+        _fork_shaped_database(engine, stamp='ffffffffffff')
+
+        with engine.begin() as connection:
+            assert adopt_upstream_database(connection) is None
+
+        assert _stamp(engine) == 'ffffffffffff'
+        # and nothing was dropped or rewritten on the way past
+        tables = set(sa.inspect(engine).get_table_names())
+        assert {'table_shows', 'table_episodes', 'table_movies'} <= tables
+    finally:
+        engine.dispose()
+
+
+def test_an_upstream_database_is_still_adopted(upstream_engine):
+    """The guard must not cost the case the whole feature exists for: upstream
+    keys table_shows on sonarrSeriesId, never on a local id."""
+    from app.upstream_adoption import adopt_upstream_database
+
+    with upstream_engine.begin() as connection:
+        connection.execute(sa.text(
+            'CREATE TABLE table_shows ("sonarrSeriesId" INTEGER PRIMARY KEY, path TEXT)'))
+
+    with upstream_engine.begin() as connection:
+        assert adopt_upstream_database(connection) == '309dc062d2e4'
+
+
+# --- not dropping rows that were never folded -----------------------------
+
+def test_a_split_table_holding_an_orphan_row_is_kept(upstream_engine):
+    """The fold walks the item table, so a row whose parent id is missing is
+    never copied. Dropping the table then destroys it for good."""
+    from app.upstream_adoption import adopt_upstream_database
+
+    with upstream_engine.begin() as connection:
+        connection.execute(sa.text(
+            'INSERT INTO table_episodes ("sonarrEpisodeId", "sonarrSeriesId", path) '
+            "VALUES (61, 6, '/m/a.mkv')"))
+        connection.execute(sa.text(
+            'INSERT INTO table_episodes_subtitles '
+            '("sonarrEpisodeId", "sonarrSeriesId", language, hi, forced, path, size) '
+            "VALUES (61, 6, 'en', 0, 0, '/m/a.en.srt', 5)"))
+        # no episode 99 exists
+        connection.execute(sa.text(
+            'INSERT INTO table_episodes_subtitles '
+            '("sonarrEpisodeId", "sonarrSeriesId", language, hi, forced, path, size) '
+            "VALUES (99, 6, 'fr', 0, 0, '/m/orphan.fr.srt', 5)"))
+
+    with upstream_engine.begin() as connection:
+        adopt_upstream_database(connection)
+
+    tables = set(sa.inspect(upstream_engine).get_table_names())
+    assert 'table_episodes_subtitles' in tables, 'the orphan row would have been destroyed'
+    # the row that did have a parent still reached the column
+    assert _subtitles_of(upstream_engine, 61) == str([['en', '/m/a.en.srt', 5]])
+    # and the movie table, which has no orphan, is still retired
+    assert 'table_movies_subtitles' not in tables
+
+
+# --- not restoring a column whose constraint would be lost ----------------
+
+def test_a_foreign_key_column_is_not_restored_bare(tmp_path):
+    """Adding the column without its referential action leaves a schema that
+    reports success and then orphans rows on the next parent delete."""
+    import sqlalchemy as sa_
+
+    from app.upstream_adoption import restore_missing_model_columns
+
+    metadata = sa_.MetaData()
+    sa_.Table('parents', metadata, sa_.Column('id', sa_.Integer, primary_key=True))
+    sa_.Table('children', metadata,
+              sa_.Column('id', sa_.Integer, primary_key=True),
+              sa_.Column('parent_id', sa_.Integer,
+                         sa_.ForeignKey('parents.id', ondelete='CASCADE')))
+
+    engine = sa_.create_engine(f"sqlite:///{tmp_path / 'fk.db'}")
+    try:
+        with engine.begin() as connection:
+            connection.execute(sa_.text('CREATE TABLE parents (id INTEGER PRIMARY KEY)'))
+            connection.execute(sa_.text('CREATE TABLE children (id INTEGER PRIMARY KEY)'))
+
+        with engine.begin() as connection:
+            restored = restore_missing_model_columns(connection, metadata=metadata)
+
+        assert ('children', 'parent_id') not in restored
+        assert 'parent_id' not in {c['name'] for c in
+                                   sa.inspect(engine).get_columns('children')}
     finally:
         engine.dispose()
