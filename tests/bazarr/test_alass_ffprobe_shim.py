@@ -383,3 +383,62 @@ def test_the_sweep_leaves_directories_that_are_not_ours_alone(monkeypatch, tmp_p
     shim.ensure_launcher()
 
     assert someone_else.is_dir()
+
+
+# ---------------------------------------------------------------------------
+# The sweep has to tell a stale launcher from one in use
+# ---------------------------------------------------------------------------
+# Ownership was the only test, and every Bazarr on the host runs as the same
+# user. A second install sharing /tmp therefore deletes the first one's live
+# launcher, and alass execs ALASS_FFPROBE_PATH directly, so that sync fails on
+# a file that was there when the environment was built. The directory now
+# carries a lock its process holds for as long as it runs.
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the claim is an flock")
+def test_a_launcher_another_process_still_holds_is_not_swept(monkeypatch, tmp_path):
+    shim = _shim()
+    monkeypatch.setattr(shim, "_LAUNCHER_PATH", None, raising=False)
+    monkeypatch.setattr(shim, "_writable_directories", lambda: [str(tmp_path)])
+
+    theirs = tmp_path / f"{shim.LAUNCHER_PREFIX}other"
+    theirs.mkdir()
+    held = shim._claim(str(theirs))
+    try:
+        shim.ensure_launcher()
+        assert theirs.is_dir(), (
+            'another running Bazarr lost its launcher mid-sync because this one '
+            'could not tell a live directory from an abandoned one')
+    finally:
+        os.close(held)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the claim is an flock")
+def test_a_launcher_whose_process_is_gone_is_swept(monkeypatch, tmp_path):
+    """The lock dies with the process that held it, which is what makes an
+    abandoned directory distinguishable from a live one."""
+    shim = _shim()
+    monkeypatch.setattr(shim, "_LAUNCHER_PATH", None, raising=False)
+    monkeypatch.setattr(shim, "_writable_directories", lambda: [str(tmp_path)])
+
+    abandoned = tmp_path / f"{shim.LAUNCHER_PREFIX}dead"
+    abandoned.mkdir()
+    os.close(shim._claim(str(abandoned)))  # the process exited
+
+    shim.ensure_launcher()
+
+    assert not abandoned.exists(), 'an abandoned launcher directory was left behind'
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the claim is an flock")
+def test_the_launcher_this_process_installed_is_claimed(monkeypatch, tmp_path):
+    shim = _shim()
+    monkeypatch.setattr(shim, "_LAUNCHER_PATH", None, raising=False)
+    monkeypatch.setattr(shim, "_writable_directories", lambda: [str(tmp_path)])
+
+    launcher = shim.ensure_launcher()
+
+    assert launcher, "the launcher could not be installed at all"
+    assert shim._is_claimed(os.path.dirname(launcher)), (
+        'the directory alass is about to exec from is not protected from the '
+        'next sweep on this host')
