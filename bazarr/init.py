@@ -12,6 +12,7 @@ from app.config import settings, configure_captcha_func, write_config
 from app.get_args import args
 from app.logger import configure_logging
 from utilities.binaries import get_binary, BinaryNotFound
+from utilities.package import package_info_path, read_package_info
 from utilities.path_mappings import path_mappings
 from utilities.backup import restore_from_backup
 
@@ -69,22 +70,18 @@ if isinstance(settings.general.enabled_providers, str) and not settings.general.
     write_config()
 
 # Read package_info (if exists) to override some settings by package maintainers
-# This file can also provide some info about the package version and author
-package_info_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'package_info')
+# This file can also provide some info about the package version and author.
+#
+# The path used to be derived here, one directory too high for this layout, so
+# in the shipped image the lookup asked for /app/package_info while the file is
+# at /app/bazarr/package_info. Everything below was skipped in silence: no
+# packaged version in System Status, and updatemethod=External never disabled
+# in-app updates. It lives in utilities.package now so the location is asserted
+# by a test instead of being taken on trust.
+package_info_file = package_info_path()
 if os.path.isfile(package_info_file):
     try:
-        splitted_lines = []
-        package_info = {}
-        with open(package_info_file) as file:
-            lines = file.readlines()
-            for line in lines:
-                splitted_lines += line.split(r'\n')
-            for line in splitted_lines:
-                splitted_line = line.split('=', 1)
-                if len(splitted_line) == 2:
-                    package_info[splitted_line[0].lower()] = splitted_line[1].replace('\n', '')
-                else:
-                    continue
+        package_info = read_package_info(package_info_file)
         # package author can force a branch to follow
         if 'branch' in package_info:
             settings.general.branch = package_info['branch']

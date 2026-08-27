@@ -1,7 +1,10 @@
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import {
+  faClockRotateLeft,
+  faDatabase,
   faFileZipper,
   faLayerGroup,
+  faScaleBalanced,
   faServer,
   faShieldHalved,
   faSliders,
@@ -28,9 +31,46 @@ export interface WhatsNewSlide {
  * cutting a release. Kept as an explicit token so the wizard never has to parse the
  * fork's `version + YYMMDD` runtime string.
  */
-export const latestWhatsNewVersion = "2.5.2";
+export const latestWhatsNewVersion = "2.6.0";
 
 export const whatsNew: Record<string, WhatsNewSlide[]> = {
+  "2.6.0": [
+    {
+      title: "Coming from upstream Bazarr? It just starts now",
+      body: "Pointing Bazarr+ at a config directory created by upstream Bazarr used to crash on boot in a restart loop, because the two projects' migration histories diverged. Any upstream database is now adopted on first start, whatever revision it came from, with your subtitle lists preserved.",
+      icon: faDatabase,
+    },
+    {
+      title: "Movie edition scores are honest now, and some will drop",
+      body: "Subtitles used to get credit for matching a movie's edition (Extended, Director's Cut) even when they named no edition at all, worth up to 30 points. That is fixed. If edition-tagged movies stop getting subtitles, your minimum score is now being applied to an honest number: lower it a notch.",
+      icon: faScaleBalanced,
+      cta: { label: "Open Subtitles settings", to: "/settings/subtitles" },
+    },
+    {
+      title: "Sync rejects a bad result instead of reporting success",
+      body: 'Maximum offset used to bound ffsubsync\'s search, so a subtitle minutes out of sync could come back "synced" and overwrite a good file. It is now an acceptance threshold: a result beyond it is rejected and the next engine gets its turn. Expect more honest failures, and files already ruined stay ruined.',
+      icon: faClockRotateLeft,
+      cta: { label: "Open Subtitles settings", to: "/settings/subtitles" },
+    },
+    {
+      title: "Mass translate can use an embedded track",
+      body: 'If a release only carries its English subtitles inside the video container, mass translate can now extract and translate them. Turn on "Use embedded subtitles" and pick the source language as usual. Each variant is handled separately, so a normal and a hearing-impaired track produce their own outputs.',
+      icon: faWandMagicSparkles,
+      cta: { label: "Open Subtitles settings", to: "/settings/subtitles" },
+    },
+    {
+      title: "Weight one provider up or down",
+      body: "Each provider can carry a score modifier of up to 100 points, applied before the minimum-score gate. Built for keeping something like WhisperAI as a genuine last resort without lowering the bar for everyone else.",
+      icon: faSliders,
+      cta: { label: "Open Providers", to: "/settings/providers" },
+    },
+    {
+      title: "Four dead providers were removed",
+      body: "Hosszupuska, Podnapisi, SubsCenter and XSubs no longer work and are gone. On first start they leave your enabled list and their leftover settings, including any saved password, are deleted from the config so old cleartext credentials cannot linger.",
+      icon: faStore,
+      cta: { label: "Open Providers", to: "/settings/providers" },
+    },
+  ],
   "2.5.2": [
     {
       title: "WhisperAI timeouts no longer cut off at 30 seconds",
