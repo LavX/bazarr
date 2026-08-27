@@ -96,6 +96,13 @@ def alpha2_from_alpha3(lang):
     return next((item['code2'] for item in languages_dict if lang[:3] in [item['code3'], item['code3b']]), None)
 
 
+def alpha3_from_alpha3b(lang):
+    # Exact match only, unlike the prefix-matching lookups above: maps a
+    # terminological or bibliographic three-letter code to the canonical
+    # terminological alpha3 (ger -> deu), or None for anything else.
+    return next((item['code3'] for item in languages_dict if lang in (item['code3'], item['code3b'])), None)
+
+
 def alpha2_from_language(lang):
     return next((item['code2'] for item in languages_dict if item['name'] == lang), None)
 
