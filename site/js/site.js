@@ -142,6 +142,27 @@
       ).filter(function (el) { return el.offsetParent !== null; });
     }
 
+    var scrollLock = null;
+
+    /* `inert` blocks focus and interaction but is not a scroll lock, and a
+       fixed overlay does not stop the document behind it moving. Without this,
+       wheeling over the control bar or the padding scrolls the page, and
+       closing the dialog leaves the reader somewhere else entirely. The
+       scrollbar's width is paid back as padding so the layout does not jump. */
+    function lockScroll() {
+      var gap = window.innerWidth - document.documentElement.clientWidth;
+      scrollLock = { overflow: document.body.style.overflow, pad: document.body.style.paddingRight };
+      document.body.style.overflow = "hidden";
+      if (gap > 0) document.body.style.paddingRight = gap + "px";
+    }
+
+    function unlockScroll() {
+      if (!scrollLock) return;
+      document.body.style.overflow = scrollLock.overflow;
+      document.body.style.paddingRight = scrollLock.pad;
+      scrollLock = null;
+    }
+
     function open(btn) {
       var src = btn.dataset.full;
       if (!src) return;
@@ -163,6 +184,7 @@
       if (caption) caption.textContent = img.alt;
 
       setZoom(false);
+      lockScroll();
       lightbox.setAttribute("open", "");
       shell.forEach(function (el) { if (el) el.setAttribute("inert", ""); });
       if (closeBtn) closeBtn.focus();
@@ -171,6 +193,7 @@
 
     function close() {
       setZoom(false);
+      unlockScroll();
       lightbox.removeAttribute("open");
       shell.forEach(function (el) { if (el) el.removeAttribute("inert"); });
       document.removeEventListener("keydown", onKey);

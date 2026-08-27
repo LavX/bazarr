@@ -60,16 +60,27 @@ jobs:
           set -euo pipefail
           mkdir -p data
 
+          # Whatever the last good run wrote. A transient failure below must
+          # degrade to the previous value, never to null: the change detector
+          # matches these field names, so a null would be committed as a real
+          # change and every visitor would lose a verified number until the
+          # next successful run.
+          prev='{}'
+          [ -f data/stats.json ] && prev=$(cat data/stats.json)
+          keep() { echo "$prev" | jq -r --arg k "$1" '.[$k] // empty'; }
+
           repo=$(gh api repos/${{ github.repository }})
           stars=$(echo "$repo" | jq -r '.stargazers_count')
           forks=$(echo "$repo" | jq -r '.forks_count')
           release=$(gh api repos/${{ github.repository }}/releases/latest --jq '.tag_name' || echo "")
+          [ -n "$release" ] || release=$(keep release)
 
           # Installable providers in the plugin catalog. Its catalog.json is the
           # same file the app reads, so this number is the product's own.
           providers=$(curl -sfL --max-time 20 \
             "https://raw.githubusercontent.com/${{ github.repository_owner }}/bazarr-provider-catalog/main/catalog.json" \
             | jq '.providers | length' 2>/dev/null || echo "")
+          [ -n "$providers" ] || providers=$(keep providers)
 
           # Upstream feature-request upvotes shown in the comparison table. They
           # are the table's evidence that a feature was asked for and refused, so
@@ -81,7 +92,8 @@ jobs:
           # figures silently freeze, which is the exact drift being fixed.
           UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36'
 
-          votes='{}'
+          # seeded from the previous run for the same reason
+          votes=$(echo "$prev" | jq -c '.votes // {}')
           for id in 112323 172013; do
             n=$(curl -sfL --max-time 20 -A "$UA" \
                   "https://bazarr.featureupvote.com/suggestions/$id" \

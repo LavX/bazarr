@@ -98,10 +98,15 @@
     scrubFromEvent(e);
   });
   window.addEventListener("pointermove", function (e) { if (dragging) scrubFromEvent(e); });
-  window.addEventListener("pointerup", function () {
+  function endScrub() {
     dragging = false;
     hero.classList.remove("scrubbing");
-  });
+  }
+  window.addEventListener("pointerup", endScrub);
+  /* Touch browsers fire pointercancel, not pointerup, when they take the
+     gesture over for a native page scroll. Without this the drag state stuck
+     on, and later touches anywhere kept moving the playhead. */
+  window.addEventListener("pointercancel", endScrub);
 
   paint();
 
