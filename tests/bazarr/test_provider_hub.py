@@ -563,20 +563,25 @@ def test_worker_reader_caps_oversized_response_line(monkeypatch):
     assert buffered <= worker_mod._MAX_RESPONSE_LINE_BYTES + worker_mod._READ_CHUNK_CHARS
 
 
-def test_worker_consumer_kills_on_oversized_sentinel():
+def test_worker_consumer_kills_on_oversized_sentinel(monkeypatch):
     import queue
     from types import SimpleNamespace
     from provider_hub import worker as worker_mod
     from provider_hub.worker import ProviderWorkerClient, WorkerError
 
+    killed = []
+    monkeypatch.setattr(worker_mod.os, "killpg",
+                        lambda pgid, sig: killed.append((pgid, sig)))
     client = ProviderWorkerClient.__new__(ProviderWorkerClient)
     client.process = SimpleNamespace(
-        stdout=object(), kill=lambda: None, wait=lambda timeout=None: None
+        pid=4242, stdout=object(), kill=lambda: None, wait=lambda timeout=None: None
     )
     client._stdout_queue = queue.Queue()
     client._stdout_queue.put(worker_mod._OVERSIZE_RESPONSE)
     with pytest.raises(WorkerError, match="exceeded"):
         client._read_line_with_deadline(5.0)
+    assert killed == [(4242, worker_mod.signal.SIGKILL)], (
+        "a worker discarded mid-protocol has to take its children with it")
 
 
 def test_venv_installer_uses_isolated_hash_checked_pip(monkeypatch, tmp_path):

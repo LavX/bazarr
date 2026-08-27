@@ -208,20 +208,58 @@ class ProviderWorkerClient:
             _live_clients.discard(self)
 
     @staticmethod
-    def _kill_tree(process, grace_seconds: float) -> None:
-        """SIGKILL the worker's whole process group, not just the worker.
+    def _signal_group(process, sig) -> bool:
+        """Send ``sig`` to the worker's whole process group. False if it could not.
 
         ``start_new_session=True`` makes the worker its own session and group
-        leader, so its group id is its pid. Killing only that pid leaves
+        leader, so its group id is its pid. Signalling only that pid leaves
         anything the plugin forked running and reparented to init, where nothing
         counts or reclaims it, and a reap would report success having freed
         nothing. Plugin code is third party, so that is a mechanism to close,
         not an unlikely accident.
+
+        ``os.killpg`` is POSIX only, so this reports failure rather than raising
+        on Windows and the caller falls back to signalling the worker alone.
+        ``AttributeError`` is not an ``OSError``, so catching it is not enough:
+        it has to be checked before the call.
         """
+        killpg = getattr(os, "killpg", None)
+        if killpg is None:
+            return False
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            killpg(process.pid, sig)
         except (ProcessLookupError, PermissionError, OSError):
-            process.kill()
+            return False
+        return True
+
+    @classmethod
+    def _terminate_tree(cls, process, grace_seconds: float) -> None:
+        """Ask the group to stop, wait for the worker, reclaim what stayed.
+
+        Raises if the worker itself outlives the grace period, which is the
+        caller's signal to escalate to ``_kill_tree``.
+
+        The trailing SIGKILL is what makes the graceful path complete. A worker
+        that exits promptly never reaches ``_kill_tree``, so without it a child
+        that ignored SIGTERM would survive a reap that reported success. It
+        addresses the group by the id the exited worker led; a pid freed
+        microseconds earlier could in principle be reused, but only a process
+        that had made itself a group leader in that window would be reachable
+        by it.
+        """
+        if not cls._signal_group(process, signal.SIGTERM):
+            process.terminate()
+        process.wait(timeout=grace_seconds)
+        cls._signal_group(process, signal.SIGKILL)
+
+    @classmethod
+    def _kill_tree(cls, process, grace_seconds: float) -> None:
+        """SIGKILL the worker's whole process group, not just the worker."""
+        if not cls._signal_group(process, signal.SIGKILL):
+            try:
+                process.kill()
+            except Exception:
+                logger.warning("failed to kill provider worker", exc_info=True)
         try:
             process.wait(timeout=grace_seconds)
         except Exception:
@@ -255,8 +293,7 @@ class ProviderWorkerClient:
             if process.poll() is not None:
                 return False
             try:
-                process.terminate()
-                process.wait(timeout=grace_seconds)
+                self._terminate_tree(process, grace_seconds)
             except Exception:
                 self._kill_tree(process, grace_seconds)
         finally:
@@ -275,6 +312,8 @@ class ProviderWorkerClient:
         try:
             self.request("shutdown", {"reason": "app_shutdown", "grace_ms": int(grace_seconds * 1000)}, grace_seconds)
             process.wait(timeout=grace_seconds)
+            # A clean shutdown ends the worker, not necessarily what it forked.
+            self._signal_group(process, signal.SIGKILL)
         except Exception:
             self._kill_tree(process, grace_seconds)
 
@@ -333,15 +372,7 @@ class ProviderWorkerClient:
         process = self.process
         if process is None:
             return
-        try:
-            process.kill()
-        except Exception:
-            logger.exception("failed to kill provider worker")
-        finally:
-            try:
-                process.wait(timeout=5.0)
-            except Exception:
-                pass
+        self._kill_tree(process, 5.0)
 
     def select_archive_member(
         self, payload: dict[str, Any] | None = None, timeout: float | None = None

@@ -36,27 +36,70 @@ def empty_registry():
     worker_mod._live_clients.clear()
 
 
-def _client(idle_for, alive=True):
+@pytest.fixture
+def group_signals(monkeypatch):
+    """Record every process-group signal instead of sending one."""
+    from provider_hub import worker as worker_mod
+
+    sent = []
+    monkeypatch.setattr(worker_mod.os, 'killpg',
+                        lambda pgid, sig: sent.append((pgid, sig)))
+    return sent
+
+
+def _client(idle_for, alive=True, pid=4242):
     """A client wired to a stand-in process and a real lock, spawning nothing."""
     from provider_hub.worker import ProviderWorkerClient
 
     client = ProviderWorkerClient.__new__(ProviderWorkerClient)
     client.process = MagicMock()
+    client.process.pid = pid
     client.process.poll.return_value = None if alive else 0
     client._lock = threading.Lock()
     client.last_used = time.monotonic() - idle_for
     return client
 
 
-def test_an_idle_worker_is_ended():
+def test_an_idle_worker_is_ended(group_signals):
     from provider_hub import worker as worker_mod
 
     stale = _client(idle_for=3600)
     worker_mod._live_clients.add(stale)
 
     assert worker_mod.reap_idle_workers(idle_seconds=1800) == 1
-    stale.process.terminate.assert_called_once()
+    assert (4242, worker_mod.signal.SIGTERM) in group_signals
     assert stale not in worker_mod._live_clients
+
+
+def test_the_normal_reap_path_ends_the_whole_group(group_signals):
+    """A worker that exits on the first SIGTERM never reaches the kill path, so
+    signalling the pid alone would leave whatever the plugin forked running and
+    reparented while the sweep reported the memory reclaimed."""
+    from provider_hub import worker as worker_mod
+
+    stale = _client(idle_for=3600)
+    stale.process.wait.return_value = 0
+    worker_mod._live_clients.add(stale)
+
+    assert worker_mod.reap_idle_workers(idle_seconds=1800) == 1
+    assert (4242, worker_mod.signal.SIGTERM) in group_signals, (
+        'the group was never asked to stop, only the worker')
+    assert (4242, worker_mod.signal.SIGKILL) in group_signals, (
+        'children that ignored SIGTERM were left behind by a successful reap')
+
+
+def test_a_platform_without_process_groups_still_ends_the_worker(monkeypatch):
+    """os.killpg does not exist on Windows. AttributeError is not an OSError, so
+    an unguarded call escapes the fallback and the worker is never killed."""
+    from provider_hub import worker as worker_mod
+
+    monkeypatch.delattr(worker_mod.os, 'killpg', raising=False)
+    stubborn = _client(idle_for=3600)
+    stubborn.process.wait.side_effect = [Exception('ignored SIGTERM'), 0]
+    worker_mod._live_clients.add(stubborn)
+
+    assert worker_mod.reap_idle_workers(idle_seconds=1800) == 1
+    stubborn.process.kill.assert_called_once()
 
 
 def test_a_recently_used_worker_is_left_alone():
@@ -143,22 +186,18 @@ def test_a_worker_that_already_exited_is_not_ended_again():
     dead.process.terminate.assert_not_called()
 
 
-def test_a_worker_that_will_not_terminate_has_its_group_killed(monkeypatch):
+def test_a_worker_that_will_not_terminate_has_its_group_killed(group_signals):
     """start_new_session makes the worker a process-group leader, so killing the
     pid alone would leave anything the plugin forked orphaned and resident."""
     from provider_hub import worker as worker_mod
 
     stubborn = _client(idle_for=3600)
-    stubborn.process.pid = 4242
     stubborn.process.wait.side_effect = [Exception('ignored SIGTERM'), 0]
-    killed = []
-    monkeypatch.setattr(worker_mod.os, 'killpg',
-                        lambda pgid, sig: killed.append((pgid, sig)))
     worker_mod._live_clients.add(stubborn)
 
     assert worker_mod.reap_idle_workers(idle_seconds=1800) == 1
-    assert killed == [(4242, worker_mod.signal.SIGKILL)], (
-        f'expected the process group to be killed, got {killed!r}')
+    assert (4242, worker_mod.signal.SIGKILL) in group_signals, (
+        f'expected the process group to be killed, got {group_signals!r}')
 
 
 def test_one_failing_worker_does_not_strand_the_rest(monkeypatch):
