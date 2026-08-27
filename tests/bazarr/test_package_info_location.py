@@ -87,3 +87,60 @@ def _restore_get_args():
     import importlib
 
     importlib.reload(importlib.import_module('app.get_args'))
+
+
+def test_a_source_checkout_ignores_the_tracked_external_marker(tmp_path):
+    """The repository tracks a package_info that declares updatemethod=External
+    for the shipped image. A git checkout following the source-install docs is
+    not that image: forcing no_update there disables in-app updates and shows
+    the Docker-specific message to the wrong audience."""
+    from utilities.package import updates_are_externally_managed
+
+    packaged = tmp_path / 'package_info'
+    packaged.write_text('packageversion=x\nupdatemethod=External\n')
+    (tmp_path / '.git').mkdir()
+    assert not updates_are_externally_managed(path=str(packaged))
+
+
+def test_an_unreadable_package_info_is_treated_as_absent(tmp_path):
+    """A package with wrong permissions must not abort startup at import time;
+    the old parsing lived inside init's broad guard."""
+    import os as os_mod
+
+    from utilities.package import read_package_info
+
+    packaged = tmp_path / 'package_info'
+    packaged.write_text('packageversion=x\n')
+    os_mod.chmod(packaged, 0o000)
+    try:
+        assert read_package_info(path=str(packaged)) == {}
+    finally:
+        os_mod.chmod(packaged, 0o644)
+
+
+def test_an_undecodable_package_info_is_treated_as_absent(tmp_path):
+    from utilities.package import read_package_info
+
+    packaged = tmp_path / 'package_info'
+    packaged.write_bytes(b'packageversion=\xff\xfe\x00garbage\n')
+    assert read_package_info(path=str(packaged)) == {}
+
+
+def test_get_args_imports_under_the_root_launcher():
+    """The root bazarr.py imports bazarr.app.get_args BEFORE anything puts the
+    bazarr/ directory on sys.path; main.py gets that for free as the subprocess
+    entry script. get_args must therefore resolve its own imports either way,
+    or the shipped image crash-loops at boot."""
+    import subprocess
+    import sys
+
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    result = subprocess.run(
+        [sys.executable, '-c', 'import bazarr.app.get_args'],
+        cwd=root,
+        env={'NO_CLI': 'true', 'PATH': os.environ.get('PATH', '')},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr

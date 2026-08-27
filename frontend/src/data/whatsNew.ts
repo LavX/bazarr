@@ -70,6 +70,12 @@ export const whatsNew: Record<string, WhatsNewSlide[]> = {
       icon: faStore,
       cta: { label: "Open Providers", to: "/settings/providers" },
     },
+    {
+      title: "CaptchaAI can solve your captchas",
+      body: "CaptchaAI joins Anti-Captcha and Death by Captcha as a third anti-captcha vendor, using its flat-rate 2Captcha-compatible API for the providers that hit a reCAPTCHA on login. The API keys for both key-based vendors are now encrypted at rest like every other credential.",
+      icon: faShieldHalved,
+      cta: { label: "Open Providers", to: "/settings/providers" },
+    },
   ],
   "2.5.2": [
     {

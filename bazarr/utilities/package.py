@@ -24,20 +24,28 @@ def package_info_path():
 
 
 def read_package_info(path=None):
-    """Parse `package_info` into a dict, lowercased keys. {} when absent."""
+    """Parse `package_info` into a dict, lowercased keys. {} when absent.
+
+    Unreadable or undecodable is the same answer as absent: this runs at
+    `app.get_args` import time, before any broad guard, and a mispackaged
+    file must not abort startup.
+    """
     path = path or package_info_path()
     if not os.path.isfile(path):
         return {}
 
     info = {}
-    with open(path) as handle:
-        lines = []
-        for line in handle.readlines():
-            lines += line.split(r'\n')
-        for line in lines:
-            key, sep, value = line.partition('=')
-            if sep:
-                info[key.lower()] = value.replace('\n', '')
+    try:
+        with open(path) as handle:
+            lines = []
+            for line in handle.readlines():
+                lines += line.split(r'\n')
+    except (OSError, UnicodeDecodeError):
+        return {}
+    for line in lines:
+        key, sep, value = line.partition('=')
+        if sep:
+            info[key.lower()] = value.replace('\n', '')
     return info
 
 
@@ -48,7 +56,15 @@ def updates_are_externally_managed(path=None, info=None):
     image, a distribution package, an unRAID template. Honouring it is the
     caller's job, and for a long time nobody did, so the setting only ever set
     an environment variable nothing reads.
+
+    A git checkout is none of those. The repository tracks a package_info
+    written for the shipped image, so beside a `.git` the marker describes the
+    image the checkout could become, not the install it is; source installs
+    keep the in-app updater.
     """
     if info is None:
-        info = read_package_info(path)
+        resolved = path or package_info_path()
+        if os.path.isdir(os.path.join(os.path.dirname(os.path.abspath(resolved)), '.git')):
+            return False
+        info = read_package_info(resolved)
     return info.get('updatemethod', '') == 'External'

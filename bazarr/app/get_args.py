@@ -1,9 +1,17 @@
 # coding=utf-8
 
 import os
+import sys
 import argparse
 
-from utilities import package
+# The root launcher imports this module as bazarr.app.get_args before anything
+# puts the bazarr/ directory on sys.path; main.py, as the subprocess entry
+# script, gets that for free. Resolve our own tree so both entries work.
+_APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _APP_ROOT not in sys.path:
+    sys.path.insert(0, _APP_ROOT)
+
+from utilities import package  # noqa: E402
 
 
 def strtobool(val):
