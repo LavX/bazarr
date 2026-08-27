@@ -67,8 +67,7 @@ def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, sonarr_serie
         .join(TableShows, onclause=and_(TableHistory.sonarrSeriesId == TableShows.sonarrSeriesId,
                                   TableHistory.arr_instance_id == TableShows.arr_instance_id)) \
         .join(TableEpisodes, onclause=and_(TableHistory.sonarrEpisodeId == TableEpisodes.sonarrEpisodeId,
-                                     TableHistory.arr_instance_id == TableEpisodes.arr_instance_id)) \
-        .where(TableHistory.video_path == TableEpisodes.path)
+                                     TableHistory.arr_instance_id == TableEpisodes.arr_instance_id))
 
     if sonarr_series_filters:
         query = query.where(or_(*[
@@ -80,6 +79,18 @@ def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, sonarr_serie
     elif sonarr_series_ids:
         query = query.where(TableHistory.sonarrSeriesId.in_(sonarr_series_ids))
 
+    # Streamed rather than .all(): the Row objects and the dicts built from them
+    # would otherwise both be held at once, over a history table that is never
+    # pruned.
+    #
+    # The video_path filter deliberately stays in Python rather than moving into
+    # the join. SQL equality is not NULL safe, so a NULL on either side drops the
+    # row instead of comparing equal, and this file already works around exactly
+    # that elsewhere with is_not_distinct_from. Today TableEpisodes.path is NOT
+    # NULL so the two agree, but that is a constraint sixty lines away in another
+    # module, and it keeps the episode side symmetrical with the movie side below,
+    # where the same comparison has to stay in Python so a dropped candidate can
+    # be explained in the log.
     episodes_data = [{
         'id': x.id,
         'seriesTitle': x.seriesTitle,
@@ -99,7 +110,8 @@ def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, sonarr_serie
         'profileId': x.profileId,
         'external_subtitles': [y[1] for y in ast.literal_eval(x.external_subtitles) if y[1]],
     } for x in database.execute(query)
-    if _language_still_desired(x.language, x.profileId)
+    if _language_still_desired(x.language, x.profileId) and
+       x.video_path == x.path
     ]
 
     for item in episodes_data:

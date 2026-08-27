@@ -30,11 +30,12 @@ class _Payload:
         self.series_id = series_id
 
 
-@pytest.fixture
-def sync_harness(monkeypatch):
+@pytest.fixture(params=[3])
+def sync_harness(request, monkeypatch):
     import sonarr.sync.series as series_mod
 
-    shows = [{'id': n, 'title': f'Show {n}', 'monitored': True} for n in (1, 2, 3)]
+    shows = [{'id': n, 'title': f'Show {n}', 'monitored': True}
+             for n in range(1, request.param + 1)]
     payloads = {}
     refs = {}
 
@@ -87,3 +88,47 @@ def test_a_consumed_episode_payload_becomes_collectable(sync_harness, monkeypatc
         f'while the last one was being handled: {observed[0]}. Peak memory '
         'therefore scales with the whole library rather than with what is in '
         'flight.')
+
+
+@pytest.mark.parametrize('sync_harness', [60], indirect=True)
+def test_read_ahead_is_bounded_by_the_window(sync_harness, monkeypatch, schema_session):
+    """Popping consumed futures is not on its own a bound.
+
+    The fetchers run in parallel and finish far ahead of a consumer that writes
+    to the database serially, so submitting every series up front leaves the
+    completed payloads queued regardless of how promptly each one is popped, and
+    peak memory still tracks the size of the library. What bounds it is not
+    submitting them all.
+    """
+    series_mod, shows, payloads, refs = sync_harness
+    submitted = []
+    consumed = []
+
+    real_episodes = series_mod.get_episodes_from_sonarr_api
+
+    def _counting_episodes(**kwargs):
+        submitted.append(kwargs['series_id'])
+        return real_episodes(**kwargs)
+
+    monkeypatch.setattr(series_mod, 'get_episodes_from_sonarr_api', _counting_episodes)
+
+    outstanding_seen = []
+
+    def _sync_episodes(series_id=None, episodes_data=None, **kw):
+        payloads.pop(series_id, None)
+        consumed.append(series_id)
+        # Submitted but not yet consumed, i.e. results that may be in memory.
+        outstanding_seen.append(len(submitted) - len(consumed))
+
+    monkeypatch.setattr(series_mod, 'sync_episodes', _sync_episodes)
+    monkeypatch.setattr(series_mod, 'database', schema_session)
+
+    series_mod.update_series(job_id='job-1')
+
+    assert len(consumed) == len(shows), 'every series should still be processed'
+    assert consumed == [s['id'] for s in shows], 'series order was not preserved'
+    assert max(outstanding_seen) <= series_mod.SONARR_PREFETCH_WINDOW, (
+        f'up to {max(outstanding_seen)} episode payloads were outstanding at '
+        f'once against a window of {series_mod.SONARR_PREFETCH_WINDOW}; the '
+        'read-ahead is not bounded'
+    )

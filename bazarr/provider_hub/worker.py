@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import queue
+import signal
 import subprocess
 import threading
 import weakref
@@ -74,30 +75,23 @@ _live_clients_lock = threading.Lock()
 def reap_idle_workers(idle_seconds: float) -> int:
     """Stop workers that have served no request for ``idle_seconds``.
 
-    Not destructive: ``request()`` starts the process if it is not running, so a
-    reaped worker returns on the next search for the price of a cold start. Safe
-    against a request in flight too, because ``stop()`` goes through
-    ``request()`` and waits on the same lock a live request holds; the worst case
-    is a worker that is stopped just after being used and respawned immediately.
+    The decision and the shutdown happen together inside each client, under the
+    same lock a request holds. Deciding here and acting afterwards is a
+    check-then-act race: a search can pass ``start()`` and be queued on that
+    lock in the window between the two, and would then write into a process
+    this sweep had already ended.
     """
-    now = time.monotonic()
     with _live_clients_lock:
         candidates = list(_live_clients)
 
     reaped = 0
     for client in candidates:
-        process = client.process
-        if process is None or process.poll() is not None:
-            continue
-        if now - getattr(client, "last_used", now) < idle_seconds:
-            continue
         try:
-            client.stop()
+            if client.stop_if_idle(idle_seconds):
+                reaped += 1
         except Exception:
             # One plugin refusing to shut down must not strand the rest.
             logger.warning("Provider Hub worker did not stop cleanly", exc_info=True)
-            continue
-        reaped += 1
 
     if reaped:
         logger.debug("Provider Hub reclaimed %d idle worker(s)", reaped)
@@ -209,22 +203,94 @@ class ProviderWorkerClient:
         except Exception:
             pass
 
-    def stop(self, grace_seconds: float = 5.0) -> None:
-        process = self.process
+    def _deregister(self) -> None:
+        with _live_clients_lock:
+            _live_clients.discard(self)
+
+    @staticmethod
+    def _kill_tree(process, grace_seconds: float) -> None:
+        """SIGKILL the worker's whole process group, not just the worker.
+
+        ``start_new_session=True`` makes the worker its own session and group
+        leader, so its group id is its pid. Killing only that pid leaves
+        anything the plugin forked running and reparented to init, where nothing
+        counts or reclaims it, and a reap would report success having freed
+        nothing. Plugin code is third party, so that is a mechanism to close,
+        not an unlikely accident.
+        """
         try:
-            if not process:
-                return
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            process.kill()
+        try:
+            process.wait(timeout=grace_seconds)
+        except Exception:
+            pass
+
+    def stop_if_idle(self, idle_seconds: float, grace_seconds: float = 5.0) -> bool:
+        """End this worker only if it is genuinely idle. True if it was stopped.
+
+        Never waits. A worker serving a request holds ``_lock``, so the
+        non-blocking acquire fails and it is left alone. That covers both halves
+        of the problem: the sweep cannot end a request in flight, and it cannot
+        pin the scheduler thread behind one. The second half matters because a
+        request may run for hours, and a blocking acquire would hold the sweep
+        for all of it and then kill the worker the instant it succeeded.
+
+        Idleness is checked again once the lock is held, because the sweep chose
+        this client without it.
+
+        The process is ended directly rather than through ``stop()``, which
+        sends a shutdown request and so would take the lock this already holds.
+        An idle worker has nothing in progress to unwind.
+        """
+        process = self.process
+        if process is None or process.poll() is not None:
+            return False
+        if not self._lock.acquire(blocking=False):
+            return False
+        try:
+            if time.monotonic() - self.last_used < idle_seconds:
+                return False
             if process.poll() is not None:
-                return
+                return False
             try:
-                self.request("shutdown", {"reason": "app_shutdown", "grace_ms": int(grace_seconds * 1000)}, grace_seconds)
+                process.terminate()
                 process.wait(timeout=grace_seconds)
             except Exception:
-                process.kill()
-                process.wait(timeout=grace_seconds)
+                self._kill_tree(process, grace_seconds)
         finally:
-            with _live_clients_lock:
-                _live_clients.discard(self)
+            self._lock.release()
+
+        self._deregister()
+        return True
+
+    def stop(self, grace_seconds: float = 5.0) -> None:
+        process = self.process
+        if not process or process.poll() is not None:
+            # Nothing left to reap, so this is the one safe unconditional
+            # discard.
+            self._deregister()
+            return
+        try:
+            self.request("shutdown", {"reason": "app_shutdown", "grace_ms": int(grace_seconds * 1000)}, grace_seconds)
+            process.wait(timeout=grace_seconds)
+        except Exception:
+            self._kill_tree(process, grace_seconds)
+
+        # Leave the registry only once this process is confirmed dead AND is
+        # still the one this client owns. Two ways to get that wrong:
+        #
+        # A worker can outlive its own stop. start() registers only on the spawn
+        # path, so a client discarded while its process still runs is never
+        # re-added by a later request(), and that subprocess becomes permanently
+        # unreapable: precisely the leak this reaper exists to prevent.
+        #
+        # And request() calls start(), which respawns if the process died
+        # between the check above and the shutdown. self.process is then a NEW
+        # worker that registered itself, and discarding here would strand it.
+        if self.process is process and process.poll() is not None:
+            self._deregister()
 
     def _read_line_with_deadline(self, timeout: float) -> str:
         """Read one NDJSON line from the worker, honoring ``timeout`` seconds.
@@ -307,6 +373,11 @@ class ProviderWorkerClient:
             )
             self.process.stdin.flush()
             line = self._read_line_with_deadline(timeout)
+            # Stamped on the way out as well as the way in. A single request may
+            # legitimately run for hours (transcription is allowed up to the 24
+            # hour ceiling), and a worker judged only on when its request
+            # STARTED would read as idle for almost all of that.
+            self.last_used = time.monotonic()
 
         if not line:
             raise WorkerError("worker closed stdout")
