@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Bazarr+ &middot; subtitles for your whole library, without asking twice</title>
-<meta name="description" content="Bazarr+ is a self-hosted subtitle manager for Sonarr, Radarr, Plex and Jellyfin. It finds subtitles in the languages you want, times them to your files, translates what is missing, and keeps doing it for every new episode. No account, no telemetry.">
+<title>Bazarr+ &middot; self-hosted subtitles for Sonarr and Radarr</title>
+<meta name="description" content="Self-hosted subtitle manager for Sonarr, Radarr, Plex and Jellyfin. Finds subtitles in the languages you want, times them to your files, and translates the rest.">
 <meta name="theme-color" content="#121125">
 <link rel="canonical" href="https://lavx.github.io/bazarr/">
 
@@ -15,8 +15,13 @@
 <meta property="og:description" content="Self-hosted subtitle automation for Sonarr, Radarr, Plex and Jellyfin. Finds, times and translates subtitles for every episode, then keeps doing it.">
 <meta property="og:url" content="https://lavx.github.io/bazarr/">
 <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="The Bazarr+ subtitle editor with a video preview, a waveform timeline and an AI translation panel">
 <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Bazarr+ &middot; subtitles for your whole library">
+  <meta name="twitter:description" content="Self-hosted subtitle automation for Sonarr, Radarr, Plex and Jellyfin. Finds, times and translates subtitles for every episode, then keeps doing it.">
+  <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
 
 <link rel="icon" href="favicon.ico" sizes="any">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -26,18 +31,45 @@
 
 <script type="application/ld+json">
 {
-  "@context": "https://schema.org",
-  "@type": "SoftwareApplication",
-  "name": "Bazarr+",
-  "applicationCategory": "MultimediaApplication",
-  "operatingSystem": "Docker, Linux, Windows, macOS",
-  "softwareVersion": "2.5.2",
-  "license": "https://www.gnu.org/licenses/gpl-3.0.html",
-  "url": "https://lavx.github.io/bazarr/",
-  "codeRepository": "https://github.com/LavX/bazarr",
-  "description": "Self-hosted subtitle manager for Sonarr, Radarr, Plex and Jellyfin with a provider plugin catalog, a multi-tenant subtitle API, combined bilingual subtitles and AI translation.",
-  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
-}
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Bazarr+",
+    "applicationCategory": "MultimediaApplication",
+    "operatingSystem": "Docker, Linux, Windows, macOS",
+    "softwareVersion": "2.5.2",
+    "license": "https://www.gnu.org/licenses/gpl-3.0.html",
+    "url": "https://lavx.github.io/bazarr/",
+    "codeRepository": "https://github.com/LavX/bazarr",
+    "description": "Self-hosted subtitle manager for Sonarr, Radarr, Plex and Jellyfin with a provider plugin catalog, a multi-tenant subtitle API, combined bilingual subtitles and AI translation.",
+    "offers": {
+      "@type": "Offer",
+      "price": "0",
+      "priceCurrency": "USD"
+    },
+    "author": {
+      "@type": "Person",
+      "name": "LavX",
+      "url": "https://github.com/LavX"
+    },
+    "image": "https://lavx.github.io/bazarr/screenshots/og-image.png",
+    "downloadUrl": "https://github.com/LavX/bazarr/releases",
+    "screenshot": [
+      "https://lavx.github.io/bazarr/screenshots/v2.4.0/provider-hub-marketplace-wide.webp",
+      "https://lavx.github.io/bazarr/screenshots/v2.4.0/distribution-hub-overview.webp",
+      "https://lavx.github.io/bazarr/screenshots/editor-translate.webp",
+      "https://lavx.github.io/bazarr/screenshots/series-batch-actions.webp"
+    ],
+    "featureList": [
+      "Provider Hub plugin catalog for subtitle sources",
+      "Distribution Hub: multi-tenant OpenSubtitles-compatible API",
+      "AI translation through any OpenRouter model",
+      "Combined bilingual and trilingual subtitles",
+      "Multi-engine subtitle sync with side-by-side compare",
+      "Bulk operations across up to 10,000 items",
+      "Multiple Sonarr and Radarr instances",
+      "No telemetry"
+    ]
+  }
 </script>
 <!-- The FAQ is eligible for Google's FAQ rich result, which is why the
      questions and answers are mirrored here. Keep this in step with the
