@@ -609,7 +609,7 @@ footer ul { display: flex; flex-wrap: wrap; gap: 8px 24px; list-style: none; mar
    first because the footer carries both on every page; Install and Guides are
    the two a visitor on a phone is actually here for. */
 @media (max-width: 380px) {
-  .nav-offsite { display: none; }
+  .nav .nav-offsite { display: none; }   /* header only: the footer keeps both */
   .nav-sep { padding-left: 0; border-left: 0; }
   .nav ul { gap: 20px; }
   .container { padding-left: 16px; padding-right: 16px; }

@@ -29,6 +29,11 @@ on:
 
 permissions:
   contents: write
+  # Required by the `gh workflow run` dispatch below. Declaring any
+  # permissions block sets every unlisted scope to none, so without this
+  # the dispatch 403s after the commit has already reached master:
+  # master changed, nothing published.
+  actions: write
 
 concurrency:
   group: promote-site
