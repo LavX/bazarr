@@ -9,7 +9,8 @@ from app.config import settings
 from app.database import TableEpisodes, TableMovies, database, update, select
 from arr_instances.resolution import scoped
 from languages.custom_lang import CustomLanguage
-from languages.get_languages import language_from_alpha2, language_from_alpha3, alpha3_from_alpha2
+from languages.get_languages import (language_from_alpha2, language_from_alpha3, alpha3_from_alpha2,
+                                     alpha3_from_alpha3b)
 from utilities.path_mappings import path_mappings
 
 from knowit.api import know, KnowitException
@@ -36,14 +37,42 @@ def _title_is_forced(title):
     return bool(_FORCED_TITLE_RE.search(text))
 
 
+def alpha3_from_language_value(language):
+    """Alpha3 code from a knowit/ffprobe language value, or None.
+
+    knowit normally yields a babelfish Language object, but replayed metadata
+    caches can hand the language through as a bare string. A string is accepted
+    only when it is exactly a known three-letter code, and it is normalized to
+    the terminological alpha3 (ger -> deu) so indexing, extraction and scoring
+    all see the same code a Language object would have produced.
+    """
+    if hasattr(language, "alpha3"):
+        return language.alpha3
+    if isinstance(language, str):
+        code = language.strip().lower()
+        if code == "und":
+            # Not in the languages table, but a Language("und") object returns
+            # it, so the string form must resolve the same way.
+            return code
+        return alpha3_from_alpha3b(code)
+    return None
+
+
 def _handle_alpha3(detected_language: dict):
-    alpha3 = detected_language["language"].alpha3
+    language = detected_language.get("language")
+    alpha3 = alpha3_from_language_value(language)
+
+    if alpha3 is None:
+        return None
+
     custom = CustomLanguage.from_value(alpha3, "official_alpha3")
 
     if not custom:
         return alpha3
 
-    found = custom.language_found(detected_language["language"])
+    # language_found needs a Language object; a bare string code can only be
+    # matched through the track name.
+    found = custom.language_found(language) if hasattr(language, "alpha3") else False
     if not found:
         found = custom.ffprobe_found(detected_language)
 
@@ -72,10 +101,16 @@ def embedded_track_language(track, und_default_language=None):
     if "commentary" in name:
         return None
 
-    language = _handle_alpha3(track) if "language" in track else None
-    if not language and und_default_language:
-        language = und_default_language
-    return language or None
+    if "language" in track:
+        language = _handle_alpha3(track)
+        if language is None:
+            # A language tag that exists but cannot be parsed is not the same
+            # as no tag at all: the undefined-language default must not claim
+            # it, and silence here would hide the drop.
+            logging.debug("BAZARR unusable embedded subtitle track language, ignoring: %s",
+                          track.get("language"))
+        return language
+    return und_default_language or None
 
 
 def embedded_subs_reader(file, file_size, episode_file_id=None, movie_file_id=None, use_cache=True,
@@ -133,12 +168,12 @@ def embedded_audio_reader(file, file_size, episode_file_id=None, movie_file_id=N
                 audio_list.append(None)
                 continue
 
-            if isinstance(detected_language['language'], str):
+            alpha3 = _handle_alpha3(detected_language)
+            if alpha3 is None:
                 logging.error(f"Cannot identify audio track language for this file: {file}. Value detected is "  # noqa: G004
                               f"{detected_language['language']}.")
                 continue
 
-            alpha3 = _handle_alpha3(detected_language)
             language = language_from_alpha3(alpha3)
 
             if language not in audio_list:
@@ -202,7 +237,7 @@ def subtitles_sync_references(subtitles_path, sonarr_episode_id=None, radarr_mov
                     language = 'Undefined'
                 else:
                     alpha3 = _handle_alpha3(detected_language)
-                    language = language_from_alpha3(alpha3)
+                    language = language_from_alpha3(alpha3) if alpha3 else 'Undefined'
 
                 references_dict['audio_tracks'].append({'stream': f'a:{track_id}', 'name': name, 'language': language})
 
@@ -223,7 +258,7 @@ def subtitles_sync_references(subtitles_path, sonarr_episode_id=None, radarr_mov
                     language = 'Undefined'
                 else:
                     alpha3 = _handle_alpha3(detected_language)
-                    language = language_from_alpha3(alpha3)
+                    language = language_from_alpha3(alpha3) if alpha3 else 'Undefined'
 
                 forced = detected_language.get("forced", False) or _title_is_forced(name)
                 hearing_impaired = detected_language.get("hearing_impaired", False)
