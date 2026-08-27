@@ -107,6 +107,7 @@ def process_episode_translation(
             radarr_id=None,
             metadata=episode,
             job_id=job_id,
+            arr_instance_id=arr_instance_id,
         )
         # Re-index subtitles so Bazarr's DB knows about the new translated file
         store_subtitles(
@@ -194,6 +195,7 @@ def process_movie_translation(
             radarr_id=radarr_id,
             metadata=movie,
             job_id=job_id,
+            arr_instance_id=arr_instance_id,
         )
         # Re-index subtitles so Bazarr's DB knows about the new translated file
         store_subtitles_movie(
@@ -253,11 +255,12 @@ def find_subtitle_by_language(subtitles, language_code, video_path, media_type="
 
     # Helper function to resolve and validate subtitle path
     def resolve_subtitle_path(sub_path):
-        # Apply path mapping based on media type
-        if media_type == "episode":
-            mapped_path = path_mappings.path_replace(sub_path)
-        else:
-            mapped_path = path_mappings.path_replace_movie(sub_path)
+        # The owning instance's mapping, the same one the caller used for the
+        # video. Mixing them pairs a secondary instance's video with a default
+        # instance's subtitle when both paths happen to exist, or reports no
+        # subtitle at all when they do not.
+        kind = "episode" if media_type == "episode" else "movie"
+        mapped_path = path_mappings.path_replace_instance(sub_path, arr_instance_id, kind)
 
         # Check if file exists at mapped path
         if os.path.exists(mapped_path):

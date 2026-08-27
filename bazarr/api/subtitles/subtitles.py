@@ -456,6 +456,7 @@ class Subtitles(Resource):
                     sonarr_episode_id=id if media_type == "episode" else None,
                     radarr_id=id if media_type == "movie" else None,
                     metadata=metadata,
+                    arr_instance_id=arr_instance_id,
                 )
             except OSError:
                 return "Unable to edit subtitles file. Check logs.", 409

@@ -194,6 +194,7 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
                 sonarr_episode_id=episode_id,
                 radarr_id=radarr_id,
                 metadata=translation_metadata,
+                arr_instance_id=arr_instance_id,
             )
     except Exception:
         logging.exception('BAZARR error in _trigger_auto_translation')

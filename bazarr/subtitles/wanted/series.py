@@ -142,6 +142,7 @@ def _wanted_episode(episode, providers_list, job_id=None):
                             sonarr_episode_id=episode.sonarrEpisodeId,
                             radarr_id=None,
                             metadata=metadata,
+                            arr_instance_id=arr_instance_id,
                         )
                         # Guard: skip if an identical translate job is already
                         # pending or running. Why: history guard (action=6) only

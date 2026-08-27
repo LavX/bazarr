@@ -136,6 +136,7 @@ def _wanted_movie(movie, providers_list, job_id=None):
                             sonarr_episode_id=None,
                             radarr_id=movie.radarrId,
                             metadata=metadata,
+                            arr_instance_id=arr_instance_id,
                         )
                         # Guard: skip if an identical translate job is already
                         # pending or running. Why: history guard (action=6) only
