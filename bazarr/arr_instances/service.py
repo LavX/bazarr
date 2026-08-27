@@ -16,6 +16,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.database import TableLanguagesProfiles, TableMovies, TableShows
+from utilities.sql_limits import in_chunks
 
 from .media_defaults import (instance_default_profile, merge_media_defaults_into_options,
                              read_media_defaults, validate_media_defaults)
@@ -504,13 +505,17 @@ def apply_default_profile(session, instance_id):
     excluded_tags = _excluded_profile_tags(row.kind)
     upstream_ids = [t[0] for t in targets
                     if not _tags_exclude_a_profile(t[1], excluded_tags)]
-    if upstream_ids:
+    # One statement per chunk: this binds a variable per item, and SQLite built
+    # with the legacy limit rejects more than 999 in a statement. A library with
+    # that many unprofiled items is ordinary, and the failure would be the Apply
+    # button erroring with nothing updated.
+    for chunk in in_chunks(upstream_ids):
         session.execute(
             update(table)
             .values(profileId=profile)
             .where(table.arr_instance_id == instance_id,
                    table.profileId.is_(None),
-                   upstream_column.in_(upstream_ids)))
+                   upstream_column.in_(chunk)))
 
     logging.info("Assigned language profile %s to %s unprofiled %s items on instance %s",
                  profile, len(upstream_ids), row.kind, instance_id)

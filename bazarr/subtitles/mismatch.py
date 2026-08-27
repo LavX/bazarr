@@ -52,6 +52,7 @@ from app.event_handler import event_stream
 from app.notifier import send_notifications, send_notifications_movie
 from arr_instances.resolution import scoped
 from utilities.path_mappings import path_mappings
+from utilities.sql_limits import MAX_IN_CLAUSE, in_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -547,13 +548,10 @@ def forget_media_by_upstream(media_type, upstream_ids, arr_instance_id=None,
 
 # One page of Wanted may legitimately be 1000 rows, and SQLite builds carrying
 # the legacy limit reject a statement binding more than 999 variables with "too
-# many SQL variables". Leave room for the other bound values in the statement.
-_MAX_IN_CLAUSE = 900
-
-
-def _in_chunks(values):
-    for start in range(0, len(values), _MAX_IN_CLAUSE):
-        yield values[start:start + _MAX_IN_CLAUSE]
+# many SQL variables". The ceiling and the splitting live in utilities.sql_limits
+# so every caller that binds one variable per row respects the same number.
+_MAX_IN_CLAUSE = MAX_IN_CLAUSE
+_in_chunks = in_chunks
 
 
 def flagged_media_ids(session, media_type, media_ids):
