@@ -127,7 +127,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -248,6 +248,7 @@ jobs:
         # directly rather than leaving it to collection order.
         run: |
           pytest \
+            tests/bazarr/test_anti_captcha_config.py \
             tests/bazarr/test_app_notifier.py \
             tests/bazarr/test_auto_translation_profile.py \
             tests/bazarr/test_ci_guard_list.py \
@@ -345,6 +346,10 @@ jobs:
             tests/bazarr/test_triage_low_findings.py \
             tests/bazarr/test_indexer_owner_scope.py \
             tests/bazarr/test_indexer_path_mapping_owner.py \
+            tests/bazarr/test_provider_hub_worker_reaper.py \
+            tests/bazarr/test_job_module_identity.py \
+            tests/bazarr/test_sonarr_sync_memory.py \
+            tests/bazarr/test_anilist_index.py \
             tests/bazarr/test_image_memory_config.py \
             tests/bazarr/test_translate_owner_threading.py \
             tests/bazarr/test_embedded_track_eligibility.py \

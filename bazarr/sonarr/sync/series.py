@@ -1,8 +1,10 @@
 # coding=utf-8
 
+import itertools
 import logging
 import gc
 
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from sqlalchemy.exc import IntegrityError
 from datetime import datetime
@@ -33,6 +35,10 @@ FEATURE_PREFIX = "SYNC_SERIES "
 # series); 8 workers compresses that without overwhelming a typical
 # home Sonarr instance.
 SONARR_PREFETCH_WORKERS = 8
+# How many episode payloads may be outstanding at once. Two per fetcher
+# keeps them from idling between hand-offs without letting the read-ahead
+# run away from a consumer that writes to the database serially.
+SONARR_PREFETCH_WINDOW = SONARR_PREFETCH_WORKERS * 2
 
 
 def trace(message):
@@ -162,15 +168,34 @@ def update_series(job_id=None, wait_for_completion=False, arr_instance_id=None, 
         apikey_sonarr = settings.sonarr.apikey
         with ThreadPoolExecutor(max_workers=SONARR_PREFETCH_WORKERS,
                                 thread_name_prefix='bazarr-sonarr-prefetch') as executor:
-            episode_futures = {
-                show['id']: executor.submit(get_episodes_from_sonarr_api,
-                                            apikey_sonarr=apikey_sonarr,
-                                            series_id=show['id'],
-                                            arr_client=arr_client)
-                for _, show in shows_to_process
-            }
+            # Submitted a window at a time, not all at once. Submitting every
+            # series up front bounds nothing: the fetchers finish far ahead of a
+            # consumer that writes to the database serially, so completed
+            # results simply queue up and peak memory tracks the size of the
+            # library. Topping the window up as each result is consumed keeps
+            # the outstanding payloads proportional to the fan-out instead.
+            def _prefetch(entry):
+                _, show = entry
+                return executor.submit(get_episodes_from_sonarr_api,
+                                       apikey_sonarr=apikey_sonarr,
+                                       series_id=show['id'],
+                                       arr_client=arr_client)
 
-            for processed_index, (orig_index, show) in enumerate(shows_to_process, start=1):
+            upcoming = iter(shows_to_process)
+            in_flight = deque(
+                (entry, _prefetch(entry))
+                for entry in itertools.islice(upcoming, SONARR_PREFETCH_WINDOW)
+            )
+
+            processed_index = 0
+            while in_flight:
+                (orig_index, show), episode_future = in_flight.popleft()
+                # Top the window up before the slow part, so the fetchers stay
+                # busy while this series is written.
+                following = next(upcoming, None)
+                if following is not None:
+                    in_flight.append((following, _prefetch(following)))
+                processed_index += 1
                 jobs_queue.update_job_progress(job_id=job_id, progress_value=processed_index,
                                                progress_message=show['title'])
                 trace(f"{orig_index}: (Processing) {show['title']}")
@@ -191,13 +216,14 @@ def update_series(job_id=None, wait_for_completion=False, arr_instance_id=None, 
                                   serie_default_profile=serie_default_profile)
 
                 try:
-                    episodes_data = episode_futures[show['id']].result()
+                    episodes_data = episode_future.result()
                 except Exception:
                     logging.exception(f"BAZARR error pre-fetching episodes for series {show['id']}")  # noqa: G004
                     episodes_data = None
 
                 sync_episodes(series_id=show['id'], episodes_data=episodes_data,
                               arr_instance_id=arr_instance_id, arr_client=arr_client)
+                del episodes_data
 
         # Calculate series to remove from DB
         removed_series = current_shows_db - current_shows_sonarr
