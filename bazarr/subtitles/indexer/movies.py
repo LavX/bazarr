@@ -423,14 +423,20 @@ def movies_full_scan_subtitles(job_id=None, use_cache=None, wait_for_completion=
     if use_cache is None:
         use_cache = settings.radarr.use_ffprobe_cache
 
+    # The owner comes along, because store_subtitles_movie now scopes its write
+    # to it: without it every row sharing a path would resolve to the same
+    # arbitrary owner and the other instances would never be indexed at all.
     movies = database.execute(
-        select(TableMovies.path, TableMovies.title))\
+        select(TableMovies.path, TableMovies.title, TableMovies.arr_instance_id))\
         .all()
 
     jobs_queue.update_job_progress(job_id=job_id, progress_max=len(movies), progress_message='Indexing')
     for i, movie in enumerate(movies, start=1):
         jobs_queue.update_job_progress(job_id=job_id, progress_value=i, progress_message=movie.title)
-        store_subtitles_movie(movie.path, path_mappings.path_replace_movie(movie.path), use_cache=use_cache)
+        store_subtitles_movie(movie.path,
+                              path_mappings.path_replace_instance(movie.path,
+                                                                  movie.arr_instance_id, 'movie'),
+                              use_cache=use_cache, arr_instance_id=movie.arr_instance_id)
 
     logging.info('BAZARR All existing movie subtitles indexed from disk.')
 
@@ -442,11 +448,14 @@ def movies_full_scan_subtitles(job_id=None, use_cache=None, wait_for_completion=
 def movies_scan_subtitles(no, arr_instance_id=None):
     movies = database.execute(
         scoped(
-            select(TableMovies.path)
+            select(TableMovies.path, TableMovies.arr_instance_id)
             .where(TableMovies.radarrId == no)
             .order_by(TableMovies.radarrId),
             TableMovies.arr_instance_id, arr_instance_id)) \
         .all()
 
     for movie in movies:
-        store_subtitles_movie(movie.path, path_mappings.path_replace_movie(movie.path), use_cache=False)
+        store_subtitles_movie(movie.path,
+                              path_mappings.path_replace_instance(movie.path,
+                                                                  movie.arr_instance_id, 'movie'),
+                              use_cache=False, arr_instance_id=movie.arr_instance_id)

@@ -193,3 +193,59 @@ def test_the_supplied_owner_beats_the_path_lookup_for_movies(two_movie_rows, mon
     assert seen['arr_instance_id'] == 2
     assert seen['movie_file_id'] == 800, \
         f"probed the wrong instance's file id: {seen['movie_file_id']}"
+
+
+# ------------------------------------------------- the indexer's own scanners
+
+def _record_indexing(monkeypatch, module):
+    """Capture (path, owner) for every store_subtitles* call the scanner makes."""
+    calls = []
+    name = 'store_subtitles' if module.__name__.endswith('series') else 'store_subtitles_movie'
+    monkeypatch.setattr(module, name,
+                        lambda path, mapped, **kw: calls.append((path, kw.get('arr_instance_id'))))
+    monkeypatch.setattr(module.jobs_queue, 'update_job_progress', lambda *a, **kw: None)
+    monkeypatch.setattr(module.jobs_queue, 'update_job_name', lambda *a, **kw: None)
+    return calls
+
+
+def test_the_full_episode_scan_indexes_both_instances(two_series_rows, monkeypatch):
+    """Scoping the UPDATE means an owner-less call now writes one row instead of
+    all of them, so a scanner that does not pass the owner silently stops
+    indexing every instance but one."""
+    se, _session = two_series_rows
+    calls = _record_indexing(monkeypatch, se)
+
+    se.series_full_scan_subtitles(job_id=1, use_cache=False)
+
+    assert sorted(owner for _p, owner in calls) == [1, 2], (
+        f'the full scan must index each instance under its own owner; got {calls!r}')
+
+
+def test_the_targeted_episode_scan_passes_the_owner_it_was_given(two_series_rows,
+                                                                 monkeypatch):
+    se, _session = two_series_rows
+    calls = _record_indexing(monkeypatch, se)
+
+    se.series_scan_subtitles(1, arr_instance_id=2)
+
+    assert calls == [('/tv/s/e.mkv', 2)], (
+        f'a scan scoped to instance 2 must index instance 2; got {calls!r}')
+
+
+def test_the_full_movie_scan_indexes_both_instances(two_movie_rows, monkeypatch):
+    mv, _session = two_movie_rows
+    calls = _record_indexing(monkeypatch, mv)
+
+    mv.movies_full_scan_subtitles(job_id=1, use_cache=False)
+
+    assert sorted(owner for _p, owner in calls) == [1, 2], (
+        f'the full scan must index each instance under its own owner; got {calls!r}')
+
+
+def test_the_targeted_movie_scan_passes_the_owner_it_was_given(two_movie_rows, monkeypatch):
+    mv, _session = two_movie_rows
+    calls = _record_indexing(monkeypatch, mv)
+
+    mv.movies_scan_subtitles(7, arr_instance_id=2)
+
+    assert calls == [('/movies/m.mkv', 2)]

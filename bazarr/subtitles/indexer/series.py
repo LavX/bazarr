@@ -440,8 +440,12 @@ def series_full_scan_subtitles(job_id=None, use_cache=None, wait_for_completion=
     if use_cache is None:
         use_cache = settings.sonarr.use_ffprobe_cache
 
+    # The owner comes along, because store_subtitles now scopes its write to it:
+    # without it every row sharing a path would resolve to the same arbitrary
+    # owner and the other instances would never be indexed at all.
     episodes = database.execute(
-        select(TableEpisodes.path, TableShows.title, TableEpisodes.title.label("episodeTitle"), TableEpisodes.season, TableEpisodes.episode)
+        select(TableEpisodes.path, TableShows.title, TableEpisodes.title.label("episodeTitle"),
+               TableEpisodes.season, TableEpisodes.episode, TableEpisodes.arr_instance_id)
         .select_from(TableEpisodes)
         .join(TableShows)
     ).all()
@@ -451,7 +455,10 @@ def series_full_scan_subtitles(job_id=None, use_cache=None, wait_for_completion=
         jobs_queue.update_job_progress(
             job_id=job_id, progress_value=i,
             progress_message=f"{episode.title} - S{episode.season:02d}E{episode.episode:02d} - {episode.episodeTitle}")
-        store_subtitles(episode.path, path_mappings.path_replace(episode.path), use_cache=use_cache)
+        store_subtitles(episode.path,
+                        path_mappings.path_replace_instance(episode.path,
+                                                            episode.arr_instance_id, 'series'),
+                        use_cache=use_cache, arr_instance_id=episode.arr_instance_id)
 
     logging.info('BAZARR All existing episode subtitles indexed from disk.')
 
@@ -463,11 +470,14 @@ def series_full_scan_subtitles(job_id=None, use_cache=None, wait_for_completion=
 def series_scan_subtitles(no, arr_instance_id=None):
     episodes = database.execute(
         scoped(
-            select(TableEpisodes.path)
+            select(TableEpisodes.path, TableEpisodes.arr_instance_id)
             .where(TableEpisodes.sonarrSeriesId == no)
             .order_by(TableEpisodes.sonarrEpisodeId),
             TableEpisodes.arr_instance_id, arr_instance_id))\
         .all()
 
     for episode in episodes:
-        store_subtitles(episode.path, path_mappings.path_replace(episode.path), use_cache=False)
+        store_subtitles(episode.path,
+                        path_mappings.path_replace_instance(episode.path,
+                                                            episode.arr_instance_id, 'series'),
+                        use_cache=False, arr_instance_id=episode.arr_instance_id)
