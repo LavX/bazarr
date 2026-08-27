@@ -246,6 +246,7 @@ jobs:
         # directly rather than leaving it to collection order.
         run: |
           pytest \
+            tests/bazarr/test_anti_captcha_config.py \
             tests/bazarr/test_app_notifier.py \
             tests/bazarr/test_auto_translation_profile.py \
             tests/bazarr/test_ci_guard_list.py \

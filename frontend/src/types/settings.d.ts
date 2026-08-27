@@ -11,6 +11,7 @@ interface Settings {
   // Anitcaptcha
   anticaptcha: Settings.Anticaptcha;
   deathbycaptcha: Settings.DeathByCaptche;
+  captchaai: Settings.CaptchaAI;
   // Providers
   opensubtitlescom: Settings.OpenSubtitlesCom;
   addic7ed: Settings.Addic7ed;
@@ -227,6 +228,10 @@ declare namespace Settings {
   interface DeathByCaptche {
     username?: string;
     password?: string;
+  }
+
+  interface CaptchaAI {
+    captchaai_key?: string;
   }
 
   // Providers
