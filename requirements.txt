@@ -9,7 +9,7 @@ babelfish==0.6.1
 beautifulsoup4==4.15.0
 cachetools>=7.1.4
 certifi==2026.6.17
-chardet==7.4.3
+chardet==7.6.0
 charset-normalizer==3.5.1
 click-option-group>=0.5.9
 # Ceiling, not a floor: subliminal_patch CFSession relies on cloudscraper to
