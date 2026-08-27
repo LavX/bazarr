@@ -210,6 +210,31 @@ def test_a_season_pack_keeps_its_own_release_name(version):
         f"a season pack was mangled into {sub.release_info!r}")
 
 
+@pytest.mark.parametrize("version,expected", [
+    # "season" is the token that names the season, so it cannot also be the
+    # thing that says "whole season", or the most common tag shape there is
+    # loses its episode marker.
+    ("Season 1 WEB-DL", "Breaking.Bad.S01E02.Season.1.WEB-DL"),
+    # "Full HD" is a resolution. Only "full season" says whole season.
+    ("S01.Full.HD.WEB-DL", "Breaking.Bad.S01E02.S01.Full.HD.WEB-DL"),
+])
+def test_an_ordinary_episode_tag_is_not_mistaken_for_a_pack(version, expected):
+    sub = _subtitle(version, series="Breaking Bad", season=1, episode=2)
+
+    assert sub.release_info == expected, (
+        f"an ordinary tag was treated as a season pack: {sub.release_info!r}")
+
+
+@pytest.mark.parametrize("version", [
+    "Season 01 COMPLETE",
+    "COMPLETE.SEASON.01.1080p",
+])
+def test_a_zero_padded_pack_is_still_recognised(version):
+    sub = _subtitle(version, series="Breaking Bad", season=1, episode=2)
+
+    assert sub.release_info == version
+
+
 def test_a_pack_for_another_season_still_gets_the_scene_style_name():
     """Season 3 says nothing about the season 1 episode being requested."""
     sub = _subtitle("S03.COMPLETE.1080p", series="Breaking Bad", season=1, episode=2)

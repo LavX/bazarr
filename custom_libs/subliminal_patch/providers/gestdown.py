@@ -66,7 +66,16 @@ _MAX_NUMBER_DIGITS = 6
 # release is the whole of it.
 _SEASON_ONLY = re.compile(r"(?<![a-z0-9])s(\d{1,4})(?![a-z0-9])")
 _SEASON_WORD = re.compile(r"(?<![a-z0-9])season[-_. ]?(\d{1,4})(?![0-9])")
-_PACK_WORDS = re.compile(r"(?<![a-z0-9])(complete|full|pack|season)(?![a-z0-9])")
+# What turns a season into a whole season. "complete" and "pack" say it on their
+# own; "full" does not, because "Full HD" is a resolution, so it counts only in
+# the phrase "full season". "season" is deliberately absent: it is the token that
+# names the season in the first place, so accepting it here would classify an
+# ordinary "Season 1 WEB-DL" as a pack and strip the episode marker from the most
+# common tag shape there is.
+_PACK_WORDS = re.compile(
+    r"(?<![a-z0-9])(?:complete|pack)(?![a-z0-9])"
+    r"|(?<![a-z0-9])full[^a-z0-9]+season(?![a-z0-9])"
+)
 
 
 def _tail_covers(tail, episode):
