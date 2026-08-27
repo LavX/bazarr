@@ -1,9 +1,9 @@
 import { FunctionComponent, useCallback, useMemo } from "react";
-import { useLanguageProfiles } from "@/apis/hooks";
 import { Badge, Button, Group } from "@mantine/core";
 import { faTrash, faWrench } from "@fortawesome/free-solid-svg-icons";
 import { ColumnDef } from "@tanstack/react-table";
 import { cloneDeep, includes, maxBy } from "lodash";
+import { useLanguageProfiles } from "@/apis/hooks";
 import { Action } from "@/components";
 import {
   anyCutoff,
