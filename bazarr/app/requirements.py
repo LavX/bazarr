@@ -103,7 +103,7 @@ RUNTIME_REQUIREMENTS = {
     "babelfish": ("babelfish", "==0.6.1"),
     "bs4": ("beautifulsoup4", "==4.14.3"),
     "cachetools": ("cachetools", ">=7.1.1"),
-    "certifi": ("certifi", "==2026.2.25"),
+    "certifi": ("certifi", "==2026.7.22"),
     "chardet": ("chardet", "==7.4.3"),
     "charset_normalizer": ("charset-normalizer", "==3.5.1"),
     "click_option_group": ("click-option-group", ">=0.5.6"),
