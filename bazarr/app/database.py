@@ -860,27 +860,29 @@ def migrate_db(app):
         flask_migrate.upgrade(directory=migrations_directory)
         db.engine.dispose()
 
-    if adopted_from is not None:
-        # An adopted database can still be missing a column this fork models
-        # and its own migrations never add, because that column predates the
-        # point where the two chains diverged. Now the chain has had its turn,
-        # fill in whatever is still missing from the models.
-        try:
-            with engine.begin() as connection:
-                repair_missing_columns_after_upgrade(connection)
-        except Exception:
-            logging.exception("Post-upgrade column repair failed; continuing startup")
+    # An adopted database can still be missing a column this fork models and
+    # its own migrations never add, because that column predates the point
+    # where the two chains diverged. Unconditional rather than gated on this
+    # run's adoption: an older build could stamp the shared ancestor and then
+    # fail the upgrade, so the next start finds a known revision, adopts
+    # nothing, and would otherwise reach head with the column still gone. Both
+    # repairs are idempotent and an inspection no-op on a healthy database.
+    try:
+        with engine.begin() as connection:
+            repair_missing_columns_after_upgrade(connection)
+    except Exception:
+        logging.exception("Post-upgrade column repair failed; continuing startup")
 
-        # Separately, and only once those columns are committed. A migration
-        # cannot index a column that is still missing without aborting the whole
-        # upgrade, so it skips and the index is made here. It gets its own
-        # transaction per index: on PostgreSQL one index that cannot be built
-        # would abort the transaction it shared, and the commit that persists
-        # the restored columns would fail with it.
-        try:
-            restore_missing_model_indexes(engine)
-        except Exception:
-            logging.exception("Post-upgrade index repair failed; continuing startup")
+    # Separately, and only once those columns are committed. A migration
+    # cannot index a column that is still missing without aborting the whole
+    # upgrade, so it skips and the index is made here. It gets its own
+    # transaction per index: on PostgreSQL one index that cannot be built
+    # would abort the transaction it shared, and the commit that persists
+    # the restored columns would fail with it.
+    try:
+        restore_missing_model_indexes(engine)
+    except Exception:
+        logging.exception("Post-upgrade index repair failed; continuing startup")
 
     # add the system table single row if it's not existing
     if not database.execute(

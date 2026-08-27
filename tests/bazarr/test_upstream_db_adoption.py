@@ -991,3 +991,48 @@ def test_a_column_a_pending_migration_indexes_does_not_crash_the_upgrade(tmp_pat
         'not, so the hot-path query it exists for stays unindexed')
 
     engine.dispose()
+
+
+def test_a_previously_stamped_adoption_still_gets_its_columns_repaired(tmp_path, monkeypatch):
+    """An older build could adopt (stamp the shared ancestor) and then fail the
+    upgrade on a migration that assumed a column upstream had dropped. On the
+    next start with the tolerant migrations, adoption finds a known revision
+    and returns None; the post-upgrade repairs must still run, or that install
+    advances to head with an ORM-required column permanently missing."""
+    import sqlite3
+
+    from flask import Flask
+    from sqlalchemy.orm import scoped_session, sessionmaker
+
+    import app.database as db_module
+    from app.upstream_adoption import FORK_SHARED_ANCESTOR
+
+    if sqlite3.sqlite_version_info < (3, 35, 0):
+        pytest.skip('DROP COLUMN needs SQLite 3.35; cannot build the shape')
+
+    db_path = tmp_path / 'bazarr.db'
+    engine = sa.create_engine(f'sqlite:///{db_path}')
+    db_module.Base.metadata.create_all(engine)
+
+    with engine.begin() as connection:
+        connection.execute(sa.text('CREATE TABLE IF NOT EXISTS alembic_version '
+                                   '(version_num VARCHAR(32) NOT NULL)'))
+        connection.execute(sa.text('DELETE FROM alembic_version'))
+        connection.execute(sa.text(
+            f"INSERT INTO alembic_version (version_num) VALUES ('{FORK_SHARED_ANCESTOR}')"))
+        connection.execute(sa.text('ALTER TABLE table_shows DROP COLUMN overview'))
+
+    monkeypatch.setattr(db_module, 'engine', engine)
+    monkeypatch.setattr(db_module, 'url', f'sqlite:///{db_path}')
+    monkeypatch.setattr(db_module, 'database', scoped_session(sessionmaker(bind=engine)))
+
+    application = Flask(__name__)
+    application.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+    db_module.migrate_db(application)
+
+    assert _stamp(engine) == _chain_head()
+    assert 'overview' in {c['name'] for c in
+                          sa.inspect(engine).get_columns('table_shows')}, (
+        'the stamped-but-unrepaired install kept its missing column')
+
+    engine.dispose()
