@@ -7,6 +7,7 @@ import os
 import queue
 import subprocess
 import threading
+import weakref
 import time
 import uuid
 
@@ -59,6 +60,50 @@ class WorkerResult:
     events: list[dict[str, Any]]
 
 
+# Every started worker registers here so idle ones can be reclaimed. A weak set,
+# so a client the pool has dropped does not stay alive just by being listed.
+#
+# The fleet needs reclaiming because nothing else does it: a worker is spawned
+# lazily the first time a pool searches with that provider, and the pool's own
+# recycle only fires the next time that same pool is searched. On a quiet install
+# the processes simply accumulate, at 17.6 to 44.6 MiB each.
+_live_clients: "weakref.WeakSet[ProviderWorkerClient]" = weakref.WeakSet()
+_live_clients_lock = threading.Lock()
+
+
+def reap_idle_workers(idle_seconds: float) -> int:
+    """Stop workers that have served no request for ``idle_seconds``.
+
+    Not destructive: ``request()`` starts the process if it is not running, so a
+    reaped worker returns on the next search for the price of a cold start. Safe
+    against a request in flight too, because ``stop()`` goes through
+    ``request()`` and waits on the same lock a live request holds; the worst case
+    is a worker that is stopped just after being used and respawned immediately.
+    """
+    now = time.monotonic()
+    with _live_clients_lock:
+        candidates = list(_live_clients)
+
+    reaped = 0
+    for client in candidates:
+        process = client.process
+        if process is None or process.poll() is not None:
+            continue
+        if now - getattr(client, "last_used", now) < idle_seconds:
+            continue
+        try:
+            client.stop()
+        except Exception:
+            # One plugin refusing to shut down must not strand the rest.
+            logger.warning("Provider Hub worker did not stop cleanly", exc_info=True)
+            continue
+        reaped += 1
+
+    if reaped:
+        logger.debug("Provider Hub reclaimed %d idle worker(s)", reaped)
+    return reaped
+
+
 class ProviderWorkerClient:
     """Small NDJSON client for a single provider worker process."""
 
@@ -72,6 +117,8 @@ class ProviderWorkerClient:
         self.cwd = str(cwd) if cwd else None
         self.env = env
         self.process: subprocess.Popen | None = None
+        # monotonic timestamp of the last request, read by reap_idle_workers
+        self.last_used: float = time.monotonic()
         self._lock = threading.Lock()
         self._stdout_queue: queue.Queue[Any] | None = None
         self._stdout_thread: threading.Thread | None = None
@@ -89,6 +136,7 @@ class ProviderWorkerClient:
         if self.env:
             env.update(self.env)
 
+        self.last_used = time.monotonic()
         self.process = subprocess.Popen(
             self.command,
             cwd=self.cwd,
@@ -115,6 +163,9 @@ class ProviderWorkerClient:
             daemon=True,
         )
         self._stderr_thread.start()
+
+        with _live_clients_lock:
+            _live_clients.add(self)
 
     @staticmethod
     def _enqueue_stdout(process: subprocess.Popen, stdout_queue: queue.Queue[Any]) -> None:
@@ -160,16 +211,20 @@ class ProviderWorkerClient:
 
     def stop(self, grace_seconds: float = 5.0) -> None:
         process = self.process
-        if not process:
-            return
-        if process.poll() is not None:
-            return
         try:
-            self.request("shutdown", {"reason": "app_shutdown", "grace_ms": int(grace_seconds * 1000)}, grace_seconds)
-            process.wait(timeout=grace_seconds)
-        except Exception:
-            process.kill()
-            process.wait(timeout=grace_seconds)
+            if not process:
+                return
+            if process.poll() is not None:
+                return
+            try:
+                self.request("shutdown", {"reason": "app_shutdown", "grace_ms": int(grace_seconds * 1000)}, grace_seconds)
+                process.wait(timeout=grace_seconds)
+            except Exception:
+                process.kill()
+                process.wait(timeout=grace_seconds)
+        finally:
+            with _live_clients_lock:
+                _live_clients.discard(self)
 
     def _read_line_with_deadline(self, timeout: float) -> str:
         """Read one NDJSON line from the worker, honoring ``timeout`` seconds.
@@ -232,6 +287,7 @@ class ProviderWorkerClient:
 
     def request(self, op: str, payload: dict[str, Any] | None = None, timeout: float = 30.0) -> WorkerResult:
         self.start()
+        self.last_used = time.monotonic()
         if self.process is None or self.process.stdin is None or self.process.stdout is None:
             raise WorkerError("worker process did not start")
 
