@@ -87,6 +87,9 @@ USER_VISIBLE_SECRETS = frozenset({
     "pipocas.password",
     "deathbycaptcha.username",
     "deathbycaptcha.password",
+    # Anti-captcha vendors - bare API keys.
+    "anticaptcha.anti_captcha_key",
+    "captchaai.captchaai_key",
     "napisy24.username",
     "napisy24.password",
     "titlovi.username",

@@ -9,7 +9,8 @@ import base64
 import requests
 from subliminal.cache import region
 from dogpile.cache.api import NO_VALUE
-from python_anticaptcha import AnticaptchaClient, NoCaptchaTaskProxylessTask, NoCaptchaTask, AnticaptchaException
+from python_anticaptcha import AnticaptchaClient, NoCaptchaTaskProxylessTask, NoCaptchaTask, ImageToTextTask, \
+    AnticaptchaException
 from deathbycaptcha import SocketClient as DBCClient, DEFAULT_TOKEN_TIMEOUT
 import six
 from six.moves import range
@@ -263,10 +264,14 @@ class CaptchaAIProxyLessPitcher(Pitcher):
     host = "https://ocr.captchaai.com"
     timeout = 180
 
-    def __init__(self, website_name, website_url, website_key, tries=3, host=None, *args, **kwargs):
+    def __init__(self, website_name, website_url, website_key, tries=3, host=None, user_agent=None,
+                 cookies=None, is_invisible=False, *args, **kwargs):
         super(CaptchaAIProxyLessPitcher, self).__init__(website_name, website_url, website_key, tries=tries, *args,
                                                         **kwargs)
         self.host = host or self.host
+        self.user_agent = user_agent
+        self.cookies = cookies
+        self.is_invisible = is_invisible
 
     def get_client(self):
         # CaptchaAI exposes a 2Captcha-compatible HTTP API (in.php/res.php), so a
@@ -279,13 +284,21 @@ class CaptchaAIProxyLessPitcher(Pitcher):
 
     @property
     def in_params(self):
-        return {
+        params = {
             "key": self.client_key,
             "method": "userrecaptcha",
             "googlekey": self.website_key,
             "pageurl": self.website_url,
             "json": 1,
         }
+        if self.is_invisible:
+            params["invisible"] = 1
+        if self.user_agent:
+            params["userAgent"] = self.user_agent
+        if self.cookies:
+            # 2Captcha-compatible cookie format: KEY1:Value1;KEY2:Value2
+            params["cookies"] = ";".join("%s:%s" % (k, v) for k, v in self.cookies.items())
+        return params
 
     def _throw(self):
         self.client = self.get_client()
@@ -343,14 +356,9 @@ class CaptchaAIPitcher(CaptchaAIProxyLessPitcher):
     proxy = None
     needs_proxy = True
     proxy_type = "HTTP"
-    user_agent = None
 
     def __init__(self, *args, **kwargs):
         self.proxy = kwargs.pop("proxy", None)
-        self.user_agent = kwargs.pop("user_agent", None)
-        # cookies/is_invisible are accepted for call-site compatibility but unused.
-        kwargs.pop("cookies", None)
-        kwargs.pop("is_invisible", None)
         super(CaptchaAIPitcher, self).__init__(*args, **kwargs)
 
     @property
@@ -358,8 +366,6 @@ class CaptchaAIPitcher(CaptchaAIProxyLessPitcher):
         params = super(CaptchaAIPitcher, self).in_params
         if self.proxy:
             params.update({"proxy": self.proxy, "proxytype": self.proxy_type})
-        if self.user_agent:
-            params.update({"userAgent": self.user_agent})
         return params
 
 
@@ -372,15 +378,11 @@ class CaptchaAIImageToTextPitcher(Pitcher):
     image_fp = None
 
     def __init__(self, website_name, image_fp, tries=3, client_key=None, *args, **kwargs):
-        super().__init__(website_name, tries, client_key, *args, **kwargs)
-        self.tries = tries
-        self.client_key = client_key or os.environ.get("ANTICAPTCHA_ACCOUNT_KEY")
-        if not self.client_key:
-            raise Exception("CaptchaAI key not given, exiting")
-        self.website_name = website_name
+        # No page URL or site key for an image task; keyword the rest so an
+        # explicit client_key reaches Pitcher instead of being read as the
+        # website key while the env fallback raises.
+        super().__init__(website_name, None, None, tries=tries, client_key=client_key, **kwargs)
         self.image_fp = image_fp
-        self.success = False
-        self.solve_time = None
 
     def get_client(self):
         # CaptchaAI exposes a 2Captcha-compatible HTTP API (in.php/res.php), so a
@@ -463,15 +465,10 @@ class AntiCaptchaImageToTextPitcher(Pitcher):
     image_fp = None
 
     def __init__(self, website_name, image_fp, tries=3, client_key=None, *args, **kwargs):
-        super().__init__(website_name, tries, client_key, *args, **kwargs)
-        self.tries = tries
-        self.client_key = client_key or os.environ.get("ANTICAPTCHA_ACCOUNT_KEY")
-        if not self.client_key:
-            raise Exception("AntiCaptcha key not given, exiting")
-        self.website_name = website_name
+        # Same shape as the CaptchaAI image pitcher: keyword the arguments so
+        # an explicit client_key is honored without ANTICAPTCHA_ACCOUNT_KEY.
+        super().__init__(website_name, None, None, tries=tries, client_key=client_key, **kwargs)
         self.image_fp = image_fp
-        self.success = False
-        self.solve_time = None
 
     def get_client(self):
         return AnticaptchaClient(self.client_key)

@@ -95,3 +95,59 @@ def test_pitcher_registry_resolves_captchaai_from_env(monkeypatch):
 
     cls = pitchers.get_pitcher()
     assert cls.name == "CaptchaAIProxyLess"
+
+
+def test_secret_registry_covers_captcha_keys():
+    from secret_store.registry import USER_VISIBLE_SECRETS
+
+    assert "captchaai.captchaai_key" in USER_VISIBLE_SECRETS
+    assert "anticaptcha.anti_captcha_key" in USER_VISIBLE_SECRETS
+
+
+def test_image_to_text_task_is_imported():
+    import subliminal_patch.pitcher as pitcher_module
+
+    assert hasattr(pitcher_module, "ImageToTextTask")
+
+
+def test_captchaai_image_pitcher_accepts_explicit_key_without_env(monkeypatch):
+    import io
+
+    monkeypatch.delenv("ANTICAPTCHA_ACCOUNT_KEY", raising=False)
+    from subliminal_patch.pitcher import pitchers
+
+    cls = pitchers.get_pitcher("CaptchaAIImageToText")
+    pitcher = cls("Zimuku", io.BytesIO(b"img"), client_key="explicit-key")
+    assert pitcher.client_key == "explicit-key"
+    assert pitcher.tries == 3
+
+
+def test_anticaptcha_image_pitcher_accepts_explicit_key_without_env(monkeypatch):
+    import io
+
+    monkeypatch.delenv("ANTICAPTCHA_ACCOUNT_KEY", raising=False)
+    from subliminal_patch.pitcher import pitchers
+
+    cls = pitchers.get_pitcher("AntiCaptchaImageToText")
+    pitcher = cls("Zimuku", io.BytesIO(b"img"), client_key="explicit-key")
+    assert pitcher.client_key == "explicit-key"
+
+
+def test_captchaai_proxyless_forwards_caller_context(monkeypatch):
+    monkeypatch.delenv("ANTICAPTCHA_ACCOUNT_KEY", raising=False)
+    from subliminal_patch.pitcher import pitchers
+
+    cls = pitchers.get_pitcher("CaptchaAIProxyLess")
+    pitcher = cls(
+        "Addic7ed",
+        "https://example.org/login",
+        "site-key",
+        client_key="explicit-key",
+        user_agent="UA/1.0",
+        cookies={"session": "abc"},
+        is_invisible=True,
+    )
+    params = pitcher.in_params
+    assert params["invisible"] == 1
+    assert params["userAgent"] == "UA/1.0"
+    assert params["cookies"] == "session:abc"
