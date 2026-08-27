@@ -514,20 +514,66 @@ footer ul { display: flex; flex-wrap: wrap; gap: 8px 24px; list-style: none; mar
 /* --- lightbox ------------------------------------------------------------- */
 .lightbox {
   position: fixed; inset: 0; z-index: 60;
-  display: none; align-items: center; justify-content: center;
-  background: rgba(6, 5, 14, 0.94);
-  padding: 32px;
+  display: none; flex-direction: column;
+  /* Opaque, not 0.94. Six percent of cream type on a near-black page still
+     ghosts through legibly on a dark screen, and a half-visible page behind a
+     screenshot reads as a rendering fault rather than as a dialog. */
+  background: #06050e;
+  padding: 20px;
 }
 /* `display: none` rather than opacity, so nothing inside can hold focus while
    the dialog is closed. */
 .lightbox[open] { display: flex; }
-.lightbox img { max-width: 100%; max-height: 100%; border-radius: var(--radius); box-shadow: var(--lift-2); }
-.lightbox-close {
-  position: absolute; top: 20px; right: 24px;
-  background: transparent; border: 1px solid var(--hair-strong); color: var(--ink);
-  border-radius: 4px; width: 40px; height: 40px; cursor: pointer; font-size: 1.2rem; line-height: 1;
+
+/* The scroll container. It only ever scrolls while zoomed; at fit size the
+   image is centred in it. */
+.lightbox-stage {
+  flex: 1; min-height: 0;
+  display: flex; align-items: center; justify-content: center;
+  overflow: auto;
+  overscroll-behavior: contain;
 }
-.lightbox-close:hover { border-color: var(--amber-line); color: var(--amber-bright); }
+.lightbox img {
+  max-width: 100%; max-height: 100%;
+  border-radius: var(--radius); box-shadow: var(--lift-2);
+  cursor: zoom-in;
+}
+/* Zoomed: the image renders at its own width and the stage pans. This is the
+   whole point on a phone, where a 1920px wide UI capture fitted to a 414px
+   viewport is far too small to read. */
+.lightbox.zoomed img {
+  max-width: none; max-height: none;
+  width: auto; height: auto;
+  cursor: zoom-out;
+}
+.lightbox.zoomed .lightbox-stage { align-items: flex-start; justify-content: flex-start; }
+
+.lightbox-bar {
+  flex: none;
+  display: flex; align-items: flex-start; gap: 16px;
+  padding-bottom: 14px;
+}
+.lightbox-caption {
+  flex: 1; min-width: 0;
+  color: var(--ink-3); font-size: 0.84rem; line-height: 1.45;
+}
+.lightbox-zoom, .lightbox-close {
+  flex: none;
+  background: var(--plane-1); border: 1px solid var(--hair-strong); color: var(--ink);
+  border-radius: 4px; height: 40px; cursor: pointer; font: 500 0.86rem 'Geist Variable', sans-serif;
+}
+.lightbox-zoom { padding: 0 14px; }
+.lightbox-close { width: 40px; font-size: 1.2rem; line-height: 1; }
+.lightbox-zoom:hover, .lightbox-close:hover { border-color: var(--amber-line); color: var(--amber-bright); }
+
+@media (max-width: 600px) {
+  .lightbox { padding: 12px; }
+  /* The caption is hidden rather than wrapped: on a phone the vertical space
+     it would take is the space the picture needs. The same words remain on the
+     image's alt attribute, so nothing is lost to a screen reader. */
+  .lightbox-caption { display: none; }
+  .lightbox-bar { justify-content: flex-end; }
+}
 
 /* ---------------------------------------------------------------------------
    Reveal. One authored moment, not an entrance on every section: content is

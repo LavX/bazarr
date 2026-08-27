@@ -118,7 +118,22 @@
   var lightbox = document.getElementById("lightbox");
   if (lightbox) {
     var closeBtn = lightbox.querySelector(".lightbox-close");
+    var zoomBtn = lightbox.querySelector(".lightbox-zoom");
+    var stage = lightbox.querySelector(".lightbox-stage");
+    var caption = lightbox.querySelector(".lightbox-caption");
     var opener = null;
+
+    /* Fit by default, so the whole frame is legible at a glance. Zoom renders
+       the capture at its own size and pans, which is the only way a 1920px
+       wide UI screenshot is readable on a phone. */
+    function setZoom(on) {
+      lightbox.classList.toggle("zoomed", on);
+      if (zoomBtn) {
+        zoomBtn.setAttribute("aria-pressed", on ? "true" : "false");
+        zoomBtn.textContent = on ? "Fit" : "Zoom";
+      }
+      if (!on && stage) { stage.scrollTop = 0; stage.scrollLeft = 0; }
+    }
     var shell = [document.querySelector("header.nav"), document.getElementById("main"), document.querySelector("footer")];
 
     function focusables() {
@@ -135,12 +150,19 @@
       var img = lightbox.querySelector("img");
       if (!img) {
         img = document.createElement("img");
-        lightbox.appendChild(img);
+        img.addEventListener("click", function () {
+          setZoom(!lightbox.classList.contains("zoomed"));
+        });
+        stage.appendChild(img);
       }
       var inner = btn.querySelector("img");
       img.src = src;
       img.alt = inner ? inner.alt : "";
+      /* The alt text already describes the capture, so it doubles as the
+         caption rather than being written twice and drifting apart. */
+      if (caption) caption.textContent = img.alt;
 
+      setZoom(false);
       lightbox.setAttribute("open", "");
       shell.forEach(function (el) { if (el) el.setAttribute("inert", ""); });
       if (closeBtn) closeBtn.focus();
@@ -148,6 +170,7 @@
     }
 
     function close() {
+      setZoom(false);
       lightbox.removeAttribute("open");
       shell.forEach(function (el) { if (el) el.removeAttribute("inert"); });
       document.removeEventListener("keydown", onKey);
@@ -169,7 +192,16 @@
       btn.addEventListener("click", function () { open(btn); });
     });
     if (closeBtn) closeBtn.addEventListener("click", close);
-    lightbox.addEventListener("click", function (e) { if (e.target === lightbox) close(); });
+    if (zoomBtn) {
+      zoomBtn.addEventListener("click", function () {
+        setZoom(!lightbox.classList.contains("zoomed"));
+      });
+    }
+    /* Clicking the backdrop closes. The stage counts as backdrop, but only
+       where the image is not: clicking the image itself toggles zoom. */
+    lightbox.addEventListener("click", function (e) {
+      if (e.target === lightbox || e.target === stage) close();
+    });
   }
 
   /* -------------------------------------------------------------------------

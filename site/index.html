@@ -635,9 +635,14 @@
 </footer>
 
 <div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-label="Screenshot">
-  <button class="lightbox-close" type="button" aria-label="Close">&times;</button>
+  <div class="lightbox-bar">
+    <p class="lightbox-caption" id="lightbox-caption"></p>
+    <button class="lightbox-zoom" type="button" aria-pressed="false">Zoom</button>
+    <button class="lightbox-close" type="button" aria-label="Close">&times;</button>
+  </div>
   <!-- the image element is created on open: an empty <img> in the markup
        ships as a broken-image box for anyone who never opens the dialog -->
+  <div class="lightbox-stage"></div>
 </div>
 
 <script src="js/p5.min.js" defer></script>
