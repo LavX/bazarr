@@ -5,6 +5,8 @@ import os
 import time
 import logging
 import json
+import base64
+import requests
 from subliminal.cache import region
 from dogpile.cache.api import NO_VALUE
 from python_anticaptcha import AnticaptchaClient, NoCaptchaTaskProxylessTask, NoCaptchaTask, AnticaptchaException
@@ -252,6 +254,130 @@ class DBCPitcher(DBCProxyLessPitcher):
             "proxy": self.proxy
         })
         return payload
+
+
+@registry.register
+class CaptchaAIProxyLessPitcher(Pitcher):
+    name = "CaptchaAIProxyLess"
+    source = "captchaai.com"
+    host = "https://ocr.captchaai.com"
+    timeout = 180
+
+    def __init__(self, website_name, website_url, website_key, tries=3, host=None, user_agent=None,
+                 cookies=None, is_invisible=False, *args, **kwargs):
+        super(CaptchaAIProxyLessPitcher, self).__init__(website_name, website_url, website_key, tries=tries, *args,
+                                                        **kwargs)
+        self.host = host or self.host
+        self.user_agent = user_agent
+        self.cookies = cookies
+        self.is_invisible = is_invisible
+
+    def get_client(self):
+        # CaptchaAI exposes a 2Captcha-compatible HTTP API (in.php/res.php), so a
+        # plain requests session is all that is needed.
+        return requests.Session()
+
+    def get_job(self):
+        # The reCAPTCHA task is created in _throw() through the in.php endpoint.
+        pass
+
+    @property
+    def in_params(self):
+        params = {
+            "key": self.client_key,
+            "method": "userrecaptcha",
+            "googlekey": self.website_key,
+            "pageurl": self.website_url,
+            "json": 1,
+        }
+        if self.is_invisible:
+            params["invisible"] = 1
+        if self.user_agent:
+            params["userAgent"] = self.user_agent
+        # self.cookies is accepted for call-site compatibility but deliberately
+        # NOT transmitted: it holds the provider's live session cookies, and a
+        # reCAPTCHA token task does not need them. Shipping a paid provider
+        # session to the captcha vendor is an exposure, not a feature.
+        return params
+
+    def _throw(self):
+        self.client = self.get_client()
+        for i in range(self.tries):
+            try:
+                resp = self.client.post("%s/in.php" % self.host, data=self.in_params, timeout=30)
+                resp.raise_for_status()
+                payload = resp.json()
+                if payload.get("status") != 1:
+                    request = payload.get("request")
+                    if request == "ERROR_ZERO_BALANCE":
+                        logger.error("%s: No balance left on captcha solving service. Exiting", self.website_name)
+                        return
+                    elif request == "ERROR_NO_SLOT_AVAILABLE":
+                        logger.info("%s: No captcha solving slot available, retrying", self.website_name)
+                        time.sleep(5.0)
+                        continue
+                    elif request in ("ERROR_KEY_DOES_NOT_EXIST", "ERROR_WRONG_USER_KEY"):
+                        logger.error("%s: Bad CaptchaAI API key", self.website_name)
+                        return
+                    logger.error("%s: CaptchaAI returned an error: %s", self.website_name, request)
+                    if i >= self.tries - 1:
+                        return
+                    time.sleep(5.0)
+                    continue
+
+                job_id = payload.get("request")
+                # The key travels in this URL's query string, so the log
+                # redaction in app/logger.py must keep covering bare "key=".
+                poll_failed = False
+                deadline = time.time() + self.timeout
+                while time.time() < deadline:
+                    time.sleep(5.0)
+                    res = self.client.get(
+                        "%s/res.php" % self.host,
+                        params={"key": self.client_key, "action": "get", "id": job_id, "json": 1},
+                        timeout=30,
+                    )
+                    res.raise_for_status()
+                    res_payload = res.json()
+                    if res_payload.get("status") == 1:
+                        self.success = True
+                        return res_payload.get("request")
+                    if res_payload.get("request") == "CAPCHA_NOT_READY":
+                        continue
+                    logger.error("%s: CaptchaAI returned an error: %s", self.website_name,
+                                 res_payload.get("request"))
+                    poll_failed = True
+                    break
+                if not poll_failed:
+                    logger.info("%s: Captcha solving timed out, retrying", self.website_name)
+            except Exception:
+                if i >= self.tries - 1:
+                    logger.error("%s: Captcha solving finally failed. Exiting", self.website_name,
+                                 exc_info=True)
+                    return
+                logger.info("%s: Captcha solving failed, retrying", self.website_name)
+                time.sleep(5.0)
+
+
+@registry.register
+class CaptchaAIPitcher(CaptchaAIProxyLessPitcher):
+    name = "CaptchaAI"
+    proxy = None
+    needs_proxy = True
+    proxy_type = "HTTP"
+
+    def __init__(self, *args, **kwargs):
+        # No default: a pitcher that declares needs_proxy must fail loudly
+        # when constructed without one, like the other proxy pitchers.
+        self.proxy = kwargs.pop("proxy")
+        super(CaptchaAIPitcher, self).__init__(*args, **kwargs)
+
+    @property
+    def in_params(self):
+        params = super(CaptchaAIPitcher, self).in_params
+        if self.proxy:
+            params.update({"proxy": self.proxy, "proxytype": self.proxy_type})
+        return params
 
 
 def load_verification(site_name, session, callback=lambda x: None):
