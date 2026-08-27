@@ -335,7 +335,13 @@ class Subtitles(Resource):
             if not metadata:
                 return "Episode not found", 404
 
-            video_path = path_mappings.path_replace(metadata.path)
+            # The owning instance's mapping again, for the same reason the
+            # extraction branch above uses it: everything downstream (sync,
+            # translation, mods, the re-index) resolves this path against the
+            # instance that owns the media, and a global mapping here points at
+            # another instance's library whenever the two differ.
+            video_path = path_mappings.path_replace_instance(
+                metadata.path, arr_instance_id, 'episode')
         else:
             metadata_stmt = scoped(
                 select(
@@ -352,7 +358,8 @@ class Subtitles(Resource):
             if not metadata:
                 return "Movie not found", 404
 
-            video_path = path_mappings.path_replace_movie(metadata.path)
+            video_path = path_mappings.path_replace_instance(
+                metadata.path, arr_instance_id, 'movie')
 
         # Path-traversal containment (#GHSA): a user-supplied subtitle path must
         # stay where Bazarr stores subtitles for this video (alongside it / a
@@ -514,7 +521,7 @@ def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id, 
                 subtitles_path)
 
     if media_type == "episode":
-        store_subtitles(path_mappings.path_replace_reverse(video_path), video_path, arr_instance_id=arr_instance_id)
+        store_subtitles(path_mappings.path_replace_reverse_instance(video_path, arr_instance_id, 'episode'), video_path, arr_instance_id=arr_instance_id)
         event_stream(type="series", payload=metadata.sonarrSeriesId)
         # Emit the LOCAL episode id (#156): `id` is the upstream sonarrEpisodeId
         # (not unique across instances), but the frontend caches episode detail
@@ -539,7 +546,7 @@ def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id, 
             )
     else:
         store_subtitles_movie(
-            path_mappings.path_replace_reverse_movie(video_path), video_path
+            path_mappings.path_replace_reverse_instance(video_path, arr_instance_id, 'movie'), video_path
         , arr_instance_id=arr_instance_id)
         event_stream(type="movie", payload=id)
 

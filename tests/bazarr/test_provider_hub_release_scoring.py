@@ -140,3 +140,28 @@ def test_a_worker_cannot_switch_the_capability_off_through_display():
     from provider_hub import protocol
 
     assert "matches_need_video" in protocol._RESERVED_DISPLAY_ATTRS
+
+
+def test_display_metadata_cannot_replace_the_release_information_scoring_reads():
+    """`display` is cosmetic. `release_info` is not: with matches_need_video on,
+    get_matches recomputes source, resolution and release group from it every
+    time a priority-disabled listing is scored.
+
+    Applying the display dictionary last meant a plugin sending a tidier label
+    under the same key overwrote the scoring input, discarding the very matches
+    that separate one candidate from another."""
+    from provider_hub.protocol import candidate_from_worker
+
+    subtitle = candidate_from_worker("hub-provider", {
+        "id": "abc",
+        "language": {"alpha3": "eng"},
+        "provider_payload": {"provider": "hub-provider"},
+        "release_info": VIDEO_RELEASE,
+        "display": {"release_info": "Season 1 (English)", "release": "pretty label"},
+    })
+
+    assert subtitle.release_info == VIDEO_RELEASE, (
+        'a cosmetic display value replaced the release information the scorer '
+        f'reads; got {subtitle.release_info!r}')
+    assert getattr(subtitle, "release", None) == "pretty label", (
+        'genuinely cosmetic display keys must still come through')

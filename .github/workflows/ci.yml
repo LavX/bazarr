@@ -13,6 +13,7 @@ on:
       - bazarr.py
       - requirements.txt
       - dev-requirements.txt
+      - Dockerfile
       - .github/workflows/ci.yml
   # No branches filter on purpose. A stacked pull request, one whose base is
   # another feature branch rather than development, got no CI at all under
@@ -173,6 +174,7 @@ jobs:
             tests/bazarr/test_signalrcore_compat.py \
             tests/bazarr/test_app_get_providers.py \
             tests/bazarr/test_retired_provider_config_compat.py \
+            tests/bazarr/test_settings_profile_deletion.py \
             tests/bazarr/test_jellyfin_apikey_location.py \
             tests/bazarr/test_provider_hub.py \
             tests/bazarr/test_provider_pool_config_reload.py \
@@ -343,6 +345,7 @@ jobs:
             tests/bazarr/test_ffprobe_cache_instance_scope.py \
             tests/bazarr/test_triage_low_findings.py \
             tests/bazarr/test_indexer_owner_scope.py \
+            tests/bazarr/test_indexer_path_mapping_owner.py \
             tests/bazarr/test_provider_hub_worker_reaper.py \
             tests/bazarr/test_job_module_identity.py \
             tests/bazarr/test_sonarr_sync_memory.py \

@@ -34,6 +34,7 @@ protects nothing. Every rule below is therefore biased towards silence:
   above the score of the subtitle the user already has.
 """
 
+import ast
 import logging
 
 from datetime import datetime
@@ -196,6 +197,16 @@ def detect_release_type_mismatch(video_release_type, candidates, min_score,
         if normalize_release_type(subtitle_type) not in MERGED_FORMATS_REV:
             continue
 
+        # A hash in the SCORED matches means compute_score applied its
+        # hash collapse and threw every release-derived match away
+        # (subliminal_patch/score.py). What is left is the hash points, so the
+        # candidate's score is not a base the source points can be added to:
+        # the sum describes a number this subtitle would never score. Providers
+        # that cannot verify their hashes, RegieLive among them, hit this on
+        # every result they return with one.
+        if 'hash' in (candidate.get('scored_matches') or ()):
+            continue
+
         score = int(candidate.get('score') or 0)
         projected_score = score + release_type_points
         if projected_score < min_score:
@@ -258,9 +269,18 @@ def _language_key(language):
     collapse a plain search and a hearing-impaired one for the same language:
     a recorded English mismatch would then stand in for an English HI search
     and suppress its notification. The flag is appended explicitly.
+
+    Forced wins over hearing-impaired, exactly as the indexers decide it when
+    they serialise a still-missing profile item ("if forced ... elif hi"). The
+    two have to agree: prune_mismatches compares these keys against that list,
+    so a record written as "en:forced:hi" while the indexer wrote "en:forced"
+    would be deleted as satisfied while the variant is still missing. The
+    profile editor offers the three as one exclusive choice, so both flags
+    together is not reachable through the UI, but the API takes the profile
+    JSON as given and the two spellings must not be able to drift.
     """
     key = str(language)
-    if getattr(language, 'hi', False):
+    if not getattr(language, 'forced', False) and getattr(language, 'hi', False):
         key += ':hi'
     return key
 
@@ -408,6 +428,45 @@ def clear_mismatch(session, media_type, media_id, language=None):
         stmt = stmt.where(TableReleaseTypeMismatch.language == _language_key(language))
 
     session.execute(stmt)
+
+
+def prune_mismatches(session, media_type, media_id, still_missing):
+    """Drop every recorded mismatch for an item except the languages still missing.
+
+    Clearing used to happen only where a download or a manual save landed. Every
+    other way a subtitle arrives, a full scan, a sync, a translation, a combined
+    output, a file dropped next to the video, reaches the database through the
+    indexer instead, which recomputes missing_subtitles and left the mismatch
+    rows untouched. The badge then outlived the problem it described, and a
+    stale flag is worse than none because the user cannot tell it from a live
+    one.
+
+    ``still_missing`` is what the indexer just wrote to missing_subtitles, in
+    the same 'en' / 'en:hi' / 'en:forced' form the records are keyed by. A
+    language that adaptive searching has given up on is absent from it and is
+    pruned here too: it is no longer wanted, so it is no longer flagged.
+    """
+    stmt = (delete(TableReleaseTypeMismatch)
+            .where(TableReleaseTypeMismatch.media_type == media_type)
+            .where(TableReleaseTypeMismatch.media_id == media_id))
+    if still_missing:
+        stmt = stmt.where(TableReleaseTypeMismatch.language.notin_(list(still_missing)))
+
+    session.execute(stmt)
+
+
+def prune_mismatches_for_media(media_type, media_id, missing_subtitles_text):
+    """``prune_mismatches`` for an indexer that has the stored text form in hand.
+
+    Never raises: indexing a file must not fail because a cleanup did.
+    """
+    try:
+        if media_id is None:
+            return
+        still_missing = ast.literal_eval(missing_subtitles_text or '[]')
+        prune_mismatches(database, media_type, media_id, still_missing)
+    except Exception:
+        logger.exception('BAZARR could not prune the release-type mismatch records')
 
 
 def clear_mismatch_for_video(video, media_type, language, arr_instance_id=None):

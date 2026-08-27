@@ -183,7 +183,7 @@ def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, sonarr_serie
                 result = result[0]
             if isinstance(result, tuple) and len(result):
                 result = result[0]
-            store_subtitles(episode['video_path'], path_mappings.path_replace(episode['video_path']),
+            store_subtitles(episode['video_path'], path_mappings.path_replace_instance(episode['video_path'], episode['arr_instance_id'], 'episode'),
                             arr_instance_id=episode['arr_instance_id'])
             history_log(3, episode['sonarrSeriesId'], episode['sonarrEpisodeId'], result,
                         upgraded_from_id=episode['original_id'],
@@ -331,7 +331,7 @@ def upgrade_movies_subtitles(job_id=None, radarr_ids=None, radarr_filters=None, 
             if isinstance(result, tuple) and len(result):
                 result = result[0]
             store_subtitles_movie(movie['video_path'],
-                                  path_mappings.path_replace_movie(movie['video_path']),
+                                  path_mappings.path_replace_instance(movie['video_path'], movie['arr_instance_id'], 'movie'),
                                   arr_instance_id=movie['arr_instance_id'])
             history_log_movie(3, movie['radarrId'], result, upgraded_from_id=movie['original_id'],
                               arr_instance_id=movie['arr_instance_id'])

@@ -381,6 +381,13 @@ def clear_mismatch_after_manual_save(video, media_type, saved_subtitles, arr_ins
     download path would leave the badge up for a subtitle the user can see on
     disk. storage_path is the evidence a file was written, since save_subtitles
     returns a subtitle even when it wrote nothing.
+
+    Kept deliberately now that the indexer prunes as well. This clears the exact
+    language that was just written, at the moment it was written, and depends on
+    neither the profile state nor on list_missing_subtitles being reached. The
+    indexer prune is the safety net for every OTHER way a subtitle arrives, not
+    a replacement for this one, and on a badge the user is actively resolving
+    the overlap is worth its cost.
     """
     for saved in saved_subtitles or []:
         storage_path = getattr(saved, 'storage_path', None)

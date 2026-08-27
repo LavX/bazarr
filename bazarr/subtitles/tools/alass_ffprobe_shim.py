@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 # What a stream whose codec ffprobe could not identify gets called. alass only
 # needs the field to exist: it reads codec_type to pick the audio stream.
@@ -116,6 +117,81 @@ def _writable_directories():
 
 LAUNCHER_PREFIX = "bazarr-alass-shim-"
 
+# Where a launcher is built before anyone else can see it. The sweep matches on
+# LAUNCHER_PREFIX, so a directory created directly under that name is fair game
+# for another process between mkdtemp() and the claim, however few syscalls
+# apart those are. It is built under this prefix instead, claimed, and only then
+# renamed into the launcher namespace, by which point the claim protects it.
+LAUNCHER_STAGING_PREFIX = "bazarr-alass-staging-"
+
+# A staging directory lives for microseconds. One left unclaimed for this long
+# belongs to a process that died mid-install, so reclaiming it cannot race
+# anything live. Six orders of magnitude of margin, deliberately.
+_STAGING_ABANDONED_AFTER = 3600.0
+
+# Held open for as long as this process runs, which is what makes the launcher
+# directory distinguishable from one an exited process left behind.
+LAUNCHER_CLAIM_NAME = ".in-use"
+_LAUNCHER_CLAIM_FD = None
+
+
+def _claim(directory):
+    """Take the directory's lock and return the fd holding it.
+
+    The lock lives with the open file description, so it is released by the
+    kernel when this process exits however it exits, including os._exit, which
+    is how Bazarr goes down. Nothing has to clean it up.
+    """
+    import fcntl
+
+    fd = os.open(os.path.join(directory, LAUNCHER_CLAIM_NAME),
+                 os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _is_claimed(directory):
+    """Whether a live process is using this launcher.
+
+    A directory with no lock file predates this and is treated as abandoned,
+    which is the behaviour it had before either way.
+    """
+    lock_path = os.path.join(directory, LAUNCHER_CLAIM_NAME)
+    if not os.path.isfile(lock_path):
+        return False
+
+    import fcntl
+
+    try:
+        fd = os.open(lock_path, os.O_RDWR)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
+def _release_claim():
+    """Give up this process's launcher, which it is about to replace."""
+    global _LAUNCHER_CLAIM_FD
+
+    if _LAUNCHER_CLAIM_FD is not None:
+        try:
+            os.close(_LAUNCHER_CLAIM_FD)
+        except OSError:
+            pass
+        _LAUNCHER_CLAIM_FD = None
+
 
 def _ensure(parent):
     os.makedirs(parent, exist_ok=True)
@@ -128,9 +204,14 @@ def _sweep(parent):
 
     The current one is only remembered in memory and Bazarr exits through
     os._exit, so nothing cleans up on the way out and every restart that syncs
-    with alass would leave another directory here. Only directories this user
-    owns are touched, and a running process that loses its launcher this way
-    simply installs another one.
+    with alass would leave another directory here.
+
+    Ownership is not enough to decide what is abandoned: every Bazarr on a host
+    normally runs as the same user, so a second install sharing the temporary
+    directory would delete the first one's live launcher. alass execs
+    ALASS_FFPROBE_PATH directly, so that sync fails on a file that existed when
+    its environment was built. A directory whose lock is still held belongs to a
+    running process and is left alone.
     """
     try:
         entries = os.listdir(parent)
@@ -143,16 +224,28 @@ def _sweep(parent):
     in_use = os.path.dirname(_LAUNCHER_PATH) if _LAUNCHER_PATH else None
 
     for entry in entries:
-        if not entry.startswith(LAUNCHER_PREFIX):
+        staging = entry.startswith(LAUNCHER_STAGING_PREFIX)
+        if not staging and not entry.startswith(LAUNCHER_PREFIX):
             continue
 
         path = os.path.join(parent, entry)
+        if staging:
+            # Never a staging directory that could still be mid-install: that is
+            # the race this staging step exists to remove, and reintroducing it
+            # here would defeat the point.
+            try:
+                if time.time() - os.stat(path).st_mtime < _STAGING_ABANDONED_AFTER:
+                    continue
+            except OSError:
+                continue
         if in_use and os.path.abspath(path) == os.path.abspath(in_use):
             continue
         try:
             if os.stat(path).st_uid != os.getuid():
                 continue
         except OSError:
+            continue
+        if _is_claimed(path):
             continue
 
         shutil.rmtree(path, ignore_errors=True)
@@ -193,7 +286,7 @@ def ensure_launcher():
     Windows has no equivalent alass would run, so there the shim is simply not
     installed and alass behaves as it always has.
     """
-    global _LAUNCHER_PATH
+    global _LAUNCHER_PATH, _LAUNCHER_CLAIM_FD
 
     if os.name != "posix":
         return None
@@ -208,17 +301,32 @@ def ensure_launcher():
             return _LAUNCHER_PATH
 
         content = launcher_script(sys.executable, os.path.abspath(__file__))
+        # Whatever this process was using is being replaced, so let the sweep
+        # below reclaim it rather than skipping it as still in use.
+        _release_claim()
         for parent in _writable_directories():
-            directory = None
+            directory = staging = None
             try:
-                directory = tempfile.mkdtemp(prefix=LAUNCHER_PREFIX, dir=_ensure(parent))
+                staging = tempfile.mkdtemp(prefix=LAUNCHER_STAGING_PREFIX,
+                                           dir=_ensure(parent))
+                # Claim it, THEN give it a name the sweep looks at. A directory
+                # created directly under LAUNCHER_PREFIX is visible to another
+                # process's sweep before this one can hold it, and the rename is
+                # what makes appearing and being held a single step.
+                _LAUNCHER_CLAIM_FD = _claim(staging)
+                directory = os.path.join(
+                    parent,
+                    LAUNCHER_PREFIX + os.path.basename(staging)[len(LAUNCHER_STAGING_PREFIX):])
+                os.rename(staging, directory)
                 _LAUNCHER_PATH = _install_launcher(directory, content)
             except Exception:
                 logger.debug("Could not install the alass ffprobe shim in %s", parent, exc_info=True)
                 # Nothing remembers the failure, so every sync retries this. Each
                 # retry leaving its private directory behind would leak inodes.
-                if directory:
-                    shutil.rmtree(directory, ignore_errors=True)
+                _release_claim()
+                for leftover in (directory, staging):
+                    if leftover:
+                        shutil.rmtree(leftover, ignore_errors=True)
                 continue
 
             return _LAUNCHER_PATH

@@ -190,3 +190,53 @@ def test_an_absurdly_long_numeric_token_does_not_abort_the_listing():
     sub = _subtitle(version, series="Show", season=1, episode=2)
 
     assert sub.release_info.endswith(version)
+
+
+@pytest.mark.parametrize("version", [
+    "S01.COMPLETE.1080p.BluRay",
+    "Season 1 COMPLETE WEB-DL",
+    "S01.Full.Season.HDTV",
+])
+def test_a_season_pack_keeps_its_own_release_name(version):
+    """A pack covers the requested episode without naming it.
+
+    Prefixing Show.S01E02. onto S01.COMPLETE.1080p leaves two conflicting
+    season markers in one name, which gives guessit less to work with than the
+    proper pack name it already had.
+    """
+    sub = _subtitle(version, series="Breaking Bad", season=1, episode=2)
+
+    assert sub.release_info == version, (
+        f"a season pack was mangled into {sub.release_info!r}")
+
+
+@pytest.mark.parametrize("version,expected", [
+    # "season" is the token that names the season, so it cannot also be the
+    # thing that says "whole season", or the most common tag shape there is
+    # loses its episode marker.
+    ("Season 1 WEB-DL", "Breaking.Bad.S01E02.Season.1.WEB-DL"),
+    # "Full HD" is a resolution. Only "full season" says whole season.
+    ("S01.Full.HD.WEB-DL", "Breaking.Bad.S01E02.S01.Full.HD.WEB-DL"),
+])
+def test_an_ordinary_episode_tag_is_not_mistaken_for_a_pack(version, expected):
+    sub = _subtitle(version, series="Breaking Bad", season=1, episode=2)
+
+    assert sub.release_info == expected, (
+        f"an ordinary tag was treated as a season pack: {sub.release_info!r}")
+
+
+@pytest.mark.parametrize("version", [
+    "Season 01 COMPLETE",
+    "COMPLETE.SEASON.01.1080p",
+])
+def test_a_zero_padded_pack_is_still_recognised(version):
+    sub = _subtitle(version, series="Breaking Bad", season=1, episode=2)
+
+    assert sub.release_info == version
+
+
+def test_a_pack_for_another_season_still_gets_the_scene_style_name():
+    """Season 3 says nothing about the season 1 episode being requested."""
+    sub = _subtitle("S03.COMPLETE.1080p", series="Breaking Bad", season=1, episode=2)
+
+    assert sub.release_info == "Breaking.Bad.S01E02.S03.COMPLETE.1080p"

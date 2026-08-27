@@ -15,6 +15,7 @@ from app.scheduler import scheduler  # noqa: F401
 from subtitles.indexer.series import list_missing_subtitles
 from subtitles.indexer.movies import list_missing_subtitles_movies
 from subtitles.language_profiles import validate_combine_rule, CombineRuleError
+from arr_instances.resolution import forget_deleted_language_profiles
 
 from ..utils import authenticate
 
@@ -43,6 +44,7 @@ class SystemSettings(Resource):
 
     @authenticate
     def post(self):
+        deleted_profile_ids = []
         enabled_languages = request.form.getlist('languages-enabled')
         if len(enabled_languages) != 0:
             database.execute(
@@ -111,6 +113,9 @@ class SystemSettings(Resource):
                 database.execute(
                     delete(TableLanguagesProfiles)
                     .where(TableLanguagesProfiles.profileId == profileId))
+            # Cleared below, once the submitted settings have been applied.
+            deleted_profile_ids = list(existing)
+
 
             # invalidate cache
             update_profile_id_list.invalidate()
@@ -138,6 +143,19 @@ class SystemSettings(Resource):
             event_stream("settings")
             return e.message, 406
         else:
+            # Every stored reference to a profile that was just deleted. The
+            # editor allocates a new id as max(existing) + 1, so deleting the
+            # highest-numbered profile and adding another reuses that id, and a
+            # reference left behind would point at an unrelated profile that
+            # does exist, which no validation downstream can catch.
+            #
+            # After save_settings, not before: this reads the configuration, and
+            # a user who picks a replacement default and deletes the old profile
+            # in the same Apply has the replacement only in the request. Running
+            # first would see the profile being replaced, switch the default off,
+            # and the untouched enable checkbox is not in the form to turn it
+            # back on.
+            forget_deleted_language_profiles(deleted_profile_ids)
             event_stream("settings")
             return '', 204
 

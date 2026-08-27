@@ -179,6 +179,20 @@ _ALL_OWNED = (
 # same names, and CREATE INDEX would abort the whole cutover. A fresh install
 # never noticed, because create_all builds the final shape and the cutover
 # short-circuits before reaching any of this.
+def _ddl_columns(ddl):
+    """The column names an index DDL in this file references.
+
+    Every entry below has the shape ``... ON <table> (a, "b", c)``, so the last
+    parenthesised group is the column list. Only used to skip a DDL whose column
+    is absent, so a parse that comes back empty simply means "do not skip".
+    """
+    opening = ddl.rfind('(')
+    closing = ddl.rfind(')')
+    if opening == -1 or closing < opening:
+        return []
+    return [part.strip().strip('"') for part in ddl[opening + 1:closing].split(',')]
+
+
 def _rebuild_table(bind, table, pk_col, fk_clauses, force_not_null, index_ddls):
     """Recreate `table` with `pk_col` as a column-level INTEGER PRIMARY KEY, the
     given table-level FK clauses, and `force_not_null` columns made NOT NULL;
@@ -208,7 +222,19 @@ def _rebuild_table(bind, table, pk_col, fk_clauses, force_not_null, index_ddls):
         f'SELECT {", ".join(colnames)} FROM "{table}"'))
     bind.execute(sa.text(f'DROP TABLE "{table}"'))
     bind.execute(sa.text(f'ALTER TABLE "{tmp}" RENAME TO "{table}"'))
+    present = {name.strip('"') for name in colnames}
     for ddl in index_ddls:
+        # A database adopted from upstream can be missing a column this fork
+        # models. The repair that restores it deliberately runs after the whole
+        # chain, so indexing an absent column here would abort the upgrade and
+        # the repair would never run: the install crash-loops. Skipping leaves
+        # the index to be created once the column is back.
+        missing = [name for name in _ddl_columns(ddl) if name not in present]
+        if missing:
+            logger.warning(
+                "Skipping the index on %s: %s not present yet. It is created once the "
+                "post-upgrade column repair restores them.", table, ", ".join(missing))
+            continue
         bind.execute(sa.text(ddl))
 
 
@@ -420,7 +446,18 @@ def _rebuild_all_postgres(bind):
         for col in not_null_cols:
             bind.execute(sa.text(f'ALTER TABLE {table} ALTER COLUMN "{col}" SET NOT NULL'))
         _pg_set_local_pk(bind, table, pk_col)
+        # Same reason as the SQLite path: a database adopted from upstream can
+        # be missing a column this fork models, and indexing it here would abort
+        # the upgrade before the post-upgrade repair could restore it.
+        present = {column['name'] for column in sa.inspect(bind).get_columns(table)}
         for ddl in index_ddls:
+            missing = [name for name in _ddl_columns(ddl) if name not in present]
+            if missing:
+                logger.warning(
+                    "Skipping the index on %s: %s not present yet. It is created once "
+                    "the post-upgrade column repair restores them.",
+                    table, ", ".join(missing))
+                continue
             bind.execute(sa.text(ddl))
     # Phase 3: re-add FKs now that every parent has its new local PK. ADD
     # CONSTRAINT validates existing rows, so a dangling reference aborts here.

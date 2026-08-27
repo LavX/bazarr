@@ -325,10 +325,12 @@ def test_download_best_subtitles_reports_every_scored_candidate():
     assert sink == [
         {"provider_name": "acceptable", "release_info": WEB_RELEASE,
          "score": 311, "downloaded": True,
-         "matches": ["episode", "season", "series", "year"]},
+         "matches": ["episode", "season", "series", "year"],
+         "scored_matches": ["episode", "hearing_impaired", "season", "series", "year"]},
         {"provider_name": "rejected", "release_info": BLURAY_RELEASE,
          "score": 221, "downloaded": False,
-         "matches": ["episode", "season", "series"]},
+         "matches": ["episode", "season", "series"],
+         "scored_matches": ["episode", "hearing_impaired", "season", "series"]},
     ]
 
 
@@ -1389,3 +1391,207 @@ def test_a_hearing_impaired_search_is_recorded_separately(schema_session):
                            _mismatch()) is True
     assert record_mismatch(schema_session, "series", 101, 2, _language_key(hi),
                            _mismatch()) is True
+
+
+# ---------------------------------------------------------------------------
+# The indexer is the only path every subtitle arrival goes through
+# ---------------------------------------------------------------------------
+# Clearing happened on the automatic download and manual save paths only. A full
+# scan, a sync, a translation, a combined output or a file the user dropped next
+# to the video all reach the database through store_subtitles, which recomputes
+# missing_subtitles and never touched the mismatch rows. The badge then outlived
+# the problem: the item kept advertising "grab the Blu-ray release" for a
+# language that had been sitting on disk since the last scan.
+
+
+def test_pruning_drops_the_languages_that_are_no_longer_missing(schema_session):
+    from sqlalchemy import select as sa_select
+
+    from app.database import TableReleaseTypeMismatch
+    from subtitles.mismatch import prune_mismatches, record_mismatch
+
+    record_mismatch(schema_session, "series", 101, 2, "en", _mismatch())
+    record_mismatch(schema_session, "series", 101, 2, "hu", _mismatch())
+
+    prune_mismatches(schema_session, "series", 101, ["hu"])
+
+    remaining = schema_session.execute(
+        sa_select(TableReleaseTypeMismatch.language)).scalars().all()
+    assert remaining == ["hu"], (
+        f'english was satisfied and should have been dropped; kept {remaining!r}')
+
+
+def test_pruning_keeps_variants_apart(schema_session):
+    """`en` and `en:hi` are different records and different wanted entries."""
+    from sqlalchemy import select as sa_select
+
+    from app.database import TableReleaseTypeMismatch
+    from subtitles.mismatch import prune_mismatches, record_mismatch
+
+    record_mismatch(schema_session, "series", 101, 2, "en", _mismatch())
+    record_mismatch(schema_session, "series", 101, 2, "en:hi", _mismatch())
+
+    prune_mismatches(schema_session, "series", 101, ["en:hi"])
+
+    assert schema_session.execute(
+        sa_select(TableReleaseTypeMismatch.language)).scalars().all() == ["en:hi"]
+
+
+def test_pruning_an_item_with_nothing_missing_clears_it(schema_session):
+    from sqlalchemy import select as sa_select
+
+    from app.database import TableReleaseTypeMismatch
+    from subtitles.mismatch import prune_mismatches, record_mismatch
+
+    record_mismatch(schema_session, "series", 101, 2, "en", _mismatch())
+
+    prune_mismatches(schema_session, "series", 101, [])
+
+    assert schema_session.execute(
+        sa_select(TableReleaseTypeMismatch.id)).scalars().all() == []
+
+
+def test_pruning_leaves_other_media_alone(schema_session):
+    from sqlalchemy import select as sa_select
+
+    from app.database import TableReleaseTypeMismatch
+    from subtitles.mismatch import prune_mismatches, record_mismatch
+
+    record_mismatch(schema_session, "series", 101, 2, "en", _mismatch())
+    record_mismatch(schema_session, "series", 102, 2, "en", _mismatch())
+    record_mismatch(schema_session, "movie", 101, 2, "en", _mismatch())
+
+    prune_mismatches(schema_session, "series", 101, [])
+
+    kept = schema_session.execute(
+        sa_select(TableReleaseTypeMismatch.media_type,
+                  TableReleaseTypeMismatch.media_id)).all()
+    assert sorted(tuple(row) for row in kept) == [("movie", 101), ("series", 102)]
+
+
+def test_indexing_an_externally_added_subtitle_retires_the_badge(schema_session, monkeypatch):
+    """The whole point of pruning from the indexer rather than the download path.
+
+    Nothing here goes near a provider: the episode simply has an English file on
+    disk the next time it is indexed, which is what a full scan, a sync, a
+    translation or a hand-copied file all look like from the database's side."""
+    from sqlalchemy import select as sa_select, update as sa_update
+
+    from app.database import TableEpisodes, TableReleaseTypeMismatch
+    from subtitles import mismatch
+    from subtitles.indexer import series as series_indexer
+    from subtitles.mismatch import record_mismatch
+
+    from sqlalchemy import insert as sa_insert
+
+    from app.database import TableLanguagesProfiles
+
+    _seed_episode(schema_session, 101, 2)
+    schema_session.execute(sa_insert(TableLanguagesProfiles).values(
+        profileId=1, name='Test', items="[]", cutoff=None))
+    schema_session.execute(sa_update(TableEpisodes)
+                           .where(TableEpisodes.id == 101)
+                           .values(subtitles="[['en', '/series/2/101.en.srt', 10]]"))
+    schema_session.execute(sa_update(series_indexer.TableShows)
+                           .where(series_indexer.TableShows.id == 1010)
+                           .values(profileId=1))
+    record_mismatch(schema_session, "series", 101, 2, "en", _mismatch())
+    record_mismatch(schema_session, "series", 101, 2, "hu", _mismatch())
+
+    monkeypatch.setattr(series_indexer, "database", schema_session)
+    monkeypatch.setattr(mismatch, "database", schema_session)
+    monkeypatch.setattr(series_indexer, "get_profiles_list", lambda profile_id=None: {
+        "items": [
+            {"language": "en", "forced": "False", "hi": "False",
+             "audio_exclude": "False", "audio_only_include": "False"},
+            {"language": "hu", "forced": "False", "hi": "False",
+             "audio_exclude": "False", "audio_only_include": "False"},
+        ]})
+    monkeypatch.setattr(series_indexer, "get_profile_cutoff", lambda profile_id=None: None)
+    monkeypatch.setattr(series_indexer, "is_search_given_up", lambda *a, **kw: False)
+    monkeypatch.setattr(series_indexer, "event_stream", lambda *a, **kw: None)
+
+    series_indexer.list_missing_subtitles(epno=20, arr_instance_id=2)
+
+    remaining = schema_session.execute(
+        sa_select(TableReleaseTypeMismatch.language)).scalars().all()
+    assert remaining == ["hu"], (
+        'the english subtitle is on disk and the indexer knows it, so its '
+        f'release-type badge should be gone; kept {remaining!r}')
+
+
+# ---------------------------------------------------------------------------
+# A hash-only score is not a base you can add points to
+# ---------------------------------------------------------------------------
+# When a provider that cannot verify its hashes reports one, the scorer keeps
+# the hash and discards every other match (subliminal_patch/score.py). The
+# candidate's score is then the hash points and nothing else, so adding the
+# source points on top describes a number the subtitle would never actually
+# score. The projection promised a re-grab that fixes nothing.
+
+
+def test_the_sink_records_the_matches_the_score_was_computed_from():
+    from subzero.language import Language
+
+    collapsed = _FakeSubtitle("hashy", BLURAY_RELEASE,
+                              {"hash", "series", "season", "episode"})
+    sink = []
+
+    _pool().download_best_subtitles([collapsed], _episode_video(),
+                                    {Language("eng")}, min_score=1000,
+                                    candidate_sink=sink)
+
+    assert sink[0]["matches"] == ["episode", "hash", "season", "series"], (
+        'the pre-score matches are what the download loop tested and must stay')
+    assert sink[0]["scored_matches"] == ["hash", "hearing_impaired"], (
+        'the scorer discarded every release-derived match and kept the hash, '
+        'and the detector cannot see that without this')
+
+
+def test_a_hash_collapsed_candidate_is_not_reported_as_a_release_mismatch():
+    from subtitles.mismatch import detect_release_type_mismatch
+
+    assert detect_release_type_mismatch(
+        video_release_type="WEB-DL",
+        candidates=[{"provider_name": "regielive", "release_info": BLURAY_RELEASE,
+                     "score": 359, "downloaded": False,
+                     "matches": ["episode", "hash", "season", "series"],
+                     "scored_matches": ["hash", "hearing_impaired"]}],
+        min_score=360,
+        media_type="series") is None, (
+        'this candidate scored 359 from its hash alone. Adding the source '
+        'points describes a score it would never reach, so the user would be '
+        'told to re-grab the Blu-ray for nothing')
+
+
+def test_a_normally_scored_candidate_is_still_reported():
+    from subtitles.mismatch import detect_release_type_mismatch
+
+    assert detect_release_type_mismatch(
+        video_release_type="WEB-DL",
+        candidates=[{"provider_name": "goodsubs", "release_info": BLURAY_RELEASE,
+                     "score": 270, "downloaded": False,
+                     "matches": ["episode", "season", "series"],
+                     "scored_matches": ["episode", "hearing_impaired", "season", "series"]}],
+        min_score=280,
+        media_type="series") is not None
+
+
+def test_the_record_key_and_the_indexer_agree_on_every_variant():
+    """The prune compares these two spellings, so they cannot be allowed to drift.
+
+    A record written as "en:forced:hi" while the indexer serialises the same
+    still-missing profile item as "en:forced" is deleted as satisfied on the next
+    indexing pass, taking away a badge for a variant that is still missing.
+    """
+    from subzero.language import Language
+
+    from subtitles.mismatch import _language_key
+
+    for forced, hi in ((False, False), (True, False), (False, True), (True, True)):
+        language = Language.rebuild(Language('eng'), forced=forced, hi=hi)
+        # Exactly what list_missing_subtitles writes: forced first, then hi.
+        expected = 'en' + (':forced' if forced else (':hi' if hi else ''))
+        assert _language_key(language) == expected, (
+            f'forced={forced} hi={hi}: record key {_language_key(language)!r} '
+            f'does not match the indexer spelling {expected!r}')

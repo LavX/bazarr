@@ -205,3 +205,53 @@ def test_the_episodes_cutover_indexes_survive_one_already_existing(pg_engine):
     indexes = {index['name'] for index in sa.inspect(pg_engine).get_indexes('table_episodes')}
     assert 'ix_table_episodes_episode_file_id' in indexes
     assert 'ix_table_episodes_series_id' in indexes
+
+
+def test_an_index_that_cannot_be_built_does_not_undo_the_column_repair(pg_engine):
+    """On PostgreSQL a failed statement aborts the transaction it ran in.
+
+    The column repair and the index repair used to share one, so a single index
+    that cannot be built (a unique one meeting duplicate rows) poisoned the
+    connection: the commit that was going to persist the freshly restored
+    columns failed instead, and the repair silently undid itself. Everything the
+    adoption path had just fixed went with it.
+
+    A savepoint would fix that here and break the app, whose engine runs with
+    isolation_level=AUTOCOMMIT where PostgreSQL rejects SAVEPOINT outright. One
+    transaction per index is correct under both.
+    """
+    from sqlalchemy import Column, Index, Integer, MetaData, Table, Text
+
+    from app.upstream_adoption import (restore_missing_model_columns,
+                                       restore_missing_model_indexes)
+
+    with pg_engine.begin() as connection:
+        connection.execute(sa.text('DROP TABLE IF EXISTS probe_repair'))
+        connection.execute(sa.text('CREATE TABLE probe_repair (id INTEGER)'))
+        connection.execute(sa.text('INSERT INTO probe_repair VALUES (1), (1)'))
+
+    # A UNIQUE INDEX (not a unique constraint: only an Index reaches the index
+    # repair at all) over a column that already holds duplicates. It cannot be
+    # built, which is the failure the repair has to survive.
+    indexed = MetaData()
+    probe = Table('probe_repair', indexed,
+                  Column('id', Integer),
+                  Column('restored', Text))
+    Index('ix_probe_repair_id', probe.c.id, unique=True)
+
+    with pg_engine.begin() as connection:
+        restored = restore_missing_model_columns(connection, metadata=indexed)
+    assert ('probe_repair', 'restored') in restored
+
+    created = restore_missing_model_indexes(pg_engine, metadata=indexed)
+    assert created == [], (
+        'the unique index cannot exist over duplicate rows, so nothing should '
+        f'have been reported as created; got {created!r}')
+
+    columns = {c['name'] for c in sa.inspect(pg_engine).get_columns('probe_repair')}
+    assert 'restored' in columns, (
+        'the failed index rolled back the column the repair had just restored, '
+        f'leaving {sorted(columns)}')
+
+    with pg_engine.begin() as connection:
+        connection.execute(sa.text('DROP TABLE IF EXISTS probe_repair'))

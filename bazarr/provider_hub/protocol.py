@@ -197,6 +197,12 @@ _RESERVED_DISPLAY_ATTRS = frozenset({
     "worker_id",
     "provider_payload",
     "matches",
+    # The scorer's input, not a label. With matches_need_video on, get_matches
+    # recomputes source, resolution and release group from this on every
+    # priority-disabled listing, so a tidier display string here would discard
+    # exactly the matches that separate one candidate from another. Plugins put
+    # their cosmetic label in display["release"].
+    "release_info",
     "content",
     "pack_data",
     "storage_path",

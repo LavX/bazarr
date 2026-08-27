@@ -62,6 +62,21 @@ _SEASON_X_EPISODES = re.compile(
 # Longer than any real episode number, and short enough for int() to accept.
 _MAX_NUMBER_DIGITS = 6
 
+# A season named without an episode, in either spelling, plus a word saying the
+# release is the whole of it.
+_SEASON_ONLY = re.compile(r"(?<![a-z0-9])s(\d{1,4})(?![a-z0-9])")
+_SEASON_WORD = re.compile(r"(?<![a-z0-9])season[-_. ]?(\d{1,4})(?![0-9])")
+# What turns a season into a whole season. "complete" and "pack" say it on their
+# own; "full" does not, because "Full HD" is a resolution, so it counts only in
+# the phrase "full season". "season" is deliberately absent: it is the token that
+# names the season in the first place, so accepting it here would classify an
+# ordinary "Season 1 WEB-DL" as a pack and strip the episode marker from the most
+# common tag shape there is.
+_PACK_WORDS = re.compile(
+    r"(?<![a-z0-9])(?:complete|pack)(?![a-z0-9])"
+    r"|(?<![a-z0-9])full[^a-z0-9]+season(?![a-z0-9])"
+)
+
 
 def _tail_covers(tail, episode):
     """True when ``tail`` names ``episode``, expanding ranges as it goes."""
@@ -91,6 +106,24 @@ def _already_names_the_episode(lowered, season, episode):
     return False
 
 
+def _covers_the_whole_season(lowered, season):
+    """True when the release is a pack of the season being searched.
+
+    A pack covers the requested episode without naming it, so the formatter
+    would treat it as a bare tag and prefix Show.SxxEyy. onto a name that
+    already says S01: two conflicting season markers, and less for guessit to
+    work with than the proper pack name it arrived with.
+
+    Only the requested season counts. S03.COMPLETE says nothing about a season
+    1 episode and still deserves the marker.
+    """
+    named = any(int(match.group(1)) == season
+                for pattern in (_SEASON_ONLY, _SEASON_WORD)
+                for match in pattern.finditer(lowered)
+                if len(match.group(1)) <= _MAX_NUMBER_DIGITS)
+    return named and _PACK_WORDS.search(lowered) is not None
+
+
 def _format_release(version_item, series, season, episode):
     """Display-only scene-style name: ``Series.SxxEyy.version``.
 
@@ -103,6 +136,8 @@ def _format_release(version_item, series, season, episode):
 
     lowered = version_item.lower()
     if _already_names_the_episode(lowered, season, episode):
+        return version_item
+    if _covers_the_whole_season(lowered, season):
         return version_item
 
     clean_version = version_item.replace(" ", ".")

@@ -25,6 +25,7 @@ from subtitles.utils import _get_scores
 from radarr.history import history_log_movie
 from app.jobs_queue import jobs_queue
 from subtitles.adaptive_searching import is_search_given_up
+from subtitles.mismatch import prune_mismatches_for_media
 from arr_instances.resolution import scoped
 
 gc.enable()
@@ -278,6 +279,7 @@ def _log_embedded_history_movie(radarr_id, embedded_languages, reversed_path, ar
 
 def list_missing_subtitles_movies(no=None, arr_instance_id=None):
     stmt = select(TableMovies.radarrId,
+                  TableMovies.id,
                   TableMovies.subtitles,
                   TableMovies.failedAttempts,
                   TableMovies.profileId,
@@ -408,6 +410,10 @@ def list_missing_subtitles_movies(no=None, arr_instance_id=None):
                    .values(missing_subtitles=missing_subtitles_text)
                    .where(TableMovies.radarrId == movie_subtitles.radarrId),
                    TableMovies.arr_instance_id, arr_instance_id))
+
+        # See the note in the series indexer: this is the one path every
+        # subtitle arrival goes through.
+        prune_mismatches_for_media('movie', movie_subtitles.id, missing_subtitles_text)
 
         event_stream(type='movie', payload=movie_subtitles.radarrId)
         event_stream(type='movie-wanted', action='update', payload=movie_subtitles.radarrId)

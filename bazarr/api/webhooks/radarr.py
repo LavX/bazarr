@@ -130,7 +130,7 @@ class WebHooksRadarr(Resource):
             logging.debug(message)
             return message, 200
 
-        store_subtitles_movie(movie.path, path_mappings.path_replace_movie(movie.path), arr_instance_id=arr_instance_id)
+        store_subtitles_movie(movie.path, path_mappings.path_replace_instance(movie.path, arr_instance_id, 'movie'), arr_instance_id=arr_instance_id)
         movies_download_subtitles(no=movie.radarrId, arr_instance_id=arr_instance_id)
 
         return "Finished processing subtitles.", 200

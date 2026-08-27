@@ -861,7 +861,7 @@ class SZProviderPool(ProviderPool):
             # Identity, not equality: Subtitle equality is provider-defined and
             # two distinct candidates can compare equal.
             downloaded_ids = {id(s) for s in downloaded_subtitles}
-            for subtitle, score, _score_without_hash, _matches, orig_matches in scored_subtitles:
+            for subtitle, score, _score_without_hash, matches, orig_matches in scored_subtitles:
                 candidate_sink.append({
                     'provider_name': subtitle.provider_name,
                     'release_info': getattr(subtitle, 'release_info', None),
@@ -872,6 +872,12 @@ class SZProviderPool(ProviderPool):
                     # consumer reasoning about "would this have been downloaded"
                     # needs the same matches the loop tested.
                     'matches': sorted(orig_matches or ()),
+                    # And what the score was actually computed from, which is
+                    # not the same set: compute_score discards every match but
+                    # the hash when one is present. A consumer reasoning about
+                    # what this subtitle would score under other circumstances
+                    # cannot tell that from the pre-score matches.
+                    'scored_matches': sorted(matches or ()),
                 })
 
         return downloaded_subtitles
