@@ -43,7 +43,7 @@ guess_language-spirit==0.5.4
 guessit==3.8.0
 itsdangerous==2.2.0
 json_tricks==3.17.3
-knowit==0.5.11
+knowit==0.6.1
 lxml>=6.1.1  # XXE fix in iterparse / ETCompatXMLParser
 msgpack==1.2.1  # GHSA-6v7p-g79w-8964 fix. signalrcore 1.0.2 over-pins msgpack==1.1.2 in its metadata, so it is installed with --no-deps (see Dockerfile, .github/workflows/ci.yml, bazarr/app/requirements.py). Bazarr forces the JSON SignalR protocol, so msgpack's MessagePack path is never used, and 1.2.1 is runtime-compatible with signalrcore 1.0.2 (verified).
 numpy>=2.5.0,<2.6.0  # cap excludes entire 2.4.x line: it raised the x86-64 baseline to v2, crashing pre-2009 CPUs (SIGILL on import). 2.4.0 itself is also yanked for an unrelated BC bug.
