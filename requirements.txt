@@ -48,7 +48,7 @@ lxml>=6.1.1  # XXE fix in iterparse / ETCompatXMLParser
 msgpack==1.2.1  # GHSA-6v7p-g79w-8964 fix. signalrcore 1.0.2 over-pins msgpack==1.1.2 in its metadata, so it is installed with --no-deps (see Dockerfile, .github/workflows/ci.yml, bazarr/app/requirements.py). Bazarr forces the JSON SignalR protocol, so msgpack's MessagePack path is never used, and 1.2.1 is runtime-compatible with signalrcore 1.0.2 (verified).
 numpy>=2.5.0,<2.6.0  # cap excludes entire 2.4.x line: it raised the x86-64 baseline to v2, crashing pre-2009 CPUs (SIGILL on import). 2.4.0 itself is also yanked for an unrelated BC bug.
 Pillow>=12.3.0 --only-binary=Pillow
-plexapi>=4.18.1
+plexapi>=4.18.2
 py7zr==1.1.3  # GHSA-q6rc-2cgv-63h7 arbitrary-file-write fix (latest)
 pycountry==26.2.16
 PyJWT>=2.13.0  # CVE-2026-32597 fix for unknown crit headers
