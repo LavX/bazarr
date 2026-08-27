@@ -1368,3 +1368,221 @@ class TestMassBatchOperationProcessing:
         assert result['queued'] == 3
         assert result['skipped'] == 2  # the 2 skipped from _collect_subtitle_items
         assert mock_process.call_count == 3
+
+
+class TestMassTranslateFromEmbeddedTracks:
+    """Mass translate sourcing from an embedded track.
+
+    A user with anime libraries whose only English subtitles are inside the
+    container could translate one episode at a time but not a series: the
+    collector kept only entries carrying a path, and the indexer records an
+    embedded track as ``[language, None, None]``.
+    """
+
+    def _episode(self, ep_id=1, series_id=10, path='/video/ep1.mkv', subtitles=None):
+        ep = MagicMock()
+        ep.sonarrEpisodeId = ep_id
+        ep.sonarrSeriesId = series_id
+        ep.path = path
+        ep.subtitles = subtitles if subtitles is not None else "[['en', None, None]]"
+        return ep
+
+    def _collect(self, mock_db, episode, action='translate', options=None):
+        from subtitles.mass_operations import _collect_subtitle_items
+
+        mock_db.execute.return_value.all.return_value = [episode]
+        return _collect_subtitle_items(
+            [{'type': 'episode', 'sonarrEpisodeId': episode.sonarrEpisodeId}],
+            action=action,
+            options=options if options is not None else {'from_lang': 'en', 'to_lang': 'nl'})
+
+    @staticmethod
+    def _wire(mock_settings, mock_path_map, mock_lang):
+        mock_settings.subsync.max_offset_seconds = 60
+        mock_settings.subsync.gss = True
+        mock_settings.subsync.no_fix_framerate = True
+        mock_path_map.path_replace_instance.side_effect = lambda p, *a, **kw: p
+        mock_path_map.path_replace_reverse_instance.side_effect = lambda p, *a, **kw: p
+        mock_lang.return_value = {'language': 'en', 'forced': False, 'hi': False}
+
+    # --- collecting -------------------------------------------------------
+
+    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
+    @patch('subtitles.mass_operations.os.path.isfile', return_value=False)
+    @patch('subtitles.mass_operations.path_mappings')
+    @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
+    @patch('subtitles.mass_operations._get_synced_movie_paths', return_value=set())
+    @patch('subtitles.mass_operations.database')
+    @patch('subtitles.mass_operations.settings')
+    def test_an_embedded_track_becomes_a_translate_source(
+            self, mock_settings, mock_db, _sm, _se, mock_path_map, _isfile, mock_lang):
+        self._wire(mock_settings, mock_path_map, mock_lang)
+
+        items, skipped = self._collect(mock_db, self._episode())
+
+        assert len(items) == 1
+        assert items[0]['embedded'] is True
+        assert items[0]['srt_path'] is None
+        assert items[0]['srt_lang'] == 'en'
+        assert items[0]['video_path'] == '/video/ep1.mkv'
+
+    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
+    @patch('subtitles.mass_operations.os.path.isfile', return_value=False)
+    @patch('subtitles.mass_operations.path_mappings')
+    @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
+    @patch('subtitles.mass_operations._get_synced_movie_paths', return_value=set())
+    @patch('subtitles.mass_operations.database')
+    @patch('subtitles.mass_operations.settings')
+    def test_sync_still_skips_an_embedded_track(
+            self, mock_settings, mock_db, _sm, _se, mock_path_map, _isfile, mock_lang):
+        """There is no file to sync, and no useful one to produce."""
+        self._wire(mock_settings, mock_path_map, mock_lang)
+
+        items, skipped = self._collect(mock_db, self._episode(), action='sync', options={})
+
+        assert items == []
+        assert skipped == 1
+
+    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
+    @patch('subtitles.mass_operations.os.path.isfile', return_value=False)
+    @patch('subtitles.mass_operations.path_mappings')
+    @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
+    @patch('subtitles.mass_operations._get_synced_movie_paths', return_value=set())
+    @patch('subtitles.mass_operations.database')
+    @patch('subtitles.mass_operations.settings')
+    def test_a_mod_action_still_skips_an_embedded_track(
+            self, mock_settings, mock_db, _sm, _se, mock_path_map, _isfile, mock_lang):
+        self._wire(mock_settings, mock_path_map, mock_lang)
+
+        items, skipped = self._collect(mock_db, self._episode(),
+                                       action='remove_HI', options={})
+
+        assert items == []
+        assert skipped == 1
+
+    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
+    @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
+    @patch('subtitles.mass_operations.path_mappings')
+    @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
+    @patch('subtitles.mass_operations._get_synced_movie_paths', return_value=set())
+    @patch('subtitles.mass_operations.database')
+    @patch('subtitles.mass_operations.settings')
+    def test_a_real_file_wins_over_the_embedded_track_of_the_same_language(
+            self, mock_settings, mock_db, _sm, _se, mock_path_map, _isfile, mock_lang):
+        """Queueing both would run the same translation twice into one output."""
+        self._wire(mock_settings, mock_path_map, mock_lang)
+        episode = self._episode(
+            subtitles="[['en', None, None], ['en', '/subs/ep1.en.srt', 100]]")
+
+        items, _skipped = self._collect(mock_db, episode)
+
+        assert len(items) == 1
+        assert items[0]['srt_path'] == '/subs/ep1.en.srt'
+        assert not items[0].get('embedded')
+
+    @patch('subtitles.mass_operations.languages_from_colon_seperated_string')
+    @patch('subtitles.mass_operations.os.path.isfile', return_value=True)
+    @patch('subtitles.mass_operations.path_mappings')
+    @patch('subtitles.mass_operations._get_synced_episode_paths', return_value=set())
+    @patch('subtitles.mass_operations._get_synced_movie_paths', return_value=set())
+    @patch('subtitles.mass_operations.database')
+    @patch('subtitles.mass_operations.settings')
+    def test_an_item_that_already_has_the_target_language_is_still_skipped(
+            self, mock_settings, mock_db, _sm, _se, mock_path_map, _isfile, mock_lang):
+        self._wire(mock_settings, mock_path_map, mock_lang)
+        episode = self._episode(subtitles="[['en', None, None], ['nl', None, None]]")
+
+        items, skipped = self._collect(mock_db, episode)
+
+        assert items == []
+        assert skipped == 1
+
+    # --- processing -------------------------------------------------------
+
+    def _embedded_item(self, **overrides):
+        item = {
+            'video_path': '/video/ep1.mkv',
+            'srt_path': None,
+            'srt_lang': 'en',
+            'embedded': True,
+            'forced': False,
+            'hi': False,
+            'sonarr_series_id': 10,
+            'sonarr_episode_id': 1,
+            'radarr_id': None,
+            'arr_instance_id': None,
+            'metadata': MagicMock(),
+        }
+        item.update(overrides)
+        return item
+
+    @patch('subtitles.tools.translate.main.translate_subtitles_file', return_value=True)
+    @patch('subtitles.tools.translate.batch.extract_embedded_subtitle',
+           return_value='/config/extracted_subs/ep1.en.srt')
+    def test_the_track_is_extracted_when_the_item_runs_not_when_it_is_collected(
+            self, mock_extract, mock_translate):
+        """A whole-library batch must not extract every track up front."""
+        from subtitles.mass_operations import _process_subtitle_item
+
+        assert _process_subtitle_item(self._embedded_item(), 'translate',
+                                      {'from_lang': 'en', 'to_lang': 'nl'}, 'job') is True
+
+        mock_extract.assert_called_once_with('/video/ep1.mkv', 'en', 'episode',
+                                             hi=False, forced=False)
+        assert mock_translate.call_args[1]['source_srt_file'] == \
+            '/config/extracted_subs/ep1.en.srt'
+        assert mock_translate.call_args[1]['to_lang'] == 'nl'
+
+    @patch('subtitles.tools.translate.main.translate_subtitles_file')
+    @patch('subtitles.tools.translate.batch.extract_embedded_subtitle', return_value=None)
+    def test_a_track_that_cannot_be_extracted_fails_only_its_own_item(
+            self, mock_extract, mock_translate):
+        """A bitmap track such as PGS cannot become an SRT. That is this item's
+        problem, not the batch's."""
+        from subtitles.mass_operations import _process_subtitle_item
+
+        assert _process_subtitle_item(self._embedded_item(), 'translate',
+                                      {'from_lang': 'en', 'to_lang': 'nl'}, 'job') is False
+        mock_translate.assert_not_called()
+
+    @patch('subtitles.tools.translate.main.translate_subtitles_file', return_value=True)
+    @patch('subtitles.tools.translate.batch.extract_embedded_subtitle',
+           return_value='/config/extracted_subs/movie.en.srt')
+    def test_a_movie_track_is_extracted_as_a_movie(self, mock_extract, mock_translate):
+        from subtitles.mass_operations import _process_subtitle_item
+
+        item = self._embedded_item(sonarr_series_id=None, sonarr_episode_id=None,
+                                   radarr_id=5, video_path='/video/movie.mkv')
+
+        assert _process_subtitle_item(item, 'translate',
+                                      {'from_lang': 'en', 'to_lang': 'nl'}, 'job') is True
+
+        mock_extract.assert_called_once_with('/video/movie.mkv', 'en', 'movies',
+                                             hi=False, forced=False)
+
+    @patch('subtitles.tools.translate.main.translate_subtitles_file', return_value=True)
+    @patch('subtitles.tools.translate.batch.extract_embedded_subtitle',
+           return_value='/config/extracted_subs/ep1.en.hi.srt')
+    def test_the_source_variant_flags_reach_the_extractor(self, mock_extract, _translate):
+        """The cache key encodes hi and forced, and the wrong track would be a
+        silently different subtitle."""
+        from subtitles.mass_operations import _process_subtitle_item
+
+        item = self._embedded_item(hi=True, forced=False)
+        _process_subtitle_item(item, 'translate', {'from_lang': 'en', 'to_lang': 'nl'}, 'job')
+
+        mock_extract.assert_called_once_with('/video/ep1.mkv', 'en', 'episode',
+                                             hi=True, forced=False)
+
+    @patch('subtitles.tools.translate.main.translate_subtitles_file', return_value=True)
+    @patch('subtitles.tools.translate.batch.extract_embedded_subtitle')
+    def test_an_ordinary_file_item_never_reaches_the_extractor(
+            self, mock_extract, mock_translate):
+        from subtitles.mass_operations import _process_subtitle_item
+
+        item = self._embedded_item(embedded=False, srt_path='/subs/ep1.en.srt')
+
+        assert _process_subtitle_item(item, 'translate',
+                                      {'from_lang': 'en', 'to_lang': 'nl'}, 'job') is True
+        mock_extract.assert_not_called()
+        assert mock_translate.call_args[1]['source_srt_file'] == '/subs/ep1.en.srt'
