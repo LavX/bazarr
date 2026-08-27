@@ -23,7 +23,7 @@ from .config import settings
 from .get_args import args
 from .upstream_adoption import (adopt_upstream_database, explain_unknown_revision,
                                known_revisions, repair_missing_columns_after_upgrade,
-                               stamped_revision)
+                               restore_missing_model_indexes, stamped_revision)
 
 logger = logging.getLogger(__name__)
 
@@ -870,6 +870,17 @@ def migrate_db(app):
                 repair_missing_columns_after_upgrade(connection)
         except Exception:
             logging.exception("Post-upgrade column repair failed; continuing startup")
+
+        # Separately, and only once those columns are committed. A migration
+        # cannot index a column that is still missing without aborting the whole
+        # upgrade, so it skips and the index is made here. It gets its own
+        # transaction per index: on PostgreSQL one index that cannot be built
+        # would abort the transaction it shared, and the commit that persists
+        # the restored columns would fail with it.
+        try:
+            restore_missing_model_indexes(engine)
+        except Exception:
+            logging.exception("Post-upgrade index repair failed; continuing startup")
 
     # add the system table single row if it's not existing
     if not database.execute(

@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -442,3 +443,67 @@ def test_the_launcher_this_process_installed_is_claimed(monkeypatch, tmp_path):
     assert shim._is_claimed(os.path.dirname(launcher)), (
         'the directory alass is about to exec from is not protected from the '
         'next sweep on this host')
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the claim is an flock")
+def test_a_directory_is_never_visible_to_a_sweep_before_it_is_claimed(monkeypatch, tmp_path):
+    """mkdtemp creates the directory; the claim comes after it.
+
+    The sweep matches on the name prefix, so between those two steps another
+    process is free to delete the directory this one is about to install into.
+    Claiming earlier narrows the window but does not close it. The directory has
+    to be built under a name the sweep ignores and moved in once it is held.
+    """
+    from provider_hub import worker as _unused  # noqa: F401  (keeps import order stable)
+    shim = _shim()
+
+    monkeypatch.setattr(shim, "_LAUNCHER_PATH", None, raising=False)
+    monkeypatch.setattr(shim, "_writable_directories", lambda: [str(tmp_path)])
+
+    seen = []
+    real_claim = shim._claim
+
+    def _claim_watching_what_the_sweep_would_see(directory):
+        # Everything a concurrent _sweep() would consider fair game right now.
+        seen.append([
+            entry for entry in os.listdir(tmp_path)
+            if entry.startswith(shim.LAUNCHER_PREFIX)
+            and not shim._is_claimed(os.path.join(tmp_path, entry))
+        ])
+        return real_claim(directory)
+
+    monkeypatch.setattr(shim, "_claim", _claim_watching_what_the_sweep_would_see)
+
+    launcher = shim.ensure_launcher()
+
+    assert launcher, "the launcher could not be installed at all"
+    assert seen and seen[0] == [], (
+        f"an unclaimed launcher directory was already visible to the sweep: "
+        f"{seen[0]!r}. A concurrent install would have deleted it.")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the claim is an flock")
+def test_a_staging_directory_left_by_a_crash_is_eventually_reclaimed(monkeypatch, tmp_path):
+    """Staging is invisible to the sweep, so the leak has to be bounded somehow.
+
+    A staging directory exists for two syscalls. One sitting unclaimed for an
+    hour belongs to a process that died mid-install, and reclaiming it cannot
+    race anything live.
+    """
+    shim = _shim()
+    monkeypatch.setattr(shim, "_LAUNCHER_PATH", None, raising=False)
+    monkeypatch.setattr(shim, "_writable_directories", lambda: [str(tmp_path)])
+
+    fresh = tmp_path / f"{shim.LAUNCHER_STAGING_PREFIX}inflight"
+    fresh.mkdir()
+    abandoned = tmp_path / f"{shim.LAUNCHER_STAGING_PREFIX}crashed"
+    abandoned.mkdir()
+    old = time.time() - shim._STAGING_ABANDONED_AFTER - 60
+    os.utime(abandoned, (old, old))
+
+    shim.ensure_launcher()
+
+    assert fresh.is_dir(), (
+        "a staging directory young enough to be mid-install was removed, which "
+        "is the race staging exists to avoid")
+    assert not abandoned.exists(), "an abandoned staging directory leaked"

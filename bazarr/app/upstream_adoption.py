@@ -320,13 +320,25 @@ def retire_split_subtitle_tables(connection, folded_tables):
     return dropped
 
 
-def restore_missing_model_indexes(connection, metadata=None):
+def restore_missing_model_indexes(engine, metadata=None):
     """Create the model-declared indexes a table is missing.
 
     The other half of restoring a column. A migration that wanted to index one
     upstream had dropped has to skip it, or it aborts the upgrade before the
     column can be restored at all. Skipping leaves the index to be made here,
     once the column exists.
+
+    Takes the ENGINE, not the connection the columns were restored on, and gives
+    every index its own transaction. On PostgreSQL a failed statement aborts the
+    whole transaction it ran in, so a single index that cannot be built (a
+    unique one meeting duplicate rows, say) would otherwise poison the
+    connection: the commit that was going to persist the freshly restored
+    columns fails instead, and the repair silently undoes itself.
+
+    A savepoint would fix that on a transactional connection and break the app's
+    own engine, which runs with isolation_level=AUTOCOMMIT, where SAVEPOINT is
+    rejected outright. One transaction per index is correct under both, and it
+    is why this runs after the column repair has committed rather than inside it.
 
     Only indexes whose columns are all present are attempted, so a column the
     repair could not restore faithfully leaves its index out rather than turning
@@ -339,34 +351,38 @@ def restore_missing_model_indexes(connection, metadata=None):
 
         metadata = Base.metadata
 
-    inspector = sa.inspect(connection)
-    existing_tables = set(inspector.get_table_names())
+    wanted_indexes = []
+    with engine.connect() as connection:
+        inspector = sa.inspect(connection)
+        existing_tables = set(inspector.get_table_names())
+        for table in metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue
+            present_columns = {column['name'] for column in inspector.get_columns(table.name)}
+            present_indexes = {index['name'] for index in inspector.get_indexes(table.name)}
+            for index in table.indexes:
+                if index.name in present_indexes:
+                    continue
+                columns = {column.name for column in index.columns}
+                if not columns <= present_columns:
+                    logging.warning(
+                        'BAZARR cannot create the index %s, %s is still missing from %s.',
+                        index.name, ', '.join(sorted(columns - present_columns)), table.name)
+                    continue
+                wanted_indexes.append((table.name, index))
+
     created = []
-
-    for table in metadata.sorted_tables:
-        if table.name not in existing_tables:
-            continue
-
-        present_columns = {column['name'] for column in inspector.get_columns(table.name)}
-        present_indexes = {index['name'] for index in inspector.get_indexes(table.name)}
-        for index in table.indexes:
-            if index.name in present_indexes:
-                continue
-            wanted = {column.name for column in index.columns}
-            if not wanted <= present_columns:
-                logging.warning(
-                    'BAZARR cannot create the index %s, %s is still missing from %s.',
-                    index.name, ', '.join(sorted(wanted - present_columns)), table.name)
-                continue
-            try:
+    for table_name, index in wanted_indexes:
+        try:
+            with engine.begin() as connection:
                 index.create(bind=connection)
-            except Exception:
-                logging.warning('BAZARR could not create the index %s on %s. Bazarr+ will '
-                                'start, but queries relying on it stay unindexed.',
-                                index.name, table.name, exc_info=True)
-                continue
-            created.append(index.name)
-            logging.info('BAZARR created the missing index %s on %s.', index.name, table.name)
+        except Exception:
+            logging.warning('BAZARR could not create the index %s on %s. Bazarr+ will '
+                            'start, but queries relying on it stay unindexed.',
+                            index.name, table_name, exc_info=True)
+            continue
+        created.append(index.name)
+        logging.info('BAZARR created the missing index %s on %s.', index.name, table_name)
 
     return created
 
@@ -383,13 +399,12 @@ def repair_missing_columns_after_upgrade(connection):
     fork's own migrations are about to create changes what they see, and on
     PostgreSQL the local-id PK cutover in particular wants to build its own.
 
-    That ordering is also why the indexes are rebuilt here: a migration cannot
-    index a column that is still missing without aborting the whole upgrade, so
-    it skips, and this is where the skipped ones are made.
+    The indexes a migration had to skip are made by
+    ``restore_missing_model_indexes``, which the caller runs AFTER this has
+    committed. It cannot share this transaction: on PostgreSQL one index that
+    cannot be built would abort it and take these columns down with it.
     """
-    restored = restore_missing_model_columns(connection)
-    restore_missing_model_indexes(connection)
-    return restored
+    return restore_missing_model_columns(connection)
 
 
 def looks_like_a_bazarr_database(connection):

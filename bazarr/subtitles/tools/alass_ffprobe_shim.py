@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 # What a stream whose codec ffprobe could not identify gets called. alass only
 # needs the field to exist: it reads codec_type to pick the audio stream.
@@ -115,6 +116,18 @@ def _writable_directories():
 
 
 LAUNCHER_PREFIX = "bazarr-alass-shim-"
+
+# Where a launcher is built before anyone else can see it. The sweep matches on
+# LAUNCHER_PREFIX, so a directory created directly under that name is fair game
+# for another process between mkdtemp() and the claim, however few syscalls
+# apart those are. It is built under this prefix instead, claimed, and only then
+# renamed into the launcher namespace, by which point the claim protects it.
+LAUNCHER_STAGING_PREFIX = "bazarr-alass-staging-"
+
+# A staging directory lives for microseconds. One left unclaimed for this long
+# belongs to a process that died mid-install, so reclaiming it cannot race
+# anything live. Six orders of magnitude of margin, deliberately.
+_STAGING_ABANDONED_AFTER = 3600.0
 
 # Held open for as long as this process runs, which is what makes the launcher
 # directory distinguishable from one an exited process left behind.
@@ -211,10 +224,20 @@ def _sweep(parent):
     in_use = os.path.dirname(_LAUNCHER_PATH) if _LAUNCHER_PATH else None
 
     for entry in entries:
-        if not entry.startswith(LAUNCHER_PREFIX):
+        staging = entry.startswith(LAUNCHER_STAGING_PREFIX)
+        if not staging and not entry.startswith(LAUNCHER_PREFIX):
             continue
 
         path = os.path.join(parent, entry)
+        if staging:
+            # Never a staging directory that could still be mid-install: that is
+            # the race this staging step exists to remove, and reintroducing it
+            # here would defeat the point.
+            try:
+                if time.time() - os.stat(path).st_mtime < _STAGING_ABANDONED_AFTER:
+                    continue
+            except OSError:
+                continue
         if in_use and os.path.abspath(path) == os.path.abspath(in_use):
             continue
         try:
@@ -282,21 +305,28 @@ def ensure_launcher():
         # below reclaim it rather than skipping it as still in use.
         _release_claim()
         for parent in _writable_directories():
-            directory = None
+            directory = staging = None
             try:
-                directory = tempfile.mkdtemp(prefix=LAUNCHER_PREFIX, dir=_ensure(parent))
-                # Claimed before anything is written: the sweep matches on the
-                # name prefix, so another install starting now would otherwise
-                # be free to remove this directory between here and the exec.
-                _LAUNCHER_CLAIM_FD = _claim(directory)
+                staging = tempfile.mkdtemp(prefix=LAUNCHER_STAGING_PREFIX,
+                                           dir=_ensure(parent))
+                # Claim it, THEN give it a name the sweep looks at. A directory
+                # created directly under LAUNCHER_PREFIX is visible to another
+                # process's sweep before this one can hold it, and the rename is
+                # what makes appearing and being held a single step.
+                _LAUNCHER_CLAIM_FD = _claim(staging)
+                directory = os.path.join(
+                    parent,
+                    LAUNCHER_PREFIX + os.path.basename(staging)[len(LAUNCHER_STAGING_PREFIX):])
+                os.rename(staging, directory)
                 _LAUNCHER_PATH = _install_launcher(directory, content)
             except Exception:
                 logger.debug("Could not install the alass ffprobe shim in %s", parent, exc_info=True)
                 # Nothing remembers the failure, so every sync retries this. Each
                 # retry leaving its private directory behind would leak inodes.
                 _release_claim()
-                if directory:
-                    shutil.rmtree(directory, ignore_errors=True)
+                for leftover in (directory, staging):
+                    if leftover:
+                        shutil.rmtree(leftover, ignore_errors=True)
                 continue
 
             return _LAUNCHER_PATH
