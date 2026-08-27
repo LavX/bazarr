@@ -840,9 +840,13 @@ def test_an_upstream_database_is_still_adopted(upstream_engine):
 
 # --- not dropping rows that were never folded -----------------------------
 
-def test_a_split_table_holding_an_orphan_row_is_kept(upstream_engine):
+def test_orphan_rows_are_archived_and_the_split_table_still_goes(upstream_engine):
     """The fold walks the item table, so a row whose parent id is missing is
-    never copied. Dropping the table then destroys it for good."""
+    never copied. Keeping the table to protect those rows does not work: it
+    carries a foreign key into the item table, and the local-id PK cutover
+    aborts on any foreign_key_check violation, so the user crash-loops anyway
+    with adoption already half committed. The rows are copied into a plain
+    table with no constraints instead, and the split table goes."""
     from app.upstream_adoption import adopt_upstream_database
 
     with upstream_engine.begin() as connection:
@@ -863,11 +867,40 @@ def test_a_split_table_holding_an_orphan_row_is_kept(upstream_engine):
         adopt_upstream_database(connection)
 
     tables = set(sa.inspect(upstream_engine).get_table_names())
-    assert 'table_episodes_subtitles' in tables, 'the orphan row would have been destroyed'
+    assert 'table_episodes_subtitles' not in tables, \
+        'the split table has to go or the cutover aborts on its foreign key'
+    assert 'orphaned_table_episodes_subtitles' in tables
+
+    with upstream_engine.connect() as connection:
+        archived = connection.execute(sa.text(
+            'SELECT "sonarrEpisodeId", language, path FROM orphaned_table_episodes_subtitles'
+        )).fetchall()
+    assert archived == [(99, 'fr', '/m/orphan.fr.srt')], archived
+
     # the row that did have a parent still reached the column
     assert _subtitles_of(upstream_engine, 61) == str([['en', '/m/a.en.srt', 5]])
-    # and the movie table, which has no orphan, is still retired
-    assert 'table_movies_subtitles' not in tables
+
+
+def test_nothing_is_archived_when_every_row_has_a_parent(upstream_engine):
+    """The archive is for a database that lost referential integrity, not a
+    table left behind on every adoption."""
+    from app.upstream_adoption import adopt_upstream_database
+
+    with upstream_engine.begin() as connection:
+        connection.execute(sa.text(
+            'INSERT INTO table_episodes ("sonarrEpisodeId", "sonarrSeriesId", path) '
+            "VALUES (62, 6, '/m/b.mkv')"))
+        connection.execute(sa.text(
+            'INSERT INTO table_episodes_subtitles '
+            '("sonarrEpisodeId", "sonarrSeriesId", language, hi, forced, path, size) '
+            "VALUES (62, 6, 'en', 0, 0, '/m/b.en.srt', 5)"))
+
+    with upstream_engine.begin() as connection:
+        adopt_upstream_database(connection)
+
+    tables = set(sa.inspect(upstream_engine).get_table_names())
+    assert 'table_episodes_subtitles' not in tables
+    assert not any(name.startswith('orphaned_') for name in tables), tables
 
 
 # --- not restoring a column whose constraint would be lost ----------------

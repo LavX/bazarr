@@ -285,16 +285,32 @@ def retire_split_subtitle_tables(connection, folded_tables):
         # not there was never copied anywhere. Foreign keys should prevent it,
         # and on SQLite they are not always enforced, so this is checked rather
         # than assumed: dropping the table would destroy those rows for good.
+        #
+        # Keeping the table instead does not work either. It carries a foreign
+        # key into the item table, and the local-id PK cutover aborts on any
+        # foreign_key_check violation, so the user would crash-loop with
+        # adoption already half committed. The rows are copied into a plain
+        # table with no constraints, and the split table goes.
+        orphan_clause = (f'"{join_column}" IS NULL OR "{join_column}" NOT IN '
+                         f'(SELECT "{join_column}" FROM {item_table})')
         orphans = connection.execute(sa.text(
-            f'SELECT count(*) FROM {split_table} WHERE "{join_column}" IS NULL '
-            f'OR "{join_column}" NOT IN (SELECT "{join_column}" FROM {item_table})')).scalar()
+            f'SELECT count(*) FROM {split_table} WHERE {orphan_clause}')).scalar()
         if orphans:
+            archive_table = f'orphaned_{split_table}'
+            columns = [column['name'] for column
+                       in sa.inspect(connection).get_columns(split_table)]
+            column_list = ', '.join(f'"{name}"' for name in columns)
+            connection.execute(sa.text(f'DROP TABLE IF EXISTS {archive_table}'))
+            # CREATE TABLE AS copies the values and none of the constraints,
+            # which is the point: nothing may reference the item tables.
+            connection.execute(sa.text(
+                f'CREATE TABLE {archive_table} AS SELECT {column_list} '
+                f'FROM {split_table} WHERE {orphan_clause}'))
             logging.warning(
-                'BAZARR keeping %s: %s of its rows point at an item that is not in %s, so they '
-                'were never folded across. Nothing reads this table, and it is left in place '
-                'rather than dropped so those rows are not lost.',
-                split_table, orphans, item_table)
-            continue
+                'BAZARR %s rows in %s point at an item that is not in %s, so nothing folded '
+                'them across. They have been copied to %s, which nothing reads and nothing '
+                'references, so they can be inspected or discarded at your leisure.',
+                orphans, split_table, item_table, archive_table)
 
         connection.execute(sa.text(f'DROP TABLE {split_table}'))
         dropped.append(split_table)
