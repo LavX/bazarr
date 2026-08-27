@@ -37,7 +37,7 @@
     "url": "https://lavx.github.io/bazarr/",
     "image": "https://lavx.github.io/bazarr/screenshots/og-image.png",
     "downloadUrl": "https://github.com/LavX/bazarr",
-    "softwareVersion": "2.5.2",
+    "softwareVersion": "2.6.0",
     "author": {
       "@type": "Person",
       "name": "LavX",
@@ -525,8 +525,8 @@
         <li><strong>v2.5.0 &ldquo;Murmuration&rdquo;</strong> (released): <a href="https://github.com/LavX/bazarr/issues/156" target="_blank" rel="noopener">multiple Radarr and Sonarr instances</a> managed as one flock, per-instance subtitle settings, compressed-archive uploads with drag-and-drop, and an SSRF / path-traversal security pass.</li>
         <li><strong>v2.5.1 &ldquo;Murmuration&rdquo;</strong> (released): a stability patch for the multi-instance rollout. Fresh-setup connection-refused noise is fixed and self-heals on upgrade, reverse-proxy subpath asset loading works again, plus a full round of dependency and security maintenance.</li>
         <li><strong>v2.5.2 &ldquo;Murmuration&rdquo;</strong> (released): a Provider Hub patch. WhisperAI transcriptions are no longer killed at a hardcoded 30 seconds; the deadline now follows the timeouts you configure, with a new global default worker-timeout setting as the fallback.</li>
-        <li><strong>v2.6.0</strong>: universal providers and federation. Point Bazarr+ at any OpenSubtitles.com-compatible endpoint, including another Bazarr+ instance, and daisy-chain instances together over a loop-safe federation protocol.</li>
-        <li><strong>v3.0.0 &ldquo;Subnet&rdquo;</strong>: peer-to-peer subtitle federation, a self-organizing mesh of Bazarr+ instances.</li>
+        <li><strong>v2.6.0 &ldquo;Clockwork&rdquo;</strong> (released): a correctness pass over the parts that quietly did the wrong thing. Databases created by upstream Bazarr are adopted instead of crash-looping, the sync maximum offset decides whether a result is accepted rather than merely bounding the search, Provider Hub candidates are scored on their release information, mass translate can work from an embedded subtitle track, and per-provider score modifiers let you weight one provider up or down.</li>
+        <li><strong>v3.0.0 &ldquo;Galaxy&rdquo;</strong>: peer-to-peer subtitle sharing, a self-organizing mesh of Bazarr+ instances.</li>
       </ul>
     </div>
   </section>

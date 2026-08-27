@@ -348,6 +348,7 @@ jobs:
             tests/bazarr/test_sonarr_sync_memory.py \
             tests/bazarr/test_anilist_index.py \
             tests/bazarr/test_image_memory_config.py \
+            tests/bazarr/test_package_info_location.py \
             tests/bazarr/test_translate_owner_threading.py \
             tests/bazarr/test_embedded_track_eligibility.py \
             tests/bazarr/test_parser_owner_threading.py \
