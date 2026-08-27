@@ -18,7 +18,6 @@ goes, rather than asserting the shape of the code.
 import gc
 import weakref
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 

@@ -71,6 +71,11 @@ class WorkerResult:
 _live_clients: "weakref.WeakSet[ProviderWorkerClient]" = weakref.WeakSet()
 _live_clients_lock = threading.Lock()
 
+# Resolved once: signal.SIGKILL does not exist on Windows, and referencing it
+# at a call site raises AttributeError before _signal_group's own guards can
+# report False, breaking the process.kill() fallback.
+_SIGKILL = getattr(signal, "SIGKILL", None)
+
 
 def reap_idle_workers(idle_seconds: float) -> int:
     """Stop workers that have served no request for ``idle_seconds``.
@@ -224,7 +229,7 @@ class ProviderWorkerClient:
         it has to be checked before the call.
         """
         killpg = getattr(os, "killpg", None)
-        if killpg is None:
+        if killpg is None or sig is None:
             return False
         try:
             killpg(process.pid, sig)
@@ -250,12 +255,16 @@ class ProviderWorkerClient:
         if not cls._signal_group(process, signal.SIGTERM):
             process.terminate()
         process.wait(timeout=grace_seconds)
-        cls._signal_group(process, signal.SIGKILL)
+        cls._signal_group(process, _SIGKILL)
 
     @classmethod
-    def _kill_tree(cls, process, grace_seconds: float) -> None:
-        """SIGKILL the worker's whole process group, not just the worker."""
-        if not cls._signal_group(process, signal.SIGKILL):
+    def _kill_tree(cls, process, grace_seconds: float) -> bool:
+        """SIGKILL the worker's whole process group, not just the worker.
+
+        True only when the worker is confirmed gone; the caller must not
+        deregister a process this could not end.
+        """
+        if not cls._signal_group(process, _SIGKILL):
             try:
                 process.kill()
             except Exception:
@@ -263,7 +272,8 @@ class ProviderWorkerClient:
         try:
             process.wait(timeout=grace_seconds)
         except Exception:
-            pass
+            return False
+        return True
 
     def stop_if_idle(self, idle_seconds: float, grace_seconds: float = 5.0) -> bool:
         """End this worker only if it is genuinely idle. True if it was stopped.
@@ -292,12 +302,19 @@ class ProviderWorkerClient:
                 return False
             if process.poll() is not None:
                 return False
+            ended = True
             try:
                 self._terminate_tree(process, grace_seconds)
             except Exception:
-                self._kill_tree(process, grace_seconds)
+                ended = self._kill_tree(process, grace_seconds)
         finally:
             self._lock.release()
+
+        if not ended:
+            # Both attempts left it running. Deregistering now would make it
+            # permanently unreapable; keep it listed so a later sweep retries.
+            logger.warning("idle provider worker survived termination; keeping it registered")
+            return False
 
         self._deregister()
         return True
@@ -313,7 +330,7 @@ class ProviderWorkerClient:
             self.request("shutdown", {"reason": "app_shutdown", "grace_ms": int(grace_seconds * 1000)}, grace_seconds)
             process.wait(timeout=grace_seconds)
             # A clean shutdown ends the worker, not necessarily what it forked.
-            self._signal_group(process, signal.SIGKILL)
+            self._signal_group(process, _SIGKILL)
         except Exception:
             self._kill_tree(process, grace_seconds)
 

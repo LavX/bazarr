@@ -264,3 +264,47 @@ def test_a_started_worker_registers_and_a_stopped_one_deregisters(monkeypatch, t
     fake.poll.return_value = 0  # exited
     client.stop()
     assert client not in worker_mod._live_clients
+
+
+def test_a_platform_without_sigkill_still_ends_the_worker(monkeypatch):
+    """Windows has neither os.killpg nor signal.SIGKILL. The SIGKILL name is
+    evaluated at the call sites, so it must not be looked up unguarded or the
+    AttributeError fires before _signal_group can report False and fall back
+    to process.kill()."""
+    from provider_hub import worker as worker_mod
+
+    monkeypatch.delattr(worker_mod.os, "killpg", raising=False)
+    monkeypatch.delattr(worker_mod.signal, "SIGKILL", raising=False)
+
+    client = _client(idle_for=3600)
+    process = client.process
+
+    def _ended():
+        process.poll.return_value = 0
+
+    process.terminate.side_effect = _ended
+    process.kill.side_effect = _ended
+    process.wait.return_value = 0
+    worker_mod._live_clients.add(client)
+
+    assert client.stop_if_idle(idle_seconds=60) is True
+    assert process.terminate.called or process.kill.called
+    assert client not in worker_mod._live_clients
+
+
+def test_a_worker_surviving_the_kill_stays_registered(group_signals):
+    """If both termination attempts leave the process running, deregistering
+    anyway makes it permanently unreapable; it must stay registered so a later
+    sweep retries."""
+    import subprocess
+
+    from provider_hub import worker as worker_mod
+
+    client = _client(idle_for=3600)
+    process = client.process
+    process.poll.return_value = None  # survives everything
+    process.wait.side_effect = subprocess.TimeoutExpired(cmd="worker", timeout=0.01)
+    worker_mod._live_clients.add(client)
+
+    assert client.stop_if_idle(idle_seconds=60, grace_seconds=0.01) is False
+    assert client in worker_mod._live_clients
