@@ -16,24 +16,30 @@ _TTL_SECONDS = 3600  # 1 hour
 # ---------------------------------------------------------------------------
 # Shared backing store
 # ---------------------------------------------------------------------------
-# The bazarr process puts BOTH ``/app/bazarr`` (script dir) and
-# ``/app`` (the parent, added by ``bazarr/app/libs.py`` so jobs_queue can
-# ``importlib.import_module('bazarr.<x>')``) onto ``sys.path``. As a result
-# Python may resolve this module under two different dotted names:
+# HISTORICAL, and kept as a guard rather than as a live workaround.
 #
-#   * ``subtitles.cache``         — imported from the Flask request thread
-#                                   (api/providers/* → subtitles.manual)
-#   * ``bazarr.subtitles.cache``  — imported by ``jobs_queue._run_job`` via
-#                                   ``importlib.import_module('bazarr.<x>')``
+# The process puts BOTH ``/app/bazarr`` (the script dir) and ``/app`` (its
+# parent, added by ``bazarr/app/libs.py``) onto ``sys.path``, so this module can
+# resolve under two dotted names, ``subtitles.cache`` and
+# ``bazarr.subtitles.cache``. Each name produces a separate module object with
+# its own ``subtitle_cache = _SubtitleCache()`` singleton, so the UUID stored by
+# manual_search() was never found by the queued download job and the user saw
+# "Subtitle not found in cache" every time.
 #
-# Each dotted name produces a separate module object with its own
-# ``subtitle_cache = _SubtitleCache()`` singleton, so the UUID stored during
-# manual_search() is never found during the queued download job → the user
-# sees "Subtitle not found in cache" every time.
+# What created the second name was ``jobs_queue`` deriving a job's module
+# relative to the repository root rather than the package directory, so every
+# job was queued as ``bazarr.<x>``. That is fixed, and nothing in the app
+# process imports ``bazarr.<x>`` any more.
+#
+# The shared store stays regardless. It costs nothing, and ``sys.path`` still
+# admits the second name, so the split is one stray ``import bazarr.something``
+# away. Treat it as a guard against that, not as a description of what the
+# process does today.
 #
 # Solution: stash the actual storage dict on ``sys.modules`` under a stable
-# key. Both module copies hand out ``_SubtitleCache`` instances that share
-# that single dict, so .store() and .get() always agree.
+# key. Any module copy hands out ``_SubtitleCache`` instances that share that
+# single dict, so .store() and .get() always agree.
+# ---------------------------------------------------------------------------
 
 _SHARED_STORE_KEY = "_bazarr_subtitle_cache_shared_store"
 
