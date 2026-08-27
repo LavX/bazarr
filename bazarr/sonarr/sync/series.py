@@ -191,13 +191,20 @@ def update_series(job_id=None, wait_for_completion=False, arr_instance_id=None, 
                                   serie_default_profile=serie_default_profile)
 
                 try:
-                    episodes_data = episode_futures[show['id']].result()
+                    # pop, not [...]: the future holds its result, so leaving
+                    # consumed ones in the dict keeps every episode payload the
+                    # pass has already finished with alive until the executor
+                    # block ends. Peak memory then scales with the size of the
+                    # library instead of with how much is actually in flight,
+                    # once an hour per configured instance.
+                    episodes_data = episode_futures.pop(show['id']).result()
                 except Exception:
                     logging.exception(f"BAZARR error pre-fetching episodes for series {show['id']}")  # noqa: G004
                     episodes_data = None
 
                 sync_episodes(series_id=show['id'], episodes_data=episodes_data,
                               arr_instance_id=arr_instance_id, arr_client=arr_client)
+                del episodes_data
 
         # Calculate series to remove from DB
         removed_series = current_shows_db - current_shows_sonarr

@@ -14,6 +14,28 @@ logger = logging.getLogger(__name__)
 refined_providers = {'jimaku'}
 
 
+INDEXED_ID_TAGS = ("anidb_id", "imdb_id")
+
+
+def build_series_index(anime_list):
+    """{tag: {str(id): anilist_id}} for the tags lookups actually use.
+
+    First entry wins, matching the old code, which scanned in order and took
+    the first match. Entries carrying no AniList id are not indexed: they could
+    never have produced an answer.
+    """
+    index = {tag: {} for tag in INDEXED_ID_TAGS}
+    for entry in anime_list:
+        anilist_id = entry.get("anilist_id")
+        if not anilist_id:
+            continue
+        for tag in INDEXED_ID_TAGS:
+            value = entry.get(tag)
+            if value is not None:
+                index[tag].setdefault(str(value), anilist_id)
+    return index
+
+
 class AniListClient(object):    
     def __init__(self, session=None, timeout=10):
         self.session = session or requests.Session()
@@ -21,8 +43,7 @@ class AniListClient(object):
         self.session.headers['Content-Type'] = 'application/json'
         self.session.headers['User-Agent'] = 'Subliminal/%s' % __short_version__
     
-    @region.cache_on_arguments(expiration_time=timedelta(days=1).total_seconds())
-    def get_series_mappings(self):
+    def fetch_series_mappings(self):
         r = self.session.get(
             'https://raw.githubusercontent.com/Fribb/anime-lists/master/anime-list-mini.json'
         )
@@ -30,28 +51,32 @@ class AniListClient(object):
         r.raise_for_status()
         return r.json()
 
+    @region.cache_on_arguments(expiration_time=timedelta(days=1).total_seconds())
+    def get_series_index(self):
+        """The two id maps, which is all any lookup here consults.
+
+        The whole anime list used to be what was cached. The region is file
+        backed, so it unpickled roughly 43,000 dicts on every call, scanned them
+        linearly, took one match and discarded the rest: about 30 MB of
+        short-lived objects per refined search. The index is a fraction of that
+        and turns the scan into a hash lookup.
+        """
+        return build_series_index(self.fetch_series_mappings())
+
     def get_series_id(self, candidate_id_name, candidate_id_value):
-        anime_list = self.get_series_mappings()
-        
         tag_map = {
             "series_anidb_id": "anidb_id",
             "imdb_id": "imdb_id"
         }
-        mapped_tag = tag_map.get(candidate_id_name, candidate_id_name)        
-        
-        obj = [obj for obj in anime_list if mapped_tag in obj and str(obj[mapped_tag]) == str(candidate_id_value)]
-        logger.debug(f"Based on '{mapped_tag}': '{candidate_id_value}', anime-list matched: {obj}")  # noqa: G004
+        mapped_tag = tag_map.get(candidate_id_name, candidate_id_name)
 
-        if len(obj) > 0:
-            anilist_id = obj[0].get("anilist_id")
-            if not anilist_id:
-                logger.error("This entry does not have an AniList ID")
-            
-            return anilist_id
-        else:
+        anilist_id = self.get_series_index().get(mapped_tag, {}).get(str(candidate_id_value))
+        if anilist_id is None:
             logger.debug(f"Could not find corresponding AniList ID with '{mapped_tag}': {candidate_id_value}")  # noqa: G004
-        
-        return None
+            return None
+
+        logger.debug(f"Based on '{mapped_tag}': '{candidate_id_value}', anime-list matched AniList ID {anilist_id}")  # noqa: G004
+        return anilist_id
 
 
 def refine_from_anilist(path, video):

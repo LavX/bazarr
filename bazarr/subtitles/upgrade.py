@@ -67,7 +67,8 @@ def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, sonarr_serie
         .join(TableShows, onclause=and_(TableHistory.sonarrSeriesId == TableShows.sonarrSeriesId,
                                   TableHistory.arr_instance_id == TableShows.arr_instance_id)) \
         .join(TableEpisodes, onclause=and_(TableHistory.sonarrEpisodeId == TableEpisodes.sonarrEpisodeId,
-                                     TableHistory.arr_instance_id == TableEpisodes.arr_instance_id))
+                                     TableHistory.arr_instance_id == TableEpisodes.arr_instance_id)) \
+        .where(TableHistory.video_path == TableEpisodes.path)
 
     if sonarr_series_filters:
         query = query.where(or_(*[
@@ -98,8 +99,7 @@ def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, sonarr_serie
         'profileId': x.profileId,
         'external_subtitles': [y[1] for y in ast.literal_eval(x.external_subtitles) if y[1]],
     } for x in database.execute(query)
-    .all() if _language_still_desired(x.language, x.profileId) and
-              x.video_path == x.path
+    if _language_still_desired(x.language, x.profileId)
     ]
 
     for item in episodes_data:
@@ -217,9 +217,12 @@ def upgrade_movies_subtitles(job_id=None, radarr_ids=None, radarr_filters=None, 
     elif radarr_ids:
         query = query.where(TableHistoryMovie.radarrId.in_(radarr_ids))
 
-    all_rows = database.execute(query).all()
+    # Streamed rather than .all(): the diagnostics below explain why each
+    # candidate was dropped, so the filtering stays in Python, but there is no
+    # reason to hold every Row of the history join in memory at once while the
+    # dicts for the survivors are being built alongside them.
     movies_data = []
-    for x in all_rows:
+    for x in database.execute(query):
         if not _language_still_desired(x.language, x.profileId):
             if x.id in movies_to_upgrade:
                 logging.debug(f"Upgrade candidate {x.id} ({x.title}) dropped: language {x.language} no longer desired "  # noqa: G004
