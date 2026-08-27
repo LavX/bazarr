@@ -172,3 +172,26 @@ class TestExtractionIsAtomic:
         leftovers = [n for n in os.listdir(tmp_path / 'extracted_subs')] \
             if os.path.isdir(tmp_path / 'extracted_subs') else []
         assert leftovers == [], leftovers
+
+    def test_ffmpeg_is_told_the_format_and_given_a_recognisable_name(
+            self, monkeypatch, tmp_path):
+        """ffmpeg chooses its muxer from the output extension. Writing to a
+        temporary name broke that: it exited with "Unable to choose an output
+        format" and extracted nothing. Caught on a real deployment, because
+        this suite stubs the subprocess away."""
+        import subtitles.tools.translate.batch as batch
+
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            seen['cmd'] = cmd
+            with open(cmd[-1], 'w', encoding='utf-8') as handle:
+                handle.write('1\n00:00:01,000 --> 00:00:02,000\nhi\n')
+            return MagicMock(returncode=0, stderr='')
+
+        self._prepare(monkeypatch, tmp_path, fake_run)
+        batch.extract_embedded_subtitle('/media/ep.mkv', 'en', 'episode')
+
+        cmd = seen['cmd']
+        assert '-f' in cmd and cmd[cmd.index('-f') + 1] == 'srt', cmd
+        assert cmd[-1].endswith('.srt'), cmd[-1]

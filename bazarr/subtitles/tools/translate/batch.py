@@ -510,8 +510,9 @@ def extract_embedded_subtitle(
     # place, so output_path either does not exist or is complete. Writing
     # straight to it meant a second caller arriving mid-write saw a non-empty
     # file, took it as a cache hit, and translated a truncated subtitle. The
-    # temporary name carries the pid so two processes cannot share one.
-    temp_path = f"{output_path}.{os.getpid()}.part"
+    # temporary name carries the pid so two processes cannot share one, and
+    # keeps the .srt extension because ffmpeg picks its muxer from it.
+    temp_path = f"{output_path}.{os.getpid()}.part.srt"
 
     # Extract using ffmpeg
     try:
@@ -530,6 +531,12 @@ def extract_embedded_subtitle(
         "-map",
         f"0:s:{found_track}",
         "-c:s",
+        "srt",
+        # Name the container format rather than leaving ffmpeg to infer it from
+        # the extension: the output goes to a temporary name, and an
+        # unrecognised one makes it fail with "Unable to choose an output
+        # format" instead of writing anything.
+        "-f",
         "srt",
         temp_path,
     ]
