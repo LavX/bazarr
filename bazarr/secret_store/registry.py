@@ -90,6 +90,7 @@ USER_VISIBLE_SECRETS = frozenset({
     # Anti-captcha vendors - bare API keys.
     "anticaptcha.anti_captcha_key",
     "captchaai.captchaai_key",
+    # Subtitle providers - full login pairs, continued.
     "napisy24.username",
     "napisy24.password",
     "titlovi.username",

@@ -9,8 +9,7 @@ import base64
 import requests
 from subliminal.cache import region
 from dogpile.cache.api import NO_VALUE
-from python_anticaptcha import AnticaptchaClient, NoCaptchaTaskProxylessTask, NoCaptchaTask, ImageToTextTask, \
-    AnticaptchaException
+from python_anticaptcha import AnticaptchaClient, NoCaptchaTaskProxylessTask, NoCaptchaTask, AnticaptchaException
 from deathbycaptcha import SocketClient as DBCClient, DEFAULT_TOKEN_TIMEOUT
 import six
 from six.moves import range
@@ -295,9 +294,10 @@ class CaptchaAIProxyLessPitcher(Pitcher):
             params["invisible"] = 1
         if self.user_agent:
             params["userAgent"] = self.user_agent
-        if self.cookies:
-            # 2Captcha-compatible cookie format: KEY1:Value1;KEY2:Value2
-            params["cookies"] = ";".join("%s:%s" % (k, v) for k, v in self.cookies.items())
+        # self.cookies is accepted for call-site compatibility but deliberately
+        # NOT transmitted: it holds the provider's live session cookies, and a
+        # reCAPTCHA token task does not need them. Shipping a paid provider
+        # session to the captcha vendor is an exposure, not a feature.
         return params
 
     def _throw(self):
@@ -305,6 +305,7 @@ class CaptchaAIProxyLessPitcher(Pitcher):
         for i in range(self.tries):
             try:
                 resp = self.client.post("%s/in.php" % self.host, data=self.in_params, timeout=30)
+                resp.raise_for_status()
                 payload = resp.json()
                 if payload.get("status") != 1:
                     request = payload.get("request")
@@ -321,9 +322,13 @@ class CaptchaAIProxyLessPitcher(Pitcher):
                     logger.error("%s: CaptchaAI returned an error: %s", self.website_name, request)
                     if i >= self.tries - 1:
                         return
+                    time.sleep(5.0)
                     continue
 
                 job_id = payload.get("request")
+                # The key travels in this URL's query string, so the log
+                # redaction in app/logger.py must keep covering bare "key=".
+                poll_failed = False
                 deadline = time.time() + self.timeout
                 while time.time() < deadline:
                     time.sleep(5.0)
@@ -332,6 +337,7 @@ class CaptchaAIProxyLessPitcher(Pitcher):
                         params={"key": self.client_key, "action": "get", "id": job_id, "json": 1},
                         timeout=30,
                     )
+                    res.raise_for_status()
                     res_payload = res.json()
                     if res_payload.get("status") == 1:
                         self.success = True
@@ -340,11 +346,14 @@ class CaptchaAIProxyLessPitcher(Pitcher):
                         continue
                     logger.error("%s: CaptchaAI returned an error: %s", self.website_name,
                                  res_payload.get("request"))
+                    poll_failed = True
                     break
-                logger.info("%s: Captcha solving timed out, retrying", self.website_name)
+                if not poll_failed:
+                    logger.info("%s: Captcha solving timed out, retrying", self.website_name)
             except Exception:
                 if i >= self.tries - 1:
-                    logger.error("%s: Captcha solving finally failed. Exiting", self.website_name)
+                    logger.error("%s: Captcha solving finally failed. Exiting", self.website_name,
+                                 exc_info=True)
                     return
                 logger.info("%s: Captcha solving failed, retrying", self.website_name)
                 time.sleep(5.0)
@@ -358,7 +367,9 @@ class CaptchaAIPitcher(CaptchaAIProxyLessPitcher):
     proxy_type = "HTTP"
 
     def __init__(self, *args, **kwargs):
-        self.proxy = kwargs.pop("proxy", None)
+        # No default: a pitcher that declares needs_proxy must fail loudly
+        # when constructed without one, like the other proxy pitchers.
+        self.proxy = kwargs.pop("proxy")
         super(CaptchaAIPitcher, self).__init__(*args, **kwargs)
 
     @property
@@ -367,184 +378,6 @@ class CaptchaAIPitcher(CaptchaAIProxyLessPitcher):
         if self.proxy:
             params.update({"proxy": self.proxy, "proxytype": self.proxy_type})
         return params
-
-
-@registry.register
-class CaptchaAIImageToTextPitcher(Pitcher):
-    name = "CaptchaAIImageToText"
-    source = "captchaai.com"
-    host = "https://ocr.captchaai.com"
-    timeout = 180
-    image_fp = None
-
-    def __init__(self, website_name, image_fp, tries=3, client_key=None, *args, **kwargs):
-        # No page URL or site key for an image task; keyword the rest so an
-        # explicit client_key reaches Pitcher instead of being read as the
-        # website key while the env fallback raises.
-        super().__init__(website_name, None, None, tries=tries, client_key=client_key, **kwargs)
-        self.image_fp = image_fp
-
-    def get_client(self):
-        # CaptchaAI exposes a 2Captcha-compatible HTTP API (in.php/res.php), so a
-        # plain requests session is all that is needed.
-        return requests.Session()
-
-    def get_job(self):
-        # The image task is created in _throw() through the in.php endpoint.
-        pass
-
-    @property
-    def in_params(self):
-        # Read the image bytes and submit them as base64 (method=base64).
-        try:
-            self.image_fp.seek(0)
-        except (AttributeError, ValueError):
-            pass
-        body = base64.b64encode(self.image_fp.read()).decode("ascii")
-        return {
-            "key": self.client_key,
-            "method": "base64",
-            "body": body,
-            "json": 1,
-        }
-
-    def _throw(self):
-        self.client = self.get_client()
-        for i in range(self.tries):
-            try:
-                resp = self.client.post("%s/in.php" % self.host, data=self.in_params, timeout=30)
-                payload = resp.json()
-                if payload.get("status") != 1:
-                    request = payload.get("request")
-                    if request == "ERROR_ZERO_BALANCE":
-                        logger.error("%s: No balance left on captcha solving service. Exiting", self.website_name)
-                        return
-                    elif request == "ERROR_NO_SLOT_AVAILABLE":
-                        logger.info("%s: No captcha solving slot available, retrying", self.website_name)
-                        time.sleep(5.0)
-                        continue
-                    elif request in ("ERROR_KEY_DOES_NOT_EXIST", "ERROR_WRONG_USER_KEY"):
-                        logger.error("%s: Bad CaptchaAI API key", self.website_name)
-                        return
-                    logger.error("%s: CaptchaAI returned an error: %s", self.website_name, request)
-                    if i >= self.tries - 1:
-                        return
-                    continue
-
-                job_id = payload.get("request")
-                deadline = time.time() + self.timeout
-                while time.time() < deadline:
-                    time.sleep(5.0)
-                    res = self.client.get(
-                        "%s/res.php" % self.host,
-                        params={"key": self.client_key, "action": "get", "id": job_id, "json": 1},
-                        timeout=30,
-                    )
-                    res_payload = res.json()
-                    if res_payload.get("status") == 1:
-                        self.success = True
-                        return res_payload.get("request")
-                    if res_payload.get("request") == "CAPCHA_NOT_READY":
-                        continue
-                    logger.error("%s: CaptchaAI returned an error: %s", self.website_name,
-                                 res_payload.get("request"))
-                    break
-                logger.info("%s: Captcha solving timed out, retrying", self.website_name)
-            except Exception:
-                if i >= self.tries - 1:
-                    logger.error("%s: Captcha solving finally failed. Exiting", self.website_name)
-                    return
-                logger.info("%s: Captcha solving failed, retrying", self.website_name)
-                time.sleep(5.0)
-
-
-@registry.register
-class AntiCaptchaImageToTextPitcher(Pitcher):
-    name = "AntiCaptchaImageToText"
-    source = "anti-captcha.com"
-    image_fp = None
-
-    def __init__(self, website_name, image_fp, tries=3, client_key=None, *args, **kwargs):
-        # Same shape as the CaptchaAI image pitcher: keyword the arguments so
-        # an explicit client_key is honored without ANTICAPTCHA_ACCOUNT_KEY.
-        super().__init__(website_name, None, None, tries=tries, client_key=client_key, **kwargs)
-        self.image_fp = image_fp
-
-    def get_client(self):
-        return AnticaptchaClient(self.client_key)
-
-    def get_job(self):
-        task = ImageToTextTask(self.image_fp)
-        return self.client.createTask(task)
-
-    def _throw(self):
-        for i in range(self.tries):
-            try:
-                super(AntiCaptchaImageToTextPitcher, self)._throw()
-                self.job.join()
-                ret = self.job.get_captcha_text()
-                if ret:
-                    self.success = True
-                    return ret
-            except AnticaptchaException as e:
-                if i >= self.tries - 1:
-                    logger.error("%s: Captcha solving finally failed. Exiting", self.website_name)
-                    return
-                if e.error_code == 'ERROR_ZERO_BALANCE':
-                    logger.error("%s: No balance left on captcha solving service. Exiting", self.website_name)
-                    return
-                elif e.error_code == 'ERROR_NO_SLOT_AVAILABLE':
-                    logger.info("%s: No captcha solving slot available, retrying", self.website_name)
-                    time.sleep(5.0)
-                    continue
-                elif e.error_code == 'ERROR_KEY_DOES_NOT_EXIST':
-                    logger.error("%s: Bad AntiCaptcha API key", self.website_name)
-                    return
-                raise
-
-
-@registry.register
-class DBCImageToTextPitcher(Pitcher):
-    name = "DeathByCaptchaImageToText"
-    source = "deathbycaptcha.com"
-    image_fp = None
-    username = None
-    password = None
-
-    def __init__(self, website_name, image_fp, timeout=DEFAULT_TOKEN_TIMEOUT, tries=3,
-                 client_key=None, *args, **kwargs):
-        super().__init__(website_name, tries, client_key, *args, **kwargs)
-        self.tries = tries
-        self.client_key = client_key or os.environ.get("ANTICAPTCHA_ACCOUNT_KEY")
-        if not self.client_key:
-            raise Exception("DeathByCaptcha credentials not given, exiting")
-        self.username, self.password = self.client_key.split(":", 1)
-        self.website_name = website_name
-        self.image_fp = image_fp
-        self.timeout = timeout
-        self.success = False
-        self.solve_time = None
-
-    def get_client(self):
-        return DBCClient(self.username, self.password)
-
-    def get_job(self):
-        pass
-
-    def _throw(self):
-        self.client = self.get_client()
-        for i in range(self.tries):
-            try:
-                data = self.client.decode(self.image_fp, timeout=self.timeout)
-                if data and data["is_correct"] and data["text"]:
-                    self.success = True
-                    return data["text"]
-            except Exception:
-                if i >= self.tries - 1:
-                    logger.error("%s: Captcha solving finally failed. Exiting", self.website_name)
-                    return
-                logger.info("%s: Captcha solving failed, retrying", self.website_name)
-                time.sleep(5.0)
 
 
 def load_verification(site_name, session, callback=lambda x: None):

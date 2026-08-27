@@ -1304,6 +1304,9 @@ def configure_captcha_func():
         os.environ["ANTICAPTCHA_ACCOUNT_KEY"] = str(settings.captchaai.captchaai_key)
     else:
         os.environ["ANTICAPTCHA_CLASS"] = ''
+        # Clear the key too, or disabling the vendor leaves the previous
+        # credential exported for the rest of the process lifetime.
+        os.environ["ANTICAPTCHA_ACCOUNT_KEY"] = ''
 
 
 def configure_proxy_func():

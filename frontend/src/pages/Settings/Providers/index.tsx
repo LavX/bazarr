@@ -223,7 +223,7 @@ const AntiCaptchaSection: FunctionComponent = () => (
       settingKey="settings-general-anti_captcha_provider"
       on={(value) => value === "anti-captcha"}
     >
-      <Text
+      <Password
         label="Account Key"
         settingKey="settings-anticaptcha-anti_captcha_key"
       />
@@ -248,7 +248,7 @@ const AntiCaptchaSection: FunctionComponent = () => (
       settingKey="settings-general-anti_captcha_provider"
       on={(value) => value === "captchaai"}
     >
-      <Text label="API Key" settingKey="settings-captchaai-captchaai_key" />
+      <Password label="API Key" settingKey="settings-captchaai-captchaai_key" />
       <Anchor href="https://captchaai.com">CaptchaAI.com</Anchor>
       <Message>Link to subscribe</Message>
     </CollapseBox>
