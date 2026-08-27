@@ -1,0 +1,1013 @@
+/* ===========================================================================
+   Bazarr+ site: the Multiplane world.
+
+   Subtitles are a layer over the picture. That is not a metaphor here, it is
+   the layout model: the page is a stack of planes, the plate sits furthest
+   back and softest, and text lives on its own clear cel nearest the reader.
+   Amber is the only warm light in the frame and it means one thing, a
+   subtitle that exists.
+
+   The brand constants are shared verbatim with the release-artwork pipeline in
+   scripts/release/hero/src/theme.ts. Five releases of hero art read as one
+   product because nobody re-picks them; the site does not re-pick them either.
+   =========================================================================== */
+
+@font-face {
+  font-family: 'Geist Variable';
+  src: url('../fonts/Geist-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  /* --- brand, from theme.ts --- */
+  --navy: #121125;
+  --amber: #e68a00;
+  --amber-bright: #ffb347;
+  --cream: #fff8e1;
+  --cyan: #7fe9ff;
+
+  /* --- planes: each surface is a depth, not a shade picked by eye --- */
+  --plane-0: #0b0a16;  /* behind everything, the darkest air */
+  --plane-1: #121125;  /* the ground the reader stands on */
+  --plane-2: #1a1a2e;  /* a panel lifted off the ground */
+  --plane-3: #22223a;  /* a cel held closest to the reader */
+
+  /* --- ink --- */
+  --ink: #fff8e1;
+  --ink-2: rgba(255, 248, 225, 0.74);
+  --ink-3: rgba(255, 248, 225, 0.52);
+  --ink-faint: rgba(255, 248, 225, 0.30);
+
+  --hair: rgba(255, 248, 225, 0.10);
+  --hair-strong: rgba(255, 248, 225, 0.18);
+
+  --amber-wash: rgba(230, 138, 0, 0.13);
+  --amber-line: rgba(230, 138, 0, 0.38);
+
+  --radius: 6px;
+  /* Reading measure. NOT 68ch: the ch unit is the advance of the digit zero,
+     and Geist's zero is much wider than its average lowercase letter, so 68ch
+     of running prose measured 91 real characters. This value is calibrated
+     against rendered text to land at roughly 72, inside the 65 to 75 the eye
+     tracks without losing its place. */
+  --measure: 54ch;
+
+  /* Depth is expressed as offset plus blur. A zero-offset halo is decoration,
+     not elevation, so there are none in this system. */
+  --lift-1: 0 2px 8px rgba(6, 5, 14, 0.5);
+  --lift-2: 0 8px 28px rgba(6, 5, 14, 0.55);
+
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html {
+  /* every in-page anchor used to land underneath the sticky nav */
+  scroll-padding-top: 92px;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--plane-1);
+  color: var(--ink);
+  font-family: 'Geist Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 17px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ---------------------------------------------------------------------------
+   Browser surfaces. These ship with defaults that belong to no design system,
+   so they get themed like anything else that is visible.
+   --------------------------------------------------------------------------- */
+::selection { background: var(--amber); color: #1b1200; }
+::-moz-selection { background: var(--amber); color: #1b1200; }
+
+* { scrollbar-color: rgba(255, 248, 225, 0.22) transparent; scrollbar-width: thin; }
+*::-webkit-scrollbar { width: 11px; height: 11px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 248, 225, 0.18);
+  border-radius: 6px;
+  border: 3px solid var(--plane-1);
+}
+*::-webkit-scrollbar-thumb:hover { background: rgba(255, 248, 225, 0.30); }
+
+:focus-visible {
+  outline: 2px solid var(--amber-bright);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+input, textarea { caret-color: var(--amber-bright); }
+
+/* Data that is read as quantity gets real tabular figures. */
+.tnum, time, .metric { font-variant-numeric: tabular-nums; }
+
+/* ---------------------------------------------------------------------------
+   Skip link
+   --------------------------------------------------------------------------- */
+.skip {
+  position: absolute; left: 12px; top: 12px; z-index: 100;
+  background: var(--amber); color: #1b1200;
+  padding: 10px 16px; border-radius: var(--radius);
+  font-weight: 500; text-decoration: none;
+  transform: translateY(-200%);
+  transition: transform 0.16s var(--ease);
+}
+.skip:focus { transform: none; }
+/* the generic link hover must not repaint the skip link into 1.7:1 */
+.skip:hover, .skip:focus { color: #1b1200; }
+
+/* Anchors the pre-redesign page shipped. The sections were renamed; these keep
+   every indexed deep link and forum post landing where it used to. They occupy
+   no space and are not focusable. */
+.anchor-alias { display: block; height: 0; scroll-margin-top: 88px; }
+
+/* ---------------------------------------------------------------------------
+   Shell
+   --------------------------------------------------------------------------- */
+.container { width: 100%; max-width: 1180px; margin: 0 auto; padding: 0 32px; }
+
+a { color: var(--amber-bright); text-decoration: none; }
+a:hover { color: var(--amber); }
+
+/* Prose links carry a non-colour cue: colour alone was 1.10:1 against body. */
+.prose a, .faq-answer a, .cell-plus a, footer a.inline {
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+  text-decoration-color: var(--amber-line);
+}
+.prose a:hover, .faq-answer a:hover { text-decoration-color: var(--amber-bright); }
+
+/* --- nav ------------------------------------------------------------------ */
+.nav {
+  position: sticky; top: 0; z-index: 40;
+  background: rgba(11, 10, 22, 0.82);
+  backdrop-filter: blur(14px) saturate(140%);
+  border-bottom: 1px solid var(--hair);
+}
+.nav .container { display: flex; align-items: center; justify-content: space-between; height: 68px; }
+/* The Bazarr+ lockup. Not a typographic approximation of it: the ratios below
+   are the ones the release-art painter uses (scripts/release/hero/src/brand.ts,
+   paintText), so the site header and the hero artwork sign the product the same
+   way. `+` is 0.72 of the title, weight 900, amber, nudged right by 0.035 and
+   up by 0.045 of the title size, measured from the cap line rather than the
+   baseline. Do not restyle these per surface. */
+.wordmark {
+  --title: 1.22rem;
+  display: inline-flex; align-items: center; gap: 10px;
+  font-size: var(--title); font-weight: 800; letter-spacing: -0.015em;
+  line-height: 1; color: var(--cream);
+}
+.wordmark img { display: block; width: 30px; height: 30px; }
+.wordmark b {
+  font-size: 0.72em; font-weight: 900; color: var(--amber);
+  vertical-align: top; position: relative;
+  margin-left: calc(var(--title) * 0.035);
+  top: calc(var(--title) * -0.045);
+}
+.nav ul { display: flex; gap: 28px; list-style: none; margin: 0; padding: 0; }
+.nav ul a { color: var(--ink-3); font-size: 0.94rem; }
+.nav ul a:hover { color: var(--ink); }
+.nav ul a[aria-current="page"] { color: var(--ink); font-weight: 600; }
+
+/* ---------------------------------------------------------------------------
+   THE HERO. Four planes, back to front:
+     1  plate      the picture, softened, receding
+     2  grade      the navy the whole site is graded into
+     3  canvas     p5 draws the drifting air between planes
+     4  cels       text, always nearest the reader, always sharp
+   --------------------------------------------------------------------------- */
+.hero { position: relative; min-height: min(92svh, 900px); display: flex; align-items: stretch; overflow: hidden; }
+
+.hero-planes { position: absolute; inset: 0; pointer-events: none; }
+
+/* The plate is the <picture> inside this element: a Remotion render, made in
+   this repo by scripts/release/hero/src/SiteHero.tsx. There is deliberately no
+   background-image here. An earlier pass painted a generated raster behind the
+   loop; it was invisible under the <img> and still cost every visitor the
+   download, so both the rule and the file are gone. */
+.plane-plate { position: absolute; inset: 0; overflow: hidden; }
+
+/* The grade is what makes cream text legible over the picture. It has to stay
+   dense on the left, where the headline sits, and thin out fast on the right,
+   or it buries the one warm light the plate is built around. */
+.plane-grade {
+  position: absolute; inset: 0;
+  background:
+    linear-gradient(96deg, rgba(11,10,22,0.90) 0%, rgba(11,10,22,0.72) 30%, rgba(11,10,22,0.20) 60%, rgba(11,10,22,0.04) 100%),
+    linear-gradient(180deg, rgba(18,17,37,0.30), rgba(18,17,37,0.02) 42%, rgba(11,10,22,0.62));
+}
+
+.hero .container { position: relative; display: flex; flex-direction: column; justify-content: center; padding-top: 48px; padding-bottom: 48px; }
+@media (min-width: 901px) {
+  /* The lower band belongs to the cels, which are absolutely positioned
+     against this container. The reserve has to clear their real height, not
+     an assumed one line. */
+  .hero .container { padding-bottom: 268px; }
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(1.95rem, 2.9vw, 2.75rem);
+  line-height: 1.08;
+  letter-spacing: -0.028em;
+  font-weight: 500;
+  max-width: 19ch;
+  text-wrap: balance;
+}
+h1 .lit { display: block; color: var(--amber); }
+
+.hero-sub {
+  margin: 20px 0 0;
+  max-width: 46ch;
+  color: var(--ink-2);
+  font-size: 1.06rem;
+}
+
+.hero-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 18px; margin-top: 30px; }
+
+.btn {
+  display: inline-flex; align-items: center; gap: 9px;
+  background: var(--amber); color: #1b1200;
+  border: 1px solid var(--amber);
+  border-radius: var(--radius);
+  padding: 13px 24px;
+  font: 500 1rem 'Geist Variable', sans-serif;
+  cursor: pointer;
+  box-shadow: var(--lift-1);
+  transition: background 0.18s var(--ease), transform 0.18s var(--ease);
+}
+.btn:hover { background: var(--amber-bright); border-color: var(--amber-bright); color: #1b1200; transform: translateY(-1px); }
+.btn:active { transform: translateY(0); }
+
+.btn-quiet {
+  background: transparent; color: var(--ink);
+  border: 1px solid var(--hair-strong);
+  box-shadow: none;
+}
+.btn-quiet:hover { background: rgba(255,248,225,0.06); border-color: var(--hair-strong); color: var(--ink); transform: translateY(-1px); }
+
+/* --- the cels: the one component this world is built from ----------------- */
+/* In the flow by default, so on a phone the demonstration simply follows the
+   actions. Only when the viewport is tall and wide enough does it lift into
+   the plate's lower band, where subtitles actually sit on a screen. */
+/* Every cue occupies the same cell, so consecutive lines cross-fade in place
+   instead of the block growing a row per line of dialogue in the shot. */
+.cels {
+  display: grid; margin-top: 34px; pointer-events: none;
+  justify-items: start;
+}
+.cels > .cue { grid-area: 1 / 1; }
+@media (min-width: 901px) {
+  .cels {
+    position: absolute; left: 0; right: 0; bottom: 44px;
+    justify-items: center; margin-top: 0; padding: 0 24px;
+  }
+}
+
+/* A combined subtitle is one block, not two captions that happen to be near
+   each other, so the pair is set tight: the gap is smaller than the leading. */
+.cue {
+  display: flex; flex-direction: column; gap: 2px;
+  align-items: inherit;
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 0.42s var(--ease), transform 0.42s var(--ease);
+}
+@media (min-width: 901px) { .cue { align-items: center; } }
+.cue.is-on { opacity: 1; transform: none; }
+/* With no JavaScript nothing ever gets .is-on, so the first cue stands open
+   and the shot reads as a still frame with a subtitle on it. */
+html:not(.js) .cels > .cue:first-child { opacity: 1; transform: none; }
+
+.cel {
+  margin: 0;
+  padding: 7px 14px;
+  border-radius: 3px;
+  background: rgba(11, 10, 22, 0.58);
+  text-align: center;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.8);
+  font-size: clamp(1rem, 1.7vw, 1.5rem);
+  line-height: 1.24;
+  letter-spacing: -0.005em;
+}
+.cel.dialogue { color: var(--cream); }
+.cel.translated { color: var(--amber-bright); font-size: clamp(0.94rem, 1.5vw, 1.34rem); }
+.cel.is-off { display: none; }
+
+/* The depth key. It names the planes, and it is the same component the guides
+   reuse as their table of contents rail. */
+.depthkey {
+  position: absolute; right: 32px; bottom: 92px;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 9px;
+  font-size: 0.72rem; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.depthkey span { display: flex; align-items: center; gap: 9px; transition: color 0.4s var(--ease); }
+.depthkey i { display: block; width: 34px; height: 1px; background: var(--hair-strong); transform: scaleX(0.59); transform-origin: right center; transition: transform 0.4s var(--ease), background 0.4s var(--ease); }
+.depthkey span.on { color: var(--amber-bright); }
+.depthkey span.on i { transform: none; background: var(--amber-bright); }
+
+/* ---------------------------------------------------------------------------
+   Sections
+   --------------------------------------------------------------------------- */
+section { padding: 108px 0; position: relative; }
+section + section { border-top: 1px solid var(--hair); }
+
+h2 {
+  margin: 0 0 18px;
+  font-size: clamp(1.85rem, 3.1vw, 2.6rem);
+  line-height: 1.12;
+  letter-spacing: -0.026em;
+  font-weight: 500;
+  max-width: 20ch;
+  text-wrap: balance;
+}
+h3 {
+  margin: 0 0 10px;
+  font-size: 1.2rem; font-weight: 600; letter-spacing: -0.012em;
+}
+.lede { margin: 0 0 44px; max-width: var(--measure); color: var(--ink-2); font-size: 1.06rem; }
+.prose { max-width: var(--measure); color: var(--ink-2); }
+
+/* --- the layer stack: what the product actually does ---------------------- */
+.layers { display: grid; gap: 1px; background: var(--hair); border: 1px solid var(--hair); border-radius: var(--radius); overflow: hidden; }
+.layer {
+  display: grid;
+  grid-template-columns: 168px 1fr;
+  gap: 32px;
+  padding: 30px 30px;
+  background: var(--plane-1);
+  transition: background 0.3s var(--ease);
+}
+.layer:hover { background: var(--plane-2); }
+.layer-name {
+  font-size: 0.78rem; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--ink-faint);
+  padding-top: 4px;
+}
+.layer h3 { margin-bottom: 6px; }
+.layer p { margin: 0; color: var(--ink-2); max-width: 62ch; }
+.layer p .term { color: var(--ink); border-bottom: 1px dotted var(--amber-line); cursor: help; }
+
+/* --- proof ---------------------------------------------------------------- */
+.shots { display: grid; grid-template-columns: repeat(2, 1fr); gap: 28px; }
+.shot { display: flex; flex-direction: column; gap: 12px; }
+.shot button {
+  display: block; padding: 0; border: 1px solid var(--hair); background: var(--plane-2);
+  border-radius: var(--radius); overflow: hidden; cursor: zoom-in;
+  box-shadow: var(--lift-1);
+  transition: border-color 0.2s var(--ease), transform 0.2s var(--ease);
+}
+.shot button:hover { border-color: var(--hair-strong); transform: translateY(-2px); }
+.shot img { display: block; width: 100%; height: auto; }
+.shot figcaption { color: var(--ink-2); font-size: 0.94rem; max-width: 52ch; }
+/* Each caption names a feature that has a guide, so the caption is the way in.
+   Set as a trailing link rather than an inline one: the sentence stays a
+   sentence and the route stays obviously separate from it. */
+.shot figcaption a {
+  display: inline-block; margin-top: 6px;
+  color: var(--amber); font-size: 0.88rem;
+}
+.shot figcaption a::after { content: " \2192"; }
+.shot figcaption a:hover { color: var(--amber-bright); }
+
+/* --- comparison ----------------------------------------------------------- */
+.cluster { margin-top: 46px; }
+.cluster > h3 {
+  font-size: 0.78rem; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--ink-faint); font-weight: 500;
+  padding-bottom: 12px; border-bottom: 1px solid var(--hair); margin-bottom: 0;
+}
+.cmp { width: 100%; border-collapse: collapse; }
+.cmp caption { text-align: left; color: var(--ink-faint); font-size: 0.78rem; padding: 10px 0; }
+.cmp th { text-align: left; font-weight: 500; font-size: 0.78rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-faint); padding: 14px 16px; border-bottom: 1px solid var(--hair); }
+.cmp td { padding: 16px; border-bottom: 1px solid var(--hair); vertical-align: top; font-size: 0.94rem; }
+.cmp tr:last-child td { border-bottom: 0; }
+.cmp .feature { color: var(--ink); font-weight: 500; width: 26%; }
+.cmp .up { color: var(--ink-3); width: 30%; }
+.cmp .plus { color: var(--ink-2); }
+.cmp .plus strong { color: var(--ink); font-weight: 600; }
+.mark { display: inline-block; width: 1.1em; margin-right: 6px; }
+.mark.no { color: var(--ink-faint); }
+.mark.yes { color: var(--amber); }
+.since { font-size: 0.72rem; color: var(--ink-faint); letter-spacing: 0.06em; margin-left: 6px; white-space: nowrap; }
+
+/* --- code ----------------------------------------------------------------- */
+.code { border: 1px solid var(--hair); border-radius: var(--radius); overflow: hidden; background: var(--plane-0); margin: 22px 0; }
+.code-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--hair); background: var(--plane-2); }
+/* The label in a code block header is usually a filename, so it renders as
+   written. This rule used to uppercase it, which turned docker-compose.yml
+   into DOCKER-COMPOSE.YML, a path that does not exist on a case-sensitive
+   filesystem. It also outranked .code-lang, so styling .code-lang alone did
+   not fix it. */
+.code-head span {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.78rem; letter-spacing: 0; color: var(--ink-3);
+}
+.code pre { margin: 0; padding: 18px; overflow-x: auto; }
+.code code {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  font-size: 0.86rem; line-height: 1.7; color: var(--ink-2);
+  tab-size: 2;
+}
+code.inline {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.88em; background: rgba(255,248,225,0.07);
+  padding: 2px 6px; border-radius: 4px; color: var(--ink);
+  /* long URLs used to overflow the viewport with no way to pan to them */
+  overflow-wrap: anywhere;
+}
+.copy {
+  background: transparent; border: 1px solid var(--hair-strong); color: var(--ink-2);
+  border-radius: 4px; padding: 5px 12px; font: 500 0.78rem 'Geist Variable', sans-serif; cursor: pointer;
+  transition: border-color 0.18s var(--ease), color 0.18s var(--ease);
+}
+.copy:hover { border-color: var(--amber-line); color: var(--ink); }
+.copy.ok { border-color: var(--amber-line); color: var(--amber-bright); }
+.copy.fail { border-color: #c94a4a; color: #ff9d9d; }
+
+/* --- faq ------------------------------------------------------------------ */
+.faq { border-top: 1px solid var(--hair); }
+.faq-item { border-bottom: 1px solid var(--hair); }
+.faq-trigger {
+  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 20px;
+  background: none; border: 0; color: var(--ink);
+  padding: 22px 0; text-align: left; cursor: pointer;
+  font: 500 1.06rem 'Geist Variable', sans-serif;
+}
+.faq-trigger:hover { color: var(--amber-bright); }
+.faq-trigger svg { flex: none; width: 18px; height: 18px; color: var(--ink-faint); transition: transform 0.3s var(--ease), color 0.3s var(--ease); }
+.faq-item.open .faq-trigger svg { transform: rotate(180deg); color: var(--amber); }
+
+/* Animating to intrinsic height, so an open answer cannot be clipped by a
+   resize or a rotation the way a measured max-height was. */
+.faq-answer { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 0.34s var(--ease); }
+.faq-item.open .faq-answer { grid-template-rows: 1fr; }
+.faq-answer > div { overflow: hidden; visibility: hidden; }
+.faq-item.open .faq-answer > div { visibility: visible; }
+.faq-answer p { margin: 0 0 22px; max-width: var(--measure); color: var(--ink-2); }
+
+/* --- roadmap -------------------------------------------------------------- */
+/* ---------------------------------------------------------------------------
+   THE ROADMAP, as three receding planes.
+
+   This is the hero's own grammar turned into information: what has shipped is
+   nearest and lit, what is coming is mid-ground, and the major version is far
+   enough back that it reads as far without a date having to say so. Distance
+   is carried by rule weight, marker and text value, the way the hero carries
+   it by blur and rate.
+   --------------------------------------------------------------------------- */
+.horizon {
+  list-style: none; margin: 36px 0 0; padding: 0;
+  max-width: var(--measure);
+}
+.horizon > li {
+  position: relative;
+  padding: 0 0 40px 28px;
+  border-left: 1px solid var(--hair);
+}
+.horizon > li:last-child { padding-bottom: 0; border-left-color: transparent; }
+.horizon > li::before {
+  content: ""; position: absolute; left: -4px; top: 7px;
+  width: 7px; height: 7px; border-radius: 50%;
+}
+.horizon h3 { margin: 0; font-size: 1.24rem; letter-spacing: -0.015em; }
+.horizon .horizon-when {
+  display: block; margin: 3px 0 12px;
+  font-size: 0.72rem; letter-spacing: 0.13em; text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.horizon p { margin: 0 0 10px; color: var(--ink-2); }
+.horizon ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 11px; }
+.horizon ul li { color: var(--ink-2); }
+.horizon strong { color: var(--ink); font-weight: 600; }
+
+/* near: shipped, and the only plane the amber reaches */
+.horizon > .near { border-left-color: var(--amber-line); }
+.horizon > .near::before { background: var(--amber); }
+
+.horizon > .mid { border-left-color: var(--hair-strong); }
+.horizon > .mid::before { background: var(--ink-3); }
+
+/* far: still legible, deliberately not competing with the near planes */
+.horizon > .far::before { background: var(--ink-faint); }
+.horizon > .far h3 { color: var(--ink-2); }
+.horizon > .far p { color: var(--ink-3); }
+
+/* --- close ---------------------------------------------------------------- */
+.close-cta { text-align: left; }
+.close-cta h2 { max-width: 18ch; }
+
+footer { padding: 54px 0 68px; border-top: 1px solid var(--hair); color: var(--ink-3); font-size: 0.94rem; }
+footer .container { display: flex; flex-wrap: wrap; gap: 24px 40px; align-items: baseline; justify-content: space-between; }
+footer ul { display: flex; flex-wrap: wrap; gap: 8px 24px; list-style: none; margin: 0; padding: 0; }
+
+/* --- lightbox ------------------------------------------------------------- */
+.lightbox {
+  position: fixed; inset: 0; z-index: 60;
+  display: none; align-items: center; justify-content: center;
+  background: rgba(6, 5, 14, 0.94);
+  padding: 32px;
+}
+/* `display: none` rather than opacity, so nothing inside can hold focus while
+   the dialog is closed. */
+.lightbox[open] { display: flex; }
+.lightbox img { max-width: 100%; max-height: 100%; border-radius: var(--radius); box-shadow: var(--lift-2); }
+.lightbox-close {
+  position: absolute; top: 20px; right: 24px;
+  background: transparent; border: 1px solid var(--hair-strong); color: var(--ink);
+  border-radius: 4px; width: 40px; height: 40px; cursor: pointer; font-size: 1.2rem; line-height: 1;
+}
+.lightbox-close:hover { border-color: var(--amber-line); color: var(--amber-bright); }
+
+/* ---------------------------------------------------------------------------
+   Reveal. One authored moment, not an entrance on every section: content is
+   visible by default and only lifts if the browser can animate it.
+   --------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: no-preference) {
+  .reveal { opacity: 0; transform: translateY(14px); transition: opacity 0.7s var(--ease), transform 0.7s var(--ease); }
+  .reveal.seen { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+  /* state changes must survive: these are the elements motion would strand */
+  .reveal, .cel { opacity: 1 !important; transform: none !important; filter: none !important; }
+  .faq-answer { transition: none; }
+}
+
+@media (forced-colors: active) {
+  .plane-plate, .plane-grade, #hero-canvas { display: none; }
+  .cel { background: Canvas; }
+}
+
+/* ---------------------------------------------------------------------------
+   Narrow viewports
+   --------------------------------------------------------------------------- */
+@media (max-width: 900px) {
+  .shots { grid-template-columns: 1fr; }
+  .layer { grid-template-columns: 1fr; gap: 10px; padding: 24px; }
+  .layer-name { padding-top: 0; }
+  .depthkey { display: none; }
+}
+
+@media (max-width: 720px) {
+  body { font-size: 16px; }
+  .container { padding: 0 20px; }
+  section { padding: 76px 0; }
+  .nav ul { gap: 18px; }
+  .nav ul a { font-size: 0.86rem; white-space: nowrap; }
+
+  /* The comparison table stops being a table below 720px. Its third column
+     used to sit off-screen behind a horizontal scroll, which rendered the
+     product's strongest proof as a list of things it cannot do. */
+  .cmp, .cmp tbody, .cmp tr, .cmp td { display: block; width: 100%; }
+  .cmp thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .cmp tr { padding: 18px 0; border-bottom: 1px solid var(--hair); }
+  .cmp td { border: 0; padding: 0; }
+  .cmp .feature { font-size: 1.06rem; margin-bottom: 8px; width: auto; }
+  .cmp .up { font-size: 0.86rem; color: var(--ink-faint); margin-bottom: 6px; width: auto; }
+  .cmp .up::before { content: 'Upstream: '; }
+  .cmp .plus { color: var(--ink-2); }
+}
+
+/* Below 600px only the three destinations survive. The in-page anchors are
+   reachable by scrolling the page itself, which beats a nav that wraps into
+   the wordmark or hides itself behind an undiscoverable side-scroll. */
+/* The nav carries the page's own structure, which is more links than fit at
+   every width. They drop in the order a visitor can most afford to lose them:
+   first the evaluate-and-decide sections (screenshots, FAQ, roadmap), which
+   the page itself still scrolls to, then the remaining in-page anchors. What
+   never drops is Install, Guides, GitHub and Discord: arriving, learning, the
+   source, and getting help. */
+@media (max-width: 1080px) {
+  .nav-deep { display: none; }
+}
+@media (max-width: 600px) {
+  .nav-inpage { display: none; }
+  .nav .container { height: 60px; }
+}
+
+/* Everything before this point is a place on this site; everything after it
+   leaves. The rule says so without needing a word. */
+.nav-sep { padding-left: 28px; border-left: 1px solid var(--hair); }
+@media (max-width: 600px) { .nav-sep { padding-left: 0; border-left: 0; } }
+
+@media (max-width: 420px) {
+  .hero-actions { gap: 14px; }
+  .btn { width: 100%; justify-content: center; }
+  .cel { font-size: 1rem; }
+  .cel.translated { font-size: 0.94rem; }
+}
+
+/* ---------------------------------------------------------------------------
+   Hero controls, live numbers, and the install line.
+   Added after the first build round: the hero became something you operate.
+   --------------------------------------------------------------------------- */
+
+.hero-install {
+  display: inline-flex; align-self: flex-start; align-items: center; gap: 12px;
+  margin-top: 26px; padding: 8px 8px 8px 14px;
+  border: 1px solid var(--hair); border-radius: var(--radius);
+  background: rgba(11, 10, 22, 0.55);
+  max-width: 100%;
+}
+.hero-install code {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.86rem; color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+/* Live figures only. An em dash means the number did not load, which is the
+   honest state; it is never replaced with an approximation. */
+.stats { display: flex; flex-wrap: wrap; gap: 14px 40px; margin: 26px 0 0; align-self: flex-start; }
+.stats div { display: flex; flex-direction: column; gap: 2px; }
+.stats dt { font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); }
+.stats dd { margin: 0; font-size: 1.06rem; color: var(--ink-3); }
+.stats dd.live { color: var(--ink); }
+.stats dd a { color: inherit; }
+.stats dd time { color: var(--ink-3); font-size: 0.86rem; margin-left: 4px; }
+
+/* The depth key is now a control, so it has to read and behave as one. */
+.depthkey { align-items: flex-end; }
+.depthkey-hint {
+  margin: 0 0 4px; font-size: 0.72rem; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--ink-faint);
+}
+.depthkey button {
+  display: flex; align-items: center; gap: 9px;
+  background: none; border: 0; padding: 3px 0; cursor: pointer;
+  font: 400 0.72rem 'Geist Variable', sans-serif;
+  letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--ink-faint);
+  transition: color 0.3s var(--ease);
+}
+.depthkey button:disabled { cursor: default; }
+.depthkey button:not(:disabled):hover { color: var(--ink-2); }
+.depthkey button.on { color: var(--amber-bright); }
+.depthkey button.on i { transform: none; background: var(--amber-bright); }
+
+/* The playhead. A real range input, so it is keyboard operable for free. */
+.scrub {
+  position: absolute; left: 32px; right: 32px; bottom: 26px;
+  display: flex; align-items: center; gap: 16px;
+}
+.scrub input[type="range"] {
+  flex: 1; height: 22px; margin: 0; background: transparent; cursor: grab;
+  -webkit-appearance: none; appearance: none;
+}
+.scrub input[type="range"]::-webkit-slider-runnable-track {
+  height: 2px; background: var(--hair-strong); border-radius: 2px;
+}
+.scrub input[type="range"]::-moz-range-track {
+  height: 2px; background: var(--hair-strong); border-radius: 2px;
+}
+.scrub input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 3px; height: 18px; margin-top: -8px; border: 0; border-radius: 1px;
+  background: var(--amber-bright);
+}
+.scrub input[type="range"]::-moz-range-thumb {
+  width: 3px; height: 18px; border: 0; border-radius: 1px; background: var(--amber-bright);
+}
+.scrub output { font-size: 0.72rem; letter-spacing: 0.08em; color: var(--ink-faint); }
+.hero.scrubbing { cursor: grabbing; }
+.hero.scrubbing .cel { transition-duration: 0.12s; }
+
+@media (max-width: 900px) {
+  /* the key is a control now, so it stays, it just moves into the flow */
+  .depthkey {
+    display: flex; position: static; align-items: flex-start;
+    margin-top: 28px;
+  }
+  .depthkey button { flex-direction: row-reverse; }
+  .depthkey button i { transform-origin: left center; }
+  .scrub { position: static; margin-top: 18px; }
+}
+
+/* ===========================================================================
+   Guides (Read mode).
+
+   Same world, different job. The plate belongs to the landing page; a guide
+   gets the grade only, because a reader who came to execute a command should
+   not have to read over a picture. What carries the world here is the ink, the
+   cel-flat panels, the amber-means-one-thing rule, and the depth key, which
+   becomes the table of contents these pages never had.
+   =========================================================================== */
+.guide-page { padding: 0 0 96px; }
+.guide-page > .container {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 208px;
+  gap: 0 56px;
+  align-items: start;
+}
+
+.breadcrumb {
+  grid-column: 1 / -1;
+  padding: 26px 0 0;
+  font-size: 0.86rem; color: var(--ink-faint);
+}
+.breadcrumb a { color: var(--ink-3); }
+.breadcrumb a:hover { color: var(--ink); }
+.breadcrumb .sep { margin: 0 8px; opacity: 0.5; }
+
+.guide-page h1 {
+  grid-column: 1 / -1;
+  margin: 14px 0 34px;
+  font-size: clamp(2rem, 3.6vw, 2.9rem);
+  /* the rule is the page's top edge, so it spans the grid rather than the
+     title's own text box. The global h1 caps at 19ch for the hero headline,
+     which would otherwise cut this rule off mid-page. */
+  width: 100%; max-width: none;
+  padding-bottom: 26px;
+  border-bottom: 1px solid var(--hair);
+}
+
+/* --- the rail ------------------------------------------------------------- */
+.guide-rail {
+  grid-column: 2; grid-row: 3;
+  position: sticky; top: 96px;
+  display: flex; flex-direction: column; gap: 10px;
+  /* Sentence case, deliberately. This rail is built from the page's own h2
+     text, which is sentences up to 40 characters, not micro-labels. Set in
+     tracked uppercase they lost the ascenders and descenders the eye reads
+     word shapes by, in the one component whose entire job is being scanned.
+     The uppercase came from the hero depth key, which no longer exists. */
+  font-size: 0.76rem; letter-spacing: 0; line-height: 1.35;
+}
+.guide-rail:empty { display: none; }
+.guide-rail a {
+  display: flex; align-items: center; gap: 9px;
+  color: var(--ink-faint);
+  transition: color 0.3s var(--ease);
+}
+.guide-rail a::before {
+  content: ""; display: block; flex: none;
+  width: 34px; height: 1px; background: var(--hair-strong);
+  transform: scaleX(0.5); transform-origin: left center;
+  transition: transform 0.3s var(--ease), background 0.3s var(--ease);
+}
+.guide-rail a:hover { color: var(--ink-2); }
+.guide-rail a.here { color: var(--amber-bright); }
+.guide-rail a.here::before { transform: none; background: var(--amber-bright); }
+
+/* --- prose ---------------------------------------------------------------- */
+.content { grid-column: 1; grid-row: 3; max-width: var(--measure); }
+.content > h2:first-child { margin-top: 0; }
+.content h2 {
+  margin: 56px 0 16px;
+  font-size: 1.5rem; letter-spacing: -0.02em; max-width: 26ch;
+  scroll-margin-top: 96px;
+}
+.content h3 { margin: 34px 0 10px; font-size: 1.2rem; scroll-margin-top: 96px; }
+.content p, .content li { color: var(--ink-2); }
+.content p { margin: 0 0 18px; }
+.content ul, .content ol { padding-left: 22px; margin: 0 0 20px; }
+.content li { margin-bottom: 8px; }
+.content strong { color: var(--ink); font-weight: 600; }
+.content a { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 0.18em; text-decoration-color: var(--amber-line); }
+.content img { max-width: 100%; height: auto; border-radius: var(--radius); }
+.content figure { margin: 26px 0; }
+.content table { width: 100%; border-collapse: collapse; margin: 22px 0; font-size: 0.94rem; }
+.content th, .content td { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--hair); vertical-align: top; }
+.content th { color: var(--ink-faint); font-size: 0.78rem; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 500; }
+
+/* Sentence case: these are captions naming what is in the picture, up to 49
+   characters, not micro-labels. Uppercase flattened the proper nouns that make
+   them scannable in the first place. */
+.shot-label {
+  font-size: 0.76rem; letter-spacing: 0.01em;
+  color: var(--ink-faint); margin-bottom: 8px;
+}
+.screenshot-frame { border: 1px solid var(--hair); border-radius: var(--radius); padding: 12px; background: var(--plane-2); }
+
+/* Numbered steps: the best-chunked thing on the old site, kept. */
+.steps { counter-reset: step; list-style: none; padding: 0; margin: 24px 0; }
+.steps > li {
+  counter-increment: step;
+  position: relative; padding-left: 44px; margin-bottom: 22px;
+}
+.steps > li::before {
+  content: counter(step);
+  position: absolute; left: 0; top: 1px;
+  width: 26px; height: 26px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: rgba(230, 138, 0, 0.14); border: 1px solid var(--amber-line);
+  color: var(--amber-bright); font-size: 0.78rem; font-variant-numeric: tabular-nums;
+}
+
+/* Callouts. The old ones used a 3px amber left border; a 1px rule plus a tint
+   carries the same signal without the costume. */
+.note {
+  margin: 24px 0; padding: 18px 20px;
+  border: 1px solid var(--hair); border-radius: var(--radius);
+  background: var(--plane-2);
+}
+.note p:last-child { margin-bottom: 0; }
+.note-warning { border-color: var(--amber-line); background: rgba(230, 138, 0, 0.07); }
+.note-warning strong { color: var(--amber-bright); }
+
+/* Never uppercase this one. It carries filenames, and a path is case
+   sensitive: text-transform rendered docker-compose.yml as DOCKER-COMPOSE.YML,
+   which is a different file to anything that reads it literally. */
+.code-lang {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.76rem; letter-spacing: 0; color: var(--ink-3);
+}
+.badge-new {
+  font-size: 0.7rem; letter-spacing: 0.06em; color: var(--amber-bright);
+  border: 1px solid var(--amber-line); border-radius: 3px; padding: 1px 5px;
+  margin-left: 6px; white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------------------
+   THE GUIDE INDEX
+
+   An index is not an article, so it does not get the article's two-column
+   shell. Without this the card list auto-placed into the 208px rail track and
+   every card rendered one word per line.
+   --------------------------------------------------------------------------- */
+.guide-index > .container { grid-template-columns: minmax(0, 1fr); }
+.guide-intro {
+  grid-column: 1 / -1;
+  max-width: var(--measure);
+  margin: 0 0 34px;
+  color: var(--ink-2); font-size: 1.06rem;
+}
+
+/* A real path, not seven equal choices: the first card is the way in and takes
+   the full width, the rest pair off behind it. */
+.guide-grid {
+  grid-column: 1 / -1;
+  display: grid; gap: 14px; margin-top: 0;
+}
+@media (min-width: 760px) {
+  .guide-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .guide-grid > .guide-card:first-child { grid-column: 1 / -1; }
+}
+
+.guide-card {
+  display: flex; flex-direction: column; justify-content: space-between; gap: 18px;
+  padding: 22px 24px;
+  border: 1px solid var(--hair); border-radius: var(--radius);
+  background: var(--plane-1);
+  /* the card is an <a>, so everything inside it would inherit link amber */
+  color: var(--ink);
+  transition: border-color 0.2s var(--ease), background 0.2s var(--ease), transform 0.2s var(--ease);
+}
+.guide-card:hover { border-color: var(--amber-line); background: var(--plane-2); transform: translateY(-1px); }
+.guide-card h2, .guide-card h3 { margin: 0 0 6px; font-size: 1.2rem; color: var(--ink); }
+.guide-card p { margin: 0; color: var(--ink-2); font-size: 0.94rem; }
+
+.guide-card-title {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  margin-bottom: 7px;
+  font-size: 1.14rem; font-weight: 600; letter-spacing: -0.015em;
+  color: var(--ink);
+}
+.guide-card-desc { color: var(--ink-2); font-size: 0.94rem; line-height: 1.55; }
+.guide-card-arrow {
+  color: var(--amber); font-size: 0.9rem;
+  transition: color 0.2s var(--ease);
+}
+.guide-card:hover .guide-card-arrow { color: var(--amber-bright); }
+.guide-card-title .badge-new { margin-left: 0; }
+
+@media (max-width: 1080px) {
+  .guide-page > .container { grid-template-columns: minmax(0, 1fr); }
+  .guide-rail {
+    grid-column: 1; grid-row: auto; position: static;
+    flex-direction: row; flex-wrap: wrap; gap: 10px 20px;
+    padding-bottom: 26px; margin-bottom: 8px;
+    border-bottom: 1px solid var(--hair);
+  }
+  .guide-rail a::before { display: none; }
+  .content { grid-row: auto; }
+}
+
+/* Structural rather than selector-guessing: any inline code may wrap anywhere,
+   and only a <pre> keeps its lines intact and scrolls instead. */
+.content code { overflow-wrap: anywhere; }
+.content pre code { overflow-wrap: normal; }
+
+/* ===========================================================================
+   Hero, second pass.
+
+   It now fits the viewport exactly and uses both halves: the claim on the
+   left, and on the right the screen area, where the subtitles actually live.
+   The background is a seamless Remotion loop; the right-hand track is p5 and
+   answers the playhead.
+   =========================================================================== */
+.hero {
+  min-height: calc(100svh - 68px);
+  max-height: calc(100svh - 68px);
+  overflow: hidden;
+  /* A full-bleed hero is not a section with a rhythm above and below it. The
+     generic section padding was eating 216px of a 628px box here, which is
+     what pushed the stats row off the bottom of a laptop viewport. */
+  padding-top: 0; padding-bottom: 0;
+  /* Centre the block itself rather than stretching it and centring inside:
+     the two columns are different heights, and only this keeps the shorter
+     one optically level with the taller one on every viewport. */
+  align-items: center;
+}
+.hero .container {
+  display: grid;
+  grid-template-columns: minmax(0, 1.02fr) minmax(0, 0.98fr);
+  gap: 0 64px;
+  align-items: center;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+/* the earlier single-column reserve is no longer how this hero is built */
+@media (min-width: 901px) { .hero .container { padding-bottom: 0; } }
+
+.hero-copy { display: flex; flex-direction: column; min-width: 0; }
+
+.plane-plate img {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+  /* the loop is graded warm; the page is graded navy */
+  filter: saturate(0.9);
+}
+
+/* --- the screen ----------------------------------------------------------- */
+.hero-screen {
+  position: relative;
+  display: flex; flex-direction: column; justify-content: center; gap: 18px;
+  min-width: 0;
+}
+
+/* The cue block sits at the bottom of a fixed reserve, so a line appearing or
+   leaving never moves the track underneath it. */
+.cels {
+  position: static; margin: 0; padding: 0;
+  min-height: 84px;
+  align-content: end; justify-items: center;
+}
+@media (min-width: 901px) {
+  .cels { position: static; margin: 0; padding: 0; justify-items: center; }
+}
+
+#track { display: block; width: 100%; height: auto; }
+
+.hero-screen .depthkey {
+  position: static; flex-direction: row; flex-wrap: wrap;
+  align-items: center; justify-content: center; gap: 8px 22px;
+}
+.hero-screen .depthkey-hint { width: 100%; text-align: center; margin-bottom: 2px; }
+.hero-screen .scrub { position: static; }
+.screen-note {
+  margin: 10px 0 0; text-align: right;
+  /* a sentence, not a label: it gets readable size and normal tracking */
+  font-size: 0.8rem; letter-spacing: normal;
+  color: var(--ink-3);
+}
+@media (max-width: 900px) { .screen-note { text-align: left; } }
+
+@media (max-width: 900px) {
+  .hero { min-height: auto; max-height: none; }
+  .hero .container {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 40px;
+    padding-top: 56px; padding-bottom: 64px;
+  }
+  .hero-screen .depthkey { justify-content: flex-start; }
+  .hero-screen .depthkey-hint { text-align: left; }
+}
+
+
+
+
+/* The track needs real height: it is a wrapper now, and p5 fills it. */
+#track { width: 100%; height: clamp(150px, 19vh, 210px); }
+#track canvas { display: block; width: 100% !important; height: 100% !important; }
+
+
+/* The lane legend. It replaces a three-row control panel that explained itself
+   with a hint line: two letters beside the track say the same thing, and each
+   one is the switch for its own lane. */
+.scrub .lane {
+  flex: none;
+  background: transparent;
+  border: 1px solid var(--amber-line);
+  border-radius: 3px;
+  padding: 3px 8px;
+  font: 500 0.72rem/1 'Geist Variable', sans-serif;
+  letter-spacing: 0.1em;
+  color: var(--amber-bright);
+  cursor: pointer;
+  transition: color 0.2s var(--ease), border-color 0.2s var(--ease), opacity 0.2s var(--ease);
+}
+.scrub .lane[data-track="dialogue"] { border-color: var(--hair-strong); color: var(--ink); }
+.scrub .lane.off { opacity: 0.42; border-color: var(--hair); color: var(--ink-faint); }
+.scrub .lane:hover { border-color: var(--amber-bright); }
+.hero-screen .depthkey { display: none; }

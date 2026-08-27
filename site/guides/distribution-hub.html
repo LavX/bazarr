@@ -23,40 +23,32 @@
   <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
 
   <!-- Geist font: async preload -->
-  <link rel="preload" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" as="style" crossorigin>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" media="print" onload="this.media='all'">
-  <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css"></noscript>
 
-  <link rel="icon" href="../screenshots/logo128.png" type="image/png">
-  <link rel="stylesheet" href="../css/style.css">
+  <link rel="icon" href="../favicon.ico" sizes="any">
+  <link rel="stylesheet" href="../css/site.css">
 </head>
 <body>
 
-<a href="#main-content" class="skip-link">Skip to content</a>
+<a class="skip" href="#main-content">Skip to content</a>
 
-<!-- Grain overlay -->
-<svg class="grain" aria-hidden="true">
-  <filter id="grain-filter">
-    <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/>
-  </filter>
-  <rect width="100%" height="100%" filter="url(#grain-filter)"/>
-</svg>
-
-<!-- Ambient gradients -->
-<div class="ambient" aria-hidden="true"></div>
-
-<nav class="sticky-nav" aria-label="Site navigation">
+<header class="nav">
   <div class="container">
-    <img src="../screenshots/logo128.png" alt="Bazarr+" class="nav-logo" width="22" height="22">
-    <a href="../">Home</a>
-    <a href="../#comparison-heading">Compare</a>
-    <a href="../#quick-start">Install</a>
-    <a href="../#screenshots-heading">Screenshots</a>
-    <a href="../#faq-heading">FAQ</a>
-    <a href="./" class="nav-active">Guides</a>
-    <a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a>
+    <a class="wordmark" href="../" aria-label="Bazarr+"><img src="../screenshots/logo128.png" width="32" height="32" alt="" decoding="async"><span>Bazarr<b>+</b></span></a>
+    <nav aria-label="Primary">
+      <ul>
+        <li class="nav-inpage"><a href="../#what">What it does</a></li>
+        <li class="nav-deep"><a href="../#proof">Screenshots</a></li>
+        <li class="nav-inpage"><a href="../#compare">Compare</a></li>
+        <li><a href="../#start">Install</a></li>
+        <li class="nav-deep"><a href="../#faq">FAQ</a></li>
+        <li class="nav-deep"><a href="../#next">Roadmap</a></li>
+        <li class="nav-sep"><a href="./" aria-current="page">Guides</a></li>
+        <li><a href="https://github.com/LavX/bazarr" rel="noopener">GitHub</a></li>
+        <li><a href="https://discord.gg/fpp5JXmB8f" rel="noopener">Discord</a></li>
+      </ul>
+    </nav>
   </div>
-</nav>
+</header>
 
 <main id="main-content" class="guide-page">
   <div class="container">
@@ -64,6 +56,8 @@
       <a href="../">Home</a><span class="sep">/</span><a href="./">Guides</a><span class="sep">/</span><span>Distribution Hub</span>
     </nav>
     <h1>Distribution Hub <span class="badge-new" aria-label="New in v2.4">v2.4</span></h1>
+
+    <nav class="guide-rail" id="guide-rail" aria-label="On this page"></nav>
 
     <article class="content">
 
@@ -89,10 +83,7 @@
       <p>The <strong>Overview</strong> tab shows four stat cards (Searches today, Downloads today, Active keys, Throttled over 30 days), a 30-day usage chart, and a Top keys table.</p>
 
       <figure class="screenshot-frame">
-        <div class="screenshot-chrome" aria-hidden="true">
-          <span class="chrome-dot"></span><span class="chrome-dot"></span><span class="chrome-dot"></span>
-          <span class="chrome-title">Distribution Hub - Overview</span>
-        </div>
+        <figcaption class="shot-label">Distribution Hub - Overview</figcaption>
         <picture>
           <source type="image/webp" srcset="../screenshots/v2.4.0/distribution-hub-overview.webp">
           <img src="../screenshots/v2.4.0/distribution-hub-overview.png" alt="Distribution Hub Overview tab with stat cards for searches, downloads, active keys, and throttled requests, plus a 30-day usage chart and a top keys table" loading="lazy" decoding="async" width="2864" height="1800">
@@ -102,10 +93,7 @@
       <p>The <strong>API Keys</strong> tab is where you create, edit, rotate, disable, and delete keys. The table lists each key by name, prefix, tier, today's usage, last used, and an enabled switch.</p>
 
       <figure class="screenshot-frame">
-        <div class="screenshot-chrome" aria-hidden="true">
-          <span class="chrome-dot"></span><span class="chrome-dot"></span><span class="chrome-dot"></span>
-          <span class="chrome-title">API Keys</span>
-        </div>
+        <figcaption class="shot-label">API Keys</figcaption>
         <picture>
           <source type="image/webp" srcset="../screenshots/v2.4.0/distribution-hub-keys.webp">
           <img src="../screenshots/v2.4.0/distribution-hub-keys.png" alt="Distribution Hub API Keys tab showing the keys table with name, prefix, tier badge, usage, last used, and enabled switch columns, plus a New key button" loading="lazy" decoding="async" width="2864" height="1800">
@@ -115,10 +103,7 @@
       <p>The <strong>Tiers</strong> tab holds the editable limit grid for each preset tier and the default tier new keys inherit.</p>
 
       <figure class="screenshot-frame">
-        <div class="screenshot-chrome" aria-hidden="true">
-          <span class="chrome-dot"></span><span class="chrome-dot"></span><span class="chrome-dot"></span>
-          <span class="chrome-title">Tiers</span>
-        </div>
+        <figcaption class="shot-label">Tiers</figcaption>
         <picture>
           <source type="image/webp" srcset="../screenshots/v2.4.0/distribution-hub-tiers.webp">
           <img src="../screenshots/v2.4.0/distribution-hub-tiers.png" alt="Distribution Hub Tiers tab with the default tier selector and per-tier cards showing editable hourly, daily, weekly, and monthly search and download limits" loading="lazy" decoding="async" width="2864" height="2628">
@@ -128,10 +113,7 @@
       <p>The <strong>Settings</strong> tab carries the consent and enable switches, the global search timeout, usage retention, secret regeneration, and the OpenSubtitles affiliation disclaimer.</p>
 
       <figure class="screenshot-frame">
-        <div class="screenshot-chrome" aria-hidden="true">
-          <span class="chrome-dot"></span><span class="chrome-dot"></span><span class="chrome-dot"></span>
-          <span class="chrome-title">Settings</span>
-        </div>
+        <figcaption class="shot-label">Settings</figcaption>
         <picture>
           <source type="image/webp" srcset="../screenshots/v2.4.0/distribution-hub-settings.webp">
           <img src="../screenshots/v2.4.0/distribution-hub-settings.png" alt="Distribution Hub Settings tab with the endpoint consent and enable switches, search rate-limit toggle, global timeout, usage retention, regenerate secrets button, and OpenSubtitles affiliation disclaimer" loading="lazy" decoding="async" width="2864" height="1800">
@@ -201,10 +183,10 @@
 
       <p>To see exactly which provider names a key can reach, a client can call the discovery endpoint:</p>
 
-      <div class="code-wrap">
-        <div class="code-header">
+      <div class="code">
+        <div class="code-head">
           <span class="code-lang">Discovery</span>
-          <button class="copy-btn" data-copy="curl -H &quot;Api-Key: bzr_your_token&quot; https://your-bazarr/api/v1/providers" aria-label="Copy provider discovery request">Copy</button>
+          <button class="copy" data-copy="curl -H &quot;Api-Key: bzr_your_token&quot; https://your-bazarr/api/v1/providers" aria-label="Copy provider discovery request">Copy</button>
         </div>
         <pre><code>curl -H "Api-Key: bzr_your_token" https://your-bazarr/api/v1/providers</code></pre>
       </div>
@@ -219,10 +201,10 @@
         <li>Point your client at <code>&lt;your base URL&gt;/api/v1</code> and send the token in the <code>Api-Key</code> header. Hand the token to your Jellyfin plugin, VLSub, or app.</li>
       </ol>
 
-      <div class="code-wrap">
-        <div class="code-header">
+      <div class="code">
+        <div class="code-head">
           <span class="code-lang">Client request</span>
-          <button class="copy-btn" data-copy="curl -H &quot;Api-Key: bzr_your_token&quot; \&#10;  &quot;https://your-bazarr/api/v1/subtitles?query=Dune&amp;languages=en&quot;" aria-label="Copy client search request">Copy</button>
+          <button class="copy" data-copy="curl -H &quot;Api-Key: bzr_your_token&quot; \&#10;  &quot;https://your-bazarr/api/v1/subtitles?query=Dune&amp;languages=en&quot;" aria-label="Copy client search request">Copy</button>
         </div>
         <pre><code>curl -H "Api-Key: bzr_your_token" \
   "https://your-bazarr/api/v1/subtitles?query=Dune&amp;languages=en"</code></pre>
@@ -265,15 +247,21 @@
 <!-- Footer -->
 <footer>
   <div class="container">
-    <div class="footer-inner">
-      <p class="footer-credit">Built by <a href="https://github.com/LavX" target="_blank" rel="noopener">LavX</a>. Based on <a href="https://github.com/morpheus65535/bazarr" target="_blank" rel="noopener">Bazarr</a> by morpheus65535.</p>
-      <ul class="footer-links">
-        <li><a href="./">Guides</a></li>
-        <li><a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a></li>
-        <li><a href="https://github.com/LavX/bazarr/issues" target="_blank" rel="noopener">Issues</a></li>
-        <li><a href="https://github.com/LavX/bazarr/wiki" target="_blank" rel="noopener">Wiki</a></li>
-      </ul>
-    </div>
+    <p>Bazarr+ is a hard fork of <a class="inline" href="https://github.com/morpheus65535/bazarr" rel="noopener">Bazarr</a>, GPL-3, maintained by <a class="inline" href="https://github.com/LavX" rel="noopener">LavX</a>.</p>
+    <ul>
+      <li><a href="../">Home</a></li>
+      <li><a href="getting-started.html">Getting Started</a></li>
+      <li><a href="migration.html">Migration</a></li>
+      <li><a href="provider-hub.html">Provider Hub</a></li>
+      <li><a href="ai-translation.html">AI Translation</a></li>
+      <li><a href="bulk-operations.html">Bulk Operations</a></li>
+      <li><a href="external-integration.html">External Integration</a></li>
+      <li><a href="./">All guides</a></li>
+      <li><a href="https://github.com/LavX/bazarr/releases" rel="noopener">Releases</a></li>
+      <li><a href="https://github.com/LavX/bazarr/issues" rel="noopener">Issues</a></li>
+      <li><a href="https://github.com/LavX/bazarr/wiki" rel="noopener">Wiki</a></li>
+      <li><a href="https://discord.gg/fpp5JXmB8f" rel="noopener">Discord</a></li>
+    </ul>
   </div>
 </footer>
 

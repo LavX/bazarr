@@ -1,0 +1,87 @@
+name: Promote site to master
+
+# The lifecycle for everything in this repository is feature -> development ->
+# master, and master is release-only. The public site is the one thing that
+# should not have to wait for a release cut: a typo in a guide, or a corrected
+# figure, ought to reach lavx.github.io the day it is merged.
+#
+# The release policy already allows exactly one narrow exception, a site/**
+# change written directly to master. This job is that exception, automated so
+# it cannot be got wrong by hand:
+#
+#   * It copies ONLY the site/ tree from development. Unreleased backend code on
+#     development can never ride along, which is the thing that makes a plain
+#     development -> master merge unsafe outside a release.
+#   * It refuses to run if anything outside site/ would change on master.
+#   * The resulting push to master triggers deploy-pages.yml, which is what
+#     actually publishes to gh-pages.
+#
+# So: work on a feature branch, PR into development, and when you want the site
+# live, dispatch this. No direct pushes to master by hand, ever.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Show what would change without pushing'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: promote-site
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: master
+
+      - name: Take site/ from development
+        id: apply
+        run: |
+          set -euo pipefail
+          git fetch origin development:refs/remotes/origin/development
+
+          if git diff --quiet origin/development master -- site/; then
+            echo "site/ on master already matches development. Nothing to promote."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git checkout origin/development -- site/
+
+          # Belt and braces: whatever the checkout did, the staged diff must
+          # touch nothing outside site/. If it does, something is wrong with the
+          # assumptions above and master must not be written to.
+          outside=$(git diff --cached --name-only | grep -v '^site/' || true)
+          if [ -n "$outside" ]; then
+            echo "::error::Refusing to promote. These paths are outside site/:"
+            echo "$outside"
+            exit 1
+          fi
+
+          echo "Files promoted:"
+          git diff --cached --name-only | sed 's/^/  /'
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push to master
+        if: steps.apply.outputs.changed == 'true' && inputs.dry_run != true
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          SHA=$(git rev-parse --short origin/development)
+          git commit -m "site: promote site/ from development (${SHA})"
+          git push origin HEAD:master
+
+      - name: Dry run summary
+        if: steps.apply.outputs.changed == 'true' && inputs.dry_run == true
+        run: |
+          echo "Dry run: nothing pushed."

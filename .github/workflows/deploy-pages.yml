@@ -37,9 +37,13 @@ jobs:
           # site/hero/ is a developer-side p5.js generator (release artwork
           # source), not referenced from any deployed page. Everything else
           # under site/ ships as-is, including .nojekyll.
+          # data/ holds generated stats written straight to gh-pages by
+          # site-stats.yml and has no counterpart on master, so --delete would
+          # wipe the live numbers on every deploy. Excluding it leaves them be.
           rsync -a --delete \
             --exclude '.git/' \
             --exclude 'hero/' \
+            --exclude 'data/' \
             src/site/ pages/
 
       - name: Commit and push if changed

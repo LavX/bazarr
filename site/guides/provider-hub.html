@@ -28,10 +28,10 @@
   <!-- Geist font: self-hosted preload -->
   <link rel="preload" href="../fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
 
-  <link rel="icon" href="../screenshots/logo128.png" type="image/png">
-  <meta name="theme-color" content="#1a1a2e">
+  <link rel="icon" href="../favicon.ico" sizes="any">
+  <meta name="theme-color" content="#121125">
   <link rel="apple-touch-icon" href="../apple-touch-icon.png">
-  <link rel="stylesheet" href="../css/style.css">
+  <link rel="stylesheet" href="../css/site.css">
 
   <script type="application/ld+json">
   {
@@ -81,31 +81,26 @@
 </head>
 <body>
 
-<a href="#main-content" class="skip-link">Skip to content</a>
+<a class="skip" href="#main-content">Skip to content</a>
 
-<!-- Grain overlay -->
-<svg class="grain" aria-hidden="true">
-  <filter id="grain-filter">
-    <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/>
-  </filter>
-  <rect width="100%" height="100%" filter="url(#grain-filter)"/>
-</svg>
-
-<!-- Ambient gradients -->
-<div class="ambient" aria-hidden="true"></div>
-
-<nav class="sticky-nav" aria-label="Site navigation">
+<header class="nav">
   <div class="container">
-    <img src="../screenshots/logo128.png" alt="Bazarr+" class="nav-logo" width="22" height="22">
-    <a href="../">Home</a>
-    <a href="../#comparison-heading">Compare</a>
-    <a href="../#quick-start">Install</a>
-    <a href="../#screenshots-heading">Screenshots</a>
-    <a href="../#faq-heading">FAQ</a>
-    <a href="./" class="nav-active">Guides</a>
-    <a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a>
+    <a class="wordmark" href="../" aria-label="Bazarr+"><img src="../screenshots/logo128.png" width="32" height="32" alt="" decoding="async"><span>Bazarr<b>+</b></span></a>
+    <nav aria-label="Primary">
+      <ul>
+        <li class="nav-inpage"><a href="../#what">What it does</a></li>
+        <li class="nav-deep"><a href="../#proof">Screenshots</a></li>
+        <li class="nav-inpage"><a href="../#compare">Compare</a></li>
+        <li><a href="../#start">Install</a></li>
+        <li class="nav-deep"><a href="../#faq">FAQ</a></li>
+        <li class="nav-deep"><a href="../#next">Roadmap</a></li>
+        <li class="nav-sep"><a href="./" aria-current="page">Guides</a></li>
+        <li><a href="https://github.com/LavX/bazarr" rel="noopener">GitHub</a></li>
+        <li><a href="https://discord.gg/fpp5JXmB8f" rel="noopener">Discord</a></li>
+      </ul>
+    </nav>
   </div>
-</nav>
+</header>
 
 <main id="main-content" class="guide-page">
   <div class="container">
@@ -113,6 +108,8 @@
       <a href="../">Home</a><span class="sep">/</span><a href="./">Guides</a><span class="sep">/</span><span>Provider Hub</span>
     </nav>
     <h1>Provider Hub <span class="badge-new" aria-label="New in v2.4">v2.4</span></h1>
+
+    <nav class="guide-rail" id="guide-rail" aria-label="On this page"></nav>
 
     <article class="content">
 
@@ -147,10 +144,10 @@
         <strong>Kill-switch.</strong> To disable startup auto-install entirely, set the environment variable <code>BAZARR_DISABLE_PROVIDER_AUTOINSTALL=1</code>. Bazarr+ then leaves your enabled built-ins as they are and skips the reconcile step. Installs you perform yourself from the Marketplace still work.
       </div>
 
-      <div class="code-wrap">
-        <div class="code-header">
+      <div class="code">
+        <div class="code-head">
           <span class="code-lang">Disable auto-install</span>
-          <button class="copy-btn" data-copy="BAZARR_DISABLE_PROVIDER_AUTOINSTALL=1" aria-label="Copy environment variable">Copy</button>
+          <button class="copy" data-copy="BAZARR_DISABLE_PROVIDER_AUTOINSTALL=1" aria-label="Copy environment variable">Copy</button>
         </div>
         <pre><code>BAZARR_DISABLE_PROVIDER_AUTOINSTALL=1</code></pre>
       </div>
@@ -162,10 +159,7 @@
       <p>This is the enabled search providers grid. Add shipped providers or active Provider Hub plugins from the same <code>+</code> button. The <strong>Provider Priority</strong> toggle queries providers in priority order and stops at the minimum score. Each enabled provider is a card numbered by priority. Catalog-backed providers are marked <strong>PLUGIN</strong> with their language count and signup type (NO SIGNUP, API KEY, or ACCOUNT). The same tab holds the Anti-captcha and Integrations (embedded and metadata) sections. When no provider is enabled, the empty state nudges you toward the Marketplace but keeps the <code>+</code> add control.</p>
 
       <figure class="screenshot-frame">
-        <div class="screenshot-chrome" aria-hidden="true">
-          <span class="chrome-dot"></span><span class="chrome-dot"></span><span class="chrome-dot"></span>
-          <span class="chrome-title">Subtitle Hub - My Providers</span>
-        </div>
+        <figcaption class="shot-label">Subtitle Hub - My Providers</figcaption>
         <picture>
           <source type="image/webp" srcset="../screenshots/v2.4.0/provider-hub-my-providers.webp">
           <img src="../screenshots/v2.4.0/provider-hub-my-providers.png" alt="Subtitle Hub My Providers tab showing the enabled search providers grid, where every enabled provider appears as a numbered PLUGIN card from startup auto-install, with a staged change restart banner at the top" loading="lazy" decoding="async" width="2864" height="2600">
@@ -176,10 +170,7 @@
       <p>This tab browses the catalog. It has a search box, an All / Trusted / Community filter, and a card for each catalog provider with <strong>Trusted</strong>, <strong>Active</strong>, and <strong>Installed</strong> badges plus an <strong>Install</strong> button. Manage installed plugins (Test connection, Uninstall) from each card's actions menu. You add and configure catalog sources here too.</p>
 
       <figure class="screenshot-frame">
-        <div class="screenshot-chrome" aria-hidden="true">
-          <span class="chrome-dot"></span><span class="chrome-dot"></span><span class="chrome-dot"></span>
-          <span class="chrome-title">Marketplace</span>
-        </div>
+        <figcaption class="shot-label">Marketplace</figcaption>
         <picture>
           <source type="image/webp" srcset="../screenshots/v2.4.0/provider-hub-marketplace.webp">
           <img src="../screenshots/v2.4.0/provider-hub-marketplace.png" alt="Subtitle Hub Marketplace tab browsing the catalog, with provider cards showing Trusted, Active, and Installed badges, a search box, an All Trusted Community filter, and Install buttons" loading="lazy" decoding="async" width="2864" height="2600">
@@ -190,10 +181,7 @@
       <p>The Updates tab lists pending plugin updates and pending-restart items. When a plugin has a newer catalog version, or when an install, update, or removal is staged and waiting for restart, it shows here.</p>
 
       <figure class="screenshot-frame">
-        <div class="screenshot-chrome" aria-hidden="true">
-          <span class="chrome-dot"></span><span class="chrome-dot"></span><span class="chrome-dot"></span>
-          <span class="chrome-title">Updates</span>
-        </div>
+        <figcaption class="shot-label">Updates</figcaption>
         <picture>
           <source type="image/webp" srcset="../screenshots/v2.4.0/provider-hub-updates.webp">
           <img src="../screenshots/v2.4.0/provider-hub-updates.png" alt="Subtitle Hub Updates tab listing pending plugin updates and staged changes that are waiting for a restart to apply" loading="lazy" decoding="async" width="2864" height="1800">
@@ -241,10 +229,10 @@
 
       <p>The SDK is authoring tooling. Installed providers do not import it at runtime.</p>
 
-      <div class="code-wrap">
-        <div class="code-header">
+      <div class="code">
+        <div class="code-head">
           <span class="code-lang">Catalog SDK</span>
-          <button class="copy-btn" data-copy="python3 -B -m sdk validate&#10;python3 -B -m sdk hash providers/&lt;id&gt;&#10;python3 -B -m sdk build-catalog&#10;python3 -B -m sdk smoke-test" aria-label="Copy SDK commands">Copy</button>
+          <button class="copy" data-copy="python3 -B -m sdk validate&#10;python3 -B -m sdk hash providers/&lt;id&gt;&#10;python3 -B -m sdk build-catalog&#10;python3 -B -m sdk smoke-test" aria-label="Copy SDK commands">Copy</button>
         </div>
         <pre><code>python3 -B -m sdk validate
 python3 -B -m sdk hash providers/&lt;id&gt;
@@ -278,15 +266,21 @@ python3 -B -m sdk smoke-test</code></pre>
 <!-- Footer -->
 <footer>
   <div class="container">
-    <div class="footer-inner">
-      <p class="footer-credit">Built by <a href="https://github.com/LavX" target="_blank" rel="noopener">LavX</a>. Based on <a href="https://github.com/morpheus65535/bazarr" target="_blank" rel="noopener">Bazarr</a> by morpheus65535.</p>
-      <ul class="footer-links">
-        <li><a href="./">Guides</a></li>
-        <li><a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a></li>
-        <li><a href="https://github.com/LavX/bazarr/issues" target="_blank" rel="noopener">Issues</a></li>
-        <li><a href="https://github.com/LavX/bazarr/wiki" target="_blank" rel="noopener">Wiki</a></li>
-      </ul>
-    </div>
+    <p>Bazarr+ is a hard fork of <a class="inline" href="https://github.com/morpheus65535/bazarr" rel="noopener">Bazarr</a>, GPL-3, maintained by <a class="inline" href="https://github.com/LavX" rel="noopener">LavX</a>.</p>
+    <ul>
+      <li><a href="../">Home</a></li>
+      <li><a href="getting-started.html">Getting Started</a></li>
+      <li><a href="migration.html">Migration</a></li>
+      <li><a href="provider-hub.html">Provider Hub</a></li>
+      <li><a href="ai-translation.html">AI Translation</a></li>
+      <li><a href="bulk-operations.html">Bulk Operations</a></li>
+      <li><a href="external-integration.html">External Integration</a></li>
+      <li><a href="./">All guides</a></li>
+      <li><a href="https://github.com/LavX/bazarr/releases" rel="noopener">Releases</a></li>
+      <li><a href="https://github.com/LavX/bazarr/issues" rel="noopener">Issues</a></li>
+      <li><a href="https://github.com/LavX/bazarr/wiki" rel="noopener">Wiki</a></li>
+      <li><a href="https://discord.gg/fpp5JXmB8f" rel="noopener">Discord</a></li>
+    </ul>
   </div>
 </footer>
 

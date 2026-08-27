@@ -1,0 +1,141 @@
+name: Site stats
+
+# The public site shows live project numbers. Stars, forks and the latest
+# release the page can fetch for itself; this workflow exists for the numbers it
+# cannot, and to spare most visitors the third-party request entirely.
+#
+# TWO THINGS HERE ARE DELIBERATE AND EASY TO BREAK BY "TIDYING":
+#
+# 1. It writes to gh-pages, not master.
+#    A workflow that pushes with the default GITHUB_TOKEN does NOT trigger other
+#    workflows, by design, so a commit to master here would never fire
+#    deploy-pages.yml and the refreshed numbers would sit on master forever
+#    without reaching the live site. Writing to gh-pages puts them where the
+#    site is actually served from. It also keeps master release-only, which is
+#    the repository's branch policy: a daily bot commit there is not one of the
+#    two writes master is allowed.
+#
+# 2. There is no container pull count.
+#    GHCR does not expose one. GitHub's own API description for
+#    /users/{u}/packages/container/{p}/versions returns metadata.container.tags
+#    and no download_count field of any kind, so an earlier version of this file
+#    summed a field that never exists and would have published "0 image pulls"
+#    as a fact. Do not add it back without checking the schema first.
+
+on:
+  schedule:
+    - cron: '17 4 * * *'
+  # Also right after a deploy, so data/stats.json exists from the first one.
+  # Until it does, every visitor's browser has to ask api.github.com itself,
+  # which is capped at 60 requests an hour per IP; once the file is there the
+  # page answers from one same-origin fetch and contacts nobody.
+  workflow_run:
+    workflows: ["Deploy Pages"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: site-stats
+  cancel-in-progress: false
+
+jobs:
+  stats:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout gh-pages
+        uses: actions/checkout@v7
+        with:
+          ref: gh-pages
+
+      - name: Collect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p data
+
+          repo=$(gh api repos/${{ github.repository }})
+          stars=$(echo "$repo" | jq -r '.stargazers_count')
+          forks=$(echo "$repo" | jq -r '.forks_count')
+          release=$(gh api repos/${{ github.repository }}/releases/latest --jq '.tag_name' || echo "")
+
+          # Installable providers in the plugin catalog. Its catalog.json is the
+          # same file the app reads, so this number is the product's own.
+          providers=$(curl -sfL --max-time 20 \
+            "https://raw.githubusercontent.com/${{ github.repository_owner }}/bazarr-provider-catalog/main/catalog.json" \
+            | jq '.providers | length' 2>/dev/null || echo "")
+
+          # Upstream feature-request upvotes shown in the comparison table. They
+          # are the table's evidence that a feature was asked for and refused, so
+          # a number typed once and left alone quietly becomes a lie: these were
+          # written as 62 and 249 and had reached 72 and 260.
+          #
+          # The tracker answers 403 to a request with no browser User-Agent, so
+          # this header is load-bearing: without it every run warns and the
+          # figures silently freeze, which is the exact drift being fixed.
+          UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36'
+
+          votes='{}'
+          for id in 112323 172013; do
+            n=$(curl -sfL --max-time 20 -A "$UA" \
+                  "https://bazarr.featureupvote.com/suggestions/$id" \
+                | grep -o 'data-vote-count="[0-9]\+"' | head -1 \
+                | grep -o '[0-9]\+' || true)
+            if [ -n "$n" ]; then
+              votes=$(echo "$votes" | jq --arg k "$id" --argjson v "$n" '.[$k] = $v')
+            else
+              echo "::warning::could not read upvotes for $id; leaving it out"
+            fi
+          done
+
+          jq -n \
+            --argjson stars "$stars" \
+            --argjson forks "$forks" \
+            --arg release "$release" \
+            --arg providers "$providers" \
+            --argjson votes "$votes" \
+            '{
+               generated: (now | todate),
+               stars: $stars,
+               forks: $forks,
+               release: (if $release == "" then null else $release end),
+               providers: (if $providers == "" then null else ($providers | tonumber) end),
+               votes: $votes
+             }' > data/stats.json
+
+          cat data/stats.json
+
+      - name: Commit if the numbers changed
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/stats.json
+          if git diff --staged --quiet; then
+            echo "No change."
+            exit 0
+          fi
+          # `generated` moves on every run; only the figures are worth a commit
+          if [ -z "$(git diff --staged -U0 -- data/stats.json \
+                     | grep -E '^\+.*(stars|forks|release|providers|"1[0-9]{5}")' || true)" ]; then
+            echo "Only the timestamp moved; not committing."
+            git reset
+            exit 0
+          fi
+          git commit -m "chore(site): refresh public stats"
+
+          # deploy-pages.yml pushes to gh-pages too, so a scheduled run can
+          # collide with a deploy that landed seconds earlier. Rebase and retry
+          # rather than failing the run and leaving the numbers a day stale.
+          for attempt in 1 2 3; do
+            if git push origin gh-pages; then
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt), rebasing on the new tip"
+            git pull --rebase origin gh-pages
+          done
+          echo "::error::could not push gh-pages after three attempts"
+          exit 1
