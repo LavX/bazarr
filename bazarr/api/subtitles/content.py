@@ -44,8 +44,11 @@ def _is_safe_path(path):
 # "en:sync-ffsubsync", "en:combined-hu", "de:combined-es-zh".
 # Anchored + char-class prevents `..`, slashes, or shell metachars from reaching
 # the file-system probe paths downstream.
+# The base-tag half is shared with download.py's bundle language filter so a
+# grammar change lands in both consumers.
+LANGUAGE_BASE_TAG_FRAGMENT = r'[A-Za-z]{2,3}(-[A-Za-z0-9]{2,4})?'
 _LANGUAGE_CODE_RE = re.compile(
-    r'^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,4})?'
+    r'^' + LANGUAGE_BASE_TAG_FRAGMENT +
     r'(:(forced|hi|'
     r'sync-(ffsubsync|autosubsync|alass)|'
     r'combined-[a-z]{2}(-[a-z]{2})?'

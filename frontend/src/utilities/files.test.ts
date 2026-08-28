@@ -28,6 +28,15 @@ describe("filenameFromContentDisposition", () => {
     ).toBe("Kém - subtitles.zip");
   });
 
+  it("keeps a semicolon inside a quoted filename", () => {
+    expect(
+      filenameFromContentDisposition(
+        'attachment; filename="Rock; Roll - subtitles.zip"',
+        "fallback",
+      ),
+    ).toBe("Rock; Roll - subtitles.zip");
+  });
+
   it("falls back when the header is missing or unparsable", () => {
     expect(filenameFromContentDisposition(undefined, "fallback")).toBe(
       "fallback",

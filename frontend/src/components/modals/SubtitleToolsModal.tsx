@@ -12,12 +12,14 @@ import { ColumnDef } from "@tanstack/react-table";
 import {
   useEpisodeSubtitleModification,
   useMovieSubtitleModification,
+  useSubtitleFileDownload,
 } from "@/apis/hooks";
 import Language from "@/components/bazarr/Language";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
 import SimpleTable from "@/components/tables/SimpleTable";
 import { useModals, withModal } from "@/modules/modals";
 import { fromPython, isMovie, toPython } from "@/utilities";
+import { buildSubtitleLanguageKey } from "@/utilities/subtitles";
 
 type SupportType = Item.Episode | Item.Movie;
 
@@ -73,6 +75,7 @@ const SubtitleToolView: FunctionComponent<SubtitleToolViewProps> = ({
     useEpisodeSubtitleModification();
   const { download: downloadMovie, remove: removeMovie } =
     useMovieSubtitleModification();
+  const fileDownload = useSubtitleFileDownload();
   const modals = useModals();
 
   const columns = useMemo<ColumnDef<TableColumnType>[]>(
@@ -215,6 +218,17 @@ const SubtitleToolView: FunctionComponent<SubtitleToolViewProps> = ({
                 await download.mutateAsync(actionPayload);
               } else if (action === "delete" && selection.path) {
                 await remove.mutateAsync(actionPayload);
+              } else if (action === "download") {
+                // raw_language holds the full subtitle entry, so the key
+                // carries hi/forced and sync/combined variants correctly.
+                fileDownload.mutate({
+                  type: selection.type,
+                  mediaId: selection.id,
+                  language: buildSubtitleLanguageKey(
+                    selection.raw_language as Subtitle,
+                  ),
+                  arrInstanceId: selection.arr_instance_id,
+                });
               }
             });
             modals.closeAll();

@@ -65,10 +65,15 @@ class BazarrClient {
         }
       },
       (error: AxiosError) => {
-        const message = GetErrorMessage(
-          error.response?.data,
-          "You have disconnected from the server",
-        );
+        // A blob response (file downloads) carries its error body as a Blob,
+        // which cannot be read synchronously: give it a status-based message
+        // (never the disconnect sentinel, which would suppress the 401
+        // handling below) and let the caller surface the real reason.
+        const data = error.response?.data;
+        const isBlobBody = typeof Blob !== "undefined" && data instanceof Blob;
+        const message = isBlobBody
+          ? `Error ${error.response?.status ?? 500}`
+          : GetErrorMessage(data, "You have disconnected from the server");
 
         const backendError: BackendError = {
           code: error.response?.status ?? 500,
@@ -76,14 +81,14 @@ class BazarrClient {
         };
 
         error.message = backendError.message;
-        this.handleError(backendError);
+        this.handleError(backendError, isBlobBody);
 
         return Promise.reject(error);
       },
     );
   }
 
-  handleError(error: BackendError) {
+  handleError(error: BackendError, silent = false) {
     const { code, message } = error;
 
     // Backend not ready yet: suppress everything, don't trigger auth changes
@@ -111,6 +116,11 @@ class BazarrClient {
     }
 
     LOG("error", "A error has occurred", code);
+    if (silent) {
+      // The caller owns the user-facing message (e.g. blob downloads read
+      // the error body asynchronously); avoid a duplicate generic toast.
+      return;
+    }
     showNotification(notification.error(`Error ${code}`, message));
   }
 }

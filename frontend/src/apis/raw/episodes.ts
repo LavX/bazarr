@@ -68,18 +68,6 @@ class EpisodeApi extends BaseApi {
     });
   }
 
-  async downloadSubtitleFile(
-    episodeid: number,
-    language: string,
-    arrInstanceId?: number,
-  ) {
-    // language is the viewer/editor language key ("en", "en:hi", ...).
-    return this.getBlob(
-      `/${episodeid}/subtitles/${encodeURIComponent(language)}/download`,
-      { arr_instance_id: arrInstanceId },
-    );
-  }
-
   async uploadSubtitles(
     seriesid: number,
     episodeid: number,

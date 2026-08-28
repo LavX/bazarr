@@ -7,6 +7,7 @@ sys.modules before importing the module under test, keep a reference, then
 fully restore sys.modules so nothing leaks into later test files.
 """
 
+import os
 import sys
 import zipfile
 from types import SimpleNamespace
@@ -93,7 +94,6 @@ _patches = {
     'flask': MagicMock(),
 }
 
-_preexisting = {k: sys.modules.get(k) for k in _patches}
 for _mod, _obj in _patches.items():
     sys.modules[_mod] = _obj
 
@@ -122,20 +122,30 @@ class _IdentityPathMappings:
 
 
 @pytest.fixture
+def no_instance_param(monkeypatch):
+    # _request_arr_instance_id lives in content.py and reads content's own
+    # flask request; pin it directly for route tests.
+    monkeypatch.setattr(download_module, '_request_arr_instance_id', lambda: None)
+
+
+@pytest.fixture
 def identity_mappings(monkeypatch):
     stub = _IdentityPathMappings()
     monkeypatch.setattr(download_module, 'path_mappings', stub)
+    # The subfolder target depends on live settings; the tests pin it off.
+    monkeypatch.setattr(download_module, 'get_target_folder', lambda path: None)
     return stub
 
 
-def _episode_row(season, subtitles, arr_instance_id=None):
+def _episode_row(season, subtitles, arr_instance_id=None, path='/tv/video.mkv'):
     return SimpleNamespace(season=season, subtitles=subtitles,
-                           arr_instance_id=arr_instance_id)
+                           arr_instance_id=arr_instance_id, path=path)
 
 
-def _movie_row(subtitles, arr_instance_id=None, title='Movie'):
+def _movie_row(subtitles, arr_instance_id=None, title='Movie',
+               path='/movies/Movie.mkv'):
     return SimpleNamespace(subtitles=subtitles, arr_instance_id=arr_instance_id,
-                           title=title)
+                           title=title, path=path)
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +156,7 @@ class TestSafeFilenameComponent:
 
     def test_strips_forbidden_characters(self):
         assert download_module.safe_filename_component(
-            'A/B\\C:D*E?F"G<H>I|J', 'x') == 'A_B_C_D_E_F_G_H_I_J'
+            'A/B\\C:D*E?F"G<H>I|J;K', 'x') == 'A_B_C_D_E_F_G_H_I_J_K'
 
     def test_collapses_whitespace_and_trims_dots(self):
         assert download_module.safe_filename_component('  A   B. ', 'x') == 'A B'
@@ -155,6 +165,14 @@ class TestSafeFilenameComponent:
         assert download_module.safe_filename_component('', 'series') == 'series'
         assert download_module.safe_filename_component(None, 'movie') == 'movie'
         assert download_module.safe_filename_component('...', 'x') == 'x'
+
+
+class TestSanitizeArcnameComponent:
+
+    def test_neutralizes_separators(self):
+        f = download_module.sanitize_arcname_component
+        assert f(r'..\..\evil.srt') == '.._.._evil.srt'
+        assert f('plain.en.srt') == 'plain.en.srt'
 
 
 class TestUniqueArcname:
@@ -186,6 +204,20 @@ class TestIterExternalSubtitles:
         assert download_module.iter_external_subtitles("{'a': 1}") == []
 
 
+class TestDedupeLanguageEntries:
+
+    def test_keeps_newest_for_duplicate_language(self, tmp_path):
+        older = tmp_path / 'old.en.ass'
+        newer = tmp_path / 'new.en.srt'
+        older.write_text('old')
+        newer.write_text('new')
+        os.utime(older, (1000, 1000))
+        os.utime(newer, (2000, 2000))
+        pairs = [('en', str(older)), ('en', str(newer)), ('hu', str(older))]
+        result = dict(download_module.dedupe_language_entries(pairs, lambda p: p))
+        assert result == {'en': str(newer), 'hu': str(older)}
+
+
 class TestMatchesLanguage:
 
     def test_no_filter_matches_everything(self):
@@ -211,11 +243,47 @@ class TestLanguageFilterRe:
         assert download_module._LANGUAGE_FILTER_RE.match('pt-BR')
         assert download_module._LANGUAGE_FILTER_RE.match('zho')
 
-    def test_rejects_modifiers_and_traversal(self):
+    def test_rejects_modifiers_traversal_and_newlines(self):
         assert not download_module._LANGUAGE_FILTER_RE.match('en:hi')
         assert not download_module._LANGUAGE_FILTER_RE.match('../evil')
         assert not download_module._LANGUAGE_FILTER_RE.match('en/..')
         assert not download_module._LANGUAGE_FILTER_RE.match('')
+        # $ would accept a trailing newline; \Z must not.
+        assert not download_module._LANGUAGE_FILTER_RE.match('en\n')
+
+
+# ---------------------------------------------------------------------------
+# Containment barrier
+# ---------------------------------------------------------------------------
+
+class TestResolveBundlePath:
+
+    def test_accepts_file_under_trusted_root(self, tmp_path):
+        sub = tmp_path / 'a.en.srt'
+        sub.write_text('x')
+        assert download_module.resolve_bundle_path(
+            str(sub), [str(tmp_path)]) == str(sub)
+
+    def test_rejects_symlink_escaping_the_root(self, tmp_path):
+        outside = tmp_path / 'outside'
+        media = tmp_path / 'media'
+        outside.mkdir()
+        media.mkdir()
+        secret = outside / 'secret.conf'
+        secret.write_text('apikey')
+        link = media / 'movie.en.srt'
+        link.symlink_to(secret)
+        assert download_module.resolve_bundle_path(str(link), [str(media)]) is None
+
+    def test_rejects_path_outside_all_roots(self, tmp_path):
+        assert download_module.resolve_bundle_path(
+            '/etc/passwd.srt', [str(tmp_path)]) is None
+
+    def test_rejects_unknown_extension(self, tmp_path):
+        exe = tmp_path / 'a.exe'
+        exe.write_text('x')
+        assert download_module.resolve_bundle_path(
+            str(exe), [str(tmp_path)]) is None
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +321,22 @@ class TestCollectSeriesBundleEntries:
     def test_paths_map_through_owning_instance(self, identity_mappings):
         rows = [_episode_row(3, "[['en', '/tv/S03E01.en.srt']]", arr_instance_id=7)]
         download_module.collect_series_bundle_entries(rows)
-        assert identity_mappings.calls == [('/tv/S03E01.en.srt', 7, 'episode')]
+        assert ('/tv/S03E01.en.srt', 7, 'episode') in identity_mappings.calls
+        assert ('/tv/video.mkv', 7, 'episode') in identity_mappings.calls
+
+    def test_entry_outside_media_dir_is_dropped(self, identity_mappings):
+        rows = [_episode_row(1, "[['en', '/elsewhere/S01E01.en.srt']]")]
+        assert download_module.collect_series_bundle_entries(rows) == []
+
+    def test_mapping_resolved_once_per_unique_path(self, identity_mappings):
+        # Two rows sharing one video path (a multi-episode file): the mapping
+        # must not be recomputed per row.
+        rows = [
+            _episode_row(1, "[['en', '/tv/S01E01E02.en.srt']]"),
+            _episode_row(1, "[['en', '/tv/S01E01E02.en.srt']]"),
+        ]
+        download_module.collect_series_bundle_entries(rows)
+        assert identity_mappings.calls.count(('/tv/S01E01E02.en.srt', None, 'episode')) == 1
 
 
 class TestCollectMovieBundleEntries:
@@ -294,10 +377,23 @@ class TestBuildSubtitleBundle:
                 'Season 01/a.en.srt', 'Season 02/b.en.srt']
             assert archive.read('Season 01/a.en.srt').endswith(b'A\n')
 
-    def test_duplicate_arcnames_are_deduplicated(self, tmp_path):
+    def test_same_disk_path_is_added_once(self, tmp_path):
         a = tmp_path / 'a.srt'
         a.write_text('x')
-        entries = [('same.srt', str(a)), ('same.srt', str(a))]
+        entries = [('Season 01/a.srt', str(a)), ('Season 01/a.srt', str(a))]
+        buffer = download_module.build_subtitle_bundle(entries)
+        with zipfile.ZipFile(buffer) as archive:
+            assert archive.namelist() == ['Season 01/a.srt']
+
+    def test_distinct_files_with_same_arcname_get_suffixed(self, tmp_path):
+        one = tmp_path / 'one'
+        two = tmp_path / 'two'
+        one.mkdir()
+        two.mkdir()
+        (one / 'same.srt').write_text('1')
+        (two / 'same.srt').write_text('2')
+        entries = [('same.srt', str(one / 'same.srt')),
+                   ('same.srt', str(two / 'same.srt'))]
         buffer = download_module.build_subtitle_bundle(entries)
         with zipfile.ZipFile(buffer) as archive:
             assert sorted(archive.namelist()) == ['same (2).srt', 'same.srt']
@@ -307,12 +403,31 @@ class TestBuildSubtitleBundle:
         assert download_module.build_subtitle_bundle(entries) is None
         assert download_module.build_subtitle_bundle([]) is None
 
-    def test_size_cap_raises(self, tmp_path):
+    def test_size_cap_enforced_while_reading(self, tmp_path):
         big = tmp_path / 'big.srt'
         big.write_text('x' * 1024)
         with pytest.raises(download_module.BundleTooLargeError):
             download_module.build_subtitle_bundle(
                 [('big.srt', str(big))], max_total_size=100)
+
+    def test_pre_1980_mtime_is_clamped_not_fatal(self, tmp_path):
+        old = tmp_path / 'old.srt'
+        old.write_text('x')
+        os.utime(old, (0, 0))
+        buffer = download_module.build_subtitle_bundle([('old.srt', str(old))])
+        with zipfile.ZipFile(buffer) as archive:
+            info = archive.getinfo('old.srt')
+            assert info.date_time[0] == 1980
+
+    def test_directory_entry_is_skipped(self, tmp_path):
+        sub = tmp_path / 'dir.srt'
+        sub.mkdir()
+        ok = tmp_path / 'ok.srt'
+        ok.write_text('x')
+        buffer = download_module.build_subtitle_bundle(
+            [('dir.srt', str(sub)), ('ok.srt', str(ok))])
+        with zipfile.ZipFile(buffer) as archive:
+            assert archive.namelist() == ['ok.srt']
 
 
 class TestBundleDownloadName:
@@ -321,6 +436,7 @@ class TestBundleDownloadName:
         f = download_module.bundle_download_name
         assert f('Show') == 'Show - subtitles.zip'
         assert f('Show', season=2) == 'Show - Season 02 - subtitles.zip'
+        assert f('Show', season=0) == 'Show - Season 00 - subtitles.zip'
         assert f('Show', language='EN') == 'Show - en - subtitles.zip'
         assert f('Show', season=10, language='hu') == \
             'Show - Season 10 - hu - subtitles.zip'
@@ -346,40 +462,9 @@ def _fake_request(args=None):
     return SimpleNamespace(args=_Args())
 
 
-class TestSingleFileDownload:
-
-    def test_error_tuple_passes_through(self, monkeypatch):
-        monkeypatch.setattr(download_module, 'request', _fake_request())
-        monkeypatch.setattr(download_module, 'resolve_subtitle_path',
-                            lambda *a, **k: ('No subtitle found for requested language', 404))
-        resource = download_module.EpisodeSubtitleFileDownload()
-        assert resource.get(12, 'en') == ('No subtitle found for requested language', 404)
-
-    def test_success_sends_attachment(self, monkeypatch):
-        sent = {}
-
-        def fake_send_file(path, **kwargs):
-            sent['path'] = path
-            sent.update(kwargs)
-            return 'SENT'
-
-        monkeypatch.setattr(download_module, 'request',
-                            _fake_request({'arr_instance_id': 3}))
-        captured = {}
-
-        def fake_resolve(media_type, media_id, language_code, arr_instance_id=None):
-            captured['args'] = (media_type, media_id, language_code, arr_instance_id)
-            return ('/media/Movie (2020)/Movie.en.srt', {'mediaTitle': 'Movie'})
-
-        monkeypatch.setattr(download_module, 'resolve_subtitle_path', fake_resolve)
-        monkeypatch.setattr(download_module, 'send_file', fake_send_file)
-
-        resource = download_module.MovieSubtitleFileDownload()
-        assert resource.get(654, 'en:hi') == 'SENT'
-        assert captured['args'] == ('movie', 654, 'en:hi', 3)
-        assert sent['path'] == '/media/Movie (2020)/Movie.en.srt'
-        assert sent['as_attachment'] is True
-        assert sent['download_name'] == 'Movie.en.srt'
+class _FakeResponse:
+    def __init__(self):
+        self.headers = {}
 
 
 class _FakeDatabase:
@@ -402,76 +487,183 @@ class _FakeDatabase:
         return _Result()
 
 
+class TestSingleFileDownload:
+
+    def test_error_tuple_passes_through(self, monkeypatch, no_instance_param):
+        monkeypatch.setattr(download_module, 'request', _fake_request())
+        monkeypatch.setattr(download_module, 'resolve_subtitle_path',
+                            lambda *a, **k: ('No subtitle found for requested language', 404))
+        resource = download_module.EpisodeSubtitleFileDownload()
+        assert resource.get(12, 'en') == ('No subtitle found for requested language', 404)
+
+    def test_success_sends_attachment_with_nosniff(self, monkeypatch):
+        sent = {}
+
+        def fake_send_file(path, **kwargs):
+            sent['path'] = path
+            sent.update(kwargs)
+            return _FakeResponse()
+
+        monkeypatch.setattr(download_module, 'request', _fake_request())
+        monkeypatch.setattr(download_module, '_request_arr_instance_id', lambda: 3)
+        captured = {}
+
+        def fake_resolve(media_type, media_id, language_code, arr_instance_id=None):
+            captured['args'] = (media_type, media_id, language_code, arr_instance_id)
+            return ('/media/Movie (2020)/Movie.en.srt', {'mediaTitle': 'Movie'})
+
+        monkeypatch.setattr(download_module, 'resolve_subtitle_path', fake_resolve)
+        monkeypatch.setattr(download_module, 'send_file', fake_send_file)
+
+        resource = download_module.MovieSubtitleFileDownload()
+        response = resource.get(654, 'en:hi')
+        assert captured['args'] == ('movie', 654, 'en:hi', 3)
+        assert sent['path'] == '/media/Movie (2020)/Movie.en.srt'
+        assert sent['as_attachment'] is True
+        assert sent['download_name'] == 'Movie.en.srt'
+        assert response.headers['X-Content-Type-Options'] == 'nosniff'
+
+    def test_file_deleted_after_resolution_is_404(self, monkeypatch, no_instance_param):
+        monkeypatch.setattr(download_module, 'request', _fake_request())
+        monkeypatch.setattr(download_module, 'resolve_subtitle_path',
+                            lambda *a, **k: ('/media/gone.srt', {}))
+
+        def raising_send_file(path, **kwargs):
+            raise FileNotFoundError(path)
+
+        monkeypatch.setattr(download_module, 'send_file', raising_send_file)
+        resource = download_module.EpisodeSubtitleFileDownload()
+        assert resource.get(12, 'en') == ('Subtitle file or directory not found', 404)
+
+
 class TestSeriesBundleDownload:
 
-    def test_series_not_found(self, monkeypatch):
+    def test_series_not_found(self, monkeypatch, no_instance_param):
         monkeypatch.setattr(download_module, 'request', _fake_request())
-        monkeypatch.setattr(download_module, 'database', _FakeDatabase([None]))
+        monkeypatch.setattr(download_module, 'database', _FakeDatabase([[]]))
         resource = download_module.SeriesSubtitleBundleDownload()
         assert resource.get(99) == ('Series not found', 404)
 
-    def test_invalid_language_filter_rejected(self, monkeypatch):
+    def test_ambiguous_series_without_instance_is_400(self, monkeypatch, no_instance_param):
+        rows = [SimpleNamespace(title='A', arr_instance_id=1),
+                SimpleNamespace(title='B', arr_instance_id=2)]
+        monkeypatch.setattr(download_module, 'request', _fake_request())
+        monkeypatch.setattr(download_module, 'database', _FakeDatabase([rows]))
+        resource = download_module.SeriesSubtitleBundleDownload()
+        assert resource.get(5) == ('Ambiguous Sonarr series ID; pass arr_instance_id', 400)
+
+    def test_invalid_language_filter_rejected(self, monkeypatch, no_instance_param):
         monkeypatch.setattr(download_module, 'request',
                             _fake_request({'language': 'en:hi'}))
         resource = download_module.SeriesSubtitleBundleDownload()
         assert resource.get(1) == ('Invalid language filter', 400)
 
-    def test_bundles_matching_episodes(self, monkeypatch, tmp_path, identity_mappings):
+    def test_invalid_season_filter_rejected(self, monkeypatch, no_instance_param):
+        monkeypatch.setattr(download_module, 'request',
+                            _fake_request({'season': 'abc'}))
+        resource = download_module.SeriesSubtitleBundleDownload()
+        assert resource.get(1) == ('Invalid season filter', 400)
+
+    def test_episode_query_scoped_to_series_rows_instance(self, monkeypatch,
+                                                          identity_mappings):
+        # No arr_instance_id from the caller: the matched series row's owner
+        # must scope the episode query.
+        scoped_calls = []
+
+        def fake_scoped(stmt, column, arr_instance_id):
+            scoped_calls.append(arr_instance_id)
+            return stmt
+
+        monkeypatch.setattr(download_module, 'scoped', fake_scoped)
+        monkeypatch.setattr(download_module, '_request_arr_instance_id', lambda: None)
+        series_row = SimpleNamespace(title='My Show', arr_instance_id=7)
+        monkeypatch.setattr(download_module, 'request', _fake_request())
+        monkeypatch.setattr(download_module, 'database',
+                            _FakeDatabase([[series_row], []]))
+        resource = download_module.SeriesSubtitleBundleDownload()
+        resource.get(1)
+        assert scoped_calls == [None, 7]
+
+    def test_bundles_matching_episodes(self, monkeypatch, no_instance_param, tmp_path, identity_mappings):
         sub = tmp_path / 'S01E01.en.srt'
         sub.write_text('x')
         series_row = SimpleNamespace(title='My Show', arr_instance_id=None)
-        episode_rows = [_episode_row(1, f"[['en', '{sub}']]")]
+        episode_rows = [_episode_row(1, f"[['en', '{sub}']]",
+                                     path=str(tmp_path / 'S01E01.mkv'))]
         monkeypatch.setattr(download_module, 'request',
                             _fake_request({'language': 'en'}))
         monkeypatch.setattr(download_module, 'database',
-                            _FakeDatabase([series_row, episode_rows]))
+                            _FakeDatabase([[series_row], episode_rows]))
         sent = {}
 
         def fake_send_file(buffer, **kwargs):
             sent['names'] = zipfile.ZipFile(buffer).namelist()
             sent.update(kwargs)
-            return 'SENT'
+            return _FakeResponse()
 
         monkeypatch.setattr(download_module, 'send_file', fake_send_file)
         resource = download_module.SeriesSubtitleBundleDownload()
-        assert resource.get(1) == 'SENT'
+        response = resource.get(1)
         assert sent['names'] == ['Season 01/S01E01.en.srt']
         assert sent['download_name'] == 'My Show - en - subtitles.zip'
         assert sent['mimetype'] == 'application/zip'
+        assert response.headers['X-Content-Type-Options'] == 'nosniff'
 
-    def test_no_files_is_404(self, monkeypatch, identity_mappings):
+    def test_no_files_is_404(self, monkeypatch, no_instance_param, identity_mappings):
         series_row = SimpleNamespace(title='My Show', arr_instance_id=None)
         monkeypatch.setattr(download_module, 'request', _fake_request())
         monkeypatch.setattr(download_module, 'database',
-                            _FakeDatabase([series_row, []]))
+                            _FakeDatabase([[series_row], []]))
         resource = download_module.SeriesSubtitleBundleDownload()
         assert resource.get(1) == ('No subtitle files found', 404)
+
+    def test_oversized_bundle_is_413(self, monkeypatch, no_instance_param, identity_mappings):
+        series_row = SimpleNamespace(title='My Show', arr_instance_id=None)
+        monkeypatch.setattr(download_module, 'request', _fake_request())
+        monkeypatch.setattr(download_module, 'database',
+                            _FakeDatabase([[series_row], []]))
+
+        def too_big(entries, **kwargs):
+            raise download_module.BundleTooLargeError
+
+        monkeypatch.setattr(download_module, 'build_subtitle_bundle', too_big)
+        resource = download_module.SeriesSubtitleBundleDownload()
+        assert resource.get(1) == ('Subtitle bundle too large', 413)
 
 
 class TestMovieBundleDownload:
 
-    def test_movie_not_found(self, monkeypatch):
+    def test_movie_not_found(self, monkeypatch, no_instance_param):
         monkeypatch.setattr(download_module, 'request', _fake_request())
-        monkeypatch.setattr(download_module, 'database', _FakeDatabase([None]))
+        monkeypatch.setattr(download_module, 'database', _FakeDatabase([[]]))
         resource = download_module.MovieSubtitleBundleDownload()
         assert resource.get(1) == ('Movie not found', 404)
 
-    def test_bundles_movie_files(self, monkeypatch, tmp_path, identity_mappings):
+    def test_ambiguous_movie_without_instance_is_400(self, monkeypatch, no_instance_param):
+        rows = [_movie_row('[]', arr_instance_id=1),
+                _movie_row('[]', arr_instance_id=2)]
+        monkeypatch.setattr(download_module, 'request', _fake_request())
+        monkeypatch.setattr(download_module, 'database', _FakeDatabase([rows]))
+        resource = download_module.MovieSubtitleBundleDownload()
+        assert resource.get(1) == ('Ambiguous Radarr movie ID; pass arr_instance_id', 400)
+
+    def test_bundles_movie_files(self, monkeypatch, no_instance_param, tmp_path, identity_mappings):
         sub = tmp_path / 'Movie.en.srt'
         sub.write_text('x')
-        movie_row = _movie_row(f"[['en', '{sub}']]", title='Movie: The Sequel')
+        movie_row = _movie_row(f"[['en', '{sub}']]", title='Movie: The Sequel',
+                               path=str(tmp_path / 'Movie.mkv'))
         monkeypatch.setattr(download_module, 'request', _fake_request())
         monkeypatch.setattr(download_module, 'database',
-                            _FakeDatabase([movie_row]))
+                            _FakeDatabase([[movie_row]]))
         sent = {}
 
         def fake_send_file(buffer, **kwargs):
             sent['names'] = zipfile.ZipFile(buffer).namelist()
             sent.update(kwargs)
-            return 'SENT'
+            return _FakeResponse()
 
         monkeypatch.setattr(download_module, 'send_file', fake_send_file)
         resource = download_module.MovieSubtitleBundleDownload()
-        assert resource.get(654) == 'SENT'
+        resource.get(654)
         assert sent['names'] == ['Movie.en.srt']
         assert sent['download_name'] == 'Movie_ The Sequel - subtitles.zip'

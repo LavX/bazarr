@@ -180,6 +180,20 @@ class SubtitlesApi extends BaseApi {
     return response;
   }
 
+  async downloadFile(
+    mediaType: "episode" | "movie",
+    mediaId: number,
+    language: string,
+    arrInstanceId?: number,
+  ) {
+    // language is the viewer/editor language key ("en", "en:hi", ...).
+    const base = mediaType === "episode" ? "episodes" : "movies";
+    return client.axios.get<Blob>(
+      `/${base}/${mediaId}/subtitles/${encodeURIComponent(language)}/download`,
+      { params: { arr_instance_id: arrInstanceId }, responseType: "blob" },
+    );
+  }
+
   async getContent(
     mediaType: string,
     mediaId: number,

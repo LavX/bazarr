@@ -16,15 +16,25 @@ export function filenameFromContentDisposition(
   const extended = header.match(/filename\*=(?:UTF-8|utf-8)''([^;]+)/);
   if (extended) {
     try {
-      return decodeURIComponent(extended[1].trim());
+      const decoded = decodeURIComponent(extended[1].trim());
+      if (decoded) {
+        return decoded;
+      }
     } catch {
-      // Malformed percent-encoding; fall through to the plain form.
+      // Malformed percent-encoding; fall through to the plain forms.
     }
   }
 
-  const plain = header.match(/filename="?([^";]+)"?/);
-  if (plain) {
-    return plain[1].trim();
+  // Quoted form first, consumed to the closing quote: a semicolon INSIDE the
+  // quotes is part of the filename, not a parameter separator.
+  const quoted = header.match(/filename="([^"]*)"/);
+  if (quoted && quoted[1].trim()) {
+    return quoted[1].trim();
+  }
+
+  const token = header.match(/filename=([^;"\s]+)/);
+  if (token) {
+    return token[1].trim();
   }
 
   return fallback;

@@ -90,18 +90,6 @@ class MovieApi extends BaseApi {
     });
   }
 
-  async downloadSubtitleFile(
-    radarrid: number,
-    language: string,
-    arrInstanceId?: number,
-  ) {
-    // language is the viewer/editor language key ("en", "en:hi", ...).
-    return this.getBlob(
-      `/${radarrid}/subtitles/${encodeURIComponent(language)}/download`,
-      { arr_instance_id: arrInstanceId },
-    );
-  }
-
   async downloadSubtitlesArchive(
     radarrid: number,
     options: { language?: string; arrInstanceId?: number } = {},

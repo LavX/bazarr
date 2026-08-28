@@ -482,6 +482,42 @@ export function useSubtitleCreate() {
   });
 }
 
+// The error body of a blob request is itself a Blob; read it back to get the
+// backend's actual message (a JSON-encoded string like "No subtitle files
+// found") instead of a generic one.
+async function downloadErrorMessage(
+  error: unknown,
+  fallback: string,
+): Promise<string> {
+  const response = (error as { response?: { status?: number; data?: unknown } })
+    .response;
+  const data = response?.data;
+  let text: string | undefined;
+  if (data instanceof Blob) {
+    try {
+      text = (await data.text()).trim();
+    } catch {
+      // Unreadable body; keep the fallback.
+    }
+  } else if (typeof data === "string") {
+    text = data;
+  }
+  if (text) {
+    try {
+      const parsed = JSON.parse(text);
+      if (typeof parsed === "string") {
+        return parsed;
+      }
+      if (parsed && typeof parsed.message === "string") {
+        return parsed.message;
+      }
+    } catch {
+      return text.slice(0, 200);
+    }
+  }
+  return fallback;
+}
+
 export function useSubtitleFileDownload() {
   interface Param {
     type: "episode" | "movie";
@@ -493,18 +529,12 @@ export function useSubtitleFileDownload() {
   return useMutation({
     mutationKey: [QueryKeys.Subtitles, "download-file"],
     mutationFn: async (param: Param) => {
-      const response =
-        param.type === "episode"
-          ? await api.episodes.downloadSubtitleFile(
-              param.mediaId,
-              param.language,
-              param.arrInstanceId,
-            )
-          : await api.movies.downloadSubtitleFile(
-              param.mediaId,
-              param.language,
-              param.arrInstanceId,
-            );
+      const response = await api.subtitles.downloadFile(
+        param.type,
+        param.mediaId,
+        param.language,
+        param.arrInstanceId,
+      );
       saveBlobAs(
         response.data,
         filenameFromContentDisposition(
@@ -513,11 +543,14 @@ export function useSubtitleFileDownload() {
         ),
       );
     },
-    onError: () => {
+    onError: async (error) => {
       showNotification(
         notification.error(
           "Download failed",
-          "The subtitle file could not be downloaded",
+          await downloadErrorMessage(
+            error,
+            "The subtitle file could not be downloaded",
+          ),
         ),
       );
     },
@@ -561,15 +594,14 @@ export function useSubtitleArchiveDownload() {
         ),
       );
     },
-    onError: (error) => {
-      const status = (error as { response?: { status?: number } }).response
-        ?.status;
+    onError: async (error) => {
       showNotification(
         notification.error(
           "Download failed",
-          status === 404
-            ? "No subtitle files found for this selection"
-            : "The subtitle archive could not be downloaded",
+          await downloadErrorMessage(
+            error,
+            "The subtitle archive could not be downloaded",
+          ),
         ),
       );
     },

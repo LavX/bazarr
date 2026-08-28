@@ -40,6 +40,7 @@ import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import client from "@/apis/raw/client";
 import { Environment } from "@/utilities/env";
+import { saveBlobAs } from "@/utilities/files";
 import { isCombinedOutputLanguageKey } from "@/utilities/subtitles";
 import { cueId } from "./parsers/uuid";
 import DetailPane, { type DetailPaneHandle } from "./DetailPane";
@@ -865,17 +866,10 @@ export default function EditorPage() {
   const handleDownload = useCallback(() => {
     const serialized = getSerializer(format).serialize(buildParseResult());
     const blob = new Blob([serialized], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
     const title =
       data?.mediaTitle?.replace(/[/\\?%*:|"<>]/g, "_") ?? "subtitle";
     const langPart = data?.language ?? language ?? "unknown";
-    a.download = `${title}.${langPart}.${format}`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    saveBlobAs(blob, `${title}.${langPart}.${format}`);
   }, [format, language, data?.mediaTitle, data?.language, buildParseResult]);
 
   // Toolbar action handler
