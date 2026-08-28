@@ -45,13 +45,13 @@ def fail(message):
     sys.exit(1)
 
 
-def stamp_package_info(version):
+def prepare_package_info(version):
     text = PACKAGE_INFO.read_text()
     new_text, count = re.subn(r'(?m)^packageversion=.*$',
                               f'packageversion=Bazarr+ v{version}', text)
     if count != 1:
         fail(f'expected exactly one packageversion line in {PACKAGE_INFO}, found {count}')
-    PACKAGE_INFO.write_text(new_text)
+    return PACKAGE_INFO, new_text
 
 
 def scaffold_slides(items):
@@ -70,7 +70,7 @@ def scaffold_slides(items):
     return '\n'.join(slides)
 
 
-def stamp_whats_new(version, items):
+def prepare_whats_new(version, items):
     text = WHATS_NEW.read_text()
 
     new_text, count = re.subn(r'export const latestWhatsNewVersion = "[^"]+";',
@@ -94,20 +94,16 @@ def stamp_whats_new(version, items):
         text = re.sub(r'(import \{\n)',
                       r'\g<1>  ' + PLACEHOLDER_ICON + ',\n', text, count=1)
 
-    WHATS_NEW.write_text(text)
+    return WHATS_NEW, text
 
 
-def stamp_site(version):
+def prepare_site(version):
     text = SITE_INDEX.read_text()
     new_text, count = re.subn(r'"softwareVersion": "[^"]+"',
                               f'"softwareVersion": "{version}"', text)
     if count != 1:
         fail(f'expected exactly one softwareVersion in {SITE_INDEX}, found {count}')
-    SITE_INDEX.write_text(new_text)
-    # The redesigned landing page's roadmap is themed prose (Shipped / Next /
-    # v3.0.0), not a per-version list, so it cannot be stamped mechanically.
-    print('NOTE: site/index.html roadmap ("Shipped" horizon) is prose; '
-          'update it by hand as part of the prep review.')
+    return SITE_INDEX, new_text
 
 
 def main():
@@ -128,9 +124,19 @@ def main():
         fail('at least one --slide item is required: the What\'s New entry is '
              'a content deliverable of every release, not a version bump')
 
-    stamp_package_info(args.version)
-    stamp_whats_new(args.version, args.slides)
-    stamp_site(args.version)
+    # Validate every target first, write only when all three are valid: a
+    # drifted later target must not leave a partial stamp behind.
+    prepared = [
+        prepare_package_info(args.version),
+        prepare_whats_new(args.version, args.slides),
+        prepare_site(args.version),
+    ]
+    for path, text in prepared:
+        path.write_text(text)
+    # The redesigned landing page's roadmap is themed prose (Shipped / Next /
+    # v3.0.0), not a per-version list, so it cannot be stamped mechanically.
+    print('NOTE: site/index.html roadmap ("Shipped" horizon) is prose; '
+          'update it by hand as part of the prep review.')
 
     print(f'Stamped Bazarr+ v{args.version} ({args.codename}). Working-tree diff:\n')
     sys.stdout.flush()

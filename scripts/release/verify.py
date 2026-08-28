@@ -130,12 +130,18 @@ def check_pages(expected_version, results):
                     f'last observed: {observed!r}'))
 
 
-def check_release_page(tag, results):
+def check_release_page(tag, results, require_hero=False):
     name = f'release {tag}'
-    fetched = subprocess.run(
-        ['gh', 'api', f'repos/{REPO_SLUG}/releases/tags/{tag}',
-         '--jq', '{draft: .draft, prerelease: .prerelease, body: .body}'],
-        capture_output=True, text=True)
+    try:
+        fetched = subprocess.run(
+            ['gh', 'api', f'repos/{REPO_SLUG}/releases/tags/{tag}',
+             '--jq', '{draft: .draft, prerelease: .prerelease, body: .body}'],
+            capture_output=True, text=True)
+    except FileNotFoundError:
+        # Independent reporting: a machine without gh still gets the other
+        # surfaces' results plus an explicit failure here.
+        results.append((name, False, 'gh executable not available'))
+        return
     if fetched.returncode != 0:
         results.append((name, False, 'release page does not exist'))
         return
@@ -156,7 +162,7 @@ def check_release_page(tag, results):
     # Same render verification as the draft check in notes.py.
     sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent))
     from notes import render_check
-    problems = render_check(release['body'])
+    problems = render_check(release['body'], require_hero=require_hero)
     if problems:
         results.append((name, False, '; '.join(problems)))
     else:
@@ -168,6 +174,9 @@ def check_release_page(tag, results):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--version', required=True, help='bare semver, e.g. 2.6.0')
+    parser.add_argument('--feature', action='store_true',
+                        help='feature release: the release page must open '
+                             'with a hero image')
     args = parser.parse_args()
     version = args.version
     tag = f'v{version}'
@@ -183,7 +192,7 @@ def main():
         check_image_tag(token, version, version, results)
         check_image_tag(token, 'latest', version, results)
     check_pages(version, results)
-    check_release_page(tag, results)
+    check_release_page(tag, results, require_hero=args.feature)
 
     failed = False
     for name, passed, detail in results:

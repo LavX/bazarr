@@ -185,8 +185,11 @@ PLACEHOLDER: name external reporters and contributors, or thank the community.
 # check
 # ---------------------------------------------------------------------------
 
-def render_check(markdown):
-    """Return a list of problems; empty means the draft renders correctly."""
+def render_check(markdown, require_hero=False):
+    """Return a list of problems; empty means the draft renders correctly.
+
+    require_hero: a feature release must open with a hero image; without the
+    flag a hero is only validated when present (patch releases have none)."""
     problems = []
     with tempfile.NamedTemporaryFile('w', suffix='.md', delete=False) as source:
         source.write(markdown)
@@ -198,8 +201,13 @@ def render_check(markdown):
     html = result.stdout
 
     # The hero line is checked in isolation: any other valid screenshot in
-    # the body would otherwise mask a malformed hero.
-    hero_lines = [line for line in markdown.splitlines() if line.startswith('![')]
+    # the body would otherwise mask a malformed hero. Indented hero lines are
+    # still detected (indentation is itself a way a hero breaks).
+    hero_lines = [line for line in markdown.splitlines()
+                  if line.lstrip().startswith('![')]
+    if require_hero and not hero_lines:
+        problems.append('no hero image line found; a feature release must '
+                        'open with one')
     for hero_line in hero_lines[:1]:
         with tempfile.NamedTemporaryFile('w', suffix='.md', delete=False) as hero_source:
             hero_source.write(hero_line + '\n')
@@ -214,9 +222,14 @@ def render_check(markdown):
         problems.append('literal triple backticks survive in the rendered '
                         'HTML: a code fence degraded to text')
 
-    fence_count = markdown.count('```')
-    if fence_count % 2 != 0:
-        problems.append(f'odd number of code fences ({fence_count}): one is unclosed')
+    # Both GFM fence forms: an unclosed ~~~ fence swallows the rest of the
+    # document as code just as an unclosed ``` one does.
+    for delimiter in ('```', '~~~'):
+        fence_count = sum(1 for line in markdown.splitlines()
+                          if line.lstrip().startswith(delimiter))
+        if fence_count % 2 != 0:
+            problems.append(f'odd number of {delimiter} fences '
+                            f'({fence_count}): one is unclosed')
 
     return problems
 
@@ -238,7 +251,7 @@ def check(args):
         markdown = result.stdout
         source = f'release {args.release}'
 
-    problems = render_check(markdown)
+    problems = render_check(markdown, require_hero=args.require_hero)
     if problems:
         for problem in problems:
             print(f'FAIL: {problem}', file=sys.stderr)
@@ -265,6 +278,9 @@ def main():
     group = p_check.add_mutually_exclusive_group(required=True)
     group.add_argument('--file', help='markdown file to check')
     group.add_argument('--release', help='release tag whose body to check, e.g. v2.6.0')
+    p_check.add_argument('--require-hero', action='store_true',
+                         help='fail when no hero image line is present '
+                              '(feature releases open with one)')
     p_check.set_defaults(func=check)
 
     args = parser.parse_args()
