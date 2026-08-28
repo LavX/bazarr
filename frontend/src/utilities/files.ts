@@ -26,10 +26,14 @@ export function filenameFromContentDisposition(
   }
 
   // Quoted form first, consumed to the closing quote: a semicolon INSIDE the
-  // quotes is part of the filename, not a parameter separator.
-  const quoted = header.match(/filename="([^"]*)"/);
-  if (quoted && quoted[1].trim()) {
-    return quoted[1].trim();
+  // quotes is part of the filename, not a parameter separator, and escaped
+  // quotes/backslashes (quoted-pairs) are part of the value.
+  const quoted = header.match(/filename="((?:[^"\\]|\\.)*)"/);
+  if (quoted) {
+    const unescaped = quoted[1].replace(/\\(.)/g, "$1").trim();
+    if (unescaped) {
+      return unescaped;
+    }
   }
 
   const token = header.match(/filename=([^;"\s]+)/);

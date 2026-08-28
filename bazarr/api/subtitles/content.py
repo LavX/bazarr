@@ -53,7 +53,10 @@ _LANGUAGE_CODE_RE = re.compile(
     r'sync-(ffsubsync|autosubsync|alass)|'
     r'combined-[a-z]{2}(-[a-z]{2})?'
     # \Z, not $: $ would accept a trailing newline (en%0A in the route).
-    r'))*\Z'
+    r'))*\Z',
+    # Custom languages index uppercase modifiers (zh:HI, zt:HI, pb:HI);
+    # validation is case-insensitive while lookups keep the exact label.
+    re.IGNORECASE
 )
 
 

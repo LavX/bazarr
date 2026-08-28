@@ -155,6 +155,25 @@ const SeriesEpisodesView: FunctionComponent = () => {
     return Array.from(seen).sort();
   }, [episodes]);
 
+  const languagesBySeason = useMemo(() => {
+    const bySeason: Record<number, string[]> = {};
+    const seen = new Map<number, Set<string>>();
+    for (const episode of episodes ?? []) {
+      for (const s of episode.subtitles) {
+        if (s.path) {
+          if (!seen.has(episode.season)) {
+            seen.set(episode.season, new Set());
+          }
+          seen.get(episode.season)!.add(s.code2);
+        }
+      }
+    }
+    for (const [season, codes] of seen) {
+      bySeason[season] = Array.from(codes).sort();
+    }
+    return bySeason;
+  }, [episodes]);
+
   // Only seasons that actually have a file on disk: offering an empty season
   // would just produce a guaranteed 404 bundle.
   const seasons = useMemo(
@@ -324,6 +343,7 @@ const SeriesEpisodesView: FunctionComponent = () => {
                       seriesId: series.sonarrSeriesId,
                       arrInstanceId: series.arr_instance_id ?? undefined,
                       seasons,
+                      languagesBySeason,
                     },
                     availableLanguages: downloadableLangs,
                   });

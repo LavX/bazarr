@@ -244,6 +244,13 @@ class TestLanguageFilterRe:
         assert download_module._LANGUAGE_FILTER_RE.match('pt-BR')
         assert download_module._LANGUAGE_FILTER_RE.match('zho')
 
+    def test_content_grammar_accepts_uppercase_modifiers(self):
+        # Custom languages index uppercase HI labels (zh:HI, zt:HI, pb:HI);
+        # validation must accept them or those Download/View actions 400.
+        assert content_module._LANGUAGE_CODE_RE.match('zt:HI')
+        assert content_module._LANGUAGE_CODE_RE.match('pb:HI')
+        assert content_module._LANGUAGE_CODE_RE.match('en:FORCED')
+
     def test_content_grammar_rejects_trailing_newline(self):
         # The single-file route validates through content.py's full grammar;
         # \Z (not $) so an encoded trailing newline cannot pass.

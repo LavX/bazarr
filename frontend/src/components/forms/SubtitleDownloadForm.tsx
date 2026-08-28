@@ -9,6 +9,9 @@ type Scope =
       seriesId: number;
       arrInstanceId?: number;
       seasons: number[];
+      // Languages that actually exist per season, so a season/language
+      // combination that would bundle nothing is never offered.
+      languagesBySeason: Record<number, string[]>;
     }
   | { kind: "movie"; radarrId: number; arrInstanceId?: number };
 
@@ -27,6 +30,11 @@ const SubtitleDownloadForm: FunctionComponent<Props> = ({
   const [language, setLanguage] = useState<string>(ALL);
   const { mutateAsync, isPending } = useSubtitleArchiveDownload();
   const modals = useModals();
+
+  const languageOptions =
+    scope.kind === "series" && season !== ALL
+      ? (scope.languagesBySeason[Number(season)] ?? [])
+      : availableLanguages;
 
   const submit = async () => {
     const languageFilter = language === ALL ? undefined : language;
@@ -66,7 +74,19 @@ const SubtitleDownloadForm: FunctionComponent<Props> = ({
           label="Season"
           allowDeselect={false}
           value={season}
-          onChange={(next) => setSeason(next ?? ALL)}
+          onChange={(next) => {
+            const value = next ?? ALL;
+            setSeason(value);
+            // A language picked for the whole series may not exist in the
+            // newly selected season; fall back to All rather than 404.
+            if (
+              value !== ALL &&
+              language !== ALL &&
+              !(scope.languagesBySeason[Number(value)] ?? []).includes(language)
+            ) {
+              setLanguage(ALL);
+            }
+          }}
           data={[
             { value: ALL, label: "All seasons" },
             ...scope.seasons.map((s) => ({
@@ -83,7 +103,7 @@ const SubtitleDownloadForm: FunctionComponent<Props> = ({
         onChange={(next) => setLanguage(next ?? ALL)}
         data={[
           { value: ALL, label: "All languages" },
-          ...availableLanguages.map((code) => ({
+          ...languageOptions.map((code) => ({
             value: code,
             label: code.toUpperCase(),
           })),

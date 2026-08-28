@@ -37,6 +37,21 @@ describe("filenameFromContentDisposition", () => {
     ).toBe("Rock; Roll - subtitles.zip");
   });
 
+  it("unescapes quoted-pairs inside a quoted filename", () => {
+    expect(
+      filenameFromContentDisposition(
+        'attachment; filename="a\\"b.srt"',
+        "fallback",
+      ),
+    ).toBe('a"b.srt');
+    expect(
+      filenameFromContentDisposition(
+        'attachment; filename="back\\\\slash.srt"',
+        "fallback",
+      ),
+    ).toBe("back\\slash.srt");
+  });
+
   it("falls back when the header is missing or unparsable", () => {
     expect(filenameFromContentDisposition(undefined, "fallback")).toBe(
       "fallback",
