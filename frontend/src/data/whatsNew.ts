@@ -1,8 +1,8 @@
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import {
   faClockRotateLeft,
-  faDownload,
   faDatabase,
+  faDownload,
   faFileZipper,
   faLayerGroup,
   faScaleBalanced,
