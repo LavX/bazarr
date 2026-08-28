@@ -3,60 +3,100 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Subtitle Processing - Bazarr+ Guides</title>
-  <meta name="description" content="Combine on-disk subtitles, score and translate embedded tracks, and sync with multiple engines in Bazarr+ v2.4.">
+  <title>Subtitle Processing: combine, sync and score - Bazarr+</title>
+  <meta name="description" content="Compose bilingual and trilingual subtitles, score and translate embedded tracks, and sync timing with ffsubsync, autosubsync or ALASS with a side-by-side compare.">
   <link rel="canonical" href="https://lavx.github.io/bazarr/guides/subtitle-processing.html">
 
   <!-- Open Graph -->
   <meta property="og:type" content="website">
-  <meta property="og:title" content="Subtitle Processing - Bazarr+ Guides">
-  <meta property="og:description" content="Combine on-disk subtitles, score and translate embedded tracks, and sync with multiple engines in Bazarr+ v2.4.">
+  <meta property="og:title" content="Subtitle Processing: combine, sync and score - Bazarr+">
+  <meta property="og:description" content="Compose bilingual and trilingual subtitles, score and translate embedded tracks, and sync timing with ffsubsync, autosubsync or ALASS with a side-by-side compare.">
   <meta property="og:url" content="https://lavx.github.io/bazarr/guides/subtitle-processing.html">
   <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Bazarr+ subtitle management dashboard">
+  <meta property="og:site_name" content="Bazarr+">
+  <meta property="og:locale" content="en_US">
 
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Subtitle Processing - Bazarr+ Guides">
-  <meta name="twitter:description" content="Combine on-disk subtitles, score and translate embedded tracks, and sync with multiple engines in Bazarr+ v2.4.">
+  <meta name="twitter:title" content="Subtitle Processing: combine, sync and score - Bazarr+">
+  <meta name="twitter:description" content="Compose bilingual and trilingual subtitles, score and translate embedded tracks, and sync timing with ffsubsync, autosubsync or ALASS with a side-by-side compare.">
   <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
 
   <!-- Geist font: async preload -->
-  <link rel="preload" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" as="style" crossorigin>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css" media="print" onload="this.media='all'">
-  <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.min.css"></noscript>
 
-  <link rel="icon" href="../screenshots/logo128.png" type="image/png">
-  <link rel="stylesheet" href="../css/style.css">
+  <link rel="icon" href="../favicon.ico" sizes="any">
+  <link rel="stylesheet" href="../css/site.css">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [
+      {
+        "@type": "ListItem",
+        "position": 1,
+        "name": "Home",
+        "item": "https://lavx.github.io/bazarr/"
+      },
+      {
+        "@type": "ListItem",
+        "position": 2,
+        "name": "Guides",
+        "item": "https://lavx.github.io/bazarr/guides/"
+      },
+      {
+        "@type": "ListItem",
+        "position": 3,
+        "name": "Subtitle Processing",
+        "item": "https://lavx.github.io/bazarr/guides/subtitle-processing.html"
+      }
+    ]
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "TechArticle",
+    "headline": "Subtitle Processing",
+    "description": "Combine on-disk subtitles, score and translate embedded tracks, and sync with multiple engines in Bazarr+ v2.4.",
+    "url": "https://lavx.github.io/bazarr/guides/subtitle-processing.html",
+    "author": {
+      "@type": "Person",
+      "name": "LavX",
+      "sameAs": "https://github.com/LavX"
+    },
+    "isPartOf": {
+      "@type": "WebSite",
+      "name": "Bazarr+",
+      "url": "https://lavx.github.io/bazarr/"
+    }
+  }
+  </script>
 </head>
 <body>
 
-<a href="#main-content" class="skip-link">Skip to content</a>
+<a class="skip" href="#main-content">Skip to content</a>
 
-<!-- Grain overlay -->
-<svg class="grain" aria-hidden="true">
-  <filter id="grain-filter">
-    <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/>
-  </filter>
-  <rect width="100%" height="100%" filter="url(#grain-filter)"/>
-</svg>
-
-<!-- Ambient gradients -->
-<div class="ambient" aria-hidden="true"></div>
-
-<nav class="sticky-nav" aria-label="Site navigation">
+<header class="nav">
   <div class="container">
-    <img src="../screenshots/logo128.png" alt="Bazarr+" class="nav-logo" width="22" height="22">
-    <a href="../">Home</a>
-    <a href="../#comparison-heading">Compare</a>
-    <a href="../#quick-start">Install</a>
-    <a href="../#screenshots-heading">Screenshots</a>
-    <a href="../#faq-heading">FAQ</a>
-    <a href="./" class="nav-active">Guides</a>
-    <a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a>
+    <a class="wordmark" href="../" aria-label="Bazarr+"><img src="../screenshots/logo128.png" width="32" height="32" alt="" decoding="async"><span>Bazarr<b>+</b></span></a>
+    <nav aria-label="Primary">
+      <ul>
+        <li class="nav-inpage"><a href="../#what">What it does</a></li>
+        <li class="nav-deep"><a href="../#proof">Screenshots</a></li>
+        <li class="nav-inpage"><a href="../#compare">Compare</a></li>
+        <li><a href="../#start">Install</a></li>
+        <li class="nav-deep"><a href="../#faq">FAQ</a></li>
+        <li class="nav-deep"><a href="../#next">Roadmap</a></li>
+        <li class="nav-sep"><a href="./" aria-current="page">Guides</a></li>
+        <li class="nav-offsite"><a href="https://github.com/LavX/bazarr" rel="noopener">GitHub</a></li>
+        <li class="nav-offsite"><a href="https://discord.gg/fpp5JXmB8f" rel="noopener">Discord</a></li>
+      </ul>
+    </nav>
   </div>
-</nav>
+</header>
 
 <main id="main-content" class="guide-page">
   <div class="container">
@@ -64,6 +104,8 @@
       <a href="../">Home</a><span class="sep">/</span><a href="./">Guides</a><span class="sep">/</span><span>Subtitle Processing</span>
     </nav>
     <h1>Subtitle Processing <span class="badge-new" aria-label="New in v2.4">v2.4</span></h1>
+
+    <nav class="guide-rail" id="guide-rail" aria-label="On this page"></nav>
 
     <article class="content">
 
@@ -73,10 +115,7 @@
       <p>Combined output takes subtitles you already have on disk and composes them into a single bilingual or trilingual subtitle, written as SRT or ASS. You pick two or three languages, and Bazarr+ aligns their cues into one file.</p>
 
       <figure class="screenshot-frame">
-        <div class="screenshot-chrome" aria-hidden="true">
-          <span class="chrome-dot"></span><span class="chrome-dot"></span><span class="chrome-dot"></span>
-          <span class="chrome-title">Jellyfin: combined Hungarian and English subtitle</span>
-        </div>
+        <figcaption class="shot-label">Jellyfin: combined Hungarian and English subtitle</figcaption>
         <picture>
           <source type="image/webp" srcset="../screenshots/v2.4.0/combined-subtitle-jellyfin.webp">
           <img src="../screenshots/v2.4.0/combined-subtitle-jellyfin.png" alt="A film playing in Jellyfin with a combined bilingual subtitle: Hungarian on the top line and English on the bottom line, composed by Bazarr+ as a single ASS file" loading="lazy" decoding="async" width="1920" height="1080">
@@ -120,10 +159,10 @@
 
       <h3 id="combined-api">API endpoints</h3>
       <p>The on-demand and mass-combine actions call these endpoints. The series endpoint is the batch form that combines across the show's episodes.</p>
-      <div class="code-wrap">
-        <div class="code-header">
+      <div class="code">
+        <div class="code-head">
           <span class="code-lang">HTTP</span>
-          <button class="copy-btn" data-copy="POST /api/movies/&lt;id&gt;/subtitles/combine&#10;POST /api/episodes/&lt;id&gt;/subtitles/combine&#10;POST /api/series/&lt;id&gt;/subtitles/combine" aria-label="Copy combine endpoints">Copy</button>
+          <button class="copy" data-copy="POST /api/movies/&lt;id&gt;/subtitles/combine&#10;POST /api/episodes/&lt;id&gt;/subtitles/combine&#10;POST /api/series/&lt;id&gt;/subtitles/combine" aria-label="Copy combine endpoints">Copy</button>
         </div>
         <pre><code>POST /api/movies/&lt;id&gt;/subtitles/combine
 POST /api/episodes/&lt;id&gt;/subtitles/combine
@@ -158,10 +197,66 @@ POST /api/series/&lt;id&gt;/subtitles/combine</code></pre>
         <li>From the <strong>subtitle editor</strong>, on a single subtitle.</li>
         <li>From the <strong>mass-sync form</strong>, across multiple items at once.</li>
       </ul>
-      <p>In either place you pick the engine to run. When the editor sync finishes, the <strong>SyncOutputCompareModal</strong> shows the produced output next to the original side by side, so you can confirm the timing improved before committing to it.</p>
+      <p>In either place you pick the engine to run. When an editor sync finishes with results from more than one engine, a <strong>Choose Sync Result</strong> dialog lists the engines that produced output and you load the one you want into the editor. A single result is loaded straight away without asking. Either way the cues sit in the editor unsaved, so you look at them before writing anything to disk.</p>
 
       <div class="note">
         <strong>Editor sync now fails explicitly.</strong> If a sync run produces no output, the editor reports the failure instead of silently leaving the subtitle unchanged. You see that the engine did not produce a result rather than assuming it succeeded.
+      </div>
+
+      <h3 id="sync-engines">The three engines</h3>
+
+      <p><strong>Nothing to install.</strong> If you run the Docker image, all three engines and ffmpeg are already inside it. There is no separate download, no manual step, and no setting to point at a binary.</p>
+
+      <ul>
+        <li><strong>ffsubsync</strong> aligns the subtitle against a reference taken from the video, either an audio track or an embedded subtitle stream. Naming a reference yourself in a manual sync settles it; otherwise <strong>Force audio</strong> and the original-language settings do.</li>
+        <li><strong>autosubsync</strong> aligns against the <strong>audio track</strong> with a different speech model, so it often succeeds where ffsubsync does not, and the reverse. It has no reference setting of its own: it takes the video, unless a sync you start by hand names another file in <strong>Reference</strong>, which it then uses instead.</li>
+        <li><strong>ALASS</strong> aligns against the reference itself and is built for timing that drifts in blocks: adverts cut out, a different edit, or a subtitle that is right at the start and progressively wrong later. This is usually the one that rescues a file the other two cannot.</li>
+      </ul>
+
+      <p>All three correct a subtitle that is uniformly early or late. A <strong>framerate</strong> mismatch, where the subtitle drifts further out the longer the file runs, needs more than a shift. autosubsync estimates that stretch on every run as a matter of course. ffsubsync can do it too but does not by default: <strong>No fix framerate</strong> ships enabled, and both mass sync and the subtitle editor keep it that way, so turn it off if you want ffsubsync to attempt it. ALASS does not stretch a subtitle at all.</p>
+
+      <p>On a bare-metal install, ffsubsync and autosubsync arrive with the Python requirements. <strong>ALASS is an external binary</strong> and must be on your <code>PATH</code> as <code>alass</code> or <code>alass-cli</code>. ffsubsync and autosubsync read the audio out of the video, so they need <strong>ffmpeg</strong> and <strong>ffprobe</strong> too; ALASS handles the reference itself and only reaches for ffprobe when that reference is a video.</p>
+
+      <h3 id="sync-output-modes">Output modes</h3>
+
+      <ul>
+        <li><strong>Overwrite</strong> replaces the subtitle with the result of the first engine that succeeds, and stops there. The remaining engines are not run.</li>
+        <li><strong>Keep all engine outputs</strong> runs the enabled engines and writes each result beside the original as <code>&lt;name&gt;.&lt;engine&gt;.&lt;ext&gt;</code>, keeping the source file's extension: an ASS subtitle produces <code>.alass.ass</code>, not <code>.alass.srt</code>. Compare them and delete the ones you do not want.</li>
+      </ul>
+
+      <p>A keep-all run does not necessarily run every engine. It skips one whose output is already there and still current, and one that has failed repeatedly on this subtitle, and it says so in the report. Starting the sync yourself overrides both, so a run you asked for always runs.</p>
+
+      <div class="note">
+        <strong>These modes apply to a sync that writes to your library.</strong> A sync started from the subtitle editor works on a temporary copy and cleans up after itself: the results are handed to the editor for you to save or discard, and nothing is left beside your subtitle. The side-by-side <strong>comparison view</strong> is a separate thing, reached from the episode or movie screen, and it compares the keep-all files a library sync wrote.
+      </div>
+
+      <div class="note">
+        <strong>Keep-all outputs are never used as a sync source.</strong> The <code>&lt;name&gt;.&lt;engine&gt;.&lt;ext&gt;</code> files are recognised as engine output and skipped when a later sync looks for something to align, so those results cannot be stacked on each other. Overwrite mode is different: it replaces the subtitle in place with no marker in the name, so syncing that file again re-aligns an already-aligned subtitle. That is what you want when the first attempt was wrong, and worth knowing about when it was not.
+      </div>
+
+      <h3 id="sync-failures">When an engine produces nothing</h3>
+
+      <p>Engines failing is routine, not a sign of a broken install. A run where two engines produce nothing and the third works is a normal outcome, and it is the reason more than one engine is offered.</p>
+
+      <p>autosubsync is the most visible case: it judges its own result against a confidence threshold and reports failure when it does not trust the alignment, rather than handing back a subtitle it believes is wrong. Sparse dialogue, a heavy musical score, or audio in a language its model handles poorly all lower that confidence even when the file itself is fine.</p>
+
+      <p>You read the outcome in the notifications drawer. A sync you start on one subtitle from the episode or movie screen is a job of its own and the outcome becomes its name. The automatic sync after a download is not a separate job: it runs inside the download's job and the outcome appears there as a progress message, under the name of the download. An overwrite run that succeeds says only <em>Sync complete</em>, because it stopped at the first engine that worked and never asked the others. A keep-all run where some engines produced nothing says how many did, and then gives a line for each that did not. A run where nothing worked lists them all. Those lines name six different things:</p>
+
+      <ul>
+        <li><strong>declined</strong> &mdash; the engine ran and rejected its own result. Nothing is wrong with your installation. autosubsync's line quotes the quality it measured and the threshold it was judged against, because it has a number to give; ffsubsync's says only that it reported the run unsuccessful.</li>
+        <li><strong>rejected</strong> &mdash; the engine claimed success but Bazarr+ refused the result, because the alignment was further out than your configured maximum offset.</li>
+        <li><strong>failed</strong> &mdash; the engine errored out. This one is worth reading: it carries whatever the engine said on its way down.</li>
+        <li><strong>not installed</strong> &mdash; something the engine needs could not be found. Usually the engine itself, and on a bare-metal install that usually means ALASS is not on <code>PATH</code>. It also covers <strong>ffmpeg and ffprobe</strong>: ffsubsync needs both, and a run without them reports ffsubsync as not installed even when ffsubsync is there. On Docker none of this should appear.</li>
+        <li><strong>skipped after repeated failures</strong> &mdash; the engine has come away from this subtitle empty-handed several times since it last produced a result, and is being left alone. Errors and rejected results both count towards that; an engine that declines its own result neither counts nor clears the tally, because that verdict can change when the reference or the settings do. Only a run that works clears it. Starting a sync yourself runs the engine anyway.</li>
+        <li><strong>output already existed</strong> &mdash; keep-all found a current result from this engine and kept it rather than doing the work again.</li>
+      </ul>
+
+      <p>An engine that declines, is rejected, or fails leaves your original subtitle untouched, and the next engine in the chain runs.</p>
+
+      <p>A <strong>mass sync</strong> does not report at this level of detail. It is one job covering many files, so it reports the file it is on and finishes with a tally of how many were done and how many were skipped. To see why a particular engine produced nothing on a particular subtitle, sync that one subtitle on its own, or read System &gt; Logs.</p>
+
+      <div class="note">
+        <strong>The maximum offset only binds an engine that reports one.</strong> Bazarr+ can refuse an alignment for being too far out only when the engine tells it how far it moved the subtitle. ffsubsync and autosubsync do; ALASS does not, so the setting does not constrain it.
       </div>
 
       <h2 id="next-steps">Next steps</h2>
@@ -178,15 +273,21 @@ POST /api/series/&lt;id&gt;/subtitles/combine</code></pre>
 <!-- Footer -->
 <footer>
   <div class="container">
-    <div class="footer-inner">
-      <p class="footer-credit">Built by <a href="https://github.com/LavX" target="_blank" rel="noopener">LavX</a>. Based on <a href="https://github.com/morpheus65535/bazarr" target="_blank" rel="noopener">Bazarr</a> by morpheus65535.</p>
-      <ul class="footer-links">
-        <li><a href="./">Guides</a></li>
-        <li><a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a></li>
-        <li><a href="https://github.com/LavX/bazarr/issues" target="_blank" rel="noopener">Issues</a></li>
-        <li><a href="https://github.com/LavX/bazarr/wiki" target="_blank" rel="noopener">Wiki</a></li>
-      </ul>
-    </div>
+    <p>Bazarr+ is a hard fork of <a class="inline" href="https://github.com/morpheus65535/bazarr" rel="noopener">Bazarr</a>, GPL-3, maintained by <a class="inline" href="https://github.com/LavX" rel="noopener">LavX</a>.</p>
+    <ul>
+      <li><a href="../">Home</a></li>
+      <li><a href="getting-started.html">Getting Started</a></li>
+      <li><a href="migration.html">Migration</a></li>
+      <li><a href="provider-hub.html">Provider Hub</a></li>
+      <li><a href="ai-translation.html">AI Translation</a></li>
+      <li><a href="bulk-operations.html">Bulk Operations</a></li>
+      <li><a href="external-integration.html">External Integration</a></li>
+      <li><a href="./">All guides</a></li>
+      <li><a href="https://github.com/LavX/bazarr/releases" rel="noopener">Releases</a></li>
+      <li><a href="https://github.com/LavX/bazarr/issues" rel="noopener">Issues</a></li>
+      <li><a href="https://github.com/LavX/bazarr/wiki" rel="noopener">Wiki</a></li>
+      <li><a href="https://discord.gg/fpp5JXmB8f" rel="noopener">Discord</a></li>
+    </ul>
   </div>
 </footer>
 

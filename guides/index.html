@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Bazarr+ Guides - Install, Provider Hub, AI Translation &amp; Migration</title>
-  <meta name="description" content="Setup guides for Bazarr+. Learn how to install, use Provider Hub, run the Distribution Hub multi-tenant API, process subtitles, configure External Integration, set up AI translation, and migrate from upstream Bazarr.">
+  <title>Bazarr+ Guides: install, providers, AI translation, sync</title>
+  <meta name="description" content="Step-by-step Bazarr+ guides: install with Docker, add subtitle providers, connect Jellyfin and VLSub, translate with AI, run bulk actions, and migrate from Bazarr.">
   <link rel="canonical" href="https://lavx.github.io/bazarr/guides/">
 
   <!-- Open Graph -->
   <meta property="og:type" content="website">
   <meta property="og:title" content="Guides - Bazarr+">
-  <meta property="og:description" content="Setup guides for Bazarr+. Learn how to install, use Provider Hub, run the Distribution Hub multi-tenant API, process subtitles, configure External Integration, set up AI translation, and migrate from upstream Bazarr.">
+  <meta property="og:description" content="Step-by-step Bazarr+ guides: install with Docker, add subtitle providers, connect Jellyfin and VLSub, translate with AI, run bulk actions, and migrate from Bazarr.">
   <meta property="og:url" content="https://lavx.github.io/bazarr/guides/">
   <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
   <meta property="og:image:width" content="1200">
@@ -22,16 +22,16 @@
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Guides - Bazarr+">
-  <meta name="twitter:description" content="Setup guides for Bazarr+. Learn how to install, use Provider Hub, run the Distribution Hub multi-tenant API, process subtitles, configure External Integration, set up AI translation, and migrate from upstream Bazarr.">
+  <meta name="twitter:description" content="Step-by-step Bazarr+ guides: install with Docker, add subtitle providers, connect Jellyfin and VLSub, translate with AI, run bulk actions, and migrate from Bazarr.">
   <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
 
   <!-- Geist font: self-hosted -->
   <link rel="preload" href="../fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
 
-  <link rel="icon" href="../screenshots/logo128.png" type="image/png">
-  <meta name="theme-color" content="#1a1a2e">
+  <link rel="icon" href="../favicon.ico" sizes="any">
+  <meta name="theme-color" content="#121125">
   <link rel="apple-touch-icon" href="../apple-touch-icon.png">
-  <link rel="stylesheet" href="../css/style.css">
+  <link rel="stylesheet" href="../css/site.css">
 
   <script type="application/ld+json">
   {
@@ -70,39 +70,34 @@
 </head>
 <body>
 
-<a href="#main-content" class="skip-link">Skip to content</a>
+<a class="skip" href="#main-content">Skip to content</a>
 
-<!-- Grain overlay -->
-<svg class="grain" aria-hidden="true">
-  <filter id="grain-filter">
-    <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/>
-  </filter>
-  <rect width="100%" height="100%" filter="url(#grain-filter)"/>
-</svg>
-
-<!-- Ambient gradients -->
-<div class="ambient" aria-hidden="true"></div>
-
-<nav class="sticky-nav" aria-label="Site navigation">
+<header class="nav">
   <div class="container">
-    <img src="../screenshots/logo128.png" alt="Bazarr+" class="nav-logo" width="22" height="22">
-    <a href="../">Home</a>
-    <a href="../#comparison-heading">Compare</a>
-    <a href="../#quick-start">Install</a>
-    <a href="../#screenshots-heading">Screenshots</a>
-    <a href="../#faq-heading">FAQ</a>
-    <a href="./" class="nav-active">Guides</a>
-    <a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a>
+    <a class="wordmark" href="../" aria-label="Bazarr+"><img src="../screenshots/logo128.png" width="32" height="32" alt="" decoding="async"><span>Bazarr<b>+</b></span></a>
+    <nav aria-label="Primary">
+      <ul>
+        <li class="nav-inpage"><a href="../#what">What it does</a></li>
+        <li class="nav-deep"><a href="../#proof">Screenshots</a></li>
+        <li class="nav-inpage"><a href="../#compare">Compare</a></li>
+        <li><a href="../#start">Install</a></li>
+        <li class="nav-deep"><a href="../#faq">FAQ</a></li>
+        <li class="nav-deep"><a href="../#next">Roadmap</a></li>
+        <li class="nav-sep"><a href="./" aria-current="page">Guides</a></li>
+        <li class="nav-offsite"><a href="https://github.com/LavX/bazarr" rel="noopener">GitHub</a></li>
+        <li class="nav-offsite"><a href="https://discord.gg/fpp5JXmB8f" rel="noopener">Discord</a></li>
+      </ul>
+    </nav>
   </div>
-</nav>
+</header>
 
-<main id="main-content" class="guide-page">
+<main id="main-content" class="guide-page guide-index">
   <div class="container">
     <nav class="breadcrumb" aria-label="Breadcrumb">
       <a href="../">Home</a><span class="sep">/</span><span>Guides</span>
     </nav>
     <h1>Guides</h1>
-    <p class="guide-intro">Step-by-step setup guides for Bazarr+: install with Docker, add subtitle providers through Provider Hub, connect Jellyfin and VLSub over the External Integration endpoint, translate subtitles with AI, and migrate from upstream Bazarr without losing your database or config.</p>
+    <p class="guide-intro">Step-by-step setup guides for Bazarr+: install with Docker, add subtitle providers through Provider Hub, connect Jellyfin and VLSub over the External Integration endpoint, translate subtitles with AI, run actions in bulk across your whole library, and migrate from upstream Bazarr without losing your database or config.</p>
 
     <div class="guide-grid">
       <a href="getting-started.html" class="guide-card">
@@ -145,6 +140,14 @@
         <span class="guide-card-arrow">Read guide &rarr;</span>
       </a>
 
+      <a href="bulk-operations.html" class="guide-card">
+        <div>
+          <div class="guide-card-title">Bulk Operations</div>
+          <div class="guide-card-desc">Sync, translate, combine or clean up subtitles across any number of shows and films at once, up to 10,000 items in one run.</div>
+        </div>
+        <span class="guide-card-arrow">Read guide &rarr;</span>
+      </a>
+
       <a href="ai-translation.html" class="guide-card">
         <div>
           <div class="guide-card-title">AI Translation Setup</div>
@@ -168,15 +171,21 @@
 <!-- Footer -->
 <footer>
   <div class="container">
-    <div class="footer-inner">
-      <p class="footer-credit">Built by <a href="https://github.com/LavX" target="_blank" rel="noopener">LavX</a>. Based on <a href="https://github.com/morpheus65535/bazarr" target="_blank" rel="noopener">Bazarr</a> by morpheus65535.</p>
-      <ul class="footer-links">
-        <li><a href="./">Guides</a></li>
-        <li><a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a></li>
-        <li><a href="https://github.com/LavX/bazarr/issues" target="_blank" rel="noopener">Issues</a></li>
-        <li><a href="https://github.com/LavX/bazarr/wiki" target="_blank" rel="noopener">Wiki</a></li>
-      </ul>
-    </div>
+    <p>Bazarr+ is a hard fork of <a class="inline" href="https://github.com/morpheus65535/bazarr" rel="noopener">Bazarr</a>, GPL-3, maintained by <a class="inline" href="https://github.com/LavX" rel="noopener">LavX</a>.</p>
+    <ul>
+      <li><a href="../">Home</a></li>
+      <li><a href="getting-started.html">Getting Started</a></li>
+      <li><a href="migration.html">Migration</a></li>
+      <li><a href="provider-hub.html">Provider Hub</a></li>
+      <li><a href="ai-translation.html">AI Translation</a></li>
+      <li><a href="bulk-operations.html">Bulk Operations</a></li>
+      <li><a href="external-integration.html">External Integration</a></li>
+      <li><a href="./">All guides</a></li>
+      <li><a href="https://github.com/LavX/bazarr/releases" rel="noopener">Releases</a></li>
+      <li><a href="https://github.com/LavX/bazarr/issues" rel="noopener">Issues</a></li>
+      <li><a href="https://github.com/LavX/bazarr/wiki" rel="noopener">Wiki</a></li>
+      <li><a href="https://discord.gg/fpp5JXmB8f" rel="noopener">Discord</a></li>
+    </ul>
   </div>
 </footer>
 

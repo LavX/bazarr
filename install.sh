@@ -455,7 +455,6 @@ general:
   - opensubtitlescom
   - opensubtitles
   - embeddedsubtitles
-  - podnapisi
   flask_secret_key: ${flask_secret}
   hi_extension: hi
   ip: '*'

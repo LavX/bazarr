@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bulk Operations: sync and translate in batches - Bazarr+</title>
+  <meta name="description" content="Run subtitle actions across many shows or films at once in Bazarr+: bulk sync, translate, combine, subtitle tools, scan disk, search missing and upgrade.">
+  <link rel="canonical" href="https://lavx.github.io/bazarr/guides/bulk-operations.html">
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Bulk Operations: sync and translate in batches - Bazarr+">
+  <meta property="og:description" content="Run subtitle actions across many shows or films at once in Bazarr+: bulk sync, translate, combine, subtitle tools, scan disk, search missing and upgrade.">
+  <meta property="og:url" content="https://lavx.github.io/bazarr/guides/bulk-operations.html">
+  <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Bazarr+ subtitle management dashboard">
+  <meta property="og:site_name" content="Bazarr+">
+  <meta property="og:locale" content="en_US">
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Bulk Operations: sync and translate in batches - Bazarr+">
+  <meta name="twitter:description" content="Run subtitle actions across many shows or films at once in Bazarr+: bulk sync, translate, combine, subtitle tools, scan disk, search missing and upgrade.">
+  <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
+
+  <!-- Geist font: self-hosted -->
+  <link rel="preload" href="../fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
+
+  <link rel="icon" href="../favicon.ico" sizes="any">
+  <meta name="theme-color" content="#121125">
+  <link rel="apple-touch-icon" href="../apple-touch-icon.png">
+  <link rel="stylesheet" href="../css/site.css">
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [
+      {
+        "@type": "ListItem",
+        "position": 1,
+        "name": "Home",
+        "item": "https://lavx.github.io/bazarr/"
+      },
+      {
+        "@type": "ListItem",
+        "position": 2,
+        "name": "Guides",
+        "item": "https://lavx.github.io/bazarr/guides/"
+      },
+      {
+        "@type": "ListItem",
+        "position": 3,
+        "name": "Bulk Operations",
+        "item": "https://lavx.github.io/bazarr/guides/bulk-operations.html"
+      }
+    ]
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "TechArticle",
+    "headline": "Bulk Operations",
+    "description": "Run subtitle actions across many shows or films at once in Bazarr+: bulk sync, translate, combine, subtitle tools, scan disk, search missing and upgrade.",
+    "url": "https://lavx.github.io/bazarr/guides/bulk-operations.html",
+    "author": {
+      "@type": "Person",
+      "name": "LavX",
+      "sameAs": "https://github.com/LavX"
+    },
+    "isPartOf": {
+      "@type": "WebSite",
+      "name": "Bazarr+",
+      "url": "https://lavx.github.io/bazarr/"
+    }
+  }
+  </script>
+</head>
+<body>
+
+<a class="skip" href="#main-content">Skip to content</a>
+
+<header class="nav">
+  <div class="container">
+    <a class="wordmark" href="../" aria-label="Bazarr+"><img src="../screenshots/logo128.png" width="32" height="32" alt="" decoding="async"><span>Bazarr<b>+</b></span></a>
+    <nav aria-label="Primary">
+      <ul>
+        <li class="nav-inpage"><a href="../#what">What it does</a></li>
+        <li class="nav-deep"><a href="../#proof">Screenshots</a></li>
+        <li class="nav-inpage"><a href="../#compare">Compare</a></li>
+        <li><a href="../#start">Install</a></li>
+        <li class="nav-deep"><a href="../#faq">FAQ</a></li>
+        <li class="nav-deep"><a href="../#next">Roadmap</a></li>
+        <li class="nav-sep"><a href="./" aria-current="page">Guides</a></li>
+        <li class="nav-offsite"><a href="https://github.com/LavX/bazarr" rel="noopener">GitHub</a></li>
+        <li class="nav-offsite"><a href="https://discord.gg/fpp5JXmB8f" rel="noopener">Discord</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<main id="main-content" class="guide-page">
+  <div class="container">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <a href="../">Home</a><span class="sep">/</span><a href="./">Guides</a><span class="sep">/</span><span>Bulk Operations</span>
+    </nav>
+    <h1>Bulk Operations</h1>
+
+    <nav class="guide-rail" id="guide-rail" aria-label="On this page"></nav>
+
+    <article class="content">
+
+      <p>Upstream Bazarr works one item at a time. Bazarr+ lets you select any number of shows or
+        films and run the same action across all of them, up to 10,000 items in a single run. This
+        is the most requested missing feature upstream, and it is the one people notice first after
+        switching.</p>
+
+      <h2 id="where">Where the actions live</h2>
+      <p>Bulk actions are on the <strong>Series</strong> and <strong>Movies</strong> pages, not on
+        the Tasks page. Tick the checkbox on any rows you want and a toolbar appears above the
+        table. Both pages offer the same actions.</p>
+
+      <div class="note">
+        <p><strong>Selection is per page.</strong> Changing page clears it, and the header checkbox
+          selects only the rows currently shown. To act on a whole filtered set at once, filter
+          first (by language profile, by audio language, or by Sonarr or Radarr instance), then set
+          the page size to <strong>All</strong> at the bottom of the table, then select all. The
+          sizes are 25, 50, 100, 250 and All.</p>
+      </div>
+
+      <h2 id="sync">Sync subtitles in bulk</h2>
+      <p>The <strong>Sync Subtitles</strong> button opens a form that runs the timing engine across
+        every selected item. The options are the same ones the single-item sync uses, and they
+        default to whatever you set under Settings:</p>
+
+      <ul>
+        <li><strong>Max Offset Seconds.</strong> How far the engine may shift a subtitle before it
+          decides the match is wrong. Defaults to 60.</li>
+        <li><strong>Golden-Section Search.</strong> A slower search that finds offsets a fast pass
+          misses. On by default.</li>
+        <li><strong>No Fix Framerate.</strong> Leaves the framerate alone and corrects offset only.</li>
+        <li><strong>Force Re-sync.</strong> Off by default, so subtitles that have already been
+          synced are skipped. Turn it on to redo them.</li>
+        <li><strong>Output mode.</strong> Overwrite the existing file, or keep all engine outputs
+          side by side so you can compare them.</li>
+      </ul>
+
+      <p>Select more than 100 items and Bazarr+ asks you to confirm before it starts, because a run
+        that size takes a while.</p>
+
+      <h2 id="translate-combine">Translate and combine</h2>
+      <p><strong>Translate</strong> runs AI translation across the selection. You pick a source and
+        a target language once and it applies to everything selected. See the
+        <a href="ai-translation.html">AI Translation guide</a> for setting up a model first.</p>
+      <p><strong>Combine</strong> composes bilingual subtitles across the selection, as either a
+        stacked SRT or a positioned ASS file. See
+        <a href="subtitle-processing.html">Subtitle Processing</a> for what combining does and what
+        it needs on disk.</p>
+
+      <h2 id="tools">Subtitle tools</h2>
+      <p>The <strong>Subtitle Tools</strong> menu applies a text modification to every subtitle in
+        the selection. These rewrite the subtitle files themselves, so they are worth trying on a
+        small selection first.</p>
+
+      <ul>
+        <li><strong>OCR Fixes.</strong> Repairs the character errors typical of subtitles ripped
+          from image-based sources.</li>
+        <li><strong>Common Fixes.</strong> General cleanup of spacing, punctuation and line breaks.</li>
+        <li><strong>Remove Hearing Impaired.</strong> Strips sound cues and speaker labels.</li>
+        <li><strong>Remove Style Tags.</strong> Drops formatting tags, leaving plain text.</li>
+        <li><strong>Fix Uppercase.</strong> Recases subtitles that arrived in all capitals.</li>
+        <li><strong>Reverse RTL.</strong> Fixes right-to-left text that was stored in the wrong
+          direction.</li>
+      </ul>
+
+      <h2 id="more">Scan, search and upgrade</h2>
+      <p>The <strong>More</strong> menu holds three actions that work on the media rather than on
+        an existing subtitle file:</p>
+
+      <ul>
+        <li><strong>Scan Disk.</strong> Re-reads the files on disk and picks up subtitles that were
+          added outside Bazarr+.</li>
+        <li><strong>Search Missing.</strong> Searches providers for every language your profile
+          asks for that is not present yet.</li>
+        <li><strong>Upgrade.</strong> Looks for a better match than the subtitle you already have.</li>
+      </ul>
+
+      <h2 id="limits">Limits and what happens next</h2>
+      <p>A single batch accepts up to <strong>10,000 items</strong>. Above that the request is
+        refused rather than silently truncated, so split the selection and run it twice.</p>
+      <p>Batches are queued as background jobs rather than run in the browser, so you can leave
+        the page. Progress appears under <strong>System &rarr; Tasks</strong>, which is where you
+        watch a run, not where you start one.</p>
+
+      <div class="note">
+        <p><strong>Combine is the exception.</strong> It runs in your browser, one item at a time,
+          rather than queueing a job. So it shows no progress under Tasks, and closing the tab or
+          navigating away stops whatever has not been done yet. Leave the page open until a combine
+          run finishes.</p>
+      </div>
+
+      <div class="note">
+        <p>Batch actions respect the language profile attached to each item, and on a multi-instance
+          setup each item is actioned against the Sonarr or Radarr instance that owns it. You can
+          mix items from different instances in one selection.</p>
+      </div>
+
+      <h2 id="next-steps">Next steps</h2>
+      <ul>
+        <li><a href="subtitle-processing.html">Subtitle Processing</a> for combining, embedded
+          tracks and the sync engines in detail.</li>
+        <li><a href="ai-translation.html">AI Translation</a> for connecting a model before running a
+          bulk translate.</li>
+        <li><a href="provider-hub.html">Provider Hub</a> for adding the providers that Search
+          Missing will query.</li>
+      </ul>
+
+    </article>
+  </div>
+</main>
+
+<!-- Footer -->
+<footer>
+  <div class="container">
+    <p>Bazarr+ is a hard fork of <a class="inline" href="https://github.com/morpheus65535/bazarr" rel="noopener">Bazarr</a>, GPL-3, maintained by <a class="inline" href="https://github.com/LavX" rel="noopener">LavX</a>.</p>
+    <ul>
+      <li><a href="../">Home</a></li>
+      <li><a href="getting-started.html">Getting Started</a></li>
+      <li><a href="migration.html">Migration</a></li>
+      <li><a href="provider-hub.html">Provider Hub</a></li>
+      <li><a href="ai-translation.html">AI Translation</a></li>
+      <li><a href="bulk-operations.html">Bulk Operations</a></li>
+      <li><a href="external-integration.html">External Integration</a></li>
+      <li><a href="./">All guides</a></li>
+      <li><a href="https://github.com/LavX/bazarr/releases" rel="noopener">Releases</a></li>
+      <li><a href="https://github.com/LavX/bazarr/issues" rel="noopener">Issues</a></li>
+      <li><a href="https://github.com/LavX/bazarr/wiki" rel="noopener">Wiki</a></li>
+      <li><a href="https://discord.gg/fpp5JXmB8f" rel="noopener">Discord</a></li>
+    </ul>
+  </div>
+</footer>
+
+<script src="../js/site.js"></script>
+
+</body>
+</html>
