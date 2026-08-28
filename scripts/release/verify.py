@@ -47,45 +47,63 @@ def registry_token():
     return json.loads(payload)['token']
 
 
-def image_config_version(token, tag):
-    """The org.opencontainers.image.version label of a tag, without pulling
-    any layer: manifest (or index -> first manifest) then the config blob."""
+def _manifest_version_label(token, manifest):
+    headers = {'Authorization': f'Bearer {token}'}
+    config_digest = manifest['config']['digest']
+    config = json.loads(http_get(
+        f'https://ghcr.io/v2/{IMAGE}/blobs/{config_digest}', headers))
+    labels = config.get('config', {}).get('Labels') or {}
+    return labels.get('org.opencontainers.image.version')
+
+
+def image_config_versions(token, tag):
+    """(platform, version-label) per real platform of a tag, without pulling
+    any layer: manifest (or index -> every non-attestation manifest) plus the
+    config blob each. Every platform is checked: one stale architecture in a
+    multi-arch index must not hide behind another's correct label."""
     headers = {'Authorization': f'Bearer {token}', 'Accept': MANIFEST_TYPES}
     manifest = json.loads(http_get(
         f'https://ghcr.io/v2/{IMAGE}/manifests/{tag}', headers))
-    if 'manifests' in manifest:
-        digest = next(
-            entry['digest'] for entry in manifest['manifests']
-            if entry.get('platform', {}).get('os') != 'unknown')
-        manifest = json.loads(http_get(
-            f'https://ghcr.io/v2/{IMAGE}/manifests/{digest}', headers))
-    config_digest = manifest['config']['digest']
-    config = json.loads(http_get(
-        f'https://ghcr.io/v2/{IMAGE}/blobs/{config_digest}',
-        {'Authorization': f'Bearer {token}'}))
-    labels = config.get('config', {}).get('Labels') or {}
-    return labels.get('org.opencontainers.image.version')
+    if 'manifests' not in manifest:
+        return [('single', _manifest_version_label(token, manifest))]
+    results = []
+    for entry in manifest['manifests']:
+        platform = entry.get('platform', {})
+        if platform.get('os') == 'unknown':
+            continue  # attestation manifest
+        child = json.loads(http_get(
+            f'https://ghcr.io/v2/{IMAGE}/manifests/{entry["digest"]}', headers))
+        name = f"{platform.get('os', '?')}/{platform.get('architecture', '?')}"
+        results.append((name, _manifest_version_label(token, child)))
+    return results
 
 
 def check_image_tag(token, tag, expected_version, results):
     name = f'image ghcr.io/{IMAGE}:{tag}'
     try:
-        observed = image_config_version(token, tag)
+        versions = image_config_versions(token, tag)
     except urllib.error.HTTPError as error:
         results.append((name, False, f'tag does not resolve (HTTP {error.code})'))
         return
     except Exception as error:  # network shapes vary; report, do not crash
         results.append((name, False, f'lookup failed: {error}'))
         return
-    if observed is None:
-        results.append((name, True,
-                        'tag resolves; image carries no version label to compare'))
-    elif expected_version in observed:
-        results.append((name, True, f'resolves, version label {observed!r}'))
-    else:
+    if not versions:
+        results.append((name, False, 'index carries no platform manifests'))
+        return
+    wrong = [(platform, observed) for platform, observed in versions
+             if not (observed and expected_version in observed)]
+    if wrong:
+        # A missing label is a failure too: without it the verifier cannot
+        # establish that the tag contains the requested release.
+        detail = ', '.join(f'{platform}: {observed!r}' for platform, observed in wrong)
         results.append((name, False,
-                        f'resolves but version label is {observed!r}, '
-                        f'expected it to contain {expected_version!r}'))
+                        f'expected every platform label to contain '
+                        f'{expected_version!r}; got {detail}'))
+    else:
+        detail = ', '.join(f'{platform}: {observed!r}'
+                           for platform, observed in versions)
+        results.append((name, True, detail))
 
 
 def check_pages(expected_version, results):
@@ -122,6 +140,10 @@ def check_release_page(tag, results):
     release = json.loads(fetched.stdout)
     if release.get('draft'):
         results.append((name, False, 'release exists but is still a draft'))
+        return
+    if not (release.get('body') or '').strip():
+        # An empty body renders "correctly"; require actual notes.
+        results.append((name, False, 'release page is public but its body is empty'))
         return
 
     # Same render verification as the draft check in notes.py.

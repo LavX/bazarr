@@ -72,8 +72,12 @@ def pr_titles(numbers):
     """Best-effort PR titles via gh; empty dict when gh is unavailable."""
     titles = {}
     for number in numbers:
-        result = run(['gh', 'pr', 'view', str(number), '-R', REPO_SLUG,
-                      '--json', 'title', '--jq', '.title'])
+        try:
+            result = run(['gh', 'pr', 'view', str(number), '-R', REPO_SLUG,
+                          '--json', 'title', '--jq', '.title'])
+        except FileNotFoundError:
+            # No gh on this machine: every title becomes a placeholder.
+            return {}
         if result.returncode == 0 and result.stdout.strip():
             titles[number] = result.stdout.strip().rstrip('.')
     return titles
@@ -193,10 +197,18 @@ def render_check(markdown):
         return [f'pandoc failed: {result.stderr.strip()}']
     html = result.stdout
 
-    has_hero_line = any(line.startswith('![') for line in markdown.splitlines())
-    if has_hero_line and '<img' not in html:
-        problems.append('a hero line is present but no <img> rendered: '
-                        'the image line does not parse as an image')
+    # The hero line is checked in isolation: any other valid screenshot in
+    # the body would otherwise mask a malformed hero.
+    hero_lines = [line for line in markdown.splitlines() if line.startswith('![')]
+    for hero_line in hero_lines[:1]:
+        with tempfile.NamedTemporaryFile('w', suffix='.md', delete=False) as hero_source:
+            hero_source.write(hero_line + '\n')
+            hero_path = hero_source.name
+        hero_result = run(['pandoc', '-f', 'gfm', '-t', 'html', hero_path])
+        pathlib.Path(hero_path).unlink()
+        if hero_result.returncode != 0 or '<img' not in hero_result.stdout:
+            problems.append('the hero line does not parse as an image: '
+                            + hero_line[:80])
 
     if '```' in html:
         problems.append('literal triple backticks survive in the rendered '
