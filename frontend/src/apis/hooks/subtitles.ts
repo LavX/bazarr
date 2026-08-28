@@ -482,6 +482,18 @@ export function useSubtitleCreate() {
   });
 }
 
+// An unmatched route is served by the SPA catch-all as 200 text/html, so a
+// "successful" blob can actually be the app shell (seen live when a backend
+// without these endpoints sat behind a browser whose service worker kept the
+// newer UI). Never save that as a subtitle: fail loudly instead.
+function assertDownloadPayload(blob: Blob): void {
+  if (blob.type.includes("text/html")) {
+    throw new Error(
+      "The server returned a page instead of a file; is the backend up to date?",
+    );
+  }
+}
+
 // The error body of a blob request is itself a Blob; read it back to get the
 // backend's actual message (a JSON-encoded string like "No subtitle files
 // found") instead of a generic one.
@@ -491,6 +503,9 @@ async function downloadErrorMessage(
 ): Promise<string> {
   const response = (error as { response?: { status?: number; data?: unknown } })
     .response;
+  if (!response && error instanceof Error && error.message) {
+    return error.message;
+  }
   const data = response?.data;
   let text: string | undefined;
   if (data instanceof Blob) {
@@ -535,6 +550,7 @@ export function useSubtitleFileDownload() {
         param.language,
         param.arrInstanceId,
       );
+      assertDownloadPayload(response.data);
       saveBlobAs(
         response.data,
         filenameFromContentDisposition(
@@ -586,6 +602,7 @@ export function useSubtitleArchiveDownload() {
               language: param.language,
               arrInstanceId: param.arrInstanceId,
             });
+      assertDownloadPayload(response.data);
       saveBlobAs(
         response.data,
         filenameFromContentDisposition(
