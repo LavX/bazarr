@@ -1,7 +1,10 @@
+import { showNotification } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { BatchAction, BatchItem, BatchOptions } from "@/apis/raw/subtitles";
+import { notification } from "@/modules/task";
+import { filenameFromContentDisposition, saveBlobAs } from "@/utilities/files";
 
 export function useSubtitleAction() {
   const client = useQueryClient();
@@ -18,9 +21,12 @@ export function useSubtitleAction() {
       // TODO: Query less
       const { type, id } = param.form;
       if (type === "episode") {
-        // id is the sonarrEpisodeId here, not a series id. Invalidate the
-        // individual episode cache and the Series root so the episode list,
-        // wanted, blacklist and episode history all refresh.
+        // id is the sonarrEpisodeId, the upstream id. Keep it: the ref-track
+        // query is keyed [Episodes, sonarrEpisodeId, Subtitles, ...], so this
+        // prefix-matches and refreshes it, and those queries are active exactly
+        // when this mutation fires. It does NOT reach the [Episodes, localId]
+        // entries primed by cacheEpisodes, which are read directly rather than
+        // through a query, so nothing there needs invalidating.
         client.invalidateQueries({
           queryKey: [QueryKeys.Episodes, id],
         });
@@ -28,13 +34,17 @@ export function useSubtitleAction() {
           queryKey: [QueryKeys.Series],
         });
       } else {
+        // The prefix, not [Movies, id]. Movie queries are cached under the
+        // canonical LOCAL id while this id is the upstream radarrId, so a key
+        // built from it matches nothing once the two diverge, which is any
+        // install with a second Radarr. Worse than a no-op: it can match a
+        // different movie that happens to hold that local id.
+        // One call: react-query matches by key prefix, so [Movies] already
+        // covers [Movies, History] and every per-movie entry. The separate
+        // history invalidation this replaces was needed only while the first
+        // key was [Movies, id].
         client.invalidateQueries({
-          queryKey: [QueryKeys.Movies, id],
-        });
-        // Movie history lives under [Movies, History] and is not covered by
-        // the per-movie invalidation above.
-        client.invalidateQueries({
-          queryKey: [QueryKeys.Movies, QueryKeys.History],
+          queryKey: [QueryKeys.Movies],
         });
       }
     },
@@ -63,10 +73,10 @@ export function useEpisodeSubtitleModification() {
         param.arrInstanceId,
       ),
 
-    onSuccess: (_, param) => {
-      client.invalidateQueries({
-        queryKey: [QueryKeys.Series, param.seriesId],
-      });
+    onSuccess: () => {
+      // Invalidate by prefix. Series queries are cached under the canonical
+      // LOCAL series id, while seriesId here is the upstream one, so a key
+      // built from it never matched a series cache entry.
       client.invalidateQueries({
         queryKey: [QueryKeys.Series],
       });
@@ -84,10 +94,10 @@ export function useEpisodeSubtitleModification() {
         param.arrInstanceId,
       ),
 
-    onSuccess: (_, param) => {
-      client.invalidateQueries({
-        queryKey: [QueryKeys.Series, param.seriesId],
-      });
+    onSuccess: () => {
+      // Invalidate by prefix. Series queries are cached under the canonical
+      // LOCAL series id, while seriesId here is the upstream one, so a key
+      // built from it never matched a series cache entry.
       client.invalidateQueries({
         queryKey: [QueryKeys.Series],
       });
@@ -105,10 +115,11 @@ export function useEpisodeSubtitleModification() {
         param.arrInstanceId,
       ),
 
-    onSuccess: (_, { seriesId }) => {
-      client.invalidateQueries({
-        queryKey: [QueryKeys.Series, seriesId],
-      });
+    onSuccess: () => {
+      // Invalidate by prefix. A previous targeted invalidation keyed on the
+      // upstream seriesId never matched, because series queries are cached
+      // under the LOCAL id; it was redundant as well as wrong, since this
+      // prefix already covers every series query.
       client.invalidateQueries({
         queryKey: [QueryKeys.Series],
       });
@@ -138,10 +149,10 @@ export function useMovieSubtitleModification() {
         param.arrInstanceId,
       ),
 
-    onSuccess: (_, param) => {
-      client.invalidateQueries({
-        queryKey: [QueryKeys.Movies, param.radarrId],
-      });
+    onSuccess: () => {
+      // Invalidate by prefix. Movie queries are cached under the canonical
+      // LOCAL id, while radarrId here is the upstream one, so a key built from
+      // it never matched a movie cache entry.
       client.invalidateQueries({
         queryKey: [QueryKeys.Movies],
       });
@@ -158,10 +169,10 @@ export function useMovieSubtitleModification() {
         param.arrInstanceId,
       ),
 
-    onSuccess: (_, param) => {
-      client.invalidateQueries({
-        queryKey: [QueryKeys.Movies, param.radarrId],
-      });
+    onSuccess: () => {
+      // Invalidate by prefix. Movie queries are cached under the canonical
+      // LOCAL id, while radarrId here is the upstream one, so a key built from
+      // it never matched a movie cache entry.
       client.invalidateQueries({
         queryKey: [QueryKeys.Movies],
       });
@@ -178,10 +189,10 @@ export function useMovieSubtitleModification() {
         param.arrInstanceId,
       ),
 
-    onSuccess: (_, { radarrId }) => {
-      client.invalidateQueries({
-        queryKey: [QueryKeys.Movies, radarrId],
-      });
+    onSuccess: () => {
+      // Invalidate by prefix. Movie queries are cached under the canonical
+      // LOCAL id, while radarrId here is the upstream one, so a key built from
+      // it never matched a movie cache entry.
       client.invalidateQueries({
         queryKey: [QueryKeys.Movies],
       });
@@ -467,6 +478,149 @@ export function useSubtitleCreate() {
       } else {
         client.invalidateQueries({ queryKey: [QueryKeys.Movies] });
       }
+    },
+  });
+}
+
+// An unmatched route is served by the SPA catch-all as 200 text/html, so a
+// "successful" blob can actually be the app shell (seen live when a backend
+// without these endpoints sat behind a browser whose service worker kept the
+// newer UI). Never save that as a subtitle: fail loudly instead.
+function assertDownloadPayload(blob: Blob): void {
+  if (blob.type.includes("text/html")) {
+    throw new Error(
+      "The server returned a page instead of a file; is the backend up to date?",
+    );
+  }
+}
+
+// The error body of a blob request is itself a Blob; read it back to get the
+// backend's actual message (a JSON-encoded string like "No subtitle files
+// found") instead of a generic one.
+async function downloadErrorMessage(
+  error: unknown,
+  fallback: string,
+): Promise<string> {
+  const response = (error as { response?: { status?: number; data?: unknown } })
+    .response;
+  if (!response && error instanceof Error && error.message) {
+    return error.message;
+  }
+  const data = response?.data;
+  let text: string | undefined;
+  if (data instanceof Blob) {
+    try {
+      text = (await data.text()).trim();
+    } catch {
+      // Unreadable body; keep the fallback.
+    }
+  } else if (typeof data === "string") {
+    text = data;
+  }
+  if (text) {
+    try {
+      const parsed = JSON.parse(text);
+      if (typeof parsed === "string") {
+        return parsed;
+      }
+      if (parsed && typeof parsed.message === "string") {
+        return parsed.message;
+      }
+    } catch {
+      return text.slice(0, 200);
+    }
+  }
+  return fallback;
+}
+
+export function useSubtitleFileDownload() {
+  interface Param {
+    type: "episode" | "movie";
+    mediaId: number;
+    // Viewer/editor language key ("en", "en:hi", "en:forced", ...).
+    language: string;
+    arrInstanceId?: number;
+  }
+  return useMutation({
+    mutationKey: [QueryKeys.Subtitles, "download-file"],
+    mutationFn: async (param: Param) => {
+      const response = await api.subtitles.downloadFile(
+        param.type,
+        param.mediaId,
+        param.language,
+        param.arrInstanceId,
+      );
+      assertDownloadPayload(response.data);
+      saveBlobAs(
+        response.data,
+        filenameFromContentDisposition(
+          response.headers["content-disposition"],
+          "subtitle.srt",
+        ),
+      );
+    },
+    onError: async (error) => {
+      showNotification(
+        notification.error(
+          "Download failed",
+          await downloadErrorMessage(
+            error,
+            "The subtitle file could not be downloaded",
+          ),
+        ),
+      );
+    },
+  });
+}
+
+export function useSubtitleArchiveDownload() {
+  type Param =
+    | {
+        kind: "series";
+        seriesId: number;
+        season?: number;
+        language?: string;
+        arrInstanceId?: number;
+      }
+    | {
+        kind: "movie";
+        radarrId: number;
+        language?: string;
+        arrInstanceId?: number;
+      };
+  return useMutation({
+    mutationKey: [QueryKeys.Subtitles, "download-archive"],
+    mutationFn: async (param: Param) => {
+      const response =
+        param.kind === "series"
+          ? await api.series.downloadSubtitlesArchive(param.seriesId, {
+              season: param.season,
+              language: param.language,
+              arrInstanceId: param.arrInstanceId,
+            })
+          : await api.movies.downloadSubtitlesArchive(param.radarrId, {
+              language: param.language,
+              arrInstanceId: param.arrInstanceId,
+            });
+      assertDownloadPayload(response.data);
+      saveBlobAs(
+        response.data,
+        filenameFromContentDisposition(
+          response.headers["content-disposition"],
+          "subtitles.zip",
+        ),
+      );
+    },
+    onError: async (error) => {
+      showNotification(
+        notification.error(
+          "Download failed",
+          await downloadErrorMessage(
+            error,
+            "The subtitle archive could not be downloaded",
+          ),
+        ),
+      );
     },
   });
 }

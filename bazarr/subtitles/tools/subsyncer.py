@@ -10,13 +10,18 @@ from utilities.binaries import get_binary
 from radarr.history import history_log_movie
 from sonarr.history import history_log
 from subtitles.processing import ProcessSubtitlesResult
+from subtitles.tools import alass_ffprobe_shim
 from subtitles.tools.subsync_engines import (
     DEFAULT_ENABLED_ENGINES,
+    ENGINE_LABELS,
     OUTPUT_MODE_OVERWRITE,
+    UNCONSTRAINED_MAX_OFFSET_SECONDS,
     SubsyncEngineRunner,
     MissingSyncEngineError,
+    SyncEngineDeclinedError,
     normalize_enabled_engines,
     normalize_output_mode,
+    validate_engine_result,
 )
 from languages.get_languages import audio_language_from_name, language_from_alpha2
 from utilities.path_mappings import path_mappings
@@ -25,13 +30,6 @@ from app.config import settings
 from app.database import TableMovies, TableShows, database, select
 from app.get_args import args
 from arr_instances.resolution import scoped, default_instance_id
-
-
-ENGINE_LABELS = {
-    'ffsubsync': 'FFsubsync',
-    'autosubsync': 'Autosubsync',
-    'alass': 'ALASS',
-}
 
 
 def _autosubsync_model_file():
@@ -43,14 +41,70 @@ def _autosubsync_model_file():
 def _run_autosubsync_api(reference, subtitle_file, output_file, model_file, parallelism):
     from autosubsync.main import synchronize
 
-    return synchronize(
-        reference,
-        subtitle_file,
-        output_file,
-        verbose=False,
-        model_file=model_file,
-        parallelism=parallelism,
-    )
+    # return_parameters gets the numbers out: (success, quality, skew, shift).
+    # Without it the call answers a bare bool, and the user is told only that
+    # the run "did not meet the quality threshold", with no way to tell a near
+    # miss from a total mismatch. Older builds do not accept the argument, so a
+    # TypeError falls back to the plain call rather than failing the sync.
+    try:
+        return synchronize(
+            reference,
+            subtitle_file,
+            output_file,
+            verbose=False,
+            model_file=model_file,
+            parallelism=parallelism,
+            return_parameters=True,
+        )
+    except TypeError as exc:
+        # Only a signature mismatch. autosubsync does minutes of work and writes
+        # its output before returning, so re-running the whole synchronization
+        # for any internal TypeError would repeat that work and rewrite the file.
+        if 'return_parameters' not in str(exc):
+            raise
+        logging.debug('BAZARR autosubsync does not support return_parameters; '
+                      'synchronising without diagnostics')
+        return synchronize(
+            reference,
+            subtitle_file,
+            output_file,
+            verbose=False,
+            model_file=model_file,
+            parallelism=parallelism,
+        )
+
+
+def _distinguishable(measured, threshold, minimum=2, maximum=6):
+    """Format two nearby numbers so the pair does not read as one number.
+
+    A near miss is the case this message exists to explain, and two decimals
+    turn 0.749 against 0.75 into "0.75, below its 0.75 threshold", which
+    contradicts itself. Precision grows only until the two differ, so an
+    ordinary number keeps its two decimals instead of a tail of zeros.
+    """
+    for places in range(minimum, maximum + 1):
+        left, right = f'{measured:.{places}f}', f'{threshold:.{places}f}'
+        if left != right:
+            return left, right
+
+    # Closer than six decimals. Quoting one number twice would contradict
+    # itself, and quoting seventeen would be unreadable, so the caller says it
+    # in words instead.
+    return None, f'{threshold:.{minimum}f}'
+
+
+def _autosubsync_quality_threshold():
+    """The threshold autosubsync judges its own work against, or None.
+
+    Hard-coded upstream at 0.75. Read rather than copied, so a message quoting
+    it cannot drift from what the engine actually applied.
+    """
+    try:
+        from autosubsync import quality_of_fit
+
+        return float(quality_of_fit.threshold)
+    except Exception:
+        return None
 
 
 class SubSyncer:
@@ -202,15 +256,24 @@ class SubSyncer:
         self.ffmpeg_path = os.path.dirname(ffmpeg_exe)
         return self.ffmpeg_path
 
-    def _build_ffsubsync_args(self, output_path, max_offset_seconds, no_fix_framerate, gss, reference=None,
+    def _build_ffsubsync_args(self, output_path, no_fix_framerate, gss, reference=None,
                               sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None, force_sync=False,
                               arr_instance_id=None):
+        """Build the ffsubsync argument namespace.
+
+        The configured maximum offset is deliberately NOT passed as
+        ``--max-offset-seconds``: that flag is a search window, and a window makes
+        ffsubsync return the best alignment *inside* it rather than the one it would
+        really have picked, so a subtitle that is further out than the maximum comes
+        back looking synchronized. The engine searches unconstrained and the host
+        applies the maximum afterwards, in ``validate_engine_result``.
+        """
         from ffsubsync.ffsubsync import make_parser
 
         ffmpeg_path = self._ensure_ffmpeg_path()
         unparsed_args = [self.reference, '-i', self.srtin, '-o', str(output_path), '--ffmpegpath', ffmpeg_path,
                          '--vad', self.vad, '--log-dir-path', self.log_dir_path, '--max-offset-seconds',
-                         max_offset_seconds, '--output-encoding', 'same']
+                         str(UNCONSTRAINED_MAX_OFFSET_SECONDS), '--output-encoding', 'same']
 
         if no_fix_framerate:
             unparsed_args.append('--no-fix-framerate')
@@ -263,14 +326,13 @@ class SubSyncer:
         parser = make_parser()
         return parser.parse_args(args=unparsed_args)
 
-    def _run_ffsubsync_engine(self, output_path, max_offset_seconds, no_fix_framerate, gss, reference=None,
+    def _run_ffsubsync_engine(self, output_path, no_fix_framerate, gss, reference=None,
                               sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None, force_sync=False,
                               arr_instance_id=None):
         from ffsubsync.ffsubsync import run
 
         self.args = self._build_ffsubsync_args(
             output_path=output_path,
-            max_offset_seconds=max_offset_seconds,
             no_fix_framerate=no_fix_framerate,
             gss=gss,
             reference=reference,
@@ -302,11 +364,12 @@ class SubSyncer:
                 capture_output=True,
                 text=True,
                 timeout=1800,
+                env=self._alass_environment() if engine == 'alass' else None,
             )
         except subprocess.CalledProcessError as exc:
             details = (getattr(exc, 'stderr', None) or getattr(exc, 'stdout', None) or str(exc)).strip()
             raise RuntimeError(
-                f'{engine} failed with exit code {exc.returncode}: {details}'
+                f'{engine} exited with code {exc.returncode}: {details}'
             ) from exc
         return {
             'stdout': completed.stdout,
@@ -314,10 +377,51 @@ class SubSyncer:
             'returncode': completed.returncode,
         }
 
+    def _alass_environment(self):
+        """Environment for alass, pointing its ffprobe at our shim.
+
+        alass probes the reference video itself and cannot parse the output for
+        a stream whose codec ffprobe could not identify, which any MKV with an
+        application/octet-stream attachment produces. It honours
+        ALASS_FFPROBE_PATH, so the shim goes in there rather than in a patched
+        build. If either half is unavailable the environment is left alone and
+        alass runs exactly as it did before.
+        """
+        environment = dict(os.environ)
+
+        # An ALASS_FFPROBE_PATH already in the environment is somebody's
+        # deliberate choice of ffprobe, which alass honoured before this shim
+        # existed. The shim runs it rather than replacing it.
+        configured = os.environ.get('ALASS_FFPROBE_PATH')
+        if configured:
+            launcher = alass_ffprobe_shim.ensure_launcher()
+            if not launcher:
+                return environment
+            environment[alass_ffprobe_shim.REAL_FFPROBE_ENV] = configured
+            environment['ALASS_FFPROBE_PATH'] = launcher
+            return environment
+
+        try:
+            ffprobe_exe = get_binary('ffprobe')
+        except Exception:
+            # get_binary raises when it can neither find nor fetch the binary.
+            # An install that runs alass off an inherited PATH worked before
+            # this shim existed and has to keep working.
+            logging.debug('BAZARR no ffprobe for the alass shim, running alass unshimmed', exc_info=True)
+            return environment
+
+        launcher = alass_ffprobe_shim.ensure_launcher()
+        if not ffprobe_exe or not launcher:
+            return environment
+
+        environment[alass_ffprobe_shim.REAL_FFPROBE_ENV] = ffprobe_exe
+        environment['ALASS_FFPROBE_PATH'] = launcher
+        return environment
+
     def _run_autosubsync_engine(self, output_path, video_path):
         reference = self.reference if self.reference and os.path.isfile(self.reference) else video_path
         try:
-            success = _run_autosubsync_api(
+            raw = _run_autosubsync_api(
                 reference=reference,
                 subtitle_file=self.srtin,
                 output_file=str(output_path),
@@ -329,11 +433,47 @@ class SubSyncer:
                 raise MissingSyncEngineError('autosubsync', 'autosubsync Python package not installed') from exc
             raise
 
+        # (success, quality, skew, shift) with return_parameters, a bare bool
+        # without it.
+        if isinstance(raw, tuple):
+            success, quality, skew, shift = (list(raw) + [None, None, None])[:4]
+        else:
+            success, quality, skew, shift = raw, None, None, None
+
         if not success:
-            raise RuntimeError('autosubsync completed but did not meet the quality threshold.')
+            # autosubsync's own quality check said no. That is a verdict, not a
+            # fault, so it is reported as a decline rather than an engine failure.
+            threshold = _autosubsync_quality_threshold()
+            if quality is not None and threshold is not None:
+                measured, limit = _distinguishable(quality, threshold)
+                if measured is None:
+                    message = (f'autosubsync measured a quality of fit just below its {limit} '
+                               f'threshold; the subtitle may not match this audio.')
+                else:
+                    message = (f'autosubsync measured a quality of fit of {measured}, below its '
+                               f'{limit} threshold; the subtitle may not match this audio.')
+            elif quality is not None:
+                message = (f'autosubsync measured a quality of fit of {quality:.2f} and rejected '
+                           f'its own result.')
+            else:
+                message = 'autosubsync completed but did not meet its quality threshold.'
+            raise SyncEngineDeclinedError('autosubsync', message)
+
+        logging.debug('BAZARR autosubsync aligned %s with quality %s, skew %s, shift %s',
+                      self.srtin, quality, skew, shift)
 
         return {
             'success': success,
+            # The measured shift, under the same key ffsubsync reports, so the
+            # acceptance threshold applies to autosubsync too instead of it
+            # being exempt for want of a number.
+            'offset_seconds': shift,
+            'quality_of_fit': quality,
+            'skew': skew,
+            # The same quantity ffsubsync calls framerate_scale_factor, under
+            # the key the history entry reads: without it a run with a real
+            # skew was recorded as a scale factor of 0.00.
+            'framerate_scale_factor': skew,
             'stdout': '',
             'stderr': '',
             'returncode': 0,
@@ -349,6 +489,14 @@ class SubSyncer:
                    f"{success_result.engine} ({output_mode}) ended with an offset of "
                    f"{offset_seconds} seconds and a framerate scale factor of "
                    f"{f'{framerate_scale_factor:.2f}'}.")
+
+        # Whatever confidence the engine measured, where it measures one. Without
+        # it a recorded sync says how far it moved the subtitle but nothing about
+        # how sure it was, which is the question a user asks when the result
+        # looks wrong.
+        quality_of_fit = raw_result.get('quality_of_fit')
+        if quality_of_fit is not None:
+            message += f' Quality of fit: {quality_of_fit:.2f}.'
 
         if sonarr_series_id:
             prr = path_mappings.path_replace_reverse
@@ -415,7 +563,6 @@ class SubSyncer:
             if engine == 'ffsubsync':
                 raw_result = self._run_ffsubsync_engine(
                     output_path=output_path,
-                    max_offset_seconds=max_offset_seconds,
                     no_fix_framerate=no_fix_framerate,
                     gss=gss,
                     reference=reference,
@@ -427,6 +574,10 @@ class SubSyncer:
                 )
             else:
                 raw_result = self._run_external_engine(engine=engine, output_path=output_path, video_path=video_path)
+            # The engines search unconstrained, so the maximum offset is enforced here.
+            # Raising leaves the runner to delete the engine output, keep the original
+            # subtitle and move on to the next engine.
+            validate_engine_result(engine, raw_result, max_offset_seconds)
             self._report_progress(
                 f'Finished {engine_label} ({engine_position}/{progress_total})',
                 engine_position,

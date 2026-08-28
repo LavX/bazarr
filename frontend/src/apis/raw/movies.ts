@@ -90,6 +90,17 @@ class MovieApi extends BaseApi {
     });
   }
 
+  async downloadSubtitlesArchive(
+    radarrid: number,
+    options: { language?: string; arrInstanceId?: number } = {},
+  ) {
+    // Zip of the movie's external subtitle files, optionally one base language.
+    return this.getBlob(`/${radarrid}/subtitles/download`, {
+      language: options.language,
+      arr_instance_id: options.arrInstanceId,
+    });
+  }
+
   async uploadSubtitles(
     radarrid: number,
     form: FormType.UploadSubtitle,

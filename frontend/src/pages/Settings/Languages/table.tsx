@@ -3,6 +3,7 @@ import { Badge, Button, Group } from "@mantine/core";
 import { faTrash, faWrench } from "@fortawesome/free-solid-svg-icons";
 import { ColumnDef } from "@tanstack/react-table";
 import { cloneDeep, includes, maxBy } from "lodash";
+import { useLanguageProfiles } from "@/apis/hooks";
 import { Action } from "@/components";
 import {
   anyCutoff,
@@ -15,16 +16,34 @@ import { useFormActions } from "@/pages/Settings/utilities/FormValues";
 import { BuildKey, useArrayAction } from "@/utilities";
 import { useLatestEnabledLanguages, useLatestProfiles } from ".";
 
+// The next id must clear the server-known profiles too, not just the staged
+// list: deleting the highest profile and adding a new one in the same Apply
+// would otherwise reuse the removed id, and the server then treats the new
+// profile as an update, silently repointing every default that referenced
+// the deleted one.
+export function nextProfileIdFrom(
+  staged: readonly Language.Profile[],
+  original: readonly Language.Profile[],
+): number {
+  return (
+    1 +
+    [...staged, ...original].reduce<number>(
+      (val, prof) => Math.max(prof.profileId, val),
+      0,
+    )
+  );
+}
+
 const Table: FunctionComponent = () => {
   const profiles = useLatestProfiles();
+
+  const { data: originalProfiles = [] } = useLanguageProfiles();
 
   const languages = useLatestEnabledLanguages();
 
   const nextProfileId = useMemo(
-    () =>
-      1 +
-      profiles.reduce<number>((val, prof) => Math.max(prof.profileId, val), 0),
-    [profiles],
+    () => nextProfileIdFrom(profiles, originalProfiles),
+    [profiles, originalProfiles],
   );
 
   const { setValue } = useFormActions();

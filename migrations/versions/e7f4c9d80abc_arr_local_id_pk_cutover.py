@@ -172,6 +172,27 @@ _ALL_OWNED = (
 )
 
 
+# The index DDLs are shared by both branches and every one of them says
+# IF NOT EXISTS. The SQLite branch rebuilds each table, so its old indexes go
+# with it and creation always starts clean. The PostgreSQL branch alters in
+# place, where 4bb94a033f93 has already created the hot-path indexes under the
+# same names, and CREATE INDEX would abort the whole cutover. A fresh install
+# never noticed, because create_all builds the final shape and the cutover
+# short-circuits before reaching any of this.
+def _ddl_columns(ddl):
+    """The column names an index DDL in this file references.
+
+    Every entry below has the shape ``... ON <table> (a, "b", c)``, so the last
+    parenthesised group is the column list. Only used to skip a DDL whose column
+    is absent, so a parse that comes back empty simply means "do not skip".
+    """
+    opening = ddl.rfind('(')
+    closing = ddl.rfind(')')
+    if opening == -1 or closing < opening:
+        return []
+    return [part.strip().strip('"') for part in ddl[opening + 1:closing].split(',')]
+
+
 def _rebuild_table(bind, table, pk_col, fk_clauses, force_not_null, index_ddls):
     """Recreate `table` with `pk_col` as a column-level INTEGER PRIMARY KEY, the
     given table-level FK clauses, and `force_not_null` columns made NOT NULL;
@@ -201,7 +222,19 @@ def _rebuild_table(bind, table, pk_col, fk_clauses, force_not_null, index_ddls):
         f'SELECT {", ".join(colnames)} FROM "{table}"'))
     bind.execute(sa.text(f'DROP TABLE "{table}"'))
     bind.execute(sa.text(f'ALTER TABLE "{tmp}" RENAME TO "{table}"'))
+    present = {name.strip('"') for name in colnames}
     for ddl in index_ddls:
+        # A database adopted from upstream can be missing a column this fork
+        # models. The repair that restores it deliberately runs after the whole
+        # chain, so indexing an absent column here would abort the upgrade and
+        # the repair would never run: the install crash-loops. Skipping leaves
+        # the index to be created once the column is back.
+        missing = [name for name in _ddl_columns(ddl) if name not in present]
+        if missing:
+            logger.warning(
+                "Skipping the index on %s: %s not present yet. It is created once the "
+                "post-upgrade column repair restores them.", table, ", ".join(missing))
+            continue
         bind.execute(sa.text(ddl))
 
 
@@ -211,35 +244,35 @@ def _rebuild_all(bind):
 
     _rebuild_table(
         bind, 'table_shows', 'id', [profile_fk], {'arr_instance_id'},
-        ['CREATE UNIQUE INDEX ux_table_shows_instance_upstream_id ON table_shows (arr_instance_id, "sonarrSeriesId")',
-         'CREATE UNIQUE INDEX ux_table_shows_instance_path ON table_shows (arr_instance_id, path)',
-         'CREATE INDEX ix_table_shows_profileId ON table_shows ("profileId")'])
+        ['CREATE UNIQUE INDEX IF NOT EXISTS ux_table_shows_instance_upstream_id ON table_shows (arr_instance_id, "sonarrSeriesId")',
+         'CREATE UNIQUE INDEX IF NOT EXISTS ux_table_shows_instance_path ON table_shows (arr_instance_id, path)',
+         'CREATE INDEX IF NOT EXISTS ix_table_shows_profileId ON table_shows ("profileId")'])
 
     _rebuild_table(
         bind, 'table_episodes', 'id',
         ['FOREIGN KEY("series_id") REFERENCES table_shows("id") ON DELETE CASCADE'],
         {'arr_instance_id'},
-        ['CREATE UNIQUE INDEX ux_table_episodes_instance_upstream_id ON table_episodes (arr_instance_id, "sonarrEpisodeId")',
-         'CREATE INDEX ix_table_episodes_episode_file_id ON table_episodes (episode_file_id)',
-         'CREATE INDEX ix_table_episodes_sonarrSeriesId ON table_episodes ("sonarrSeriesId")',
-         'CREATE INDEX ix_table_episodes_series_id ON table_episodes (series_id)'])
+        ['CREATE UNIQUE INDEX IF NOT EXISTS ux_table_episodes_instance_upstream_id ON table_episodes (arr_instance_id, "sonarrEpisodeId")',
+         'CREATE INDEX IF NOT EXISTS ix_table_episodes_episode_file_id ON table_episodes (episode_file_id)',
+         'CREATE INDEX IF NOT EXISTS ix_table_episodes_sonarrSeriesId ON table_episodes ("sonarrSeriesId")',
+         'CREATE INDEX IF NOT EXISTS ix_table_episodes_series_id ON table_episodes (series_id)'])
 
     _rebuild_table(
         bind, 'table_movies', 'id', [profile_fk], {'arr_instance_id'},
-        ['CREATE UNIQUE INDEX ux_table_movies_instance_upstream_id ON table_movies (arr_instance_id, "radarrId")',
-         'CREATE UNIQUE INDEX ux_table_movies_instance_path ON table_movies (arr_instance_id, path)',
-         'CREATE UNIQUE INDEX ux_table_movies_instance_tmdbid ON table_movies (arr_instance_id, "tmdbId")',
-         'CREATE INDEX ix_table_movies_profileId ON table_movies ("profileId")'])
+        ['CREATE UNIQUE INDEX IF NOT EXISTS ux_table_movies_instance_upstream_id ON table_movies (arr_instance_id, "radarrId")',
+         'CREATE UNIQUE INDEX IF NOT EXISTS ux_table_movies_instance_path ON table_movies (arr_instance_id, path)',
+         'CREATE UNIQUE INDEX IF NOT EXISTS ux_table_movies_instance_tmdbid ON table_movies (arr_instance_id, "tmdbId")',
+         'CREATE INDEX IF NOT EXISTS ix_table_movies_profileId ON table_movies ("profileId")'])
 
     _rebuild_table(
         bind, 'table_shows_rootfolder', 'local_rootfolder_id', [],
         {'arr_instance_id', 'upstream_rootfolder_id'},
-        ['CREATE UNIQUE INDEX ux_shows_rootfolder_instance_upstream ON table_shows_rootfolder (arr_instance_id, upstream_rootfolder_id)'])
+        ['CREATE UNIQUE INDEX IF NOT EXISTS ux_shows_rootfolder_instance_upstream ON table_shows_rootfolder (arr_instance_id, upstream_rootfolder_id)'])
 
     _rebuild_table(
         bind, 'table_movies_rootfolder', 'local_rootfolder_id', [],
         {'arr_instance_id', 'upstream_rootfolder_id'},
-        ['CREATE UNIQUE INDEX ux_movies_rootfolder_instance_upstream ON table_movies_rootfolder (arr_instance_id, upstream_rootfolder_id)'])
+        ['CREATE UNIQUE INDEX IF NOT EXISTS ux_movies_rootfolder_instance_upstream ON table_movies_rootfolder (arr_instance_id, upstream_rootfolder_id)'])
 
     _rebuild_table(
         bind, 'table_history', 'id',
@@ -247,35 +280,35 @@ def _rebuild_all(bind):
          'FOREIGN KEY("episode_id") REFERENCES table_episodes("id") ON DELETE CASCADE',
          'FOREIGN KEY("upgradedFromId") REFERENCES table_history("id")'],
         {'arr_instance_id'},
-        ['CREATE INDEX ix_table_history_video_path_language_timestamp ON table_history (video_path, language, timestamp)',
-         'CREATE INDEX ix_table_history_action ON table_history (action)',
-         'CREATE INDEX ix_history_instance_upstream_series ON table_history (arr_instance_id, "sonarrSeriesId")',
-         'CREATE INDEX ix_history_instance_upstream_episode ON table_history (arr_instance_id, "sonarrEpisodeId")'])
+        ['CREATE INDEX IF NOT EXISTS ix_table_history_video_path_language_timestamp ON table_history (video_path, language, timestamp)',
+         'CREATE INDEX IF NOT EXISTS ix_table_history_action ON table_history (action)',
+         'CREATE INDEX IF NOT EXISTS ix_history_instance_upstream_series ON table_history (arr_instance_id, "sonarrSeriesId")',
+         'CREATE INDEX IF NOT EXISTS ix_history_instance_upstream_episode ON table_history (arr_instance_id, "sonarrEpisodeId")'])
 
     _rebuild_table(
         bind, 'table_history_movie', 'id',
         ['FOREIGN KEY("movie_id") REFERENCES table_movies("id") ON DELETE CASCADE',
          'FOREIGN KEY("upgradedFromId") REFERENCES table_history_movie("id")'],
         {'arr_instance_id'},
-        ['CREATE INDEX ix_table_history_movie_video_path_language_timestamp ON table_history_movie (video_path, language, timestamp)',
-         'CREATE INDEX ix_table_history_movie_action ON table_history_movie (action)',
-         'CREATE INDEX ix_history_movie_instance_upstream ON table_history_movie (arr_instance_id, "radarrId")'])
+        ['CREATE INDEX IF NOT EXISTS ix_table_history_movie_video_path_language_timestamp ON table_history_movie (video_path, language, timestamp)',
+         'CREATE INDEX IF NOT EXISTS ix_table_history_movie_action ON table_history_movie (action)',
+         'CREATE INDEX IF NOT EXISTS ix_history_movie_instance_upstream ON table_history_movie (arr_instance_id, "radarrId")'])
 
     _rebuild_table(
         bind, 'table_blacklist', 'id',
         ['FOREIGN KEY("series_id") REFERENCES table_shows("id") ON DELETE CASCADE',
          'FOREIGN KEY("episode_id") REFERENCES table_episodes("id") ON DELETE CASCADE'],
         {'arr_instance_id'},
-        ['CREATE INDEX ix_table_blacklist_subs_id ON table_blacklist (subs_id)',
-         'CREATE INDEX ix_blacklist_instance_upstream_series ON table_blacklist (arr_instance_id, sonarr_series_id)',
-         'CREATE INDEX ix_blacklist_instance_upstream_episode ON table_blacklist (arr_instance_id, sonarr_episode_id)'])
+        ['CREATE INDEX IF NOT EXISTS ix_table_blacklist_subs_id ON table_blacklist (subs_id)',
+         'CREATE INDEX IF NOT EXISTS ix_blacklist_instance_upstream_series ON table_blacklist (arr_instance_id, sonarr_series_id)',
+         'CREATE INDEX IF NOT EXISTS ix_blacklist_instance_upstream_episode ON table_blacklist (arr_instance_id, sonarr_episode_id)'])
 
     _rebuild_table(
         bind, 'table_blacklist_movie', 'id',
         ['FOREIGN KEY("movie_id") REFERENCES table_movies("id") ON DELETE CASCADE'],
         {'arr_instance_id'},
-        ['CREATE INDEX ix_table_blacklist_movie_subs_id ON table_blacklist_movie (subs_id)',
-         'CREATE INDEX ix_blacklist_movie_instance_upstream ON table_blacklist_movie (arr_instance_id, radarr_id)'])
+        ['CREATE INDEX IF NOT EXISTS ix_table_blacklist_movie_subs_id ON table_blacklist_movie (subs_id)',
+         'CREATE INDEX IF NOT EXISTS ix_blacklist_movie_instance_upstream ON table_blacklist_movie (arr_instance_id, radarr_id)'])
 
 
 # --------------------------------------------------------------------------- #
@@ -295,53 +328,53 @@ _PG_PROFILE_FK = ('FOREIGN KEY("profileId") REFERENCES table_languages_profiles'
 
 _PG_SPECS = (
     ('table_shows', 'id', ('arr_instance_id',), ('sonarrSeriesId', 'path', 'tmdbId'),
-     ['CREATE UNIQUE INDEX ux_table_shows_instance_upstream_id ON table_shows (arr_instance_id, "sonarrSeriesId")',
-      'CREATE UNIQUE INDEX ux_table_shows_instance_path ON table_shows (arr_instance_id, path)',
-      'CREATE INDEX ix_table_shows_profileId ON table_shows ("profileId")'],
+     ['CREATE UNIQUE INDEX IF NOT EXISTS ux_table_shows_instance_upstream_id ON table_shows (arr_instance_id, "sonarrSeriesId")',
+      'CREATE UNIQUE INDEX IF NOT EXISTS ux_table_shows_instance_path ON table_shows (arr_instance_id, path)',
+      'CREATE INDEX IF NOT EXISTS ix_table_shows_profileId ON table_shows ("profileId")'],
      [_PG_PROFILE_FK]),
     ('table_episodes', 'id', ('arr_instance_id',), ('sonarrEpisodeId',),
-     ['CREATE UNIQUE INDEX ux_table_episodes_instance_upstream_id ON table_episodes (arr_instance_id, "sonarrEpisodeId")',
-      'CREATE INDEX ix_table_episodes_episode_file_id ON table_episodes (episode_file_id)',
-      'CREATE INDEX ix_table_episodes_sonarrSeriesId ON table_episodes ("sonarrSeriesId")',
-      'CREATE INDEX ix_table_episodes_series_id ON table_episodes (series_id)'],
+     ['CREATE UNIQUE INDEX IF NOT EXISTS ux_table_episodes_instance_upstream_id ON table_episodes (arr_instance_id, "sonarrEpisodeId")',
+      'CREATE INDEX IF NOT EXISTS ix_table_episodes_episode_file_id ON table_episodes (episode_file_id)',
+      'CREATE INDEX IF NOT EXISTS ix_table_episodes_sonarrSeriesId ON table_episodes ("sonarrSeriesId")',
+      'CREATE INDEX IF NOT EXISTS ix_table_episodes_series_id ON table_episodes (series_id)'],
      ['FOREIGN KEY("series_id") REFERENCES table_shows("id") ON DELETE CASCADE']),
     ('table_movies', 'id', ('arr_instance_id',), ('radarrId', 'path', 'tmdbId'),
-     ['CREATE UNIQUE INDEX ux_table_movies_instance_upstream_id ON table_movies (arr_instance_id, "radarrId")',
-      'CREATE UNIQUE INDEX ux_table_movies_instance_path ON table_movies (arr_instance_id, path)',
-      'CREATE UNIQUE INDEX ux_table_movies_instance_tmdbid ON table_movies (arr_instance_id, "tmdbId")',
-      'CREATE INDEX ix_table_movies_profileId ON table_movies ("profileId")'],
+     ['CREATE UNIQUE INDEX IF NOT EXISTS ux_table_movies_instance_upstream_id ON table_movies (arr_instance_id, "radarrId")',
+      'CREATE UNIQUE INDEX IF NOT EXISTS ux_table_movies_instance_path ON table_movies (arr_instance_id, path)',
+      'CREATE UNIQUE INDEX IF NOT EXISTS ux_table_movies_instance_tmdbid ON table_movies (arr_instance_id, "tmdbId")',
+      'CREATE INDEX IF NOT EXISTS ix_table_movies_profileId ON table_movies ("profileId")'],
      [_PG_PROFILE_FK]),
     ('table_shows_rootfolder', 'local_rootfolder_id',
      ('arr_instance_id', 'upstream_rootfolder_id'), ('upstream_rootfolder_id',),
-     ['CREATE UNIQUE INDEX ux_shows_rootfolder_instance_upstream ON table_shows_rootfolder (arr_instance_id, upstream_rootfolder_id)'],
+     ['CREATE UNIQUE INDEX IF NOT EXISTS ux_shows_rootfolder_instance_upstream ON table_shows_rootfolder (arr_instance_id, upstream_rootfolder_id)'],
      []),
     ('table_movies_rootfolder', 'local_rootfolder_id',
      ('arr_instance_id', 'upstream_rootfolder_id'), ('upstream_rootfolder_id',),
-     ['CREATE UNIQUE INDEX ux_movies_rootfolder_instance_upstream ON table_movies_rootfolder (arr_instance_id, upstream_rootfolder_id)'],
+     ['CREATE UNIQUE INDEX IF NOT EXISTS ux_movies_rootfolder_instance_upstream ON table_movies_rootfolder (arr_instance_id, upstream_rootfolder_id)'],
      []),
     ('table_history', 'id', ('arr_instance_id',), (),
-     ['CREATE INDEX ix_table_history_video_path_language_timestamp ON table_history (video_path, "language", "timestamp")',
-      'CREATE INDEX ix_table_history_action ON table_history (action)',
-      'CREATE INDEX ix_history_instance_upstream_series ON table_history (arr_instance_id, "sonarrSeriesId")',
-      'CREATE INDEX ix_history_instance_upstream_episode ON table_history (arr_instance_id, "sonarrEpisodeId")'],
+     ['CREATE INDEX IF NOT EXISTS ix_table_history_video_path_language_timestamp ON table_history (video_path, "language", "timestamp")',
+      'CREATE INDEX IF NOT EXISTS ix_table_history_action ON table_history (action)',
+      'CREATE INDEX IF NOT EXISTS ix_history_instance_upstream_series ON table_history (arr_instance_id, "sonarrSeriesId")',
+      'CREATE INDEX IF NOT EXISTS ix_history_instance_upstream_episode ON table_history (arr_instance_id, "sonarrEpisodeId")'],
      ['FOREIGN KEY("series_id") REFERENCES table_shows("id") ON DELETE CASCADE',
       'FOREIGN KEY("episode_id") REFERENCES table_episodes("id") ON DELETE CASCADE',
       'FOREIGN KEY("upgradedFromId") REFERENCES table_history("id")']),
     ('table_history_movie', 'id', ('arr_instance_id',), (),
-     ['CREATE INDEX ix_table_history_movie_video_path_language_timestamp ON table_history_movie (video_path, "language", "timestamp")',
-      'CREATE INDEX ix_table_history_movie_action ON table_history_movie (action)',
-      'CREATE INDEX ix_history_movie_instance_upstream ON table_history_movie (arr_instance_id, "radarrId")'],
+     ['CREATE INDEX IF NOT EXISTS ix_table_history_movie_video_path_language_timestamp ON table_history_movie (video_path, "language", "timestamp")',
+      'CREATE INDEX IF NOT EXISTS ix_table_history_movie_action ON table_history_movie (action)',
+      'CREATE INDEX IF NOT EXISTS ix_history_movie_instance_upstream ON table_history_movie (arr_instance_id, "radarrId")'],
      ['FOREIGN KEY("movie_id") REFERENCES table_movies("id") ON DELETE CASCADE',
       'FOREIGN KEY("upgradedFromId") REFERENCES table_history_movie("id")']),
     ('table_blacklist', 'id', ('arr_instance_id',), (),
-     ['CREATE INDEX ix_table_blacklist_subs_id ON table_blacklist (subs_id)',
-      'CREATE INDEX ix_blacklist_instance_upstream_series ON table_blacklist (arr_instance_id, sonarr_series_id)',
-      'CREATE INDEX ix_blacklist_instance_upstream_episode ON table_blacklist (arr_instance_id, sonarr_episode_id)'],
+     ['CREATE INDEX IF NOT EXISTS ix_table_blacklist_subs_id ON table_blacklist (subs_id)',
+      'CREATE INDEX IF NOT EXISTS ix_blacklist_instance_upstream_series ON table_blacklist (arr_instance_id, sonarr_series_id)',
+      'CREATE INDEX IF NOT EXISTS ix_blacklist_instance_upstream_episode ON table_blacklist (arr_instance_id, sonarr_episode_id)'],
      ['FOREIGN KEY("series_id") REFERENCES table_shows("id") ON DELETE CASCADE',
       'FOREIGN KEY("episode_id") REFERENCES table_episodes("id") ON DELETE CASCADE']),
     ('table_blacklist_movie', 'id', ('arr_instance_id',), (),
-     ['CREATE INDEX ix_table_blacklist_movie_subs_id ON table_blacklist_movie (subs_id)',
-      'CREATE INDEX ix_blacklist_movie_instance_upstream ON table_blacklist_movie (arr_instance_id, radarr_id)'],
+     ['CREATE INDEX IF NOT EXISTS ix_table_blacklist_movie_subs_id ON table_blacklist_movie (subs_id)',
+      'CREATE INDEX IF NOT EXISTS ix_blacklist_movie_instance_upstream ON table_blacklist_movie (arr_instance_id, radarr_id)'],
      ['FOREIGN KEY("movie_id") REFERENCES table_movies("id") ON DELETE CASCADE']),
 )
 
@@ -413,7 +446,18 @@ def _rebuild_all_postgres(bind):
         for col in not_null_cols:
             bind.execute(sa.text(f'ALTER TABLE {table} ALTER COLUMN "{col}" SET NOT NULL'))
         _pg_set_local_pk(bind, table, pk_col)
+        # Same reason as the SQLite path: a database adopted from upstream can
+        # be missing a column this fork models, and indexing it here would abort
+        # the upgrade before the post-upgrade repair could restore it.
+        present = {column['name'] for column in sa.inspect(bind).get_columns(table)}
         for ddl in index_ddls:
+            missing = [name for name in _ddl_columns(ddl) if name not in present]
+            if missing:
+                logger.warning(
+                    "Skipping the index on %s: %s not present yet. It is created once "
+                    "the post-upgrade column repair restores them.",
+                    table, ", ".join(missing))
+                continue
             bind.execute(sa.text(ddl))
     # Phase 3: re-add FKs now that every parent has its new local PK. ADD
     # CONSTRAINT validates existing rows, so a dangling reference aborts here.

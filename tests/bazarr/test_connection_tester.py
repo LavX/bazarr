@@ -10,6 +10,9 @@ Covers:
 - proxy_service: service whitelist, missing url/apikey, end-to-end status
   probe with mocked requests.get, both legacy (/api/system/status) and
   v3 (/api/v3/system/status) paths attempted.
+- the API-key gate on both /test routes: header only, because the `apikey`
+  query parameter on these routes is the target arr's key and is forwarded to
+  the host being probed.
 """
 import socket
 from unittest.mock import patch, MagicMock
@@ -150,10 +153,31 @@ def _build_app():
     return app
 
 
+TEST_API_KEY = "test-api-key"
+
+
+@pytest.fixture(autouse=True)
+def _configure_api_key(monkeypatch):
+    """Give the server a known API key for every test in this module."""
+    monkeypatch.setattr("app.config.settings.auth.apikey", TEST_API_KEY)
+
+
 def _login(client):
-    """Pre-populate the session so @check_login passes."""
+    """Authenticate the client the way the frontend does.
+
+    Two independent gates apply. @check_login covers settings.auth.type, and
+    the /test proxies additionally require the global API key regardless of
+    that setting, because they forward a server-side request to a user-supplied
+    host and must never be reachable unauthenticated.
+
+    The query string's `apikey` is the TARGET arr's key and nothing else: the
+    gate reads Bazarr's own key from the X-API-KEY header only, so a query
+    value can never satisfy it whatever it happens to contain. The harness
+    authenticates by header, as the frontend does.
+    """
     with client.session_transaction() as sess:
         sess["logged_in"] = True
+    client.environ_base["HTTP_X_API_KEY"] = TEST_API_KEY
 
 
 def test_proxy_service_rejects_unknown_service(monkeypatch):
@@ -451,3 +475,139 @@ def test_proxy_service_pins_for_https_when_verify_disabled(monkeypatch):
         assert "203.0.113.42" in called_url
         assert called_headers.get("Host") == "sonarr.example.com"
         assert fake_get.call_args_list[0].kwargs["verify"] is False
+
+
+def test_proxy_service_rejects_an_unauthenticated_request(monkeypatch):
+    """The hardening itself, which had no coverage.
+
+    These endpoints forward a server-side request to a user-supplied host, so
+    they were an unauthenticated reconnaissance surface before the API key was
+    required. Without this test, a regression that dropped the requirement
+    would look identical to a passing suite.
+    """
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    app = _build_app()
+    client = app.test_client()
+    # Deliberately not authenticated: no X-API-KEY header.
+    r = client.get("/test/sonarr?url=http://127.0.0.1:8989&apikey=k")
+    assert r.status_code == 401
+
+
+def test_proxy_service_rejects_a_target_key_that_is_not_bazarrs(monkeypatch):
+    """A target arr key that differs from Bazarr's own does not authenticate.
+
+    This holds for the weak reason (the value differs) and, since the gate went
+    header-only, for the real one as well: the query string is not an
+    authentication channel here at all. The test below pins that stronger
+    property by putting Bazarr's own key in the query.
+    """
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    app = _build_app()
+    client = app.test_client()
+    with client.session_transaction() as sess:
+        sess["logged_in"] = True
+    r = client.get("/test/sonarr?url=http://127.0.0.1:8989&apikey=some-arr-key")
+    assert r.status_code == 401
+
+
+def test_proxy_service_rejects_the_api_key_from_the_query_string(monkeypatch):
+    """The query string is not an authentication channel on these routes.
+
+    `apikey` here means the TARGET arr's key, which the endpoint forwards to the
+    user-supplied host it probes. While the gate also accepted it as Bazarr's
+    own credential, one parameter carried two meanings: a caller authenticating
+    the way Bazarr's API is normally used had Bazarr's key sent onward to an
+    arbitrary address, and an operator reusing one key for Sonarr and Bazarr
+    turned the target's key into a valid credential for Bazarr's own gate.
+    """
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    app = _build_app()
+    client = app.test_client()
+    # No session, no header: authenticating purely by the query string.
+    r = client.get(f"/test/sonarr?url=http://127.0.0.1:8989&apikey={TEST_API_KEY}")
+    assert r.status_code == 401
+
+
+def test_proxy_service_rejects_the_query_string_key_even_with_a_session(monkeypatch):
+    """A logged-in session does not soften the gate.
+
+    @check_login and the API-key gate are independent. The proxies forward a
+    server-side request to a user-supplied host, so the key is required on top
+    of the session, and it still has to arrive in the header.
+    """
+    monkeypatch.setattr("app.config.settings.auth.type", "form")
+    app = _build_app()
+    client = app.test_client()
+    with client.session_transaction() as sess:
+        sess["logged_in"] = True
+    r = client.get(f"/test/sonarr?url=http://127.0.0.1:8989&apikey={TEST_API_KEY}")
+    assert r.status_code == 401
+
+
+def test_proxy_service_never_forwards_bazarrs_own_key(monkeypatch):
+    """Bazarr's key reaches the probed host through no path of its own.
+
+    Whisper-ASR has no API-key concept, so a correct request carries no
+    `apikey` at all. Nothing in the route may substitute the configured global
+    key for the missing one: the outbound request goes out with no credential.
+    """
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **kw: [_addr("127.0.0.1")])
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = {"version": "1.0"}
+    with patch("app.ui.requests.get", return_value=resp) as fake_get:
+        app = _build_app()
+        client = app.test_client()
+        _login(client)
+        r = client.get("/test/whisperai?url=http://127.0.0.1:9000")
+        assert r.get_json()["status"] is True
+        called = fake_get.call_args_list[0]
+        assert "X-Api-Key" not in called.kwargs["headers"]
+        assert TEST_API_KEY not in called.args[0]
+        assert TEST_API_KEY not in repr(called.kwargs)
+
+
+# === the legacy /test/<protocol>/<url> proxy ===
+#
+# Same gate, same query parameter, and it forwards request.args wholesale to
+# the probed host, so the dual use bit harder here.
+
+
+def test_legacy_proxy_rejects_the_api_key_from_the_query_string(monkeypatch):
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    app = _build_app()
+    client = app.test_client()
+    r = client.get(f"/test/http/127.0.0.1:8989/api?apikey={TEST_API_KEY}")
+    assert r.status_code == 401
+
+
+def test_legacy_proxy_rejects_an_unauthenticated_request(monkeypatch):
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    app = _build_app()
+    client = app.test_client()
+    r = client.get("/test/http/127.0.0.1:8989/api?apikey=some-arr-key")
+    assert r.status_code == 401
+
+
+def test_legacy_proxy_accepts_the_header_and_forwards_only_the_query(monkeypatch):
+    """The header authenticates, and what goes upstream is what the caller
+    typed: the query parameters, Bazarr's own key not among them.
+
+    This route uses the strict resolver, which refuses loopback, hence the
+    private-LAN address.
+    """
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **kw: [_addr("10.0.0.5")])
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = {"version": "4.0.0.0"}
+    with patch("app.ui.requests.get", return_value=resp) as fake_get:
+        app = _build_app()
+        client = app.test_client()
+        _login(client)
+        r = client.get("/test/http/sonarr.lan:8989/api?apikey=some-arr-key")
+        assert r.get_json()["status"] is True
+        forwarded = fake_get.call_args_list[0].args[1]
+        assert forwarded["apikey"] == "some-arr-key"
+        assert TEST_API_KEY not in repr(fake_get.call_args_list[0])

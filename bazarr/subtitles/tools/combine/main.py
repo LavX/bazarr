@@ -45,7 +45,7 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
         # nonsense Movie.en.combined-en.srt), out-of-range counts, and codes that
         # are not plain 2-letter lowercase (defends compose_combined_filename
         # against a crafted code reaching the on-disk filename).
-        langs = rule["languages"]
+        langs = _normalize_language_codes(rule["languages"])
         if not (2 <= len(langs) <= 3) or len(set(langs)) != len(langs):
             return CombineResult(
                 status="failed",
@@ -64,18 +64,18 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
 
         sources = resolve_source_paths(
             video_path=video_path,
-            languages=rule["languages"],
+            languages=langs,
         )
         if sources is None:
             return CombineResult(
                 status="skipped",
-                reason=f"missing source(s) for {rule['languages']}",
+                reason=f"missing source(s) for {langs}",
             )
 
         out_path = compose_combined_filename(
             video_path=video_path,
-            primary=rule["languages"][0],
-            secondaries=rule["languages"][1:],
+            primary=langs[0],
+            secondaries=langs[1:],
             format=rule["format"],
         )
 
@@ -132,6 +132,33 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
     except Exception as e:
         logging.exception("BAZARR combine top-level failure")
         return CombineResult(status="failed", error=str(e))
+
+
+def _normalize_language_codes(languages):
+    """Map custom-language codes back to the 2-letter codes combine works with.
+
+    A combined artifact built for zt is indexed through CustomLanguage, so its
+    row reads "zh-TW:combined-en" and the API reports code2 "zh-TW". Rebuild
+    posts that value back here, where the 2-letter check rejected it outright,
+    leaving every custom-language combined file unrebuildable. Fold "zh-TW"
+    back to "zt" (and "pt-BR" to "pb", "es-MX" to "ea") first, so the check
+    still guards the on-disk filename against anything else.
+    """
+    try:
+        from languages.custom_lang import CustomLanguage
+    except Exception:
+        logging.debug("BAZARR combine: CustomLanguage unavailable, cannot "
+                      "normalize custom-language codes", exc_info=True)
+        return list(languages)
+
+    normalized = []
+    for code in languages:
+        if isinstance(code, str):
+            custom = CustomLanguage.from_value(code, attr="language")
+            if custom is not None:
+                code = custom.alpha2
+        normalized.append(code)
+    return normalized
 
 
 _COMBINED_OUTPUT_EXTS = (".srt", ".ass", ".ssa")

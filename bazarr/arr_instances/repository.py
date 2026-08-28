@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 from app.database import TableArrInstances
 
+from .media_defaults import read_media_defaults
 from .subtitle_settings import read_subtitle_settings
 
 VALID_KINDS = ("sonarr", "radarr")
@@ -324,4 +325,5 @@ def to_safe_dict(row):
         "http_timeout": row.http_timeout,
         "api_key_set": bool(row.api_key),
         "subtitle_settings": read_subtitle_settings(row.options),
+        "media_defaults": read_media_defaults(row.options),
     }

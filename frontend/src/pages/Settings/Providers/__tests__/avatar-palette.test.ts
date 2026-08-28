@@ -48,7 +48,7 @@ describe("getAvatarPaletteIndex", () => {
       "napiprojekt",
       "betaseries",
       "addic7ed",
-      "podnapisi",
+      "titlovi",
     ];
     for (const key of keys) {
       seen.add(getAvatarPaletteIndex(key));

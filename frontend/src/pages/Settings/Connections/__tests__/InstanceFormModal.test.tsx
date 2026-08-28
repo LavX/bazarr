@@ -19,6 +19,7 @@
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type {
+  ArrInstance,
   ArrInstanceCreate,
   ArrInstanceUpdate,
 } from "@/apis/raw/arrInstances";
@@ -79,7 +80,7 @@ function makeInstance(
     name: string;
     api_key_set: boolean;
   }> = {},
-) {
+): ArrInstance {
   return {
     id: 42,
     kind: (overrides.kind ?? "sonarr") as "sonarr" | "radarr",
@@ -476,5 +477,100 @@ describe("InstanceFormModal, edit mode", () => {
       unknown,
     ];
     expect(args.body.clear_api_key).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-instance default language profile
+// ---------------------------------------------------------------------------
+
+describe("InstanceFormModal, default language profile", () => {
+  it("starts on the explicit global-default choice for a new instance", () => {
+    renderAdd("sonarr");
+    expect(
+      screen.getByRole("combobox", { name: /profile for newly synced/i }),
+    ).toHaveValue("Use the global default");
+  });
+
+  it("omits media_defaults from the create payload when nothing is picked", async () => {
+    const user = userEvent.setup();
+    mockCreateMutate.mockClear();
+    renderAdd("sonarr");
+
+    await user.type(screen.getByRole("textbox", { name: /name/i }), "Plain");
+    await user.type(
+      screen.getByRole("textbox", { name: /address/i }),
+      "10.0.0.9",
+    );
+    await user.click(screen.getByRole("button", { name: /add instance/i }));
+
+    await waitFor(() => {
+      expect(mockCreateMutate).toHaveBeenCalled();
+    });
+    const [body] = mockCreateMutate.mock.calls[0] as [
+      ArrInstanceCreate,
+      unknown,
+    ];
+    // No override means no block at all, so the instance inherits the global
+    // default rather than pinning whatever the form happened to show.
+    expect(body.media_defaults).toBeUndefined();
+  });
+
+  it("sends a cleared media_defaults block when editing an instance with no override", async () => {
+    const user = userEvent.setup();
+    mockUpdateMutate.mockClear();
+    renderEdit(makeInstance());
+
+    await user.click(screen.getByRole("button", { name: /save changes/i }));
+
+    await waitFor(() => {
+      expect(mockUpdateMutate).toHaveBeenCalled();
+    });
+    const [args] = mockUpdateMutate.mock.calls[0] as [
+      { id: number; body: ArrInstanceUpdate },
+      unknown,
+    ];
+    expect(args.body.media_defaults).toEqual({});
+  });
+
+  it("keeps the saved override selected when editing", () => {
+    renderEdit({
+      ...makeInstance(),
+      media_defaults: { default_enabled: false },
+    });
+    expect(
+      screen.getByRole("combobox", { name: /profile for newly synced/i }),
+    ).toHaveValue("No profile");
+  });
+
+  it("spells out the precedence in the field description", () => {
+    renderAdd("sonarr");
+    expect(
+      screen.getByText(
+        /Sonarr tag still wins over this, and this wins over the global/i,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("offers the apply action only on a saved instance that assigns a profile", () => {
+    renderEdit(makeInstance());
+    expect(
+      screen.getByRole("button", { name: /apply to unset/i }),
+    ).toBeDisabled();
+
+    renderEdit({
+      ...makeInstance(),
+      media_defaults: { default_enabled: true, default_profile: 3 },
+    });
+    expect(
+      screen.getAllByRole("button", { name: /apply to unset/i }).at(-1),
+    ).toBeEnabled();
+  });
+
+  it("hides the apply action entirely while adding an instance", () => {
+    renderAdd("sonarr");
+    expect(
+      screen.queryByRole("button", { name: /apply to unset/i }),
+    ).not.toBeInTheDocument();
   });
 });

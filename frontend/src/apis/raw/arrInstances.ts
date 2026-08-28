@@ -31,6 +31,16 @@ export interface ArrSubtitleSettings {
   subsync?: ArrSubtitleSettingsSubsync;
 }
 
+// Per-instance default language profile. Three states, and only three: an
+// absent block inherits the global default, default_enabled false assigns no
+// profile, and default_enabled true assigns default_profile. It is stored
+// beside subtitle_settings under the instance's options, not inside it: a
+// language profile is not a subtitle setting.
+export interface ArrMediaDefaults {
+  default_enabled?: boolean;
+  default_profile?: number | null;
+}
+
 export interface ArrInstance {
   id: number;
   kind: ArrKind;
@@ -48,6 +58,7 @@ export interface ArrInstance {
   // The API never returns the key itself, only whether one is stored.
   api_key_set: boolean;
   subtitle_settings?: ArrSubtitleSettings;
+  media_defaults?: ArrMediaDefaults;
 }
 
 export interface ArrInstanceCreate {
@@ -63,6 +74,7 @@ export interface ArrInstanceCreate {
   enabled?: boolean;
   is_default?: boolean;
   subtitle_settings?: ArrSubtitleSettings;
+  media_defaults?: ArrMediaDefaults;
 }
 
 export type ArrInstanceUpdate = Partial<{
@@ -79,6 +91,7 @@ export type ArrInstanceUpdate = Partial<{
   enabled: boolean;
   is_default: boolean;
   subtitle_settings: ArrSubtitleSettings;
+  media_defaults: ArrMediaDefaults;
 }>;
 
 export interface ArrInstanceTest {
@@ -102,6 +115,11 @@ export type ArrInstanceTestOverrides = Partial<{
   verify_ssl: boolean;
   http_timeout: number;
 }>;
+
+export interface ArrApplyDefaultProfileResult {
+  updated: number;
+  profileId: number;
+}
 
 export interface ArrInstanceTestResult {
   ok: boolean;
@@ -136,6 +154,16 @@ class ArrInstancesApi extends BaseApi {
 
   remove(id: number) {
     return this.delete(`/${id}`);
+  }
+
+  // Opt-in: fills in this instance's default language profile on its media that
+  // has none yet. Never touches an item that already has a profile.
+  async applyDefaultProfile(id: number) {
+    const response = await this.postRaw<ArrApplyDefaultProfileResult>(
+      `/${id}/apply-default-profile`,
+      {},
+    );
+    return response.data;
   }
 
   // The API key travels in the JSON body only, never in a URL or query string.

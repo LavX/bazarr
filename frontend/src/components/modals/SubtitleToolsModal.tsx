@@ -12,12 +12,14 @@ import { ColumnDef } from "@tanstack/react-table";
 import {
   useEpisodeSubtitleModification,
   useMovieSubtitleModification,
+  useSubtitleFileDownload,
 } from "@/apis/hooks";
 import Language from "@/components/bazarr/Language";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
 import SimpleTable from "@/components/tables/SimpleTable";
 import { useModals, withModal } from "@/modules/modals";
 import { fromPython, isMovie, toPython } from "@/utilities";
+import { buildSubtitleLanguageKey } from "@/utilities/subtitles";
 
 type SupportType = Item.Episode | Item.Movie;
 
@@ -73,6 +75,7 @@ const SubtitleToolView: FunctionComponent<SubtitleToolViewProps> = ({
     useEpisodeSubtitleModification();
   const { download: downloadMovie, remove: removeMovie } =
     useMovieSubtitleModification();
+  const fileDownload = useSubtitleFileDownload();
   const modals = useModals();
 
   const columns = useMemo<ColumnDef<TableColumnType>[]>(
@@ -186,7 +189,29 @@ const SubtitleToolView: FunctionComponent<SubtitleToolViewProps> = ({
       <Group>
         <SubtitleToolsMenu
           selections={selections}
-          onAction={(action) => {
+          onAction={async (action) => {
+            if (action === "download") {
+              // Sequential on purpose: parallel programmatic anchor clicks
+              // are dropped by browsers that restrict multiple automatic
+              // downloads; one at a time surfaces the browser's own
+              // multi-download permission prompt instead.
+              for (const selection of selections) {
+                try {
+                  await fileDownload.mutateAsync({
+                    type: selection.type,
+                    mediaId: selection.id,
+                    language: buildSubtitleLanguageKey(
+                      selection.raw_language as Subtitle,
+                    ),
+                    arrInstanceId: selection.arr_instance_id,
+                  });
+                } catch {
+                  // The hook already notified; continue with the rest.
+                }
+              }
+              modals.closeAll();
+              return;
+            }
             selections.forEach(async (selection) => {
               const actionPayload = {
                 form: {

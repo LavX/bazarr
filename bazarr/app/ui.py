@@ -75,9 +75,19 @@ def _require_proxy_api_key():
     """The /test connection proxies forward a server-side request to a
     user-supplied host (an SSRF surface). Require the global API key so they are
     never reachable unauthenticated, independent of settings.auth.type (which is
-    None by default). The frontend already sends X-API-KEY on every request."""
-    provided = request.headers.get('X-API-KEY') or request.args.get('apikey')
-    if not api_key_matches(provided, settings.auth.apikey):
+    None by default). The frontend already sends X-API-KEY on every request.
+
+    Header only, unlike the deprecated query-string fallback the rest of the API
+    still honours. On these routes `apikey` in the query string is the TARGET
+    arr's key, which the endpoint forwards to the host it probes. Accepting it
+    as Bazarr's credential too gave one parameter two meanings: a caller
+    authenticating that way had Bazarr's own key sent onward to an
+    attacker-choosable address, and an operator reusing one key for Sonarr and
+    Bazarr turned the target's key into a valid credential for this gate. A key
+    in a query string also lands in browser history, access logs and Referer
+    headers, which a header does not.
+    """
+    if not api_key_matches(request.headers.get('X-API-KEY'), settings.auth.apikey):
         abort(401)
 
 
@@ -290,13 +300,24 @@ def backup_download(filename):
     return send_file(fullpath, max_age=0, as_attachment=True)
 
 
+def swaggerui_static_dir():
+    """Where flask_restx keeps the swagger UI assets.
+
+    Resolved from the installed package: the old vendored ``libs/flask_restx``
+    tree is gone since the library unvendoring, and pointing there made every
+    asset request 500 so the API documentation page rendered blank.
+    """
+    import flask_restx
+
+    return os.path.realpath(os.path.join(os.path.dirname(flask_restx.__file__), 'static'))
+
+
 @ui_bp.route('/api/swaggerui/static/<path:filename>', methods=['GET'])
 def swaggerui_static(filename):
-    basepath = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'libs', 'flask_restx',
-                            'static')
+    basepath = swaggerui_static_dir()
     fullpath = os.path.realpath(os.path.join(basepath, filename))
     # Use startswith to prevent path traversal
-    if not fullpath.startswith(os.path.realpath(basepath) + os.sep):
+    if not fullpath.startswith(basepath + os.sep):
         return '', 404
     else:
         return send_file(fullpath)

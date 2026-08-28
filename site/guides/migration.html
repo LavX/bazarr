@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Migration from Upstream - Bazarr+ Guides</title>
-  <meta name="description" content="Switch from upstream Bazarr to Bazarr+ in five minutes. Same database, same config, nothing lost.">
+  <title>Migrate from Bazarr to Bazarr+ without losing data</title>
+  <meta name="description" content="Switch from upstream Bazarr in about five minutes. Same database, same config, same subtitle files, and it is fully reversible if you change your mind.">
   <link rel="canonical" href="https://lavx.github.io/bazarr/guides/migration.html">
 
   <!-- Open Graph -->
   <meta property="og:type" content="website">
-  <meta property="og:title" content="Migration from Upstream - Bazarr+ Guides">
-  <meta property="og:description" content="Switch from upstream Bazarr to Bazarr+ in five minutes. Same database, same config, nothing lost.">
+  <meta property="og:title" content="Migrate from Bazarr to Bazarr+ without losing data">
+  <meta property="og:description" content="Switch from upstream Bazarr in about five minutes. Same database, same config, same subtitle files, and it is fully reversible if you change your mind.">
   <meta property="og:url" content="https://lavx.github.io/bazarr/guides/migration.html">
   <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
   <meta property="og:image:width" content="1200">
@@ -21,17 +21,17 @@
 
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Migration from Upstream - Bazarr+ Guides">
-  <meta name="twitter:description" content="Switch from upstream Bazarr to Bazarr+ in five minutes. Same database, same config, nothing lost.">
+  <meta name="twitter:title" content="Migrate from Bazarr to Bazarr+ without losing data">
+  <meta name="twitter:description" content="Switch from upstream Bazarr in about five minutes. Same database, same config, same subtitle files, and it is fully reversible if you change your mind.">
   <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
 
   <!-- Geist font: self-hosted preload -->
   <link rel="preload" href="../fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
 
-  <link rel="icon" href="../screenshots/logo128.png" type="image/png">
-  <meta name="theme-color" content="#1a1a2e">
+  <link rel="icon" href="../favicon.ico" sizes="any">
+  <meta name="theme-color" content="#121125">
   <link rel="apple-touch-icon" href="../apple-touch-icon.png">
-  <link rel="stylesheet" href="../css/style.css">
+  <link rel="stylesheet" href="../css/site.css">
 
   <script type="application/ld+json">
   {
@@ -81,31 +81,26 @@
 </head>
 <body>
 
-<a href="#main-content" class="skip-link">Skip to content</a>
+<a class="skip" href="#main-content">Skip to content</a>
 
-<!-- Grain overlay -->
-<svg class="grain" aria-hidden="true">
-  <filter id="grain-filter">
-    <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/>
-  </filter>
-  <rect width="100%" height="100%" filter="url(#grain-filter)"/>
-</svg>
-
-<!-- Ambient gradients -->
-<div class="ambient" aria-hidden="true"></div>
-
-<nav class="sticky-nav" aria-label="Site navigation">
+<header class="nav">
   <div class="container">
-    <img src="../screenshots/logo128.png" alt="Bazarr+" class="nav-logo" width="22" height="22">
-    <a href="../">Home</a>
-    <a href="../#comparison-heading">Compare</a>
-    <a href="../#quick-start">Install</a>
-    <a href="../#screenshots-heading">Screenshots</a>
-    <a href="../#faq-heading">FAQ</a>
-    <a href="./" class="nav-active">Guides</a>
-    <a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a>
+    <a class="wordmark" href="../" aria-label="Bazarr+"><img src="../screenshots/logo128.png" width="32" height="32" alt="" decoding="async"><span>Bazarr<b>+</b></span></a>
+    <nav aria-label="Primary">
+      <ul>
+        <li class="nav-inpage"><a href="../#what">What it does</a></li>
+        <li class="nav-deep"><a href="../#proof">Screenshots</a></li>
+        <li class="nav-inpage"><a href="../#compare">Compare</a></li>
+        <li><a href="../#start">Install</a></li>
+        <li class="nav-deep"><a href="../#faq">FAQ</a></li>
+        <li class="nav-deep"><a href="../#next">Roadmap</a></li>
+        <li class="nav-sep"><a href="./" aria-current="page">Guides</a></li>
+        <li class="nav-offsite"><a href="https://github.com/LavX/bazarr" rel="noopener">GitHub</a></li>
+        <li class="nav-offsite"><a href="https://discord.gg/fpp5JXmB8f" rel="noopener">Discord</a></li>
+      </ul>
+    </nav>
   </div>
-</nav>
+</header>
 
 <main id="main-content" class="guide-page">
   <div class="container">
@@ -113,6 +108,8 @@
       <a href="../">Home</a><span class="sep">/</span><a href="./">Guides</a><span class="sep">/</span><span>Migration from Upstream</span>
     </nav>
     <h1>Migration from Upstream</h1>
+
+    <nav class="guide-rail" id="guide-rail" aria-label="On this page"></nav>
 
     <article class="content">
 
@@ -123,10 +120,10 @@
       <h2 id="back-up-your-config">Back up your config</h2>
       <p>Before making any changes, copy your entire config directory. This is the directory you mounted as <code>/config</code> in your existing Bazarr container.</p>
 
-      <div class="code-wrap">
-        <div class="code-header">
+      <div class="code">
+        <div class="code-head">
           <span class="code-lang">Shell</span>
-          <button class="copy-btn" data-copy="cp -r ./config ./config-backup-$(date +%Y%m%d)" aria-label="Copy backup command">Copy</button>
+          <button class="copy" data-copy="cp -r ./config ./config-backup-$(date +%Y%m%d)" aria-label="Copy backup command">Copy</button>
         </div>
         <pre><code>cp -r ./config ./config-backup-$(date +%Y%m%d)</code></pre>
       </div>
@@ -143,18 +140,18 @@
       <ol class="steps">
         <li>
           <strong>Stop the current container.</strong>
-          <div class="code-wrap" style="margin-top: 12px;">
-            <div class="code-header">
+          <div class="code" style="margin-top: 12px;">
+            <div class="code-head">
               <span class="code-lang">Shell</span>
-              <button class="copy-btn" data-copy="docker compose down" aria-label="Copy stop command">Copy</button>
+              <button class="copy" data-copy="docker compose down" aria-label="Copy stop command">Copy</button>
             </div>
             <pre><code>docker compose down</code></pre>
           </div>
         </li>
         <li>
           <strong>Update the image in your <code>docker-compose.yml</code>.</strong> Change the image line from the upstream image to the Bazarr+ image:
-          <div class="code-wrap" style="margin-top: 12px;">
-            <div class="code-header">
+          <div class="code" style="margin-top: 12px;">
+            <div class="code-head">
               <span class="code-lang">Before → After</span>
             </div>
             <pre><code># Before (upstream)
@@ -168,10 +165,10 @@ image: ghcr.io/lavx/bazarr:latest</code></pre>
         </li>
         <li>
           <strong>Add the companion services.</strong> The only companion service recommended now is FlareSolverr, plus the optional AI translator. OpenSubtitles.org is a native <a href="provider-hub.html">Provider Hub</a> plugin in v2.4: install it from the Marketplace, then point its <strong>FlareSolverr URL</strong> setting at the flaresolverr service below (<code>http://flaresolverr:8191/v1</code> on a shared Docker network, or <code>http://localhost:8191/v1</code> with host networking, in which case also publish FlareSolverr's <code>8191:8191</code> port or run it on host networking too so 8191 is reachable on the host). There is no separate scraper container anymore.
-          <div class="code-wrap" style="margin-top: 12px;">
-            <div class="code-header">
+          <div class="code" style="margin-top: 12px;">
+            <div class="code-head">
               <span class="code-lang">docker-compose.yml additions</span>
-              <button class="copy-btn" data-copy-from="migration-scraper-code" aria-label="Copy companion services config">Copy</button>
+              <button class="copy" data-copy-from="migration-scraper-code" aria-label="Copy companion services config">Copy</button>
             </div>
             <pre id="migration-scraper-code"><code># Add these services:
   # Recommended for the OpenSubtitles.org and many other plugins. Set this container's
@@ -209,10 +206,10 @@ image: ghcr.io/lavx/bazarr:latest</code></pre>
         </li>
         <li>
           <strong>Start the new stack.</strong>
-          <div class="code-wrap" style="margin-top: 12px;">
-            <div class="code-header">
+          <div class="code" style="margin-top: 12px;">
+            <div class="code-head">
               <span class="code-lang">Shell</span>
-              <button class="copy-btn" data-copy="docker compose up -d" aria-label="Copy start command">Copy</button>
+              <button class="copy" data-copy="docker compose up -d" aria-label="Copy start command">Copy</button>
             </div>
             <pre><code>docker compose up -d</code></pre>
           </div>
@@ -281,15 +278,21 @@ image: ghcr.io/lavx/bazarr:latest</code></pre>
 <!-- Footer -->
 <footer>
   <div class="container">
-    <div class="footer-inner">
-      <p class="footer-credit">Built by <a href="https://github.com/LavX" target="_blank" rel="noopener">LavX</a>. Based on <a href="https://github.com/morpheus65535/bazarr" target="_blank" rel="noopener">Bazarr</a> by morpheus65535.</p>
-      <ul class="footer-links">
-        <li><a href="./">Guides</a></li>
-        <li><a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a></li>
-        <li><a href="https://github.com/LavX/bazarr/issues" target="_blank" rel="noopener">Issues</a></li>
-        <li><a href="https://github.com/LavX/bazarr/wiki" target="_blank" rel="noopener">Wiki</a></li>
-      </ul>
-    </div>
+    <p>Bazarr+ is a hard fork of <a class="inline" href="https://github.com/morpheus65535/bazarr" rel="noopener">Bazarr</a>, GPL-3, maintained by <a class="inline" href="https://github.com/LavX" rel="noopener">LavX</a>.</p>
+    <ul>
+      <li><a href="../">Home</a></li>
+      <li><a href="getting-started.html">Getting Started</a></li>
+      <li><a href="migration.html">Migration</a></li>
+      <li><a href="provider-hub.html">Provider Hub</a></li>
+      <li><a href="ai-translation.html">AI Translation</a></li>
+      <li><a href="bulk-operations.html">Bulk Operations</a></li>
+      <li><a href="external-integration.html">External Integration</a></li>
+      <li><a href="./">All guides</a></li>
+      <li><a href="https://github.com/LavX/bazarr/releases" rel="noopener">Releases</a></li>
+      <li><a href="https://github.com/LavX/bazarr/issues" rel="noopener">Issues</a></li>
+      <li><a href="https://github.com/LavX/bazarr/wiki" rel="noopener">Wiki</a></li>
+      <li><a href="https://discord.gg/fpp5JXmB8f" rel="noopener">Discord</a></li>
+    </ul>
   </div>
 </footer>
 

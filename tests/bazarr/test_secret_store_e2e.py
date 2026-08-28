@@ -66,7 +66,7 @@ class _FakeSettings:
         "general", "auth", "compat_endpoint", "sonarr", "radarr", "plex",
         "jellyfin", "translator", "proxy", "postgresql", "opensubtitles",
         "opensubtitlescom", "addic7ed", "legendasdivx", "legendasnet",
-        "xsubs", "deathbycaptcha", "napisy24", "titlovi", "titulky",
+        "deathbycaptcha", "napisy24", "titlovi", "titulky",
         "karagarga", "assrt", "betaseries", "jimaku", "subdl", "subsource",
         "subx", "subsro", "omdb",
     )

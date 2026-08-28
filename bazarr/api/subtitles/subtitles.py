@@ -275,7 +275,11 @@ class Subtitles(Resource):
                 ep_meta = database.execute(ep_stmt).first()
                 if not ep_meta:
                     return "Episode not found", 404
-                embedded_video_path = path_mappings.path_replace(ep_meta.path)
+                # The owning instance's mapping, not the global one: extraction
+                # reverses this path with path_replace_reverse_instance, and the
+                # two only round-trip when the same mapping made both.
+                embedded_video_path = path_mappings.path_replace_instance(
+                    ep_meta.path, arr_instance_id, 'episode')
             else:
                 mv_stmt = scoped(
                     select(TableMovies.path).where(TableMovies.radarrId == id),
@@ -285,7 +289,8 @@ class Subtitles(Resource):
                 mv_meta = database.execute(mv_stmt).first()
                 if not mv_meta:
                     return "Movie not found", 404
-                embedded_video_path = path_mappings.path_replace_movie(mv_meta.path)
+                embedded_video_path = path_mappings.path_replace_instance(
+                    mv_meta.path, arr_instance_id, 'movie')
 
             extracted = extract_embedded_subtitle(
                 embedded_video_path,
@@ -293,6 +298,7 @@ class Subtitles(Resource):
                 media_type,
                 hi=source_hi,
                 forced=source_forced,
+                arr_instance_id=arr_instance_id,
             )
             if not extracted:
                 return (
@@ -329,7 +335,13 @@ class Subtitles(Resource):
             if not metadata:
                 return "Episode not found", 404
 
-            video_path = path_mappings.path_replace(metadata.path)
+            # The owning instance's mapping again, for the same reason the
+            # extraction branch above uses it: everything downstream (sync,
+            # translation, mods, the re-index) resolves this path against the
+            # instance that owns the media, and a global mapping here points at
+            # another instance's library whenever the two differ.
+            video_path = path_mappings.path_replace_instance(
+                metadata.path, arr_instance_id, 'episode')
         else:
             metadata_stmt = scoped(
                 select(
@@ -346,7 +358,8 @@ class Subtitles(Resource):
             if not metadata:
                 return "Movie not found", 404
 
-            video_path = path_mappings.path_replace_movie(metadata.path)
+            video_path = path_mappings.path_replace_instance(
+                metadata.path, arr_instance_id, 'movie')
 
         # Path-traversal containment (#GHSA): a user-supplied subtitle path must
         # stay where Bazarr stores subtitles for this video (alongside it / a
@@ -450,6 +463,7 @@ class Subtitles(Resource):
                     sonarr_episode_id=id if media_type == "episode" else None,
                     radarr_id=id if media_type == "movie" else None,
                     metadata=metadata,
+                    arr_instance_id=arr_instance_id,
                 )
             except OSError:
                 return "Unable to edit subtitles file. Check logs.", 409
@@ -507,7 +521,7 @@ def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id, 
                 subtitles_path)
 
     if media_type == "episode":
-        store_subtitles(path_mappings.path_replace_reverse(video_path), video_path)
+        store_subtitles(path_mappings.path_replace_reverse_instance(video_path, arr_instance_id, 'episode'), video_path, arr_instance_id=arr_instance_id)
         event_stream(type="series", payload=metadata.sonarrSeriesId)
         # Emit the LOCAL episode id (#156): `id` is the upstream sonarrEpisodeId
         # (not unique across instances), but the frontend caches episode detail
@@ -532,8 +546,8 @@ def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id, 
             )
     else:
         store_subtitles_movie(
-            path_mappings.path_replace_reverse_movie(video_path), video_path
-        )
+            path_mappings.path_replace_reverse_instance(video_path, arr_instance_id, 'movie'), video_path
+        , arr_instance_id=arr_instance_id)
         event_stream(type="movie", payload=id)
 
         if settings.general.use_plex and settings.plex.update_movie_library:

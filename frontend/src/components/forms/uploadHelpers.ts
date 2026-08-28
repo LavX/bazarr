@@ -42,3 +42,24 @@ export function shouldAutoCloseUpload(
 ): boolean {
   return ready && !processing && fileCount <= 0;
 }
+
+// True when the chosen episode is owned by the opened series.
+//
+// Compared against the series' own local id, NOT against the fetched episode
+// list. Membership of that list cannot catch the bug this guard exists for: if
+// a regression makes the form fetch the wrong series' episodes, the matcher
+// selects from that wrong list, so the episode is a member of it and a
+// membership check passes while the subtitle goes to the wrong show.
+//
+// The episode payload carries `series_id`, the local id of its owning series,
+// so this holds even when the fetched list is wrong. An episode with no owning
+// id is rejected rather than assumed to belong.
+export function episodeBelongsToSeries(
+  episode: Item.Episode | null,
+  seriesLocalId: number,
+): boolean {
+  if (episode === null) {
+    return false;
+  }
+  return episode.series_id === seriesLocalId;
+}

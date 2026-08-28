@@ -10,6 +10,7 @@ from functools import reduce
 from app.config import settings
 from app.database import TableMovies, TableLanguagesProfiles, database, insert, update, delete, select, get_exclusion_clause
 from app.event_handler import event_stream
+from subtitles.mismatch import forget_media_by_upstream
 from app.jobs_queue import jobs_queue
 from app.notifier import send_notifications_movie
 from constants import MINIMUM_VIDEO_SIZE
@@ -18,7 +19,8 @@ from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.mass_download import movies_download_subtitles  # noqa: F401
 from utilities.path_mappings import path_mappings
 from subtitles.adaptive_searching import is_search_active
-from arr_instances.resolution import client_for_instance, default_instance_id, scoped, stamp_owner
+from arr_instances.resolution import (client_for_instance, default_instance_id,
+                                      resolve_default_profile, scoped, stamp_owner)
 
 from sqlalchemy.exc import IntegrityError
 from .parser import movieParser
@@ -73,7 +75,7 @@ def update_movie(updated_movie, arr_instance_id=None):
                 previous_movie_path != updated_movie['path']):
             # Store subtitles for updated movie where path or movie_file_id changed
             logging.debug(f'BAZARR updating subtitles for movie {updated_movie["path"]}')  # noqa: G004
-            store_subtitles_movie(updated_movie['path'], path_mappings.path_replace_movie(updated_movie['path']))
+            store_subtitles_movie(updated_movie['path'], path_mappings.path_replace_instance(updated_movie['path'], arr_instance_id, 'movie'), arr_instance_id=arr_instance_id)
         else:
             logging.debug(f'BAZARR skipping subtitle update for movie {updated_movie["path"]} as path '  # noqa: G004
                           f'and movie_file_id unchanged')
@@ -103,7 +105,9 @@ def add_movie(added_movie):
     except IntegrityError as e:
         logging.error(f"BAZARR cannot insert movie {added_movie['path']} because of {e}")  # noqa: G004
     else:
-        store_subtitles_movie(added_movie['path'], path_mappings.path_replace_movie(added_movie['path']))
+        store_subtitles_movie(added_movie['path'],
+                              path_mappings.path_replace_instance(added_movie['path'], added_movie.get('arr_instance_id'), 'movie'),
+                              arr_instance_id=added_movie.get('arr_instance_id'))
         event_stream(type='movie', action='update', payload=int(added_movie['radarrId']))
 
 
@@ -119,22 +123,6 @@ def update_movies(job_id=None, wait_for_completion=False, arr_instance_id=None, 
     logging.debug('BAZARR Starting movie sync from Radarr.')
     apikey_radarr = settings.radarr.apikey
 
-    movie_default_enabled = settings.general.movie_default_enabled
-
-    if movie_default_enabled is True:
-        movie_default_profile = settings.general.movie_default_profile
-        if movie_default_profile == '':
-            movie_default_profile = None
-    else:
-        movie_default_profile = None
-
-    # Prevent trying to insert a movie with a non-existing languages profileId
-    if (movie_default_profile and not database.execute(
-            select(TableLanguagesProfiles)
-            .where(TableLanguagesProfiles.profileId == movie_default_profile))
-            .first()):
-        movie_default_profile = None
-
     # The scalar apikey gate only blocks the legacy default path; an
     # instance-scoped sync carries its own credentials in arr_client.
     if arr_client is None and apikey_radarr is None:
@@ -148,6 +136,22 @@ def update_movies(job_id=None, wait_for_completion=False, arr_instance_id=None, 
         # else the enabled default. stamp_owner leaves it unset pre-backfill.
         instance_id = arr_instance_id if arr_instance_id is not None \
             else default_instance_id(database, 'radarr')
+
+        # Default languages profile for movies this pass INSERTS: the owning
+        # instance's override when it has one, otherwise the global default
+        # exactly as before, so an instance without an override is unaffected.
+        movie_default_profile = resolve_default_profile(
+            instance_id,
+            settings.general.movie_default_enabled,
+            settings.general.movie_default_profile,
+            session=database)
+
+        # Prevent trying to insert a movie with a non-existing languages profileId
+        if (movie_default_profile and not database.execute(
+                select(TableLanguagesProfiles)
+                .where(TableLanguagesProfiles.profileId == movie_default_profile))
+                .first()):
+            movie_default_profile = None
 
         # Get movies data from radarr
         movies = get_movies_from_radarr_api(apikey_radarr=apikey_radarr, arr_client=arr_client)
@@ -237,6 +241,7 @@ def update_movies(job_id=None, wait_for_completion=False, arr_instance_id=None, 
             movies_to_delete = list(set(current_movies_id_db) - set(current_movies_radarr))
             movies_deleted = []
             if len(movies_to_delete):
+                forget_media_by_upstream('movie', movies_to_delete, arr_instance_id)
                 try:
                     database.execute(scoped(delete(TableMovies).where(TableMovies.radarrId.in_(movies_to_delete)),
                                             TableMovies.arr_instance_id, arr_instance_id))
@@ -279,7 +284,8 @@ def update_movies(job_id=None, wait_for_completion=False, arr_instance_id=None, 
                                                            tags_dict=tagsDict,
                                                            language_profiles=language_profiles,
                                                            movie_default_profile=movie_default_profile,
-                                                           audio_profiles=audio_profiles)
+                                                           audio_profiles=audio_profiles,
+                                                           arr_instance_id=instance_id)
                                 cached_db_row = current_movies_in_db_dict[movie['id']]
                                 if not (parsed_movie.items() <= cached_db_row.items()):
                                     # Stamp AFTER the subset-diff so the added
@@ -292,7 +298,8 @@ def update_movies(job_id=None, wait_for_completion=False, arr_instance_id=None, 
                                                            tags_dict=tagsDict,
                                                            language_profiles=language_profiles,
                                                            movie_default_profile=movie_default_profile,
-                                                           audio_profiles=audio_profiles)
+                                                           audio_profiles=audio_profiles,
+                                                           arr_instance_id=instance_id)
                                 stamp_owner(parsed_movie, instance_id)
                                 add_movie(parsed_movie)
                                 movies_added.append(parsed_movie['title'])
@@ -357,6 +364,7 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False,
     # Remove movie from DB
     if action == 'deleted':
         if existing_movie:
+            forget_media_by_upstream('movie', [movie_id], arr_instance_id)
             try:
                 database.execute(
                     scoped(delete(TableMovies)
@@ -372,15 +380,6 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False,
                     '%s', path_mappings.path_replace_movie(existing_movie.path))
         return
 
-    movie_default_enabled = settings.general.movie_default_enabled
-
-    if movie_default_enabled is True:
-        movie_default_profile = settings.general.movie_default_profile
-        if movie_default_profile == '':
-            movie_default_profile = None
-    else:
-        movie_default_profile = None
-
     audio_profiles = get_profile_list(arr_client=arr_client)
     tagsDict = get_tags(arr_client=arr_client)
     language_profiles = get_language_profiles()
@@ -388,6 +387,13 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False,
     # Resolve the owning instance: explicit when scoped, else the default.
     instance_id = arr_instance_id if arr_instance_id is not None \
         else default_instance_id(database, 'radarr')
+
+    # Same per-instance default resolution as the bulk sync above; see there.
+    movie_default_profile = resolve_default_profile(
+        instance_id,
+        settings.general.movie_default_enabled,
+        settings.general.movie_default_profile,
+        session=database)
 
     try:
         # Get movie data from radarr api
@@ -399,10 +405,12 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False,
         else:
             if action == 'updated' and existing_movie:
                 movie = movieParser(movie_data, action='update', tags_dict=tagsDict, language_profiles=language_profiles,
-                                    movie_default_profile=movie_default_profile, audio_profiles=audio_profiles)
+                                    movie_default_profile=movie_default_profile, audio_profiles=audio_profiles,
+                                    arr_instance_id=instance_id)
             elif action == 'updated' and not existing_movie:
                 movie = movieParser(movie_data, action='insert', tags_dict=tagsDict, language_profiles=language_profiles,
-                                    movie_default_profile=movie_default_profile, audio_profiles=audio_profiles)
+                                    movie_default_profile=movie_default_profile, audio_profiles=audio_profiles,
+                                    arr_instance_id=instance_id)
     except Exception:
         logging.exception('BAZARR cannot get movie returned by SignalR feed from Radarr API.')
         return
@@ -413,6 +421,7 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False,
 
     # Remove movie from DB
     if not movie and existing_movie:
+        forget_media_by_upstream('movie', [movie_id], arr_instance_id)
         try:
             database.execute(
                 scoped(delete(TableMovies)
@@ -441,7 +450,7 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False,
             logging.error(f"BAZARR cannot update movie {path_mappings.path_replace_movie(movie['path'])} because "  # noqa: G004
                           f"of {e}")
         else:
-            store_subtitles_movie(movie['path'], path_mappings.path_replace_movie(movie['path']))
+            store_subtitles_movie(movie['path'], path_mappings.path_replace_instance(movie['path'], arr_instance_id, 'movie'), arr_instance_id=arr_instance_id)
             event_stream(type='movie', action='update', payload=int(movie_id))
             logging.debug(
                 'BAZARR updated this movie into the database:%s', path_mappings.path_replace_movie(movie["path"]))
@@ -458,7 +467,7 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False,
             logging.error(f"BAZARR cannot insert movie {path_mappings.path_replace_movie(movie['path'])} because "  # noqa: G004
                           f"of {e}")
         else:
-            store_subtitles_movie(movie['path'], path_mappings.path_replace_movie(movie['path']))
+            store_subtitles_movie(movie['path'], path_mappings.path_replace_instance(movie['path'], arr_instance_id, 'movie'), arr_instance_id=arr_instance_id)
             event_stream(type='movie', action='update', payload=int(movie_id))
             logging.debug(
                 'BAZARR inserted this movie into the database:%s', path_mappings.path_replace_movie(movie["path"]))

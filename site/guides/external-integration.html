@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>External Integration (Jellyfin & VLSub) - Bazarr+ Guides</title>
-  <meta name="description" content="Set up Bazarr+'s External Integration endpoint, install the Jellyfin plugin and VLSub Bazarr+ extension, and manage the API token.">
+  <title>Connect Jellyfin and VLSub to Bazarr+ subtitles</title>
+  <meta name="description" content="Point Jellyfin and VLSub clients at your Bazarr+ instance for subtitles. Endpoint setup and token management now live in the Distribution Hub.">
   <link rel="canonical" href="https://lavx.github.io/bazarr/guides/external-integration.html">
 
   <!-- Open Graph -->
   <meta property="og:type" content="website">
-  <meta property="og:title" content="External Integration (Jellyfin & VLSub) - Bazarr+ Guides">
-  <meta property="og:description" content="Set up Bazarr+'s External Integration endpoint, install the Jellyfin plugin and VLSub Bazarr+ extension, and manage the API token.">
+  <meta property="og:title" content="Connect Jellyfin and VLSub to Bazarr+ subtitles">
+  <meta property="og:description" content="Point Jellyfin and VLSub clients at your Bazarr+ instance for subtitles. Endpoint setup and token management now live in the Distribution Hub.">
   <meta property="og:url" content="https://lavx.github.io/bazarr/guides/external-integration.html">
   <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
   <meta property="og:image:width" content="1200">
@@ -21,17 +21,17 @@
 
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="External Integration (Jellyfin & VLSub) - Bazarr+ Guides">
-  <meta name="twitter:description" content="Set up Bazarr+'s External Integration endpoint, install the Jellyfin plugin and VLSub Bazarr+ extension, and manage the API token.">
+  <meta name="twitter:title" content="Connect Jellyfin and VLSub to Bazarr+ subtitles">
+  <meta name="twitter:description" content="Point Jellyfin and VLSub clients at your Bazarr+ instance for subtitles. Endpoint setup and token management now live in the Distribution Hub.">
   <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
 
   <!-- Geist font: self-hosted variable font -->
   <link rel="preload" href="../fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
 
-  <link rel="icon" href="../screenshots/logo128.png" type="image/png">
-  <meta name="theme-color" content="#1a1a2e">
+  <link rel="icon" href="../favicon.ico" sizes="any">
+  <meta name="theme-color" content="#121125">
   <link rel="apple-touch-icon" href="../apple-touch-icon.png">
-  <link rel="stylesheet" href="../css/style.css">
+  <link rel="stylesheet" href="../css/site.css">
 
   <script type="application/ld+json">
   {
@@ -81,31 +81,26 @@
 </head>
 <body>
 
-<a href="#main-content" class="skip-link">Skip to content</a>
+<a class="skip" href="#main-content">Skip to content</a>
 
-<!-- Grain overlay -->
-<svg class="grain" aria-hidden="true">
-  <filter id="grain-filter">
-    <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/>
-  </filter>
-  <rect width="100%" height="100%" filter="url(#grain-filter)"/>
-</svg>
-
-<!-- Ambient gradients -->
-<div class="ambient" aria-hidden="true"></div>
-
-<nav class="sticky-nav" aria-label="Site navigation">
+<header class="nav">
   <div class="container">
-    <img src="../screenshots/logo128.png" alt="Bazarr+" class="nav-logo" width="22" height="22">
-    <a href="../">Home</a>
-    <a href="../#comparison-heading">Compare</a>
-    <a href="../#quick-start">Install</a>
-    <a href="../#screenshots-heading">Screenshots</a>
-    <a href="../#faq-heading">FAQ</a>
-    <a href="./" class="nav-active">Guides</a>
-    <a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a>
+    <a class="wordmark" href="../" aria-label="Bazarr+"><img src="../screenshots/logo128.png" width="32" height="32" alt="" decoding="async"><span>Bazarr<b>+</b></span></a>
+    <nav aria-label="Primary">
+      <ul>
+        <li class="nav-inpage"><a href="../#what">What it does</a></li>
+        <li class="nav-deep"><a href="../#proof">Screenshots</a></li>
+        <li class="nav-inpage"><a href="../#compare">Compare</a></li>
+        <li><a href="../#start">Install</a></li>
+        <li class="nav-deep"><a href="../#faq">FAQ</a></li>
+        <li class="nav-deep"><a href="../#next">Roadmap</a></li>
+        <li class="nav-sep"><a href="./" aria-current="page">Guides</a></li>
+        <li class="nav-offsite"><a href="https://github.com/LavX/bazarr" rel="noopener">GitHub</a></li>
+        <li class="nav-offsite"><a href="https://discord.gg/fpp5JXmB8f" rel="noopener">Discord</a></li>
+      </ul>
+    </nav>
   </div>
-</nav>
+</header>
 
 <main id="main-content" class="guide-page">
   <div class="container">
@@ -113,6 +108,8 @@
       <a href="../">Home</a><span class="sep">/</span><a href="./">Guides</a><span class="sep">/</span><span>External Integration</span>
     </nav>
     <h1>External Integration (Jellyfin &amp; VLSub) <span class="badge-new" aria-label="New in v2.2">v2.2</span></h1>
+
+    <nav class="guide-rail" id="guide-rail" aria-label="On this page"></nav>
 
     <article class="content">
 
@@ -191,19 +188,19 @@
       <p>VLSub Bazarr+ is a single Lua extension file plus a small library tree. The provided installer scripts handle both native VLC installs and Flatpak/Snap setups across Linux, macOS, and Windows.</p>
 
       <h3 id="vlsub-linux-mac">Linux and macOS</h3>
-      <div class="code-wrap">
-        <div class="code-header">
+      <div class="code">
+        <div class="code-head">
           <span class="code-lang">Shell</span>
-          <button class="copy-btn" data-copy="curl -sSL https://raw.githubusercontent.com/LavX/vlsub-bazarr-plus/main/scripts/install.sh | bash" aria-label="Copy install command">Copy</button>
+          <button class="copy" data-copy="curl -sSL https://raw.githubusercontent.com/LavX/vlsub-bazarr-plus/main/scripts/install.sh | bash" aria-label="Copy install command">Copy</button>
         </div>
         <pre><code>curl -sSL https://raw.githubusercontent.com/LavX/vlsub-bazarr-plus/main/scripts/install.sh | bash</code></pre>
       </div>
 
       <h3 id="vlsub-windows">Windows</h3>
-      <div class="code-wrap">
-        <div class="code-header">
+      <div class="code">
+        <div class="code-head">
           <span class="code-lang">PowerShell</span>
-          <button class="copy-btn" data-copy="iwr -useb https://raw.githubusercontent.com/LavX/vlsub-bazarr-plus/main/scripts/install.ps1 | iex" aria-label="Copy install command">Copy</button>
+          <button class="copy" data-copy="iwr -useb https://raw.githubusercontent.com/LavX/vlsub-bazarr-plus/main/scripts/install.ps1 | iex" aria-label="Copy install command">Copy</button>
         </div>
         <pre><code>iwr -useb https://raw.githubusercontent.com/LavX/vlsub-bazarr-plus/main/scripts/install.ps1 | iex</code></pre>
       </div>
@@ -270,15 +267,21 @@
 <!-- Footer -->
 <footer>
   <div class="container">
-    <div class="footer-inner">
-      <p class="footer-credit">Built by <a href="https://github.com/LavX" target="_blank" rel="noopener">LavX</a>. Based on <a href="https://github.com/morpheus65535/bazarr" target="_blank" rel="noopener">Bazarr</a> by morpheus65535.</p>
-      <ul class="footer-links">
-        <li><a href="./">Guides</a></li>
-        <li><a href="https://github.com/LavX/bazarr" target="_blank" rel="noopener">GitHub</a></li>
-        <li><a href="https://github.com/LavX/bazarr/issues" target="_blank" rel="noopener">Issues</a></li>
-        <li><a href="https://github.com/LavX/bazarr/wiki" target="_blank" rel="noopener">Wiki</a></li>
-      </ul>
-    </div>
+    <p>Bazarr+ is a hard fork of <a class="inline" href="https://github.com/morpheus65535/bazarr" rel="noopener">Bazarr</a>, GPL-3, maintained by <a class="inline" href="https://github.com/LavX" rel="noopener">LavX</a>.</p>
+    <ul>
+      <li><a href="../">Home</a></li>
+      <li><a href="getting-started.html">Getting Started</a></li>
+      <li><a href="migration.html">Migration</a></li>
+      <li><a href="provider-hub.html">Provider Hub</a></li>
+      <li><a href="ai-translation.html">AI Translation</a></li>
+      <li><a href="bulk-operations.html">Bulk Operations</a></li>
+      <li><a href="external-integration.html">External Integration</a></li>
+      <li><a href="./">All guides</a></li>
+      <li><a href="https://github.com/LavX/bazarr/releases" rel="noopener">Releases</a></li>
+      <li><a href="https://github.com/LavX/bazarr/issues" rel="noopener">Issues</a></li>
+      <li><a href="https://github.com/LavX/bazarr/wiki" rel="noopener">Wiki</a></li>
+      <li><a href="https://discord.gg/fpp5JXmB8f" rel="noopener">Discord</a></li>
+    </ul>
   </div>
 </footer>
 

@@ -85,10 +85,12 @@ USER_VISIBLE_SECRETS = frozenset({
     "legendasnet.password",
     "pipocas.username",
     "pipocas.password",
-    "xsubs.username",
-    "xsubs.password",
     "deathbycaptcha.username",
     "deathbycaptcha.password",
+    # Anti-captcha vendors - bare API keys.
+    "anticaptcha.anti_captcha_key",
+    "captchaai.captchaai_key",
+    # Subtitle providers - full login pairs, continued.
     "napisy24.username",
     "napisy24.password",
     "titlovi.username",

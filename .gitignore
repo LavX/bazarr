@@ -40,3 +40,12 @@ docs/superpowers/
 
 # Git worktrees
 .worktrees/
+
+# Release hero renders and test-server captures. Local artefacts: the hero
+# pipeline regenerates them, and the captures can carry LAN detail.
+screenshot/release/
+
+# Third-party tooling clones and local agent config. These are working-copy
+# conveniences that must never become part of the published source.
+claude-remotion-skill/
+.github/hooks/

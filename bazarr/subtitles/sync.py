@@ -9,10 +9,80 @@ from app.jobs_queue import jobs_queue
 from subtitles.tools.subsyncer import SubSyncer
 from subtitles.tools.subsync_engines import (
     DEFAULT_ENABLED_ENGINES,
+    ENGINE_LABELS,
     OUTPUT_MODE_KEEP_ALL,
+    REASON_ENGINE_DECLINED,
+    REASON_ENGINE_FAILED,
+    REASON_FAILURE_THRESHOLD,
+    REASON_GENERATED_SOURCE,
+    REASON_MISSING_ENGINE,
+    REASON_OUTPUT_EXISTS,
+    REASON_RESULT_REJECTED,
     is_sync_engine_output,
     normalize_enabled_engines,
 )
+
+
+# How a per-engine outcome is phrased for the user. Every reason code the runner can
+# emit gets a sentence here: the point of the vocabulary is that "ALASS is not
+# installed" and "ALASS ran and rejected this file" are different problems and only
+# one of them is the user's to fix.
+_ENGINE_OUTCOME_SENTENCES = {
+    REASON_MISSING_ENGINE: "{label} is not installed.",
+    REASON_FAILURE_THRESHOLD: "{label} was skipped after repeated failures.",
+    REASON_OUTPUT_EXISTS: "{label} output already existed and was kept.",
+    # {message} carries whatever the engine measured, e.g. the quality of fit
+    # and the threshold it was judged against. Without it the card said only
+    # that the engine declined, which is the report this text exists to answer.
+    REASON_ENGINE_DECLINED: ("{label} rejected its own result as unreliable, which is normal "
+                             "when it cannot confidently align a file. {message}"),
+    REASON_RESULT_REJECTED: "{label} result rejected: {message}",
+    REASON_ENGINE_FAILED: "{label} failed: {message}",
+}
+_ENGINE_MESSAGE_LIMIT = 160
+
+
+def _short_engine_message(message, engine=None):
+    """Flatten an engine message to one bounded line the label can be prefixed to.
+
+    Two things get in the way. An engine failure message can be a whole captured
+    stderr, and this text lands in a job card in the notification drawer, so it has to
+    stay a sentence. And engines name themselves in their own messages, which reads as
+    a stutter once the sentence already starts with the engine label, so a leading
+    engine token is dropped.
+    """
+    text = " ".join(str(message or "").split())
+    if engine and text.lower().startswith(f"{engine.lower()} "):
+        text = text[len(engine) + 1:]
+    if not text:
+        return ""
+    if len(text) > _ENGINE_MESSAGE_LIMIT:
+        return f"{text[:_ENGINE_MESSAGE_LIMIT].rstrip()}..."
+    return text
+
+
+def _engine_outcome_sentence(engine_result):
+    if engine_result.reason == REASON_GENERATED_SOURCE:
+        return "A generated sync output cannot be synchronized again."
+
+    label = ENGINE_LABELS.get(engine_result.engine, engine_result.engine)
+    template = _ENGINE_OUTCOME_SENTENCES.get(engine_result.reason)
+    if not template:
+        return f"{label} produced no output."
+
+    message = _short_engine_message(engine_result.message, engine_result.engine)
+    # A template may carry an optional {message}: an engine that measured nothing
+    # would otherwise leave a dangling space or a stray fragment in the card.
+    sentence = " ".join(template.format(label=label, message=message).split())
+    return sentence if sentence.endswith((".", "...")) else f"{sentence}."
+
+
+def _engine_outcome_sentences(engine_results):
+    return [_engine_outcome_sentence(item) for item in engine_results]
+
+
+def _unsuccessful_results(sync_result):
+    return [item for item in sync_result.results if not item.success]
 
 
 def _sync_complete_job_name(srt_path, sync_result):
@@ -23,6 +93,12 @@ def _sync_complete_job_name(srt_path, sync_result):
         successes = sync_result.successful_results
         if sync_result.output_mode == OUTPUT_MODE_KEEP_ALL:
             count = len(successes)
+            # Keep-all asks every enabled engine, so the result list is the roll call.
+            # Naming both numbers is the whole point: "Generated 1 sync output" reads
+            # like a complete run when two of the three engines produced nothing.
+            attempted = len(sync_result.results)
+            if count < attempted:
+                return f"Generated {count} of {attempted} sync outputs for {srt_path}"
             noun = "output" if count == 1 else "outputs"
             return f"Generated {count} sync {noun} for {srt_path}"
         engine = successes[0].engine if successes else "sync engine"
@@ -32,6 +108,38 @@ def _sync_complete_job_name(srt_path, sync_result):
         return f"Skipped sync for {srt_path}"
 
     return f"Failed to sync {srt_path}"
+
+
+def _sync_outcome_message(sync_result):
+    """The progress line the notification drawer shows under the job name.
+
+    This is the only place a user sees why an engine produced nothing: the runner's own
+    account of it goes to System > Logs, which nobody opens after being told the job
+    succeeded.
+    """
+    if not sync_result:
+        return "Sync failed"
+
+    unsuccessful = _unsuccessful_results(sync_result)
+
+    if sync_result.success:
+        # Overwrite mode stops at the first success, so the engines behind it were
+        # never asked to run and a count would be meaningless. Only keep-all, which
+        # asks every engine, can report a partial outcome.
+        if not unsuccessful or sync_result.output_mode != OUTPUT_MODE_KEEP_ALL:
+            return "Sync complete"
+        produced = len(sync_result.successful_results)
+        attempted = len(sync_result.results)
+        head = f"Sync partially complete: {produced} of {attempted} engines produced output."
+        return " ".join([head] + _engine_outcome_sentences(unsuccessful))
+
+    if sync_result.skipped_results and not sync_result.failed_results:
+        head = "Sync skipped: no engine produced output."
+    else:
+        count = len(unsuccessful)
+        noun = "engine" if count == 1 else "engines"
+        head = f"Sync failed: no output from {count} {noun}."
+    return " ".join([head] + _engine_outcome_sentences(unsuccessful))
 
 
 def _sync_progress_total(enabled_engines):
@@ -80,7 +188,7 @@ def _index_keep_all_outputs(video_path, sonarr_series_id=None, sonarr_episode_id
         from utilities.media_ids import local_episode_id
         from utilities.path_mappings import path_mappings
 
-        store_subtitles(path_mappings.path_replace_reverse(video_path), video_path)
+        store_subtitles(path_mappings.path_replace_reverse_instance(video_path, arr_instance_id, 'episode'), video_path, arr_instance_id=arr_instance_id)
         if sonarr_series_id:
             event_stream(type='series', payload=sonarr_series_id)
         # Emit the LOCAL episode id (#156): the frontend caches episode detail by
@@ -93,7 +201,7 @@ def _index_keep_all_outputs(video_path, sonarr_series_id=None, sonarr_episode_id
         from subtitles.indexer.movies import store_subtitles_movie
         from utilities.path_mappings import path_mappings
 
-        store_subtitles_movie(path_mappings.path_replace_reverse_movie(video_path), video_path)
+        store_subtitles_movie(path_mappings.path_replace_reverse_instance(video_path, arr_instance_id, 'movie'), video_path, arr_instance_id=arr_instance_id)
         event_stream(type='movie', payload=radarr_id)
 
 
@@ -234,13 +342,8 @@ def sync_subtitles(video_path,
         else:
             return bool(sync_result and sync_result.success)
         finally:
-            if sync_result and sync_result.success:
-                progress_message = 'Sync complete'
-            elif sync_result and sync_result.skipped_results and not sync_result.failed_results:
-                progress_message = 'Sync skipped'
-            else:
-                progress_message = 'Sync failed'
-            report(progress_message, value='max', name=_sync_complete_job_name(srt_path, sync_result))
+            report(_sync_outcome_message(sync_result), value='max',
+                   name=_sync_complete_job_name(srt_path, sync_result))
             del subsync
             gc.collect()
 

@@ -28,7 +28,8 @@ from subtitles.processing import ProcessSubtitlesResult  # noqa: F401
 
 from .cache import subtitle_cache
 from .pool import update_pools, _get_pool
-from .utils import get_video, _get_lang_obj, _get_scores, _set_forced_providers
+from .utils import get_video, _get_lang_obj, _get_scores
+from .mismatch import clear_mismatch_for_video
 from .processing import process_subtitle
 
 
@@ -44,7 +45,6 @@ def manual_search(path, profile_id, providers, sceneName, title, media_type):
     also_forced = any([x.forced for x in language_set])
     forced_required = all([x.forced for x in language_set])
     normal = not also_forced and not forced_required and all([not x.hi for x in language_set])
-    _set_forced_providers(pool=pool, also_forced=also_forced, forced_required=forced_required)
 
     if providers:
         video = get_video(force_unicode(path), title, sceneName, providers=providers, media_type=media_type)
@@ -208,6 +208,8 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
                 return 'Error saving Subtitles file to disk'
             else:
                 if saved_subtitles:
+                    clear_mismatch_after_manual_save(video, media_type, saved_subtitles,
+                                                     arr_instance_id)
                     _, max_score, _ = _get_scores(media_type)
                     for saved_subtitle in saved_subtitles:
                         processed_subtitle = process_subtitle(subtitle=saved_subtitle, media_type=media_type,
@@ -284,7 +286,7 @@ def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode
             if not settings.general.dont_notify_manual_actions:
                 send_notifications(sonarr_series_id, sonarr_episode_id, result.message,
                                    arr_instance_id=arr_instance_id)
-            store_subtitles(result.path, episodePath)
+            store_subtitles(result.path, episodePath, arr_instance_id=arr_instance_id)
             return '', 204
     finally:
         jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Manually downloaded Subtitles for {title} - "
@@ -338,7 +340,7 @@ def movie_manually_download_specific_subtitle(radarr_id, hi, forced, use_origina
             history_log_movie(2, radarr_id, result, arr_instance_id=arr_instance_id)
             if not settings.general.dont_notify_manual_actions:
                 send_notifications_movie(radarr_id, result.message, arr_instance_id=arr_instance_id)
-            store_subtitles_movie(result.path, moviePath)
+            store_subtitles_movie(result.path, moviePath, arr_instance_id=arr_instance_id)
             return '', 204
     finally:
         jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Manually downloaded Subtitles for {title} "
@@ -370,3 +372,31 @@ def _get_language_obj(profile_id):
         language_set.add(lang_obj)
 
     return language_set, original_format
+
+
+def clear_mismatch_after_manual_save(video, media_type, saved_subtitles, arr_instance_id=None):
+    """Clear recorded mismatches for the languages a manual save actually wrote.
+
+    A language satisfied by hand is satisfied: clearing only on the automatic
+    download path would leave the badge up for a subtitle the user can see on
+    disk. storage_path is the evidence a file was written, since save_subtitles
+    returns a subtitle even when it wrote nothing.
+
+    Kept deliberately now that the indexer prunes as well. This clears the exact
+    language that was just written, at the moment it was written, and depends on
+    neither the profile state nor on list_missing_subtitles being reached. The
+    indexer prune is the safety net for every OTHER way a subtitle arrives, not
+    a replacement for this one, and on a badge the user is actively resolving
+    the overlap is worth its cost.
+    """
+    for saved in saved_subtitles or []:
+        storage_path = getattr(saved, 'storage_path', None)
+        # The file, not the attribute: save_subtitles assigns storage_path
+        # before it writes, so a subtitle whose content came back empty carries
+        # a path to a file that was never created.
+        if not storage_path or not os.path.isfile(storage_path):
+            continue
+        language = getattr(saved, 'language', None)
+        if language is None:
+            continue
+        clear_mismatch_for_video(video, media_type, language, arr_instance_id=arr_instance_id)

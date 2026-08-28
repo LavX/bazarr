@@ -1,9 +1,27 @@
 # -*- coding: utf-8 -*-
+# LEGACY PROVIDER. Do not fix subtitle providers here.
+#
+# Built-in providers are deprecated and will be removed after Bazarr+ v3.0.0.
+# Providers now ship as plugins in the Bazarr+ provider catalog and are
+# installed at runtime through the Provider Hub, so a fix reaches users as a
+# plugin release instead of waiting for a Bazarr+ release, and a broken
+# provider can no longer take the application down with it.
+#
+# Send provider fixes here instead:
+#   https://github.com/LavX/bazarr-provider-catalog
+#   docs/writing-a-scraper-provider.md in that repo explains how to port one.
+#
+# A pull request against this file will most likely be asked to move.
+
 import logging
 import io
 import os
 import re
 import zipfile
+import tempfile
+import subprocess
+import shutil
+import time
 from time import sleep
 from urllib.parse import quote
 from urllib.parse import parse_qs
@@ -29,6 +47,151 @@ from dogpile.cache.api import NO_VALUE
 
 logger = logging.getLogger(__name__)
 
+# Budget for a single CLI extractor invocation. These three limits are one
+# policy: the archives come from a third-party subtitle site, so their contents
+# are untrusted, and _extract_via_cli runs inside the download worker.
+#
+# Time bounds a hang. A malformed or password-protected archive can make
+# unar/7z/unrar sit waiting forever. Mirrors FILEBOT_XATTR_TIMEOUT in
+# subliminal_patch.refiners.filebot.
+#
+# Size and member count bound a fill, which the timeout does not: extraction
+# writes to disk, and a small response can expand enormously. A 76KB 7z reaching
+# 500MB, roughly 6800:1, is trivial to build, so a 1MB provider response can fill
+# several GB of the user's disk in seconds. A huge member count is the same
+# attack aimed at inodes instead of bytes.
+#
+# Headroom is deliberate, since a cap that trips on a genuine season pack would
+# be worse than no cap. The largest real archive in tests/subliminal_patch/data
+# is titlovi_some_subtitle_pack.zip: 588639 bytes across 24 members. 128MB is
+# roughly 230x that size and 2000 members roughly 80x that count, which leaves
+# room for packs far larger than anything this provider ships, VobSub .sub
+# members included.
+CLI_EXTRACT_TIMEOUT = 60
+CLI_EXTRACT_MAX_BYTES = 128 * 1024 * 1024
+CLI_EXTRACT_MAX_MEMBERS = 2000
+
+# How often the budget is checked while an extractor runs. Peak disk use is the
+# cap plus at most one interval of writing, so this trades a little polling
+# against the overshoot. Measured on a 1.2GB zip bomb (1028:1): the extractor is
+# killed at about 156MB against the 128MB cap, in well under a second.
+CLI_EXTRACT_POLL_SECONDS = 0.1
+
+
+def guess_matches_wanted_episode(video, guess):
+    """False when a guessed name contradicts the episode we are downloading for.
+
+    A missing season or episode in the guess is not a contradiction, only a
+    present-and-different one is. Every path that picks a member out of an
+    archive has to apply this, otherwise the caller silently gets a subtitle
+    for the wrong episode and the episode is marked done.
+    """
+    if not isinstance(video, Episode):
+        return True
+
+    episode = guess.get('episode')
+    if episode is not None:
+        candidates = episode if isinstance(episode, list) else [episode]
+        # Every episode the video carries, not just video.episode: that is the
+        # lowest of them, so a combined S01E01-E02 file would reject the
+        # subtitle for its own second episode.
+        wanted = set(getattr(video, 'episodes', None) or [])
+        if video.episode is not None:
+            wanted.add(video.episode)
+        # Anime archives number episodes absolutely while Sonarr stores the
+        # video as season-relative and carries the absolute number separately,
+        # so both spellings of the same episode have to be accepted.
+        absolute = getattr(video, 'absolute_episode', None)
+        if not wanted.intersection(candidates) and (absolute is None or absolute not in candidates):
+            return False
+
+    season = guess.get('season')
+    # The season is still checked after an absolute match: a name that states a
+    # season is claiming season-relative numbering, so Show.S01E14 is not the
+    # subtitle for S02E01 just because that episode's absolute number is 14.
+    if season is not None:
+        if isinstance(season, list):
+            if video.season not in season:
+                return False
+        elif season != video.season:
+            return False
+
+    return True
+
+
+def name_matches_wanted_episode(video, name):
+    """guess_matches_wanted_episode() for a member name that is not guessed yet."""
+    if not isinstance(video, Episode):
+        return True
+
+    return guess_matches_wanted_episode(video, guessit(name))
+
+
+def clean_release_line(text):
+    # Separate glued keywords like versãoThe or releaseThe
+    text = re.sub(r"(vers[aã]o|release|filme)([A-Z0-9])", r"\1 \2", text, flags=re.I)
+    # Strip common Portuguese subtitle upload prefixes
+    prefix_pattern = (
+        r"^(legendas?\s*(anteriormente\s*)?(enviadas?\s*(por|pelo|do)?\s*[\w\d_]+\s*)?"
+        r"|sincronizadas?|ressincronizadas?|sinc|sync|traduzidas?|ripadas?\s*(por\s*mim)?|ajustad[ao]s?|ajustei\s*(a\s*)?sincronia)?"
+        r"\s*(do\s*dvd\.?|de\s*raiz\s*)?(para\s*(a|o|as|os)?\s*)?(vers[aã]o|release[s]?|filme|nomes?)?\s*[:\-–]?\s*"
+    )
+    return re.sub(prefix_pattern, "", text, flags=re.I).strip().strip("*").strip("`").strip()
+
+
+def extract_release_info(title, year, desc):
+    default_name = f"{title} ({year})" if year and title else (title or "")
+    if not desc or desc.strip().lower() in (
+        "não há descrição disponível",
+        "nao ha descricao disponivel",
+        "n/a",
+        "none",
+        "",
+    ):
+        return default_name
+
+    lines = [line.strip().strip("*").strip("`") for line in desc.splitlines() if line.strip()]
+    candidates = []
+    release_re = re.compile(
+        r"(2160p|1080p|720p|480p|4k|bluray|blu-ray|bdrip|brrip|web-dl|webdl|web-rip|webrip|web|dvdrip|dvd|hdtv|x264|x265|hevc|h\.264|h\.265|xvid|divx|remastered|proper|internal|repack)",
+        re.I,
+    )
+    conversational_re = re.compile(
+        r"^(legenda[s]?|ripada[s]?|enviada[s]?|postada[s]?|corrigido[s]?|feita[s]?|fiz\s|peguei\s|são\s|sao\s|não\s|nao\s|avisem|cumps|enjoy|obrigado|duração|duracao)",
+        re.I,
+    )
+
+    for line in lines:
+        cleaned = clean_release_line(line)
+        if not cleaned:
+            continue
+        if release_re.search(cleaned):
+            match = re.search(
+                r"([\w\.\-_]+(?:2160p|1080p|720p|480p|4k|bluray|blu-ray|bdrip|brrip|web-dl|webdl|dvdrip|dvd|x264|x265|hevc|xvid|divx)[\w\.\-_]*)",
+                cleaned,
+                re.I,
+            )
+            if match and len(match.group(1)) > 10:
+                candidates.append(match.group(1).strip("."))
+            elif not conversational_re.search(cleaned) and len(cleaned) > 5:
+                candidates.append(cleaned)
+        elif title and title.lower() in cleaned.lower() and len(cleaned) > len(title) and not conversational_re.search(cleaned):
+            candidates.append(cleaned)
+
+    if candidates:
+        def candidate_quality(cand):
+            score = len(cand)
+            if title and title.lower() in cand.lower():
+                score += 100
+            if "." in cand or "-" in cand:
+                score += 50
+            return score
+
+        best = max(candidates, key=candidate_quality)
+        return best
+
+    return default_name
+
 
 class LegendasdivxSubtitle(Subtitle):
     """Legendasdivx Subtitle."""
@@ -39,15 +202,16 @@ class LegendasdivxSubtitle(Subtitle):
         self.page_link = data['link']
         self.hits = data['hits']
         self.exact_match = data['exact_match']
+        self.title = data.get('title', '')
+        self.year = data.get('year')
         self.description = data['description']
         self.video = video
         self.sub_frame_rate = data['frame_rate']
         self.uploader = data['uploader']
         self.wrong_fps = False
         self.skip_wrong_fps = skip_wrong_fps
-        self.release_info = self.description
+        self.release_info = data.get('release_info') or self.description
         self.matches = set()
-
     @property
     def id(self):
         try:
@@ -77,53 +241,57 @@ class LegendasdivxSubtitle(Subtitle):
 
         description = sanitize(self.description)
 
-        video_filename = video.name
-        video_filename = os.path.basename(video_filename)
-        video_filename, _ = os.path.splitext(video_filename)
-        video_filename = sanitize_release_group(video_filename)
+        # Match title
+        if video.title:
+            for movie_name in [video.title] + getattr(video, 'alternative_titles', []):
+                if sanitize(movie_name) == sanitize(self.title) or sanitize(movie_name) in description:
+                    self.matches.update(['title'])
 
-        if sanitize(video_filename) in description:
-            self.matches.update(['title'])
-            # relying people won' use just S01E01 for the file name
-            if isinstance(video, Episode):
-                self.matches.update(['series'])
-                self.matches.update(['season'])
-                self.matches.update(['episode'])
-
-        # can match both movies and series
-        if video.year and '{:04d}'.format(video.year) in description:
-            self.matches.update(['year'])
+        # Match year
+        if video.year:
+            if self.year and video.year == self.year:
+                self.matches.update(['year'])
+            elif '{:04d}'.format(video.year) in description:
+                self.matches.update(['year'])
 
         type_ = "movie" if isinstance(video, Movie) else "episode"
-        # match movie title (include alternative movie names)
-        if type_ == "movie":
-            if video.title:
-                for movie_name in [video.title] + video.alternative_titles:
-                    if sanitize(movie_name) in description:
-                        self.matches.update(['title'])
 
+        if isinstance(video, Movie):
+            # score.py expands a movie imdb_id match into title plus year, which
+            # is 100 of the 180 available points against a default
+            # minimum_score_movie of 126. The episode branch below can take that
+            # shortcut because query() passes series_imdb_id to the site's imdb=
+            # filter, so the backend guarantees the match. For movies query()
+            # sends imdbid='' and only puts the id in the free-text query, so
+            # there is no such guarantee: claim it only when this result
+            # actually carries the id.
+            if video.imdb_id and video.imdb_id.lower() in self.description.lower():
+                self.matches.update(['imdb_id'])
         else:
-            if video.title and sanitize(video.title) in description:
-                self.matches.update(['title'])
             if video.series:
-                for series_name in [video.series] + video.alternative_series:
-                    if sanitize(series_name) in description:
+                for series_name in [video.series] + getattr(video, 'alternative_series', []):
+                    if sanitize(series_name) == sanitize(self.title) or sanitize(series_name) in description:
                         self.matches.update(['series'])
+            if video.series_imdb_id:
+                self.matches.update(['series', 'series_imdb_id', 'season', 'episode'])
             if video.season and 's{:02d}'.format(video.season) in description:
                 self.matches.update(['season'])
             if video.episode and 'e{:02d}'.format(video.episode) in description:
                 self.matches.update(['episode'])
-            # All the search is already based on the series_imdb_id when present in the video and controlled via the
-            # the legendasdivx backend it, so if there is a result, it matches, either inside of a pack or a specific
-            # series and episode, so we can assume the season and episode matches.
-            if video.series_imdb_id:
-                self.matches.update(['series', 'series_imdb_id', 'season', 'episode'])
 
-        # release_group
-        if video.release_group and sanitize_release_group(video.release_group) in sanitize_release_group(description):
+        # release_group matching
+        if video.release_group and sanitize_release_group(video.release_group) in sanitize_release_group(self.description):
             self.matches.update(['release_group'])
 
-        self.matches |= guess_matches(video, guessit(description, {"type": type_}))
+        # Guess matches from release_info
+        if self.release_info:
+            self.matches |= guess_matches(video, guessit(self.release_info, {"type": type_}))
+
+        # Also guess matches across description candidate lines
+        for line in self.description.splitlines():
+            cleaned_line = clean_release_line(line)
+            if len(cleaned_line) > 5 and cleaned_line != self.release_info:
+                self.matches |= guess_matches(video, guessit(cleaned_line, {"type": type_}))
 
         return self.matches
 
@@ -180,7 +348,7 @@ class LegendasdivxProvider(Provider):
             res.raise_for_status()
             bsoup = ParserBeautifulSoup(res.content, ['lxml'])
 
-            _allinputs = bsoup.findAll('input')
+            _allinputs = bsoup.find_all('input')
             data = {}
             # necessary to set 'sid' for POST request
             for field in _allinputs:
@@ -193,17 +361,24 @@ class LegendasdivxProvider(Provider):
             res = self.session.post(self.loginpage, data)
             res.raise_for_status()
             # make sure we're logged in
-            logger.debug('Legendasdivx.pt :: Logged in successfully: PHPSESSID: %s',
-                         self.session.cookies.get_dict()['PHPSESSID'])
+            uid = self.session.cookies.get('phpbb3_2z8zs_u')
+            session_id = self.session.cookies.get('PHPSESSID') or self.session.cookies.get('phpbb3_2z8zs_sid')
+            if uid == '1' or not session_id:
+                logger.error("Legendasdivx.pt :: Couldn't get session ID, check your credentials")
+                raise AuthenticationError("Legendasdivx.pt :: Couldn't get session ID, check your credentials")
+
+            logger.debug('Legendasdivx.pt :: Logged in successfully: session: %s', session_id)
             cj = self.session.cookies.copy()
             store_cks = ("PHPSESSID", "phpbb3_2z8zs_sid", "phpbb3_2z8zs_k", "phpbb3_2z8zs_u", "lang")
-            for cn in iter(self.session.cookies.keys()):
+            for cn in list(self.session.cookies.keys()):
                 if cn not in store_cks:
                     del cj[cn]
             # store session cookies on cache
             logger.debug("Legendasdivx.pt :: Storing legendasdivx session cookies: %r", cj)
             region.set("legendasdivx_cookies2", cj)
 
+        except (AuthenticationError, ConfigurationError, IPAddressBlocked, TooManyRequests):
+            raise
         except KeyError:
             logger.error("Legendasdivx.pt :: Couldn't get session ID, check your credentials")
             raise AuthenticationError("Legendasdivx.pt :: Couldn't get session ID, check your credentials")
@@ -220,17 +395,16 @@ class LegendasdivxProvider(Provider):
         except Exception as e:
             logger.error("LegendasDivx.pt :: Uncaught error: %r", e)
             raise ServiceUnavailable("LegendasDivx.pt :: Uncaught error: %r", e)
-
     def _process_page(self, video, bsoup):
 
         subtitles = []
 
-        _allsubs = bsoup.findAll("div", {"class": "sub_box"})
+        _allsubs = bsoup.find_all("div", {"class": "sub_box"})
 
         for _subbox in _allsubs:
 
             hits = 0
-            for th in _subbox.findAll("th"):
+            for th in _subbox.find_all("th"):
                 if th.text == 'Hits:':
                     hits = int(th.find_next("td").text)
                 if th.text == 'Idioma:':
@@ -259,9 +433,24 @@ class LegendasdivxProvider(Provider):
                 logger.debug("Legendasdivx.pt :: Couldn't find download link. Trying next...")
                 continue
 
-            # get subtitle uploader
+            # get title and year from sub_header
+            title = ''
+            year = None
             sub_header = _subbox.find("div", {"class": "sub_header"})
-            uploader = sub_header.find("a").text if sub_header else 'anonymous'
+            if sub_header:
+                title_elem = sub_header.find("b")
+                if title_elem:
+                    title = title_elem.get_text().strip()
+                header_text = sub_header.get_text()
+                year_match = re.search(r'\((\d{4})\)', header_text)
+                if year_match:
+                    try:
+                        year = int(year_match.group(1))
+                    except ValueError:
+                        pass
+
+            uploader = sub_header.find("a").text if sub_header and sub_header.find("a") else 'anonymous'
+            release_info = extract_release_info(title, year, description)
 
             exact_match = False
             if video.name.lower() in description.lower():
@@ -272,6 +461,9 @@ class LegendasdivxProvider(Provider):
                     'hits': hits,
                     'uploader': uploader,
                     'frame_rate': frame_rate,
+                    'title': title,
+                    'year': year,
+                    'release_info': release_info,
                     'description': description
                     }
             subtitles.append(
@@ -393,6 +585,8 @@ class LegendasdivxProvider(Provider):
                             else:
                                 if searches_count >= self.SAFE_SEARCH_LIMIT:
                                     searchLimitReached = True
+            except (AuthenticationError, ConfigurationError, IPAddressBlocked, TooManyRequests, SearchLimitReached):
+                raise
             except HTTPError as e:
                 if "bloqueado" in res.text.lower():
                     logger.error("LegendasDivx.pt :: Your IP is blocked on this server.")
@@ -449,6 +643,8 @@ class LegendasdivxProvider(Provider):
             sleep(1)
             res = self.session.get(subtitle.page_link)
             res.raise_for_status()
+        except (AuthenticationError, ConfigurationError, IPAddressBlocked, TooManyRequests, DownloadLimitExceeded):
+            raise
         except HTTPError as e:
             if "bloqueado" in res.text.lower():
                 logger.error("LegendasDivx.pt :: Your IP is blocked on this server.")
@@ -465,13 +661,15 @@ class LegendasdivxProvider(Provider):
             raise DownloadLimitExceeded("Legendasdivx.pt :: Daily download limit reached!")
 
         archive = self._get_archive(res.content)
-        # extract the subtitle
         if archive:
-            subtitle_content = self._get_subtitle_from_archive(archive, subtitle)
-            if subtitle_content:
-                subtitle.content = fix_line_ending(subtitle_content)
-                subtitle.normalize()
-                return subtitle
+            subtitle_content = self._get_subtitle_from_archive(archive, res.content, subtitle)
+        else:
+            subtitle_content = self._extract_via_cli(res.content, video=subtitle.video)
+
+        if subtitle_content:
+            subtitle.content = fix_line_ending(subtitle_content)
+            subtitle.normalize()
+            return subtitle
         return
 
     def _get_archive(self, content):
@@ -488,48 +686,286 @@ class LegendasdivxProvider(Provider):
             return None
         return archive
 
-    def _get_subtitle_from_archive(self, archive, subtitle):
+    def _read_from_archive(self, archive, content, target_name, video=None):
+        try:
+            return archive.read(target_name)
+        except Exception as e:
+            logger.warning("Legendasdivx.pt :: Direct archive.read failed (%s), attempting CLI extraction fallback", e)
+            return self._extract_via_cli(content, target_name, video=video)
+
+    @staticmethod
+    def _extracted_usage(outdir):
+        """(bytes, member count) written below outdir so far.
+
+        Directories count as members: an archive of nothing but empty
+        directories writes no bytes and no files, so a files-only count would
+        sit at zero while the extractor spends one inode per member until the
+        timeout.
+
+        scandir rather than os.walk, and counted entry by entry: os.walk builds
+        the whole list of names in a directory before it yields anything, so a
+        directory with millions of entries would be enumerated in full before
+        any budget could be consulted, with the extractor still running and the
+        deadline unreachable. scandir hands entries back as it reads them, so
+        the scan stops within the directory that blew the budget.
+
+        Sizes come from the entry itself without following symlinks: a symlink
+        member must not be charged the size of whatever it points at, and
+        _is_safe_extracted_file drops those anyway.
+        """
+        total_bytes = 0
+        members = 0
+        pending = [outdir]
+
+        while pending:
+            current = pending.pop()
+            try:
+                with os.scandir(current) as entries:
+                    for entry in entries:
+                        members += 1
+                        if members > CLI_EXTRACT_MAX_MEMBERS:
+                            return total_bytes, members
+
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                pending.append(entry.path)
+                                continue
+                            total_bytes += entry.stat(follow_symlinks=False).st_size
+                        except OSError:
+                            continue
+
+                        if total_bytes > CLI_EXTRACT_MAX_BYTES:
+                            return total_bytes, members
+            except OSError:
+                continue
+
+        return total_bytes, members
+
+    def _over_extraction_budget(self, outdir, tool):
+        used_bytes, members = self._extracted_usage(outdir)
+        if used_bytes > CLI_EXTRACT_MAX_BYTES or members > CLI_EXTRACT_MAX_MEMBERS:
+            logger.warning("Legendasdivx.pt :: %s blew the extraction budget "
+                           "(%s bytes against a %s limit, %s members against %s), abandoning it",
+                           tool, used_bytes, CLI_EXTRACT_MAX_BYTES, members, CLI_EXTRACT_MAX_MEMBERS)
+            return True
+
+        return False
+
+    def _run_extractor(self, tool, cmd, outdir):
+        """Run one extractor under the time, size and member budget.
+
+        True only when it exited successfully inside the budget. Never raises: a
+        hang, a blown budget or a failure to start is just this extractor not
+        working out, and the caller moves on to the next one.
+        """
+        try:
+            # stdin is closed so an extractor that prompts, which is what an
+            # encrypted archive triggers, cannot block on an inherited terminal.
+            # Output is discarded rather than piped: nothing reads it, and an
+            # unread pipe would deadlock a long extraction once its buffer fills.
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as err:
+            logger.warning("Legendasdivx.pt :: could not run %s: %s", tool, err)
+            return False
+
+        deadline = time.monotonic() + CLI_EXTRACT_TIMEOUT
+        returncode = None
+        try:
+            while True:
+                try:
+                    returncode = proc.wait(timeout=CLI_EXTRACT_POLL_SECONDS)
+                except subprocess.TimeoutExpired:
+                    pass
+                else:
+                    break
+
+                if time.monotonic() >= deadline:
+                    logger.warning("Legendasdivx.pt :: %s timed out after %ss extracting archive, "
+                                   "trying next extractor", tool, CLI_EXTRACT_TIMEOUT)
+                    return False
+
+                if self._over_extraction_budget(outdir, tool):
+                    return False
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+
+        if returncode != 0:
+            return False
+
+        # a fast extractor can blow the budget between two polls
+        return not self._over_extraction_budget(outdir, tool)
+
+    @staticmethod
+    def _is_safe_extracted_file(full_path, safe_root):
+        """Reject anything that is not a regular file inside the temp directory.
+
+        unar restores symlink members verbatim, absolute targets included, so an
+        archive can ship a link named like a subtitle and have the extractor
+        point it at any file the process can read. os.walk() does not descend
+        into symlinked directories, but a symlinked file still shows up in
+        files, and opening it reads the link target.
+        """
+        if os.path.islink(full_path):
+            logger.warning("Legendasdivx.pt :: Skipping symlink member in archive: %s", full_path)
+            return False
+
+        real_path = os.path.realpath(full_path)
+        if real_path != safe_root and not real_path.startswith(safe_root + os.sep):
+            logger.warning("Legendasdivx.pt :: Skipping archive member escaping the temp directory: %s", full_path)
+            return False
+
+        if not os.path.isfile(real_path):
+            logger.warning("Legendasdivx.pt :: Skipping non-regular archive member: %s", full_path)
+            return False
+
+        return True
+
+    def _extract_via_cli(self, content, target_name=None, video=None):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            tmparc = os.path.join(tmpdir, "archive.rar")
+            with open(tmparc, "wb") as f:
+                f.write(content)
+
+            # Extract into a directory of its own, beside the archive rather than
+            # around it. Each extractor then gets a clean tree and its own budget,
+            # instead of inheriting whatever a previous attempt left behind when
+            # it timed out or overran.
+            outdir = os.path.join(tmpdir, "extracted")
+
+            extracted = False
+            for tool, cmd in [
+                ("unar", ["unar", "-o", outdir, "-f", tmparc]),
+                ("7z", ["7z", "x", "-y", f"-o{outdir}", tmparc]),
+                ("unrar", ["unrar", "x", "-y", tmparc, outdir]),
+            ]:
+                if not shutil.which(tool):
+                    continue
+
+                os.makedirs(outdir, exist_ok=True)
+                if self._run_extractor(tool, cmd, outdir):
+                    extracted = True
+                    break
+
+                shutil.rmtree(outdir, ignore_errors=True)
+
+            if extracted:
+                _tmp = list(SUBTITLE_EXTENSIONS)
+                if ".txt" in _tmp:
+                    _tmp.remove(".txt")
+                _subtitle_extensions = tuple(_tmp)
+
+                target_base = os.path.split(target_name)[-1].lower() if target_name else None
+                safe_root = os.path.realpath(outdir)
+                found_files = []
+                for root, _, files in os.walk(outdir):
+                    for f in files:
+                        if not f.lower().endswith(_subtitle_extensions):
+                            continue
+
+                        full_path = os.path.join(root, f)
+                        if not self._is_safe_extracted_file(full_path, safe_root):
+                            continue
+
+                        if target_base and f.lower() == target_base:
+                            with open(full_path, "rb") as sf:
+                                return sf.read()
+                        found_files.append(full_path)
+
+                if target_base:
+                    # The caller named the member the scoring loop chose. Handing
+                    # back a different one is how a subtitle for the wrong episode
+                    # ends up in the library, marked done, with no error anywhere.
+                    logger.error("Legendasdivx.pt :: %s not found in the extracted archive", target_name)
+                    return None
+
+                # No specific member was asked for, so drop anything the wanted
+                # episode contradicts before falling back to the first one. The
+                # member's path inside the archive is what gets matched, not its
+                # basename: some packs put the episode in the directory and call
+                # every file the same thing, and matching the basename alone
+                # would accept every one of them.
+                found_files = [f for f in found_files
+                               if name_matches_wanted_episode(video, os.path.relpath(f, outdir))]
+
+                # Sorted, because os.walk yields whatever order the filesystem
+                # hands back and "the first one" has to mean something stable.
+                for candidate in sorted(found_files):
+                    with open(candidate, "rb") as sf:
+                        return sf.read()
+
+                logger.error("Legendasdivx.pt :: No usable subtitle in the extracted archive")
+        except Exception as err:
+            logger.error("Legendasdivx.pt :: CLI extraction fallback failed: %s", err)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        return None
+
+    def _get_subtitle_from_archive(self, archive, content, subtitle):
         # some files have a non subtitle with .txt extension
         _tmp = list(SUBTITLE_EXTENSIONS)
-        _tmp.remove('.txt')
+        if '.txt' in _tmp:
+            _tmp.remove('.txt')
         _subtitle_extensions = tuple(_tmp)
-        _max_score = 0
+        _max_score = -1
+        _max_name = None
         _scores = get_scores(subtitle.video)
 
+        candidate_files = []
         for name in archive.namelist():
-            # discard hidden files
-            if os.path.split(name)[-1].startswith('.'):
+            # discard hidden files and directories
+            if os.path.split(name)[-1].startswith('.') or name.endswith('/'):
                 continue
 
             # discard non-subtitle files
             if not name.lower().endswith(_subtitle_extensions):
                 continue
 
-            _guess = guessit(name)
-            if isinstance(subtitle.video, Episode):
-                if all(key in _guess for key in ('season', 'episode')):
-                    logger.debug("Legendasdivx.pt :: guessing %s", name)
-                    logger.debug("Legendasdivx.pt :: subtitle S%sE%s video S%sE%s", _guess['season'], _guess['episode'],
-                                 subtitle.video.season, subtitle.video.episode)
+            candidate_files.append(name)
 
-                    if subtitle.video.episode != _guess['episode'] or subtitle.video.season != _guess['season']:
-                        logger.debug('Legendasdivx.pt :: subtitle does not match video, skipping')
-                        continue
-                else:
-                    logger.debug('Legendasdivx.pt :: no "season" and/or "episode" on "_guess" , skipping')
-                    continue
+        if not candidate_files:
+            logger.error("Legendasdivx.pt :: No subtitle file found in archive")
+            return self._extract_via_cli(content, video=subtitle.video)
+
+        # If archive contains only 1 subtitle file, return it directly, but only
+        # once it has passed the same episode check the scoring loop applies.
+        # This is the common shape for this provider, one subtitle per upload,
+        # so skipping the check here misfiles far more often than the pack path.
+        if len(candidate_files) == 1:
+            if not name_matches_wanted_episode(subtitle.video, candidate_files[0]):
+                logger.error("Legendasdivx.pt :: Only subtitle in archive (%s) is not the wanted episode",
+                             candidate_files[0])
+                return None
+            logger.debug("Legendasdivx.pt :: Only 1 subtitle in archive, returning: %s", candidate_files[0])
+            return self._read_from_archive(archive, content, candidate_files[0], video=subtitle.video)
+
+        for name in candidate_files:
+            _guess = guessit(name)
+            if not guess_matches_wanted_episode(subtitle.video, _guess):
+                continue
+
             matches = set()
             matches |= guess_matches(subtitle.video, _guess)
-            logger.debug('Legendasdivx.pt :: sub matches: %s', matches)
             _score = sum((_scores.get(match, 0) for match in matches))
+            if isinstance(subtitle.video, Episode) and _guess.get('episode') == subtitle.video.episode:
+                _score += 10
+
             if _score > _max_score:
                 _max_name = name
                 _max_score = _score
-                logger.debug("Legendasdivx.pt :: new max: %s %s", name, _score)
+                logger.debug("Legendasdivx.pt :: candidate %s scored %s", name, _score)
 
-        if _max_score > 0:
-            logger.debug("Legendasdivx.pt :: returning from archive: %s scored %s", _max_name, _max_score)
-            return archive.read(_max_name)
+        if _max_name:
+            logger.debug("Legendasdivx.pt :: returning from archive: %s (score %s)", _max_name, _max_score)
+            return self._read_from_archive(archive, content, _max_name, video=subtitle.video)
 
-        logger.error("Legendasdivx.pt :: No subtitle found on compressed file. Max score was 0")
+        # Every candidate was rejected by the episode check. Returning
+        # candidate_files[0] here hands back a subtitle for a different episode,
+        # which is written to the library and marks the episode done with no
+        # error anywhere. Nothing usable means nothing, same as the base did.
+        logger.error("Legendasdivx.pt :: No subtitle in archive matches the wanted episode")
         return None

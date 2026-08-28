@@ -1,5 +1,6 @@
 # coding=utf-8
 
+import math
 import os
 import json
 import datetime
@@ -19,6 +20,7 @@ from subliminal_patch.exceptions import (TooManyRequests, APIThrottled, ParseRes
 from subliminal.exceptions import DownloadLimitExceeded, ServiceUnavailable, AuthenticationError, ConfigurationError
 from subliminal import region as subliminal_cache_region
 from subliminal_patch.extensions import provider_registry
+from subliminal_patch.score import ComputeScore
 
 from app.get_args import args
 from app.config import settings
@@ -147,9 +149,22 @@ def provider_throttle_map():
 
 
 PROVIDERS_FORCED_OFF = ["addic7ed", "tvsubtitles", "legendasdivx", "napiprojekt", "shooter",
-                        "hosszupuska", "supersubtitles", "titlovi", "assrt"]
+                        "supersubtitles", "titlovi", "assrt"]
 
 throttle_count = {}
+
+
+def provider_is_usable(name):
+    """Adoption gate for the provider pools (see SZProviderPool.__getitem__):
+    True only when the provider is enabled in settings and not currently
+    throttled, so a download naming a provider from a stale cached search
+    cannot resurrect one the user disabled or the backoff excluded."""
+    if name not in settings.general.enabled_providers:
+        return False
+    reason, until, _ = tp.get(name, (None, None, None))
+    if reason and until and datetime.datetime.now() < until:
+        return False
+    return True
 
 
 def provider_pool():
@@ -305,6 +320,35 @@ def get_provider_priority(provider_name):
     return priorities.get(provider_name, priorities.get('default', 100))
 
 
+def get_provider_score_modifier(provider_name):
+    """The signed percentage to add to this provider's candidate scores.
+
+    Read fresh on every scoring call rather than cached, so editing the setting
+    takes effect on the next search without a restart. The value comes back
+    from the browser as JSON, so anything that is not a number is treated as no
+    modifier at all instead of taking the search down.
+    """
+    modifiers = settings.general.provider_score_modifiers or {}
+    value = modifiers.get(provider_name, 0)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    # NaN and the infinities pass the type check and then raise inside round().
+    if not math.isfinite(value):
+        return 0
+    # The scale only goes to a hundred, and a finite value large enough to
+    # overflow the multiplication would raise rather than degrade.
+    return max(-100, min(100, value))
+
+
+# Install the reader on the scorer class, not on the shared instance. Every
+# native search path -- automatic download, the priority-ordered listing's
+# early-exit, manual search -- goes through the shared one, but the compat
+# endpoint builds its own ComputeScore to project scores for external clients,
+# and that surface has to agree with the rest. staticmethod keeps it a plain
+# function rather than binding self over the provider name.
+ComputeScore.modifier = staticmethod(get_provider_score_modifier)
+
+
 _FFPROBE_BINARY = get_binary("ffprobe")
 _FFMPEG_BINARY = get_binary("ffmpeg")
 
@@ -348,11 +392,6 @@ def get_providers_auth():
                              },
         'napiprojekt': {'only_authors': settings.napiprojekt.only_authors,
                         'only_real_names': settings.napiprojekt.only_real_names},
-        'podnapisi': {
-            'only_foreign': False,  # fixme
-            'also_foreign': False,  # fixme
-            'verify_ssl': settings.podnapisi.verify_ssl
-        },
         'legendasdivx': {
             'username': settings.legendasdivx.username,
             'password': settings.legendasdivx.password,
@@ -365,10 +404,6 @@ def get_providers_auth():
         'pipocas': {
             'username': settings.pipocas.username,
             'password': settings.pipocas.password,
-        },
-        'xsubs': {
-            'username': settings.xsubs.username,
-            'password': settings.xsubs.password,
         },
         'assrt': {
             'token': settings.assrt.token,

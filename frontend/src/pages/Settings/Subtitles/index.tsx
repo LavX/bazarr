@@ -273,6 +273,23 @@ const SettingsSubtitlesView: FunctionComponent = () => {
           </CollapseBox>
         </CollapseBox>
       </Section>
+      <Section header="Release Type Mismatch">
+        <Check
+          label="Notify About Release Type Mismatches"
+          settingKey="settings-general-detect_release_type_mismatch"
+        ></Check>
+        <Message>
+          For smaller subtitle communities an episode or movie is often only
+          ever synchronised to one release type, so a search for the release you
+          have comes back empty even though a good subtitle exists for another
+          one. When that happens, Bazarr sends a notification and flags the item
+          in the Wanted list. It only looks at the candidates the search already
+          found, so it never queries a provider of its own, and it reports a
+          given item once instead of on every scheduled pass. Nothing is
+          blocklisted and nothing is re-downloaded automatically. Disabled by
+          default.
+        </Message>
+      </Section>
       <Section header="Upgrading Subtitles">
         <Check
           label="Upgrade Previously Downloaded Subtitles"
@@ -600,7 +617,12 @@ const SettingsSubtitlesView: FunctionComponent = () => {
               defaultValue={60}
             ></Selector>
             <Message>
-              The max allowed offset seconds for any subtitle segment.
+              Acceptance threshold: a synchronization that has to shift the
+              subtitles further than this is rejected, and the next enabled
+              engine is tried with the original subtitles. Engines search
+              without a limit, so the offset checked here is the one they
+              actually settled on. Only FFsubsync reports an offset, so the
+              threshold applies to FFsubsync.
             </Message>
             <Check
               label="Generate Debug File Instead of Synchronizing"

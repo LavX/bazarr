@@ -340,3 +340,168 @@ def test_embedded_subs_reader_disposition_forced_preserved(video_file):
     ):
         result = video_analyzer.embedded_subs_reader(video_file, 1e6)
         assert ["eng", True, False, "SubRip"] in result
+
+
+# A real-shaped languages table, patched over the DB-backed module global so the
+# REAL language_from_alpha3 / alpha3_from_alpha3b / alpha3_from_alpha2 lookups
+# run in these tests; a hand-written fake of their matching rules is exactly how
+# a prefix-acceptance bug stays invisible.
+_LANGUAGES_TABLE = [
+    {"code3": "eng", "code3b": None, "code2": "en", "name": "English", "enabled": 1},
+    {"code3": "por", "code3b": None, "code2": "pt", "name": "Portuguese", "enabled": 1},
+    {"code3": "deu", "code3b": "ger", "code2": "de", "name": "German", "enabled": 1},
+    {"code3": "spa", "code3b": None, "code2": "es", "name": "Spanish", "enabled": 1},
+]
+
+
+@pytest.fixture
+def real_languages_table(monkeypatch):
+    import languages.get_languages as get_languages
+
+    monkeypatch.setattr(get_languages, "languages_dict", _LANGUAGES_TABLE, raising=False)
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (Language("eng"), "eng"),   # normal knowit value keeps working
+        (Language("und"), "und"),   # knowit's fallback object
+        ("eng", "eng"),             # bare valid alpha3 string is accepted
+        ("ger", "deu"),             # bibliographic code normalizes to terminological
+        (" GER ", "deu"),           # case and padding from a replayed cache
+        ("und", "und"),             # string und resolves like the object does
+        ("english", None),          # full names are not codes
+        ("eng-US", None),           # IETF-ish tags are not codes
+        ("banana", None),           # junk is rejected
+        ("", None),
+        (None, None),
+    ],
+)
+def test_alpha3_from_language_value(real_languages_table, value, expected):
+    assert video_analyzer.alpha3_from_language_value(value) == expected
+
+
+def test_embedded_audio_reader_accepts_alpha3_string(real_languages_table, video_file):
+    """ffprobe/knowit sometimes yield a bare string language; a valid alpha3
+    code must resolve instead of dropping the track."""
+    from unittest.mock import patch
+
+    data = {"subtitle": [], "audio": [{"language": "eng", "format": "AAC"}]}
+    with patch(
+        "utilities.video_analyzer.parse_video_metadata",
+        return_value={"mediainfo": data},
+    ):
+        result = video_analyzer.embedded_audio_reader(video_file, 1e6)
+        assert result == ["English"]
+
+
+def test_embedded_audio_reader_normalizes_bibliographic_string(real_languages_table, video_file):
+    """A bibliographic tag (ger) must resolve to the same language a
+    Language object would have produced (deu -> German)."""
+    from unittest.mock import patch
+
+    data = {"subtitle": [], "audio": [{"language": "ger", "format": "AC-3"}]}
+    with patch(
+        "utilities.video_analyzer.parse_video_metadata",
+        return_value={"mediainfo": data},
+    ):
+        result = video_analyzer.embedded_audio_reader(video_file, 1e6)
+        assert result == ["German"]
+
+
+@pytest.mark.parametrize("bad_value", ["banana", "english", "eng-US"])
+def test_embedded_audio_reader_drops_invalid_string(real_languages_table, video_file, bad_value):
+    """A string that is not exactly a known three-letter code still drops
+    the track; prefix matches like 'english' must not slip through."""
+    from unittest.mock import patch
+
+    data = {"subtitle": [], "audio": [{"language": bad_value, "format": "AAC"}]}
+    with patch(
+        "utilities.video_analyzer.parse_video_metadata",
+        return_value={"mediainfo": data},
+    ):
+        result = video_analyzer.embedded_audio_reader(video_file, 1e6)
+        assert result == []
+
+
+def test_embedded_audio_reader_custom_language_string_no_crash(real_languages_table, video_file):
+    """A string code that maps onto a CustomLanguage (por) must not crash in
+    language_found, which expects a Language object."""
+    from unittest.mock import patch
+
+    data = {"subtitle": [], "audio": [{"language": "por", "format": "AAC"}]}
+    with patch(
+        "utilities.video_analyzer.parse_video_metadata",
+        return_value={"mediainfo": data},
+    ):
+        result = video_analyzer.embedded_audio_reader(video_file, 1e6)
+        assert result == ["Portuguese"]
+
+
+def test_embedded_subs_reader_accepts_alpha3_string(real_languages_table, video_file):
+    """A subtitle track whose language arrives as a bare valid alpha3 string
+    is indexed instead of raising AttributeError in _handle_alpha3."""
+    from unittest.mock import patch
+
+    data = {
+        "subtitle": [
+            {"language": "eng", "format": "SubRip", "forced": False,
+             "hearing_impaired": False, "name": ""},
+        ],
+        "audio": [],
+    }
+    with patch(
+        "utilities.video_analyzer.parse_video_metadata",
+        return_value={"mediainfo": data},
+    ), patch(
+        "utilities.video_analyzer.alpha3_from_alpha2", return_value=None
+    ):
+        result = video_analyzer.embedded_subs_reader(video_file, 1e6)
+        assert ["eng", False, False, "SubRip"] in result
+
+
+def test_embedded_subs_reader_invalid_string_ignored(real_languages_table, video_file):
+    """An unusable string language with no undefined-language default set
+    means the track is ignored, not a crash."""
+    from unittest.mock import patch
+
+    data = {
+        "subtitle": [
+            {"language": "banana", "format": "SubRip", "forced": False,
+             "hearing_impaired": False, "name": ""},
+        ],
+        "audio": [],
+    }
+    with patch(
+        "utilities.video_analyzer.parse_video_metadata",
+        return_value={"mediainfo": data},
+    ), patch(
+        "utilities.video_analyzer.alpha3_from_alpha2", return_value=None
+    ):
+        result = video_analyzer.embedded_subs_reader(video_file, 1e6)
+        assert result == []
+
+
+def test_embedded_subs_reader_unusable_string_not_claimed_by_und_default(real_languages_table, video_file):
+    """A garbage language tag must NOT be absorbed by the undefined-language
+    default: that default is for tracks with no tag at all. A track without a
+    tag still takes it."""
+    from unittest.mock import patch
+
+    data = {
+        "subtitle": [
+            {"language": "banana", "format": "SubRip", "forced": False,
+             "hearing_impaired": False, "name": ""},
+            {"format": "SubRip", "forced": False,
+             "hearing_impaired": False, "name": ""},
+        ],
+        "audio": [],
+    }
+    with patch(
+        "utilities.video_analyzer.parse_video_metadata",
+        return_value={"mediainfo": data},
+    ), patch(
+        "utilities.video_analyzer.alpha3_from_alpha2", return_value="spa"
+    ):
+        result = video_analyzer.embedded_subs_reader(video_file, 1e6)
+        assert result == [["spa", False, False, "SubRip"]]

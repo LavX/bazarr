@@ -13,9 +13,25 @@ on:
       - bazarr.py
       - requirements.txt
       - dev-requirements.txt
+      - Dockerfile
       - .github/workflows/ci.yml
+  # No branches filter on purpose. A stacked pull request, one whose base is
+  # another feature branch rather than development, got no CI at all under
+  # `branches: [master, development]`: GitHub simply did not trigger, and the
+  # pull request sat green-looking with zero checks.
+  #
+  # What that costs is a run per opened / synchronize / reopened event on every
+  # pull request against any base, not one run per stacked branch: pushing ten
+  # times to each branch of a three-deep stack is thirty runs, and each one is a
+  # three-way Python matrix plus a Postgres service. The concurrency group below
+  # is what keeps it bounded, cancelling a pull request's superseded runs as soon
+  # as the next push lands. Pushes to master and development are deliberately not
+  # cancelled: those runs are the record of what the branch does.
   pull_request:
-    branches: [master, development]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -43,7 +59,7 @@ jobs:
           restore-keys: ${{ runner.os }}-modules-
 
       - name: Setup NodeJS
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version-file: "${{ env.UI_DIRECTORY }}/.nvmrc"
 
@@ -95,7 +111,8 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_PASSWORD: postgres
+          # Throwaway password for the ephemeral CI service container.
+          POSTGRES_PASSWORD: postgres  # pragma: allowlist secret
           POSTGRES_DB: bazarr_test
         ports:
           - 5432:5432
@@ -110,7 +127,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -120,10 +137,13 @@ jobs:
           name: ${{ env.UI_ARTIFACT_NAME }}
           path: "${{ env.UI_DIRECTORY }}/build"
 
-      - name: Install ffmpeg
-        # test_embeddedsubtitles uses real .mkv fixtures that require ffprobe to
-        # extract stream metadata. Ubuntu runners ship without it.
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Install ffmpeg and a RAR extractor
+        # ffmpeg: test_embeddedsubtitles uses real .mkv fixtures that require
+        # ffprobe to extract stream metadata, and Ubuntu runners ship without it.
+        # unar: the RAR fixtures cannot be read without it. 7z is present on the
+        # runner and recognises RAR as a format, but carries no RAR
+        # decompression codec, which is the same trap the image once shipped.
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ffmpeg unar
 
       - name: Install Python dependencies
         run: |
@@ -147,18 +167,28 @@ jobs:
         run: |
           pytest \
             tests/bazarr/test_pretty_date.py \
+            tests/bazarr/test_connection_tester.py \
+            tests/bazarr/test_database_sqlite_maintenance.py \
+            tests/bazarr/test_gestdown_release_matching.py \
             tests/bazarr/test_dependency_loading.py \
             tests/bazarr/test_signalrcore_compat.py \
             tests/bazarr/test_app_get_providers.py \
+            tests/bazarr/test_retired_provider_config_compat.py \
+            tests/bazarr/test_settings_profile_deletion.py \
+            tests/bazarr/test_jellyfin_apikey_location.py \
             tests/bazarr/test_provider_hub.py \
+            tests/bazarr/test_provider_pool_config_reload.py \
+            tests/bazarr/test_rar_extraction_production_config.py \
             tests/bazarr/test_provider_hub_auto_install_optin.py \
             tests/bazarr/test_provider_hub_archive_select.py \
+            tests/bazarr/test_archive_member_matching.py \
             tests/bazarr/test_provider_hub_worker_timeout.py \
             tests/bazarr/test_arr_instances_schema.py \
             tests/bazarr/test_arr_ownership_columns.py \
             tests/bazarr/test_arr_instance_repository.py \
             tests/bazarr/test_arr_instances_api.py \
             tests/bazarr/test_arr_subtitle_settings.py \
+            tests/bazarr/test_arr_media_defaults.py \
             tests/bazarr/test_arr_client.py \
             tests/bazarr/test_arr_backfill.py \
             tests/bazarr/test_arr_instance_stamping.py \
@@ -169,12 +199,19 @@ jobs:
             tests/bazarr/test_arr_rootfolder.py \
             tests/bazarr/test_arr_local_id_cutover_migration.py \
             tests/bazarr/test_jobs_queue_progress.py \
+            tests/bazarr/test_jobs_concurrency_limit.py \
             tests/bazarr/test_processing_sync_substep.py \
+            tests/bazarr/test_mass_download_path_mapping.py \
             tests/bazarr/test_processing_postprocessing.py \
             tests/bazarr/test_sync_progress_report.py \
             tests/bazarr/test_subsync_engines.py \
+            tests/bazarr/test_autosubsync_diagnostics.py \
+            tests/bazarr/test_alass_ffprobe_shim.py \
+            tests/bazarr/test_sync_offset_acceptance.py \
             tests/bazarr/test_sync_instance_overrides.py \
+            tests/bazarr/test_sync_outcome_reporting.py \
             tests/bazarr/test_subzero_keep_lyrics.py \
+            tests/bazarr/test_release_type_mismatch.py \
             tests/bazarr/test_archive_extraction.py \
             tests/bazarr/test_security_guards.py \
             tests/bazarr/test_login_backdrops.py \
@@ -186,8 +223,90 @@ jobs:
             tests/subliminal_patch/test_embeddedsubtitles.py \
             tests/subliminal_patch/test_subsunacs.py \
             tests/subliminal_patch/test_filebot_refiner.py \
+            tests/subliminal_patch/test_http.py \
+            tests/subliminal_patch/test_legendasdivx.py \
+            tests/subliminal_patch/test_provider_pool.py \
             tests/subliminal_patch/test_mods.py \
             tests/subliminal_patch/test_mods_keep_lyrics.py \
+            tests/subliminal_patch/test_video.py \
+            -v --tb=short
+
+      - name: pytest previously unguarded suites
+        # These existed but were never collected by CI, so their assertions protected
+        # nothing. Backfilled wholesale; test_ci_guard_list.py fails if a new test file
+        # is added without being enumerated here or excluded with a reason.
+        #
+        # One process for both trees. They used to be split, because
+        # tests/subliminal_patch/test_utils.py::test_get_subtitle_from_archive_season_pack
+        # failed when co-collected: any file that imports the app runs
+        # init_binaries(), which repoints rarfile at whatever extractor is
+        # installed, exactly as production does, and the image shipped only an
+        # archiver that recognises RAR without being able to decompress it. The
+        # split hid a real product bug. The image ships unar now and discovery
+        # prefers the extractors that work, so the trees run together again and
+        # test_rar_extraction_production_config.py asserts the configuration
+        # directly rather than leaving it to collection order.
+        run: |
+          pytest \
+            tests/bazarr/test_anti_captcha_config.py \
+            tests/bazarr/test_app_notifier.py \
+            tests/bazarr/test_auto_translation_profile.py \
+            tests/bazarr/test_ci_guard_list.py \
+            tests/bazarr/test_combine_aligner.py \
+            tests/bazarr/test_combine_api_dto.py \
+            tests/bazarr/test_combine_api_episodes.py \
+            tests/bazarr/test_combine_api_movies.py \
+            tests/bazarr/test_combine_api_series.py \
+            tests/bazarr/test_combine_composer.py \
+            tests/bazarr/test_combine_hook.py \
+            tests/bazarr/test_combine_indexer.py \
+            tests/bazarr/test_combine_main.py \
+            tests/bazarr/test_combine_naming.py \
+            tests/bazarr/test_combine_profile.py \
+            tests/bazarr/test_combine_rules.py \
+            tests/bazarr/test_compat_cache.py \
+            tests/bazarr/test_config.py \
+            tests/bazarr/test_config_save.py \
+            tests/bazarr/test_embedded_history_indexer.py \
+            tests/bazarr/test_encryption.py \
+            tests/bazarr/test_extra_languages.py \
+            tests/bazarr/test_gemini_translator.py \
+            tests/bazarr/test_get_video_scenename_fallback.py \
+            tests/bazarr/test_jellyfin_client.py \
+            tests/bazarr/test_jellyfin_operations.py \
+            tests/bazarr/test_logging_filters.py \
+            tests/bazarr/test_provider_hub_install_serialization.py \
+            tests/bazarr/test_provider_hub_language_fallback.py \
+            tests/bazarr/test_provider_hub_release_scoring.py \
+            tests/bazarr/test_provider_score_modifier.py \
+            tests/bazarr/test_scheduler_session_cleanup.py \
+            tests/bazarr/test_secret_store_crypto.py \
+            tests/bazarr/test_secret_store_e2e.py \
+            tests/bazarr/test_secret_store_migration.py \
+            tests/bazarr/test_secret_store_registry.py \
+            tests/bazarr/test_signalr_client.py \
+            tests/bazarr/test_sonarr_sync_episodes.py \
+            tests/bazarr/test_sql_profiler.py \
+            tests/bazarr/test_subtitle_content_sync_outputs.py \
+            tests/bazarr/test_subtitle_download_api.py \
+            tests/bazarr/test_subtitles_pool.py \
+            tests/bazarr/test_swagger_static.py \
+            tests/bazarr/test_supervisor_proxy.py \
+            tests/bazarr/test_supervisor_stages.py \
+            tests/bazarr/test_tracemalloc_dumper.py \
+            tests/bazarr/test_translator_auth.py \
+            tests/bazarr/test_upgrade_embedded_history.py \
+            tests/subliminal_patch/test_animetosho.py \
+            tests/subliminal_patch/test_core.py \
+            tests/subliminal_patch/test_prioritized_satisfaction.py \
+            tests/subliminal_patch/test_core_persistent.py \
+            tests/subliminal_patch/test_opensubtitles_scraper.py \
+            tests/subliminal_patch/test_score.py \
+            tests/subliminal_patch/test_subdl_anime_mode.py \
+            tests/subliminal_patch/test_subtitle.py \
+            tests/subliminal_patch/test_http.py \
+            tests/subliminal_patch/test_legendasdivx.py \
+            tests/subliminal_patch/test_utils.py \
             -v --tb=short
 
       - name: pytest cross-instance isolation guards (isolated per file)
@@ -197,7 +316,8 @@ jobs:
         # them in ONE process, so each runs in its OWN pytest process. The PG
         # cutover test needs a driver + the postgres service (env below).
         env:
-          BAZARR_PG_TEST_URL: postgresql+psycopg://postgres:postgres@localhost:5432/bazarr_test
+          # Same throwaway credentials, in URL form.
+          BAZARR_PG_TEST_URL: postgresql+psycopg://postgres:postgres@localhost:5432/bazarr_test  # pragma: allowlist secret
         run: |
           set -e
           pip install "psycopg[binary]"
@@ -222,7 +342,25 @@ jobs:
             tests/bazarr/test_files_browse_instance_scope.py \
             tests/bazarr/test_path_mappings_instance.py \
             tests/bazarr/test_threading_followup.py \
-            tests/bazarr/test_mass_operations.py ; do
+            tests/bazarr/test_mass_operations.py \
+            tests/bazarr/test_embedded_extraction_instance_scope.py \
+            tests/bazarr/test_ffprobe_cache_instance_scope.py \
+            tests/bazarr/test_triage_low_findings.py \
+            tests/bazarr/test_indexer_owner_scope.py \
+            tests/bazarr/test_indexer_path_mapping_owner.py \
+            tests/bazarr/test_provider_hub_worker_reaper.py \
+            tests/bazarr/test_job_module_identity.py \
+            tests/bazarr/test_sonarr_sync_memory.py \
+            tests/bazarr/test_anilist_index.py \
+            tests/bazarr/test_image_memory_config.py \
+            tests/bazarr/test_package_info_location.py \
+            tests/bazarr/test_translate_owner_threading.py \
+            tests/bazarr/test_embedded_track_eligibility.py \
+            tests/bazarr/test_parser_owner_threading.py \
+            tests/bazarr/test_embedded_translate_api_scope.py \
+            tests/bazarr/test_release_type_mismatch_migration.py \
+            tests/bazarr/test_upstream_db_adoption.py \
+            tests/bazarr/test_upstream_db_adoption_pg.py ; do
             echo "::group::$f"
             pytest "$f" -p no:cacheprovider -q
             echo "::endgroup::"

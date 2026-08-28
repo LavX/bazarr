@@ -156,3 +156,35 @@ export function useTestArrInstanceById() {
     }) => api.arrInstances.testExisting(id, overrides),
   });
 }
+
+// Opt-in bulk fill: assigns the instance's default language profile to its media
+// that has none yet. Deliberately separate from the instance save, because it
+// writes to the library rather than to the instance.
+export function useApplyArrInstanceDefaultProfile() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationKey: [...arrKey, QueryKeys.Actions, "apply-default-profile"],
+    mutationFn: (id: number) => api.arrInstances.applyDefaultProfile(id),
+    onSuccess: (result) => {
+      showNotification({
+        color: "green",
+        message:
+          result.updated === 0
+            ? "Every item on this instance already has a language profile"
+            : `Assigned the default language profile to ${result.updated} item${
+                result.updated === 1 ? "" : "s"
+              }`,
+      });
+      client.invalidateQueries({ queryKey: [QueryKeys.Series] });
+      client.invalidateQueries({ queryKey: [QueryKeys.Movies] });
+    },
+    onError: (error) =>
+      showNotification({
+        color: "red",
+        message: getArrInstanceErrorMessage(
+          error,
+          "Failed to apply the default language profile",
+        ),
+      }),
+  });
+}

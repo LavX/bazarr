@@ -9,10 +9,17 @@ chain, and keeps the resources to thin parse/commit glue.
 The session is flushed but NOT committed here; the HTTP boundary owns the
 transaction and commits on success.
 """
+import ast
 import logging
 
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
+from app.database import TableLanguagesProfiles, TableMovies, TableShows
+from utilities.sql_limits import in_chunks
+
+from .media_defaults import (instance_default_profile, merge_media_defaults_into_options,
+                             read_media_defaults, validate_media_defaults)
 from .repository import VALID_KINDS, ArrInstanceRepository, to_safe_dict
 from .subtitle_settings import merge_subtitle_settings_into_options, validate_subtitle_settings
 
@@ -113,8 +120,11 @@ def refresh_runtime(kind, instance_id=None, removed=False):
     # Per-instance subtitle settings may have changed; drop the resolver cache
     # so the next read reflects the edit (#227). Cheap and kind-agnostic, so do
     # it before the kind guard returns.
-    from .resolution import clear_subtitle_settings_cache
+    from .resolution import clear_media_defaults_cache, clear_subtitle_settings_cache
     clear_subtitle_settings_cache()
+    # Same for the per-instance default language profile: an edited override
+    # must take effect on the next sync, not on the next restart.
+    clear_media_defaults_cache()
 
     if kind not in VALID_KINDS:
         return
@@ -286,7 +296,13 @@ def create_instance(session, args):
         ss_blob = validate_subtitle_settings(args.get("subtitle_settings"))
     except ValueError as exc:
         return {"error": "invalid", "message": str(exc)}, 400
-    options = merge_subtitle_settings_into_options(None, ss_blob)
+    try:
+        md_blob = validate_media_defaults(
+            args.get("media_defaults"), known_profile_ids=_known_profile_ids(session))
+    except ValueError as exc:
+        return {"error": "invalid", "message": str(exc)}, 400
+    options = merge_media_defaults_into_options(
+        merge_subtitle_settings_into_options(None, ss_blob), md_blob)
     repo = ArrInstanceRepository(session)
     try:
         row = repo.create(
@@ -337,6 +353,17 @@ def update_instance(session, instance_id, args):
             return {"error": "invalid", "message": str(exc)}, 400
         kwargs["options"] = merge_subtitle_settings_into_options(existing.options, ss_blob)
 
+    if args.get("media_defaults") is not None:
+        try:
+            md_blob = validate_media_defaults(
+                args.get("media_defaults"), known_profile_ids=_known_profile_ids(session))
+        except ValueError as exc:
+            return {"error": "invalid", "message": str(exc)}, 400
+        # Merge onto whatever the subtitle_settings edit above already produced,
+        # so a request carrying both blobs does not drop one of them.
+        kwargs["options"] = merge_media_defaults_into_options(
+            kwargs.get("options", existing.options), md_blob)
+
     try:
         row = repo.update(instance_id, **kwargs)
     except ValueError as exc:
@@ -356,3 +383,141 @@ def delete_instance(session, instance_id):
     if not ok:
         return {"error": "not_found"}, 404
     return "", 204
+
+
+def _known_profile_ids(session):
+    """The set of language profile ids that currently exist.
+
+    Used to reject an override naming a profile that is not there, so a dangling
+    ``profileId`` is never persisted in the first place. The sync still guards
+    against a profile deleted AFTER the override was saved.
+    """
+    return {row.profileId for row in session.execute(
+        select(TableLanguagesProfiles.profileId)).all()}
+
+
+def _excluded_profile_tags(kind):
+    """Tags that mean "no profile", or an empty set when tag handling is off."""
+    from app.config import settings
+
+    enabled = (settings.general.serie_tag_enabled if kind == "sonarr"
+               else settings.general.movie_tag_enabled)
+    if not enabled:
+        return frozenset()
+
+    return frozenset(settings.general.remove_profile_tags or ())
+
+
+def _tags_exclude_a_profile(stored_tags, excluded_tags):
+    """True when this row's tags intersect the no-profile list.
+
+    ``tags`` is stored as the repr of a Python list, which is what the sync
+    writes, so it is read back the same way. An unreadable value excludes
+    nothing: refusing to apply the default because a tag blob is malformed
+    would be a worse failure than applying it.
+    """
+    if not excluded_tags or not stored_tags:
+        return False
+
+    try:
+        tags = ast.literal_eval(stored_tags)
+    except (ValueError, SyntaxError):
+        return False
+
+    if not isinstance(tags, (list, tuple, set)):
+        return False
+
+    return bool(set(tags) & excluded_tags)
+
+
+def reindex_after_default_profile(kind, upstream_ids, arr_instance_id, job_id=None):
+    """Recompute what is missing for the items apply_default_profile changed.
+
+    Runs as a queued job rather than inside the Apply request: one index pass
+    per item scans every episode and emits events, so a library of a few
+    thousand unprofiled items would hold a web worker for minutes and can
+    outlive a proxy timeout, with nothing to show for it in the UI meanwhile.
+
+    Failures are logged, not raised: the profiles are already committed, and the
+    scheduled indexer picks up anything missed here.
+    """
+    if not upstream_ids:
+        return
+
+    if kind == "sonarr":
+        from subtitles.indexer.series import list_missing_subtitles as index_one
+        event_type = "series"
+    else:
+        from subtitles.indexer.movies import list_missing_subtitles_movies as index_one
+        event_type = "movie"
+
+    for upstream_id in upstream_ids:
+        try:
+            index_one(no=upstream_id, arr_instance_id=arr_instance_id)
+            event_stream(type=event_type, payload=upstream_id)
+        except Exception:
+            logging.exception(
+                "BAZARR failed to refresh missing subtitles for %s %s on instance %s",
+                kind, upstream_id, arr_instance_id)
+
+    event_stream(type="badges")
+
+
+def apply_default_profile(session, instance_id):
+    """Assign this instance's default language profile to its media that has no
+    profile yet. Opt-in, and deliberately narrow.
+
+    Only rows owned by ``instance_id`` whose ``profileId`` is NULL are touched,
+    so hand-picked profiles are never overwritten: a silent bulk reassignment is
+    not recoverable, and wholesale reassignment already exists as the mass-edit
+    profile selector in the Series and Movies views.
+
+    Returns ``(body, status)``. The body carries the upstream ids that changed so
+    the HTTP layer can re-run the missing-subtitles indexer for exactly those
+    items.
+    """
+    repo = ArrInstanceRepository(session)
+    row = repo.get(instance_id)
+    if row is None:
+        return {"error": "not_found"}, 404
+
+    has_override, profile = instance_default_profile(read_media_defaults(row.options))
+    if not has_override or profile is None:
+        return {"error": "invalid",
+                "message": "This instance has no default language profile to apply."}, 400
+    if profile not in _known_profile_ids(session):
+        return {"error": "invalid",
+                "message": f"Language profile {profile} no longer exists."}, 400
+
+    table = TableShows if row.kind == "sonarr" else TableMovies
+    upstream_column = TableShows.sonarrSeriesId if row.kind == "sonarr" else TableMovies.radarrId
+
+    # Collect the targets before the write: the UPDATE's own WHERE stops
+    # matching them once profileId is set, and the caller needs the ids.
+    targets = session.execute(
+        select(upstream_column, table.tags)
+        .where(table.arr_instance_id == instance_id, table.profileId.is_(None))).all()
+
+    # A row a tag rule deliberately excluded is not "unset yet", it is "kept
+    # out": the sync parsers set profileId to None on purpose when the item
+    # carries one of remove_profile_tags. Filling those in here would silently
+    # undo the rule the user configured, on their whole library at once.
+    excluded_tags = _excluded_profile_tags(row.kind)
+    upstream_ids = [t[0] for t in targets
+                    if not _tags_exclude_a_profile(t[1], excluded_tags)]
+    # One statement per chunk: this binds a variable per item, and SQLite built
+    # with the legacy limit rejects more than 999 in a statement. A library with
+    # that many unprofiled items is ordinary, and the failure would be the Apply
+    # button erroring with nothing updated.
+    for chunk in in_chunks(upstream_ids):
+        session.execute(
+            update(table)
+            .values(profileId=profile)
+            .where(table.arr_instance_id == instance_id,
+                   table.profileId.is_(None),
+                   upstream_column.in_(chunk)))
+
+    logging.info("Assigned language profile %s to %s unprofiled %s items on instance %s",
+                 profile, len(upstream_ids), row.kind, instance_id)
+    return {"updated": len(upstream_ids), "profileId": profile, "kind": row.kind,
+            "upstream_ids": upstream_ids}, 200

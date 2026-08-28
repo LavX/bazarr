@@ -54,10 +54,8 @@ def _patch_collect_io(monkeypatch, mo, schema_session):
     monkeypatch.setattr(mo.path_mappings, "path_replace_instance", lambda p, *a, **kw: p)
     monkeypatch.setattr(mo.path_mappings, "path_replace_reverse_instance", lambda p, *a, **kw: p)
     monkeypatch.setattr(os.path, "isfile", lambda p: True)
-    # The real parser needs the app's languages_dict (loaded at startup, absent
-    # in tests); the collect loop only consumes forced/hi from it.
-    monkeypatch.setattr(mo, "languages_from_colon_seperated_string",
-                        lambda s: {"forced": ":forced" in s, "hi": ":hi" in s})
+    # The variant parser the collector uses is pure string work, so unlike the
+    # old one it needs no languages_dict and no stub here.
 
 
 def test_collect_episodes_scoped_to_requested_instance(schema_session, monkeypatch):

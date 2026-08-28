@@ -16,7 +16,6 @@ from subtitles.mass_download.series import series_download_subtitles
 from subtitles.mass_download.movies import movies_download_subtitles
 from subtitles.upgrade import upgrade_episodes_subtitles, upgrade_movies_subtitles
 from utilities.path_mappings import path_mappings
-from utilities.video_analyzer import languages_from_colon_seperated_string
 from sqlalchemy import or_
 
 logger = logging.getLogger(__name__)
@@ -32,15 +31,163 @@ MEDIA_ACTIONS = {'scan-disk', 'search-missing', 'upgrade'}
 MOD_ACTIONS = {'OCR_fixes', 'common', 'remove_HI', 'remove_tags', 'fix_uppercase', 'reverse_rtl', 'emoji'}
 
 
-def _parse_subtitles_column(subtitles_raw):
-    """Parse the subtitles TEXT column into a list of (lang_string, path) tuples."""
+def _item_display_name(item):
+    """What the job progress calls this item.
+
+    An embedded track has no file to name, so the video and the track's
+    language are what identify it. Naming the video alone would be ambiguous
+    on a container holding several tracks.
+    """
+    srt_path = item.get('srt_path')
+    if srt_path:
+        return os.path.basename(srt_path)
+    video_path = item.get('video_path') or ''
+    language = item.get('srt_lang') or 'embedded'
+    return f'{os.path.basename(video_path)} ({language} track)'
+
+
+def _parse_subtitles_column(subtitles_raw, include_embedded=False):
+    """Parse the subtitles TEXT column into a list of (lang_string, path) tuples.
+
+    The indexer records an in-container track as ``[language, None, None]``, so
+    an entry without a path is an embedded track rather than a broken row.
+    Those are left out by default, because most callers want a file they can
+    open. Translation does not: it can extract the track first, which is the
+    only way to translate a release whose only subtitles are embedded.
+    """
     if not subtitles_raw:
         return []
     try:
         parsed = ast.literal_eval(subtitles_raw)
-        return [(entry[0], entry[1]) for entry in parsed if len(entry) >= 2 and entry[1]]
     except (ValueError, SyntaxError):
         return []
+
+    entries = []
+    for entry in parsed:
+        if len(entry) < 2:
+            continue
+        if entry[1]:
+            entries.append((entry[0], entry[1]))
+        elif include_embedded:
+            entries.append((entry[0], None))
+    return entries
+
+
+def _subtitle_variant_key(lang_string):
+    """The identity that decides whether two sources collide.
+
+    Base language plus the hi and forced variants, because that triple is what
+    ends up in the translated file's name: an ``en:hi`` source writes
+    ``.nl.hi.srt`` and a plain ``en`` source writes ``.nl.srt``. Collapsing to
+    the base language alone would treat those as the same output and throw one
+    of them away. Every modifier is inspected, not just the first, since a
+    track can be both (``en:hi:forced``).
+    """
+    parts = lang_string.split(':')
+    modifiers = {part.lower() for part in parts[1:]}
+    return parts[0], 'hi' in modifiers, 'forced' in modifiers
+
+
+def _usable_as_translate_source(lang_string, path):
+    """Whether a path-bearing entry can actually be a translate source.
+
+    A generated sync output or a combined artifact is excluded further down the
+    collector, and a forced subtitle is never translated. If one of those is
+    the only file for a language, it cannot stand in for the embedded track,
+    and letting it suppress that track leaves nothing at all.
+
+    The file existing on disk is checked separately, by the caller, because it
+    needs the per-instance path mapping applied first.
+    """
+    _base, _hi, forced = _subtitle_variant_key(lang_string)
+    if forced:
+        return False
+    modifiers = [part.lower() for part in lang_string.split(':')[1:]]
+    if any(modifier.startswith('combined-') for modifier in modifiers):
+        return False
+    return not is_sync_engine_output(path)
+
+
+def _translate_output_present(subtitles, target_lang, hi, usable):
+    """True when the file this one source would produce is already on disk.
+
+    Asked per source, not per item. An item with an ``en`` and an ``en:hi``
+    source and an existing ``nl`` file is not fully satisfied, because ``nl:hi``
+    is missing, but deciding that at the item level queues both sources and the
+    plain one then overwrites the ``nl`` file that was already there. On a paid
+    translator that is billed work for a file the user already had.
+
+    Translation carries the source variant through and never produces a forced
+    subtitle, so the comparison is on base language plus the hearing-impaired
+    flag. ``usable`` rejects a row naming a file that is gone, and generated
+    sync or combined artifacts, which are not subtitles the user asked for.
+    """
+    for lang_string, path in subtitles:
+        if not path:
+            continue
+        base, existing_hi, forced = _subtitle_variant_key(lang_string)
+        if forced or base != target_lang or existing_hi != hi:
+            continue
+        if usable(lang_string, path):
+            return True
+    return False
+
+
+def _translate_item_satisfied(subtitles, target_lang, source_lang, usable):
+    """True when every source on this item already has its output on disk.
+
+    A fast path only. It exists so a fully covered item still reports as one
+    skipped item rather than one per subtitle entry, which is what the counter
+    meant before. The per-source check in the loop is what handles the partial
+    case, where some outputs exist and some do not.
+    """
+    wanted = []
+    for lang_string, path in subtitles:
+        base, hi, forced = _subtitle_variant_key(lang_string)
+        if forced:
+            continue
+        if source_lang and base != source_lang:
+            continue
+        if path and not usable(lang_string, path):
+            continue
+        wanted.append(hi)
+
+    if not wanted:
+        return False
+    return all(_translate_output_present(subtitles, target_lang, hi, usable)
+               for hi in wanted)
+
+
+def _drop_embedded_duplicates(subtitles, usable):
+    """Remove an embedded track when a usable file covers the same variant.
+
+    Both would translate into the same output file, so the two jobs would
+    duplicate the work and race each other for the result. The file wins: it is
+    already on disk and needs no extraction.
+
+    ``usable`` decides which path-bearing entries count. A file that the
+    collector is about to reject anyway, because it is missing, forced, a sync
+    output or a combined artifact, must not suppress the embedded track it
+    would otherwise stand in for.
+    """
+    covered = {_subtitle_variant_key(lang) for lang, path in subtitles
+               if path and usable(lang, path)}
+
+    kept = []
+    for lang, path in subtitles:
+        if path:
+            kept.append((lang, path))
+            continue
+        key = _subtitle_variant_key(lang)
+        if key in covered:
+            continue
+        # A container often carries one language twice, and the indexer writes
+        # an entry per track without de-duplicating, so the same variant can
+        # appear more than once. Every copy selects the same stream and writes
+        # the same output, which on a paid translator is billed twice.
+        covered.add(key)
+        kept.append((lang, path))
+    return kept
 
 
 def _add_instance_filter(mapping, upstream_id, arr_instance_id):
@@ -230,36 +377,83 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
         if not _instance_filter_matches(ep.arr_instance_id, req_instances):
             continue
 
-        subtitles = _parse_subtitles_column(ep.subtitles)
+        # Only translation can use an in-container track, and only when the
+        # user still has embedded subtitles turned on: the rows outlive the
+        # setting until the next index, so the check has to happen here too.
+        want_embedded = action == 'translate' and settings.general.use_embedded_subs
+        subtitles = _parse_subtitles_column(ep.subtitles, include_embedded=want_embedded)
         # Apply the owning instance's per-instance path_mappings (#156).
         video_path = path_mappings.path_replace_instance(ep.path, ep.arr_instance_id, 'episode')
 
-        # For translate: check if target language already exists
-        if action == 'translate' and target_lang:
-            existing_langs = {lang_str.split(':')[0] for lang_str, _ in subtitles}
-            if target_lang in existing_langs:
-                skipped += 1
-                continue
+        if want_embedded:
+            def _usable(lang_string, sub_path, _owner=ep):
+                if not _usable_as_translate_source(lang_string, sub_path):
+                    return False
+                return os.path.isfile(path_mappings.path_replace_instance(
+                    sub_path, _owner.arr_instance_id, 'episode'))
+
+            subtitles = _drop_embedded_duplicates(subtitles, _usable)
+
+        # For translate: skip only when every subtitle this run would write is
+        # already there. Compared per variant, not per base language, because
+        # translation carries the source variant through: a forced file in the
+        # target language is a different subtitle, and so is the plain one when
+        # the source is hearing-impaired. A row naming a file that is gone, or
+        # naming a sync or combined artifact, does not count either.
+        def _target_usable(lang_string, sub_path, _owner=ep):
+            mapped = path_mappings.path_replace_instance(
+                sub_path, _owner.arr_instance_id, 'episode')
+            if not os.path.isfile(mapped):
+                return False
+            modifiers = [part.lower() for part in lang_string.split(':')[1:]]
+            if any(m.startswith('combined-') for m in modifiers):
+                return False
+            return not is_sync_engine_output(mapped)
+
+        if action == 'translate' and target_lang and _translate_item_satisfied(
+                subtitles, target_lang, source_lang, _target_usable):
+            skipped += 1
+            continue
 
         for lang_string, sub_path in subtitles:
-            lang_info = languages_from_colon_seperated_string(lang_string)
+            # Every modifier, not just the first: a track can be both hi and
+            # forced. Reading only the first would let a forced one past the
+            # guard below and then pick the wrong stream at extraction time.
+            sub_lang, sub_hi, sub_forced = _subtitle_variant_key(lang_string)
 
             # Forced subs can't be synced or translated, but mods are fine
-            if lang_info['forced'] and action in ('sync', 'translate'):
+            if sub_forced and action in ('sync', 'translate'):
                 skipped += 1
                 continue
 
             # For translate: only queue subtitles matching the requested source language
-            sub_lang = lang_string.split(':')[0]
             if action == 'translate' and source_lang and sub_lang != source_lang:
                 skipped += 1
                 continue
 
-            # Apply per-instance path_mappings to the stored subtitle path (#156).
-            mapped_sub_path = path_mappings.path_replace_instance(sub_path, ep.arr_instance_id, 'episode')
-            if not os.path.isfile(mapped_sub_path):
+            # And only when the file this source would produce is not already
+            # there. Per source, because two sources of the same language can
+            # produce different outputs: en gives nl, en:hi gives nl:hi.
+            if action == 'translate' and target_lang and _translate_output_present(
+                    subtitles, target_lang, sub_hi, _target_usable):
                 skipped += 1
                 continue
+
+            # An entry with no path is an in-container track. Only translate can
+            # use one, by extracting it first; there is nothing for sync or the
+            # mod actions to open.
+            is_embedded = not sub_path
+            if is_embedded:
+                if action != 'translate':
+                    skipped += 1
+                    continue
+                mapped_sub_path = None
+            else:
+                # Apply per-instance path_mappings to the stored subtitle path (#156).
+                mapped_sub_path = path_mappings.path_replace_instance(sub_path, ep.arr_instance_id, 'episode')
+                if not os.path.isfile(mapped_sub_path):
+                    skipped += 1
+                    continue
 
             # Never use a generated sync output or a combined artifact as a source.
             # For translate they would queue a duplicate job targeting the same
@@ -268,7 +462,8 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
             # sync output also cannot be meaningfully re-synced.
             modifiers = [p.lower() for p in lang_string.split(':')[1:]]
             is_combined = any(m.startswith('combined-') for m in modifiers)
-            if action in ('sync', 'translate') and (is_sync_engine_output(mapped_sub_path) or is_combined):
+            if action in ('sync', 'translate') and not is_embedded and (
+                    is_sync_engine_output(mapped_sub_path) or is_combined):
                 skipped += 1
                 continue
 
@@ -282,8 +477,9 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
                 'video_path': video_path,
                 'srt_path': mapped_sub_path,
                 'srt_lang': sub_lang,
-                'forced': lang_info['forced'],
-                'hi': lang_info['hi'],
+                'embedded': is_embedded,
+                'forced': sub_forced,
+                'hi': sub_hi,
                 'sonarr_series_id': ep.sonarrSeriesId,
                 'sonarr_episode_id': ep.sonarrEpisodeId,
                 'radarr_id': None,
@@ -340,36 +536,83 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
         if not _instance_filter_matches(movie.arr_instance_id, req_instances):
             continue
 
-        subtitles = _parse_subtitles_column(movie.subtitles)
+        # Only translation can use an in-container track, and only when the
+        # user still has embedded subtitles turned on: the rows outlive the
+        # setting until the next index, so the check has to happen here too.
+        want_embedded = action == 'translate' and settings.general.use_embedded_subs
+        subtitles = _parse_subtitles_column(movie.subtitles, include_embedded=want_embedded)
         # Apply the owning instance's per-instance path_mappings (#156).
         video_path = path_mappings.path_replace_instance(movie.path, movie.arr_instance_id, 'movie')
 
-        # For translate: check if target language already exists
-        if action == 'translate' and target_lang:
-            existing_langs = {lang_str.split(':')[0] for lang_str, _ in subtitles}
-            if target_lang in existing_langs:
-                skipped += 1
-                continue
+        if want_embedded:
+            def _usable(lang_string, sub_path, _owner=movie):
+                if not _usable_as_translate_source(lang_string, sub_path):
+                    return False
+                return os.path.isfile(path_mappings.path_replace_instance(
+                    sub_path, _owner.arr_instance_id, 'movie'))
+
+            subtitles = _drop_embedded_duplicates(subtitles, _usable)
+
+        # For translate: skip only when every subtitle this run would write is
+        # already there. Compared per variant, not per base language, because
+        # translation carries the source variant through: a forced file in the
+        # target language is a different subtitle, and so is the plain one when
+        # the source is hearing-impaired. A row naming a file that is gone, or
+        # naming a sync or combined artifact, does not count either.
+        def _target_usable(lang_string, sub_path, _owner=movie):
+            mapped = path_mappings.path_replace_instance(
+                sub_path, _owner.arr_instance_id, 'movie')
+            if not os.path.isfile(mapped):
+                return False
+            modifiers = [part.lower() for part in lang_string.split(':')[1:]]
+            if any(m.startswith('combined-') for m in modifiers):
+                return False
+            return not is_sync_engine_output(mapped)
+
+        if action == 'translate' and target_lang and _translate_item_satisfied(
+                subtitles, target_lang, source_lang, _target_usable):
+            skipped += 1
+            continue
 
         for lang_string, sub_path in subtitles:
-            lang_info = languages_from_colon_seperated_string(lang_string)
+            # Every modifier, not just the first: a track can be both hi and
+            # forced. Reading only the first would let a forced one past the
+            # guard below and then pick the wrong stream at extraction time.
+            sub_lang, sub_hi, sub_forced = _subtitle_variant_key(lang_string)
 
             # Forced subs can't be synced or translated, but mods are fine
-            if lang_info['forced'] and action in ('sync', 'translate'):
+            if sub_forced and action in ('sync', 'translate'):
                 skipped += 1
                 continue
 
             # For translate: only queue subtitles matching the requested source language
-            sub_lang = lang_string.split(':')[0]
             if action == 'translate' and source_lang and sub_lang != source_lang:
                 skipped += 1
                 continue
 
-            # Apply per-instance path_mappings to the stored subtitle path (#156).
-            mapped_sub_path = path_mappings.path_replace_instance(sub_path, movie.arr_instance_id, 'movie')
-            if not os.path.isfile(mapped_sub_path):
+            # And only when the file this source would produce is not already
+            # there. Per source, because two sources of the same language can
+            # produce different outputs: en gives nl, en:hi gives nl:hi.
+            if action == 'translate' and target_lang and _translate_output_present(
+                    subtitles, target_lang, sub_hi, _target_usable):
                 skipped += 1
                 continue
+
+            # An entry with no path is an in-container track. Only translate can
+            # use one, by extracting it first; there is nothing for sync or the
+            # mod actions to open.
+            is_embedded = not sub_path
+            if is_embedded:
+                if action != 'translate':
+                    skipped += 1
+                    continue
+                mapped_sub_path = None
+            else:
+                # Apply per-instance path_mappings to the stored subtitle path (#156).
+                mapped_sub_path = path_mappings.path_replace_instance(sub_path, movie.arr_instance_id, 'movie')
+                if not os.path.isfile(mapped_sub_path):
+                    skipped += 1
+                    continue
 
             # Never use a generated sync output or a combined artifact as a source.
             # For translate they would queue a duplicate job targeting the same
@@ -378,7 +621,8 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
             # sync output also cannot be meaningfully re-synced.
             modifiers = [p.lower() for p in lang_string.split(':')[1:]]
             is_combined = any(m.startswith('combined-') for m in modifiers)
-            if action in ('sync', 'translate') and (is_sync_engine_output(mapped_sub_path) or is_combined):
+            if action in ('sync', 'translate') and not is_embedded and (
+                    is_sync_engine_output(mapped_sub_path) or is_combined):
                 skipped += 1
                 continue
 
@@ -392,8 +636,9 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
                 'video_path': video_path,
                 'srt_path': mapped_sub_path,
                 'srt_lang': sub_lang,
-                'forced': lang_info['forced'],
-                'hi': lang_info['hi'],
+                'embedded': is_embedded,
+                'forced': sub_forced,
+                'hi': sub_hi,
                 'sonarr_series_id': None,
                 'sonarr_episode_id': None,
                 'radarr_id': movie.radarrId,
@@ -445,12 +690,35 @@ def _process_subtitle_item(item, action, options, job_id):
     elif action == 'translate':
         from subtitles.tools.translate.main import translate_subtitles_file
         media_type = 'episode' if item['sonarr_series_id'] else 'movies'
+
+        source_srt_file = item['srt_path']
+        if item.get('embedded'):
+            # Extracted when the item runs rather than when the batch was
+            # collected, so a run that is cancelled or fails leaves behind only
+            # what it actually reached. A run that completes does extract every
+            # track, because every collected item is processed.
+            #
+            # The owning instance goes along (#156): the collector mapped the
+            # video path with that instance's mapping, so the reverse lookup
+            # inside has to use the same one or it finds no row at all.
+            from subtitles.tools.translate.batch import extract_embedded_subtitle
+            source_srt_file = extract_embedded_subtitle(
+                item['video_path'], item['srt_lang'], media_type,
+                hi=item.get('hi', False), forced=item.get('forced', False),
+                arr_instance_id=item.get('arr_instance_id'))
+            if not source_srt_file:
+                # Usually a bitmap track (PGS, VobSub) that cannot become an
+                # SRT. That is this item's problem; the batch carries on.
+                logger.warning(
+                    'BAZARR could not extract the embedded %s track from %s, skipping translation',
+                    item['srt_lang'], item['video_path'])
+                return False
         # Don't pass the batch job_id to translate. translate_subtitles_file
         # has its own job/progress lifecycle that would hijack the batch job.
         # Calling without job_id makes it queue as its own separate job.
         translate_subtitles_file(
             video_path=item['video_path'],
-            source_srt_file=item['srt_path'],
+            source_srt_file=source_srt_file,
             from_lang=options.get('from_lang', item['srt_lang']),
             to_lang=options.get('to_lang', 'en'),
             forced=item['forced'],
@@ -460,6 +728,7 @@ def _process_subtitle_item(item, action, options, job_id):
             sonarr_episode_id=item['sonarr_episode_id'],
             radarr_id=item['radarr_id'],
             metadata=item['metadata'],
+            arr_instance_id=item.get('arr_instance_id'),
         )
         return True
     elif action in MOD_ACTIONS:
@@ -625,7 +894,7 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
         jobs_queue.update_job_progress(
             job_id=job_id,
             progress_value=i - 1,
-            progress_message=f"{action}: {os.path.basename(item['srt_path'])} ({i}/{total_count})"
+            progress_message=f"{action}: {_item_display_name(item)} ({i}/{total_count})"
         )
 
         try:
@@ -635,14 +904,14 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
             else:
                 failed += 1
         except Exception as e:
-            logger.error(f'Error during {action} on {item["srt_path"]}: {e}')  # noqa: G004
+            logger.error(f'Error during {action} on {_item_display_name(item)}: {e}')  # noqa: G004
             all_errors.append(str(e))
             failed += 1
         finally:
             jobs_queue.update_job_progress(
                 job_id=job_id,
                 progress_value=i,
-                progress_message=f"{action}: {os.path.basename(item['srt_path'])} ({i}/{total_count})"
+                progress_message=f"{action}: {_item_display_name(item)} ({i}/{total_count})"
             )
 
     jobs_queue.update_job_name(

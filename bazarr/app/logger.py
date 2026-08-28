@@ -18,7 +18,9 @@ logger = logging.getLogger()
 
 class FileHandlerFormatter(logging.Formatter):
     """Formatter that removes apikey from logs."""
-    APIKEY_RE = re.compile(r'apikey(?:=|%3D)([a-zA-Z0-9]+)')
+    # Bare "key=" too: 2Captcha-compatible captcha vendors carry the account
+    # key as ?key=... on res.php polling, and urllib3 logs request targets.
+    APIKEY_RE = re.compile(r'((?:api)?key)(?:=|%3D)([a-zA-Z0-9]+)')
     IPv4_RE = re.compile(r'\b(?<!Failed\sauthentication\sfrom\s)(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.)'
                          r'{3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\b')
     PLEX_URL_RE = re.compile(r'(?:https?://)?[0-9\-]+\.[a-f0-9]+\.plex\.direct(?::\d+)?')
@@ -31,7 +33,7 @@ class FileHandlerFormatter(logging.Formatter):
         return repr(result)  # or format into one line however you want to
 
     def formatApikey(self, s):
-        return re.sub(self.APIKEY_RE, 'apikey=(removed)', s)
+        return re.sub(self.APIKEY_RE, r'\1=(removed)', s)
 
     def formatIPv4(self, s):
         return re.sub(self.IPv4_RE, '***.***.***.***', s)

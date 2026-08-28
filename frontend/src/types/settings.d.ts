@@ -11,11 +11,11 @@ interface Settings {
   // Anitcaptcha
   anticaptcha: Settings.Anticaptcha;
   deathbycaptcha: Settings.DeathByCaptche;
+  captchaai: Settings.CaptchaAI;
   // Providers
   opensubtitlescom: Settings.OpenSubtitlesCom;
   addic7ed: Settings.Addic7ed;
   legendasdivx: Settings.Legandasdivx;
-  xsubs: Settings.XSubs;
   assrt: Settings.Assrt;
   napisy24: Settings.Napisy24;
   betaseries: Settings.Betaseries;
@@ -88,6 +88,7 @@ declare namespace Settings {
     utf8_encode: boolean;
     provider_priorities?: string;
     provider_languages?: Record<string, string[]> | string;
+    provider_score_modifiers?: Record<string, number> | string;
     wanted_search_frequency: number;
     wanted_search_frequency_movie: number;
     use_external_webhook?: boolean;
@@ -229,6 +230,10 @@ declare namespace Settings {
     password?: string;
   }
 
+  interface CaptchaAI {
+    captchaai_key?: string;
+  }
+
   // Providers
 
   interface BaseProvider {
@@ -245,8 +250,6 @@ declare namespace Settings {
   interface Legandasdivx extends BaseProvider {
     skip_wrong_fps: boolean;
   }
-
-  interface XSubs extends BaseProvider {}
 
   interface Napisy24 extends BaseProvider {}
 

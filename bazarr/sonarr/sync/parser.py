@@ -111,7 +111,8 @@ def episodeParser(episode, arr_instance_id=None):
                                                                                           ['path']),
                                                                file_size=episode['episodeFile']['size'],
                                                                episode_file_id=episode['episodeFile']['id'],
-                                                               use_cache=True)
+                                                               use_cache=True,
+                                                               arr_instance_id=arr_instance_id)
                     else:
                         audio_language = []
                         if 'language' in episode['episodeFile'] and len(episode['episodeFile']['language']):

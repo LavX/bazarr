@@ -1,6 +1,14 @@
 FROM alpine:3.22
 
-# Install build dependencies and runtime dependencies
+# Install build dependencies and runtime dependencies.
+#
+# RAR caveat: Alpine packages neither unar nor unrar, and its 7zip build (the
+# one that provides p7zip) is compiled without any RAR decoder, so this dev
+# image cannot open RAR subtitle archives at all. p7zip stays for the ZIP and
+# 7z paths. libarchive-tools/bsdtar is not a substitute: it lists RAR members
+# but fails to read them out of solid archives, which is what providers ship.
+# Verify anything touching RAR extraction against the production Dockerfile
+# image, which installs unar from Debian main.
 RUN \
   apk add --no-cache --virtual=build-dependencies \
     build-base \

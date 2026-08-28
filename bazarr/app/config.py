@@ -93,6 +93,11 @@ validators = [
     Validator('general.secrets_encryption_key', must_exist=True, default='', is_type_of=str),
     Validator('general.ip', must_exist=True, default='*', is_type_of=str, condition=validate_ip_address),
     Validator('general.port', must_exist=True, default=6767, is_type_of=int, gte=1, lte=65535),
+    # Waitress worker threads. The old inherited constant was 100, a 25x
+    # multiple of waitress's own default that dominated the process's thread
+    # count and resident memory; see the default's justification in server.py
+    # (Socket.IO long-polling parks one worker per open browser tab).
+    Validator('general.web_server_threads', must_exist=True, default=32, is_type_of=int, gte=4, lte=100),
     Validator('general.hostname', must_exist=True, default=platform.node(), is_type_of=str),
     Validator('general.base_url', must_exist=True, default='', is_type_of=str),
     Validator('general.instance_name', must_exist=True, default='Bazarr+', is_type_of=str,
@@ -105,6 +110,9 @@ validators = [
     Validator('general.single_language', must_exist=True, default=False, is_type_of=bool),
     Validator('general.minimum_score', must_exist=True, default=80, is_type_of=int, gte=0, lte=100),
     Validator('general.use_scenename', must_exist=True, default=True, is_type_of=bool),
+    # Off by default: it notifies, and an unasked-for notification stream is
+    # worse than the problem it reports.
+    Validator('general.detect_release_type_mismatch', must_exist=True, default=False, is_type_of=bool),
     Validator('general.use_postprocessing', must_exist=True, default=False, is_type_of=bool),
     Validator('general.postprocessing_cmd', must_exist=True, default='', is_type_of=str),
     Validator('general.postprocessing_threshold', must_exist=True, default=90, is_type_of=int, gte=0, lte=100),
@@ -154,6 +162,7 @@ validators = [
     Validator('general.enabled_providers', must_exist=True, default=[], is_type_of=list),
     Validator('general.provider_priorities', must_exist=True, default={}, is_type_of=dict),
     Validator('general.provider_languages', must_exist=True, default={}, is_type_of=dict),
+    Validator('general.provider_score_modifiers', must_exist=True, default={}, is_type_of=dict),
     Validator('general.use_provider_priority', must_exist=True, default=True, is_type_of=bool),
     Validator('general.enabled_integrations', must_exist=True, default=[], is_type_of=list),
     Validator('general.multithreading', must_exist=True, default=True, is_type_of=bool),
@@ -173,7 +182,7 @@ validators = [
     Validator('general.days_to_upgrade_subs', must_exist=True, default=7, is_type_of=int, gte=0, lte=30),
     Validator('general.upgrade_manual', must_exist=True, default=True, is_type_of=bool),
     Validator('general.anti_captcha_provider', must_exist=True, default=None, is_type_of=(NoneType, str),
-              is_in=[None, 'anti-captcha', 'death-by-captcha']),
+              is_in=[None, 'anti-captcha', 'death-by-captcha', 'captchaai']),
     Validator('general.wanted_search_frequency', must_exist=True, default=6, is_type_of=int, 
               is_in=[6, 12, 24, 168, ONE_HUNDRED_YEARS_IN_HOURS]),
     Validator('general.wanted_search_frequency_movie', must_exist=True, default=6, is_type_of=int,
@@ -390,9 +399,6 @@ validators = [
     Validator('cinemaz.cookies', must_exist=True, default='', is_type_of=str),
     Validator('cinemaz.user_agent', must_exist=True, default='', is_type_of=str),
 
-    # podnapisi section
-    Validator('podnapisi.verify_ssl', must_exist=True, default=True, is_type_of=bool),
-
     # subf2m section
     Validator('subf2m.verify_ssl', must_exist=True, default=True, is_type_of=bool),
     Validator('subf2m.user_agent', must_exist=True, default='', is_type_of=str),
@@ -426,10 +432,6 @@ validators = [
     Validator('ktuvit.email', must_exist=True, default='', is_type_of=str),
     Validator('ktuvit.hashed_password', must_exist=True, default='', is_type_of=str, cast=str),
 
-    # xsubs section
-    Validator('xsubs.username', must_exist=True, default='', is_type_of=str, cast=str),
-    Validator('xsubs.password', must_exist=True, default='', is_type_of=str, cast=str),
-
     # assrt section
     Validator('assrt.token', must_exist=True, default='', is_type_of=str, cast=str),
 
@@ -439,6 +441,9 @@ validators = [
     # deathbycaptcha section
     Validator('deathbycaptcha.username', must_exist=True, default='', is_type_of=str, cast=str),
     Validator('deathbycaptcha.password', must_exist=True, default='', is_type_of=str, cast=str),
+
+    # captchaai section
+    Validator('captchaai.captchaai_key', must_exist=True, default='', is_type_of=str, cast=str),
 
     # napisy24 section
     Validator('napisy24.username', must_exist=True, default='', is_type_of=str, cast=str),
@@ -900,6 +905,7 @@ def save_settings(settings_items):
     reset_providers = False
     reset_fanout_pool = False
     reset_compat_pool = False
+    invalidate_compat_cache = False
     active_provider_hub_provider_ids = None
 
     # Subzero Mods
@@ -943,7 +949,8 @@ def save_settings(settings_items):
             value = False
 
         # Handle JSON strings for dict settings
-        if settings_keys[-1] in ['provider_priorities', 'provider_languages', 'tiers'] and isinstance(value, str):
+        if settings_keys[-1] in ['provider_priorities', 'provider_languages',
+                                'provider_score_modifiers', 'tiers'] and isinstance(value, str):
             try:
                 value = json.loads(value)
             except ValueError:
@@ -984,7 +991,8 @@ def save_settings(settings_items):
             os.environ["SZ_HI_EXTENSION"] = value or ""
 
         if key in ['settings-general-anti_captcha_provider', 'settings-anticaptcha-anti_captcha_key',
-                   'settings-deathbycaptcha-username', 'settings-deathbycaptcha-password']:
+                   'settings-deathbycaptcha-username', 'settings-deathbycaptcha-password',
+                   'settings-captchaai-captchaai_key']:
             configure_captcha = True
 
         if key in ['update_schedule', 'settings-general-use_sonarr', 'settings-general-use_radarr',
@@ -1080,6 +1088,12 @@ def save_settings(settings_items):
         if key == 'settings-subsource-apikey':
             if value != settings.subsource.apikey:
                 reset_providers = True
+
+        if key == 'settings-general-provider_score_modifiers':
+            # A cached compat envelope carries the projected scores in it, so
+            # an edited modifier would leave external clients on the old
+            # numbers until the entry expires, up to a day later.
+            invalidate_compat_cache = True
 
         if key in ('settings-general-enabled_providers',
                    'settings-general-provider_languages'):
@@ -1192,6 +1206,15 @@ def save_settings(settings_items):
         except Exception:
             pass
 
+    if invalidate_compat_cache:
+        # Same reasoning: after the writes, so the next request rebuilds
+        # against the new values rather than the ones being replaced.
+        try:
+            from compat.cache import invalidate_all as _invalidate_compat_cache
+            _invalidate_compat_cache()
+        except Exception:
+            pass
+
     try:
         settings.validators.validate()
         validate_log_regex()
@@ -1281,8 +1304,14 @@ def configure_captcha_func():
         os.environ["ANTICAPTCHA_CLASS"] = 'DeathByCaptchaProxyLess'
         os.environ["ANTICAPTCHA_ACCOUNT_KEY"] = str(':'.join(
             {settings.deathbycaptcha.username, settings.deathbycaptcha.password}))
+    elif settings.general.anti_captcha_provider == 'captchaai' and settings.captchaai.captchaai_key != "":
+        os.environ["ANTICAPTCHA_CLASS"] = 'CaptchaAIProxyLess'
+        os.environ["ANTICAPTCHA_ACCOUNT_KEY"] = str(settings.captchaai.captchaai_key)
     else:
         os.environ["ANTICAPTCHA_CLASS"] = ''
+        # Clear the key too, or disabling the vendor leaves the previous
+        # credential exported for the rest of the process lifetime.
+        os.environ["ANTICAPTCHA_ACCOUNT_KEY"] = ''
 
 
 def configure_proxy_func():

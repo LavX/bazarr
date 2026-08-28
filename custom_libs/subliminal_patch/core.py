@@ -110,10 +110,25 @@ class _ProviderConfigs(dict):
             registered_val.update(val)
 
             logger.debug("Config changed. Restarting provider: %s", key)
+
+            # Tear the old instance down before building its replacement.
+            # Dropping the reference releases nothing it owns, and a Provider
+            # Hub provider owns a worker process and the threads pumping its
+            # stdio, so a settings save that touched a config used to leak one
+            # for the life of the process. Order matters as much as the call
+            # does: EmbeddedSubtitles.terminate() removes a cache directory
+            # every instance of it shares, so tearing the old one down last
+            # would delete what the replacement had just created.
+            self._pool.retire_provider(key)
+
             try:
                 provider = provider_registry[key](**registered_val)  # type: ignore
                 provider.initialize()
             except Exception as error:
+                # Nothing is installed. The pool initializes on next access, so
+                # a provider that is merely unreachable right now comes back on
+                # its own, with the new config rather than the one the user
+                # just changed away from.
                 self._pool.throttle_callback(key, error)
             else:
                 self._pool.initialized_providers[key] = provider
@@ -215,13 +230,22 @@ class _LanguageEquals(list):
                 break
 
 
+class ProviderExcludedError(KeyError):
+    """A lookup named a provider the configuration currently excludes
+    (discarded by this pool, disabled, or throttled). Distinct from a bare
+    KeyError so callers can treat it as a quiet no-op: routing it through the
+    generic error handlers would call throttle_callback, and an unmapped
+    exception REPLACES an existing long backoff with the 10-minute default."""
+
+
 class SZProviderPool(ProviderPool):
     @staticmethod
     def _dedupe_provider_names(providers):
         return list(dict.fromkeys(providers or []))
 
     def __init__(self, providers=None, provider_configs=None, blacklist=None, ban_list=None, throttle_callback=None,
-                 pre_download_hook=None, post_download_hook=None, language_hook=None, language_equals=None):
+                 pre_download_hook=None, post_download_hook=None, language_hook=None, language_equals=None,
+                 adoption_gate=None):
         #: Name of providers to use
         self.providers = self._dedupe_provider_names(providers)
 
@@ -247,6 +271,11 @@ class SZProviderPool(ProviderPool):
         self._born = time.time()
 
         self.provider_progress_callback = None
+
+        #: Optional callable(name) -> bool consulted before __getitem__ adopts
+        #: a provider the pool was not built with. None leaves adoption open to
+        #: any registered provider (the historical behaviour).
+        self.adoption_gate = adoption_gate
 
         if not self.throttle_callback:
             self.throttle_callback = lambda x, y, ids=None, language=None: x
@@ -311,7 +340,27 @@ class SZProviderPool(ProviderPool):
 
     def __getitem__(self, name):
         if name not in self.providers:
-            raise KeyError
+            # A download can name a provider the pool was not built with, for
+            # instance when the subtitle came from an earlier search and the
+            # enabled-provider list has changed since. Adopt it when it is
+            # registered, otherwise it is a genuine lookup error.
+            #
+            # self.providers is always an ordered list (see __init__ and
+            # update(), both of which route through _dedupe_provider_names), so
+            # appending keeps the configured priority order.
+            #
+            # Absence from self.providers is also how the pool encodes
+            # discarded providers, and how update() encodes disabled or
+            # throttled ones. Never resurrect a provider this pool discarded,
+            # and let the adoption gate (the caller's enabled-and-not-throttled
+            # check) veto names the configuration currently excludes.
+            if name not in provider_registry:
+                raise KeyError(name)
+            if name in self.discarded_providers:
+                raise ProviderExcludedError(name)
+            if self.adoption_gate is not None and not self.adoption_gate(name):
+                raise ProviderExcludedError(name)
+            self.providers.append(name)
         if name not in self.initialized_providers:
             logger.info('Initializing provider %s', name)
             provider = provider_registry[name](**self.provider_configs.get(name, {}))
@@ -319,6 +368,24 @@ class SZProviderPool(ProviderPool):
             self.initialized_providers[name] = provider
 
         return self.initialized_providers[name]
+
+    def retire_provider(self, name):
+        """Terminate an initialized provider without throttling its name.
+
+        Teardown failures are logged rather than routed to throttle_callback:
+        that takes the provider out of the rotation for the throttle interval,
+        and the instance being discarded misbehaving on its way out is no
+        reason to do that to the one replacing it.
+        """
+        provider = self.initialized_providers.pop(name, None)
+        if provider is None:
+            return
+
+        try:
+            logger.info('Terminating provider %s', name)
+            provider.terminate()
+        except Exception:
+            logger.exception('Provider %r terminated unexpectedly', name)
 
     def __delitem__(self, name):
         if name not in self.initialized_providers:
@@ -398,7 +465,13 @@ class SZProviderPool(ProviderPool):
             self.provider_progress_callback(provider)
 
         try:
-            results = self[provider].list_subtitles(video, to_request)
+            try:
+                initialized_provider = self[provider]
+            except ProviderExcludedError:
+                logger.info('Provider %r is currently excluded (disabled, '
+                            'throttled or discarded); not searching it', provider)
+                return
+            results = initialized_provider.list_subtitles(video, to_request)
             seen = []
             out = []
             for s in results:
@@ -498,6 +571,25 @@ class SZProviderPool(ProviderPool):
 
         return subtitles
 
+    @staticmethod
+    def _episode_candidate_is_valid(subtitle, orig_matches, matches):
+        """Whether an episode candidate identifies the episode it claims to.
+
+        download_best_subtitles refuses one that does not, so the prioritized
+        listing has to apply the same rule before it calls a language satisfied
+        and stops asking the remaining providers. Otherwise the search ends on
+        a candidate the download then throws away and nothing is downloaded.
+
+        ``orig_matches`` is the set as the provider reported it; ``matches`` is
+        what compute_score left behind, which is where the hash decision lives.
+        """
+        if not getattr(subtitle, 'hash_verifiable', False) and "hash" in matches:
+            # The provider cannot vouch for its own hash, so there is nothing
+            # to verify the episode against and the candidate is not held to it.
+            return True
+        return ({"season", "episode"}.issubset(orig_matches)
+                and ("series" in orig_matches or "imdb_id" in orig_matches))
+
     def list_subtitles_prioritized(self, video, languages, min_score=0, provider_order=None, compute_score=None,
                                    exhaustive=False):
         """List subtitles with priority-based provider search.
@@ -554,9 +646,17 @@ class SZProviderPool(ProviderPool):
                 except AttributeError:
                     logger.error("%r: Match computation failed: %s", subtitle, traceback.format_exc())
                     continue
+                orig_matches = matches.copy()
                 score, _ = compute_score(matches, subtitle, video, False)
-                if score >= min_score:
-                    satisfied_languages.add(subtitle.language.alpha3)
+                if score < min_score:
+                    continue
+                if isinstance(video, Episode) and not self._episode_candidate_is_valid(
+                        subtitle, orig_matches, matches):
+                    logger.debug("%r: Score %d clears the minimum but the candidate does not "
+                                 "identify the episode, so it does not satisfy the language",
+                                 subtitle, score)
+                    continue
+                satisfied_languages.add(subtitle.language.alpha3)
 
             all_subtitles.extend(valid_subtitles)
 
@@ -597,7 +697,14 @@ class SZProviderPool(ProviderPool):
                 if self.pre_download_hook:
                     self.pre_download_hook(subtitle)
 
-                self[subtitle.provider_name].download_subtitle(subtitle)
+                try:
+                    initialized_provider = self[subtitle.provider_name]
+                except ProviderExcludedError:
+                    logger.info('Provider %r is currently excluded (disabled, '
+                                'throttled or discarded); not downloading from it',
+                                subtitle.provider_name)
+                    return False
+                initialized_provider.download_subtitle(subtitle)
                 if self.post_download_hook:
                     self.post_download_hook(subtitle)
 
@@ -641,35 +748,10 @@ class SZProviderPool(ProviderPool):
 
         return True
 
-    def download_best_subtitles(self, subtitles, video, languages, min_score=0, hearing_impaired=False, only_one=False,
-                                use_original_format=False, fallback_allowed=False):
-        """Download the best matching subtitles.
-
-        patch:
-            - hearing_impaired is now string
-            - add .score to subtitle
-            - move all languages check further to the top (still necessary?)
-
-        :param subtitles: the subtitles to use.
-        :type subtitles: list of :class:`~subliminal.subtitle.Subtitle`
-        :param video: video to download subtitles for.
-        :type video: :class:`~subliminal.video.Video`
-        :param languages: languages to download.
-        :type languages: set of :class:`~babelfish.language.Language`
-        :param int min_score: minimum score for a subtitle to be downloaded.
-        :param bool hearing_impaired: hearing impaired preference.
-        :param bool only_one: download only one subtitle, not one per language.
-        :param bool use_original_format: preserve original subtitles format
-        :return: downloaded subtitles.
-        :rtype: list of :class:`~subliminal.subtitle.Subtitle`
-
-        """
+    @classmethod
+    def _score_subtitles(cls, subtitles, video, languages, hearing_impaired):
+        """(subtitle, score, score_without_hash, matches, orig_matches) tuples, best first."""
         use_hearing_impaired = hearing_impaired in ("prefer", "force HI")
-
-        is_episode = isinstance(video, Episode)
-        max_score = MAX_SCORES['episode' if is_episode else 'movie']
-
-        # sort subtitles by score
         unsorted_subtitles = []
 
         for s in subtitles:
@@ -679,8 +761,22 @@ class SZProviderPool(ProviderPool):
                 continue
 
             try:
-                matches = s.matches if hasattr(s, 'matches') and isinstance(s.matches, set) and len(s.matches) \
-                        else s.get_matches(video)
+                cached = s.matches if hasattr(s, 'matches') and isinstance(s.matches, set) \
+                    and len(s.matches) else None
+                # A candidate may declare that its match set is only complete once it
+                # has seen the video. Provider Hub candidates arrive from the worker
+                # with a lean set of identifier matches already populated, so reusing
+                # it here scored every one of them identically and the first listed
+                # won, handing a user searching for a 2160p WEB release a Blu-ray
+                # subtitle for another release group. Declared on the candidate rather
+                # than sniffed from its class name, which a rename or a subclass would
+                # silently defeat. Recomputation is idempotent: the augmented set is
+                # derived from a frozen base, so the priority-ordered listing path,
+                # which already computed it, gets the same answer twice.
+                if cached is None or getattr(s, 'matches_need_video', False):
+                    matches = s.get_matches(video)
+                else:
+                    matches = cached
 
             except AttributeError:
                 logger.error("%r: Match computation failed: %s", s, traceback.format_exc())
@@ -693,8 +789,45 @@ class SZProviderPool(ProviderPool):
             unsorted_subtitles.append(
                 (s, score, score_without_hash, matches, orig_matches))
 
-        # sort subtitles by score
-        scored_subtitles = sorted(unsorted_subtitles, key=operator.itemgetter(1, 2), reverse=True)
+        return sorted(unsorted_subtitles, key=operator.itemgetter(1, 2), reverse=True)
+
+    def download_best_subtitles(self, subtitles, video, languages, min_score=0, hearing_impaired=False, only_one=False,
+                                use_original_format=False, fallback_allowed=False, candidate_sink=None):
+        """Download the best matching subtitles.
+
+        patch:
+            - hearing_impaired is now string
+            - add .score to subtitle
+            - move all languages check further to the top (still necessary?)
+            - optional candidate_sink reporting every scored candidate
+
+        :param subtitles: the subtitles to use.
+        :type subtitles: list of :class:`~subliminal.subtitle.Subtitle`
+        :param video: video to download subtitles for.
+        :type video: :class:`~subliminal.video.Video`
+        :param languages: languages to download.
+        :type languages: set of :class:`~babelfish.language.Language`
+        :param int min_score: minimum score for a subtitle to be downloaded.
+        :param bool hearing_impaired: hearing impaired preference.
+        :param bool only_one: download only one subtitle, not one per language.
+        :param bool use_original_format: preserve original subtitles format
+        :param list candidate_sink: when given, receives one record per scored
+            candidate: provider name, release description, score and whether it
+            was downloaded. The loop below stops at the first candidate under
+            ``min_score``, so the rejected candidates a caller may want to
+            inspect are exactly the ones it never visits; they are collected
+            from the scored list instead. Purely a report: no provider is
+            contacted for it.
+        :return: downloaded subtitles.
+        :rtype: list of :class:`~subliminal.subtitle.Subtitle`
+
+        """
+        use_hearing_impaired = hearing_impaired in ("prefer", "force HI")
+
+        is_episode = isinstance(video, Episode)
+        max_score = MAX_SCORES['episode' if is_episode else 'movie']
+
+        scored_subtitles = self._score_subtitles(subtitles, video, languages, hearing_impaired)
 
         # download best subtitles, falling back on the next on error
         downloaded_subtitles = []
@@ -723,20 +856,10 @@ class SZProviderPool(ProviderPool):
                              score, hearing_impaired)
                 continue
 
-            if is_episode:
-                can_verify_series = True
-                if not subtitle.hash_verifiable and "hash" in matches:
-                    can_verify_series = False
-
-                matches_series = False
-                if {"season", "episode"}.issubset(orig_matches) and \
-                        ("series" in orig_matches or "imdb_id" in orig_matches):
-                    matches_series = True
-
-                if can_verify_series and not matches_series:
-                    logger.debug("%r: Skipping subtitle with score %d, because it doesn't match our series/episode",
-                                 subtitle, score)
-                    continue
+            if is_episode and not self._episode_candidate_is_valid(subtitle, orig_matches, matches):
+                logger.debug("%r: Skipping subtitle with score %d, because it doesn't match our series/episode",
+                             subtitle, score)
+                continue
 
             # make sure to preserve original subtitles format if requested
             subtitle.use_original_format = use_original_format
@@ -770,6 +893,29 @@ class SZProviderPool(ProviderPool):
                         subtitle.score = score
                         downloaded_subtitles.append(subtitle)
                         break
+
+        if candidate_sink is not None:
+            # Identity, not equality: Subtitle equality is provider-defined and
+            # two distinct candidates can compare equal.
+            downloaded_ids = {id(s) for s in downloaded_subtitles}
+            for subtitle, score, _score_without_hash, matches, orig_matches in scored_subtitles:
+                candidate_sink.append({
+                    'provider_name': subtitle.provider_name,
+                    'release_info': getattr(subtitle, 'release_info', None),
+                    'score': score,
+                    'downloaded': id(subtitle) in downloaded_ids,
+                    # The loop above rejects an episode subtitle that does not
+                    # match the series and episode however high it scores, so a
+                    # consumer reasoning about "would this have been downloaded"
+                    # needs the same matches the loop tested.
+                    'matches': sorted(orig_matches or ()),
+                    # And what the score was actually computed from, which is
+                    # not the same set: compute_score discards every match but
+                    # the hash when one is present. A consumer reasoning about
+                    # what this subtitle would score under other circumstances
+                    # cannot tell that from the pre-score matches.
+                    'scored_matches': sorted(matches or ()),
+                })
 
         return downloaded_subtitles
 
@@ -1308,6 +1454,18 @@ def get_subtitle_path(video_path, language=None, extension='.srt', forced_tag=Fa
     return subtitle_root + extension
 
 
+# pysubs2 names a format, the filesystem names a file, and the two vocabularies
+# do not match: pysubs2 calls SAMI "sami" and MPL2 "mpl2" while the files are
+# .smi and .mpl. Saving under the parser's name produces an extension nothing in
+# Bazarr indexes, so the subtitle it just downloaded still reads as missing.
+SUBTITLE_FORMAT_EXTENSIONS = {
+    "sami": "smi",
+    "mpl2": "mpl",
+    "microdvd": "sub",
+    "tmp": "txt",
+}
+
+
 def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=None, formats=("srt",),
                    tags=None, path_decoder=None, debug_mods=False):
     """Save subtitles on filesystem.
@@ -1374,8 +1532,9 @@ def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=Non
         subtitle.storage_path = subtitle_path
 
         for format in formats:
-            if format != "srt":
-                subtitle_path = os.path.splitext(subtitle_path)[0] + (u".%s" % format)
+            extension = SUBTITLE_FORMAT_EXTENSIONS.get(format, format)
+            if extension != "srt":
+                subtitle_path = os.path.splitext(subtitle_path)[0] + (u".%s" % extension)
 
             logger.debug(u"Saving %r to %r", subtitle, subtitle_path)
             content = subtitle.get_modified_content(format=format, debug=debug_mods)

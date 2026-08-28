@@ -245,7 +245,9 @@ const monoStyle: React.CSSProperties = {
   ...cellStyle,
   fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
   fontSize: "0.8rem",
-  color: "var(--mantine-color-yellow-4)",
+  // Brand anchor color, same as the breadcrumb links: resolves to a readable
+  // shade in both color schemes (yellow-4 was near-invisible in light mode).
+  color: "var(--mantine-color-anchor)",
   letterSpacing: "-0.2px",
 };
 

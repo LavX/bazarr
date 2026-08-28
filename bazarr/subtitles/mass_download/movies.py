@@ -57,7 +57,7 @@ def movies_download_subtitles(no, job_id=None, job_sub_function=False, arr_insta
         return
     elif movie.subtitles is None:
         # subtitles indexing for this movie is incomplete, we'll do it again
-        store_subtitles_movie(movie.path, path_mappings.path_replace_movie(movie.path))
+        store_subtitles_movie(movie.path, path_mappings.path_replace_instance(movie.path, arr_instance_id, 'movie'), arr_instance_id=arr_instance_id)
         movie = database.execute(stmt).first()
     elif movie.missing_subtitles is None:
         # missing subtitles calculation for this movie is incomplete, we'll do it again
@@ -110,7 +110,7 @@ def movies_download_subtitles(no, job_id=None, job_sub_function=False, arr_insta
                 if result:
                     if isinstance(result, tuple) and len(result):
                         result = result[0]
-                    store_subtitles_movie(movie.path, moviePath)
+                    store_subtitles_movie(movie.path, moviePath, arr_instance_id=arr_instance_id)
                     history_log_movie(1, no, result, arr_instance_id=arr_instance_id)
                     send_notifications_movie(no, result.message, arr_instance_id=arr_instance_id)
                     downloaded_count += 1
@@ -178,7 +178,7 @@ def movie_download_specific_subtitles(radarr_id, language, hi, forced, job_id=No
                 result = result[0]
             history_log_movie(1, radarr_id, result, arr_instance_id=arr_instance_id)
             send_notifications_movie(radarr_id, result.message, arr_instance_id=arr_instance_id)
-            store_subtitles_movie(result.path, moviePath)
+            store_subtitles_movie(result.path, moviePath, arr_instance_id=arr_instance_id)
             jobs_queue.update_job_progress(job_id=job_id, progress_value='max',
                                            progress_message="Subtitle downloaded")
         else:

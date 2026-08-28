@@ -26,6 +26,39 @@
 
 Bazarr+ is a hard fork of [upstream Bazarr](https://github.com/morpheus65535/bazarr). There is no automatic synchronization. Bug fixes from upstream may be cherry-picked selectively when relevant, but upstream releases are not merged wholesale.
 
+## Subtitle providers go in the catalog, not here
+
+If you are fixing or adding a **subtitle provider**, it does not belong in this repository.
+
+Providers ship as plugins in the [Bazarr+ provider catalog](https://github.com/LavX/bazarr-provider-catalog)
+and are installed at runtime through the Provider Hub. That is deliberate: a catalog fix reaches
+users as a plugin release, instead of waiting for a Bazarr+ release, and a provider that breaks
+cannot take the application down with it, because the Hub runs plugins out of process.
+
+The built-in providers under `custom_libs/subliminal_patch/providers/` are **legacy**. They are
+deprecated and will be removed after v3.0.0, and they are not maintained. Each portable one carries
+a header saying so. A pull request that patches one will most likely be asked to move to the
+catalog, which is wasted effort for you, so please start there.
+
+One exception to the release-independence above, worth knowing before you port anything: the
+Provider Hub will not let a plugin quietly take over a built-in provider id. An id has to be
+listed in `bazarr/provider_hub/migration.py` before an official catalog plugin can claim it, and a
+plugin claiming an unlisted id is skipped at registration. Check that file first, because adding an
+id to it needs a release of this repository.
+
+The ids kept off it are ones where the provider's site is gone, `podnapisi`, `subscenter` and
+`xsubs` among them: `podnapisi.net` and `subscenter.info` no longer resolve, and `xsubs.tv` now
+serves an unrelated site. There is nothing left to port for those, so please do not spend time on
+one.
+
+Read `docs/writing-a-scraper-provider.md` in the catalog repository before you begin. One thing
+worth checking early: if the built-in you are porting from uses `CFSession`, the site is behind
+Cloudflare, and the plugin needs cloudscraper plus the anti-captcha or FlareSolverr manifest flags
+rather than the stdlib `urllib` that most plugins use.
+
+Everything else in this repository, including the subtitle engine, scoring, the search pool, the
+API, the database, and the frontend, is contributed normally. The rule is about providers only.
+
 ## Contribution workflow
 
 1. Fork the repository

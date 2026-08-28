@@ -32,7 +32,8 @@ def test_user_visible_includes_provider_passwords_and_keys():
     updating the registry, those credentials would ship plaintext."""
     for key in ("opensubtitles.password", "addic7ed.password",
                 "subdl.api_key", "subsource.apikey",
-                "translator.openrouter_api_key", "translator.lingarr_token"):
+                "translator.openrouter_api_key", "translator.lingarr_token",
+                "anticaptcha.anti_captcha_key", "captchaai.captchaai_key"):
         assert is_user_visible_secret(key), f"{key} should be user-visible"
 
 
@@ -82,7 +83,6 @@ def test_provider_login_pairs_are_both_classified():
         ("addic7ed.username", "addic7ed.password"),
         ("legendasdivx.username", "legendasdivx.password"),
         ("legendasnet.username", "legendasnet.password"),
-        ("xsubs.username", "xsubs.password"),
         ("deathbycaptcha.username", "deathbycaptcha.password"),
         ("napisy24.username", "napisy24.password"),
         ("titlovi.username", "titlovi.password"),

@@ -234,7 +234,7 @@ def test_startup_requirements_probe_uses_security_patched_dependency_versions():
     requirements = (repo_root / "requirements.txt").read_text()
 
     expected_versions = {
-        "dynaconf": ("dynaconf", "==3.3.2"),
+        "dynaconf": ("dynaconf", "==3.3.5"),
         "urllib3": ("urllib3", "==2.7.0"),
     }
 

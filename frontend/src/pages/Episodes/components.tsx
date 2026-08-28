@@ -1,7 +1,10 @@
 import { FunctionComponent, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import { Badge, Group, MantineColor, UnstyledButton } from "@mantine/core";
-import { useEpisodeSubtitleModification } from "@/apis/hooks";
+import {
+  useEpisodeSubtitleModification,
+  useSubtitleFileDownload,
+} from "@/apis/hooks";
 import { useCombineSubtitles } from "@/apis/hooks/combine";
 import { CombinedSubtitleBadge } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
@@ -82,6 +85,7 @@ export const Subtitle: FunctionComponent<Props> = ({
   const navigate = useNavigate();
   const { remove, download } = useEpisodeSubtitleModification();
   const combine = useCombineSubtitles();
+  const fileDownload = useSubtitleFileDownload();
 
   const [opened, setOpen] = useState(false);
   const [compareOpened, setCompareOpened] = useState(false);
@@ -193,6 +197,13 @@ export const Subtitle: FunctionComponent<Props> = ({
                   arrInstanceId,
                 ),
               );
+            } else if (action === "download") {
+              fileDownload.mutate({
+                type: "episode",
+                mediaId: episodeId,
+                language: buildSubtitleLanguageKey(subtitle),
+                arrInstanceId,
+              });
             } else if (action === "delete" && subtitlePath) {
               await remove.mutateAsync({
                 seriesId,
@@ -271,6 +282,13 @@ export const Subtitle: FunctionComponent<Props> = ({
             });
           } else if (action === "compare-sync") {
             setCompareOpened(true);
+          } else if (action === "download") {
+            fileDownload.mutate({
+              type: "episode",
+              mediaId: episodeId,
+              language: buildSubtitleLanguageKey(subtitle),
+              arrInstanceId,
+            });
           } else if (action === "delete" && subtitle.path) {
             await remove.mutateAsync({
               seriesId,

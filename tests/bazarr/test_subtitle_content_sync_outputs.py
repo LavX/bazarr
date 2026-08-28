@@ -213,7 +213,9 @@ def test_promote_sync_output_overwrites_target_atomically(tmp_path, monkeypatch)
     assert response['sourceLanguage'] == 'hu:sync-ffsubsync'
     assert response['targetLanguage'] == 'hu'
     assert original.read_text(encoding='utf-8') == 'synced subtitle'
-    assert store_calls == [((metadata['mediaPath'], metadata['mediaPath']), {'use_cache': False})]
+    assert store_calls == [((metadata['mediaPath'], metadata['mediaPath']),
+                            {'use_cache': False,
+                             'arr_instance_id': metadata.get('arrInstanceId')})]
     assert history_calls[0][1]['action'] == 5
     assert history_calls[0][1]['radarr_id'] == 1203
     assert history_calls[0][1]['result'].subs_path == str(original)

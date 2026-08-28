@@ -5,6 +5,7 @@ import {
   faClock,
   faClosedCaptioning,
   faCode,
+  faDownload,
   faExchangeAlt,
   faEye,
   faFaceGrinStars,
@@ -153,7 +154,14 @@ interface Props {
   menu?: Omit<MenuProps, "children">;
   canSync?: boolean;
   onAction?: (
-    action: "delete" | "search" | "view" | "edit" | "compare-sync" | "rebuild",
+    action:
+      | "delete"
+      | "search"
+      | "view"
+      | "edit"
+      | "compare-sync"
+      | "rebuild"
+      | "download",
   ) => void;
   canCompareSyncOutputs?: boolean;
   // When true: hide the editing tool groups (sync, cleanup, style) and show
@@ -375,6 +383,20 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
           {isCombinedOutput || selections.length > 0
             ? "Edit"
             : "Create / Upload"}
+        </Menu.Item>
+        {/* Embedded tracks have no file on disk to hand out */}
+        <Menu.Item
+          disabled={
+            selections.length === 0 ||
+            onAction === undefined ||
+            isTranslateOnlyMode
+          }
+          leftSection={<FontAwesomeIcon icon={faDownload}></FontAwesomeIcon>}
+          onClick={() => {
+            onAction?.("download");
+          }}
+        >
+          Download
         </Menu.Item>
         {!isCombinedOutput && (
           <Menu.Item

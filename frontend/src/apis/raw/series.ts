@@ -29,6 +29,23 @@ class SeriesApi extends BaseApi {
   async action(form: FormType.SeriesAction) {
     await this.patch("", form);
   }
+
+  async downloadSubtitlesArchive(
+    seriesid: number,
+    options: {
+      season?: number;
+      language?: string;
+      arrInstanceId?: number;
+    } = {},
+  ) {
+    // Zip of the series' external subtitle files, optionally narrowed to one
+    // season and/or one base language.
+    return this.getBlob(`/${seriesid}/subtitles/download`, {
+      season: options.season,
+      language: options.language,
+      arr_instance_id: options.arrInstanceId,
+    });
+  }
 }
 
 const seriesApi = new SeriesApi();

@@ -149,6 +149,18 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
         logging.exception(f'BAZARR Error saving Subtitles file to disk for this file: {path}')  # noqa: G004
         return
 
+    # An uploaded subtitle satisfies the language as surely as a downloaded one,
+    # so whatever mismatch was recorded for it no longer describes anything. This
+    # path has no Video object, only the ids, which is all the resolver reads.
+    from types import SimpleNamespace
+
+    from .manual import clear_mismatch_after_manual_save
+
+    clear_mismatch_after_manual_save(
+        SimpleNamespace(sonarrEpisodeId=sonarrEpisodeId, radarrId=radarrId,
+                        original_path=path, arr_instance_id=arr_instance_id),
+        media_type, saved_subtitles, arr_instance_id)
+
     subtitle_path = saved_subtitles[0].storage_path
 
     if hi:
@@ -230,7 +242,7 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
             if not settings.general.dont_notify_manual_actions:
                 send_notifications(sonarrSeriesId, sonarrEpisodeId, result.message,
                                    arr_instance_id=arr_instance_id)
-            store_subtitles(result.path, path)
+            store_subtitles(result.path, path, arr_instance_id=arr_instance_id)
             if settings.general.use_plex:
                 if settings.plex.update_series_library:
                     plex_refresh_item(episode_metadata.imdbId, is_movie=False,
@@ -246,7 +258,7 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
                               arr_instance_id=arr_instance_id)
             if not settings.general.dont_notify_manual_actions:
                 send_notifications_movie(radarrId, result.message, arr_instance_id=arr_instance_id)
-            store_subtitles_movie(result.path, path)
+            store_subtitles_movie(result.path, path, arr_instance_id=arr_instance_id)
             if settings.general.use_plex:
                 if settings.plex.update_movie_library:
                     plex_refresh_item(movie_metadata.imdbId, is_movie=True)

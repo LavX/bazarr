@@ -12,6 +12,7 @@ from app.config import settings, configure_captcha_func, write_config
 from app.get_args import args
 from app.logger import configure_logging
 from utilities.binaries import get_binary, BinaryNotFound
+from utilities.package import package_info_path, read_package_info
 from utilities.path_mappings import path_mappings
 from utilities.backup import restore_from_backup
 
@@ -69,26 +70,24 @@ if isinstance(settings.general.enabled_providers, str) and not settings.general.
     write_config()
 
 # Read package_info (if exists) to override some settings by package maintainers
-# This file can also provide some info about the package version and author
-package_info_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'package_info')
+# This file can also provide some info about the package version and author.
+#
+# The path used to be derived here, one directory too high for this layout, so
+# in the shipped image the lookup asked for /app/package_info while the file is
+# at /app/bazarr/package_info. Everything below was skipped in silence: no
+# packaged version in System Status, and updatemethod=External never disabled
+# in-app updates. It lives in utilities.package now so the location is asserted
+# by a test instead of being taken on trust.
+package_info_file = package_info_path()
 if os.path.isfile(package_info_file):
     try:
-        splitted_lines = []
-        package_info = {}
-        with open(package_info_file) as file:
-            lines = file.readlines()
-            for line in lines:
-                splitted_lines += line.split(r'\n')
-            for line in splitted_lines:
-                splitted_line = line.split('=', 1)
-                if len(splitted_line) == 2:
-                    package_info[splitted_line[0].lower()] = splitted_line[1].replace('\n', '')
-                else:
-                    continue
+        package_info = read_package_info(package_info_file)
         # package author can force a branch to follow
         if 'branch' in package_info:
             settings.general.branch = package_info['branch']
-        # package author can disable update
+        # package author can disable update. The setting itself is applied in
+        # app.get_args, which runs early enough to gate every consumer; these
+        # two are published for anything outside the app that reads them.
         if package_info.get('updatemethod', '') == 'External':
             os.environ['BAZARR_UPDATE_ALLOWED'] = '0'
             os.environ['BAZARR_UPDATE_MESSAGE'] = package_info.get('updatemethodmessage', '')
@@ -174,6 +173,32 @@ existing_providers = provider_registry.names()
 enabled_providers = settings.general.enabled_providers
 if provider_hub_registration_ok:
     settings.general.enabled_providers = [x for x in enabled_providers if x in existing_providers]
+
+    # Drop the config section a retired built-in provider left behind.
+    #
+    # A retired id has no provider class, no validators and no secret_store
+    # paths left, so its section is unreachable settings: the Settings card went
+    # with the provider and nothing reads the values. It is still serialized
+    # into config.yaml and into every /api/system/settings response though, and
+    # a credential written there by a build older than the secret store stays in
+    # clear text forever, because the encrypt-at-rest walk only visits
+    # registered paths. Unsetting the section is what closes that, and it is the
+    # same treatment app.config already gives series_scores / movie_scores.
+    #
+    # Skipped for any retired id a trusted catalog plugin has adopted: Provider
+    # Hub reads that plugin's credentials out of exactly this section, and the
+    # registration above is what puts the id back in existing_providers.
+    from provider_hub.migration import RETIRED_BUILT_IN_PROVIDER_IDS
+    stale_provider_sections = sorted(
+        provider_id for provider_id in RETIRED_BUILT_IN_PROVIDER_IDS
+        if provider_id not in existing_providers and hasattr(settings, provider_id)
+    )
+    for stale_provider_section in stale_provider_sections:
+        settings.unset(stale_provider_section.upper())
+    if stale_provider_sections:
+        logging.info("Removed leftover config sections of retired providers: %s",
+                     ", ".join(stale_provider_sections))
+
     write_config()
 else:
     logging.warning("Skipping enabled_providers cleanup because Provider Hub registration failed")
@@ -189,17 +214,23 @@ if not hasattr(settings.general, 'provider_priorities') or not settings.general.
 
 
 def init_binaries():
-    # RAR archives are extracted with p7zip's 7z, matching the Dockerfile
-    # (installs p7zip-full; no unrar/unar package or self-download). 7z is tried
-    # first. unar/unrar remain only as a best-effort fallback for environments
-    # that already have them on PATH; they are no longer in binaries.json, so
+    # RAR extractors are tried in descending order of RAR5 and solid-archive
+    # reliability: unrar first, then unar, then p7zip's 7z. The runtime image
+    # ships unar (Debian main) and p7zip-full; unrar is picked up only where an
+    # operator installed it, since it is not redistributable from Debian main.
+    #
+    # Every one of these is looked up with get_binary(), which returns the
+    # binary from PATH when it is there, and otherwise raises BinaryNotFound
+    # straight away: none of the three has an entry in binaries.json, so
     # get_binary never attempts a (read-only, failing) self-download for them.
+    # Do not re-add unrar/unar/7z entries to binaries.json, that would turn a
+    # cheap PATH miss into a download attempt against a read-only bin/ tree.
     try:
-        exe = get_binary("7z")
-        rarfile.UNRAR_TOOL = None
+        exe = get_binary("unrar")
+        rarfile.UNRAR_TOOL = exe
         rarfile.UNAR_TOOL = None
-        rarfile.SEVENZIP_TOOL = exe
-        rarfile.tool_setup(unrar=False, unar=False, bsdtar=False, sevenzip=True, force=True)
+        rarfile.SEVENZIP_TOOL = None
+        rarfile.tool_setup(unrar=True, unar=False, bsdtar=False, sevenzip=False, force=True)
     except (BinaryNotFound, rarfile.RarCannotExec):
         try:
             exe = get_binary("unar")
@@ -209,22 +240,22 @@ def init_binaries():
             rarfile.tool_setup(unrar=False, unar=True, bsdtar=False, sevenzip=False, force=True)
         except (BinaryNotFound, rarfile.RarCannotExec):
             try:
-                exe = get_binary("unrar")
-                rarfile.UNRAR_TOOL = exe
+                exe = get_binary("7z")
+                rarfile.UNRAR_TOOL = None
                 rarfile.UNAR_TOOL = None
-                rarfile.SEVENZIP_TOOL = None
-                rarfile.tool_setup(unrar=True, unar=False, bsdtar=False, sevenzip=False, force=True)
+                rarfile.SEVENZIP_TOOL = exe
+                rarfile.tool_setup(unrar=False, unar=False, bsdtar=False, sevenzip=True, force=True)
             except (BinaryNotFound, rarfile.RarCannotExec):
-                logging.exception("BAZARR requires a rar archive extraction utility (7z, unar, or unrar) and none could be found.")
+                logging.exception("BAZARR requires a rar archive extraction utility (unrar, unar, or 7z) and none could be found.")
                 raise BinaryNotFound
             else:
-                logging.debug("Using UnRAR from: %s", exe)
+                logging.debug("Using 7zip from: %s", exe)
                 return exe
         else:
             logging.debug("Using unar from: %s", exe)
             return exe
     else:
-        logging.debug("Using 7zip from: %s", exe)
+        logging.debug("Using UnRAR from: %s", exe)
         return exe
 
 

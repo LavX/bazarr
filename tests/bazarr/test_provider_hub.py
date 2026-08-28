@@ -13,6 +13,17 @@ from subzero.language import Language
 from subliminal.video import Movie
 from subliminal_patch.core import Episode
 
+# Retired built-in ids that were still shipping when they were retired, so the
+# claim/adoption behavior around them is what an upgrading install actually meets,
+# plus the older ones that were deleted before RETIRED_BUILT_IN_PROVIDER_IDS
+# existed. Shared with test_retired_provider_config_compat.py so the ids live in
+# one place; test_retired_id_lists_partition_the_production_set below anchors both
+# lists to the production set.
+from retired_providers import (
+    LEGACY_RETIRED_PROVIDER_IDS,
+    RETIRED_PROVIDER_IDS_UNDER_TEST,
+)
+
 
 @pytest.fixture(autouse=True)
 def _enable_provider_hub_auto_install(monkeypatch):
@@ -552,20 +563,25 @@ def test_worker_reader_caps_oversized_response_line(monkeypatch):
     assert buffered <= worker_mod._MAX_RESPONSE_LINE_BYTES + worker_mod._READ_CHUNK_CHARS
 
 
-def test_worker_consumer_kills_on_oversized_sentinel():
+def test_worker_consumer_kills_on_oversized_sentinel(monkeypatch):
     import queue
     from types import SimpleNamespace
     from provider_hub import worker as worker_mod
     from provider_hub.worker import ProviderWorkerClient, WorkerError
 
+    killed = []
+    monkeypatch.setattr(worker_mod.os, "killpg",
+                        lambda pgid, sig: killed.append((pgid, sig)))
     client = ProviderWorkerClient.__new__(ProviderWorkerClient)
     client.process = SimpleNamespace(
-        stdout=object(), kill=lambda: None, wait=lambda timeout=None: None
+        pid=4242, stdout=object(), kill=lambda: None, wait=lambda timeout=None: None
     )
     client._stdout_queue = queue.Queue()
     client._stdout_queue.put(worker_mod._OVERSIZE_RESPONSE)
     with pytest.raises(WorkerError, match="exceeded"):
         client._read_line_with_deadline(5.0)
+    assert killed == [(4242, worker_mod.signal.SIGKILL)], (
+        "a worker discarded mid-protocol has to take its children with it")
 
 
 def test_venv_installer_uses_isolated_hash_checked_pip(monkeypatch, tmp_path):
@@ -930,13 +946,164 @@ def test_untrusted_install_cannot_replace_registered_migrated_provider():
             provider_registry.register(provider_id, original_cls)
 
 
+def test_retired_id_lists_partition_the_production_set():
+    # The two test lists together must BE the production set, not merely live inside
+    # it. A retirement that adds an id to RETIRED_BUILT_IN_PROVIDER_IDS and forgets to
+    # list it turns this red, instead of silently leaving that id with no coverage in
+    # either this file or the config-compat boot.
+    from provider_hub.migration import RETIRED_BUILT_IN_PROVIDER_IDS
+
+    assert set(RETIRED_PROVIDER_IDS_UNDER_TEST).isdisjoint(LEGACY_RETIRED_PROVIDER_IDS)
+    assert (
+        set(RETIRED_PROVIDER_IDS_UNDER_TEST) | set(LEGACY_RETIRED_PROVIDER_IDS)
+        == set(RETIRED_BUILT_IN_PROVIDER_IDS)
+    )
+
+
 def test_dead_origin_providers_are_not_builtin_replacements():
     # Providers whose upstream origin is dead must never be on the trusted-replacement
     # allowlist, so a catalog cannot resurrect them by shadowing a (removed) built-in.
     from provider_hub.migration import MIGRATED_BUILT_IN_PROVIDER_IDS
 
-    assert {"hosszupuska", "podnapisi", "subscenter", "xsubs"}.isdisjoint(
+    assert set(RETIRED_PROVIDER_IDS_UNDER_TEST).isdisjoint(
         MIGRATED_BUILT_IN_PROVIDER_IDS
+    )
+
+
+def test_retired_built_in_ids_stay_claimed_and_are_trusted_only():
+    # Retiring a built-in deletes its module, so the id leaves provider_registry and
+    # the dynamic half of the shadow gate stops covering it. RETIRED_BUILT_IN_PROVIDER_IDS
+    # keeps it claimed. It is a separate set from the migration allowlist, which carries
+    # its own auto-install and rename semantics, but both are shadowable on the same
+    # terms: trusted yes, untrusted no.
+    from provider_hub.migration import (
+        MIGRATED_BUILT_IN_PROVIDER_IDS,
+        RETIRED_BUILT_IN_PROVIDER_IDS,
+    )
+    from subliminal_patch.extensions import provider_registry
+
+    for provider_id in RETIRED_PROVIDER_IDS_UNDER_TEST:
+        assert provider_id in RETIRED_BUILT_IN_PROVIDER_IDS
+    assert RETIRED_BUILT_IN_PROVIDER_IDS.isdisjoint(MIGRATED_BUILT_IN_PROVIDER_IDS)
+    for provider_id in RETIRED_BUILT_IN_PROVIDER_IDS:
+        # A retired id has no provider class left, which is the whole reason the set
+        # has to exist.
+        assert provider_id not in provider_registry.names()
+
+
+@pytest.mark.parametrize(
+    "provider_id,trusted,expected",
+    # Retired ids: a trusted catalog entry may adopt one, an untrusted one may not.
+    # Generated from the shared list rather than spelled out, so the matrix cannot
+    # drift from the ids the rest of the file (and the config-compat boot) drives.
+    [
+        (provider_id, trusted, trusted)
+        for provider_id in RETIRED_PROVIDER_IDS_UNDER_TEST + LEGACY_RETIRED_PROVIDER_IDS
+        for trusted in (True, False)
+    ]
+    + [
+        # Migrated id: unchanged in both directions.
+        ("gestdown", True, True),
+        ("gestdown", False, False),
+        # On neither set: the gate is pure set membership, so an id nobody claimed
+        # is refused at every trust level rather than waved through.
+        ("not_a_built_in_provider", True, False),
+        ("not_a_built_in_provider", False, False),
+    ],
+)
+def test_shadow_gate_matrix(provider_id, trusted, expected):
+    from provider_hub.migration import can_shadow_built_in_provider
+
+    assert can_shadow_built_in_provider(provider_id, trusted) is expected
+
+
+@pytest.mark.parametrize("provider_id", RETIRED_PROVIDER_IDS_UNDER_TEST)
+def test_retired_built_in_provider_id_cannot_be_claimed_by_an_untrusted_plugin(provider_id):
+    # Before the built-in module was deleted, an untrusted catalog entry claiming its
+    # id was rejected as shadowing a built-in. Deleting the module must not hand the
+    # id to the next plugin that asks for it.
+    import provider_hub.registry as hub_registry
+    from provider_hub.registry import register_active_provider_classes
+    from subliminal_patch.extensions import provider_registry
+
+    assert provider_id not in provider_registry.names()
+
+    installation = _install(
+        provider_id,
+        trusted=False,
+        manifest=_manifest(
+            provider_id=provider_id,
+            name=provider_id.title(),
+            dependencies={"requirements": []},
+        ),
+    )
+
+    try:
+        registered = register_active_provider_classes(installations=[installation])
+
+        assert registered == []
+        assert provider_id not in provider_registry
+    finally:
+        hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if provider_id in provider_registry:
+            del provider_registry[provider_id]
+
+
+@pytest.mark.parametrize("provider_id", RETIRED_PROVIDER_IDS_UNDER_TEST)
+def test_retired_built_in_provider_id_can_be_claimed_by_a_trusted_plugin(provider_id):
+    # Catalog plugins are the provider mechanism going forward, so a trusted catalog
+    # entry adopting a retired built-in id is the intended path. Keeping the id claimed
+    # must not lock the official catalog out of it.
+    import provider_hub.registry as hub_registry
+    from provider_hub.registry import HubProxyProvider, register_active_provider_classes
+    from subliminal_patch.extensions import provider_registry
+
+    assert provider_id not in provider_registry.names()
+
+    installation = _install(
+        provider_id,
+        trusted=True,
+        manifest=_manifest(
+            provider_id=provider_id,
+            name=provider_id.title(),
+            dependencies={"requirements": []},
+        ),
+    )
+
+    try:
+        registered = register_active_provider_classes(installations=[installation])
+
+        assert registered == [provider_id]
+        assert issubclass(provider_registry[provider_id], HubProxyProvider)
+    finally:
+        hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard(provider_id)
+        if provider_id in provider_registry:
+            del provider_registry[provider_id]
+
+
+@pytest.mark.parametrize("provider_id", RETIRED_PROVIDER_IDS_UNDER_TEST)
+def test_retired_built_in_provider_id_is_rejected_by_untrusted_manifest_validation(provider_id):
+    # Same protection one layer earlier: the local-upload path validates the manifest
+    # against the full built-in denylist, with no trusted discount, so an untrusted
+    # package claiming a retired id never even gets staged. The trusted catalog path
+    # discounts the id and validates.
+    from provider_hub.manifest import ManifestValidationError, validate_manifest
+    from provider_hub.migration import validation_built_in_provider_ids
+    from provider_hub.service import _built_in_provider_ids
+
+    assert provider_id in _built_in_provider_ids()
+
+    with pytest.raises(ManifestValidationError):
+        validate_manifest(
+            _manifest(provider_id=provider_id, name=provider_id.title()),
+            built_in_provider_ids=_built_in_provider_ids(),
+        )
+
+    validate_manifest(
+        _manifest(provider_id=provider_id, name=provider_id.title()),
+        built_in_provider_ids=validation_built_in_provider_ids(
+            provider_id, _built_in_provider_ids(), trusted=True
+        ),
     )
 
 
@@ -1501,14 +1668,14 @@ def test_provider_hub_config_redacts_secret_and_preserves_placeholder(tmp_path, 
     redacted = update_provider(
         "examplehub",
         enabled=True,
-        config={"api_key": "real-secret", "region": "eu"},
+        config={"api_key": "real-secret", "region": "eu"},  # pragma: allowlist secret
     )
 
     assert redacted["enabled"] is True
     assert redacted["config"]["api_key"] == SECRET_PLACEHOLDER
     assert redacted["config"]["region"] == "eu"
     assert "real-secret" not in json.dumps(redacted)
-    assert runtime_provider_configs()["examplehub"]["api_key"] == "real-secret"
+    assert runtime_provider_configs()["examplehub"]["api_key"] == "real-secret"  # pragma: allowlist secret
 
     redacted = update_provider(
         "examplehub",
@@ -1518,13 +1685,13 @@ def test_provider_hub_config_redacts_secret_and_preserves_placeholder(tmp_path, 
     assert redacted["config"]["api_key"] == SECRET_PLACEHOLDER
     assert redacted["config"]["region"] == "us"
     assert runtime_provider_configs()["examplehub"] == {
-        "api_key": "real-secret",
+        "api_key": "real-secret",  # pragma: allowlist secret
         "region": "us",
     }
 
-    update_provider("examplehub", config={"api_key": "new-secret"})
+    update_provider("examplehub", config={"api_key": "new-secret"})  # pragma: allowlist secret
 
-    assert runtime_provider_configs()["examplehub"]["api_key"] == "new-secret"
+    assert runtime_provider_configs()["examplehub"]["api_key"] == "new-secret"  # pragma: allowlist secret
 
 
 def test_get_providers_auth_includes_active_provider_hub_config(tmp_path, monkeypatch):
@@ -1546,9 +1713,9 @@ def test_get_providers_auth_includes_active_provider_hub_config(tmp_path, monkey
         }
     }
     save_state(state)
-    update_provider("examplehub", config={"api_key": "runtime-secret", "region": "eu"})
+    update_provider("examplehub", config={"api_key": "runtime-secret", "region": "eu"})  # pragma: allowlist secret
 
-    assert get_providers_auth()["examplehub"]["api_key"] == "runtime-secret"
+    assert get_providers_auth()["examplehub"]["api_key"] == "runtime-secret"  # pragma: allowlist secret
     assert get_providers_auth()["examplehub"]["region"] == "eu"
 
 
@@ -2590,7 +2757,7 @@ class ExampleProvider:
         content = b"hello from worker"
         return {
             "content_b64": base64.b64encode(content).decode("ascii"),
-            "content_sha256": "94bbc6037685e2186909083aa02abe58fbec222f6e2d73bb3e9e59d5b24a3d25",
+            "content_sha256": "94bbc6037685e2186909083aa02abe58fbec222f6e2d73bb3e9e59d5b24a3d25",  # pragma: allowlist secret
             "empty": False,
         }
 """,

@@ -13,6 +13,7 @@ import { useDocumentTitle } from "@mantine/hooks";
 import { showNotification } from "@mantine/notifications";
 import {
   faCloudUploadAlt,
+  faDownload,
   faEllipsis,
   faHardDrive,
   faHistory,
@@ -44,6 +45,7 @@ import { QueryOverlay } from "@/components/async";
 import { CombineModal } from "@/components/forms/CombineForm";
 import { ItemEditModal } from "@/components/forms/ItemEditForm";
 import { MovieUploadModal } from "@/components/forms/MovieUploadForm";
+import { SubtitleDownloadModal } from "@/components/forms/SubtitleDownloadForm";
 import { MovieHistoryModal, SubtitleToolsModal } from "@/components/modals";
 import { MovieSearchModal } from "@/components/modals/ManualSearchModal";
 import { useModals } from "@/modules/modals";
@@ -159,6 +161,12 @@ const MovieDetailView: FunctionComponent = () => {
     ),
   );
 
+  // Every base language with a file on disk, sync/combined outputs included:
+  // the bundle download ships whatever exists, not just original subtitles.
+  const downloadableLangs = Array.from(
+    new Set((movie?.subtitles ?? []).filter((s) => s.path).map((s) => s.code2)),
+  ).sort();
+
   return (
     <Container fluid px={0}>
       <nav aria-label="Breadcrumb">
@@ -266,6 +274,24 @@ const MovieDetailView: FunctionComponent = () => {
               onClick={() => openDropzone.current?.()}
             >
               Upload
+            </Toolbox.Button>
+            <Toolbox.Button
+              disabled={downloadableLangs.length === 0}
+              icon={faDownload}
+              onClick={() => {
+                if (movie) {
+                  modals.openContextModal(SubtitleDownloadModal, {
+                    scope: {
+                      kind: "movie",
+                      radarrId: movie.radarrId,
+                      arrInstanceId: movie.arr_instance_id ?? undefined,
+                    },
+                    availableLanguages: downloadableLangs,
+                  });
+                }
+              }}
+            >
+              Download
             </Toolbox.Button>
             <Toolbox.Button
               icon={faWrench}

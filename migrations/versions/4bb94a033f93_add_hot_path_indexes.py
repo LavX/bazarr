@@ -44,11 +44,32 @@ def _index_exists(bind, table_name, index_name):
     return any(idx['name'] == index_name for idx in existing)
 
 
+def _columns_exist(bind, table_name, columns):
+    """Whether every column is present.
+
+    A database adopted from upstream can be missing a column this fork models,
+    and the repair that restores it deliberately runs after the whole chain.
+    Indexing a column that is not there yet aborts the upgrade, so nothing
+    after this point runs, including that repair: the install crash-loops.
+    Skipping leaves the index to be created once the column is back.
+    """
+    import sqlalchemy as sa
+    insp = sa.inspect(bind)
+    try:
+        present = {column['name'] for column in insp.get_columns(table_name)}
+    except sa.exc.NoSuchTableError:
+        return False
+    return set(columns) <= present
+
+
 def upgrade():
     bind = op.get_bind()
     for index_name, table_name, columns in _INDEXES:
-        if not _index_exists(bind, table_name, index_name):
-            op.create_index(index_name, table_name, columns)
+        if _index_exists(bind, table_name, index_name):
+            continue
+        if not _columns_exist(bind, table_name, columns):
+            continue
+        op.create_index(index_name, table_name, columns)
 
 
 def downgrade():

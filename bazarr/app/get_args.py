@@ -1,7 +1,17 @@
 # coding=utf-8
 
 import os
+import sys
 import argparse
+
+# The root launcher imports this module as bazarr.app.get_args before anything
+# puts the bazarr/ directory on sys.path; main.py, as the subprocess entry
+# script, gets that for free. Resolve our own tree so both entries work.
+_APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _APP_ROOT not in sys.path:
+    sys.path.insert(0, _APP_ROOT)
+
+from utilities import package  # noqa: E402
 
 
 def strtobool(val):
@@ -52,6 +62,12 @@ parser.add_argument('--create-db-revision', default=False, type=bool, const=True
 if not no_cli:
     args = parser.parse_args()
     if no_update:
+        args.no_update = True
+    elif package.updates_are_externally_managed():
+        # `updatemethod=External` in package_info. Applied here rather than in
+        # init, because ensure_requirements(), check_if_new_update(), the
+        # scheduled update job and the Updates settings section all read
+        # args.no_update, and the first of them runs before init is imported.
         args.no_update = True
 else:
     args = parser.parse_args(["-c", config_dir, "--no-update"])

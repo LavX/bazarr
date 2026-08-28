@@ -17,8 +17,9 @@ from utilities.path_mappings import path_mappings
 from utilities.helper import get_target_folder, force_unicode
 from languages.get_languages import alpha3_from_alpha2
 
+from .mismatch import clear_mismatch_for_video, report_release_type_mismatch
 from .pool import update_pools, _get_pool
-from .utils import get_video, _get_lang_obj, _get_scores, _set_forced_providers
+from .utils import get_video, _get_lang_obj, _get_scores
 from .processing import process_subtitle
 
 
@@ -44,9 +45,6 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
     profile = get_profiles_list(profile_id=profile_id)
     original_format = profile['originalFormat']
     hi_required = "force HI" if all([x.hi for x in language_set]) else "don't prefer"
-    also_forced = any([x.forced for x in language_set])
-    forced_required = all([x.forced for x in language_set])
-    _set_forced_providers(pool=pool, also_forced=also_forced, forced_required=forced_required)
 
     try:
         video = get_video(force_unicode(path), title, sceneName, providers=providers, media_type=media_type)
@@ -81,6 +79,12 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
 
             if forced_minimum_score:
                 min_score = int(forced_minimum_score) + 1
+
+            # Languages whose subtitle was downloaded. Their recorded release-type
+            # mismatch is cleared once the file is actually on disk, not before:
+            # save_subtitles can still fail, and clearing early would drop the
+            # badge while the language is in fact still missing.
+            languages_that_landed = []
             for language in language_set:
                 # confirm if language is still missing or if cutoff has been reached
                 if check_if_still_required and language not in check_missing_languages(path, media_type):
@@ -89,6 +93,12 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                   f"has been reached during this search.")
                     continue
                 else:
+                    # Every candidate this search scores lands in the sink,
+                    # including the ones the download loop rejects. When the
+                    # search comes back empty they are the only evidence of what
+                    # the providers actually have, and looking at them costs no
+                    # extra provider request.
+                    candidate_sink = []
                     try:
                         downloaded_subtitles = download_best_subtitles(videos={video},
                                                                        languages={language},
@@ -97,10 +107,33 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                                        hearing_impaired=hi_required,
                                                                        use_original_format=original_format in (1, "1", "True", True),
                                                                        use_provider_priority=settings.general.use_provider_priority,
-                                                                       fallback_allowed=fallback_allowed)
+                                                                       fallback_allowed=fallback_allowed,
+                                                                       candidate_sink=candidate_sink)
                     except Exception as e:
                         logging.exception(f'BAZARR Error downloading Subtitles for this file {path}: {repr(e)}')  # noqa: G004
                         return None
+
+                    # An upgrade search raises the minimum above the score of
+                    # the subtitle the user already has, so every candidate is
+                    # "rejected" by construction and nothing is actually
+                    # missing. Reporting a mismatch there would be pure noise.
+                    if not downloaded_subtitles.get(video) and not is_upgrade \
+                            and not forced_minimum_score:
+                        try:
+                            report_release_type_mismatch(video, media_type, language,
+                                                         candidate_sink, int(min_score),
+                                                         arr_instance_id=arr_instance_id)
+                        except Exception:
+                            # A report must never cost the user a search.
+                            logging.exception('BAZARR Error checking for a release type '
+                                              'mismatch for this file %s', path)
+                    elif downloaded_subtitles.get(video):
+                        # Only remembered here. The record is cleared after the
+                        # file is actually on disk: save_subtitles can fail on
+                        # permissions or a full filesystem, and clearing first
+                        # would drop the badge and the once-only record while
+                        # the language is still missing.
+                        languages_that_landed.append((video, language))
 
                 if downloaded_subtitles:
                     for video, subtitles in downloaded_subtitles.items():
@@ -137,6 +170,26 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                             pass
                         else:
                             saved_any = True
+                            # Only for a subtitle that really reached disk.
+                            # save_subtitles returns normally without writing
+                            # anything when get_modified_content yields nothing:
+                            # it logs and still appends the subtitle to its
+                            # result, so its return value is not evidence of a
+                            # file. storage_path is set where the write happens.
+                            # The file, not the attribute: save_subtitles sets
+                            # storage_path before it writes, so a subtitle whose
+                            # content came back empty still carries a path to a
+                            # file that was never created.
+                            written = {str(getattr(saved, 'language', None))
+                                       for saved in saved_subtitles
+                                       if getattr(saved, 'storage_path', None)
+                                       and os.path.isfile(saved.storage_path)}
+                            for landed_video, landed_language in languages_that_landed:
+                                if str(landed_language) not in written:
+                                    continue
+                                clear_mismatch_for_video(landed_video, media_type, landed_language,
+                                                         arr_instance_id=arr_instance_id)
+                            languages_that_landed = []
                             for subtitle in saved_subtitles:
                                 if "hash" in subtitle.matches:
                                     # make matches set cleaner for history purpose when hash matches

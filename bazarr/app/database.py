@@ -21,6 +21,9 @@ from flask_sqlalchemy import SQLAlchemy
 
 from .config import settings
 from .get_args import args
+from .upstream_adoption import (adopt_upstream_database, explain_unknown_revision,
+                               known_revisions, repair_missing_columns_after_upgrade,
+                               restore_missing_model_indexes, stamped_revision)
 
 logger = logging.getLogger(__name__)
 
@@ -559,6 +562,38 @@ class TableSubsyncEngineFailure(Base):
     updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
 
 
+class TableReleaseTypeMismatch(Base):
+    """One recorded release-type mismatch: the item's own release type had no
+    acceptable subtitle while another release type did.
+
+    The row exists so a repeated scheduled pass does not re-notify, and so the
+    wanted view can flag the item. ``media_id`` is the LOCAL id (#156) and
+    ``arr_instance_id`` the owning instance, because upstream ids are not
+    unique across instances. ``video_release_type`` is part of the identity: if
+    the user re-grabs the item as another release type, that is a new situation
+    and may be reported once more.
+    """
+
+    __tablename__ = 'release_type_mismatches'
+    __table_args__ = (
+        Index('ix_release_type_mismatches_item',
+              'media_type', 'media_id', 'arr_instance_id', 'language', 'video_release_type',
+              unique=True),
+    )
+
+    id = mapped_column(Integer, primary_key=True)
+    media_type = mapped_column(Text, nullable=False)
+    media_id = mapped_column(Integer, nullable=False)
+    arr_instance_id = mapped_column(Integer)
+    language = mapped_column(Text, nullable=False)
+    video_release_type = mapped_column(Text, nullable=False)
+    subtitle_release_type = mapped_column(Text, nullable=False)
+    provider = mapped_column(Text)
+    release_info = mapped_column(Text)
+    score = mapped_column(Integer)
+    detected_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
 class TableSettingsLanguages(Base):
     __tablename__ = 'table_settings_languages'
 
@@ -797,10 +832,57 @@ def migrate_db(app):
     for table in alembic_temp_tables_list:
         database.execute(text(f"DROP TABLE IF EXISTS {table}"))
 
+    # A database created by upstream Bazarr carries a revision this fork has no
+    # script for, and has had columns the indexer reads dropped out from under
+    # it. Alembic cannot start against it at all, so this runs first.
+    adopted_from = None
+    try:
+        with engine.begin() as connection:
+            adopted_from = adopt_upstream_database(connection)
+    except Exception:
+        logging.exception("Upstream database adoption failed; continuing to the normal upgrade")
+
+    if adopted_from is None:
+        # Nothing was adopted. If the stamp is still one this codebase does not
+        # have, Alembic is about to fail with a single line that says nothing
+        # about where such a database comes from, and exit before anything else
+        # is logged. Say it plainly first.
+        try:
+            with engine.connect() as connection:
+                pending = stamped_revision(connection)
+            if pending and pending not in known_revisions(migrations_directory):
+                logging.error(explain_unknown_revision(pending))
+        except Exception:
+            logging.exception("Could not check the database migration revision before upgrading")
+
     with app.app_context():
         flask_migrate.Migrate(app, db, render_as_batch=True)
         flask_migrate.upgrade(directory=migrations_directory)
         db.engine.dispose()
+
+    # An adopted database can still be missing a column this fork models and
+    # its own migrations never add, because that column predates the point
+    # where the two chains diverged. Unconditional rather than gated on this
+    # run's adoption: an older build could stamp the shared ancestor and then
+    # fail the upgrade, so the next start finds a known revision, adopts
+    # nothing, and would otherwise reach head with the column still gone. Both
+    # repairs are idempotent and an inspection no-op on a healthy database.
+    try:
+        with engine.begin() as connection:
+            repair_missing_columns_after_upgrade(connection)
+    except Exception:
+        logging.exception("Post-upgrade column repair failed; continuing startup")
+
+    # Separately, and only once those columns are committed. A migration
+    # cannot index a column that is still missing without aborting the whole
+    # upgrade, so it skips and the index is made here. It gets its own
+    # transaction per index: on PostgreSQL one index that cannot be built
+    # would abort the transaction it shared, and the commit that persists
+    # the restored columns would fail with it.
+    try:
+        restore_missing_model_indexes(engine)
+    except Exception:
+        logging.exception("Post-upgrade index repair failed; continuing startup")
 
     # add the system table single row if it's not existing
     if not database.execute(
@@ -836,6 +918,16 @@ def migrate_db(app):
             mirror_scalar_config_from_default(database, _kind)
     except Exception:
         logging.exception("Scalar-config reconcile from default instances failed; continuing startup")
+
+    # And heal installs that deleted a language profile before deletion started
+    # clearing what pointed at it. A dangling reference makes every save of that
+    # instance fail validation with a 400, and it would silently adopt an
+    # unrelated profile the moment the editor reuses the id.
+    try:
+        from arr_instances.resolution import forget_dangling_language_profile_references
+        forget_dangling_language_profile_references(database)
+    except Exception:
+        logging.exception("Language profile reference reconcile failed; continuing startup")
 
     optimize_sqlite_database(engine)
 

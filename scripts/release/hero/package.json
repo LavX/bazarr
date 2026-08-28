@@ -1,0 +1,24 @@
+{
+  "name": "bazarr-release-hero",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Animated release hero renderer for Bazarr+ (Remotion). Renders the MP4 source of truth plus the GIF and animated WebP derivatives.",
+  "scripts": {
+    "font": "mkdir -p public && cp -f ../../../site/fonts/Geist-Variable.woff2 public/",
+    "prestudio": "npm run font",
+    "prestill": "npm run font",
+    "studio": "remotion studio src/index.ts",
+    "render": "./render.sh",
+    "still": "remotion still src/index.ts Hero"
+  },
+  "dependencies": {
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "remotion": "4.0.410",
+    "@remotion/cli": "4.0.410"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.2",
+    "typescript": "5.9.3"
+  }
+}

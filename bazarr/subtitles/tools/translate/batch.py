@@ -5,13 +5,16 @@ import os
 import ast
 import re
 import subprocess
+import uuid
 from app.database import TableEpisodes, TableMovies, TableShows, database, select
+from app.config import settings
 from app.jobs_queue import jobs_queue
 from app.event_handler import event_stream
 from arr_instances.resolution import scoped
 from utilities.path_mappings import path_mappings
 from utilities.binaries import get_binary
-from utilities.video_analyzer import parse_video_metadata, _handle_alpha3, _title_is_forced
+from utilities.video_analyzer import (parse_video_metadata, _title_is_forced,
+                                      embedded_track_language)
 from languages.get_languages import alpha3_from_alpha2
 from subtitles.indexer.series import store_subtitles
 from subtitles.indexer.movies import store_subtitles_movie
@@ -68,14 +71,15 @@ def process_episode_translation(
             new_job_name=f"Translating {ep_label} ({source_language.upper()} → {target_language.upper()})",
         )
 
-    video_path = path_mappings.path_replace(episode.path)
+    video_path = path_mappings.path_replace_instance(episode.path, arr_instance_id, 'episode')
 
     # Find source subtitle
     source_subtitle_path = subtitle_path
     detected_source_lang = None
     if not source_subtitle_path:
         source_subtitle_path, detected_source_lang = find_subtitle_by_language(
-            episode.subtitles, source_language, video_path, media_type="episode"
+            episode.subtitles, source_language, video_path, media_type="episode",
+            arr_instance_id=arr_instance_id
         )
 
     if not source_subtitle_path:
@@ -105,9 +109,12 @@ def process_episode_translation(
             radarr_id=None,
             metadata=episode,
             job_id=job_id,
+            arr_instance_id=arr_instance_id,
         )
         # Re-index subtitles so Bazarr's DB knows about the new translated file
-        store_subtitles(path_mappings.path_replace_reverse(video_path), video_path)
+        store_subtitles(
+            path_mappings.path_replace_reverse_instance(video_path, arr_instance_id, 'episode'),
+            video_path, arr_instance_id=arr_instance_id)
         # Notify frontend to refresh series and episode views. Emit the LOCAL
         # episode id (#156): the frontend caches episode detail by local id and
         # the upstream sonarrEpisodeId is not unique across instances.
@@ -124,16 +131,21 @@ def process_movie_translation(
 ):
     """Process a single movie for translation in background"""
     radarr_id = item.get("radarrId")
+    arr_instance_id = item.get("arr_instance_id")
 
     if not radarr_id:
         logger.error("Missing radarrId")
         return False
 
-    # Get movie info from database
+    # Get movie info from database, scoped to the owning instance (#156):
+    # radarrId is not unique across instances, so an unscoped lookup can return
+    # a sibling instance's movie and translate the wrong file.
     movie = database.execute(
-        select(TableMovies.path, TableMovies.subtitles, TableMovies.title).where(
-            TableMovies.radarrId == radarr_id
-        )
+        scoped(
+            select(TableMovies.path, TableMovies.subtitles, TableMovies.title).where(
+                TableMovies.radarrId == radarr_id
+            ),
+            TableMovies.arr_instance_id, arr_instance_id)
     ).first()
 
     if not movie:
@@ -147,14 +159,15 @@ def process_movie_translation(
             new_job_name=f"Translating {movie.title} ({source_language.upper()} → {target_language.upper()})",
         )
 
-    video_path = path_mappings.path_replace_movie(movie.path)
+    video_path = path_mappings.path_replace_instance(movie.path, arr_instance_id, 'movie')
 
     # Find source subtitle
     source_subtitle_path = subtitle_path
     detected_source_lang = None
     if not source_subtitle_path:
         source_subtitle_path, detected_source_lang = find_subtitle_by_language(
-            movie.subtitles, source_language, video_path, media_type="movie"
+            movie.subtitles, source_language, video_path, media_type="movie",
+            arr_instance_id=arr_instance_id
         )
 
     if not source_subtitle_path:
@@ -184,10 +197,12 @@ def process_movie_translation(
             radarr_id=radarr_id,
             metadata=movie,
             job_id=job_id,
+            arr_instance_id=arr_instance_id,
         )
         # Re-index subtitles so Bazarr's DB knows about the new translated file
         store_subtitles_movie(
-            path_mappings.path_replace_reverse_movie(video_path), video_path
+            path_mappings.path_replace_reverse_instance(video_path, arr_instance_id, 'movie'),
+            video_path, arr_instance_id=arr_instance_id
         )
         # Notify frontend to refresh movie view
         event_stream(type="movie", payload=radarr_id)
@@ -197,8 +212,15 @@ def process_movie_translation(
         return False
 
 
-def find_subtitle_by_language(subtitles, language_code, video_path, media_type="movie"):
-    """Find a subtitle file by language code from the subtitles list."""
+def find_subtitle_by_language(subtitles, language_code, video_path, media_type="movie",
+                             arr_instance_id=None):
+    """Find a subtitle file by language code from the subtitles list.
+
+    ``arr_instance_id`` is the instance that owns the media (#156). Extraction
+    reverses the video path with that instance's mapping and scopes its row
+    lookup by it, so a caller that resolved an owner has to pass it on or the
+    lookup runs unscoped and can select another instance's subtitle stream.
+    """
     available_subtitles = []
 
     if subtitles:
@@ -235,11 +257,12 @@ def find_subtitle_by_language(subtitles, language_code, video_path, media_type="
 
     # Helper function to resolve and validate subtitle path
     def resolve_subtitle_path(sub_path):
-        # Apply path mapping based on media type
-        if media_type == "episode":
-            mapped_path = path_mappings.path_replace(sub_path)
-        else:
-            mapped_path = path_mappings.path_replace_movie(sub_path)
+        # The owning instance's mapping, the same one the caller used for the
+        # video. Mixing them pairs a secondary instance's video with a default
+        # instance's subtitle when both paths happen to exist, or reports no
+        # subtitle at all when they do not.
+        kind = "episode" if media_type == "episode" else "movie"
+        mapped_path = path_mappings.path_replace_instance(sub_path, arr_instance_id, kind)
 
         # Check if file exists at mapped path
         if os.path.exists(mapped_path):
@@ -320,6 +343,7 @@ def find_subtitle_by_language(subtitles, language_code, video_path, media_type="
                     media_type,
                     hi=sub["hi"],
                     forced=sub["forced"],
+                    arr_instance_id=arr_instance_id,
                 )
                 if extracted_path:
                     return extracted_path, sub["code2"]
@@ -341,7 +365,7 @@ def find_subtitle_by_language(subtitles, language_code, video_path, media_type="
 
 
 def extract_embedded_subtitle(
-    video_path, language_code2, media_type, hi=False, forced=False
+    video_path, language_code2, media_type, hi=False, forced=False, arr_instance_id=None
 ):
     """Extract an embedded subtitle track from a video file using ffmpeg.
 
@@ -351,7 +375,14 @@ def extract_embedded_subtitle(
     to produce a .srt file, and caches it keyed by video hash + language + hi + forced.
     Returns the path to the extracted .srt file, or None on failure.
     Test: See tests/bazarr/test_embedded_subtitle_extraction.py, covers text codec,
-    bitmap rejection, cache hit, hi/forced key separation.
+    bitmap rejection, cache hit, hi/forced key separation, and
+    tests/bazarr/test_embedded_extraction_instance_scope.py for the mapping.
+
+    ``arr_instance_id`` is the instance that owns the media (#156). The caller
+    maps the path forward with that instance's mapping, so the reverse has to
+    use the same one or the row lookup misses entirely; path_replace_reverse_instance
+    falls back to the global mapping when the instance has none, which is what
+    a None here relies on.
     """
     if not language_code2:
         logger.warning(
@@ -366,28 +397,43 @@ def extract_embedded_subtitle(
 
     # Look up file metadata needed by parse_video_metadata
     if media_type == "episode":
-        db_path = path_mappings.path_replace_reverse(video_path)
+        db_path = path_mappings.path_replace_reverse_instance(
+            video_path, arr_instance_id, "series")
+        # Scoped to the owning instance (#156): two instances can index the
+        # same path, and an unscoped first() would take an arbitrary row and
+        # feed the wrong file_size and episode_file_id to the metadata cache.
         media = database.execute(
-            select(TableEpisodes.episode_file_id, TableEpisodes.file_size).where(
-                TableEpisodes.path == db_path
+            scoped(
+                select(TableEpisodes.episode_file_id, TableEpisodes.file_size).where(
+                    TableEpisodes.path == db_path
+                ),
+                TableEpisodes.arr_instance_id,
+                arr_instance_id,
             )
         ).first()
         if not media:
             return None
         data = parse_video_metadata(
-            video_path, media.file_size, episode_file_id=media.episode_file_id
+            video_path, media.file_size, episode_file_id=media.episode_file_id,
+            arr_instance_id=arr_instance_id
         )
     else:
-        db_path = path_mappings.path_replace_reverse_movie(video_path)
+        db_path = path_mappings.path_replace_reverse_instance(
+            video_path, arr_instance_id, "movie")
         media = database.execute(
-            select(TableMovies.movie_file_id, TableMovies.file_size).where(
-                TableMovies.path == db_path
+            scoped(
+                select(TableMovies.movie_file_id, TableMovies.file_size).where(
+                    TableMovies.path == db_path
+                ),
+                TableMovies.arr_instance_id,
+                arr_instance_id,
             )
         ).first()
         if not media:
             return None
         data = parse_video_metadata(
-            video_path, media.file_size, movie_file_id=media.movie_file_id
+            video_path, media.file_size, movie_file_id=media.movie_file_id,
+            arr_instance_id=arr_instance_id
         )
 
     if not data:
@@ -416,6 +462,9 @@ def extract_embedded_subtitle(
     # Pass 1: exact match on language + hi + forced disposition flags.
     # Pass 2: fall back to first language-only match if no exact match found,
     # so extraction never silently returns the wrong track.
+    und_setting = settings.general.default_und_embedded_subtitles_lang
+    und_default_language = alpha3_from_alpha2(und_setting) if und_setting else None
+
     exact_track = None
     fallback_track = None
     track_id = 0
@@ -425,11 +474,15 @@ def extract_embedded_subtitle(
             track_id += 1
             continue
 
-        if "language" not in track:
+        # Exactly the rule indexing used to decide this track exists. Walking
+        # the stream list a second time with different rules is how extraction
+        # ends up on a commentary track the user was never offered, or refuses
+        # a track the user was.
+        track_alpha3 = embedded_track_language(track, und_default_language)
+        if track_alpha3 is None:
             track_id += 1
             continue
 
-        track_alpha3 = _handle_alpha3(track)
         if track_alpha3 == target_alpha3:
             # knowit only reports forced from the disposition flag, so apply the
             # same title heuristic used at indexing time, otherwise a forced
@@ -486,6 +539,16 @@ def extract_embedded_subtitle(
         logger.debug("Using cached extracted subtitle: %s", output_path)
         return output_path
 
+    # ffmpeg writes to a temporary name and the finished file is moved into
+    # place, so output_path either does not exist or is complete. Writing
+    # straight to it meant a second caller arriving mid-write saw a non-empty
+    # file, took it as a cache hit, and translated a truncated subtitle. The
+    # The temporary name is unique per call, not per process: jobs run as
+    # threads inside one process, so a pid would be the same for both and the
+    # first os.replace would pull the file out from under the second. It keeps
+    # the .srt extension because ffmpeg picks its muxer from it.
+    temp_path = f"{output_path}.{uuid.uuid4().hex}.part.srt"
+
     # Extract using ffmpeg
     try:
         ffmpeg_path = get_binary("ffmpeg")
@@ -504,39 +567,53 @@ def extract_embedded_subtitle(
         f"0:s:{found_track}",
         "-c:s",
         "srt",
-        output_path,
+        # Name the container format rather than leaving ffmpeg to infer it from
+        # the extension: the output goes to a temporary name, and an
+        # unrecognised one makes it fail with "Unable to choose an output
+        # format" instead of writing anything.
+        "-f",
+        "srt",
+        temp_path,
     ]
+
+    def _discard_temp():
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                logger.debug("Could not remove the temporary file %s", temp_path)
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if result.returncode != 0:
             logger.error(f"ffmpeg extraction failed for {video_path}: {result.stderr}")  # noqa: G004
-            if os.path.exists(output_path):
-                os.remove(output_path)
+            _discard_temp()
             return None
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+        if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
             # Strip Windows carriage returns (\r) that ffmpeg may produce
-            with open(output_path, "r", encoding="utf-8-sig", errors="replace") as f:
+            with open(temp_path, "r", encoding="utf-8-sig", errors="replace") as f:
                 content = f.read()
             if "\r" in content:
-                with open(output_path, "w", encoding="utf-8") as f:
+                with open(temp_path, "w", encoding="utf-8") as f:
                     f.write(content.replace("\r", ""))
+            # Atomic on the same filesystem: a reader sees the old file or the
+            # new one, never a partial write.
+            os.replace(temp_path, output_path)
             logger.info(
                 "Extracted embedded %s subtitle to: %s",
                 language_code2,
                 output_path,
             )
             return output_path
+        _discard_temp()
         return None
     except subprocess.TimeoutExpired:
         logger.error(f"ffmpeg extraction timed out for {video_path}")  # noqa: G004
-        if os.path.exists(output_path):
-            os.remove(output_path)
+        _discard_temp()
         return None
     except Exception as e:
         logger.error(f"Failed to extract embedded subtitle: {e}")  # noqa: G004
-        if os.path.exists(output_path):
-            os.remove(output_path)
+        _discard_temp()
         return None
 
 

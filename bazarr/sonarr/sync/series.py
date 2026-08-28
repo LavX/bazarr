@@ -1,8 +1,10 @@
 # coding=utf-8
 
+import itertools
 import logging
 import gc
 
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from sqlalchemy.exc import IntegrityError
 from datetime import datetime
@@ -13,8 +15,10 @@ from sonarr.rootfolder import check_sonarr_rootfolder
 from app.database import TableShows, TableLanguagesProfiles, database, insert, update, delete, select
 from utilities.path_mappings import path_mappings
 from app.event_handler import event_stream
+from subtitles.mismatch import forget_media_by_upstream
 from app.jobs_queue import jobs_queue
-from arr_instances.resolution import client_for_instance, default_instance_id, scoped, stamp_owner
+from arr_instances.resolution import (client_for_instance, default_instance_id,
+                                      resolve_default_profile, scoped, stamp_owner)
 
 from .episodes import sync_episodes
 from .parser import seriesParser
@@ -31,6 +35,10 @@ FEATURE_PREFIX = "SYNC_SERIES "
 # series); 8 workers compresses that without overwhelming a typical
 # home Sonarr instance.
 SONARR_PREFETCH_WORKERS = 8
+# How many episode payloads may be outstanding at once. Two per fetcher
+# keeps them from idling between hand-offs without letting the read-ahead
+# run away from a consumer that writes to the database serially.
+SONARR_PREFETCH_WINDOW = SONARR_PREFETCH_WORKERS * 2
 
 
 def trace(message):
@@ -53,6 +61,11 @@ def get_series_monitored_table(arr_instance_id=None):
         .all()
     series_dict = dict((x, y) for x, y in series_monitored)
     return series_dict
+
+
+# None is a legitimate resolution ("no default profile"), so it cannot double as
+# "the caller did not resolve one".
+_UNRESOLVED = object()
 
 
 def update_series(job_id=None, wait_for_completion=False, arr_instance_id=None, arr_client=None):
@@ -85,6 +98,18 @@ def update_series(job_id=None, wait_for_completion=False, arr_instance_id=None, 
         audio_profiles = get_profile_list()
         tags_dict = get_tags(arr_client=arr_client)
         language_profiles = get_language_profiles()
+
+        # One more invariant off the per-series path: resolving the default
+        # language profile costs an indexed query per series whenever the
+        # instance has an override, and every one of them returns the same
+        # answer. A tag match still wins over it, inside seriesParser.
+        bulk_instance_id = arr_instance_id if arr_instance_id is not None \
+            else default_instance_id(database, 'sonarr')
+        serie_default_profile = resolve_default_profile(
+            bulk_instance_id,
+            settings.general.serie_default_enabled,
+            settings.general.serie_default_profile,
+            session=database)
 
         # Get current shows in DB (scoped to this instance when instance-synced,
         # so removed-series computation never sees another instance's shows).
@@ -143,15 +168,34 @@ def update_series(job_id=None, wait_for_completion=False, arr_instance_id=None, 
         apikey_sonarr = settings.sonarr.apikey
         with ThreadPoolExecutor(max_workers=SONARR_PREFETCH_WORKERS,
                                 thread_name_prefix='bazarr-sonarr-prefetch') as executor:
-            episode_futures = {
-                show['id']: executor.submit(get_episodes_from_sonarr_api,
-                                            apikey_sonarr=apikey_sonarr,
-                                            series_id=show['id'],
-                                            arr_client=arr_client)
-                for _, show in shows_to_process
-            }
+            # Submitted a window at a time, not all at once. Submitting every
+            # series up front bounds nothing: the fetchers finish far ahead of a
+            # consumer that writes to the database serially, so completed
+            # results simply queue up and peak memory tracks the size of the
+            # library. Topping the window up as each result is consumed keeps
+            # the outstanding payloads proportional to the fan-out instead.
+            def _prefetch(entry):
+                _, show = entry
+                return executor.submit(get_episodes_from_sonarr_api,
+                                       apikey_sonarr=apikey_sonarr,
+                                       series_id=show['id'],
+                                       arr_client=arr_client)
 
-            for processed_index, (orig_index, show) in enumerate(shows_to_process, start=1):
+            upcoming = iter(shows_to_process)
+            in_flight = deque(
+                (entry, _prefetch(entry))
+                for entry in itertools.islice(upcoming, SONARR_PREFETCH_WINDOW)
+            )
+
+            processed_index = 0
+            while in_flight:
+                (orig_index, show), episode_future = in_flight.popleft()
+                # Top the window up before the slow part, so the fetchers stay
+                # busy while this series is written.
+                following = next(upcoming, None)
+                if following is not None:
+                    in_flight.append((following, _prefetch(following)))
+                processed_index += 1
                 jobs_queue.update_job_progress(job_id=job_id, progress_value=processed_index,
                                                progress_message=show['title'])
                 trace(f"{orig_index}: (Processing) {show['title']}")
@@ -168,16 +212,18 @@ def update_series(job_id=None, wait_for_completion=False, arr_instance_id=None, 
                                   language_profiles=language_profiles,
                                   existing_in_db=show['id'] in current_shows_db,
                                   skip_episode_sync=True,
-                                  arr_instance_id=arr_instance_id, arr_client=arr_client)
+                                  arr_instance_id=arr_instance_id, arr_client=arr_client,
+                                  serie_default_profile=serie_default_profile)
 
                 try:
-                    episodes_data = episode_futures[show['id']].result()
+                    episodes_data = episode_future.result()
                 except Exception:
                     logging.exception(f"BAZARR error pre-fetching episodes for series {show['id']}")  # noqa: G004
                     episodes_data = None
 
                 sync_episodes(series_id=show['id'], episodes_data=episodes_data,
                               arr_instance_id=arr_instance_id, arr_client=arr_client)
+                del episodes_data
 
         # Calculate series to remove from DB
         removed_series = current_shows_db - current_shows_sonarr
@@ -231,7 +277,8 @@ def update_one_series_for_instance(arr_instance_id, series_id, action, **kwargs)
 def update_one_series(series_id, action, is_signalr=False, series_data=None,
                       audio_profiles=None, tags_dict=None, language_profiles=None,
                       existing_in_db=None, skip_episode_sync=False,
-                      arr_instance_id=None, arr_client=None):
+                      arr_instance_id=None, arr_client=None,
+                      serie_default_profile=_UNRESOLVED):
     """Update or delete one series in the DB.
 
     Optional injected arguments let the bulk `update_series()` caller
@@ -261,6 +308,10 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
 
     # Delete series from DB
     if action == 'deleted' and existing_in_db:
+        # The mismatch records are per episode, so a series deletion has to take
+        # every one of its episodes' records with it.
+        forget_media_by_upstream('series', [], arr_instance_id,
+                                 series_upstream_id=int(series_id))
         database.execute(
             scoped(delete(TableShows)
                    .where(TableShows.sonarrSeriesId == int(series_id)),
@@ -268,13 +319,6 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
 
         event_stream(type='series', action='delete', payload=int(series_id))
         return
-
-    if settings.general.serie_default_enabled is True:
-        serie_default_profile = settings.general.serie_default_profile
-        if serie_default_profile == '':
-            serie_default_profile = None
-    else:
-        serie_default_profile = None
 
     # Fetch invariants only when the bulk caller didn't pre-load them.
     if audio_profiles is None:
@@ -308,6 +352,23 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
     # preserving legacy NULL behaviour.
     instance_id = arr_instance_id if arr_instance_id is not None \
         else default_instance_id(database, 'sonarr')
+
+    # Default languages profile for a series this pass INSERTS: the owning
+    # instance's override when it has one, otherwise the global default exactly
+    # as before. An instance without an override changes nothing, which is what
+    # keeps single-instance installs on the profile they already have. A tag
+    # match still wins over both, inside seriesParser.
+    # Resolved by the bulk caller when there is one: the lookup issues an
+    # indexed query whenever an instance override is set, and the answer is the
+    # same for every series in a sync. Single-series callers (signalr, the
+    # manual refresh buttons) keep resolving it here, like the other invariants
+    # this function still fetches lazily for them.
+    if serie_default_profile is _UNRESOLVED:
+        serie_default_profile = resolve_default_profile(
+            instance_id,
+            settings.general.serie_default_enabled,
+            settings.general.serie_default_profile,
+            session=database)
 
     if action == 'updated' and existing_in_db:
         # Update existing series in DB
