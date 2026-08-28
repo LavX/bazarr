@@ -9,9 +9,10 @@ heap arena on most of them.
 
 Measured on a real deployment, same database and same workload: capping arenas
 at two took the container from 514 MiB to 347 MiB and the backend process from
-388 MiB to 278 MiB, with the thread count unchanged at 123. That is the whole
-of the difference, which is why the thread count itself was left alone: after
-this, threads are no longer what the memory is spent on.
+388 MiB to 278 MiB, with the thread count unchanged at 123 at the time. The
+web-server pool has since been right-sized separately (general.web_server_threads,
+default 32; see app/server.py), which is complementary: the arena cap bounds
+what each thread costs, the pool size bounds how many exist.
 
 Asserted here because it is one environment variable in the Dockerfile with
 nothing else referring to it, so it would be removed by a tidy-up without

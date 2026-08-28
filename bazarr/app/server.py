@@ -54,10 +54,21 @@ class Server:
             # endpoint reads X-Forwarded-Host/Proto for download-link
             # construction; trusting arbitrary client values would let an
             # attacker forge stream URLs and exfiltrate the Api-Key.
+            # Thread count: measured on a live 4-instance install, the old
+            # inherited threads=100 accounted for 100 of 123 process threads
+            # at idle for a single-user UI whose heavy work runs in background
+            # schedulers and out-of-process Provider Hub workers. Two things
+            # size the pool: the event stream runs Socket.IO in forced
+            # long-polling mode (app.py), so every open browser tab parks one
+            # worker in a poll, and the subtitle editor's stream/peaks
+            # endpoints fan out a handful of concurrent requests. 32 leaves a
+            # dozen parked tabs with ample headroom for bursts, and waitress
+            # queues rather than drops beyond it. Configurable (4..100) for
+            # larger installs via general.web_server_threads.
             self.server = create_server(app,
                                         host=self.address,
                                         port=self.port,
-                                        threads=100,
+                                        threads=settings.general.web_server_threads,
                                         trusted_proxy='127.0.0.1',
                                         trusted_proxy_headers={'x-forwarded-host',
                                                                'x-forwarded-proto',
