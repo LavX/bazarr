@@ -48,23 +48,28 @@ def run(cmd, **kwargs):
 # ---------------------------------------------------------------------------
 
 def merged_prs(previous, head):
-    """PR numbers merged in previous..head, oldest first.
+    """PR numbers merged in previous..head, ascending.
 
-    Release-cut merges (a development->master merge names LavX/development as
-    its source) are excluded: they are the previous cut itself, not content.
+    Both merge shapes are collected: GitHub merge-commit subjects and
+    squash-merge subjects carrying the trailing "(#N)" suffix (this repo has
+    both). Release-cut merges (a development->master merge names
+    LavX/development as its source) are excluded: they are the previous cut
+    itself, not content.
     """
-    result = run(['git', '-C', str(REPO_ROOT), 'log', '--merges',
+    result = run(['git', '-C', str(REPO_ROOT), 'log',
                   '--pretty=%s', f'{previous}..{head}'])
     if result.returncode != 0:
         fail(f'git log {previous}..{head} failed: {result.stderr.strip()}')
     numbers = []
     for subject in result.stdout.splitlines():
         match = MERGE_RE.match(subject)
-        if not match:
+        if match:
+            if match.group(2) != 'LavX/development':
+                numbers.append(int(match.group(1)))
             continue
-        if match.group(2) == 'LavX/development':
-            continue
-        numbers.append(int(match.group(1)))
+        squash = re.search(r'\(#(\d+)\)\s*$', subject)
+        if squash:
+            numbers.append(int(squash.group(1)))
     return sorted(set(numbers))
 
 
@@ -205,9 +210,14 @@ def render_check(markdown, require_hero=False):
     # still detected (indentation is itself a way a hero breaks).
     hero_lines = [line for line in markdown.splitlines()
                   if line.lstrip().startswith('![')]
-    if require_hero and not hero_lines:
-        problems.append('no hero image line found; a feature release must '
-                        'open with one')
+    if require_hero:
+        # The hero must be the OPENING line: a valid screenshot later in the
+        # body must not satisfy the requirement.
+        first_substantive = next(
+            (line for line in markdown.splitlines() if line.strip()), '')
+        if not first_substantive.lstrip().startswith('!['):
+            problems.append('the notes must open with the hero image line; '
+                            f'first content is: {first_substantive[:60]!r}')
     for hero_line in hero_lines[:1]:
         with tempfile.NamedTemporaryFile('w', suffix='.md', delete=False) as hero_source:
             hero_source.write(hero_line + '\n')
@@ -222,14 +232,24 @@ def render_check(markdown, require_hero=False):
         problems.append('literal triple backticks survive in the rendered '
                         'HTML: a code fence degraded to text')
 
-    # Both GFM fence forms: an unclosed ~~~ fence swallows the rest of the
-    # document as code just as an unclosed ``` one does.
-    for delimiter in ('```', '~~~'):
-        fence_count = sum(1 for line in markdown.splitlines()
-                          if line.lstrip().startswith(delimiter))
-        if fence_count % 2 != 0:
-            problems.append(f'odd number of {delimiter} fences '
-                            f'({fence_count}): one is unclosed')
+    # Both GFM fence forms, paired by character AND length: a closing fence
+    # must use the opener's character and be at least as long (~~~~bash is
+    # not closed by ~~~), and a fence line of the other character inside an
+    # open block is content, not a delimiter.
+    open_fence = None
+    for line in markdown.splitlines():
+        stripped = line.lstrip()
+        for char in ('`', '~'):
+            if stripped.startswith(char * 3):
+                run_length = len(stripped) - len(stripped.lstrip(char))
+                if open_fence is None:
+                    open_fence = (char, run_length)
+                elif open_fence[0] == char and run_length >= open_fence[1]:
+                    open_fence = None
+                break
+    if open_fence is not None:
+        problems.append(f'unclosed {open_fence[0] * 3} fence: the rest of '
+                        'the document renders as code')
 
     return problems
 
