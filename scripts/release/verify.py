@@ -91,14 +91,16 @@ def check_image_tag(token, tag, expected_version, results):
     if not versions:
         results.append((name, False, 'index carries no platform manifests'))
         return
+    # Exact match: a substring test would let 2.6.0-rc1 or 12.6.0 satisfy a
+    # 2.6.0 verification, and the manual Docker workflow can produce exactly
+    # that mismatch. A missing label is a failure too: without it the
+    # verifier cannot establish the tag contains the requested release.
     wrong = [(platform, observed) for platform, observed in versions
-             if not (observed and expected_version in observed)]
+             if observed != expected_version]
     if wrong:
-        # A missing label is a failure too: without it the verifier cannot
-        # establish that the tag contains the requested release.
         detail = ', '.join(f'{platform}: {observed!r}' for platform, observed in wrong)
         results.append((name, False,
-                        f'expected every platform label to contain '
+                        f'expected every platform label to equal '
                         f'{expected_version!r}; got {detail}'))
     else:
         detail = ', '.join(f'{platform}: {observed!r}'
@@ -132,7 +134,7 @@ def check_release_page(tag, results):
     name = f'release {tag}'
     fetched = subprocess.run(
         ['gh', 'api', f'repos/{REPO_SLUG}/releases/tags/{tag}',
-         '--jq', '{draft: .draft, body: .body}'],
+         '--jq', '{draft: .draft, prerelease: .prerelease, body: .body}'],
         capture_output=True, text=True)
     if fetched.returncode != 0:
         results.append((name, False, 'release page does not exist'))
@@ -140,6 +142,11 @@ def check_release_page(tag, results):
     release = json.loads(fetched.stdout)
     if release.get('draft'):
         results.append((name, False, 'release exists but is still a draft'))
+        return
+    if release.get('prerelease'):
+        # The stable updater selects only prerelease=false entries, so a cut
+        # left marked prerelease has not reached stable users.
+        results.append((name, False, 'release is marked as a prerelease'))
         return
     if not (release.get('body') or '').strip():
         # An empty body renders "correctly"; require actual notes.

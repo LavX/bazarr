@@ -18,6 +18,7 @@ Usage:
 """
 
 import argparse
+import json
 import pathlib
 import re
 import subprocess
@@ -32,7 +33,11 @@ SITE_INDEX = REPO_ROOT / 'site' / 'index.html'
 # The scaffold's placeholder icon; added to the import block when missing.
 PLACEHOLDER_ICON = 'faStar'
 
-VERSION_RE = re.compile(r'^\d+\.\d+\.\d+$')
+# Strict bare SemVer: ASCII digits only, no leading zeros. \d would accept
+# non-ASCII digits and 02.7.0, which Docker tagging and SemVer consumers
+# reject after the value is already stamped into three files.
+VERSION_RE = re.compile(
+    r'^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z', re.ASCII)
 
 
 def fail(message):
@@ -52,7 +57,9 @@ def stamp_package_info(version):
 def scaffold_slides(items):
     slides = [
         '    {\n'
-        f'      title: "PLACEHOLDER: {item}",\n'
+        # json.dumps produces a valid double-quoted TS string literal, so a
+        # quote or backslash in the item cannot break whatsNew.ts.
+        f'      title: {json.dumps(f"PLACEHOLDER: {item}")},\n'
         '      body: "PLACEHOLDER: one to three lines, plain user language, '
         'written by a human before the cut.",\n'
         f'      icon: {PLACEHOLDER_ICON},\n'
