@@ -61,7 +61,7 @@ export const whatsNew: Record<string, WhatsNewSlide[]> = {
     },
     {
       title: "Mass translate can use an embedded track",
-      body: 'If a release only carries its English subtitles inside the video container, mass translate can now extract and translate them. Turn on "Use embedded subtitles" and pick the source language as usual. Each variant is handled separately, so a normal and a hearing-impaired track produce their own outputs.',
+      body: 'If a release only carries its English subtitles inside the video container, mass translate can now extract and translate them. Enable "Treat Embedded Subtitles as Downloaded" so embedded tracks are indexed, then pick the source language as usual: when no external source file exists, the embedded track is used automatically. Each variant is handled separately, so a normal and a hearing-impaired track produce their own outputs.',
       icon: faWandMagicSparkles,
       cta: { label: "Open Subtitles settings", to: "/settings/subtitles" },
     },
