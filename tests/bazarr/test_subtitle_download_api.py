@@ -188,6 +188,13 @@ class TestUniqueArcname:
         assert download_module.unique_arcname(used, 'a/b.srt') == 'a/b (2).srt'
         assert download_module.unique_arcname(used, 'a/b.srt') == 'a/b (3).srt'
 
+    def test_collisions_are_case_insensitive(self):
+        # Names differing only by case overwrite each other when extracted
+        # on a case-insensitive filesystem.
+        used = set()
+        assert download_module.unique_arcname(used, 'English.srt') == 'English.srt'
+        assert download_module.unique_arcname(used, 'english.srt') == 'english (2).srt'
+
 
 class TestIterExternalSubtitles:
 
@@ -244,12 +251,17 @@ class TestLanguageFilterRe:
         assert download_module._LANGUAGE_FILTER_RE.match('pt-BR')
         assert download_module._LANGUAGE_FILTER_RE.match('zho')
 
-    def test_content_grammar_accepts_uppercase_modifiers(self):
+    def test_content_grammar_accepts_only_the_indexed_uppercase_form(self):
         # Custom languages index uppercase HI labels (zh:HI, zt:HI, pb:HI);
-        # validation must accept them or those Download/View actions 400.
+        # validation must accept exactly those. A blanket case-insensitive
+        # grammar would accept en:FORCED, which the exact DB lookup misses
+        # and the case-sensitive fallback probe then resolves to the WRONG
+        # (plain) file.
         assert content_module._LANGUAGE_CODE_RE.match('zt:HI')
         assert content_module._LANGUAGE_CODE_RE.match('pb:HI')
-        assert content_module._LANGUAGE_CODE_RE.match('en:FORCED')
+        assert content_module._LANGUAGE_CODE_RE.match('en:hi')
+        assert not content_module._LANGUAGE_CODE_RE.match('en:FORCED')
+        assert not content_module._LANGUAGE_CODE_RE.match('en:SYNC-FFSUBSYNC')
 
     def test_content_grammar_rejects_trailing_newline(self):
         # The single-file route validates through content.py's full grammar;

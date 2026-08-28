@@ -83,16 +83,20 @@ def sanitize_arcname_component(name):
 
 
 def unique_arcname(used, arcname):
-    """Return arcname, suffixed with ' (n)' before the extension if taken."""
-    if arcname not in used:
-        used.add(arcname)
+    """Return arcname, suffixed with ' (n)' before the extension if taken.
+
+    Collisions are tracked case-insensitively: names differing only by case
+    would overwrite each other when the zip is extracted on a
+    case-insensitive filesystem."""
+    if arcname.casefold() not in used:
+        used.add(arcname.casefold())
         return arcname
     stem, ext = os.path.splitext(arcname)
     counter = 2
-    while f'{stem} ({counter}){ext}' in used:
+    while f'{stem} ({counter}){ext}'.casefold() in used:
         counter += 1
     result = f'{stem} ({counter}){ext}'
-    used.add(result)
+    used.add(result.casefold())
     return result
 
 
@@ -165,7 +169,9 @@ def trusted_roots_for(video_disk_path):
     if media_dir:
         roots.append(os.path.realpath(media_dir))
     try:
-        target = get_target_folder(video_disk_path)
+        # Read-only: a bundle request must not create subtitle folders
+        # across the library as a side effect.
+        target = get_target_folder(video_disk_path, create=False)
     except Exception:
         target = None
     if target and isinstance(target, str):
@@ -208,8 +214,17 @@ def open_validated_subtitle(path):
              | getattr(os, 'O_BINARY', 0))
     descriptor = os.open(path, flags)
     try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
             raise OSError(f'not a regular file: {path}')
+        if not hasattr(os, 'O_NOFOLLOW'):
+            # No O_NOFOLLOW on this platform (Windows): require the directory
+            # entry to be the very file that was opened, so a replacement
+            # symlink cannot smuggle in an outside target.
+            entry = os.lstat(path)
+            if stat.S_ISLNK(entry.st_mode) or (
+                    (entry.st_dev, entry.st_ino) != (opened.st_dev, opened.st_ino)):
+                raise OSError(f'path was replaced: {path}')
         return os.fdopen(descriptor, 'rb')
     except Exception:
         os.close(descriptor)

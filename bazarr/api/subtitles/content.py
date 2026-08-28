@@ -49,14 +49,16 @@ def _is_safe_path(path):
 LANGUAGE_BASE_TAG_FRAGMENT = r'[A-Za-z]{2,3}(-[A-Za-z0-9]{2,4})?'
 _LANGUAGE_CODE_RE = re.compile(
     r'^' + LANGUAGE_BASE_TAG_FRAGMENT +
-    r'(:(forced|hi|'
+    # hi|HI, not IGNORECASE: custom languages index the uppercase HI form
+    # (zh:HI, zt:HI, pb:HI) and lookups keep the exact label, but a blanket
+    # case-insensitive grammar would accept variants like en:FORCED that the
+    # exact DB lookup misses, sending resolution down the on-disk fallback
+    # whose suffix checks are case-sensitive.
+    r'(:(forced|hi|HI|'
     r'sync-(ffsubsync|autosubsync|alass)|'
     r'combined-[a-z]{2}(-[a-z]{2})?'
     # \Z, not $: $ would accept a trailing newline (en%0A in the route).
-    r'))*\Z',
-    # Custom languages index uppercase modifiers (zh:HI, zt:HI, pb:HI);
-    # validation is case-insensitive while lookups keep the exact label.
-    re.IGNORECASE
+    r'))*\Z'
 )
 
 
