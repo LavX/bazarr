@@ -44,12 +44,21 @@ def _is_safe_path(path):
 # "en:sync-ffsubsync", "en:combined-hu", "de:combined-es-zh".
 # Anchored + char-class prevents `..`, slashes, or shell metachars from reaching
 # the file-system probe paths downstream.
+# The base-tag half is shared with download.py's bundle language filter so a
+# grammar change lands in both consumers.
+LANGUAGE_BASE_TAG_FRAGMENT = r'[A-Za-z]{2,3}(-[A-Za-z0-9]{2,4})?'
 _LANGUAGE_CODE_RE = re.compile(
-    r'^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,4})?'
-    r'(:(forced|hi|'
+    r'^' + LANGUAGE_BASE_TAG_FRAGMENT +
+    # hi|HI, not IGNORECASE: custom languages index the uppercase HI form
+    # (zh:HI, zt:HI, pb:HI) and lookups keep the exact label, but a blanket
+    # case-insensitive grammar would accept variants like en:FORCED that the
+    # exact DB lookup misses, sending resolution down the on-disk fallback
+    # whose suffix checks are case-sensitive.
+    r'(:(forced|hi|HI|'
     r'sync-(ffsubsync|autosubsync|alass)|'
     r'combined-[a-z]{2}(-[a-z]{2})?'
-    r'))*$'
+    # \Z, not $: $ would accept a trailing newline (en%0A in the route).
+    r'))*\Z'
 )
 
 
@@ -278,15 +287,18 @@ def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=N
         # <basename>.<primary>.combined-<sec>[-<ter>].<ext>
         # Pick that path before the hi/forced suffixes so we generate the
         # right filename.
+        # Modifiers compare lowercased: the grammar accepts the indexed
+        # uppercase HI form (pb:HI), while on-disk suffixes are lowercase.
+        modifiers_lower = [m.lower() for m in language_code.split(':')[1:]]
         combined_mod = next(
-            (m for m in language_code.split(':')[1:] if m.startswith('combined-')),
+            (m for m in modifiers_lower if m.startswith('combined-')),
             None,
         )
         if combined_mod:
             suffix = f'{lang_base}.{combined_mod}'
-        elif ':hi' in language_code:
+        elif 'hi' in modifiers_lower:
             suffix += '.hi'
-        elif ':forced' in language_code:
+        elif 'forced' in modifiers_lower:
             suffix += '.forced'
 
         for ext in ['.srt', '.ass', '.ssa', '.vtt', '.sub', '.smi', '.mpl', '.txt']:

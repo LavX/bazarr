@@ -288,6 +288,7 @@ jobs:
             tests/bazarr/test_sonarr_sync_episodes.py \
             tests/bazarr/test_sql_profiler.py \
             tests/bazarr/test_subtitle_content_sync_outputs.py \
+            tests/bazarr/test_subtitle_download_api.py \
             tests/bazarr/test_subtitles_pool.py \
             tests/bazarr/test_swagger_static.py \
             tests/bazarr/test_supervisor_proxy.py \

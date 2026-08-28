@@ -38,6 +38,18 @@ class BaseApi {
     return response.data;
   }
 
+  // Full response (not just data): callers need headers like
+  // Content-Disposition to name the file they save.
+  protected getBlob(
+    path: string,
+    params?: LooseObject,
+  ): Promise<AxiosResponse<Blob>> {
+    return client.axios.get<Blob>(this.prefix + path, {
+      params,
+      responseType: "blob",
+    });
+  }
+
   protected post<T = void>(
     path: string,
     formdata?: LooseObject,

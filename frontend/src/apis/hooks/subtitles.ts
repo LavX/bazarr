@@ -1,7 +1,10 @@
+import { showNotification } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { BatchAction, BatchItem, BatchOptions } from "@/apis/raw/subtitles";
+import { notification } from "@/modules/task";
+import { filenameFromContentDisposition, saveBlobAs } from "@/utilities/files";
 
 export function useSubtitleAction() {
   const client = useQueryClient();
@@ -475,6 +478,149 @@ export function useSubtitleCreate() {
       } else {
         client.invalidateQueries({ queryKey: [QueryKeys.Movies] });
       }
+    },
+  });
+}
+
+// An unmatched route is served by the SPA catch-all as 200 text/html, so a
+// "successful" blob can actually be the app shell (seen live when a backend
+// without these endpoints sat behind a browser whose service worker kept the
+// newer UI). Never save that as a subtitle: fail loudly instead.
+function assertDownloadPayload(blob: Blob): void {
+  if (blob.type.includes("text/html")) {
+    throw new Error(
+      "The server returned a page instead of a file; is the backend up to date?",
+    );
+  }
+}
+
+// The error body of a blob request is itself a Blob; read it back to get the
+// backend's actual message (a JSON-encoded string like "No subtitle files
+// found") instead of a generic one.
+async function downloadErrorMessage(
+  error: unknown,
+  fallback: string,
+): Promise<string> {
+  const response = (error as { response?: { status?: number; data?: unknown } })
+    .response;
+  if (!response && error instanceof Error && error.message) {
+    return error.message;
+  }
+  const data = response?.data;
+  let text: string | undefined;
+  if (data instanceof Blob) {
+    try {
+      text = (await data.text()).trim();
+    } catch {
+      // Unreadable body; keep the fallback.
+    }
+  } else if (typeof data === "string") {
+    text = data;
+  }
+  if (text) {
+    try {
+      const parsed = JSON.parse(text);
+      if (typeof parsed === "string") {
+        return parsed;
+      }
+      if (parsed && typeof parsed.message === "string") {
+        return parsed.message;
+      }
+    } catch {
+      return text.slice(0, 200);
+    }
+  }
+  return fallback;
+}
+
+export function useSubtitleFileDownload() {
+  interface Param {
+    type: "episode" | "movie";
+    mediaId: number;
+    // Viewer/editor language key ("en", "en:hi", "en:forced", ...).
+    language: string;
+    arrInstanceId?: number;
+  }
+  return useMutation({
+    mutationKey: [QueryKeys.Subtitles, "download-file"],
+    mutationFn: async (param: Param) => {
+      const response = await api.subtitles.downloadFile(
+        param.type,
+        param.mediaId,
+        param.language,
+        param.arrInstanceId,
+      );
+      assertDownloadPayload(response.data);
+      saveBlobAs(
+        response.data,
+        filenameFromContentDisposition(
+          response.headers["content-disposition"],
+          "subtitle.srt",
+        ),
+      );
+    },
+    onError: async (error) => {
+      showNotification(
+        notification.error(
+          "Download failed",
+          await downloadErrorMessage(
+            error,
+            "The subtitle file could not be downloaded",
+          ),
+        ),
+      );
+    },
+  });
+}
+
+export function useSubtitleArchiveDownload() {
+  type Param =
+    | {
+        kind: "series";
+        seriesId: number;
+        season?: number;
+        language?: string;
+        arrInstanceId?: number;
+      }
+    | {
+        kind: "movie";
+        radarrId: number;
+        language?: string;
+        arrInstanceId?: number;
+      };
+  return useMutation({
+    mutationKey: [QueryKeys.Subtitles, "download-archive"],
+    mutationFn: async (param: Param) => {
+      const response =
+        param.kind === "series"
+          ? await api.series.downloadSubtitlesArchive(param.seriesId, {
+              season: param.season,
+              language: param.language,
+              arrInstanceId: param.arrInstanceId,
+            })
+          : await api.movies.downloadSubtitlesArchive(param.radarrId, {
+              language: param.language,
+              arrInstanceId: param.arrInstanceId,
+            });
+      assertDownloadPayload(response.data);
+      saveBlobAs(
+        response.data,
+        filenameFromContentDisposition(
+          response.headers["content-disposition"],
+          "subtitles.zip",
+        ),
+      );
+    },
+    onError: async (error) => {
+      showNotification(
+        notification.error(
+          "Download failed",
+          await downloadErrorMessage(
+            error,
+            "The subtitle archive could not be downloaded",
+          ),
+        ),
+      );
     },
   });
 }
