@@ -598,6 +598,25 @@ class TestSingleFileDownload:
         assert sent['mimetype'] == 'text/plain'
         assert response.headers['X-Content-Type-Options'] == 'nosniff'
 
+    def test_control_characters_in_filename_are_sanitized(self, monkeypatch, tmp_path):
+        subtitle = tmp_path / 'Movie\nevil.en.srt'
+        subtitle.write_text('x')
+        sent = {}
+
+        def fake_send_file(handle, **kwargs):
+            handle.close()
+            sent.update(kwargs)
+            return _FakeResponse()
+
+        monkeypatch.setattr(download_module, 'request', _fake_request())
+        monkeypatch.setattr(download_module, '_request_arr_instance_id', lambda: None)
+        monkeypatch.setattr(download_module, 'resolve_subtitle_path',
+                            lambda *a, **k: (str(subtitle), {}))
+        monkeypatch.setattr(download_module, 'send_file', fake_send_file)
+        resource = download_module.MovieSubtitleFileDownload()
+        resource.get(1, 'en')
+        assert sent['download_name'] == 'Movie_evil.en.srt'
+
     def test_file_deleted_after_resolution_is_404(self, monkeypatch, no_instance_param,
                                                   tmp_path):
         monkeypatch.setattr(download_module, 'request', _fake_request())

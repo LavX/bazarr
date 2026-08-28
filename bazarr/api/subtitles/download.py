@@ -434,7 +434,10 @@ def _send_single_subtitle(media_type, media_id, language_code):
     except OSError:
         # Deleted or swapped in the window since resolve_subtitle_path.
         return 'Subtitle file or directory not found', 404
-    basename = os.path.basename(subtitle_path)
+    # Control characters in an (otherwise valid POSIX) filename would make
+    # Werkzeug reject the Content-Disposition header with a 500.
+    basename = re.sub(r'[\x00-\x1f\x7f]', '_',
+                      os.path.basename(subtitle_path))
     try:
         response = send_file(handle,
                              as_attachment=True,

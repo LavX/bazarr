@@ -287,15 +287,18 @@ def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=N
         # <basename>.<primary>.combined-<sec>[-<ter>].<ext>
         # Pick that path before the hi/forced suffixes so we generate the
         # right filename.
+        # Modifiers compare lowercased: the grammar accepts the indexed
+        # uppercase HI form (pb:HI), while on-disk suffixes are lowercase.
+        modifiers_lower = [m.lower() for m in language_code.split(':')[1:]]
         combined_mod = next(
-            (m for m in language_code.split(':')[1:] if m.startswith('combined-')),
+            (m for m in modifiers_lower if m.startswith('combined-')),
             None,
         )
         if combined_mod:
             suffix = f'{lang_base}.{combined_mod}'
-        elif ':hi' in language_code:
+        elif 'hi' in modifiers_lower:
             suffix += '.hi'
-        elif ':forced' in language_code:
+        elif 'forced' in modifiers_lower:
             suffix += '.forced'
 
         for ext in ['.srt', '.ass', '.ssa', '.vtt', '.sub', '.smi', '.mpl', '.txt']:
