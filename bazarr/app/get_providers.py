@@ -154,6 +154,19 @@ PROVIDERS_FORCED_OFF = ["addic7ed", "tvsubtitles", "legendasdivx", "napiprojekt"
 throttle_count = {}
 
 
+def provider_is_usable(name):
+    """Adoption gate for the provider pools (see SZProviderPool.__getitem__):
+    True only when the provider is enabled in settings and not currently
+    throttled, so a download naming a provider from a stale cached search
+    cannot resurrect one the user disabled or the backoff excluded."""
+    if name not in settings.general.enabled_providers:
+        return False
+    reason, until, _ = tp.get(name, (None, None, None))
+    if reason and until and datetime.datetime.now() < until:
+        return False
+    return True
+
+
 def provider_pool():
     if settings.general.multithreading:
         return subliminal_patch.core.SZAsyncProviderPool
