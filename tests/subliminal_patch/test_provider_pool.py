@@ -61,3 +61,48 @@ def test_pool_getitem_rejects_unregistered_provider(registry):
         pool["nosuchprovider"]
 
     assert pool.providers == ["alpha"]
+
+
+def test_pool_getitem_never_resurrects_a_discarded_provider(registry):
+    # Absence from pool.providers is how the pool encodes a discarded
+    # provider; adoption must not undo that.
+    pool = core.SZProviderPool(["alpha"], {})
+    pool.discarded_providers.add("beta")
+
+    with pytest.raises(KeyError):
+        pool["beta"]
+
+    assert pool.providers == ["alpha"]
+
+
+def test_pool_getitem_honors_adoption_gate_veto(registry):
+    # The gate is the caller's enabled-and-not-throttled check: a registered
+    # provider the configuration currently excludes must not be adopted.
+    pool = core.SZProviderPool(["alpha"], {}, adoption_gate=lambda name: False)
+
+    with pytest.raises(KeyError):
+        pool["beta"]
+
+    assert pool.providers == ["alpha"]
+    assert "beta" not in pool.initialized_providers
+
+
+def test_pool_getitem_adopts_when_gate_allows(registry):
+    pool = core.SZProviderPool(["alpha"], {}, adoption_gate=lambda name: name == "beta")
+
+    provider = pool["beta"]
+
+    assert isinstance(provider, _FakeProvider)
+    assert pool.providers == ["alpha", "beta"]
+
+
+def test_pool_getitem_gate_not_consulted_for_configured_providers(registry):
+    # The gate only guards adoption; providers the pool was built with
+    # initialize regardless (get_providers already filtered them).
+    calls = []
+    pool = core.SZProviderPool(
+        ["alpha"], {}, adoption_gate=lambda name: calls.append(name) or False
+    )
+
+    assert isinstance(pool["alpha"], _FakeProvider)
+    assert calls == []

@@ -236,7 +236,8 @@ class SZProviderPool(ProviderPool):
         return list(dict.fromkeys(providers or []))
 
     def __init__(self, providers=None, provider_configs=None, blacklist=None, ban_list=None, throttle_callback=None,
-                 pre_download_hook=None, post_download_hook=None, language_hook=None, language_equals=None):
+                 pre_download_hook=None, post_download_hook=None, language_hook=None, language_equals=None,
+                 adoption_gate=None):
         #: Name of providers to use
         self.providers = self._dedupe_provider_names(providers)
 
@@ -262,6 +263,11 @@ class SZProviderPool(ProviderPool):
         self._born = time.time()
 
         self.provider_progress_callback = None
+
+        #: Optional callable(name) -> bool consulted before __getitem__ adopts
+        #: a provider the pool was not built with. None leaves adoption open to
+        #: any registered provider (the historical behaviour).
+        self.adoption_gate = adoption_gate
 
         if not self.throttle_callback:
             self.throttle_callback = lambda x, y, ids=None, language=None: x
@@ -334,7 +340,17 @@ class SZProviderPool(ProviderPool):
             # self.providers is always an ordered list (see __init__ and
             # update(), both of which route through _dedupe_provider_names), so
             # appending keeps the configured priority order.
+            #
+            # Absence from self.providers is also how the pool encodes
+            # discarded providers, and how update() encodes disabled or
+            # throttled ones. Never resurrect a provider this pool discarded,
+            # and let the adoption gate (the caller's enabled-and-not-throttled
+            # check) veto names the configuration currently excludes.
             if name not in provider_registry:
+                raise KeyError(name)
+            if name in self.discarded_providers:
+                raise KeyError(name)
+            if self.adoption_gate is not None and not self.adoption_gate(name):
                 raise KeyError(name)
             self.providers.append(name)
         if name not in self.initialized_providers:

@@ -202,3 +202,47 @@ def test_get_traceback_info():
     if error_ is not None:
         msg = get_providers._get_traceback_info(error_)
         assert len(msg) == 100
+
+
+class TestProviderIsUsable:
+    """provider_is_usable is the pools' adoption gate: a stale cached search
+    result must not resurrect a provider the user disabled or the backoff
+    throttled (see SZProviderPool.__getitem__)."""
+
+    def test_disabled_provider_is_not_usable(self, monkeypatch):
+        monkeypatch.setattr(
+            get_providers.settings.general, "enabled_providers", ["opensubtitlescom"]
+        )
+        monkeypatch.setattr(get_providers, "tp", {})
+        assert not get_providers.provider_is_usable("podnapisi")
+
+    def test_enabled_unthrottled_provider_is_usable(self, monkeypatch):
+        monkeypatch.setattr(
+            get_providers.settings.general, "enabled_providers", ["opensubtitlescom"]
+        )
+        monkeypatch.setattr(get_providers, "tp", {})
+        assert get_providers.provider_is_usable("opensubtitlescom")
+
+    def test_throttled_provider_is_not_usable(self, monkeypatch):
+        import datetime
+
+        monkeypatch.setattr(
+            get_providers.settings.general, "enabled_providers", ["opensubtitlescom"]
+        )
+        until = datetime.datetime.now() + datetime.timedelta(hours=1)
+        monkeypatch.setattr(
+            get_providers, "tp", {"opensubtitlescom": ("Throttled", until, "1h")}
+        )
+        assert not get_providers.provider_is_usable("opensubtitlescom")
+
+    def test_expired_throttle_is_usable_again(self, monkeypatch):
+        import datetime
+
+        monkeypatch.setattr(
+            get_providers.settings.general, "enabled_providers", ["opensubtitlescom"]
+        )
+        until = datetime.datetime.now() - datetime.timedelta(minutes=1)
+        monkeypatch.setattr(
+            get_providers, "tp", {"opensubtitlescom": ("Throttled", until, "1h")}
+        )
+        assert get_providers.provider_is_usable("opensubtitlescom")
