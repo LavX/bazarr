@@ -11,6 +11,7 @@ import { ColumnDef } from "@tanstack/react-table";
 import { isString } from "lodash";
 import {
   useMovieSubtitleModification,
+  useSubtitleFileDownload,
   useSubtitleSyncStatus,
 } from "@/apis/hooks";
 import { useCombineSubtitles } from "@/apis/hooks/combine";
@@ -298,6 +299,7 @@ const Table: FunctionComponent<Props> = ({
 
   const { download, remove } = useMovieSubtitleModification();
   const combine = useCombineSubtitles();
+  const fileDownload = useSubtitleFileDownload();
 
   // Available subtitles for translate-from source, include embedded tracks
   // (backend handles bitmap exclusion at extraction time)
@@ -405,6 +407,13 @@ const Table: FunctionComponent<Props> = ({
                   movie.arr_instance_id,
                 ),
               );
+            } else if (action === "download") {
+              fileDownload.mutate({
+                type: "movie",
+                mediaId: radarrId,
+                language: buildSubtitleLanguageKey(item),
+                arrInstanceId: movie.arr_instance_id,
+              });
             } else if (action === "delete" && path) {
               await remove.mutateAsync({
                 radarrId,
@@ -499,6 +508,13 @@ const Table: FunctionComponent<Props> = ({
             );
           } else if (action === "compare-sync") {
             setCompareSelection({ original: item, outputs: syncOutputs });
+          } else if (action === "download") {
+            fileDownload.mutate({
+              type: "movie",
+              mediaId: radarrId,
+              language: buildSubtitleLanguageKey(item),
+              arrInstanceId: movie.arr_instance_id,
+            });
           } else if (action === "delete" && path) {
             await remove.mutateAsync({
               radarrId,

@@ -1,7 +1,10 @@
+import { showNotification } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { BatchAction, BatchItem, BatchOptions } from "@/apis/raw/subtitles";
+import { notification } from "@/modules/task";
+import { filenameFromContentDisposition, saveBlobAs } from "@/utilities/files";
 
 export function useSubtitleAction() {
   const client = useQueryClient();
@@ -475,6 +478,100 @@ export function useSubtitleCreate() {
       } else {
         client.invalidateQueries({ queryKey: [QueryKeys.Movies] });
       }
+    },
+  });
+}
+
+export function useSubtitleFileDownload() {
+  interface Param {
+    type: "episode" | "movie";
+    mediaId: number;
+    // Viewer/editor language key ("en", "en:hi", "en:forced", ...).
+    language: string;
+    arrInstanceId?: number;
+  }
+  return useMutation({
+    mutationKey: [QueryKeys.Subtitles, "download-file"],
+    mutationFn: async (param: Param) => {
+      const response =
+        param.type === "episode"
+          ? await api.episodes.downloadSubtitleFile(
+              param.mediaId,
+              param.language,
+              param.arrInstanceId,
+            )
+          : await api.movies.downloadSubtitleFile(
+              param.mediaId,
+              param.language,
+              param.arrInstanceId,
+            );
+      saveBlobAs(
+        response.data,
+        filenameFromContentDisposition(
+          response.headers["content-disposition"],
+          "subtitle.srt",
+        ),
+      );
+    },
+    onError: () => {
+      showNotification(
+        notification.error(
+          "Download failed",
+          "The subtitle file could not be downloaded",
+        ),
+      );
+    },
+  });
+}
+
+export function useSubtitleArchiveDownload() {
+  type Param =
+    | {
+        kind: "series";
+        seriesId: number;
+        season?: number;
+        language?: string;
+        arrInstanceId?: number;
+      }
+    | {
+        kind: "movie";
+        radarrId: number;
+        language?: string;
+        arrInstanceId?: number;
+      };
+  return useMutation({
+    mutationKey: [QueryKeys.Subtitles, "download-archive"],
+    mutationFn: async (param: Param) => {
+      const response =
+        param.kind === "series"
+          ? await api.series.downloadSubtitlesArchive(param.seriesId, {
+              season: param.season,
+              language: param.language,
+              arrInstanceId: param.arrInstanceId,
+            })
+          : await api.movies.downloadSubtitlesArchive(param.radarrId, {
+              language: param.language,
+              arrInstanceId: param.arrInstanceId,
+            });
+      saveBlobAs(
+        response.data,
+        filenameFromContentDisposition(
+          response.headers["content-disposition"],
+          "subtitles.zip",
+        ),
+      );
+    },
+    onError: (error) => {
+      const status = (error as { response?: { status?: number } }).response
+        ?.status;
+      showNotification(
+        notification.error(
+          "Download failed",
+          status === 404
+            ? "No subtitle files found for this selection"
+            : "The subtitle archive could not be downloaded",
+        ),
+      );
     },
   });
 }

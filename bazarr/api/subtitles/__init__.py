@@ -6,6 +6,7 @@ from .batch import api_ns_batch
 from .content import api_ns_subtitle_content
 from .subtitles_contents import api_ns_subtitle_contents
 from .archive import api_ns_subtitle_archive
+from .download import api_ns_subtitle_download
 
 
 api_ns_list_subtitles = [
@@ -15,4 +16,5 @@ api_ns_list_subtitles = [
     api_ns_subtitle_content,
     api_ns_subtitle_contents,
     api_ns_subtitle_archive,
+    api_ns_subtitle_download,
 ]

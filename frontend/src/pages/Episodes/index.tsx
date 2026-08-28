@@ -24,6 +24,7 @@ import {
   faCircleChevronDown,
   faCircleChevronRight,
   faCloudUploadAlt,
+  faDownload,
   faEllipsisVertical,
   faHardDrive,
   faHdd,
@@ -52,6 +53,7 @@ import { QueryOverlay } from "@/components/async";
 import { CombineModal } from "@/components/forms/CombineForm";
 import { ItemEditModal } from "@/components/forms/ItemEditForm";
 import { SeriesUploadModal } from "@/components/forms/SeriesUploadForm";
+import { SubtitleDownloadModal } from "@/components/forms/SubtitleDownloadForm";
 import { SubtitleToolsModal } from "@/components/modals";
 import { useModals } from "@/modules/modals";
 import { notification, task, TaskGroup } from "@/modules/task";
@@ -138,6 +140,28 @@ const SeriesEpisodesView: FunctionComponent = () => {
     }
     return Array.from(seen);
   }, [episodes]);
+
+  // Every base language with a file on disk, sync/combined outputs included:
+  // the bundle download ships whatever exists, not just original subtitles.
+  const downloadableLangs = useMemo(() => {
+    const seen = new Set<string>();
+    for (const episode of episodes ?? []) {
+      for (const s of episode.subtitles) {
+        if (s.path) {
+          seen.add(s.code2);
+        }
+      }
+    }
+    return Array.from(seen).sort();
+  }, [episodes]);
+
+  const seasons = useMemo(
+    () =>
+      Array.from(new Set((episodes ?? []).map((e) => e.season))).sort(
+        (a, b) => a - b,
+      ),
+    [episodes],
+  );
 
   const onDrop = useCallback(
     (files: File[]) => {
@@ -278,6 +302,29 @@ const SeriesEpisodesView: FunctionComponent = () => {
               onClick={() => openDropzone.current?.()}
             >
               Upload
+            </Toolbox.Button>
+            <Toolbox.Button
+              disabled={
+                series === undefined ||
+                !available ||
+                downloadableLangs.length === 0
+              }
+              icon={faDownload}
+              onClick={() => {
+                if (series) {
+                  modals.openContextModal(SubtitleDownloadModal, {
+                    scope: {
+                      kind: "series",
+                      seriesId: series.sonarrSeriesId,
+                      arrInstanceId: series.arr_instance_id ?? undefined,
+                      seasons,
+                    },
+                    availableLanguages: downloadableLangs,
+                  });
+                }
+              }}
+            >
+              Download
             </Toolbox.Button>
           </Group>
           <Group gap="xs">
