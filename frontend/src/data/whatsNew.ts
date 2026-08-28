@@ -2,6 +2,7 @@ import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import {
   faClockRotateLeft,
   faDatabase,
+  faDownload,
   faFileZipper,
   faLayerGroup,
   faScaleBalanced,
@@ -35,6 +36,12 @@ export const latestWhatsNewVersion = "2.6.0";
 
 export const whatsNew: Record<string, WhatsNewSlide[]> = {
   "2.6.0": [
+    {
+      title: "Download your subtitles, single files or whole seasons",
+      body: "Every subtitle menu now has a Download action, including synced and combined outputs. The series and movie pages can also hand you one zip of everything on disk, filtered by season and language, from the new Download button next to Upload.",
+      icon: faDownload,
+      cta: { label: "Open your series", to: "/series" },
+    },
     {
       title: "Coming from upstream Bazarr? It just starts now",
       body: "Pointing Bazarr+ at a config directory created by upstream Bazarr used to crash on boot in a restart loop, because the two projects' migration histories diverged. Any upstream database is now adopted on first start, whatever revision it came from, with your subtitle lists preserved.",
