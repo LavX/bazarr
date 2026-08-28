@@ -50,17 +50,16 @@ def stamp_package_info(version):
 
 
 def scaffold_slides(items):
-    slides = []
-    for item in items:
-        slides.append(
-            '    {\n'
-            f'      title: "PLACEHOLDER: {item}",\n'
-            '      body: "PLACEHOLDER: one to three lines, plain user language, '
-            'written by a human before the cut.",\n'
-            f'      icon: {PLACEHOLDER_ICON},\n'
-            '      // cta: { label: "Open ...", to: "/..." },\n'
-            '    },'
-        )
+    slides = [
+        '    {\n'
+        f'      title: "PLACEHOLDER: {item}",\n'
+        '      body: "PLACEHOLDER: one to three lines, plain user language, '
+        'written by a human before the cut.",\n'
+        f'      icon: {PLACEHOLDER_ICON},\n'
+        '      // cta: { label: "Open ...", to: "/..." },\n'
+        '    },'
+        for item in items
+    ]
     return '\n'.join(slides)
 
 
