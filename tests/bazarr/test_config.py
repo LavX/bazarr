@@ -12,7 +12,7 @@ def test_web_server_threads_default_and_bounds():
         v for v in config.validators
         if v.names == ('general.web_server_threads',)
     )
-    assert validator.default == 16
+    assert validator.default == 32
     operations = validator.operations
     assert operations.get('gte') == 4
     assert operations.get('lte') == 100

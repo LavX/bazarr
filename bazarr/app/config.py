@@ -95,8 +95,9 @@ validators = [
     Validator('general.port', must_exist=True, default=6767, is_type_of=int, gte=1, lte=65535),
     # Waitress worker threads. The old inherited constant was 100, a 25x
     # multiple of waitress's own default that dominated the process's thread
-    # count and resident memory; see the default's justification in server.py.
-    Validator('general.web_server_threads', must_exist=True, default=16, is_type_of=int, gte=4, lte=100),
+    # count and resident memory; see the default's justification in server.py
+    # (Socket.IO long-polling parks one worker per open browser tab).
+    Validator('general.web_server_threads', must_exist=True, default=32, is_type_of=int, gte=4, lte=100),
     Validator('general.hostname', must_exist=True, default=platform.node(), is_type_of=str),
     Validator('general.base_url', must_exist=True, default='', is_type_of=str),
     Validator('general.instance_name', must_exist=True, default='Bazarr+', is_type_of=str,

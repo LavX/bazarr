@@ -57,12 +57,14 @@ class Server:
             # Thread count: measured on a live 4-instance install, the old
             # inherited threads=100 accounted for 100 of 123 process threads
             # at idle for a single-user UI whose heavy work runs in background
-            # schedulers and out-of-process Provider Hub workers. The busiest
-            # in-process surface is the subtitle editor's stream/peaks
-            # endpoints, which a browser fans out over at most a handful of
-            # connections; 16 covers that with headroom, and waitress queues
-            # rather than drops beyond it. Configurable (4..100) for larger
-            # installs via general.web_server_threads.
+            # schedulers and out-of-process Provider Hub workers. Two things
+            # size the pool: the event stream runs Socket.IO in forced
+            # long-polling mode (app.py), so every open browser tab parks one
+            # worker in a poll, and the subtitle editor's stream/peaks
+            # endpoints fan out a handful of concurrent requests. 32 leaves a
+            # dozen parked tabs with ample headroom for bursts, and waitress
+            # queues rather than drops beyond it. Configurable (4..100) for
+            # larger installs via general.web_server_threads.
             self.server = create_server(app,
                                         host=self.address,
                                         port=self.port,
