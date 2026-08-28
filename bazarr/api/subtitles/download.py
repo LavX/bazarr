@@ -1,8 +1,11 @@
 # coding=utf-8
 
 import ast
+import mimetypes
 import os
 import re
+import shutil
+import stat
 import tempfile
 import time
 import zipfile
@@ -35,6 +38,10 @@ MAX_BUNDLE_UNCOMPRESSED_SIZE = 256 * 1024 * 1024
 BUNDLE_SPOOL_MEMORY_CEILING = 16 * 1024 * 1024
 
 _BUNDLE_COPY_CHUNK = 1 << 20
+
+# Per-entry staging buffer: spills to disk past this, so reading a source is
+# fully guarded before anything touches the archive.
+_ENTRY_STAGE_MEMORY_CEILING = 4 * 1024 * 1024
 
 # Base language filter for bundles: "en", "pt-BR". Variants (hi/forced/sync)
 # of the base language are included by design, so modifiers are not accepted.
@@ -190,6 +197,25 @@ def resolve_bundle_path(disk_path, trusted_roots):
     return None
 
 
+def open_validated_subtitle(path):
+    """Open a previously validated path for reading, refusing a replacement
+    symlink at the final component (O_NOFOLLOW where the platform has it) and
+    anything that is not a regular file. Validation and opening are separate
+    operations, so a writer in the media directory could swap the file in the
+    window between them; this closes that window at the open."""
+    flags = (os.O_RDONLY
+             | getattr(os, 'O_NOFOLLOW', 0)
+             | getattr(os, 'O_BINARY', 0))
+    descriptor = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(f'not a regular file: {path}')
+        return os.fdopen(descriptor, 'rb')
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
 def _collect_bundle_entries(rows, media_type, language=None, season=None):
     """Build (arcname, disk_path) pairs for rows with .path, .subtitles and
     .arr_instance_id (episode rows also carry .season)."""
@@ -274,30 +300,39 @@ def build_subtitle_bundle(entries, max_total_size=MAX_BUNDLE_UNCOMPRESSED_SIZE):
                 if disk_path in seen_paths:
                     continue
                 try:
-                    source = open(disk_path, 'rb')
+                    source = open_validated_subtitle(disk_path)
                 except OSError:
                     continue
-                # A successfully opened POSIX file stays readable even if it
-                # is unlinked mid-copy, so streaming after the open cannot
-                # produce a partial entry from a vanished file.
-                with source:
+                # Each source is staged in full (bounded memory, spills to
+                # disk) BEFORE anything touches the archive: a read failing
+                # mid-way (NAS I/O error) skips the entry instead of leaving
+                # a truncated member or failing the request.
+                with source, tempfile.SpooledTemporaryFile(
+                        max_size=_ENTRY_STAGE_MEMORY_CEILING) as staging:
                     mtime = os.fstat(source.fileno()).st_mtime
+                    entry_size = 0
+                    try:
+                        while True:
+                            chunk = source.read(_BUNDLE_COPY_CHUNK)
+                            if not chunk:
+                                break
+                            entry_size += len(chunk)
+                            if total_size + entry_size > max_total_size:
+                                raise BundleTooLargeError
+                            staging.write(chunk)
+                    except OSError:
+                        continue
                     seen_paths.add(disk_path)
+                    total_size += entry_size
                     # An explicit ZipInfo: archive.write would raise on
                     # out-of-range mtimes; here the timestamp is clamped.
                     info = zipfile.ZipInfo(unique_arcname(used_names, arcname),
                                            date_time=_zip_date_time(mtime))
                     info.compress_type = zipfile.ZIP_DEFLATED
                     info.external_attr = 0o644 << 16
+                    staging.seek(0)
                     with archive.open(info, 'w') as target:
-                        while True:
-                            chunk = source.read(_BUNDLE_COPY_CHUNK)
-                            if not chunk:
-                                break
-                            total_size += len(chunk)
-                            if total_size > max_total_size:
-                                raise BundleTooLargeError
-                            target.write(chunk)
+                        shutil.copyfileobj(staging, target)
                 added += 1
     except BaseException:
         buffer.close()
@@ -378,13 +413,23 @@ def _send_single_subtitle(media_type, media_id, language_code):
         return result
     subtitle_path = result[0]
     try:
-        response = send_file(subtitle_path,
-                             as_attachment=True,
-                             download_name=os.path.basename(subtitle_path),
-                             max_age=0)
+        # Open before handing off, refusing a replacement symlink: send_file
+        # on a pathname would follow whatever sits there by the time it opens.
+        handle = open_validated_subtitle(subtitle_path)
     except OSError:
-        # Deleted in the window since resolve_subtitle_path's existence check.
+        # Deleted or swapped in the window since resolve_subtitle_path.
         return 'Subtitle file or directory not found', 404
+    basename = os.path.basename(subtitle_path)
+    try:
+        response = send_file(handle,
+                             as_attachment=True,
+                             download_name=basename,
+                             mimetype=(mimetypes.guess_type(basename)[0]
+                                       or 'application/octet-stream'),
+                             max_age=0)
+    except Exception:
+        handle.close()
+        raise
     return _with_nosniff(response)
 
 

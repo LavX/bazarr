@@ -310,6 +310,27 @@ class TestResolveBundlePath:
             str(exe), [str(tmp_path)]) is None
 
 
+class TestOpenValidatedSubtitle:
+
+    def test_opens_regular_file(self, tmp_path):
+        sub = tmp_path / 'a.srt'
+        sub.write_text('x')
+        with download_module.open_validated_subtitle(str(sub)) as handle:
+            assert handle.read() == b'x'
+
+    def test_refuses_symlink(self, tmp_path):
+        target = tmp_path / 'target.srt'
+        target.write_text('x')
+        link = tmp_path / 'link.srt'
+        link.symlink_to(target)
+        with pytest.raises(OSError):
+            download_module.open_validated_subtitle(str(link))
+
+    def test_refuses_directory(self, tmp_path):
+        with pytest.raises(OSError):
+            download_module.open_validated_subtitle(str(tmp_path))
+
+
 # ---------------------------------------------------------------------------
 # Entry collection
 # ---------------------------------------------------------------------------
@@ -534,11 +555,14 @@ class TestSingleFileDownload:
         resource = download_module.EpisodeSubtitleFileDownload()
         assert resource.get(12, 'en') == ('No subtitle found for requested language', 404)
 
-    def test_success_sends_attachment_with_nosniff(self, monkeypatch):
+    def test_success_sends_attachment_with_nosniff(self, monkeypatch, tmp_path):
+        subtitle = tmp_path / 'Movie.en.srt'
+        subtitle.write_text('1\n00:00:01,000 --> 00:00:02,000\nA\n')
         sent = {}
 
-        def fake_send_file(path, **kwargs):
-            sent['path'] = path
+        def fake_send_file(handle, **kwargs):
+            sent['content'] = handle.read()
+            handle.close()
             sent.update(kwargs)
             return _FakeResponse()
 
@@ -548,7 +572,7 @@ class TestSingleFileDownload:
 
         def fake_resolve(media_type, media_id, language_code, arr_instance_id=None):
             captured['args'] = (media_type, media_id, language_code, arr_instance_id)
-            return ('/media/Movie (2020)/Movie.en.srt', {'mediaTitle': 'Movie'})
+            return (str(subtitle), {'mediaTitle': 'Movie'})
 
         monkeypatch.setattr(download_module, 'resolve_subtitle_path', fake_resolve)
         monkeypatch.setattr(download_module, 'send_file', fake_send_file)
@@ -556,22 +580,31 @@ class TestSingleFileDownload:
         resource = download_module.MovieSubtitleFileDownload()
         response = resource.get(654, 'en:hi')
         assert captured['args'] == ('movie', 654, 'en:hi', 3)
-        assert sent['path'] == '/media/Movie (2020)/Movie.en.srt'
+        assert sent['content'].endswith(b'A\n')
         assert sent['as_attachment'] is True
         assert sent['download_name'] == 'Movie.en.srt'
+        assert sent['mimetype'] == 'text/plain'
         assert response.headers['X-Content-Type-Options'] == 'nosniff'
 
-    def test_file_deleted_after_resolution_is_404(self, monkeypatch, no_instance_param):
+    def test_file_deleted_after_resolution_is_404(self, monkeypatch, no_instance_param,
+                                                  tmp_path):
         monkeypatch.setattr(download_module, 'request', _fake_request())
         monkeypatch.setattr(download_module, 'resolve_subtitle_path',
-                            lambda *a, **k: ('/media/gone.srt', {}))
-
-        def raising_send_file(path, **kwargs):
-            raise FileNotFoundError(path)
-
-        monkeypatch.setattr(download_module, 'send_file', raising_send_file)
+                            lambda *a, **k: (str(tmp_path / 'gone.srt'), {}))
         resource = download_module.EpisodeSubtitleFileDownload()
         assert resource.get(12, 'en') == ('Subtitle file or directory not found', 404)
+
+    def test_replacement_symlink_at_send_time_is_refused(self, monkeypatch,
+                                                         no_instance_param, tmp_path):
+        secret = tmp_path / 'secret.conf'
+        secret.write_text('apikey')
+        link = tmp_path / 'Movie.en.srt'
+        link.symlink_to(secret)
+        monkeypatch.setattr(download_module, 'request', _fake_request())
+        monkeypatch.setattr(download_module, 'resolve_subtitle_path',
+                            lambda *a, **k: (str(link), {}))
+        resource = download_module.MovieSubtitleFileDownload()
+        assert resource.get(1, 'en') == ('Subtitle file or directory not found', 404)
 
 
 class TestSingleFileAmbiguity:

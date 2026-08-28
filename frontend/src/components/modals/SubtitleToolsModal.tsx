@@ -189,7 +189,29 @@ const SubtitleToolView: FunctionComponent<SubtitleToolViewProps> = ({
       <Group>
         <SubtitleToolsMenu
           selections={selections}
-          onAction={(action) => {
+          onAction={async (action) => {
+            if (action === "download") {
+              // Sequential on purpose: parallel programmatic anchor clicks
+              // are dropped by browsers that restrict multiple automatic
+              // downloads; one at a time surfaces the browser's own
+              // multi-download permission prompt instead.
+              for (const selection of selections) {
+                try {
+                  await fileDownload.mutateAsync({
+                    type: selection.type,
+                    mediaId: selection.id,
+                    language: buildSubtitleLanguageKey(
+                      selection.raw_language as Subtitle,
+                    ),
+                    arrInstanceId: selection.arr_instance_id,
+                  });
+                } catch {
+                  // The hook already notified; continue with the rest.
+                }
+              }
+              modals.closeAll();
+              return;
+            }
             selections.forEach(async (selection) => {
               const actionPayload = {
                 form: {
@@ -218,17 +240,6 @@ const SubtitleToolView: FunctionComponent<SubtitleToolViewProps> = ({
                 await download.mutateAsync(actionPayload);
               } else if (action === "delete" && selection.path) {
                 await remove.mutateAsync(actionPayload);
-              } else if (action === "download") {
-                // raw_language holds the full subtitle entry, so the key
-                // carries hi/forced and sync/combined variants correctly.
-                fileDownload.mutate({
-                  type: selection.type,
-                  mediaId: selection.id,
-                  language: buildSubtitleLanguageKey(
-                    selection.raw_language as Subtitle,
-                  ),
-                  arrInstanceId: selection.arr_instance_id,
-                });
               }
             });
             modals.closeAll();
