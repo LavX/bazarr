@@ -155,11 +155,17 @@ const SeriesEpisodesView: FunctionComponent = () => {
     return Array.from(seen).sort();
   }, [episodes]);
 
+  // Only seasons that actually have a file on disk: offering an empty season
+  // would just produce a guaranteed 404 bundle.
   const seasons = useMemo(
     () =>
-      Array.from(new Set((episodes ?? []).map((e) => e.season))).sort(
-        (a, b) => a - b,
-      ),
+      Array.from(
+        new Set(
+          (episodes ?? [])
+            .filter((e) => e.subtitles.some((s) => s.path))
+            .map((e) => e.season),
+        ),
+      ).sort((a, b) => a - b),
     [episodes],
   );
 

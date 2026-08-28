@@ -102,6 +102,7 @@ sys.modules.pop('api.subtitles.download', None)
 sys.modules.pop('api.subtitles.content', None)
 
 import api.subtitles.download as download_module  # noqa: E402
+import api.subtitles.content as content_module  # noqa: E402
 
 _module_isolation.restore(_SYS_BEFORE)
 
@@ -243,6 +244,13 @@ class TestLanguageFilterRe:
         assert download_module._LANGUAGE_FILTER_RE.match('pt-BR')
         assert download_module._LANGUAGE_FILTER_RE.match('zho')
 
+    def test_content_grammar_rejects_trailing_newline(self):
+        # The single-file route validates through content.py's full grammar;
+        # \Z (not $) so an encoded trailing newline cannot pass.
+        assert not content_module._LANGUAGE_CODE_RE.match('en\n')
+        assert not content_module._LANGUAGE_CODE_RE.match('en:hi\n')
+        assert content_module._LANGUAGE_CODE_RE.match('en:hi')
+
     def test_rejects_modifiers_traversal_and_newlines(self):
         assert not download_module._LANGUAGE_FILTER_RE.match('en:hi')
         assert not download_module._LANGUAGE_FILTER_RE.match('../evil')
@@ -274,6 +282,15 @@ class TestResolveBundlePath:
         link = media / 'movie.en.srt'
         link.symlink_to(secret)
         assert download_module.resolve_bundle_path(str(link), [str(media)]) is None
+
+    def test_rejects_symlink_to_in_root_non_subtitle(self, tmp_path):
+        # The extension allowlist must run on the RESOLVED path: an indexed
+        # .srt that is a symlink to Movie.nfo inside the root must not pass.
+        nfo = tmp_path / 'Movie.nfo'
+        nfo.write_text('metadata')
+        link = tmp_path / 'movie.en.srt'
+        link.symlink_to(nfo)
+        assert download_module.resolve_bundle_path(str(link), [str(tmp_path)]) is None
 
     def test_rejects_path_outside_all_roots(self, tmp_path):
         assert download_module.resolve_bundle_path(
@@ -419,6 +436,15 @@ class TestBuildSubtitleBundle:
             info = archive.getinfo('old.srt')
             assert info.date_time[0] == 1980
 
+    def test_zip_date_time_clamps_both_ends(self):
+        assert download_module._zip_date_time(0) == download_module._ZIP_EPOCH
+        assert download_module._zip_date_time(-1) == download_module._ZIP_EPOCH
+        # Year 2110: beyond the zip date field's 2107 ceiling.
+        assert download_module._zip_date_time(4418064000) == \
+            download_module._ZIP_LAST_TIMESTAMP
+        assert download_module._zip_date_time(10**18) == \
+            download_module._ZIP_EPOCH
+
     def test_directory_entry_is_skipped(self, tmp_path):
         sub = tmp_path / 'dir.srt'
         sub.mkdir()
@@ -489,6 +515,11 @@ class _FakeDatabase:
 
 class TestSingleFileDownload:
 
+    @pytest.fixture(autouse=True)
+    def _unambiguous(self, monkeypatch):
+        monkeypatch.setattr(download_module, '_ambiguous_media_error',
+                            lambda *a, **k: None)
+
     def test_error_tuple_passes_through(self, monkeypatch, no_instance_param):
         monkeypatch.setattr(download_module, 'request', _fake_request())
         monkeypatch.setattr(download_module, 'resolve_subtitle_path',
@@ -536,6 +567,31 @@ class TestSingleFileDownload:
         assert resource.get(12, 'en') == ('Subtitle file or directory not found', 404)
 
 
+class TestSingleFileAmbiguity:
+
+    def test_two_instance_rows_without_param_is_400(self, monkeypatch, no_instance_param):
+        rows = [SimpleNamespace(id=1), SimpleNamespace(id=2)]
+        monkeypatch.setattr(download_module, 'database', _FakeDatabase([rows]))
+        resource = download_module.EpisodeSubtitleFileDownload()
+        assert resource.get(12, 'en') == \
+            ('Ambiguous Sonarr episode ID; pass arr_instance_id', 400)
+
+    def test_movie_two_rows_is_400(self, monkeypatch, no_instance_param):
+        rows = [SimpleNamespace(id=1), SimpleNamespace(id=2)]
+        monkeypatch.setattr(download_module, 'database', _FakeDatabase([rows]))
+        resource = download_module.MovieSubtitleFileDownload()
+        assert resource.get(654, 'en') == \
+            ('Ambiguous Radarr movie ID; pass arr_instance_id', 400)
+
+    def test_single_row_proceeds_to_resolution(self, monkeypatch, no_instance_param):
+        monkeypatch.setattr(download_module, 'database',
+                            _FakeDatabase([[SimpleNamespace(id=1)]]))
+        monkeypatch.setattr(download_module, 'resolve_subtitle_path',
+                            lambda *a, **k: ('missing', 404))
+        resource = download_module.EpisodeSubtitleFileDownload()
+        assert resource.get(12, 'en') == ('missing', 404)
+
+
 class TestSeriesBundleDownload:
 
     def test_series_not_found(self, monkeypatch, no_instance_param):
@@ -561,6 +617,13 @@ class TestSeriesBundleDownload:
     def test_invalid_season_filter_rejected(self, monkeypatch, no_instance_param):
         monkeypatch.setattr(download_module, 'request',
                             _fake_request({'season': 'abc'}))
+        resource = download_module.SeriesSubtitleBundleDownload()
+        assert resource.get(1) == ('Invalid season filter', 400)
+
+    def test_huge_season_digit_string_rejected(self, monkeypatch, no_instance_param):
+        # isdigit passes but int() would hit the conversion limit: still 400.
+        monkeypatch.setattr(download_module, 'request',
+                            _fake_request({'season': '9' * 5000}))
         resource = download_module.SeriesSubtitleBundleDownload()
         assert resource.get(1) == ('Invalid season filter', 400)
 

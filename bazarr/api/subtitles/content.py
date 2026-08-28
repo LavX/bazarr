@@ -52,7 +52,8 @@ _LANGUAGE_CODE_RE = re.compile(
     r'(:(forced|hi|'
     r'sync-(ffsubsync|autosubsync|alass)|'
     r'combined-[a-z]{2}(-[a-z]{2})?'
-    r'))*$'
+    # \Z, not $: $ would accept a trailing newline (en%0A in the route).
+    r'))*\Z'
 )
 
 

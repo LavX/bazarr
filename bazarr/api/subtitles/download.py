@@ -1,9 +1,9 @@
 # coding=utf-8
 
 import ast
-import io
 import os
 import re
+import tempfile
 import time
 import zipfile
 
@@ -26,9 +26,15 @@ from ..utils import authenticate
 
 api_ns_subtitle_download = Namespace('SubtitleDownload', description='Download subtitle files')
 
-# Uncompressed ceiling for a bundle, enforced while reading each file (the
-# pre-stat size is advisory only: a file can grow between stat and read).
+# Uncompressed ceiling for a bundle, enforced while streaming each file (a
+# file growing after collection cannot overshoot it).
 MAX_BUNDLE_UNCOMPRESSED_SIZE = 256 * 1024 * 1024
+
+# The archive is spooled: it stays in memory up to this size and spills to a
+# temp file beyond it, so a large bundle never holds hundreds of MB resident.
+BUNDLE_SPOOL_MEMORY_CEILING = 16 * 1024 * 1024
+
+_BUNDLE_COPY_CHUNK = 1 << 20
 
 # Base language filter for bundles: "en", "pt-BR". Variants (hi/forced/sync)
 # of the base language are included by design, so modifiers are not accepted.
@@ -36,9 +42,11 @@ MAX_BUNDLE_UNCOMPRESSED_SIZE = 256 * 1024 * 1024
 # so a trailing newline does not pass.
 _LANGUAGE_FILTER_RE = re.compile(r'^' + LANGUAGE_BASE_TAG_FRAGMENT + r'\Z')
 
-# Zip timestamps cannot predate 1980; files with older mtimes (epoch-0 after
-# restores/rsync/SMB) get clamped instead of failing the whole bundle.
+# Zip timestamps can only represent 1980..2107; files outside that range
+# (epoch-0 after restores/rsync/SMB, or corrupt future metadata) get clamped
+# instead of failing the whole bundle.
 _ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
+_ZIP_LAST_TIMESTAMP = (2107, 12, 31, 23, 59, 58)
 
 
 class BundleTooLargeError(Exception):
@@ -165,11 +173,13 @@ def resolve_bundle_path(disk_path, trusted_roots):
     guarantees resolve_subtitle_path gives the single-file endpoint: the
     realpath (symlinks resolved) must sit under a trusted directory and carry
     a recognized subtitle extension. Returns the realpath, or None."""
-    if os.path.splitext(disk_path)[1].lower() not in SUBTITLE_EXTENSIONS:
-        return None
     try:
         real = os.path.realpath(disk_path)
     except OSError:
+        return None
+    # The allowlist runs on the RESOLVED path: an indexed .srt that is really
+    # a symlink to Movie.nfo must not pass on the link's own extension.
+    if os.path.splitext(real)[1].lower() not in SUBTITLE_EXTENSIONS:
         return None
     for root in trusted_roots:
         try:
@@ -238,6 +248,8 @@ def _zip_date_time(mtime):
         return _ZIP_EPOCH
     if parts.tm_year < 1980:
         return _ZIP_EPOCH
+    if parts.tm_year > 2107:
+        return _ZIP_LAST_TIMESTAMP
     return (parts.tm_year, parts.tm_mon, parts.tm_mday,
             parts.tm_hour, parts.tm_min, parts.tm_sec)
 
@@ -251,35 +263,47 @@ def build_subtitle_bundle(entries, max_total_size=MAX_BUNDLE_UNCOMPRESSED_SIZE):
     file growing after its stat cannot overshoot it. Returns None when nothing
     could be added; raises BundleTooLargeError past the cap.
     """
-    buffer = io.BytesIO()
+    buffer = tempfile.SpooledTemporaryFile(max_size=BUNDLE_SPOOL_MEMORY_CEILING)
     used_names = set()
     seen_paths = set()
     total_size = 0
     added = 0
-    with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
-        for arcname, disk_path in entries:
-            if disk_path in seen_paths:
-                continue
-            remaining = max_total_size - total_size
-            try:
-                mtime = os.path.getmtime(disk_path)
-                with open(disk_path, 'rb') as source:
-                    data = source.read(remaining + 1)
-            except OSError:
-                continue
-            if len(data) > remaining:
-                raise BundleTooLargeError
-            seen_paths.add(disk_path)
-            total_size += len(data)
-            # writestr with an explicit ZipInfo: archive.write would raise
-            # ValueError on pre-1980 mtimes; here the timestamp is clamped.
-            info = zipfile.ZipInfo(unique_arcname(used_names, arcname),
-                                   date_time=_zip_date_time(mtime))
-            info.compress_type = zipfile.ZIP_DEFLATED
-            info.external_attr = 0o644 << 16
-            archive.writestr(info, data)
-            added += 1
+    try:
+        with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
+            for arcname, disk_path in entries:
+                if disk_path in seen_paths:
+                    continue
+                try:
+                    source = open(disk_path, 'rb')
+                except OSError:
+                    continue
+                # A successfully opened POSIX file stays readable even if it
+                # is unlinked mid-copy, so streaming after the open cannot
+                # produce a partial entry from a vanished file.
+                with source:
+                    mtime = os.fstat(source.fileno()).st_mtime
+                    seen_paths.add(disk_path)
+                    # An explicit ZipInfo: archive.write would raise on
+                    # out-of-range mtimes; here the timestamp is clamped.
+                    info = zipfile.ZipInfo(unique_arcname(used_names, arcname),
+                                           date_time=_zip_date_time(mtime))
+                    info.compress_type = zipfile.ZIP_DEFLATED
+                    info.external_attr = 0o644 << 16
+                    with archive.open(info, 'w') as target:
+                        while True:
+                            chunk = source.read(_BUNDLE_COPY_CHUNK)
+                            if not chunk:
+                                break
+                            total_size += len(chunk)
+                            if total_size > max_total_size:
+                                raise BundleTooLargeError
+                            target.write(chunk)
+                added += 1
+    except BaseException:
+        buffer.close()
+        raise
     if added == 0:
+        buffer.close()
         return None
     buffer.seek(0)
     return buffer
@@ -309,7 +333,9 @@ def _validated_season_filter():
     raw = request.args.get('season')
     if raw is None:
         return None, None
-    if not raw.isdigit():
+    # Length-bounded: isdigit alone lets a huge digit string past, and int()
+    # would then raise on Python's conversion limit instead of returning 400.
+    if not raw.isdigit() or len(raw) > 4:
         return None, ('Invalid season filter', 400)
     return int(raw), None
 
@@ -319,9 +345,35 @@ def _with_nosniff(response):
     return response
 
 
+def _ambiguous_media_error(media_type, media_id, arr_instance_id):
+    """400 tuple when the upstream id matches more than one instance's row
+    and the caller did not disambiguate; None otherwise. Mirrors the bundle
+    endpoints: resolve_subtitle_path would silently .first() one of them."""
+    if media_type == 'episode':
+        query = scoped(
+            select(TableEpisodes.id)
+            .where(TableEpisodes.sonarrEpisodeId == media_id),
+            TableEpisodes.arr_instance_id, arr_instance_id)
+        label = 'Sonarr episode'
+    else:
+        query = scoped(
+            select(TableMovies.id)
+            .where(TableMovies.radarrId == media_id),
+            TableMovies.arr_instance_id, arr_instance_id)
+        label = 'Radarr movie'
+    rows = database.execute(query).all()
+    if len(rows) > 1:
+        return f'Ambiguous {label} ID; pass arr_instance_id', 400
+    return None
+
+
 def _send_single_subtitle(media_type, media_id, language_code):
+    arr_instance_id = _request_arr_instance_id()
+    ambiguous = _ambiguous_media_error(media_type, media_id, arr_instance_id)
+    if ambiguous:
+        return ambiguous
     result = resolve_subtitle_path(media_type, media_id, language_code,
-                                   arr_instance_id=_request_arr_instance_id())
+                                   arr_instance_id=arr_instance_id)
     if isinstance(result[1], int):
         return result
     subtitle_path = result[0]
