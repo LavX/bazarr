@@ -114,10 +114,11 @@ def validate_engine_result(engine, raw_result, max_offset_seconds):
        declines to shift them), so "a non-empty file exists" is not evidence of a sync.
     2. An alignment whose absolute offset is larger than the configured maximum.
 
-    Only ffsubsync reports an offset, so only ffsubsync is held to the maximum. That is
-    a knowing inconsistency: autosubsync and alass report success or failure and nothing
-    measurable, and there is no way to bound their shift short of re-deriving it from
-    their output. They are still held to condition 1.
+    ffsubsync and autosubsync report an offset (autosubsync returns its measured
+    shift under the same key), so both are held to the maximum. alass is the
+    knowing inconsistency: it reports success or failure and nothing measurable,
+    and there is no way to bound its shift short of re-deriving it from its
+    output. It is still held to condition 1.
     """
     if not isinstance(raw_result, dict):
         return
