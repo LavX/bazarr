@@ -34,12 +34,12 @@ export const folderOptions: SelectorOption<string>[] = [
 export const embeddedSubtitlesParserOption: SelectorOption<string>[] = [
   {
     label:
-      "ffprobe (faster than mediainfo. Part of Bazarr installation already)",
+      "ffprobe (faster; the right choice unless embedded tracks are misdetected)",
     value: "ffprobe",
   },
   {
     label:
-      "mediainfo (slower but may give better results. User must install the mediainfo executable first)",
+      "mediainfo (slower, but reads track language and forced/HI flags more reliably from oddly tagged files. Included in the Docker image; other installs need the mediainfo executable)",
     value: "mediainfo",
   },
 ];
