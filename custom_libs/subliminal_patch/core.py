@@ -230,6 +230,14 @@ class _LanguageEquals(list):
                 break
 
 
+class ProviderExcludedError(KeyError):
+    """A lookup named a provider the configuration currently excludes
+    (discarded by this pool, disabled, or throttled). Distinct from a bare
+    KeyError so callers can treat it as a quiet no-op: routing it through the
+    generic error handlers would call throttle_callback, and an unmapped
+    exception REPLACES an existing long backoff with the 10-minute default."""
+
+
 class SZProviderPool(ProviderPool):
     @staticmethod
     def _dedupe_provider_names(providers):
@@ -349,9 +357,9 @@ class SZProviderPool(ProviderPool):
             if name not in provider_registry:
                 raise KeyError(name)
             if name in self.discarded_providers:
-                raise KeyError(name)
+                raise ProviderExcludedError(name)
             if self.adoption_gate is not None and not self.adoption_gate(name):
-                raise KeyError(name)
+                raise ProviderExcludedError(name)
             self.providers.append(name)
         if name not in self.initialized_providers:
             logger.info('Initializing provider %s', name)
@@ -457,7 +465,13 @@ class SZProviderPool(ProviderPool):
             self.provider_progress_callback(provider)
 
         try:
-            results = self[provider].list_subtitles(video, to_request)
+            try:
+                initialized_provider = self[provider]
+            except ProviderExcludedError:
+                logger.info('Provider %r is currently excluded (disabled, '
+                            'throttled or discarded); not searching it', provider)
+                return
+            results = initialized_provider.list_subtitles(video, to_request)
             seen = []
             out = []
             for s in results:
@@ -683,7 +697,14 @@ class SZProviderPool(ProviderPool):
                 if self.pre_download_hook:
                     self.pre_download_hook(subtitle)
 
-                self[subtitle.provider_name].download_subtitle(subtitle)
+                try:
+                    initialized_provider = self[subtitle.provider_name]
+                except ProviderExcludedError:
+                    logger.info('Provider %r is currently excluded (disabled, '
+                                'throttled or discarded); not downloading from it',
+                                subtitle.provider_name)
+                    return False
+                initialized_provider.download_subtitle(subtitle)
                 if self.post_download_hook:
                     self.post_download_hook(subtitle)
 

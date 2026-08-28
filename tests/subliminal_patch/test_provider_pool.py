@@ -12,9 +12,15 @@ from subliminal_patch import core
 
 
 class _FakeProvider:
+    languages = set()
+
     def __init__(self, **kwargs):
         self.kwargs = kwargs
         self.initialized = False
+
+    @classmethod
+    def check(cls, video):
+        return True
 
     def initialize(self):
         self.initialized = True
@@ -106,3 +112,43 @@ def test_pool_getitem_gate_not_consulted_for_configured_providers(registry):
 
     assert isinstance(pool["alpha"], _FakeProvider)
     assert calls == []
+
+
+def test_excluded_download_neither_throttles_nor_discards(registry):
+    # A vetoed adoption during download must be a quiet no-op: routing it
+    # through the generic handler would call throttle_callback with an
+    # unmapped exception, REPLACING an existing long backoff with the
+    # 10-minute default.
+    throttled = []
+    pool = core.SZProviderPool(
+        ["alpha"],
+        {},
+        throttle_callback=lambda name, exc, ids=None, language=None: throttled.append(name),
+        adoption_gate=lambda name: False,
+    )
+    subtitle = type(
+        "FakeSubtitle", (), {"provider_name": "beta", "language": None}
+    )()
+
+    assert pool.download_subtitle(subtitle) is False
+    assert throttled == []
+    assert "beta" not in pool.discarded_providers
+
+
+def test_excluded_search_neither_throttles_nor_discards(registry):
+    throttled = []
+    pool = core.SZProviderPool(
+        ["alpha"],
+        {},
+        throttle_callback=lambda name, exc, ids=None, language=None: throttled.append(name),
+        adoption_gate=lambda name: False,
+    )
+    video = type("FakeVideo", (), {})()
+    language = core.Language("eng")
+    _FakeProvider.languages = {language}
+    try:
+        assert pool.list_subtitles_provider("beta", video, {language}) is None
+    finally:
+        _FakeProvider.languages = set()
+    assert throttled == []
+    assert "beta" not in pool.discarded_providers
