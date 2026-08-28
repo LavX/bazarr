@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <strong>Provider Hub</strong> plugin catalog · <strong>Distribution Hub</strong> multi-tenant subtitle API · <strong>Combined bilingual/trilingual subtitles</strong> · AI translation via OpenRouter (300+ LLMs) · translate from embedded tracks · multi-engine subtitle sync · Subtitle Editor with video preview and waveform · No tracking · Provider priority · OpenSubtitles.org native plugin · API key encryption at rest · Jellyfin library refresh · bulk operations · security hardening · Python 3.14 · navy + amber dark theme
+  <strong>Multiple Sonarr/Radarr instances</strong> · <strong>Provider Hub</strong> plugin catalog · <strong>Distribution Hub</strong> multi-tenant subtitle API · combined bilingual/trilingual subtitles · AI translation via OpenRouter (300+ LLMs) · multi-engine subtitle sync · Subtitle Editor with video preview and waveform · OpenSubtitles.org native plugin · security hardening, API key encryption at rest, no tracking · Python 3.14
 </p>
 
 <p align="center">
@@ -56,15 +56,16 @@ Bazarr+ uses its own versioning starting at v2.0.0, unrelated to upstream versio
 | Feature | Upstream Bazarr | Bazarr+ |
 |---------|-----------------|---------|
 | **Multiple Sonarr/Radarr instances** | One Sonarr + one Radarr only | Register any number of Sonarr and Radarr servers and manage them as a single library. Every sync, search, manual search, download, upgrade, blacklist, history, wanted, scan-disk and mass-edit action stays scoped to the instance that owns each item, so colliding upstream IDs across servers never cross-contaminate. Webhooks, SignalR, the cover-image proxy, root folders, path mappings and Plex updates all resolve per instance. First-class PostgreSQL. |
-| **Per-instance subtitle settings** | Not available | Each instance can override how subtitles are produced (Subzero mods, custom post-processing, sync engines, keep-lyrics); settings resolve against the media's owning instance rather than a single global default. |
+| **Per-instance subtitle settings** | Not available | Each instance can override how subtitles are produced (Subzero mods, custom post-processing, sync engines, keep-lyrics) and carry its own default language profile; settings resolve against the media's owning instance rather than a single global default. |
 | **Compressed-archive uploads** | Not available | Drop a `.zip`, `.rar` or `.7z` of subtitles into the upload modal. Archives are expanded in memory (zip-slip-safe, with entry and size caps) and fed into the normal upload flow, with reliable drag-and-drop across the whole show/movie page. |
 | **First-run setup wizard** | None (a fresh install lands on the settings page with no guidance) | A guided, skippable wizard walks a new install through Sonarr, Radarr, optional Plex/Jellyfin, a language profile, and installing plus enabling subtitle providers. It handles the restart that installing providers requires and resumes where you left off, then finishes with a few general basics. Existing installs are never interrupted. |
 | **Provider Hub (catalog plugins)** | Not available | Marketplace for installable subtitle provider plugins. Catalog sources, trust labels, staged activation, worker validation, isolated environments, activity log. Catalog plugins can replace shipped built-ins, and enabled built-ins can opt in to auto-install from the official catalog on startup (off by default). Local `.zip` package installs supported. |
 | **Distribution Hub (multi-tenant subtitle API)** | Not available | Multi-tenant control plane for the OpenSubtitles-compatible API. Named API keys, editable tiers, per-window metering and rate limits, per-key provider scoping. Two first-party clients: [Jellyfin plugin](https://github.com/LavX/jellyfin-plugin-bazarr-plus) and [VLSub Bazarr+](https://github.com/LavX/vlsub-bazarr-plus). |
 | **Combined subtitles (bilingual / trilingual)** | Not available | Composes existing on-disk subtitles into a single bilingual or trilingual SRT or ASS file, per language profile or on demand. Pure composition, never triggers translation. |
 | **Translate from embedded tracks** | Not available | Embedded (in-container) text tracks score at 100% source quality and can be translated directly. Bitmap tracks (PGS/VobSub) are rejected with a clear error. |
-| **Multi-engine subtitle sync** | Single engine | Multiple sync engines with a side-by-side output comparison before you keep a result. |
-| **Jellyfin Library Refresh** | On upstream's `development` branch only (no released version) | Cherry-picked and polished: HTTPS with optional self-signed cert acceptance, per-library overrides, secret redaction, response cap, "Refresh now" Maintenance card |
+| **Multi-engine subtitle sync** | Single engine | Multiple sync engines with a side-by-side output comparison before you keep a result. The configured maximum offset is an acceptance threshold (out-of-tolerance results are rejected, not kept), and a run where some engines failed reports those failures instead of an unqualified success. |
+| **Scoring controls** | Fixed scoring | Per-provider score modifiers weight any provider up or down, Provider Hub candidates are scored on their release information, movie edition is preserved in matching, and release-type mismatches trigger a notification. |
+| **Jellyfin Library Refresh** | Basic refresh (since upstream v1.6.0) | HTTPS with optional self-signed cert acceptance, per-library overrides, secret redaction, response cap, "Refresh now" Maintenance card |
 | **Provider Priority** | [Rejected](https://bazarr.featureupvote.com/suggestions/112323/provider-prioritization) (62 votes) | Dual mode: priority order with early stop, or classic simultaneous |
 | **OpenSubtitles.org (native plugin)** | Not available | Provider Hub plugin that scrapes in-process via ai-cloudscraper with inline Anubis proof-of-work solving; FlareSolverr recommended for Cloudflare challenges |
 | **AI Subtitle Translator (OpenRouter)** | Not available | 300+ LLMs + any custom model ID |
@@ -77,7 +78,7 @@ Bazarr+ uses its own versioning starting at v2.0.0, unrelated to upstream versio
 | **No Tracking** | GA4 + legacy UA phone home to Google | All telemetry removed, nothing phones home |
 | **Security Hardening** | MD5, no CSRF/SSRF/rate limiting | PBKDF2 (600k iter), CSRF, SSRF, brute-force, 4 more |
 | **Subtitle Editor** | Not available | Full editor with video preview, waveform timeline, AI translation, ffsubsync, 8 format support, 40+ shortcuts |
-| **Subtitle Viewer** | Not available | Read-only subtitle preview with SRT/VTT/ASS parsing, cue table, and format detection |
+| **Subtitle Viewer** | Not available | Read-only subtitle preview with SRT/VTT/ASS parsing, cue table, and format detection. Subtitle files can be downloaded one at a time from any subtitle menu, or as a zip per season, per language, or for a whole series or movie. |
 | **Audio Language Display** | Not shown in tables | Badges in all table views |
 | **Advanced Table Filters** | No filters | Include/exclude audio, missing subtitle, title search |
 | **Floating Save + Ctrl+S** | Not available | Sticky save button with 3-option unsaved changes modal |
@@ -232,7 +233,7 @@ A central `secret_store` module owns crypto: every sensitive field is registered
 Encryption covers both the disk surface (the credentials above, at rest) and keys in transit between Bazarr+ and the AI translator (AES-256-GCM).
 
 ### OpenSubtitles.org (Native Provider Hub Plugin)
-OpenSubtitles.org shut down their XML-RPC API for all third-party apps, VIP included. In v2.4, OpenSubtitles.org is a native Provider Hub plugin. Install "OpenSubtitles.org" from the Provider Hub Marketplace and it scrapes the site in-process using `ai-cloudscraper`, solving the Anubis proof-of-work challenge inline. There is no separate microservice or sidecar container anymore. No API key or VIP subscription needed.
+OpenSubtitles.org shut down their XML-RPC API for all third-party apps, VIP included. Since v2.4, OpenSubtitles.org is a native Provider Hub plugin. Install "OpenSubtitles.org" from the Provider Hub Marketplace and it scrapes the site in-process using `ai-cloudscraper`, solving the Anubis proof-of-work challenge inline. There is no separate microservice or sidecar container anymore. No API key or VIP subscription needed.
 
 FlareSolverr is strongly recommended. Run a FlareSolverr container and set its `/v1` endpoint in the plugin's **FlareSolverr URL** setting. FlareSolverr is used as a fallback to solve Cloudflare browser challenges when `ai-cloudscraper` is itself challenged. The plugin exposes `flaresolverr_url` and `flaresolverr_timeout_ms` settings. Use `http://flaresolverr:8191/v1` when Bazarr+ and FlareSolverr share a Docker network (the Compose default below), or `http://localhost:8191/v1` if you run Bazarr+ with host networking (in which case also publish FlareSolverr's `8191:8191` port, or run it on host networking too, so 8191 is reachable on the host loopback).
 
@@ -270,7 +271,8 @@ Embedded (in-container) subtitle tracks are recorded as source quality in histor
 Subtitle synchronization can run through more than one engine. Run a sync from the editor or the mass-sync form, pick an engine, and compare results before keeping one.
 
 - **Side-by-side comparison**: a compare view shows the produced output against the original so you can verify timing before saving
-- **Explicit failures**: editor sync fails clearly when no output is produced instead of silently keeping the original
+- **Acceptance threshold**: the configured maximum offset is enforced as an acceptance threshold, so a result outside your tolerance is rejected rather than written
+- **Explicit failures**: editor sync fails clearly when no output is produced instead of silently keeping the original, and a mass sync where some engines failed reports those failures rather than an unqualified success
 - **Indexed outputs**: sync outputs are indexed alongside combined outputs in movies and series
 
 ### Subtitle Editor
@@ -297,7 +299,7 @@ A full browser-based subtitle editor accessible from the subtitle action menu. N
 - **474 tests** (424 frontend + 50 backend)
 
 ### Subtitle Viewer
-Read-only subtitle preview accessible from the subtitle action menu. Supports SRT, VTT, and ASS/SSA formats with automatic format detection. Shows a cue table with timestamps and text, file size, and format badge. Useful for quickly checking subtitle content and timing without downloading.
+Read-only subtitle preview accessible from the subtitle action menu. Supports SRT, VTT, and ASS/SSA formats with automatic format detection. Shows a cue table with timestamps and text, file size, and format badge. Useful for quickly checking subtitle content and timing. When you do want the files, every subtitle menu has a Download action, and the series and movie pages can produce a zip of everything on disk, filtered by season and language.
 
 ### Advanced UI
 - **Table filters** on Wanted and Library pages: include/exclude audio language (multi-select), missing subtitle language filter, title search, with active filter chips and a collapsible filter panel
@@ -608,6 +610,7 @@ This fork is maintained by **LavX**. Explore more projects and services:
 Where Bazarr+ is heading. Plans shift, but the direction is steady.
 
 - **v2.6.0 "Clockwork"**: correctness pass. Databases created by upstream Bazarr are adopted instead of crash-looping, sync results are checked against the offset you configured rather than merely bounded by it, Provider Hub candidates are scored on their release information, mass translate can work from an embedded subtitle track, and per-provider score modifiers let you weight a provider up or down.
+- **Next on the v2 line**: Discover, which searches and pulls subtitles for any title whether or not it is in your library; a rebuilt in-process translator with a model catalog and per-profile engine choice instead of a sidecar container; search inside your subtitles, so a half-remembered line of dialogue finds the episode; and a standalone mode that runs without Sonarr and Radarr.
 - **v3.0.0 "Galaxy"**: peer-to-peer subtitle sharing, a self-organizing mesh of Bazarr+ instances.
 
 ---
