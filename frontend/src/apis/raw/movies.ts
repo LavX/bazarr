@@ -69,7 +69,9 @@ class MovieApi extends BaseApi {
   async historyBy(id: number) {
     const response = await this.get<DataWrapperWithTotal<History.Movie>>(
       "/history",
-      { id },
+      // Detail views need the Embedded Source rows the paginated history
+      // hides by default: the movie table reads their score and provider.
+      { id, include_embedded: true },
     );
     return response.data;
   }

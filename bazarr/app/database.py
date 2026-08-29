@@ -368,6 +368,14 @@ class TableEpisodes(Base):
         # indexes it but fresh installs missed it (sonarrSeriesId/episode_file_id
         # are already indexed via index=True on their columns).
         Index('ix_table_episodes_series_id', 'series_id'),
+        # The Wanted page filters on this exact predicate and orders by
+        # sonarrEpisodeId; the partial index lets both the page and its count
+        # run off the index instead of scanning every (fat) episode row twice
+        # per request. The predicate must stay verbatim in sync with the
+        # wanted queries or neither planner will use it.
+        Index('ix_table_episodes_wanted', 'sonarrEpisodeId',
+              sqlite_where=text("missing_subtitles IS NOT NULL AND missing_subtitles != '[]'"),
+              postgresql_where=text("missing_subtitles IS NOT NULL AND missing_subtitles != '[]'")),
     )
 
     id = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -409,6 +417,15 @@ class TableHistory(Base):
     __table_args__ = (
         Index('ix_table_history_video_path_language_timestamp',
               'video_path', 'language', 'timestamp'),
+        # Pagination orders by timestamp; without this the History page pays a
+        # scan-and-sort of the whole table (six figures of rows once embedded
+        # indexing has run). The partial events index serves the default view,
+        # which hides Embedded Source rows (action=7): right after a library
+        # scan the newest rows are all embedded, so the plain timestamp index
+        # would walk the flood before finding a page of real events.
+        Index('ix_table_history_timestamp', 'timestamp'),
+        Index('ix_table_history_events', 'timestamp',
+              sqlite_where=text('action != 7'), postgresql_where=text('action != 7')),
         Index('ix_history_instance_upstream_series', 'arr_instance_id', 'sonarrSeriesId'),
         Index('ix_history_instance_upstream_episode', 'arr_instance_id', 'sonarrEpisodeId'),
     )
@@ -443,6 +460,10 @@ class TableHistoryMovie(Base):
     __table_args__ = (
         Index('ix_table_history_movie_video_path_language_timestamp',
               'video_path', 'language', 'timestamp'),
+        # Same pair as table_history: see the comment there.
+        Index('ix_table_history_movie_timestamp', 'timestamp'),
+        Index('ix_table_history_movie_events', 'timestamp',
+              sqlite_where=text('action != 7'), postgresql_where=text('action != 7')),
         Index('ix_history_movie_instance_upstream', 'arr_instance_id', 'radarrId'),
     )
 
@@ -490,6 +511,10 @@ class TableMovies(Base):
         Index('ux_table_movies_instance_path', 'arr_instance_id', 'path', unique=True),
         Index('ux_table_movies_instance_upstream_id', 'arr_instance_id', 'radarrId', unique=True),
         Index('ux_table_movies_instance_tmdbid', 'arr_instance_id', 'tmdbId', unique=True),
+        # Same partial wanted index as table_episodes: see the comment there.
+        Index('ix_table_movies_wanted', 'radarrId',
+              sqlite_where=text("missing_subtitles IS NOT NULL AND missing_subtitles != '[]'"),
+              postgresql_where=text("missing_subtitles IS NOT NULL AND missing_subtitles != '[]'")),
     )
 
     id = mapped_column(Integer, primary_key=True, autoincrement=True)

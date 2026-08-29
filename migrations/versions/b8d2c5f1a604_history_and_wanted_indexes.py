@@ -80,7 +80,13 @@ def drop_history_and_wanted_indexes(bind):
             continue
         existing = {index['name'] for index in inspector.get_indexes(table)}
         if name in existing:
-            op.drop_index(name, table_name=table)
+            # Reflected drop, bind-based like the upgrade so the tests can
+            # exercise it directly with an Engine or a Connection.
+            metadata = sa.MetaData()
+            reflected = sa.Table(table, metadata, autoload_with=bind)
+            for index in reflected.indexes:
+                if index.name == name:
+                    index.drop(bind)
 
 
 def upgrade():

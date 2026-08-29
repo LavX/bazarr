@@ -40,24 +40,45 @@ def _index_names(bind, table):
     return {index['name'] for index in sa.inspect(bind).get_indexes(table)}
 
 
-def test_upgrade_creates_all_four_indexes(schema_session):
+def test_fresh_metadata_already_carries_the_indexes(schema_session):
+    """The ORM metadata declares the same indexes the migration creates, so a
+    fresh install matches an upgraded one and alembic autogeneration never
+    proposes dropping them."""
+    bind = schema_session.get_bind()
+    for name, table in EXPECTED.items():
+        assert name in _index_names(bind, table), f'{name} missing on {table}'
+
+
+def test_migration_and_metadata_declare_the_same_index_set():
+    """Drift guard: an index added to one side but not the other reintroduces
+    the fresh-vs-upgraded schema split."""
+    import sys
+    sys.path.insert(0, 'bazarr')
+    from app.database import Base
+
+    migration = _load_migration()
+    for name, table, _column, _predicate in migration.INDEXES:
+        declared = {index.name for index in Base.metadata.tables[table].indexes}
+        assert name in declared, f'{name} not declared on {table} metadata'
+
+
+def test_upgrade_creates_all_indexes_on_a_pre_upgrade_database(schema_session):
+    """An existing database (created before this revision) gets every index
+    from the migration, and a re-run (or an adopted database that already
+    carries one) is a no-op rather than a boot-blocking failure."""
     migration = _load_migration()
     bind = schema_session.get_bind()
+
+    # Simulate the pre-upgrade state: metadata created the indexes, drop them.
+    migration.drop_history_and_wanted_indexes(bind)
+    for name, table in EXPECTED.items():
+        assert name not in _index_names(bind, table)
 
     created = migration.create_history_and_wanted_indexes(bind)
 
     assert sorted(created) == sorted(EXPECTED)
     for name, table in EXPECTED.items():
         assert name in _index_names(bind, table), f'{name} missing on {table}'
-
-
-def test_upgrade_is_idempotent(schema_session):
-    """A re-run (or an adopted database that already has an index) must be a
-    no-op rather than a boot-blocking failure."""
-    migration = _load_migration()
-    bind = schema_session.get_bind()
-
-    migration.create_history_and_wanted_indexes(bind)
     assert migration.create_history_and_wanted_indexes(bind) == []
 
 
