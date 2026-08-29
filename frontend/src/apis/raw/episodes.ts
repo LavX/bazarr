@@ -38,7 +38,7 @@ class EpisodeApi extends BaseApi {
     return response;
   }
 
-  async history(params: Parameter.Range) {
+  async history(params: Parameter.Range & { include_embedded?: boolean }) {
     const response = await this.get<DataWrapperWithTotal<History.Episode>>(
       "/history",
       params,

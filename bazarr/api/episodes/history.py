@@ -9,7 +9,7 @@ from app.database import TableEpisodes, TableShows, TableHistory, TableBlacklist
 from subtitles.upgrade import get_upgradable_episode_subtitles,  _language_still_desired
 from utilities.pretty_date import pretty_date
 
-from flask_restx import Resource, Namespace, reqparse, fields, marshal
+from flask_restx import Resource, Namespace, inputs, reqparse, fields, marshal
 from ..utils import authenticate, postprocess
 
 api_ns_episodes_history = Namespace('Episodes History', description='List episodes history events')
@@ -22,6 +22,8 @@ class EpisodesHistory(Resource):
     get_request_parser.add_argument('length', type=int, required=False, default=-1, help='Paging length integer')
     get_request_parser.add_argument('id', type=int, required=False, help='Local episode ID')
     get_request_parser.add_argument('episodeid', type=int, required=False, help='Episode ID')
+    get_request_parser.add_argument('include_embedded', type=inputs.boolean, required=False, default=False,
+                                    help='Include Embedded Source records (default excludes them)')
 
     get_language_model = api_ns_episodes_history.model('subtitles_language_model', subtitles_language_model)
 
@@ -67,6 +69,7 @@ class EpisodesHistory(Resource):
         length = args.get('length')
         local_episode_id = args.get('id')
         episodeid = args.get('episodeid')
+        include_embedded = args.get('include_embedded')
 
         blacklisted_subtitles = select(TableBlacklist.provider,
                                        TableBlacklist.subs_id,
@@ -74,6 +77,13 @@ class EpisodesHistory(Resource):
             .subquery()
 
         query_conditions = [(TableEpisodes.title.is_not(None))]
+        if not include_embedded:
+            # "Treat Embedded Subtitles as Downloaded" writes one action=7 row
+            # per episode/language combination; a large library carries six
+            # figures of them and they bury real events. They stay in the table
+            # (scoring and upgrade logic read them) but out of the listing and
+            # its total unless the caller asks.
+            query_conditions.append((TableHistory.action != 7))
         if local_episode_id:
             query_conditions.append((TableEpisodes.id == local_episode_id))
         elif episodeid:
