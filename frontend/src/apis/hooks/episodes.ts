@@ -102,10 +102,11 @@ export function useEpisodeDeleteBlacklist() {
   });
 }
 
-export function useEpisodeHistoryPagination() {
+export function useEpisodeHistoryPagination(includeEmbedded = false) {
   return usePaginationQuery(
-    [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.History],
-    (param) => api.episodes.history(param),
+    [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.History, includeEmbedded],
+    (param) =>
+      api.episodes.history({ ...param, include_embedded: includeEmbedded }),
     false,
   );
 }
