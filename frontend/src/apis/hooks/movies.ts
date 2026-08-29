@@ -148,10 +148,11 @@ export function useMovieDeleteBlacklist() {
   });
 }
 
-export function useMovieHistoryPagination() {
+export function useMovieHistoryPagination(includeEmbedded = false) {
   return usePaginationQuery(
-    [QueryKeys.Movies, QueryKeys.History],
-    (param) => api.movies.history(param),
+    [QueryKeys.Movies, QueryKeys.History, includeEmbedded],
+    (param) =>
+      api.movies.history({ ...param, include_embedded: includeEmbedded }),
     false,
   );
 }

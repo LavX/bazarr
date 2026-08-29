@@ -5,6 +5,15 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _serve_local_subs_on(monkeypatch):
+    """These tests assume the serve_local_subs default (True). Pin it, so a
+    developer machine whose dev config persisted False cannot flip the
+    outcome; the disabled case sets False for itself."""
+    from app.config import settings
+    monkeypatch.setattr(settings.compat_endpoint, "serve_local_subs", True)
+
+
+@pytest.fixture(autouse=True)
 def _bypass_compat_cache():
     from compat import cache as C
     C.invalidate_all()

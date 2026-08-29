@@ -38,7 +38,7 @@ class EpisodeApi extends BaseApi {
     return response;
   }
 
-  async history(params: Parameter.Range) {
+  async history(params: Parameter.Range & { include_embedded?: boolean }) {
     const response = await this.get<DataWrapperWithTotal<History.Episode>>(
       "/history",
       params,
@@ -49,7 +49,9 @@ class EpisodeApi extends BaseApi {
   async historyBy(id: number) {
     const response = await this.get<DataWrapperWithTotal<History.Episode>>(
       "/history",
-      { id },
+      // Detail views need the Embedded Source rows the paginated history
+      // hides by default: the movie table reads their score and provider.
+      { id, include_embedded: true },
     );
     return response.data;
   }

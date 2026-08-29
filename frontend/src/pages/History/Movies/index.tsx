@@ -1,7 +1,7 @@
 /* eslint-disable camelcase */
-import { FunctionComponent, useMemo } from "react";
+import { FunctionComponent, useMemo, useState } from "react";
 import { Link } from "react-router";
-import { Anchor, Badge, Text } from "@mantine/core";
+import { Anchor, Badge, Group, Switch, Text } from "@mantine/core";
 import {
   faFileExcel,
   faInfoCircle,
@@ -176,10 +176,29 @@ const MoviesHistoryView: FunctionComponent = () => {
     [addToBlacklist],
   );
 
-  const query = useMovieHistoryPagination();
+  // Embedded Source rows (media state, not events) are hidden by default;
+  // the switch asks the API to include them.
+  const [includeEmbedded, setIncludeEmbedded] = useState(false);
+
+  const query = useMovieHistoryPagination(includeEmbedded);
 
   return (
-    <HistoryView name="Movies" query={query} columns={columns}></HistoryView>
+    <HistoryView
+      name="Movies"
+      query={query}
+      columns={columns}
+      toolbar={
+        <Group justify="flex-end" mb="xs">
+          <Switch
+            label="Show Embedded Source records"
+            checked={includeEmbedded}
+            onChange={(event) =>
+              setIncludeEmbedded(event.currentTarget.checked)
+            }
+          ></Switch>
+        </Group>
+      }
+    ></HistoryView>
   );
 };
 

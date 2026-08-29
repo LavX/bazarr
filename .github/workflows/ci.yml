@@ -254,6 +254,7 @@ jobs:
             tests/bazarr/test_ci_guard_list.py \
             tests/bazarr/test_combine_aligner.py \
             tests/bazarr/test_combine_api_dto.py \
+            tests/bazarr/test_history_embedded_filter.py \
             tests/bazarr/test_combine_api_episodes.py \
             tests/bazarr/test_combine_api_movies.py \
             tests/bazarr/test_combine_api_series.py \
@@ -358,6 +359,7 @@ jobs:
             tests/bazarr/test_embedded_track_eligibility.py \
             tests/bazarr/test_parser_owner_threading.py \
             tests/bazarr/test_embedded_translate_api_scope.py \
+            tests/bazarr/test_history_wanted_indexes.py \
             tests/bazarr/test_release_type_mismatch_migration.py \
             tests/bazarr/test_upstream_db_adoption.py \
             tests/bazarr/test_upstream_db_adoption_pg.py ; do

@@ -1,3 +1,4 @@
+import { ReactNode } from "react";
 import { Container } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import { ColumnDef } from "@tanstack/react-table";
@@ -9,16 +10,19 @@ interface Props<T extends History.Base> {
   name: string;
   query: UsePaginationQueryResult<T>;
   columns: ColumnDef<T>[];
+  toolbar?: ReactNode;
 }
 
 function HistoryView<T extends History.Base = History.Base>({
   columns,
   name,
   query,
+  toolbar,
 }: Props<T>) {
   useDocumentTitle(`${name} History - ${useInstanceName()}`);
   return (
     <Container fluid px={0}>
+      {toolbar}
       <QueryPageTable
         tableStyles={{ emptyText: `Nothing Found in ${name} History` }}
         columns={columns}
