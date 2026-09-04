@@ -53,6 +53,53 @@ def _json_default(obj):
 class WorkerError(RuntimeError):
     """Raised when a provider worker fails or returns an error."""
 
+    def __init__(self, message, *, remote_class_name=None, code=None, retryable=False):
+        super().__init__(message)
+        self.remote_class_name = remote_class_name
+        self.code = code
+        self.retryable = retryable
+
+
+def _raise_worker_error(payload):
+    if not isinstance(payload, dict):
+        raise WorkerError("worker request failed")
+
+    remote_name = payload.get("class_name")
+    remote_name = remote_name if isinstance(remote_name, str) else None
+    code = payload.get("code")
+    code = code if isinstance(code, str) else None
+    retryable = payload.get("retryable", False)
+    retryable = retryable if isinstance(retryable, bool) else False
+    message = payload.get("message")
+    message = message if isinstance(message, str) and message else code or "worker request failed"
+    error = WorkerError(message, remote_class_name=remote_name, code=code, retryable=retryable)
+    if code != "provider":
+        raise error
+
+    # Keep host exception imports out of worker startup. Only these fixed
+    # semantic names can cross the boundary as host provider exceptions.
+    from subliminal.exceptions import (
+        AuthenticationError,
+        ConfigurationError,
+        DownloadLimitExceeded,
+        ServiceUnavailable,
+    )
+    from subliminal_patch.exceptions import APIThrottled, TooManyRequests
+
+    exception_type = {
+        "DownloadLimitExceeded": DownloadLimitExceeded,
+        "TooManyRequests": TooManyRequests,
+        "RateLimited": TooManyRequests,
+        "ServiceUnavailable": ServiceUnavailable,
+        "APIThrottled": APIThrottled,
+        "AuthenticationError": AuthenticationError,
+        "AuthenticationRequired": AuthenticationError,
+        "ConfigurationError": ConfigurationError,
+    }.get(remote_name)
+    if exception_type is None:
+        raise error
+    raise exception_type(message) from error
+
 
 @dataclass
 class WorkerResult:
@@ -460,15 +507,15 @@ class ProviderWorkerClient:
         except json.JSONDecodeError as error:
             raise WorkerError("worker returned malformed JSON") from error
 
+        if not isinstance(response, dict):
+            raise WorkerError("worker response must be an object")
         if response.get("abi") != WORKER_ABI_VERSION:
             raise WorkerError("worker returned unsupported ABI")
         if response.get("id") != request_id:
             raise WorkerError("worker returned mismatched request id")
 
         if not response.get("ok", False):
-            error = response.get("error") or {}
-            message = error.get("message") or error.get("code") or "worker request failed"
-            raise WorkerError(str(message))
+            _raise_worker_error(response.get("error"))
 
         payload = response.get("payload") or {}
         events = response.get("events") or []
