@@ -351,6 +351,7 @@ jobs:
             tests/bazarr/test_indexer_owner_scope.py \
             tests/bazarr/test_indexer_path_mapping_owner.py \
             tests/bazarr/test_provider_hub_worker_reaper.py \
+            tests/bazarr/test_provider_hub_worker_errors.py \
             tests/bazarr/test_job_module_identity.py \
             tests/bazarr/test_sonarr_sync_memory.py \
             tests/bazarr/test_anilist_index.py \
