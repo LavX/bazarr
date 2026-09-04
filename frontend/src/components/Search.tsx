@@ -7,12 +7,15 @@ import {
   Image,
   OptionsFilter,
   Select,
+  Stack,
   Text,
 } from "@mantine/core";
 import { useMediaQuery } from "@mantine/hooks";
 import { faSearch } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useServerSearch } from "@/apis/hooks";
+import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
+import { InstanceBadge } from "@/components/bazarr";
 import { useDebouncedValue } from "@/utilities";
 
 type SearchResultItem = {
@@ -21,6 +24,7 @@ type SearchResultItem = {
   link: string;
   poster: string | null;
   type: string;
+  instanceId?: number;
 };
 
 function useSearch(query: string) {
@@ -64,6 +68,7 @@ function useSearch(query: string) {
           label: label,
           type: type,
           link: link,
+          instanceId: v.arr_instance_id,
         };
       }) ?? [],
     [data],
@@ -95,6 +100,8 @@ const Search: FunctionComponent = () => {
   const [query, setQuery] = useState("");
 
   const results = useSearch(query);
+  const sonarrInstances = useArrInstanceLabels("sonarr");
+  const radarrInstances = useArrInstanceLabels("radarr");
 
   const isMobile = useMediaQuery(`(max-width: ${em(750)})`);
 
@@ -120,13 +127,24 @@ const Search: FunctionComponent = () => {
       }}
       renderOption={(input) => {
         const result = results.find((r) => r.value === input.option.value);
+        const instanceLabels =
+          result?.type === "show" ? sonarrInstances : radarrInstances;
 
         return (
           <Flex>
             <Image src={result?.poster} w={55} h={70} />
-            <Text size={isMobile ? "xs" : "md"} pl="xs" pr="xs" lineClamp={3}>
-              {result?.label}
-            </Text>
+            <Stack gap={4} px="xs" justify="center" miw={0}>
+              <Text size={isMobile ? "xs" : "md"} lineClamp={3}>
+                {result?.label}
+              </Text>
+              {instanceLabels.multiInstance && (
+                <InstanceBadge
+                  instanceId={result?.instanceId}
+                  defaultId={instanceLabels.defaultId}
+                  nameById={instanceLabels.nameById}
+                />
+              )}
+            </Stack>
           </Flex>
         );
       }}
