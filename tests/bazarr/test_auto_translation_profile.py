@@ -1,14 +1,18 @@
 # coding=utf-8
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+
+import pytest
 
 
 def _missing_language(alpha3, hi=False, forced=False):
     return SimpleNamespace(alpha3=alpha3, hi=hi, forced=forced)
 
 
-def test_downloaded_series_subtitle_queues_episode_translation():
+@pytest.mark.parametrize('source_score_percent', [90, 100, None])
+def test_downloaded_series_subtitle_queues_episode_translation(source_score_percent):
     from subtitles.processing import _trigger_auto_translation
 
     mock_database = Mock()
@@ -30,7 +34,7 @@ def test_downloaded_series_subtitle_queues_episode_translation():
         patch('subtitles.processing.alpha2_from_alpha3', return_value='hu'),
         patch('subtitles.tools.translate.main.translate_subtitles_file') as mock_translate,
     ):
-        mock_settings.translator.min_source_score = 0
+        mock_settings.translator.min_source_score = 90
         mock_profiles.return_value = {
             'items': [
                 {
@@ -50,11 +54,123 @@ def test_downloaded_series_subtitle_queues_episode_translation():
             media_type='series',
             series_id=10,
             episode_id=20,
-            source_score_percent=100,
+            source_score_percent=source_score_percent,
         )
 
     mock_translate.assert_called_once()
     assert mock_translate.call_args.kwargs['media_type'] == 'episode'
+
+
+@pytest.mark.parametrize('profile', [
+    None,
+    {'items': []},
+    {'items': [
+        {'language': 'en', 'translate_from': None},
+        {'language': 'hr', 'translate_from': None},
+    ]},
+    {'items': [{'language': 'hu', 'translate_from': 'fr'}]},
+    {'items': [{'language': 'en', 'translate_from': 'en'}]},
+], ids=['no-profile', 'empty-profile', 'disabled', 'different-source', 'same-language'])
+def test_downloaded_subtitle_without_matching_translation_target_stays_silent(profile, caplog):
+    from subtitles.processing import _trigger_auto_translation
+
+    mock_database = Mock()
+    mock_database.execute.return_value.first.return_value = SimpleNamespace(
+        imdbId='tt2', tmdbId='2', profileId=1,
+    )
+
+    with (
+        caplog.at_level(logging.INFO),
+        patch('subtitles.processing.settings') as mock_settings,
+        patch('app.database.get_profiles_list', return_value=profile),
+        patch('app.database.database', mock_database),
+        patch('subtitles.download.check_missing_languages') as mock_missing,
+        patch('subtitles.tools.translate.main.translate_subtitles_file') as mock_translate,
+    ):
+        mock_settings.translator.min_source_score = 90
+
+        _trigger_auto_translation(
+            downloaded_lang='en',
+            subtitle_path='/subs/source.en.srt',
+            video_path='/video/movie.mkv',
+            media_type='movie',
+            radarr_id=30,
+            source_score_percent=80,
+        )
+
+    assert not [record for record in caplog.records if 'auto-translate' in record.getMessage()]
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+    mock_missing.assert_not_called()
+    mock_translate.assert_not_called()
+
+
+def test_low_score_subtitle_logs_once_for_multiple_matching_translation_targets(caplog):
+    from subtitles.processing import _trigger_auto_translation
+
+    mock_database = Mock()
+    mock_database.execute.return_value.first.return_value = SimpleNamespace(
+        imdbId='tt2', tmdbId='2', profileId=1,
+    )
+
+    with (
+        caplog.at_level(logging.INFO),
+        patch('subtitles.processing.settings') as mock_settings,
+        patch('app.database.get_profiles_list') as mock_profiles,
+        patch('app.database.database', mock_database),
+        patch('subtitles.download.check_missing_languages') as mock_missing,
+        patch('subtitles.tools.translate.main.translate_subtitles_file') as mock_translate,
+    ):
+        mock_settings.translator.min_source_score = 90
+        mock_profiles.return_value = {
+            'items': [
+                {'language': 'hu', 'translate_from': 'en'},
+                {'language': 'hr', 'translate_from': 'en'},
+            ]
+        }
+
+        _trigger_auto_translation(
+            downloaded_lang='en',
+            subtitle_path='/subs/source.en.srt',
+            video_path='/video/movie.mkv',
+            media_type='movie',
+            radarr_id=30,
+            source_score_percent=80,
+        )
+
+    score_logs = [record for record in caplog.records if 'below threshold' in record.getMessage()]
+    assert len(score_logs) == 1
+    assert score_logs[0].levelno == logging.INFO
+    assert score_logs[0].args == (80, 90, '/video/movie.mkv')
+    mock_missing.assert_not_called()
+    mock_translate.assert_not_called()
+
+
+@pytest.mark.parametrize('source_score_percent', [80, 100])
+def test_forced_source_subtitle_stays_silent_and_does_not_translate(source_score_percent, caplog):
+    from subtitles.processing import _trigger_auto_translation
+
+    with (
+        caplog.at_level(logging.INFO),
+        patch('subtitles.processing.settings') as mock_settings,
+        patch('app.database.database') as mock_database,
+        patch('subtitles.tools.translate.main.translate_subtitles_file') as mock_translate,
+    ):
+        mock_settings.translator.min_source_score = 90
+
+        _trigger_auto_translation(
+            downloaded_lang='en',
+            subtitle_path='/subs/source.en.forced.srt',
+            video_path='/video/movie.mkv',
+            media_type='movie',
+            radarr_id=30,
+            source_score_percent=source_score_percent,
+            forced=True,
+        )
+
+    assert not [record for record in caplog.records if 'auto-translate' in record.getMessage()]
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+    mock_database.execute.assert_not_called()
+    mock_translate.assert_not_called()
 
 
 def test_downloaded_subtitle_does_not_translate_for_mismatched_target_variant():
