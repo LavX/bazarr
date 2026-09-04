@@ -75,14 +75,14 @@ def sync_engine_from_subtitle_name(subtitle):
     return sync_engine_from_output_path(subtitle)
 
 
-def _language_code_from_sync_engine_output(subtitle):
-    filename = os.path.basename(subtitle).lower()
+def _language_code_from_sync_engine_output(subtitle, video_filename=None):
+    filename = os.path.basename(subtitle)
     stem, extension = os.path.splitext(filename)
-    if extension not in core.SUBTITLE_EXTENSIONS:
+    if extension.lower() not in core.SUBTITLE_EXTENSIONS:
         return None
 
     parts = stem.split('.')
-    if len(parts) < 3 or parts[-1] not in SYNC_ENGINES:
+    if len(parts) < 3 or parts[-1].lower() not in SYNC_ENGINES:
         return None
 
     parts = parts[:-1]
@@ -93,26 +93,32 @@ def _language_code_from_sync_engine_output(subtitle):
     # combined output is a known limitation: it is left on disk but not indexed
     # as a tracked variant. Overwrite-mode sync of a combined file works in
     # place (it keeps the Movie.en.combined-hu.srt name) and is unaffected.
-    if parts and _COMBINED_MODIFIER_PATTERN.match(parts[-1]):
+    if parts and _COMBINED_MODIFIER_PATTERN.match(parts[-1].lower()):
         return None
     variants = []
-    if parts and parts[-1] in ['hi', 'sdh', 'cc']:
+    if parts and parts[-1].lower() in ['hi', 'sdh', 'cc']:
         variants.append('hi')
         parts = parts[:-1]
-    if parts and parts[-1] == 'forced':
+    if parts and parts[-1].lower() == 'forced':
         variants.append('forced')
         parts = parts[:-1]
     if not parts:
         return None
 
-    language = parts[-1].replace('_', '-')
+    if video_filename is not None:
+        video_stem = os.path.splitext(video_filename)[0]
+        if '.'.join(parts[:-1]) != video_stem:
+            return None
+
+    language = parts[-1].lower().replace('_', '-')
     if not language:
         return None
 
     return ':'.join([language] + variants)
 
 
-def add_sync_engine_outputs(dest_folder, subtitles):
+def add_sync_engine_outputs(dest_folder, subtitles, video_filename=None):
+    """Add generated outputs, optionally scoped to the video's exact basename stem."""
     if not os.path.isdir(dest_folder):
         return subtitles
 
@@ -124,9 +130,9 @@ def add_sync_engine_outputs(dest_folder, subtitles):
         if not os.path.isfile(subtitle_path):
             continue
 
-        language_code = _language_code_from_sync_engine_output(subtitle)
+        language_code = _language_code_from_sync_engine_output(subtitle, video_filename=video_filename)
         if not language_code:
-            logging.debug("BAZARR skipping generated sync subtitle with unknown language: %s", subtitle_path)
+            logging.debug("BAZARR skipping unrelated or unrecognized generated sync subtitle: %s", subtitle_path)
             continue
 
         try:

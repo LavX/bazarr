@@ -756,6 +756,61 @@ def test_add_sync_engine_outputs_indexes_generated_files(tmp_path):
     ) == 'hu:sync-alass'
 
 
+@pytest.mark.parametrize('engine', ['ffsubsync', 'autosubsync', 'ALASS'])
+@pytest.mark.parametrize('extension', ['srt', 'sub', 'smi', 'txt', 'ssa', 'ASS', 'mpl', 'vtt'])
+@pytest.mark.parametrize('suffix, basename, hi, forced', [
+    ('en', 'en', False, False),
+    ('en.HI', 'en', True, False),
+    ('hu.sdh', 'hu', True, False),
+    ('fr.cc', 'fr', True, False),
+    ('pt_BR.forced', 'pt-BR', False, True),
+    ('pb.forced.hi', 'pt-BR', True, True),
+])
+def test_sync_output_owner_filter_preserves_language_and_format(tmp_path, engine, extension,
+                                                               suffix, basename, hi, forced):
+    from subtitles.indexer.utils import add_sync_engine_outputs
+
+    filename = f'Movie.en.{suffix}.{engine}.{extension}'
+    _write(tmp_path / filename, 'subtitle')
+    _write(tmp_path / f'Movie.en.Extended.{suffix}.{engine}.{extension}', 'sibling')
+    _write(tmp_path / f'Movie.{suffix}.{engine}.{extension}', 'shorter stem')
+
+    result = add_sync_engine_outputs(str(tmp_path), {}, video_filename='Movie.en.mkv')
+
+    assert set(result) == {filename}
+    language = result[filename]
+    assert language.basename == basename
+    assert language.hi is hi
+    assert language.forced is forced
+
+
+def test_sync_output_owner_filter_preserves_existing_entries_and_is_idempotent(tmp_path):
+    from subzero.language import Language
+    from subtitles.indexer.utils import add_sync_engine_outputs
+
+    original = Language.fromietf('hu')
+    existing = Language.fromietf('de')
+    subtitles = {'Movie.hu.srt': original, 'Movie.en.alass.srt': existing,
+                 'Existing.en.srt': Language.fromietf('en')}
+    for filename in ['Movie.hu.srt', 'Movie.en.alass.srt', 'Movie.en.ffsubsync.srt',
+                     'Other.en.alass.srt', 'Movie.en.unknown.srt', 'Movie.en.alass.mkv',
+                     'Movie.invalid.alass.srt', 'Movie.en.combined-hu.alass.srt']:
+        _write(tmp_path / filename, 'subtitle')
+    (tmp_path / 'Movie.fr.alass.srt').mkdir()
+
+    result = add_sync_engine_outputs(str(tmp_path), subtitles, video_filename='Movie.mkv')
+    assert result is subtitles
+    assert set(result) == {'Movie.hu.srt', 'Movie.en.alass.srt', 'Existing.en.srt',
+                           'Movie.en.ffsubsync.srt'}
+    assert result['Movie.hu.srt'] is original
+    assert result['Movie.en.alass.srt'] is existing
+    first_scan = result.copy()
+
+    assert add_sync_engine_outputs(str(tmp_path), result, video_filename='Movie.mkv') == first_scan
+    assert add_sync_engine_outputs(str(tmp_path / 'missing'), result,
+                                   video_filename='Movie.mkv') == first_scan
+
+
 def test_keep_all_job_name_does_not_claim_original_was_overwritten():
     from subtitles.sync import _sync_complete_job_name
     from subtitles.tools.subsync_engines import (
