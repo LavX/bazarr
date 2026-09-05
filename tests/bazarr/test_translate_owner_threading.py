@@ -27,7 +27,7 @@ def translate_harness(monkeypatch, tmp_path):
                         lambda to_lang, forced, hi: (Language('nld'), to_lang))
     monkeypatch.setattr(translate_main, 'get_subtitle_path',
                         lambda *a, **kw: str(tmp_path / 'video.nl.srt'))
-    monkeypatch.setattr(translate_main, 'get_external_subtitles_path',
+    monkeypatch.setattr(translate_main, 'get_subtitle_destination_path',
                         lambda file, subtitle: str(tmp_path / subtitle))
     monkeypatch.setattr(translate_main, 'alpha3_from_alpha2', lambda code: 'nld')
 

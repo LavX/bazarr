@@ -21,6 +21,16 @@ from .auth import get_translator_auth_headers
 
 logger = logging.getLogger(__name__)
 
+POLL_HARD_CAP_SECONDS = 12 * 3600
+POLL_UNREACHABLE_LIMIT_SECONDS = 600
+POLL_INTERVAL_SECONDS = 2
+
+
+def _extract_job_lines(result):
+    if isinstance(result, dict):
+        result = result.get("lines")
+    return result if isinstance(result, list) else None
+
 
 class OpenRouterTranslatorService:
     """
@@ -44,6 +54,7 @@ class OpenRouterTranslatorService:
         self.sonarr_series_id = sonarr_series_id
         self.sonarr_episode_id = sonarr_episode_id
         self.radarr_id = radarr_id
+        self.partial_error = None
         self.language_code_convert_dict = {
             'he': 'iw',
             'zh': 'zh-CN',
@@ -117,6 +128,8 @@ class OpenRouterTranslatorService:
                 raise OSError
 
             message = f"{language_from_alpha2(self.from_lang)} subtitles translated to {language_from_alpha3(self.to_lang)} using AI Subtitle Translator."
+            if self.partial_error:
+                message += f" Partial result: {self.partial_error[:200]}"
             result = create_process_result(message, self.video_path, self.orig_to_lang, self.forced, self.hi, self.dest_srt_file, self.media_type)
 
             if self.media_type == 'episode':
@@ -230,12 +243,30 @@ class OpenRouterTranslatorService:
             return None
 
     def _poll_job(self, base_url: str, job_id: str, total_lines: int, bazarr_job_id=None) -> Optional[Any]:
-        """Poll job status until completion"""
-        poll_interval = 2  # seconds
-        max_wait_time = 1800  # 30 minutes
-        elapsed = 0
+        """Poll until a terminal status, subject to reachability and safety limits.
 
-        while elapsed < max_wait_time:
+        The sidecar owns request timeouts and retries, so there is no normal total-time cap.
+        A slow model with reasoning enabled and a shrunk batch size can take over half an hour.
+        The old 30-minute cap discarded a translation that the sidecar finished successfully.
+        A 12-hour hard cap remains as a safety net.
+        """
+        started_at = time.monotonic()
+        last_reachable_at = started_at
+
+        while True:
+            now = time.monotonic()
+            if now - started_at >= POLL_HARD_CAP_SECONDS:
+                reason = "reached the 12-hour polling hard cap"
+                user_message = "Translation stopped after 12 hours"
+                break
+
+            unreachable_seconds = now - last_reachable_at
+            if unreachable_seconds >= POLL_UNREACHABLE_LIMIT_SECONDS:
+                unreachable_minutes = int(unreachable_seconds // 60)
+                reason = f"status endpoint unreachable for {unreachable_minutes} minutes"
+                user_message = f"Translation service unreachable for {unreachable_minutes} minutes"
+                break
+
             try:
                 status_response = requests.get(
                     f"{base_url}/api/v1/jobs/{job_id}",
@@ -245,10 +276,10 @@ class OpenRouterTranslatorService:
 
                 if status_response.status_code != 200:
                     logger.error(f"Error getting job status: {status_response.status_code}")  # noqa: G004
-                    time.sleep(poll_interval)
-                    elapsed += poll_interval
+                    time.sleep(POLL_INTERVAL_SECONDS)
                     continue
 
+                last_reachable_at = time.monotonic()
                 job_status = status_response.json()
                 status = job_status.get("status")
                 progress = job_status.get("progress", 0)
@@ -275,15 +306,10 @@ class OpenRouterTranslatorService:
 
                 if status == "completed":
                     hide_progress(id=f'translate_progress_{self.dest_srt_file}')
-                    result = job_status.get("result")
-                    if result:
-                        # Handle structured response with "lines" key from AI Subtitle Translator
-                        # The service returns {"lines": [...], "model_used": ..., "tokens_used": ...}
-                        if isinstance(result, dict) and "lines" in result:
-                            logger.debug(f'Extracted {len(result["lines"])} lines from structured result')  # noqa: G004
-                            return result["lines"]
-                        # Fallback for direct list response
-                        return result
+                    lines = _extract_job_lines(job_status.get("result"))
+                    if lines is not None:
+                        logger.debug(f'Extracted {len(lines)} lines from job result')  # noqa: G004
+                        return lines
                     logger.error("Job completed but no result returned")
                     return None
 
@@ -297,6 +323,12 @@ class OpenRouterTranslatorService:
                 elif status == "partial":
                     hide_progress(id=f'translate_progress_{self.dest_srt_file}')
                     error = job_status.get("error", message or "Partial translation")
+                    lines = _extract_job_lines(job_status.get("result"))
+                    if lines:
+                        logger.warning(f"Translation completed with untranslated lines: {error}")  # noqa: G004
+                        show_message(f"Translation completed with untranslated lines: {error[:200]}")
+                        self.partial_error = error
+                        return lines
                     logger.error(f"Translation partially failed: {error}")  # noqa: G004
                     show_message(f"Translation failed (partial): {error}")
                     return None
@@ -307,18 +339,15 @@ class OpenRouterTranslatorService:
                     return None
 
                 # Still processing or queued
-                time.sleep(poll_interval)
-                elapsed += poll_interval
+                time.sleep(POLL_INTERVAL_SECONDS)
 
             except requests.exceptions.RequestException as e:
                 logger.warning(f"Error polling job status: {e}")  # noqa: G004
-                time.sleep(poll_interval)
-                elapsed += poll_interval
+                time.sleep(POLL_INTERVAL_SECONDS)
 
-        # Timeout
         hide_progress(id=f'translate_progress_{self.dest_srt_file}')
-        logger.error("Translation job timed out")
-        show_message("Translation timed out after 30 minutes")
+        logger.error(f"Translation job {job_id} {reason}")  # noqa: G004
+        show_message(user_message)
         return None
 
     @retry(exceptions=(TooManyRequests, RequestError, requests.exceptions.RequestException), tries=3, delay=1, backoff=2, jitter=(0, 1))

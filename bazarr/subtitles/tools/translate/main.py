@@ -12,7 +12,7 @@ from .services.translator_factory import TranslatorFactory
 from languages.get_languages import alpha3_from_alpha2
 from app.config import settings
 from app.jobs_queue import jobs_queue
-from subtitles.indexer.utils import get_external_subtitles_path
+from subtitles.indexer.utils import get_subtitle_destination_path
 
 
 def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, forced, hi,
@@ -46,7 +46,9 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
             hi_tag=hi
         )
 
-        dest_srt_file = get_external_subtitles_path(
+        # Resolved as a write target, not a lookup: the file does not exist yet on a
+        # first translation, and the lookup helper answered None for custom folders.
+        dest_srt_file = get_subtitle_destination_path(
             file=video_path,
             subtitle=os.path.basename(dest_srt_file_if_alongside_video)
         )

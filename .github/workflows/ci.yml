@@ -276,6 +276,8 @@ jobs:
             tests/bazarr/test_jellyfin_client.py \
             tests/bazarr/test_jellyfin_operations.py \
             tests/bazarr/test_logging_filters.py \
+            tests/bazarr/test_openrouter_model_migration.py \
+            tests/bazarr/test_openrouter_translator_partial.py \
             tests/bazarr/test_provider_hub_install_serialization.py \
             tests/bazarr/test_provider_hub_language_fallback.py \
             tests/bazarr/test_provider_hub_release_scoring.py \
@@ -289,6 +291,7 @@ jobs:
             tests/bazarr/test_sonarr_sync_episodes.py \
             tests/bazarr/test_sql_profiler.py \
             tests/bazarr/test_subtitle_content_sync_outputs.py \
+            tests/bazarr/test_subtitle_destination_path.py \
             tests/bazarr/test_subtitle_download_api.py \
             tests/bazarr/test_subtitles_pool.py \
             tests/bazarr/test_swagger_static.py \
