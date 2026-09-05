@@ -78,9 +78,14 @@ def _subs(session, table, row_id):
 
 @pytest.mark.parametrize('media_type', ['series', 'movie'])
 @pytest.mark.parametrize('subfolder', ['current', 'relative', 'absolute'])
-@pytest.mark.parametrize('naming', ['original', 'case', 'unicode', 'single-language'])
+@pytest.mark.parametrize('naming,single_language', [
+    ('original', False), ('case', False), ('unicode', False),
+    ('single-language', True), ('single-language', False),
+    ('legacy-tagged', True), ('legacy-tagged', False),
+    ('legacy-case', True), ('legacy-unicode', True),
+])
 def test_sync_outputs_belong_to_the_indexed_video(schema_session, monkeypatch, tmp_path,
-                                                 media_type, subfolder, naming):
+                                                 media_type, subfolder, naming, single_language):
     from subzero.language import Language
     import subtitles.indexer.movies as mv
     import subtitles.indexer.series as se
@@ -90,7 +95,7 @@ def test_sync_outputs_belong_to_the_indexed_video(schema_session, monkeypatch, t
     store = se.store_subtitles if media_type == 'series' else mv.store_subtitles_movie
     stems = (['Show.S01E01', 'Show.S01E02', 'Show.S01E01.Extended'] if media_type == 'series'
              else ['Movie (2020)', 'Other (2021)', 'Movie (2020).Extended'])
-    if naming == 'unicode':
+    if naming in ['unicode', 'legacy-unicode']:
         stems = ['\u00c9pisode.S01E01', '\u00c9pisode.S01E02', '\u00c9pisode.S01E01.Extended']
     elif naming == 'single-language':
         stems = ['Movie', 'Movie.en', 'Movie.en.Extended', 'Movie.hi', 'Movie.forced']
@@ -101,7 +106,7 @@ def test_sync_outputs_belong_to_the_indexed_video(schema_session, monkeypatch, t
     subtitle_folder.mkdir(exist_ok=True)
     custom_folder = 'subs' if subfolder == 'relative' else str(subtitle_folder)
     monkeypatch.setattr(module.settings.general, 'use_embedded_subs', False)
-    monkeypatch.setattr(module.settings.general, 'single_language', naming == 'single-language')
+    monkeypatch.setattr(module.settings.general, 'single_language', single_language)
     monkeypatch.setattr(module.settings.general, 'subfolder', subfolder)
     monkeypatch.setattr(module.settings.general, 'subfolder_custom', custom_folder)
     monkeypatch.setattr(module.core, 'CUSTOM_PATHS', [])
@@ -125,6 +130,10 @@ def test_sync_outputs_belong_to_the_indexed_video(schema_session, monkeypatch, t
     if naming == 'single-language':
         suffixes = {f'{engine}.srt': f'en:sync-{engine}'
                     for engine in ['ffsubsync', 'alass', 'autosubsync']}
+        suffixes.update({'hu.ffsubsync.srt': 'hu:sync-ffsubsync',
+                         'en.hi.alass.ass': 'en:hi:sync-alass'})
+    elif naming.startswith('legacy-'):
+        suffixes['en.ffsubsync.srt'] = 'en:sync-ffsubsync'
     expected = {}
     for row_id, stem in enumerate(stems, 1):
         video = media_folder / f'{stem}.mkv'
@@ -138,8 +147,8 @@ def test_sync_outputs_belong_to_the_indexed_video(schema_session, monkeypatch, t
                               path=str(video), tmdbId=str(row_id), subtitles='[]')
         schema_session.add(row)
         expected[row_id] = []
-        subtitle_stem = stem.lower() if naming == 'case' else stem
-        if naming == 'unicode':
+        subtitle_stem = stem.lower() if naming in ['case', 'legacy-case'] else stem
+        if naming in ['unicode', 'legacy-unicode']:
             subtitle_stem = unicodedata.normalize('NFD', stem.lower())
         for suffix, language in suffixes.items():
             subtitle = subtitle_folder / f'{subtitle_stem}.{suffix}'

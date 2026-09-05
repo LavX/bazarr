@@ -76,8 +76,8 @@ def sync_engine_from_subtitle_name(subtitle):
     return sync_engine_from_output_path(subtitle)
 
 
-def _same_video_stem(left, right):
-    return unicodedata.normalize('NFC', left.lower()) == unicodedata.normalize('NFC', right.lower())
+def _normalized_video_stem(stem):
+    return unicodedata.normalize('NFC', stem.lower())
 
 
 def _language_code_from_sync_engine_output(subtitle, video_filename=None):
@@ -112,7 +112,7 @@ def _language_code_from_sync_engine_output(subtitle, video_filename=None):
 
     if video_filename is not None:
         video_stem = os.path.splitext(video_filename)[0]
-        if not _same_video_stem('.'.join(parts[:-1]), video_stem):
+        if _normalized_video_stem('.'.join(parts[:-1])) != _normalized_video_stem(video_stem):
             return None
 
     language = parts[-1].lower().replace('_', '-')
@@ -122,10 +122,22 @@ def _language_code_from_sync_engine_output(subtitle, video_filename=None):
     return ':'.join([language] + variants)
 
 
-def add_sync_engine_outputs(dest_folder, subtitles, video_filename=None, single_language=False):
-    """Add generated outputs, optionally scoped to the video's exact basename stem."""
+def add_sync_engine_outputs(dest_folder, subtitles, video_filename=None, video_path=None):
+    """Add generated outputs belonging to the video, regardless of save preferences."""
     if not os.path.isdir(dest_folder):
         return subtitles
+
+    video_stem = None
+    media_stems = set()
+    if video_path is not None:
+        video_filename = os.path.basename(video_path)
+    if video_filename is not None:
+        video_stem = _normalized_video_stem(os.path.splitext(video_filename)[0])
+        media_folder = (os.path.dirname(video_path) or '.') if video_path is not None else dest_folder
+        with os.scandir(media_folder) as media_files:
+            media_stems = {_normalized_video_stem(os.path.splitext(entry.name)[0])
+                           for entry in media_files
+                           if entry.is_file() and entry.name.lower().endswith(core.VIDEO_EXTENSIONS)}
 
     for subtitle in os.listdir(dest_folder):
         if subtitle in subtitles or not sync_engine_from_subtitle_name(subtitle):
@@ -135,16 +147,20 @@ def add_sync_engine_outputs(dest_folder, subtitles, video_filename=None, single_
         if not os.path.isfile(subtitle_path):
             continue
 
-        if single_language and video_filename is not None:
+        if video_stem is not None:
             stem, extension = os.path.splitext(subtitle)
-            owner_stem = stem.rsplit('.', 1)[0]
-            video_stem = os.path.splitext(video_filename)[0]
-            if extension.lower() in core.SUBTITLE_EXTENSIONS and _same_video_stem(owner_stem, video_stem):
-                # Single-language saves append neither a language nor HI/forced
-                # tags. Keep every component of the video stem and let the usual
-                # cached-language/content detection identify the subtitle.
+            if extension.lower() not in core.SUBTITLE_EXTENSIONS:
+                continue
+            owner_stem = _normalized_video_stem(stem.rsplit('.', 1)[0])
+            if owner_stem == video_stem:
+                # The complete basename owns an untagged output. Detect its
+                # language normally, even if the save preference has changed.
                 subtitles[subtitle] = None
-            continue
+                continue
+            if owner_stem in media_stems:
+                # Movie.en.mkv owns Movie.en.ffsubsync.srt when it exists.
+                # Without that sibling, it can be a tagged output of Movie.mkv.
+                continue
 
         language_code = _language_code_from_sync_engine_output(subtitle, video_filename=video_filename)
         if not language_code:

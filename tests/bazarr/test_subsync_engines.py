@@ -770,12 +770,12 @@ def test_sync_output_owner_filter_preserves_language_and_format(tmp_path, engine
                                                                suffix, basename, hi, forced):
     from subtitles.indexer.utils import add_sync_engine_outputs
 
-    filename = f'Movie.en.{suffix}.{engine}.{extension}'
+    filename = f'Movie.Release.{suffix}.{engine}.{extension}'
     _write(tmp_path / filename, 'subtitle')
-    _write(tmp_path / f'Movie.en.Extended.{suffix}.{engine}.{extension}', 'sibling')
+    _write(tmp_path / f'Movie.Release.Extended.{suffix}.{engine}.{extension}', 'sibling')
     _write(tmp_path / f'Movie.{suffix}.{engine}.{extension}', 'shorter stem')
 
-    result = add_sync_engine_outputs(str(tmp_path), {}, video_filename='Movie.en.mkv')
+    result = add_sync_engine_outputs(str(tmp_path), {}, video_filename='Movie.Release.mkv')
 
     assert set(result) == {filename}
     language = result[filename]
@@ -825,14 +825,51 @@ def test_sync_output_owner_uses_case_and_unicode_normalization(tmp_path, video, 
 
 
 @pytest.mark.parametrize('stem', ['Movie', 'Movie.en', 'Movie.hi', 'Movie.forced'])
-def test_single_language_sync_output_keeps_complete_owner_stem(tmp_path, stem):
+def test_sync_output_keeps_complete_actual_owner_stem(tmp_path, stem):
     from subtitles.indexer.utils import add_sync_engine_outputs
 
     for sibling in ['Movie', 'Movie.en', 'Movie.hi', 'Movie.forced', 'Movie.en.Extended']:
+        _write(tmp_path / f'{sibling}.mkv', 'video')
         _write(tmp_path / f'{sibling}.ffsubsync.srt', 'subtitle')
-    result = add_sync_engine_outputs(str(tmp_path), {}, video_filename=f'{stem}.mkv',
-                                     single_language=True)
+    result = add_sync_engine_outputs(str(tmp_path), {}, video_filename=f'{stem}.mkv')
     assert result == {f'{stem}.ffsubsync.srt': None}
+
+
+@pytest.mark.parametrize('video_stem,subtitle_stem,sibling_stem', [
+    ('Movie', 'movie', 'MOVIE.EN'),
+    ('\u00c9pisode', 'E\u0301PISODE', '\u00e9pisode.en'),
+    ('E\u0301pisode', '\u00e9pisode', 'E\u0301PISODE.EN'),
+])
+@pytest.mark.parametrize('sibling_kind', ['media', 'directory', 'non-media', 'absent'])
+def test_tagged_sync_output_defers_only_to_an_actual_media_owner(
+        tmp_path, video_stem, subtitle_stem, sibling_stem, sibling_kind):
+    from subtitles.indexer.utils import add_sync_engine_outputs
+
+    media_folder = tmp_path / 'media'
+    media_folder.mkdir()
+    subtitle_folder = tmp_path / 'subtitles'
+    subtitle_folder.mkdir()
+    video = media_folder / f'{video_stem}.mkv'
+    _write(video, 'video')
+    _write(media_folder / f'{sibling_stem}.Extended.mkv', 'prefix sibling')
+    sibling = media_folder / f'{sibling_stem}.MP4'
+    if sibling_kind == 'media':
+        _write(sibling, 'video')
+    elif sibling_kind == 'directory':
+        sibling.mkdir()
+    elif sibling_kind == 'non-media':
+        _write(media_folder / f'{sibling_stem}.txt', 'not a video')
+    subtitle = f'{subtitle_stem}.en.ffsubsync.srt'
+    _write(subtitle_folder / subtitle, 'subtitle')
+
+    result = add_sync_engine_outputs(str(subtitle_folder), {}, video_path=str(video))
+
+    if sibling_kind == 'media':
+        assert result == {}
+        assert add_sync_engine_outputs(str(subtitle_folder), {}, video_path=str(sibling)) == {subtitle: None}
+    else:
+        assert set(result) == {subtitle}
+        assert result[subtitle].basename == 'en'
 
 
 def test_keep_all_job_name_does_not_claim_original_was_overwritten():
