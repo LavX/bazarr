@@ -2,6 +2,7 @@
 
 import os
 import logging
+import unicodedata
 
 from guess_language import guess_language
 from subliminal_patch import core
@@ -75,6 +76,10 @@ def sync_engine_from_subtitle_name(subtitle):
     return sync_engine_from_output_path(subtitle)
 
 
+def _same_video_stem(left, right):
+    return unicodedata.normalize('NFC', left.lower()) == unicodedata.normalize('NFC', right.lower())
+
+
 def _language_code_from_sync_engine_output(subtitle, video_filename=None):
     filename = os.path.basename(subtitle)
     stem, extension = os.path.splitext(filename)
@@ -107,7 +112,7 @@ def _language_code_from_sync_engine_output(subtitle, video_filename=None):
 
     if video_filename is not None:
         video_stem = os.path.splitext(video_filename)[0]
-        if '.'.join(parts[:-1]) != video_stem:
+        if not _same_video_stem('.'.join(parts[:-1]), video_stem):
             return None
 
     language = parts[-1].lower().replace('_', '-')
@@ -117,7 +122,7 @@ def _language_code_from_sync_engine_output(subtitle, video_filename=None):
     return ':'.join([language] + variants)
 
 
-def add_sync_engine_outputs(dest_folder, subtitles, video_filename=None):
+def add_sync_engine_outputs(dest_folder, subtitles, video_filename=None, single_language=False):
     """Add generated outputs, optionally scoped to the video's exact basename stem."""
     if not os.path.isdir(dest_folder):
         return subtitles
@@ -128,6 +133,17 @@ def add_sync_engine_outputs(dest_folder, subtitles, video_filename=None):
 
         subtitle_path = os.path.join(dest_folder, subtitle)
         if not os.path.isfile(subtitle_path):
+            continue
+
+        if single_language and video_filename is not None:
+            stem, extension = os.path.splitext(subtitle)
+            owner_stem = stem.rsplit('.', 1)[0]
+            video_stem = os.path.splitext(video_filename)[0]
+            if extension.lower() in core.SUBTITLE_EXTENSIONS and _same_video_stem(owner_stem, video_stem):
+                # Single-language saves append neither a language nor HI/forced
+                # tags. Keep every component of the video stem and let the usual
+                # cached-language/content detection identify the subtitle.
+                subtitles[subtitle] = None
             continue
 
         language_code = _language_code_from_sync_engine_output(subtitle, video_filename=video_filename)

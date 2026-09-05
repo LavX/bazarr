@@ -811,6 +811,30 @@ def test_sync_output_owner_filter_preserves_existing_entries_and_is_idempotent(t
                                    video_filename='Movie.mkv') == first_scan
 
 
+@pytest.mark.parametrize('video,subtitle', [
+    ('Movie.mkv', 'movie.en.ffsubsync.srt'),
+    ('\u00c9pisode.mkv', 'E\u0301PISODE.en.ffsubsync.srt'),
+    ('E\u0301pisode.mkv', '\u00e9pisode.en.ffsubsync.srt'),
+])
+def test_sync_output_owner_uses_case_and_unicode_normalization(tmp_path, video, subtitle):
+    from subtitles.indexer.utils import add_sync_engine_outputs
+
+    _write(tmp_path / subtitle, 'subtitle')
+    _write(tmp_path / subtitle.replace('.en.', '.Extended.en.'), 'sibling')
+    assert set(add_sync_engine_outputs(str(tmp_path), {}, video_filename=video)) == {subtitle}
+
+
+@pytest.mark.parametrize('stem', ['Movie', 'Movie.en', 'Movie.hi', 'Movie.forced'])
+def test_single_language_sync_output_keeps_complete_owner_stem(tmp_path, stem):
+    from subtitles.indexer.utils import add_sync_engine_outputs
+
+    for sibling in ['Movie', 'Movie.en', 'Movie.hi', 'Movie.forced', 'Movie.en.Extended']:
+        _write(tmp_path / f'{sibling}.ffsubsync.srt', 'subtitle')
+    result = add_sync_engine_outputs(str(tmp_path), {}, video_filename=f'{stem}.mkv',
+                                     single_language=True)
+    assert result == {f'{stem}.ffsubsync.srt': None}
+
+
 def test_keep_all_job_name_does_not_claim_original_was_overwritten():
     from subtitles.sync import _sync_complete_job_name
     from subtitles.tools.subsync_engines import (
