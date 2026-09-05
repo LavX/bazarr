@@ -5,12 +5,15 @@ import base64
 import hashlib
 import logging
 import os
+import re
+import stat
 
 from typing import Any
 
 from subzero.language import Language
 from subliminal.video import Episode, Movie
 from subliminal_patch.core import SUBTITLE_EXTENSIONS
+from subliminal_patch.exceptions import SubtitleCandidateRejected
 from subliminal_patch.subtitle import Subtitle
 
 logger = logging.getLogger(__name__)
@@ -320,6 +323,8 @@ def _format_from_member(name: str | None, content: bytes | None = None) -> str |
 def worker_download_to_content(
     subtitle: HubWorkerSubtitle, payload: dict[str, Any], select_member_cb=None
 ) -> bool:
+    if not isinstance(payload, dict):
+        raise WorkerProtocolError("download must return an object")
     if payload.get("empty"):
         subtitle.content = b""
         return True
@@ -371,6 +376,11 @@ def _guard_archive_members(archive) -> None:
         raise WorkerProtocolError("download.archive_b64 contains too many members")
     total = 0
     for info in infos:
+        is_link = getattr(info, "is_symlink", False)
+        if callable(is_link):
+            is_link = is_link()
+        if is_link or stat.S_ISLNK(getattr(info, "external_attr", 0) >> 16):
+            raise WorkerProtocolError("download.archive_b64 contains a symbolic link")
         # zip/rar expose file_size; py7zr exposes uncompressed.
         size = int(getattr(info, "file_size", 0) or getattr(info, "uncompressed", 0) or 0)
         if size > _MAX_MEMBER_BYTES:
@@ -378,6 +388,40 @@ def _guard_archive_members(archive) -> None:
         total += size
         if total > _MAX_ARCHIVE_TOTAL_BYTES:
             raise WorkerProtocolError("download.archive_b64 decompresses past the size limit")
+    for name in archive.namelist():
+        _validate_archive_member_name(name, disk_extracted=isinstance(archive, _SevenZipArchive))
+
+
+def _validate_archive_member_name(name, disk_extracted=False):
+    if not isinstance(name, str) or not name:
+        raise WorkerProtocolError("archive member must be a non-empty string")
+    normalized = name.replace("\\", "/")
+    if (normalized.startswith("/") or ".." in normalized.split("/")
+            or re.match(r"^[A-Za-z]:", normalized) or "\0" in normalized
+            or (disk_extracted and ":" in normalized)):
+        raise WorkerProtocolError("archive member has an unsafe path")
+
+
+def _archive_rejection(subtitle, archive, reason):
+    """Describe ordinary mismatch without retaining paths, URLs or archive bytes."""
+    def safe_label(value, limit):
+        return re.sub(r"[^a-zA-Z0-9_. ()-]", "_", str(value or ""))[:limit]
+
+    members = []
+    for name in archive.namelist()[:8]:
+        basename = name.replace("\\", "/").rsplit("/", 1)[-1]
+        basename = basename.split("?", 1)[0].split("#", 1)[0]
+        members.append(safe_label(basename, 80))
+    identifier = str(getattr(subtitle, "worker_id", ""))
+    language = getattr(subtitle, "language", None)
+    return SubtitleCandidateRejected(
+        f"{reason}; provider={safe_label(getattr(subtitle, 'provider_name', ''), 48)} "
+        f"result_sha256={hashlib.sha256(identifier.encode()).hexdigest()[:16]} "
+        f"season={safe_label(getattr(subtitle, 'season', None), 12)} "
+        f"episode={safe_label(getattr(subtitle, 'episode', None), 12)} "
+        f"language={safe_label(getattr(language, 'basename', None), 24)} "
+        f"archive={type(archive).__name__} members={members!r}"
+    )
 
 
 def _list_archive_members(archive):
@@ -516,50 +560,81 @@ def _worker_archive_to_content(
     if archive is None:
         raise WorkerProtocolError("download.archive_b64 is not a zip, rar, or 7z archive")
     _guard_archive_members(archive)
+    for flag in ("select_member", "first_subtitle"):
+        if flag in payload and not isinstance(payload[flag], bool):
+            raise WorkerProtocolError(f"download.{flag} must be a boolean")
+    episode = payload.get("episode")
+    episodes = episode if isinstance(episode, (list, tuple)) else [episode]
+    if any(value is not None and (type(value) is not int or value < 0) for value in episodes):
+        raise WorkerProtocolError("download.episode must contain non-negative integers")
+    season = payload.get("season")
+    if season is not None and (type(season) is not int or season < 0):
+        raise WorkerProtocolError("download.season must be a non-negative integer")
+    member = payload.get("member")
+    if member is not None:
+        _validate_archive_member_name(member, disk_extracted=isinstance(archive, _SevenZipArchive))
 
     def _episode_pick():
         forced = bool(getattr(getattr(subtitle, "language", None), "forced", False))
-        episode = payload.get("episode")
-        if isinstance(episode, (list, tuple)):
-            episode = episode[0] if episode else None
+        context = getattr(subtitle, "_requested_archive_context", None)
+        if context is None:
+            context_season = getattr(subtitle, "season", None)
+            if context_season is None:
+                context_season = season
+            episode = payload.get("episode")
+            if isinstance(episode, (list, tuple)):
+                episode = episode[0] if episode else None
+        else:
+            # An absent requested number is intentional, including movie searches.
+            context_season = context.get("season")
+            requested_episodes = (context.get("episode"), context.get("absolute_episode"))
+            episode = tuple(value for value in requested_episodes if type(value) is int and value >= 0) or None
         picked = get_subtitle_from_archive(
             archive,
             forced=forced,
             episode=episode,
+            season=context_season,
             episode_title=payload.get("episode_title"),
             get_first_subtitle=bool(payload.get("first_subtitle")),
             extensions=ARCHIVE_MEMBER_EXTENSIONS,
+            match_episode_context=True,
+            log_member_names=False,
         )
         if picked is None:
-            raise WorkerProtocolError("download.archive_b64 has no usable subtitle member")
+            raise _archive_rejection(subtitle, archive, "No usable subtitle member")
         return picked
 
-    member = payload.get("member")
-    if member:
+    if member is not None:
         if member not in set(archive.namelist()):
-            raise WorkerProtocolError(f"download.member is not in the archive: {member}")
+            raise _archive_rejection(subtitle, archive, "Pinned subtitle member is absent")
         content = fix_line_ending(archive.read(member))
         chosen = member
-    elif payload.get("select_member") and select_member_cb is not None:
+    elif payload.get("select_member"):
         # Host lists the members; the worker language-pins one (tri-state pin/defer/reject).
         # This is the only way to language-select rar/7z, which the stdlib-only worker
-        # cannot list. "defer" => safe episode pick (single-language); "reject" => fail loud.
-        result = select_member_cb(_list_archive_members(archive)) or {}
+        # cannot list. "defer" => episode pick; "reject" => skip this candidate.
+        if select_member_cb is None:
+            raise WorkerProtocolError("download.select_member requires a selector")
+        offered_members = tuple(_list_archive_members(archive))
+        result = select_member_cb(list(offered_members))
+        if not isinstance(result, dict):
+            raise WorkerProtocolError("select_archive_member must return an object")
         decision = result.get("decision")
+        if decision in ("defer", "reject") and result.get("member") is not None:
+            raise WorkerProtocolError("select_archive_member may only name a member when pinning")
         if decision == "pin":
             chosen = result.get("member")
-            if chosen not in set(archive.namelist()):
-                raise WorkerProtocolError(
-                    f"select_archive_member returned a member not in the archive: {chosen!r}"
-                )
+            _validate_archive_member_name(chosen, disk_extracted=isinstance(archive, _SevenZipArchive))
+            if chosen not in offered_members:
+                raise WorkerProtocolError("select_archive_member pinned a member outside the offered subtitles")
             content = fix_line_ending(archive.read(chosen))
         elif decision == "defer":
             content = _episode_pick()
             chosen = payload.get("filename") or ""
+        elif decision == "reject":
+            raise _archive_rejection(subtitle, archive, "No matching subtitle language")
         else:
-            raise WorkerProtocolError(
-                "select_archive_member rejected the archive (no language match)"
-            )
+            raise WorkerProtocolError("select_archive_member returned an invalid decision")
     else:
         content = _episode_pick()
         chosen = payload.get("filename") or ""

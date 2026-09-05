@@ -139,10 +139,18 @@ class HubProxyProvider(Provider):
             "languages": [language_to_payload(item) for item in languages],
         }
         result = self._worker().request("search", request, timeout=timeout)
-        return [
-            candidate_from_worker(self.provider_name, item)
-            for item in result.payload.get("candidates", [])
-        ]
+        subtitles = []
+        for item in result.payload.get("candidates", []):
+            subtitle = candidate_from_worker(self.provider_name, item)
+            # Request context belongs to this candidate, separate from provider
+            # display metadata and opaque payloads used for scoring and download.
+            subtitle._requested_archive_context = {
+                "season": request["video"]["season"],
+                "episode": request["video"]["episode"],
+                "absolute_episode": request["video"]["absolute_episode"],
+            }
+            subtitles.append(subtitle)
+        return subtitles
 
     def download_subtitle(self, subtitle):
         timeout = self._request_timeout()
@@ -155,14 +163,15 @@ class HubProxyProvider(Provider):
         result = self._worker().request("download", request, timeout=timeout)
 
         def _select_member_cb(members):
+            context = getattr(subtitle, "_requested_archive_context", {})
             response = self._worker().select_archive_member(
                 {
                     "provider": self.provider_name,
                     "provider_payload": subtitle.provider_payload,
                     "language": language_to_payload(subtitle.language),
                     "members": members,
-                    "season": getattr(subtitle, "season", None),
-                    "episode": getattr(subtitle, "episode", None),
+                    "season": context.get("season", getattr(subtitle, "season", None)),
+                    "episode": context.get("episode", getattr(subtitle, "episode", None)),
                     "config": self.config,
                 },
                 timeout=timeout,

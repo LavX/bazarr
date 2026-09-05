@@ -26,6 +26,7 @@ import pytest
 
 import provider_hub.protocol as proto
 from subliminal_patch.core import SUBTITLE_EXTENSIONS
+from subliminal_patch.exceptions import SubtitleCandidateRejected
 from subliminal_patch.providers import utils
 from subliminal_patch.providers.utils import get_archive_from_bytes
 
@@ -173,8 +174,8 @@ def test_failed_extraction_logs_the_member_names(caplog):
     assert "Trailer.mkv" in logged
 
 
-def test_archive_without_any_subtitle_member_still_fails_loudly():
-    with pytest.raises(proto.WorkerProtocolError):
+def test_archive_without_any_subtitle_member_rejects_candidate():
+    with pytest.raises(SubtitleCandidateRejected, match="No usable subtitle member"):
         _download(_zip([("poster.jpg", b"binary")]))
 
 

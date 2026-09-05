@@ -15,6 +15,13 @@ class APIThrottled(ProviderError):
         self.retry_after = retry_after
 
 
+class SubtitleCandidateRejected(ProviderError):
+    """A valid response has no usable subtitle for this candidate.
+
+    Messages must contain only bounded, non-sensitive diagnostic context.
+    """
+
+
 class ForbiddenError(ProviderError):
     pass
 
