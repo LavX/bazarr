@@ -455,7 +455,7 @@ The OpenSubtitles.org plugin no longer uses environment variables. Configure its
 1. Go to **Settings** > **AI Translator**
 2. Select **"AI Subtitle Translator"** as the translator engine
 3. Enter your **OpenRouter API Key** (get one at [openrouter.ai/keys](https://openrouter.ai/keys))
-4. Choose your preferred **AI Model** (Google: Gemini 2.5 Flash Lite Preview 09-2025 recommended)
+4. Choose your preferred **AI Model** (`google/gemini-2.5-flash-lite` recommended)
 5. Save and test with a manual translation
 
 </details>

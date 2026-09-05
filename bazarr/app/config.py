@@ -238,7 +238,7 @@ validators = [
     Validator('translator.lingarr_url', must_exist=True, default='http://lingarr:9876', is_type_of=str),
     Validator('translator.openrouter_url', must_exist=True, default='http://subtitle-translator:8765', is_type_of=str),
     Validator('translator.openrouter_api_key', must_exist=True, default='', is_type_of=str, cast=str),
-    Validator('translator.openrouter_model', must_exist=True, default='google/gemini-2.5-flash-preview-05-20', is_type_of=str),
+    Validator('translator.openrouter_model', must_exist=True, default='google/gemini-2.5-flash-lite', is_type_of=str),
     Validator('translator.openrouter_temperature', must_exist=True, default=0.3, is_type_of=float),
     Validator('translator.openrouter_max_concurrent', must_exist=True, default=2, is_type_of=int, gte=1, lte=10),
     Validator('translator.openrouter_reasoning', must_exist=True, default='disabled', is_type_of=str,
@@ -727,6 +727,26 @@ def write_config():
                 _force_first_save_migration = False
 
 
+# OpenRouter retired these ids, including Bazarr's default and documented recommendation.
+# Users who never chose a model would otherwise get a model-not-found error.
+RETIRED_OPENROUTER_MODELS = {
+    'google/gemini-2.5-flash-preview-05-20': 'google/gemini-2.5-flash',
+    'google/gemini-2.5-flash-lite-preview-06-17': 'google/gemini-2.5-flash-lite',
+    'google/gemini-2.5-flash-lite-preview-09-2025': 'google/gemini-2.5-flash-lite',
+    'google/gemini-3-pro-preview': 'google/gemini-3.1-pro-preview',
+}
+
+
+def migrate_retired_openrouter_model(settings) -> bool:
+    current_model = settings.translator.openrouter_model.strip()
+    replacement = RETIRED_OPENROUTER_MODELS.get(current_model)
+    if replacement is None:
+        return False
+    settings.translator.openrouter_model = replacement
+    logging.warning(f'Replaced retired OpenRouter model {current_model} with {replacement}')  # noqa: G004
+    return True
+
+
 base_url = settings.general.base_url.rstrip('/')
 
 array_keys = ['excluded_tags',
@@ -789,6 +809,8 @@ if hasattr(settings.translator, 'gemini_key'):
     if legacy_key and not settings.translator.gemini_keys:
         settings.translator.gemini_keys = [legacy_key]
     del settings.translator.gemini_key
+
+migrate_retired_openrouter_model(settings)
 
 # save updated settings to file
 write_config()

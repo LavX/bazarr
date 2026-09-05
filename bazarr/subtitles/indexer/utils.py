@@ -46,6 +46,23 @@ def get_external_subtitles_path(file, subtitle):
     return path
 
 
+def get_subtitle_destination_path(file, subtitle):
+    """Where a new external subtitle for ``file`` gets written.
+
+    get_external_subtitles_path() answers only for files that already exist, which is
+    right for indexing and wrong for a first-time write: in the absolute and relative
+    subfolder modes it returned None and a translation crashed on save. An existing file
+    in either location is still preferred so a re-run overwrites what the user already
+    sees; otherwise the configured folder is used and created, the way downloads do it.
+    """
+    existing = get_external_subtitles_path(file, subtitle)
+    if existing:
+        return existing
+    from utilities.helper import get_target_folder
+    folder = get_target_folder(file) or os.path.dirname(file)
+    return os.path.join(folder, subtitle)
+
+
 def normalize_subtitle_language_variant(language, forced=False, hi=False):
     language_text = str(language)
     parts = language_text.split(':')

@@ -12,7 +12,7 @@ from app.config import settings, get_array_from
 from app.jobs_queue import jobs_queue
 from languages.custom_lang import CustomLanguage
 from languages.get_languages import alpha3_from_alpha2
-from subtitles.indexer.utils import get_external_subtitles_path
+from subtitles.indexer.utils import get_subtitle_destination_path
 
 
 def has_remove_hi(mods):
@@ -180,7 +180,7 @@ def subtitles_apply_mods(language, subtitle_path, mods, video_path, arr_instance
 
             # get the real modded subtitles path taking into account if the user set up Bazarr to store external
             # subtitles in a custom folder or relative folder
-            modded_subtitles_path = get_external_subtitles_path(
+            modded_subtitles_path = get_subtitle_destination_path(
                 file=video_path,
                 subtitle=os.path.basename(modded_subtitles_path_if_alongside_video)
             )
