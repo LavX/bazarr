@@ -6,7 +6,6 @@ from importlib import metadata
 import logging
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
 
@@ -199,30 +198,32 @@ def is_virtualenv():
     return base_prefix != real_prefix
 
 
-def _version_tuple(version):
-    parts = re.findall(r"\d+", version.split("+", 1)[0].split("-", 1)[0])
-    return tuple(int(part) for part in parts)
-
-
 def _satisfies_spec(installed_version, spec):
-    installed = _version_tuple(installed_version)
-    for item in spec.split(","):
-        item = item.strip()
-        if item.startswith("=="):
-            if installed != _version_tuple(item[2:]):
-                return False
-        elif item.startswith(">="):
-            if installed < _version_tuple(item[2:]):
-                return False
-        elif item.startswith("<="):
-            if installed > _version_tuple(item[2:]):
-                return False
-        elif item.startswith("<"):
-            if installed >= _version_tuple(item[1:]):
-                return False
-        else:
-            raise ValueError(f"Unsupported requirement specifier: {item}")
-    return True
+    # Keep startup and --no-update usable before dependencies are installed.
+    try:
+        from packaging.specifiers import SpecifierSet
+        from packaging.version import InvalidVersion, Version
+    except ModuleNotFoundError as error:
+        if error.name not in ("packaging", "packaging.specifiers", "packaging.version"):
+            raise
+        try:
+            from pip._vendor.packaging.specifiers import SpecifierSet
+            from pip._vendor.packaging.version import InvalidVersion, Version
+        except ModuleNotFoundError as error:
+            if error.name not in ("pip", "pip._vendor", "pip._vendor.packaging",
+                                  "pip._vendor.packaging.specifiers", "pip._vendor.packaging.version"):
+                raise
+            logging.warning("BAZARR cannot verify runtime versions because packaging and pip's parser are unavailable.")
+            return False
+
+    requirement = SpecifierSet(spec)
+    try:
+        installed = Version(installed_version)
+    except InvalidVersion:
+        return False
+    # Already-installed prereleases remain eligible, but must satisfy the full
+    # version bounds. Do not rely on packaging's changing prerelease defaults.
+    return requirement.contains(installed, prereleases=True)
 
 
 def _module_origin(module):

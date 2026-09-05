@@ -1,6 +1,7 @@
 import subprocess
 import sys
 import re
+import json
 from pathlib import Path
 
 from packaging.requirements import Requirement
@@ -303,6 +304,11 @@ def test_complete_compliant_runtime_does_not_request_install_or_restart(monkeypa
     ("cloudscraper", "cloudscraper", "1.2.72"),
     ("numpy", "numpy", "2.6.0"),
     ("PIL", "Pillow", "12.2.0"),
+    ("dateutil", "python-dateutil", "2.9.0rc0"),
+    ("dateutil", "python-dateutil", "2.9.0.dev0"),
+    ("dateutil", "python-dateutil", "2.9.0"),
+    ("dateutil", "python-dateutil", "2.9.0.post1"),
+    ("dateutil", "python-dateutil", "invalid"),
 ])
 def test_complete_runtime_repairs_an_unsupported_version_once(monkeypatch, tmp_path,
                                                              module, distribution, unsupported):
@@ -330,6 +336,8 @@ def test_complete_runtime_repairs_an_unsupported_version_once(monkeypatch, tmp_p
     monkeypatch.setattr(requirements, "restart_after_requirements_install", lambda: restarts.append(True))
 
     assert requirements.missing_runtime_requirements() == [module]
+    assert requirements.ensure_requirements(no_update=True) is False
+    assert repairs == restarts == []
     assert requirements.ensure_requirements() is True
     assert repairs == [[module]]
     assert restarts == [True]
@@ -356,6 +364,129 @@ def test_startup_requirements_probe_supports_upper_bound_specs():
     assert _satisfies_spec("1.2.58", "<=1.2.58")
     assert _satisfies_spec("1.2.57", "<=1.2.58")
     assert not _satisfies_spec("1.2.59", "<=1.2.58")
+
+
+VERSION_BOUNDARIES = [
+    ("2.9.0rc0", "==2.9.0.post0", False),
+    ("2.9.0.dev0", "==2.9.0.post0", False),
+    ("2.9.0", "==2.9.0.post0", False),
+    ("2.9.0.post0", "==2.9.0.post0", True),
+    ("2.9.0.post1", "==2.9.0.post0", False),
+    ("2.9.0.post0+vendor.1", "==2.9.0.post0", True),
+    ("2.9.0.post0", "==2.9.0", False),
+    ("50.0.1rc1", ">=50.0.1", False),
+    ("50.0.1.dev1", ">=50.0.1", False),
+    ("50.0.1", ">=50.0.1", True),
+    ("50.0.1.post0", ">=50.0.1", True),
+    ("50.0.1+vendor.1", ">=50.0.1", True),
+    ("50.0.2rc1", ">=50.0.1", True),
+    ("50.0.2.dev1", ">=50.0.1", True),
+    ("1.0", "==1.0.0", True),
+    ("v1.0.0", "==1.0", True),
+    ("1.0+vendor.1", "==1.0", True),
+    ("1.0+vendor.2", "==1.0+vendor.1", False),
+    ("1.0+vendor.1", "==1.0+vendor.1", True),
+    ("1!1.0", ">=2.0", True),
+    ("2.0", ">=1!1.0", False),
+    ("2.5.1", ">=2.5.2,<2.6.0", False),
+    ("2.5.2", ">=2.5.2,<2.6.0", True),
+    ("2.5.9rc1", ">=2.5.2,<2.6.0", True),
+    ("2.6.0rc1", ">=2.5.2,<2.6.0", False),
+    ("2.6.0.dev1", ">=2.5.2,<2.6.0", False),
+    ("2.6.0", ">=2.5.2,<2.6.0", False),
+    ("1.2.71", "<=1.2.71", True),
+    ("1.2.71.post0", "<=1.2.71", False),
+    ("1.2.71rc1", "<=1.2.71", True),
+    ("1.0rc1", ">=1.0rc1,<1.0", False),
+    ("1.0rc1", "==1.0rc1", True),
+    ("1.0rc2", "==1.0rc1", False),
+    ("unknown", ">=1.0", False),
+    ("unknown", "<2.0", False),
+    ("1.0-broken", "==1.0", False),
+]
+
+
+@pytest.mark.parametrize("installed,spec,expected", VERSION_BOUNDARIES)
+def test_installed_versions_follow_pep440_boundaries(installed, spec, expected):
+    from app.requirements import _satisfies_spec
+
+    assert _satisfies_spec(installed, spec) is expected
+
+
+@pytest.mark.parametrize("backend", ["packaging", "pip_vendored", "unavailable"])
+def test_version_parser_bootstraps_with_available_production_dependencies(backend):
+    repo_root = Path(__file__).resolve().parents[2]
+    script = r'''
+import importlib.abc
+import json
+import sys
+
+backend, cases = sys.argv[1], json.loads(sys.argv[2])
+class ParserBlocker(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if backend != "packaging" and (fullname == "packaging" or fullname.startswith("packaging.")):
+            raise ModuleNotFoundError(name=fullname)
+        if backend == "unavailable" and (fullname == "pip" or fullname.startswith("pip.")):
+            raise ModuleNotFoundError(name=fullname)
+
+sys.meta_path.insert(0, ParserBlocker())
+from app import requirements
+assert requirements.ensure_requirements(no_update=True) is False
+assert "packaging.specifiers" not in sys.modules
+assert "pip._vendor.packaging.specifiers" not in sys.modules
+if backend == "unavailable":
+    assert requirements._satisfies_spec("1.0", "==1.0") is False
+    requirements.RUNTIME_IMPORTS = ("types",)
+    requirements.RUNTIME_REQUIREMENTS = {"types": ("fixture", "==1.0")}
+    requirements.metadata.version = lambda distribution: "1.0"
+    requirements.importlib.util.find_spec = lambda name: None
+    def forbidden_restart():
+        raise AssertionError("restart without pip")
+    requirements.restart_after_requirements_install = forbidden_restart
+    assert requirements.ensure_requirements() is True
+else:
+    for installed, spec, expected in cases:
+        assert requirements._satisfies_spec(installed, spec) is expected, (installed, spec)
+    parser = "packaging.specifiers" if backend == "packaging" else "pip._vendor.packaging.specifiers"
+    assert parser in sys.modules
+    if backend == "pip_vendored":
+        assert "packaging" not in sys.modules
+'''
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", "import sys; sys.path.insert(0, "
+         + repr(str(repo_root / "bazarr")) + ");\n" + script, backend, json.dumps(VERSION_BOUNDARIES)],
+        cwd=repo_root, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("backend", ["packaging", "pip_vendored"])
+def test_parser_import_does_not_hide_unrelated_missing_dependencies(monkeypatch, backend):
+    import builtins
+    from app.requirements import _satisfies_spec
+
+    original_import = builtins.__import__
+
+    def broken_parser(name, *args, **kwargs):
+        if name == "packaging.specifiers":
+            if backend == "pip_vendored":
+                raise ModuleNotFoundError(name="packaging")
+            raise ModuleNotFoundError(name="unrelated_parser_dependency")
+        if name == "pip._vendor.packaging.specifiers":
+            raise ModuleNotFoundError(name="unrelated_parser_dependency")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", broken_parser)
+    with pytest.raises(ModuleNotFoundError) as raised:
+        _satisfies_spec("1.0", "==1.0")
+    assert raised.value.name == "unrelated_parser_dependency"
+
+
+def test_invalid_requirement_declarations_remain_errors():
+    from app.requirements import _satisfies_spec
+
+    with pytest.raises(ValueError):
+        _satisfies_spec("1.0", "not-a-specifier")
 
 
 @pytest.mark.parametrize('installed', ['48.0.0', '49.0.0', '50.0.0', '50.0.1', '50.0.2'])
