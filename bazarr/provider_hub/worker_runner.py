@@ -83,9 +83,10 @@ def _handle(provider, op, payload):
         # The host forwards the requested season/episode at the top level of the op payload.
         # Surface them on provider_payload (host context is authoritative) so a selector can
         # disambiguate season-pack members even when the search payload didn't carry them.
+        # An explicit null clears stale context; an absent key preserves legacy payloads.
         for key in ("season", "episode"):
-            if payload.get(key) is not None:
-                provider_payload[key] = payload.get(key)
+            if key in payload:
+                provider_payload[key] = payload[key]
         result = selector(
             provider_payload=provider_payload,
             language=payload.get("language") or {},
