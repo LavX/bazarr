@@ -577,11 +577,13 @@ def _worker_archive_to_content(
         forced = bool(getattr(getattr(subtitle, "language", None), "forced", False))
         context = getattr(subtitle, "_requested_archive_context", {})
         context_season = context.get("season", getattr(subtitle, "season", None))
-        episode = context.get("episode")
-        if episode is None:
+        # Archive names may use either numbering scheme from the original search.
+        requested_episodes = (context.get("episode"), context.get("absolute_episode"))
+        episode = tuple(value for value in requested_episodes if type(value) is int and value >= 0)
+        if not episode:
             episode = payload.get("episode")
-        if isinstance(episode, (list, tuple)):
-            episode = episode[0] if episode else None
+            if isinstance(episode, (list, tuple)):
+                episode = episode[0] if episode else None
         picked = get_subtitle_from_archive(
             archive,
             forced=forced,

@@ -147,6 +147,7 @@ class HubProxyProvider(Provider):
             subtitle._requested_archive_context = {
                 "season": request["video"]["season"],
                 "episode": request["video"]["episode"],
+                "absolute_episode": request["video"]["absolute_episode"],
             }
             subtitles.append(subtitle)
         return subtitles

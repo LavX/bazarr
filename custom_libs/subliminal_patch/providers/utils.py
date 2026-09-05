@@ -114,7 +114,9 @@ def blacklist_on(*exc_types):
 
 
 def _contains_number(guessed, requested):
-    return requested in guessed if isinstance(guessed, list) else requested == guessed
+    guessed_numbers = guessed if isinstance(guessed, (list, tuple)) else (guessed,)
+    requested_numbers = requested if isinstance(requested, (list, tuple)) else (requested,)
+    return any(number in guessed_numbers for number in requested_numbers)
 
 
 def _get_matching_sub(

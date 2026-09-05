@@ -256,15 +256,104 @@ class ArchiveSearchWorker:
         return SimpleNamespace(payload=self.selector)
 
 
-def registry_archive_search(payload, display=None, selector=None, season=3, episode=1):
+def registry_archive_search(payload, display=None, selector=None, season=3, episode=1, absolute_episode=None):
     worker = ArchiveSearchWorker(payload, display, selector)
     provider = registry.HubProxyProvider(timeout=120, worker_client=worker)
     provider.provider_name = "fixture"
     video = core.Episode("/fixtures/Show.mkv", "Show", season, episode)
+    video.absolute_episode = absolute_episode
     subtitles = provider.list_subtitles(video, {Language("eng")})
     assert len(subtitles) == 1
     assert worker.searches[0]["season"] == season and worker.searches[0]["episode"] == episode
+    assert worker.searches[0]["absolute_episode"] == absolute_episode
     return provider, worker, subtitles[0]
+
+
+@pytest.mark.parametrize("name", ["Show.S03E01.srt", "49.srt", "Show.E49.srt", "Show.S03E48E49.srt"])
+@pytest.mark.parametrize("multiple", [False, True])
+@pytest.mark.parametrize("defer", [False, True])
+@pytest.mark.parametrize("episode_hint", [None, 49, 99])
+def test_registry_archive_accepts_relative_or_absolute_request(name, multiple, defer, episode_hint):
+    names = {"Show.S03E07.srt": SRT.replace(b"Fixture", b"Unrelated")} if multiple else {}
+    names[name] = SRT
+    payload = archive_payload(names, episode=episode_hint, select_member=defer)
+    provider, worker, subtitle = registry_archive_search(payload, absolute_episode=49)
+
+    assert provider.download_subtitle(subtitle) is True
+    assert subtitle.content == SRT
+    if defer:
+        assert [(item["season"], item["episode"]) for item in worker.selections] == [(3, 1)]
+
+
+@pytest.mark.parametrize("names", [["48.srt"], ["Show.S04E49.srt"],
+                                   ["Show.S04E49.srt", "Show.S04E01.srt"]])
+@pytest.mark.parametrize("defer", [False, True])
+def test_registry_absolute_context_rejects_wrong_episode_and_season(names, defer):
+    from subliminal_patch.exceptions import SubtitleCandidateRejected
+
+    provider, _, subtitle = registry_archive_search(
+        archive_payload(names, episode=49, select_member=defer), absolute_episode=49)
+    with pytest.raises(SubtitleCandidateRejected):
+        provider.download_subtitle(subtitle)
+    assert subtitle.content is None
+
+
+@pytest.mark.parametrize("defer", [False, True])
+def test_registry_absolute_context_cannot_be_replaced_by_display_or_wire(defer):
+    payload = archive_payload({"50.srt": SRT.replace(b"Fixture", b"Forged absolute"), "49.srt": SRT},
+                              episode=50, select_member=defer)
+    display = {"episode": 50, "absolute_episode": 50,
+               "_requested_archive_context": {"episode": 50, "absolute_episode": 50}}
+    provider, _, subtitle = registry_archive_search(payload, display=display, absolute_episode=49)
+    assert provider.download_subtitle(subtitle) is True
+    assert subtitle.content == SRT
+    assert subtitle.episode == subtitle.absolute_episode == 50
+
+
+@pytest.mark.parametrize("absolute_episode", [None, True, "49", -49])
+def test_registry_unrequested_absolute_number_is_not_invented(absolute_episode):
+    from subliminal_patch.exceptions import SubtitleCandidateRejected
+
+    provider, _, subtitle = registry_archive_search(
+        archive_payload(["49.srt"], episode=49),
+        display={"absolute_episode": 49}, absolute_episode=absolute_episode)
+    with pytest.raises(SubtitleCandidateRejected):
+        provider.download_subtitle(subtitle)
+
+
+@pytest.mark.parametrize("episode,absolute_episode,name", [(None, 49, "49.srt"), (1, 1, "Show.S03E01.srt")])
+def test_registry_absolute_only_or_duplicate_numbering(episode, absolute_episode, name):
+    provider, _, subtitle = registry_archive_search(archive_payload([name], episode=None),
+                                                   episode=episode, absolute_episode=absolute_episode)
+    assert provider.download_subtitle(subtitle) is True
+    assert subtitle.content == SRT
+
+
+def test_registry_absolute_context_is_kept_per_candidate_across_searches():
+    def payload(video):
+        return archive_payload([f"{video['absolute_episode']}.srt"], episode=None, select_member=True)
+
+    provider, worker, first = registry_archive_search(payload, absolute_episode=49)
+    video = core.Episode("/fixtures/Other.mkv", "Show", 3, 2)
+    video.absolute_episode = 50
+    second = provider.list_subtitles(video, {Language("eng")})[0]
+    video.absolute_episode = 51
+    assert provider.download_subtitle(first) is True
+    assert provider.download_subtitle(second) is True
+    assert first.content == second.content == SRT
+    assert [(item["season"], item["episode"]) for item in worker.selections] == [(3, 1), (3, 2)]
+
+
+@pytest.mark.parametrize("override,selector", [
+    ({"member": "Show.S04E99.srt"}, None),
+    ({"first_subtitle": True}, None),
+    ({"select_member": True}, {"decision": "pin", "member": "Show.S04E99.srt"}),
+])
+def test_registry_absolute_context_keeps_authoritative_pins(override, selector):
+    provider, _, subtitle = registry_archive_search(archive_payload(["Show.S04E99.srt"], **override),
+                                                   selector=selector, absolute_episode=49)
+    assert provider.download_subtitle(subtitle) is True
+    assert subtitle.content == SRT
 
 
 @pytest.mark.parametrize("names", [["Show.S04E01.srt"], ["Show.S04E01.srt", "Show.S04E02.srt"]])
@@ -509,6 +598,39 @@ def select_best(pool, subtitles, only_one=True, languages=None, existing_languag
     result = core_persistent.download_best_subtitles(
         {video}, languages or {Language("eng")}, pool, only_one=only_one, candidate_sink=sink)
     return result.get(video, []), listed_languages, sink
+
+
+@pytest.mark.parametrize("only_one", [False, True])
+def test_selection_loop_keeps_absolute_context_after_rejected_archive(monkeypatch, only_one):
+    provider, worker, rejected = registry_archive_search(
+        archive_payload(["48.srt"], episode=49, select_member=True), absolute_episode=49)
+    worker.payload = archive_payload(["49.srt"], episode=None, select_member=True)
+    video = core.Episode("/fixtures/Show.mkv", "Show", 3, 1)
+    video.absolute_episode = 49
+    accepted = provider.list_subtitles(video, {Language("eng")})[0]
+    downloads, throttled = [], []
+
+    class Provider:
+        def initialize(self):
+            pass
+
+        def terminate(self):
+            pass
+
+        def download_subtitle(self, subtitle):
+            downloads.append(subtitle)
+            return provider.download_subtitle(subtitle)
+
+    monkeypatch.setattr(core, "provider_registry", {"fixture": Provider})
+    pool = core.SZProviderPool(["fixture"], {}, throttle_callback=lambda *a, **kw: throttled.append(a))
+    result, _, sink = select_best(pool, [rejected, accepted], only_one=only_one)
+
+    assert result == [accepted]
+    assert accepted.content == SRT and rejected.content is None
+    assert downloads == [rejected, accepted]
+    assert [row["downloaded"] for row in sink] == [False, True]
+    assert [(item["season"], item["episode"]) for item in worker.selections] == [(3, 1), (3, 1)]
+    assert throttled == [] and pool.discarded_providers == set()
 
 
 @pytest.mark.parametrize("only_one", [False, True])
