@@ -1,7 +1,11 @@
 import subprocess
 import sys
+import re
 from pathlib import Path
 
+from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
+from packaging.utils import canonicalize_name
 import subliminal
 import yaml
 import pytest
@@ -243,6 +247,95 @@ def test_startup_requirements_probe_uses_security_patched_dependency_versions():
     for module, (distribution, spec) in expected_versions.items():
         assert RUNTIME_REQUIREMENTS[module] == (distribution, spec)
         assert f"{distribution}{spec}" in requirements
+
+
+def test_startup_declarations_match_installation_requirements():
+    from app.requirements import RUNTIME_REQUIREMENTS, WINDOWS_RUNTIME_REQUIREMENTS
+
+    repo_root = Path(__file__).resolve().parents[2]
+    installed = {}
+    for raw_line in (repo_root / "requirements.txt").read_text().splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        # pip's per-requirement options are not part of the version or marker.
+        requirement = Requirement(re.split(r"\s+--", line, maxsplit=1)[0])
+        installed[canonicalize_name(requirement.name)] = requirement
+
+    declarations = {**RUNTIME_REQUIREMENTS, **WINDOWS_RUNTIME_REQUIREMENTS}
+    separate_installs = {distribution for distribution, _ in declarations.values()
+                         if canonicalize_name(distribution) not in installed}
+    # signalrcore is installed separately with --no-deps to retain safe msgpack.
+    assert separate_installs == {"signalrcore"}
+    mismatches = {}
+    for module, (distribution, spec) in declarations.items():
+        if distribution == "signalrcore":
+            continue
+        requirement = installed[canonicalize_name(distribution)]
+        if SpecifierSet(spec) != requirement.specifier:
+            mismatches[module] = (spec, str(requirement.specifier))
+        if module in WINDOWS_RUNTIME_REQUIREMENTS:
+            assert requirement.marker is not None
+            assert requirement.marker.evaluate({"platform_system": "Windows"})
+            assert not requirement.marker.evaluate({"platform_system": "Linux"})
+        else:
+            assert requirement.marker is None
+    assert mismatches == {}
+
+
+def test_complete_compliant_runtime_does_not_request_install_or_restart(monkeypatch, tmp_path):
+    from app import requirements
+
+    monkeypatch.setenv("PLEXAPI_CONFIG_PATH", str(tmp_path / "plexapi.ini"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    repairs, restarts = [], []
+    monkeypatch.setattr(requirements, "install_requirements", lambda missing: repairs.append(missing) or True)
+    monkeypatch.setattr(requirements, "restart_after_requirements_install", lambda: restarts.append(True))
+
+    assert requirements.missing_runtime_requirements() == []
+    assert requirements.ensure_requirements() is False
+    assert requirements.ensure_requirements() is False
+    assert repairs == restarts == []
+
+
+@pytest.mark.parametrize("module,distribution,unsupported", [
+    ("alembic", "alembic", "1.18.4"),
+    ("cloudscraper", "cloudscraper", "1.2.72"),
+    ("numpy", "numpy", "2.6.0"),
+    ("PIL", "Pillow", "12.2.0"),
+])
+def test_complete_runtime_repairs_an_unsupported_version_once(monkeypatch, tmp_path,
+                                                             module, distribution, unsupported):
+    from app import requirements
+
+    monkeypatch.setenv("PLEXAPI_CONFIG_PATH", str(tmp_path / "plexapi.ini"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    actual_version = requirements.metadata.version
+    installed_version = [unsupported]
+
+    def version(name):
+        if canonicalize_name(name) == canonicalize_name(distribution):
+            return installed_version[0]
+        return actual_version(name)
+
+    monkeypatch.setattr(requirements.metadata, "version", version)
+    repairs, restarts = [], []
+
+    def install(missing):
+        repairs.append(missing)
+        installed_version[0] = actual_version(distribution)
+        return True
+
+    monkeypatch.setattr(requirements, "install_requirements", install)
+    monkeypatch.setattr(requirements, "restart_after_requirements_install", lambda: restarts.append(True))
+
+    assert requirements.missing_runtime_requirements() == [module]
+    assert requirements.ensure_requirements() is True
+    assert repairs == [[module]]
+    assert restarts == [True]
+    assert requirements.missing_runtime_requirements() == []
+    assert requirements.ensure_requirements() is False
+    assert len(repairs) == len(restarts) == 1
 
 
 def test_startup_requirements_probe_rejects_wrong_pinned_versions(monkeypatch):
