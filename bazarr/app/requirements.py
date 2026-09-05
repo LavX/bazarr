@@ -6,7 +6,6 @@ from importlib import metadata
 import logging
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
 
@@ -95,21 +94,21 @@ WINDOWS_RUNTIME_IMPORTS = (
 )
 
 RUNTIME_REQUIREMENTS = {
-    "setuptools": ("setuptools", ">=82.0.1"),
-    "aiohttp": ("aiohttp", ">=3.13.5"),
-    "alembic": ("alembic", "==1.18.4"),
+    "setuptools": ("setuptools", ">=84.0.0"),
+    "aiohttp": ("aiohttp", ">=3.14.3"),
+    "alembic": ("alembic", "==1.19.1"),
     "apprise": ("apprise", "==1.13.0"),
-    "apscheduler": ("apscheduler", "==3.11.2"),
+    "apscheduler": ("apscheduler", "==3.11.3"),
     "babelfish": ("babelfish", "==0.6.1"),
-    "bs4": ("beautifulsoup4", "==4.14.3"),
-    "cachetools": ("cachetools", ">=7.1.1"),
+    "bs4": ("beautifulsoup4", "==4.15.0"),
+    "cachetools": ("cachetools", ">=7.1.4"),
     "certifi": ("certifi", "==2026.7.22"),
-    "chardet": ("chardet", "==7.4.3"),
+    "chardet": ("chardet", "==7.6.0"),
     "charset_normalizer": ("charset-normalizer", "==3.5.1"),
-    "click_option_group": ("click-option-group", ">=0.5.6"),
-    "cloudscraper": ("cloudscraper", "<=1.2.58"),
+    "click_option_group": ("click-option-group", ">=0.5.9"),
+    "cloudscraper": ("cloudscraper", "<=1.2.71"),
     "cryptography": ("cryptography", ">=50.0.1"),
-    "dateutil": ("python-dateutil", "==2.9.0"),
+    "dateutil": ("python-dateutil", "==2.9.0.post0"),
     "deathbycaptcha": ("deathbycaptcha-official", "==4.7.1"),
     "deep_translator": ("deep-translator", "==1.11.4"),
     "dns": ("dnspython", "==2.8.0"),
@@ -120,32 +119,32 @@ RUNTIME_REQUIREMENTS = {
     "fcache": ("fcache", "==0.6.0"),
     "fese": ("fese", "==0.3.0"),
     "ffmpeg": ("ffmpeg-python", "==0.2.0"),
-    "ffsubsync": ("ffsubsync", "==0.4.31"),
+    "ffsubsync": ("ffsubsync", "==0.5.0"),
     "autosubsync": ("autosubsync", "==1.0.1"),
     "filetype": ("filetype", "==1.2.0"),
     "flask": ("Flask", "==3.1.3"),
     "flask_compress": ("Flask-Compress", "==1.24"),
-    "flask_cors": ("flask-cors", "==6.0.2"),
+    "flask_cors": ("flask-cors", "==6.0.5"),
     "flask_migrate": ("Flask-Migrate", "==4.1.0"),
     "flask_restx": ("flask-restx", "==1.3.2"),
     "flask_socketio": ("Flask-SocketIO", "==5.6.1"),
     "flask_sqlalchemy": ("flask_sqlalchemy", "==3.1.1"),
     "ftfy": ("ftfy", "==6.3.1"),
-    "guess_language": ("guess_language-spirit", "==0.5.3"),
+    "guess_language": ("guess_language-spirit", "==0.5.4"),
     "guessit": ("guessit", "==3.8.0"),
     "itsdangerous": ("itsdangerous", "==2.2.0"),
-    "jwt": ("PyJWT", ">=2.12.1"),
+    "jwt": ("PyJWT", ">=2.13.0"),
     "json_tricks": ("json_tricks", "==3.17.3"),
-    "knowit": ("knowit", "==0.5.11"),
-    "lxml": ("lxml", ">=6.1.0"),
+    "knowit": ("knowit", "==0.6.1"),
+    "lxml": ("lxml", ">=6.1.1"),
     "msgpack": ("msgpack", "==1.2.1"),  # signalrcore over-pins ==1.1.2; we install signalrcore --no-deps
-    "numpy": ("numpy", ">=2.0.0,<2.4.0"),
-    "PIL": ("Pillow", ">=12.2.0"),
-    "plexapi": ("plexapi", ">=4.16.1"),
+    "numpy": ("numpy", ">=2.5.2,<2.6.0"),
+    "PIL": ("Pillow", ">=12.3.0"),
+    "plexapi": ("plexapi", ">=4.18.2"),
     "py7zr": ("py7zr", "==1.1.3"),
     "pycountry": ("pycountry", "==26.2.16"),
     "pysrt": ("pysrt", "==1.1.2"),
-    "pysubs2": ("pysubs2", "==1.8.0"),
+    "pysubs2": ("pysubs2", "==1.8.1"),
     "python_anticaptcha": ("python-anticaptcha", "==2.0.0"),
     "rarfile": ("rarfile", "==4.5"),
     "requests": ("requests", "==2.34.2"),
@@ -153,7 +152,7 @@ RUNTIME_REQUIREMENTS = {
     "semver": ("semver", "==3.0.4"),
     "signalrcore": ("signalrcore", "==1.0.2"),
     "six": ("six", "==1.17.0"),
-    "sqlalchemy": ("sqlalchemy", "==2.0.49"),
+    "sqlalchemy": ("sqlalchemy", "==2.0.51"),
     "srt": ("srt", "==3.5.3"),
     "subliminal": ("subliminal", "==2.6.0"),
     "textdistance": ("textdistance", "==4.6.3"),
@@ -170,8 +169,8 @@ RUNTIME_REQUIREMENTS = {
 }
 
 WINDOWS_RUNTIME_REQUIREMENTS = {
-    "win32api": ("pywin32", ">=311"),
-    "win32con": ("pywin32", ">=311"),
+    "win32api": ("pywin32", ">=312"),
+    "win32con": ("pywin32", ">=312"),
 }
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -199,30 +198,32 @@ def is_virtualenv():
     return base_prefix != real_prefix
 
 
-def _version_tuple(version):
-    parts = re.findall(r"\d+", version.split("+", 1)[0].split("-", 1)[0])
-    return tuple(int(part) for part in parts)
-
-
 def _satisfies_spec(installed_version, spec):
-    installed = _version_tuple(installed_version)
-    for item in spec.split(","):
-        item = item.strip()
-        if item.startswith("=="):
-            if installed != _version_tuple(item[2:]):
-                return False
-        elif item.startswith(">="):
-            if installed < _version_tuple(item[2:]):
-                return False
-        elif item.startswith("<="):
-            if installed > _version_tuple(item[2:]):
-                return False
-        elif item.startswith("<"):
-            if installed >= _version_tuple(item[1:]):
-                return False
-        else:
-            raise ValueError(f"Unsupported requirement specifier: {item}")
-    return True
+    # Keep startup and --no-update usable before dependencies are installed.
+    try:
+        from packaging.specifiers import SpecifierSet
+        from packaging.version import InvalidVersion, Version
+    except ModuleNotFoundError as error:
+        if error.name not in ("packaging", "packaging.specifiers", "packaging.version"):
+            raise
+        try:
+            from pip._vendor.packaging.specifiers import SpecifierSet
+            from pip._vendor.packaging.version import InvalidVersion, Version
+        except ModuleNotFoundError as error:
+            if error.name not in ("pip", "pip._vendor", "pip._vendor.packaging",
+                                  "pip._vendor.packaging.specifiers", "pip._vendor.packaging.version"):
+                raise
+            logging.warning("BAZARR cannot verify runtime versions because packaging and pip's parser are unavailable.")
+            return False
+
+    requirement = SpecifierSet(spec)
+    try:
+        installed = Version(installed_version)
+    except InvalidVersion:
+        return False
+    # Already-installed prereleases remain eligible, but must satisfy the full
+    # version bounds. Do not rely on packaging's changing prerelease defaults.
+    return requirement.contains(installed, prereleases=True)
 
 
 def _module_origin(module):
