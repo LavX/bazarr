@@ -307,7 +307,9 @@ class OpenRouterTranslatorService:
                 if status == "completed":
                     hide_progress(id=f'translate_progress_{self.dest_srt_file}')
                     lines = _extract_job_lines(job_status.get("result"))
-                    if lines is not None:
+                    # An empty list is not a translation: saving it would write every source
+                    # line under the target name and record a success in History.
+                    if lines:
                         logger.debug(f'Extracted {len(lines)} lines from job result')  # noqa: G004
                         return lines
                     logger.error("Job completed but no result returned")

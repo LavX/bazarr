@@ -85,7 +85,7 @@ def test_poll_job_returns_completed_lines(structured):
     openrouter_translator.show_message.assert_not_called()
 
 
-@pytest.mark.parametrize("result", [{"lines": "invalid"}, {"model_used": "model"}, "invalid", 42])
+@pytest.mark.parametrize("result", [None, [], {"lines": []}, {"lines": "invalid"}, {"model_used": "model"}, "invalid", 42])
 def test_poll_job_rejects_completed_without_lines(result):
     service = _build_service()
     openrouter_translator.requests.get.return_value.json.return_value = {"status": "completed", "result": result}
