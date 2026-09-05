@@ -12,7 +12,7 @@ from .services.translator_factory import TranslatorFactory
 from languages.get_languages import alpha3_from_alpha2
 from app.config import settings
 from app.jobs_queue import jobs_queue
-from subtitles.indexer.utils import get_external_subtitles_path
+from subtitles.indexer.utils import get_subtitle_destination_path
 
 
 def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, forced, hi,
@@ -46,7 +46,9 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
             hi_tag=hi
         )
 
-        dest_srt_file = get_external_subtitles_path(
+        # Resolved as a write target, not a lookup: the file does not exist yet on a
+        # first translation, and the lookup helper answered None for custom folders.
+        dest_srt_file = get_subtitle_destination_path(
             file=video_path,
             subtitle=os.path.basename(dest_srt_file_if_alongside_video)
         )
@@ -105,11 +107,12 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
             logging.exception("BAZARR combine-after-translate failed for %s", video_path)
 
         # Get current job name (which batch.py already set with title) and mark as done
+        completion_label = 'Partially translated' if getattr(translator, 'partial_error', None) else 'Translated'
         current_name = jobs_queue.get_job_name(job_id)
         if current_name and 'Translating' in current_name:
-            done_name = current_name.replace('Translating', 'Translated')
+            done_name = current_name.replace('Translating', completion_label)
         else:
-            done_name = f'Translated {from_lang.upper()} \u2192 {to_lang.upper()} using {translator_label}'
+            done_name = f'{completion_label} {from_lang.upper()} \u2192 {to_lang.upper()} using {translator_label}'
         jobs_queue.update_job_name(job_id=job_id, new_job_name=done_name)
         return result
 
