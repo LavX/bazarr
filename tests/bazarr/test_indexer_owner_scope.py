@@ -16,9 +16,12 @@ wrong data rather than a harmless duplicate.
 
 Callers know the owner. They must be able to say so.
 """
+import ast
+import unicodedata
+
 import pytest
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.database import TableEpisodes, TableMovies, TableShows
 
@@ -35,7 +38,7 @@ def stub_indexing(monkeypatch):
     for mod in (se, mv):
         monkeypatch.setattr(mod.os.path, 'exists', lambda p: True)
         monkeypatch.setattr(mod, 'search_external_subtitles', lambda *a, **kw: {})
-        monkeypatch.setattr(mod, 'add_sync_engine_outputs', lambda folder, subs: subs)
+        monkeypatch.setattr(mod, 'add_sync_engine_outputs', lambda folder, subs, **kw: subs)
         monkeypatch.setattr(mod, 'add_combined_outputs', lambda folder, subs, **kw: subs)
         monkeypatch.setattr(mod, 'guess_external_subtitles', lambda *a, **kw: {})
         monkeypatch.setattr(mod, 'event_stream', lambda *a, **kw: None)
@@ -71,6 +74,110 @@ def two_series_rows(schema_session, stub_indexing, monkeypatch):
 
 def _subs(session, table, row_id):
     return session.execute(select(table.subtitles).where(table.id == row_id)).scalar()
+
+
+@pytest.mark.parametrize('media_type', ['series', 'movie'])
+@pytest.mark.parametrize('subfolder', ['current', 'relative', 'absolute'])
+@pytest.mark.parametrize('naming,single_language', [
+    ('original', False), ('case', False), ('unicode', False),
+    ('single-language', True), ('single-language', False),
+    ('legacy-tagged', True), ('legacy-tagged', False),
+    ('legacy-case', True), ('legacy-unicode', True),
+])
+def test_sync_outputs_belong_to_the_indexed_video(schema_session, monkeypatch, tmp_path,
+                                                 media_type, subfolder, naming, single_language):
+    from subzero.language import Language
+    import subtitles.indexer.movies as mv
+    import subtitles.indexer.series as se
+
+    module = se if media_type == 'series' else mv
+    table = TableEpisodes if media_type == 'series' else TableMovies
+    store = se.store_subtitles if media_type == 'series' else mv.store_subtitles_movie
+    stems = (['Show.S01E01', 'Show.S01E02', 'Show.S01E01.Extended'] if media_type == 'series'
+             else ['Movie (2020)', 'Other (2021)', 'Movie (2020).Extended'])
+    if naming in ['unicode', 'legacy-unicode']:
+        stems = ['\u00c9pisode.S01E01', '\u00c9pisode.S01E02', '\u00c9pisode.S01E01.Extended']
+    elif naming == 'single-language':
+        stems = ['Movie', 'Movie.en', 'Movie.en.Extended', 'Movie.hi', 'Movie.forced']
+    media_folder = tmp_path / 'media'
+    media_folder.mkdir()
+    subtitle_folder = {'current': media_folder, 'relative': media_folder / 'subs',
+                       'absolute': tmp_path / 'shared-subs'}[subfolder]
+    subtitle_folder.mkdir(exist_ok=True)
+    custom_folder = 'subs' if subfolder == 'relative' else str(subtitle_folder)
+    monkeypatch.setattr(module.settings.general, 'use_embedded_subs', False)
+    monkeypatch.setattr(module.settings.general, 'single_language', single_language)
+    monkeypatch.setattr(module.settings.general, 'subfolder', subfolder)
+    monkeypatch.setattr(module.settings.general, 'subfolder_custom', custom_folder)
+    monkeypatch.setattr(module.core, 'CUSTOM_PATHS', [])
+    monkeypatch.setattr(module, 'database', schema_session)
+    monkeypatch.setattr(module, 'get_language_set', lambda: {Language.fromietf('en')})
+    monkeypatch.setattr(module, 'alpha2_from_alpha3', lambda code: Language(code).alpha2)
+    monkeypatch.setattr(module.path_mappings, 'path_replace_instance', lambda p, *a: p)
+    monkeypatch.setattr(module.path_mappings, 'path_replace_reverse_instance', lambda p, *a: p)
+    monkeypatch.setattr(module, 'event_stream', lambda *a, **kw: None)
+    missing = 'list_missing_subtitles' if media_type == 'series' else 'list_missing_subtitles_movies'
+    monkeypatch.setattr(module, missing, lambda *a, **kw: None)
+
+    if media_type == 'series':
+        schema_session.add(TableShows(id=1, arr_instance_id=1, sonarrSeriesId=1, title='Show',
+                                      path=str(media_folder), profileId=None))
+        schema_session.flush()
+
+    suffixes = {'en.srt': 'en', 'hu.ffsubsync.srt': 'hu:sync-ffsubsync',
+                'en.hi.alass.ass': 'en:hi:sync-alass',
+                'fr.forced.autosubsync.vtt': 'fr:forced:sync-autosubsync'}
+    if naming == 'single-language':
+        suffixes = {f'{engine}.srt': f'en:sync-{engine}'
+                    for engine in ['ffsubsync', 'alass', 'autosubsync']}
+        suffixes.update({'hu.ffsubsync.srt': 'hu:sync-ffsubsync',
+                         'en.hi.alass.ass': 'en:hi:sync-alass'})
+    elif naming.startswith('legacy-'):
+        suffixes['en.ffsubsync.srt'] = 'en:sync-ffsubsync'
+    expected = {}
+    for row_id, stem in enumerate(stems, 1):
+        video = media_folder / f'{stem}.mkv'
+        video.write_bytes(b'video')
+        if media_type == 'series':
+            row = TableEpisodes(id=row_id, arr_instance_id=1, series_id=1, sonarrSeriesId=1,
+                                sonarrEpisodeId=row_id, title=stem, path=str(video), season=1,
+                                episode=row_id, subtitles='[]')
+        else:
+            row = TableMovies(id=row_id, arr_instance_id=1, radarrId=row_id, title=stem,
+                              path=str(video), tmdbId=str(row_id), subtitles='[]')
+        schema_session.add(row)
+        expected[row_id] = []
+        subtitle_stem = stem.lower() if naming in ['case', 'legacy-case'] else stem
+        if naming in ['unicode', 'legacy-unicode']:
+            subtitle_stem = unicodedata.normalize('NFD', stem.lower())
+        for suffix, language in suffixes.items():
+            subtitle = subtitle_folder / f'{subtitle_stem}.{suffix}'
+            subtitle.write_text('1\n00:00:00,000 --> 00:00:01,000\n'
+                                'This is an English subtitle. We are going to the house together. '
+                                'There is a friend waiting for us in the garden. '
+                                'Please tell everyone that we will arrive before dinner.\n', encoding='utf-8')
+            expected[row_id].append([language, str(subtitle), subtitle.stat().st_size])
+    schema_session.flush()
+    contaminated = [entry for entries in expected.values() for entry in entries]
+    schema_session.execute(update(table).values(subtitles=str(contaminated)))
+    schema_session.commit()
+
+    first_scan = {}
+    for scan in range(3):
+        if scan == 2:
+            schema_session.execute(update(table).values(subtitles='[]'))
+            schema_session.commit()
+        for row_id, stem in enumerate(stems, 1):
+            video = str(media_folder / f'{stem}.mkv')
+            actual = store(video, video, arr_instance_id=1)
+            assert len(actual) == len(expected[row_id])
+            assert {path: (set(language.split(':')), size) for language, path, size in actual} == {
+                path: (set(language.split(':')), size) for language, path, size in expected[row_id]}
+            assert ast.literal_eval(_subs(schema_session, table, row_id)) == actual
+            if scan == 0:
+                first_scan[row_id] = sorted(actual)
+            else:
+                assert sorted(actual) == first_scan[row_id]
 
 
 def test_only_the_owning_episode_row_is_indexed(two_series_rows):
