@@ -10,7 +10,7 @@ import pytest
 from subzero.language import Language
 
 from provider_hub import protocol, worker_runner
-from subliminal_patch import core
+from subliminal_patch import core, core_persistent
 from subliminal_patch.providers.utils import get_archive_from_bytes, get_subtitle_from_archive
 
 
@@ -197,3 +197,176 @@ def test_rejection_diagnostic_is_bounded_and_excludes_paths_urls_and_contents(mo
     assert "token=secret" not in messages
     assert "Fixture" not in messages
     assert len(messages) < 1600
+
+
+def selection_candidate(identifier, payload=None, selector=None, language="eng", provider="fixture"):
+    subtitle = candidate(identifier)
+    subtitle.provider_name = provider
+    subtitle.language = Language(language)
+    subtitle.matches = {"series", "season", "episode"}
+    subtitle.release_info = identifier
+    subtitle.provider_payload = {"result": payload if payload is not None else archive_payload(["Show.S03E01.srt"]),
+                                 "selector": selector}
+    return subtitle
+
+
+def selection_pool_for(monkeypatch):
+    downloads, throttled = [], []
+
+    class Provider:
+        def initialize(self):
+            pass
+
+        def terminate(self):
+            pass
+
+        def download_subtitle(self, subtitle):
+            downloads.append(subtitle)
+            protocol.worker_download_to_content(subtitle, subtitle.provider_payload["result"],
+                                                select_member_cb=subtitle.provider_payload["selector"])
+
+    monkeypatch.setattr(core, "provider_registry", {"fixture": Provider, "other": Provider})
+    pool = core.SZProviderPool(["fixture", "other"], {}, throttle_callback=lambda *a, **kw: throttled.append(a))
+    return pool, downloads, throttled
+
+
+def select_best(pool, subtitles, only_one=True, languages=None, existing_languages=None):
+    video = core.Episode("/fixtures/Show.S03E01.mkv", "Show", 3, 1,
+                         subtitle_languages=existing_languages or set())
+    listed_languages, sink = [], []
+
+    def list_subtitles(video, languages, **kwargs):
+        listed_languages.append(languages)
+        return subtitles
+
+    pool.list_subtitles_prioritized = list_subtitles
+    result = core_persistent.download_best_subtitles(
+        {video}, languages or {Language("eng")}, pool, only_one=only_one, candidate_sink=sink)
+    return result.get(video, []), listed_languages, sink
+
+
+@pytest.mark.parametrize("only_one", [False, True])
+@pytest.mark.parametrize("payload,selector", [
+    (archive_payload(["Show.S03E03.srt", "Show.S03E03.alt.srt"]), None),
+    (archive_payload(["Show.S03E03.srt"]), None),
+    (archive_payload(["poster.jpg"]), None),
+    (archive_payload(["Show.S03E01.srt"], member="missing.srt"), None),
+    (archive_payload(["Show.S03E01.srt"], select_member=True),
+     lambda members: {"decision": "pin", "member": "missing.srt"}),
+    (archive_payload(["Show.S03E01.srt"], select_member=True),
+     lambda members: {"decision": "reject"}),
+    (archive_payload(["Show.S03E03.srt"], select_member=True),
+     lambda members: {"decision": "defer"}),
+])
+def test_selection_loop_continues_after_archive_rejection(monkeypatch, only_one, payload, selector):
+    pool, downloads, throttled = selection_pool_for(monkeypatch)
+    rejected = selection_candidate("first", payload, selector)
+    accepted = selection_candidate("second")
+
+    result, _, sink = select_best(pool, [rejected, accepted], only_one=only_one)
+
+    assert result == [accepted]
+    assert accepted.content == SRT
+    assert rejected.content is None
+    assert downloads == [rejected, accepted]
+    assert [row["downloaded"] for row in sink] == [False, True]
+    assert throttled == []
+    assert pool.discarded_providers == set()
+
+
+def test_single_subtitle_selection_stops_after_first_success(monkeypatch):
+    pool, downloads, throttled = selection_pool_for(monkeypatch)
+    first, duplicate = selection_candidate("first"), selection_candidate("duplicate")
+    other_language = selection_candidate("other-language", language="fra")
+
+    result, _, sink = select_best(pool, [first, duplicate, other_language],
+                                 languages={Language("eng"), Language("fra")})
+
+    assert result == downloads == [first]
+    assert first.content == SRT
+    assert duplicate.content is other_language.content is None
+    assert [row["downloaded"] for row in sink] == [True, False, False]
+    assert not throttled and not pool.discarded_providers
+
+
+def test_single_subtitle_selection_exhausts_rejected_candidates(monkeypatch):
+    pool, downloads, throttled = selection_pool_for(monkeypatch)
+    subtitles = [selection_candidate(str(index), archive_payload(["Show.S03E03.srt"]))
+                 for index in range(3)]
+
+    result, _, sink = select_best(pool, subtitles)
+
+    assert result == []
+    assert downloads == subtitles
+    assert not any(row["downloaded"] for row in sink)
+    assert not throttled and not pool.discarded_providers
+
+
+def test_single_subtitle_selection_continues_after_invalid_subtitle_content(monkeypatch):
+    pool, downloads, throttled = selection_pool_for(monkeypatch)
+    invalid = selection_candidate("invalid", {"content_b64": base64.b64encode(b"not subtitles").decode("ascii")})
+    accepted = selection_candidate("accepted")
+
+    result, _, _ = select_best(pool, [invalid, accepted])
+
+    assert result == [accepted]
+    assert downloads == [invalid, accepted]
+    assert accepted.content == SRT
+    assert not throttled and not pool.discarded_providers
+
+
+@pytest.mark.parametrize("payload,selector", [
+    (archive_payload(["Show.S03E01.srt"], select_member=True), lambda members: {"decision": "unknown"}),
+    (archive_payload(["Show.S03E01.srt"], archive_sha256="0" * 64), None),
+    (archive_payload(["../unsafe.srt"]), None),
+])
+def test_single_subtitle_selection_preserves_provider_failure_boundary(monkeypatch, payload, selector):
+    pool, downloads, throttled = selection_pool_for(monkeypatch)
+    rejected = selection_candidate("first", payload, selector)
+    same_provider = selection_candidate("same-provider")
+    other_provider = selection_candidate("other-provider", provider="other")
+
+    result, _, sink = select_best(pool, [rejected, same_provider, other_provider])
+
+    assert result == [other_provider]
+    assert downloads == [rejected, other_provider]
+    assert len(throttled) == 1
+    assert pool.discarded_providers == {"fixture"}
+    assert same_provider.content is None
+    assert [row["downloaded"] for row in sink] == [False, False, True]
+
+
+def test_multiple_subtitle_selection_keeps_language_deduplication(monkeypatch):
+    pool, downloads, throttled = selection_pool_for(monkeypatch)
+    first, duplicate = selection_candidate("first"), selection_candidate("duplicate")
+    other_language = selection_candidate("other-language", language="fra")
+
+    result, _, _ = select_best(pool, [first, duplicate, other_language], only_one=False,
+                              languages={Language("eng"), Language("fra")})
+
+    assert result == downloads == [first, other_language]
+    assert duplicate.content is None
+    assert not throttled and not pool.discarded_providers
+
+
+@pytest.mark.parametrize("only_one", [False, True])
+def test_existing_requested_language_avoids_selection(monkeypatch, only_one):
+    pool, downloads, throttled = selection_pool_for(monkeypatch)
+
+    result, listed_languages, sink = select_best(pool, [selection_candidate("unused")], only_one=only_one,
+                                                existing_languages={Language("eng")})
+
+    assert result == downloads == listed_languages == sink == throttled == []
+
+
+def test_existing_language_is_excluded_from_the_caller_search(monkeypatch):
+    pool, downloads, throttled = selection_pool_for(monkeypatch)
+    accepted = selection_candidate("missing-language", language="fra")
+
+    result, listed_languages, _ = select_best(pool, [accepted], only_one=False,
+                                             languages={Language("eng"), Language("fra")},
+                                             existing_languages={Language("eng")})
+
+    assert result == downloads == [accepted]
+    assert listed_languages == [{Language("fra")}]
+    assert not throttled and not pool.discarded_providers

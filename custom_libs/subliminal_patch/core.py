@@ -875,10 +875,10 @@ class SZProviderPool(ProviderPool):
                 subtitle.score = score
                 downloaded_subtitles.append(subtitle)
 
-            # stop if only one subtitle is requested
-            if only_one:
-                logger.debug('Only one subtitle downloaded')
-                break
+                # stop after one successful download, not one attempted candidate
+                if only_one:
+                    logger.debug('Only one subtitle downloaded')
+                    break
 
         # --- WHISPER FALLBACK PRECONDITIONS ---
         # 1. No regular provider results with at least minimum score
