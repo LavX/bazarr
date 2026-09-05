@@ -4,12 +4,13 @@ import hashlib
 import io
 import logging
 import stat
+from types import SimpleNamespace
 import zipfile
 
 import pytest
 from subzero.language import Language
 
-from provider_hub import protocol, worker_runner
+from provider_hub import protocol, registry, worker_runner
 from subliminal_patch import core, core_persistent
 from subliminal_patch.providers.utils import get_archive_from_bytes, get_subtitle_from_archive
 
@@ -20,8 +21,9 @@ SRT = b"1\n00:00:01,000 --> 00:00:02,000\nFixture\n"
 def archive_payload(names, **extra):
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
-        for name in names:
-            archive.writestr(name, SRT)
+        members = names.items() if isinstance(names, dict) else ((name, SRT) for name in names)
+        for name, content in members:
+            archive.writestr(name, content)
     body = buffer.getvalue()
     return {"archive_b64": base64.b64encode(body).decode("ascii"),
             "archive_sha256": hashlib.sha256(body).hexdigest(), "episode": 1, **extra}
@@ -60,8 +62,6 @@ def pool_for(monkeypatch, payload, selector=None):
     (archive_payload(["Show.S03E03.srt"]), None),
     (archive_payload(["poster.jpg"]), None),
     (archive_payload(["Show.S03E01.srt"], member="missing.srt"), None),
-    (archive_payload(["Show.S03E01.srt"], select_member=True),
-     lambda members: {"decision": "pin", "member": "missing.srt"}),
     (archive_payload(["Show.S03E01.srt"], select_member=True),
      lambda members: {"decision": "reject", "member": None}),
     (archive_payload(["Show.S03E03.srt"], select_member=True),
@@ -121,10 +121,276 @@ def test_single_member_with_multiple_episodes_matches_any_included_episode(name,
         assert subtitle.content == SRT
 
 
+@pytest.mark.parametrize("name", ["Show.S03E01E02.srt", "Show.S03E01-E02.srt",
+                                  "Show.S03E01-02.srt", "Show.3x01-02.srt"])
+@pytest.mark.parametrize("episode", [1, 2, 3])
+@pytest.mark.parametrize("defer", [False, True])
+def test_multi_member_combined_episode_selects_the_included_member(name, episode, defer):
+    from subliminal_patch.exceptions import SubtitleCandidateRejected
+
+    subtitle = candidate()
+    subtitle.episode = episode
+    payload = archive_payload({"Show.S03E09.srt": SRT.replace(b"Fixture", b"Wrong episode"), name: SRT},
+                              episode=episode, select_member=defer)
+    selector = (lambda members: {"decision": "defer"}) if defer else None
+    if episode == 3:
+        with pytest.raises(SubtitleCandidateRejected):
+            protocol.worker_download_to_content(subtitle, payload, select_member_cb=selector)
+        assert subtitle.content is None
+    else:
+        assert protocol.worker_download_to_content(subtitle, payload, select_member_cb=selector) is True
+        assert subtitle.content == SRT
+
+
+@pytest.mark.parametrize("names", [["Show.S04E01.srt"], ["Show.S04E01.srt", "Show.S05E01.srt"]])
+@pytest.mark.parametrize("defer", [False, True])
+@pytest.mark.parametrize("only_one", [False, True])
+def test_wrong_season_continues_to_next_valid_candidate(monkeypatch, names, defer, only_one):
+    pool, downloads, throttled = selection_pool_for(monkeypatch)
+    selector = (lambda members: {"decision": "defer"}) if defer else None
+    rejected = selection_candidate("wrong-season", archive_payload(names, select_member=defer), selector)
+    accepted = selection_candidate("accepted")
+
+    result, _, sink = select_best(pool, [rejected, accepted], only_one=only_one)
+
+    assert result == downloads[-1:] == [accepted]
+    assert downloads == [rejected, accepted]
+    assert rejected.content is None and accepted.content == SRT
+    assert [row["downloaded"] for row in sink] == [False, True]
+    assert throttled == [] and pool.discarded_providers == set()
+
+
+def test_multi_member_wrong_season_cannot_win_title_ranking():
+    subtitle = candidate()
+    payload = archive_payload({"Show.S04E01 - Mondo Magic.srt": SRT.replace(b"Fixture", b"Wrong season"),
+                               "Show.S03E01.srt": SRT}, episode_title="Mondo Magic")
+    assert protocol.worker_download_to_content(subtitle, payload) is True
+    assert subtitle.content == SRT
+
+
+def test_host_matching_keeps_same_season_episode_title_priority():
+    subtitle = candidate()
+    subtitle.episode = 17
+    payload = archive_payload({"Show.S03E17.srt": SRT.replace(b"Fixture", b"Numeric match"),
+                               "Show.S03E35 - Mondo Magic.srt": SRT}, episode=17, episode_title="Mondo Magic")
+    assert protocol.worker_download_to_content(subtitle, payload) is True
+    assert subtitle.content == SRT
+
+
+def test_host_matching_keeps_forced_filtering():
+    subtitle = candidate()
+    payload = archive_payload({"Show.S03E01.forced.srt": SRT.replace(b"Fixture", b"Forced match"),
+                               "Show.S03E01.srt": SRT})
+    assert protocol.worker_download_to_content(subtitle, payload) is True
+    assert subtitle.content == SRT
+
+
+@pytest.mark.parametrize("names", [["Show.S04E01.srt"], ["Show.S04E01.srt", "Show.S05E01.srt"]])
+def test_unknown_season_does_not_reject_episode_match(names):
+    subtitle = candidate()
+    subtitle.season = None
+    assert protocol.worker_download_to_content(subtitle, archive_payload(names)) is True
+    assert subtitle.content == SRT
+
+
+def test_legacy_matching_keeps_first_episode_and_ignores_season_context():
+    payload = archive_payload({"Show.S03E01E02.srt": SRT.replace(b"Fixture", b"Combined match"),
+                               "Show.S04E02.srt": SRT}, episode=2)
+    archive = get_archive_from_bytes(base64.b64decode(payload["archive_b64"]))
+    assert get_subtitle_from_archive(archive, episode=2, season=3) == SRT
+
+
+@pytest.mark.parametrize("name", ["subtitle.srt", "Show.E01.srt", "Show.S03.srt", "Show.S03E01.srt"])
+def test_single_member_missing_context_markers_remains_usable(name):
+    subtitle = candidate()
+    assert protocol.worker_download_to_content(subtitle, archive_payload([name])) is True
+    assert subtitle.content == SRT
+
+
+def test_wire_season_is_used_when_subtitle_has_no_season():
+    from subliminal_patch.exceptions import SubtitleCandidateRejected
+
+    subtitle = candidate()
+    subtitle.season = None
+    with pytest.raises(SubtitleCandidateRejected):
+        protocol.worker_download_to_content(subtitle, archive_payload(["Show.S04E01.srt"], season=3))
+
+
+@pytest.mark.parametrize("member_season", [3, 4])
+def test_subtitle_season_takes_precedence_over_conflicting_wire_hint(member_season):
+    from subliminal_patch.exceptions import SubtitleCandidateRejected
+
+    subtitle = candidate()
+    payload = archive_payload([f"Show.S0{member_season}E01.srt"], season=4)
+    if member_season == 4:
+        with pytest.raises(SubtitleCandidateRejected):
+            protocol.worker_download_to_content(subtitle, payload)
+    else:
+        assert protocol.worker_download_to_content(subtitle, payload) is True
+        assert subtitle.content == SRT
+
+
+class ArchiveSearchWorker:
+    def __init__(self, payload, display=None, selector=None):
+        self.payload = payload
+        self.display = display or {}
+        self.selector = selector or {"decision": "defer"}
+        self.selections = []
+        self.searches = []
+
+    def request(self, operation, request, timeout):
+        if operation == "search":
+            self.searches.append(request["video"])
+            payload = self.payload(request["video"]) if callable(self.payload) else self.payload
+            return SimpleNamespace(payload={"candidates": [{
+                "provider": "fixture", "id": str(len(self.searches)), "language": {"alpha3": "eng"},
+                "provider_payload": {"result": payload, "season": 99, "episode": 99},
+                "display": self.display, "matches": ["series", "season", "episode"],
+            }]})
+        assert operation == "download"
+        assert request["provider_payload"]["season"] == request["provider_payload"]["episode"] == 99
+        return SimpleNamespace(payload=request["provider_payload"]["result"])
+
+    def select_archive_member(self, request, timeout):
+        self.selections.append(request)
+        return SimpleNamespace(payload=self.selector)
+
+
+def registry_archive_search(payload, display=None, selector=None, season=3, episode=1):
+    worker = ArchiveSearchWorker(payload, display, selector)
+    provider = registry.HubProxyProvider(timeout=120, worker_client=worker)
+    provider.provider_name = "fixture"
+    video = core.Episode("/fixtures/Show.mkv", "Show", season, episode)
+    subtitles = provider.list_subtitles(video, {Language("eng")})
+    assert len(subtitles) == 1
+    assert worker.searches[0]["season"] == season and worker.searches[0]["episode"] == episode
+    return provider, worker, subtitles[0]
+
+
+@pytest.mark.parametrize("names", [["Show.S04E01.srt"], ["Show.S04E01.srt", "Show.S04E02.srt"]])
+@pytest.mark.parametrize("defer", [False, True])
+@pytest.mark.parametrize("episode_hint", ["absent", None, 1])
+def test_registry_request_context_rejects_wrong_season(names, defer, episode_hint):
+    from subliminal_patch.exceptions import SubtitleCandidateRejected
+
+    payload = archive_payload(names, episode=episode_hint, select_member=defer)
+    if episode_hint == "absent":
+        payload.pop("episode")
+    provider, _, subtitle = registry_archive_search(payload)
+    with pytest.raises(SubtitleCandidateRejected):
+        provider.download_subtitle(subtitle)
+    assert subtitle.content is None
+
+
+@pytest.mark.parametrize("defer", [False, True])
+@pytest.mark.parametrize("episode_hint", [None, 9])
+def test_registry_request_overrides_display_and_wire_context(defer, episode_hint):
+    display = {"season": 4, "episode": 9,
+               "_requested_archive_context": {"season": 4, "episode": 9}}
+    payload = archive_payload({"Show.S04E09.srt": SRT.replace(b"Fixture", b"Display match"),
+                               "Show.S03E01.srt": SRT}, episode=episode_hint, season=4, select_member=defer)
+    provider, worker, subtitle = registry_archive_search(payload, display)
+    assert subtitle.season == 4 and subtitle.episode == 9
+    assert provider.download_subtitle(subtitle) is True
+    assert subtitle.content == SRT
+    assert subtitle.season == 4 and subtitle.episode == 9
+    if defer:
+        assert [(r["season"], r["episode"]) for r in worker.selections] == [(3, 1)]
+
+
+def test_registry_request_context_is_kept_per_candidate_across_searches():
+    def payload(video):
+        return archive_payload([f"Show.S0{video['season']}E01.srt"], episode=None, select_member=True)
+
+    provider, worker, first = registry_archive_search(payload)
+    second = provider.list_subtitles(core.Episode("/fixtures/Other.mkv", "Show", 4, 1), {Language("eng")})[0]
+    assert provider.download_subtitle(first) is True
+    assert provider.download_subtitle(second) is True
+    assert first.content == second.content == SRT
+    assert [(r["season"], r["episode"]) for r in worker.selections] == [(3, 1), (4, 1)]
+
+
+@pytest.mark.parametrize("override,selector", [
+    ({"member": "Show.S04E09.srt"}, None),
+    ({"first_subtitle": True}, None),
+    ({"select_member": True}, {"decision": "pin", "member": "Show.S04E09.srt"}),
+])
+def test_registry_request_context_keeps_authoritative_overrides(override, selector):
+    provider, _, subtitle = registry_archive_search(archive_payload(["Show.S04E09.srt"], **override),
+                                                    selector=selector)
+    assert provider.download_subtitle(subtitle) is True
+    assert subtitle.content == SRT
+
+
+@pytest.mark.parametrize("matched", [False, True])
+def test_host_season_only_context_filters_before_movie_shortcut(matched):
+    from subliminal_patch.exceptions import SubtitleCandidateRejected
+
+    subtitle = candidate()
+    subtitle.episode = None
+    names = {"Show.S04E01.srt": SRT.replace(b"Fixture", b"Wrong season"),
+             "Show.S03E02.srt" if matched else "Show.S04E02.srt": SRT}
+    payload = archive_payload(names, episode=None)
+    if matched:
+        assert protocol.worker_download_to_content(subtitle, payload) is True
+        assert subtitle.content == SRT
+    else:
+        with pytest.raises(SubtitleCandidateRejected):
+            protocol.worker_download_to_content(subtitle, payload)
+
+
+@pytest.mark.parametrize("season", [True, "3", -1, [], {}])
+def test_malformed_wire_season_remains_a_protocol_error(season):
+    with pytest.raises(protocol.WorkerProtocolError):
+        protocol.worker_download_to_content(candidate(), archive_payload(["Show.S03E01.srt"], season=season))
+
+
+@pytest.mark.parametrize("override", [{"first_subtitle": True}, {"member": "Show.S04E01.srt"}])
+def test_authoritative_download_override_keeps_wrong_season_member(override):
+    subtitle = candidate()
+    assert protocol.worker_download_to_content(subtitle, archive_payload(["Show.S04E01.srt"], **override)) is True
+    assert subtitle.content == SRT
+
+
+@pytest.mark.parametrize("member", ["Show.S04E01.srt", "Show.S04E01.txt"])
+def test_authoritative_selector_pin_keeps_offered_wrong_season_member(member):
+    subtitle = candidate()
+    assert protocol.worker_download_to_content(
+        subtitle, archive_payload([member], select_member=True),
+        select_member_cb=lambda members: {"decision": "pin", "member": member}) is True
+    assert subtitle.content == SRT
+
+
+@pytest.mark.parametrize("member", ["poster.jpg", ".hidden.srt", "missing.srt"])
+def test_out_of_offer_selector_pin_keeps_provider_error_boundary(monkeypatch, member):
+    pool, downloads, throttled = selection_pool_for(monkeypatch)
+    offered = []
+
+    def selector(members):
+        offered.extend(members)
+        members.append(member)
+        return {"decision": "pin", "member": member}
+
+    rejected = selection_candidate("invalid-pin", archive_payload(
+        ["Show.S03E01.srt", "poster.jpg", ".hidden.srt"], select_member=True), selector)
+    same_provider = selection_candidate("same-provider")
+    other_provider = selection_candidate("other-provider", provider="other")
+
+    result, _, sink = select_best(pool, [rejected, same_provider, other_provider])
+
+    assert offered == ["Show.S03E01.srt"]
+    assert result == [other_provider]
+    assert downloads == [rejected, other_provider]
+    assert rejected.content is same_provider.content is None
+    assert len(throttled) == 1 and pool.discarded_providers == {"fixture"}
+    assert [row["downloaded"] for row in sink] == [False, False, True]
+
+
 @pytest.mark.parametrize("response", [None, [], "reject", {}, {"decision": "unknown"},
                                         {"decision": "pin"}, {"decision": "pin", "member": []},
                                         {"decision": "reject", "member": []},
                                         {"decision": "defer", "member": "unexpected.srt"},
+                                        {"decision": "pin", "member": "missing.srt"},
                                         {"decision": "pin", "member": "../unsafe.srt"}])
 def test_malformed_selector_keeps_provider_error_handling(monkeypatch, response):
     pool, downloads, throttled = pool_for(
@@ -251,8 +517,6 @@ def select_best(pool, subtitles, only_one=True, languages=None, existing_languag
     (archive_payload(["Show.S03E03.srt"]), None),
     (archive_payload(["poster.jpg"]), None),
     (archive_payload(["Show.S03E01.srt"], member="missing.srt"), None),
-    (archive_payload(["Show.S03E01.srt"], select_member=True),
-     lambda members: {"decision": "pin", "member": "missing.srt"}),
     (archive_payload(["Show.S03E01.srt"], select_member=True),
      lambda members: {"decision": "reject"}),
     (archive_payload(["Show.S03E03.srt"], select_member=True),

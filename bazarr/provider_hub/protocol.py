@@ -566,23 +566,31 @@ def _worker_archive_to_content(
     episodes = episode if isinstance(episode, (list, tuple)) else [episode]
     if any(value is not None and (type(value) is not int or value < 0) for value in episodes):
         raise WorkerProtocolError("download.episode must contain non-negative integers")
+    season = payload.get("season")
+    if season is not None and (type(season) is not int or season < 0):
+        raise WorkerProtocolError("download.season must be a non-negative integer")
     member = payload.get("member")
     if member is not None:
         _validate_archive_member_name(member)
 
     def _episode_pick():
         forced = bool(getattr(getattr(subtitle, "language", None), "forced", False))
-        episode = payload.get("episode")
+        context = getattr(subtitle, "_requested_archive_context", {})
+        context_season = context.get("season", getattr(subtitle, "season", None))
+        episode = context.get("episode")
+        if episode is None:
+            episode = payload.get("episode")
         if isinstance(episode, (list, tuple)):
             episode = episode[0] if episode else None
         picked = get_subtitle_from_archive(
             archive,
             forced=forced,
             episode=episode,
+            season=context_season if context_season is not None else season,
             episode_title=payload.get("episode_title"),
             get_first_subtitle=bool(payload.get("first_subtitle")),
             extensions=ARCHIVE_MEMBER_EXTENSIONS,
-            reject_mismatched_single_episode=True,
+            match_episode_context=True,
             log_member_names=False,
         )
         if picked is None:
@@ -600,7 +608,8 @@ def _worker_archive_to_content(
         # cannot list. "defer" => episode pick; "reject" => skip this candidate.
         if select_member_cb is None:
             raise WorkerProtocolError("download.select_member requires a selector")
-        result = select_member_cb(_list_archive_members(archive))
+        offered_members = tuple(_list_archive_members(archive))
+        result = select_member_cb(list(offered_members))
         if not isinstance(result, dict):
             raise WorkerProtocolError("select_archive_member must return an object")
         decision = result.get("decision")
@@ -609,8 +618,8 @@ def _worker_archive_to_content(
         if decision == "pin":
             chosen = result.get("member")
             _validate_archive_member_name(chosen)
-            if chosen not in set(archive.namelist()):
-                raise _archive_rejection(subtitle, archive, "Pinned subtitle member is absent")
+            if chosen not in offered_members:
+                raise WorkerProtocolError("select_archive_member pinned a member outside the offered subtitles")
             content = fix_line_ending(archive.read(chosen))
         elif decision == "defer":
             content = _episode_pick()

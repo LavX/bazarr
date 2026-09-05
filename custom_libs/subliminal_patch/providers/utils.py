@@ -113,14 +113,20 @@ def blacklist_on(*exc_types):
     return decorator
 
 
+def _contains_number(guessed, requested):
+    return requested in guessed if isinstance(guessed, list) else requested == guessed
+
+
 def _get_matching_sub(
-    sub_names, forced=False, episode=None, episode_title=None, log_member_names=True, **kwargs
+    sub_names, forced=False, episode=None, episode_title=None, log_member_names=True,
+    match_episode_context=False, season=None, **kwargs
 ):
-    guess_options = {"single_value": True}
-    if episode is not None:
+    guess_options = {} if match_episode_context else {"single_value": True}
+    if episode is not None or (match_episode_context and season is not None):
         guess_options["type"] = "episode"  # type: ignore
 
     matching_subs = []
+    movie_selection = episode is None and episode_title is None
 
     for sub_name in sub_names:
         if not forced and os.path.splitext(sub_name.lower())[0].endswith("forced"):
@@ -128,14 +134,19 @@ def _get_matching_sub(
                 logger.debug("Ignoring forced subtitle: %s", sub_name)
             continue
 
-        # If it's a movie then get the first subtitle
-        if episode is None and episode_title is None:
+        guess = {}
+        if not movie_selection or (match_episode_context and season is not None):
+            guess = guessit(sub_name, options=guess_options)
+        if (match_episode_context and season is not None and guess.get("season") is not None
+                and not _contains_number(guess["season"], season)):
+            continue
+
+        # Without episode context, get the first member that passed the season check.
+        if movie_selection:
             if log_member_names:
                 logger.debug("Movie subtitle found: %s", sub_name)
             matching_subs.append(_MatchingSub(sub_name, 2, "Movie subtitle"))
             break
-
-        guess = guessit(sub_name, options=guess_options)
 
         matched_episode_num = guess.get("episode")
         if not matched_episode_num and log_member_names:
@@ -146,7 +157,8 @@ def _get_matching_sub(
             if from_name is not None:
                 matching_subs.append(from_name)
 
-        if episode == matched_episode_num:
+        if (_contains_number(matched_episode_num, episode) if match_episode_context
+                else episode == matched_episode_num):
             if log_member_names:
                 logger.debug("Episode matched from number: %s", sub_name)
             matching_subs.append(_MatchingSub(sub_name, 2, "Episode number matched"))
@@ -191,14 +203,15 @@ def get_subtitle_from_archive(
     episode=None,
     get_first_subtitle=False,
     extensions=DEFAULT_ARCHIVE_EXTENSIONS,
-    reject_mismatched_single_episode=False,
+    match_episode_context=False,
     log_member_names=True,
+    season=None,
     **kwargs,
 ):
     """Return subtitle bytes, or None if no member matches.
 
-    The host can reject explicitly wrong single-episode files and supply its own
-    sanitized diagnostics. Defaults preserve selection and logging for providers.
+    The host can match all included episodes and reject explicit season mismatches
+    while supplying sanitized diagnostics. Defaults preserve provider behavior.
     An explicit first-subtitle request remains authoritative.
     """
     subs_in_archive = list_subtitle_members(archive, extensions)
@@ -216,19 +229,20 @@ def get_subtitle_from_archive(
         logger.debug("Subtitles in archive: %s", subs_in_archive)
 
     if len(subs_in_archive) == 1 or get_first_subtitle:
-        if reject_mismatched_single_episode and episode is not None and not get_first_subtitle:
-            guessed_episode = guessit(
+        if match_episode_context and (episode is not None or season is not None) and not get_first_subtitle:
+            guess = guessit(
                 subs_in_archive[0], options={"type": "episode"}
-            ).get("episode")
-            included_episodes = guessed_episode if isinstance(guessed_episode, list) else [guessed_episode]
-            if guessed_episode is not None and episode not in included_episodes:
-                return None
+            )
+            for key, requested in (("season", season), ("episode", episode)):
+                if requested is not None and guess.get(key) is not None and not _contains_number(guess[key], requested):
+                    return None
         if log_member_names:
             logger.debug("Getting first subtitle in archive: %s", subs_in_archive)
         return fix_line_ending(archive.read(subs_in_archive[0]))
 
     matching_sub = _get_matching_sub(
-        subs_in_archive, forced, episode, log_member_names=log_member_names, **kwargs
+        subs_in_archive, forced, episode, log_member_names=log_member_names,
+        match_episode_context=match_episode_context, season=season, **kwargs
     )
 
     if matching_sub is not None:
