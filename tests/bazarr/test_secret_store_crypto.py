@@ -6,6 +6,8 @@ bad-cipher diagnostics) lives in commit 5's test_secrets_e2e.py. This file
 covers just the crypto primitives.
 """
 from unittest.mock import MagicMock
+import json
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +18,23 @@ from secret_store.crypto import (
     get_master_key,
     is_encrypted,
 )
+
+
+_OLD_CRYPTOGRAPHY = json.loads(
+    (Path(__file__).with_name('fixtures') / 'cryptography49_fernet.json').read_text(encoding='utf-8')
+)
+
+
+@pytest.mark.parametrize('case', _OLD_CRYPTOGRAPHY['cases'], ids=['provider', 'translator', 'unicode'])
+def test_ciphertext_from_cryptography_49_remains_readable(case):
+    """Persisted synthetic fixtures were encrypted by the actual 49.0.0 wheel."""
+    key = _OLD_CRYPTOGRAPHY['master_key']
+    assert decrypt_secret(case['ciphertext'], master_key=key) == case['plaintext']
+    assert encrypt_secret(case['ciphertext'], master_key=key) == case['ciphertext']
+    with pytest.raises(ValueError, match='tampered|master key'):
+        decrypt_secret(case['ciphertext'], master_key='synthetic-wrong-master-key')
+    with pytest.raises(ValueError, match='tampered|master key'):
+        decrypt_secret(case['ciphertext'][:-2] + 'AA', master_key=key)
 
 
 @pytest.fixture

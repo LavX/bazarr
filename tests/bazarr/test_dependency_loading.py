@@ -4,6 +4,7 @@ from pathlib import Path
 
 import subliminal
 import yaml
+import pytest
 
 
 def test_pytest_conftest_imports_without_pkg_resources_deprecation_warning():
@@ -234,6 +235,7 @@ def test_startup_requirements_probe_uses_security_patched_dependency_versions():
     requirements = (repo_root / "requirements.txt").read_text()
 
     expected_versions = {
+        "cryptography": ("cryptography", ">=50.0.1"),
         "dynaconf": ("dynaconf", "==3.3.5"),
         "urllib3": ("urllib3", "==2.7.0"),
     }
@@ -261,6 +263,31 @@ def test_startup_requirements_probe_supports_upper_bound_specs():
     assert _satisfies_spec("1.2.58", "<=1.2.58")
     assert _satisfies_spec("1.2.57", "<=1.2.58")
     assert not _satisfies_spec("1.2.59", "<=1.2.58")
+
+
+@pytest.mark.parametrize('installed', ['48.0.0', '49.0.0', '50.0.0', '50.0.1', '50.0.2'])
+def test_cryptography_security_floor_repairs_old_installs_once(monkeypatch, installed):
+    from app import requirements
+
+    monkeypatch.setattr(requirements, 'RUNTIME_IMPORTS', ('cryptography',))
+    installed_version = [installed]
+    monkeypatch.setattr(requirements.metadata, 'version', lambda distribution: installed_version[0])
+    repairs, restarts = [], []
+
+    def install(missing):
+        repairs.append(missing)
+        installed_version[0] = '50.0.1'
+        return True
+
+    monkeypatch.setattr(requirements, 'install_requirements', install)
+    monkeypatch.setattr(requirements, 'restart_after_requirements_install', lambda: restarts.append(True))
+    needs_repair = installed in ['48.0.0', '49.0.0', '50.0.0']
+    assert requirements.missing_runtime_requirements() == (['cryptography'] if needs_repair else [])
+    assert requirements.ensure_requirements() is needs_repair
+    assert repairs == ([['cryptography']] if needs_repair else [])
+    assert restarts == ([True] if needs_repair else [])
+    assert requirements.ensure_requirements() is False
+    assert len(repairs) == len(restarts) == int(needs_repair)
 
 
 def test_startup_requirements_probe_rejects_removed_vendor_origins(monkeypatch):

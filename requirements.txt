@@ -17,7 +17,7 @@ click-option-group>=0.5.9
 # support must not be picked up unattended. 1.2.71 is the newest release on
 # PyPI today, so this resolves to the latest version.
 cloudscraper<=1.2.71
-cryptography>=49.0.0
+cryptography>=50.0.1
 deathbycaptcha-official==4.7.1
 deep-translator==1.11.4
 dnspython==2.8.0
