@@ -389,15 +389,16 @@ def _guard_archive_members(archive) -> None:
         if total > _MAX_ARCHIVE_TOTAL_BYTES:
             raise WorkerProtocolError("download.archive_b64 decompresses past the size limit")
     for name in archive.namelist():
-        _validate_archive_member_name(name)
+        _validate_archive_member_name(name, disk_extracted=isinstance(archive, _SevenZipArchive))
 
 
-def _validate_archive_member_name(name):
+def _validate_archive_member_name(name, disk_extracted=False):
     if not isinstance(name, str) or not name:
         raise WorkerProtocolError("archive member must be a non-empty string")
     normalized = name.replace("\\", "/")
     if (normalized.startswith("/") or ".." in normalized.split("/")
-            or ":" in normalized or "\0" in normalized):
+            or re.match(r"^[A-Za-z]:", normalized) or "\0" in normalized
+            or (disk_extracted and ":" in normalized)):
         raise WorkerProtocolError("archive member has an unsafe path")
 
 
@@ -571,24 +572,28 @@ def _worker_archive_to_content(
         raise WorkerProtocolError("download.season must be a non-negative integer")
     member = payload.get("member")
     if member is not None:
-        _validate_archive_member_name(member)
+        _validate_archive_member_name(member, disk_extracted=isinstance(archive, _SevenZipArchive))
 
     def _episode_pick():
         forced = bool(getattr(getattr(subtitle, "language", None), "forced", False))
-        context = getattr(subtitle, "_requested_archive_context", {})
-        context_season = context.get("season", getattr(subtitle, "season", None))
-        # Archive names may use either numbering scheme from the original search.
-        requested_episodes = (context.get("episode"), context.get("absolute_episode"))
-        episode = tuple(value for value in requested_episodes if type(value) is int and value >= 0)
-        if not episode:
+        context = getattr(subtitle, "_requested_archive_context", None)
+        if context is None:
+            context_season = getattr(subtitle, "season", None)
+            if context_season is None:
+                context_season = season
             episode = payload.get("episode")
             if isinstance(episode, (list, tuple)):
                 episode = episode[0] if episode else None
+        else:
+            # An absent requested number is intentional, including movie searches.
+            context_season = context.get("season")
+            requested_episodes = (context.get("episode"), context.get("absolute_episode"))
+            episode = tuple(value for value in requested_episodes if type(value) is int and value >= 0) or None
         picked = get_subtitle_from_archive(
             archive,
             forced=forced,
             episode=episode,
-            season=context_season if context_season is not None else season,
+            season=context_season,
             episode_title=payload.get("episode_title"),
             get_first_subtitle=bool(payload.get("first_subtitle")),
             extensions=ARCHIVE_MEMBER_EXTENSIONS,
@@ -619,7 +624,7 @@ def _worker_archive_to_content(
             raise WorkerProtocolError("select_archive_member may only name a member when pinning")
         if decision == "pin":
             chosen = result.get("member")
-            _validate_archive_member_name(chosen)
+            _validate_archive_member_name(chosen, disk_extracted=isinstance(archive, _SevenZipArchive))
             if chosen not in offered_members:
                 raise WorkerProtocolError("select_archive_member pinned a member outside the offered subtitles")
             content = fix_line_ending(archive.read(chosen))

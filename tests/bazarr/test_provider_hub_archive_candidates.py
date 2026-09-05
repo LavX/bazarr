@@ -29,6 +29,92 @@ def archive_payload(names, **extra):
             "archive_sha256": hashlib.sha256(body).hexdigest(), "episode": 1, **extra}
 
 
+def formatted_archive_payload(kind, members, **extra):
+    if kind == "zip":
+        return archive_payload(members, **extra)
+    buffer = io.BytesIO()
+    if kind == "rar":
+        import struct
+        import zlib
+
+        def block(block_type, flags, body):
+            header = struct.pack("<BHH", block_type, flags, 7 + len(body)) + body
+            return struct.pack("<H", zlib.crc32(header) & 0xffff) + header
+
+        # Stored RAR4 members exercise the real reader without an external writer.
+        buffer.write(b"Rar!\x1a\x07\x00" + block(0x73, 0, b"\x00" * 6))
+        for name, content in members.items():
+            encoded = name.encode("ascii")
+            header = struct.pack("<LLBLLBBHL", len(content), len(content), 3,
+                                 zlib.crc32(content), 0, 20, 0x30, len(encoded), 0o100644)
+            buffer.write(block(0x74, 0x8000, header + encoded) + content)
+        buffer.write(block(0x7b, 0, b""))
+    else:
+        import py7zr
+
+        assert kind == "7z"
+        with py7zr.SevenZipFile(buffer, "w") as archive:
+            for name, content in members.items():
+                archive.writestr(content, name)
+    body = buffer.getvalue()
+    return {"archive_b64": base64.b64encode(body).decode("ascii"),
+            "archive_sha256": hashlib.sha256(body).hexdigest(), "episode": 1, **extra}
+
+
+def archive_selection(mode, member):
+    if mode == "pin":
+        return {"member": member}, None
+    if mode == "selector":
+        return {"select_member": True}, lambda members: {"decision": "pin", "member": member}
+    if mode == "defer":
+        return {"select_member": True}, lambda members: {"decision": "defer"}
+    assert mode == "automatic"
+    return {}, None
+
+
+@pytest.mark.parametrize("kind", ["zip", "rar"])
+@pytest.mark.parametrize("mode", ["automatic", "defer", "pin", "selector"])
+@pytest.mark.parametrize("colon_subtitle", [False, True])
+def test_streamed_archives_allow_colon_subtitles_and_metadata(kind, mode, colon_subtitle):
+    name = "Show: Pilot.S03E01.srt" if colon_subtitle else "Show.S03E01.srt"
+    members = {"metadata: source.nfo": b"Fixture metadata", name: SRT}
+    extra, selector = archive_selection(mode, name)
+    subtitle = candidate()
+    assert protocol.worker_download_to_content(
+        subtitle, formatted_archive_payload(kind, members, **extra), select_member_cb=selector) is True
+    assert subtitle.content == SRT
+
+
+@pytest.mark.parametrize("mode", ["automatic", "defer", "pin", "selector"])
+@pytest.mark.parametrize("colon_subtitle", [False, True])
+def test_disk_extracted_seven_zip_rejects_all_colon_entries_before_read(monkeypatch, mode, colon_subtitle):
+    name = "Show: Pilot.S03E01.srt" if colon_subtitle else "Show.S03E01.srt"
+    members = {name: SRT} if colon_subtitle else {"metadata: source.nfo": b"Fixture metadata", name: SRT}
+    extra, selector = archive_selection(mode, name)
+    payload = formatted_archive_payload("7z", members, **extra)
+    monkeypatch.setattr(protocol._SevenZipArchive, "read", lambda *a: pytest.fail("unsafe member was read"))
+    with pytest.raises(protocol.WorkerProtocolError, match="unsafe path"):
+        protocol.worker_download_to_content(candidate(), payload, select_member_cb=selector)
+
+
+@pytest.mark.parametrize("mode", ["automatic", "defer", "pin", "selector"])
+def test_disk_extracted_seven_zip_without_colons_still_downloads(mode):
+    name = "Show.S03E01.srt"
+    extra, selector = archive_selection(mode, name)
+    subtitle = candidate()
+    assert protocol.worker_download_to_content(
+        subtitle, formatted_archive_payload("7z", {name: SRT}, **extra), select_member_cb=selector) is True
+    assert subtitle.content == SRT
+
+
+@pytest.mark.parametrize("kind", ["zip", "rar"])
+@pytest.mark.parametrize("name", ["C:/unsafe.srt", "C:unsafe.srt", "../unsafe.srt", "/unsafe.srt",
+                                  "nested/../unsafe.srt", "\\\\server\\unsafe.srt"])
+def test_streamed_archives_keep_drive_absolute_and_traversal_guards(kind, name):
+    with pytest.raises(protocol.WorkerProtocolError, match="unsafe path"):
+        protocol.worker_download_to_content(candidate(), formatted_archive_payload(kind, {name: SRT}))
+
+
 def candidate(identifier="result"):
     subtitle = protocol.HubWorkerSubtitle("fixture", "fixture", identifier, Language("eng"), {})
     subtitle.episode = 1
@@ -267,6 +353,49 @@ def registry_archive_search(payload, display=None, selector=None, season=3, epis
     assert worker.searches[0]["season"] == season and worker.searches[0]["episode"] == episode
     assert worker.searches[0]["absolute_episode"] == absolute_episode
     return provider, worker, subtitles[0]
+
+
+@pytest.mark.parametrize("kind", ["movie", "season_only", "unknown_season"])
+@pytest.mark.parametrize("hint", ["absent", "null", "conflicting"])
+@pytest.mark.parametrize("multiple", [False, True])
+@pytest.mark.parametrize("defer", [False, True])
+def test_stored_request_context_keeps_intentionally_absent_numbers(kind, hint, multiple, defer):
+    video = (core.Movie("/fixtures/Film.mkv", "Film", year=2024) if kind == "movie" else
+             core.Episode("/fixtures/Show.mkv", "Show", 3 if kind == "season_only" else None,
+                          None if kind == "season_only" else 1))
+    members = {"Show.S03E01.srt": SRT}
+    if multiple:
+        members["Show.S04E09.srt"] = SRT.replace(b"Fixture", b"Stale hint")
+    payload = archive_payload(members, select_member=defer)
+    payload.pop("episode")
+    if hint != "absent":
+        payload.update(episode=9 if hint == "conflicting" else None,
+                       season=4 if hint == "conflicting" else None)
+    worker = ArchiveSearchWorker(payload, display={"season": 4, "episode": 9, "absolute_episode": 9})
+    provider = registry.HubProxyProvider(timeout=120, worker_client=worker)
+    provider.provider_name = "fixture"
+    subtitle = provider.list_subtitles(video, {Language("eng")})[0]
+    request = worker.searches[0]
+    assert request["season"] == (3 if kind == "season_only" else None)
+    assert request["episode"] == (1 if kind == "unknown_season" else None)
+    assert request["absolute_episode"] is None
+
+    assert provider.download_subtitle(subtitle) is True
+    assert subtitle.content == SRT
+    if defer:
+        assert [(s["season"], s["episode"]) for s in worker.selections] == [
+            (request["season"], request["episode"])]
+
+
+@pytest.mark.parametrize("hint", [2, [2, 3]])
+def test_legacy_candidate_without_stored_context_keeps_wire_fallback(hint):
+    subtitle = candidate()
+    subtitle.season = subtitle.episode = None
+    assert not hasattr(subtitle, "_requested_archive_context")
+    payload = archive_payload({"Show.S03E01.srt": SRT.replace(b"Fixture", b"Wrong hint"),
+                               "Show.S04E02.srt": SRT}, episode=hint, season=4)
+    assert protocol.worker_download_to_content(subtitle, payload) is True
+    assert subtitle.content == SRT
 
 
 @pytest.mark.parametrize("name", ["Show.S03E01.srt", "49.srt", "Show.E49.srt", "Show.S03E48E49.srt"])
