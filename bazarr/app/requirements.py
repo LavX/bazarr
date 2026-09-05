@@ -108,7 +108,7 @@ RUNTIME_REQUIREMENTS = {
     "charset_normalizer": ("charset-normalizer", "==3.5.1"),
     "click_option_group": ("click-option-group", ">=0.5.6"),
     "cloudscraper": ("cloudscraper", "<=1.2.58"),
-    "cryptography": ("cryptography", ">=48.0.0"),
+    "cryptography": ("cryptography", ">=50.0.1"),
     "dateutil": ("python-dateutil", "==2.9.0"),
     "deathbycaptcha": ("deathbycaptcha-official", "==4.7.1"),
     "deep_translator": ("deep-translator", "==1.11.4"),
