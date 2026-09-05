@@ -78,9 +78,7 @@ def _handle(provider, op, payload):
     if op == "select_archive_member":
         selector = getattr(provider, "select_archive_member", None)
         if selector is None:
-            # Provider asked the host to list members (select_member) but exposes no
-            # selector: reject so the host fails loud rather than risk a wrong member.
-            return {"member": None, "decision": "reject"}
+            raise ValueError("select_archive_member is not implemented")
         provider_payload = dict(payload.get("provider_payload") or {})
         # The host forwards the requested season/episode at the top level of the op payload.
         # Surface them on provider_payload (host context is authoritative) so a selector can
@@ -93,10 +91,12 @@ def _handle(provider, op, payload):
             language=payload.get("language") or {},
             members=payload.get("members") or [],
             config=payload.get("config") or {},
-        ) or {}
+        )
+        if not isinstance(result, dict):
+            raise ValueError("select_archive_member must return an object")
         decision = result.get("decision")
         if decision not in ("pin", "defer", "reject"):
-            decision = "reject"
+            raise ValueError("select_archive_member returned an invalid decision")
         return {"member": result.get("member"), "decision": decision}
     raise ValueError(f"unsupported worker op: {op}")
 

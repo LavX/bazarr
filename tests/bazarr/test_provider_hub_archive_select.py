@@ -10,6 +10,7 @@ import zipfile
 import pytest
 
 import provider_hub.protocol as proto
+from subliminal_patch.exceptions import SubtitleCandidateRejected
 from subliminal_patch.providers.utils import get_archive_from_bytes
 
 _SRT = b"1\n00:00:01,000 --> 00:00:02,000\nx\n"
@@ -85,7 +86,7 @@ def test_select_member_pin_unknown_member_raises():
 
 def test_select_member_reject_raises():
     body = _zip(["show.eng.srt", "show.fre.srt"])
-    with pytest.raises(proto.WorkerProtocolError):
+    with pytest.raises(SubtitleCandidateRejected, match="No matching subtitle language"):
         _run(body, _archive_payload(body, select_member=True),
              lambda members: {"member": None, "decision": "reject"})
 
@@ -140,19 +141,19 @@ def test_worker_runner_select_archive_member_rejects_when_unimplemented():
     class P:
         pass
 
-    out = worker_runner._handle(P(), "select_archive_member", {"members": ["a.srt"]})
-    assert out == {"member": None, "decision": "reject"}
+    with pytest.raises(ValueError, match="not implemented"):
+        worker_runner._handle(P(), "select_archive_member", {"members": ["a.srt"]})
 
 
-def test_worker_runner_select_archive_member_coerces_bad_decision():
+def test_worker_runner_select_archive_member_rejects_bad_decision():
     from provider_hub import worker_runner
 
     class P:
         def select_archive_member(self, provider_payload, language, members, config):
             return {"member": None, "decision": "weird"}
 
-    out = worker_runner._handle(P(), "select_archive_member", {"members": ["a.srt"]})
-    assert out["decision"] == "reject"
+    with pytest.raises(ValueError, match="invalid decision"):
+        worker_runner._handle(P(), "select_archive_member", {"members": ["a.srt"]})
 
 
 def test_select_member_callback_receives_listed_members():

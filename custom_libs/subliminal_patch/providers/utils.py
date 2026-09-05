@@ -114,7 +114,7 @@ def blacklist_on(*exc_types):
 
 
 def _get_matching_sub(
-    sub_names, forced=False, episode=None, episode_title=None, **kwargs
+    sub_names, forced=False, episode=None, episode_title=None, log_member_names=True, **kwargs
 ):
     guess_options = {"single_value": True}
     if episode is not None:
@@ -124,40 +124,44 @@ def _get_matching_sub(
 
     for sub_name in sub_names:
         if not forced and os.path.splitext(sub_name.lower())[0].endswith("forced"):
-            logger.debug("Ignoring forced subtitle: %s", sub_name)
+            if log_member_names:
+                logger.debug("Ignoring forced subtitle: %s", sub_name)
             continue
 
         # If it's a movie then get the first subtitle
         if episode is None and episode_title is None:
-            logger.debug("Movie subtitle found: %s", sub_name)
+            if log_member_names:
+                logger.debug("Movie subtitle found: %s", sub_name)
             matching_subs.append(_MatchingSub(sub_name, 2, "Movie subtitle"))
             break
 
         guess = guessit(sub_name, options=guess_options)
 
         matched_episode_num = guess.get("episode")
-        if not matched_episode_num:
+        if not matched_episode_num and log_member_names:
             logger.debug("No episode number found in file: %s", sub_name)
 
         if episode_title is not None:
-            from_name = _analize_sub_name(sub_name, episode_title)
+            from_name = _analize_sub_name(sub_name, episode_title, log_member_names)
             if from_name is not None:
                 matching_subs.append(from_name)
 
         if episode == matched_episode_num:
-            logger.debug("Episode matched from number: %s", sub_name)
+            if log_member_names:
+                logger.debug("Episode matched from number: %s", sub_name)
             matching_subs.append(_MatchingSub(sub_name, 2, "Episode number matched"))
 
     if matching_subs:
         matching_subs.sort(key=lambda x: x.priority, reverse=True)
-        logger.debug("Matches: %s", matching_subs)
+        if log_member_names:
+            logger.debug("Matches: %s", matching_subs)
         return matching_subs[0].file
     else:
         logger.debug("Nothing matched")
         return None
 
 
-def _analize_sub_name(sub_name: str, title_: str):
+def _analize_sub_name(sub_name: str, title_: str, log_member_names=True):
     titles = re.split(r"[\s_\.\+]?[.-][\s_\.\+]?", os.path.splitext(sub_name)[0])
 
     for title in titles:
@@ -165,9 +169,10 @@ def _analize_sub_name(sub_name: str, title_: str):
         ratio = SequenceMatcher(None, title.lower(), title_.lower()).ratio()
 
         if ratio > 0.85:
-            logger.debug(
-                "Episode title matched: '%s' -> '%s' [%s]", title, sub_name, ratio
-            )
+            if log_member_names:
+                logger.debug(
+                    "Episode title matched: '%s' -> '%s' [%s]", title, sub_name, ratio
+                )
 
             # Avoid false positives with short titles
             if len(title_) > 4 and ratio >= 0.98:
@@ -175,7 +180,8 @@ def _analize_sub_name(sub_name: str, title_: str):
 
             return _MatchingSub(sub_name, 1, "Normal title ratio")
 
-    logger.debug("No episode title matched from file: %s", sub_name)
+    if log_member_names:
+        logger.debug("No episode title matched from file: %s", sub_name)
     return None
 
 
@@ -185,34 +191,55 @@ def get_subtitle_from_archive(
     episode=None,
     get_first_subtitle=False,
     extensions=DEFAULT_ARCHIVE_EXTENSIONS,
+    reject_mismatched_single_episode=False,
+    log_member_names=True,
     **kwargs,
 ):
-    "Get subtitle from Rarfile/Zipfile object. Return None if nothing is found."
+    """Return subtitle bytes, or None if no member matches.
+
+    The host can reject explicitly wrong single-episode files and supply its own
+    sanitized diagnostics. Defaults preserve selection and logging for providers.
+    An explicit first-subtitle request remains authoritative.
+    """
     subs_in_archive = list_subtitle_members(archive, extensions)
 
     if not subs_in_archive:
         # Name the members: without them a user whose download failed here has no
         # way to tell an archive full of the wrong extensions from a broken one.
-        logger.warning(
-            "No subtitles found in archive. Members: %s", _archive_member_names(archive)
-        )
+        if log_member_names:
+            logger.warning(
+                "No subtitles found in archive. Members: %s", _archive_member_names(archive)
+            )
         return None
 
-    logger.debug("Subtitles in archive: %s", subs_in_archive)
+    if log_member_names:
+        logger.debug("Subtitles in archive: %s", subs_in_archive)
 
     if len(subs_in_archive) == 1 or get_first_subtitle:
-        logger.debug("Getting first subtitle in archive: %s", subs_in_archive)
+        if reject_mismatched_single_episode and episode is not None and not get_first_subtitle:
+            guessed_episode = guessit(
+                subs_in_archive[0], options={"type": "episode"}
+            ).get("episode")
+            included_episodes = guessed_episode if isinstance(guessed_episode, list) else [guessed_episode]
+            if guessed_episode is not None and episode not in included_episodes:
+                return None
+        if log_member_names:
+            logger.debug("Getting first subtitle in archive: %s", subs_in_archive)
         return fix_line_ending(archive.read(subs_in_archive[0]))
 
-    matching_sub = _get_matching_sub(subs_in_archive, forced, episode, **kwargs)
+    matching_sub = _get_matching_sub(
+        subs_in_archive, forced, episode, log_member_names=log_member_names, **kwargs
+    )
 
     if matching_sub is not None:
-        logger.info("Using %s from archive", matching_sub)
+        if log_member_names:
+            logger.info("Using %s from archive", matching_sub)
         return fix_line_ending(archive.read(matching_sub))
 
-    logger.warning(
-        "No subtitle in archive matched this episode. Members: %s", subs_in_archive
-    )
+    if log_member_names:
+        logger.warning(
+            "No subtitle in archive matched this episode. Members: %s", subs_in_archive
+        )
     return None
 
 
