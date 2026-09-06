@@ -111,9 +111,20 @@ def add_translator_info(dest_srt_file, info):
             f.write(srt.compose(subtitles))
 
 
+# The callers do not agree on how to spell this: the manual translate endpoint
+# sends "movie" while the batch and mass-operation paths send "movies". Both mean
+# the same thing, and matching only one of them silently produced an empty title
+# and an empty prompt description for every movie translated from its own page.
+MOVIE_MEDIA_TYPES = ('movie', 'movies')
+
+
+def is_movie_media_type(media_type) -> bool:
+    return str(media_type or '').strip().lower() in MOVIE_MEDIA_TYPES
+
+
 def get_description(media_type, radarr_id, sonarr_series_id):
     try:
-        if media_type == 'movies':
+        if is_movie_media_type(media_type):
             movie = database.execute(
                 select(TableMovies.title, TableMovies.imdbId, TableMovies.year, TableMovies.overview)
                 .where(TableMovies.radarrId == radarr_id)
@@ -150,7 +161,7 @@ def get_title(
         sonarr_episode_id: Union[int, None] = None
 ) -> str:
     try:
-        if media_type == "movies":
+        if is_movie_media_type(media_type):
             if radarr_id is None:
                 return ""
 
