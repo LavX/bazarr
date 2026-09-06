@@ -8,6 +8,7 @@ from flask_restx import Resource, Namespace
 from app.config import settings
 from app.jobs_queue import jobs_queue
 from subtitles.tools.translate.services.auth import get_translator_auth_headers
+from subtitles.tools.translate.services.openrouter_translator import build_provider_config
 from ..utils import authenticate
 
 api_ns_translator = Namespace('Translator', description='AI Subtitle Translator service operations')
@@ -124,6 +125,7 @@ class TranslatorJobs(Resource):
                 "apiKey": api_key,
                 "model": settings.translator.openrouter_model,
                 "temperature": settings.translator.openrouter_temperature,
+                "provider": build_provider_config(),
             }
         }
 

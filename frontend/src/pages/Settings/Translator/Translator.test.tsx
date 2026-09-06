@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   aiTranslatorConcurrentOptions,
   aiTranslatorModelOptions,
+  aiTranslatorProviderRoutingOptions,
   aiTranslatorReasoningOptions,
   translatorOption,
 } from "./options";
@@ -44,5 +45,24 @@ describe("Translator options", () => {
     const values = aiTranslatorReasoningOptions.map((o) => o.value);
     expect(values).toContain("disabled");
     expect(values).toContain("high");
+  });
+
+  it("provider routing options match the backend setting values", () => {
+    const values = aiTranslatorProviderRoutingOptions.map((o) => o.value);
+    expect(values).toEqual([
+      "throughput",
+      "nitro",
+      "price",
+      "floor",
+      "latency",
+      "default",
+    ]);
+  });
+
+  it("provider routing marks throughput as the default", () => {
+    const throughput = aiTranslatorProviderRoutingOptions.find(
+      (o) => o.value === "throughput",
+    );
+    expect(throughput?.label).toContain("Default");
   });
 });

@@ -40,6 +40,7 @@ import ModelDetailsCard, { useOpenRouterModelDetails } from "./ModelDetails";
 import {
   aiTranslatorConcurrentOptions,
   aiTranslatorParallelBatchesOptions,
+  aiTranslatorProviderRoutingOptions,
   aiTranslatorReasoningOptions,
 } from "./options";
 
@@ -488,7 +489,7 @@ const SettingsTranslatorView: FunctionComponent = () => {
                 </Anchor>
               </MantineText>
               <ModelDetailsFromSetting />
-              <SimpleGrid cols={{ base: 1, sm: 4 }} mt="xs">
+              <SimpleGrid cols={{ base: 1, sm: 3, lg: 5 }} mt="xs">
                 <div>
                   <Slider
                     label="Temperature"
@@ -507,6 +508,18 @@ const SettingsTranslatorView: FunctionComponent = () => {
                   </MantineText>
                 </div>
                 <ReasoningSelector />
+                <Tooltip
+                  label="Which OpenRouter provider serves the model. Fastest picks the highest-throughput provider, Cheapest the lowest price. The :nitro and :floor variants also unlock OpenRouter's priority and flex tiers. The provider decides what a request costs."
+                  multiline
+                  w={280}
+                  withArrow
+                >
+                  <Selector
+                    label="Provider Routing"
+                    options={aiTranslatorProviderRoutingOptions}
+                    settingKey="settings-translator-openrouter_provider_routing"
+                  />
+                </Tooltip>
                 <Tooltip
                   label="Hard limit on simultaneous translation jobs. Bazarr will queue excess jobs until a slot opens."
                   multiline

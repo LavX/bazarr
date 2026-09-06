@@ -1,5 +1,6 @@
 # coding=utf-8
 
+import re
 import time
 import logging
 import os
@@ -24,9 +25,91 @@ from .auth import get_translator_auth_headers
 
 logger = logging.getLogger(__name__)
 
+PROVIDER_ROUTING_VALUES = ('throughput', 'nitro', 'price', 'floor', 'latency', 'default')
+DEFAULT_PROVIDER_ROUTING = 'throughput'
+# Sidecars before this version forward provider.sort to OpenRouter verbatim, which
+# rejects nitro, floor and default; they get the plain sort each value stands for.
+ROUTING_SHORTCUTS_MIN_SIDECAR = (1, 3, 4)
+ROUTING_PLAIN_SORT = {'nitro': 'throughput', 'floor': 'price', 'default': 'throughput'}
+SIDECAR_VERSION_CACHE_SECONDS = 300
+_sidecar_version_cache = {}
+
 POLL_HARD_CAP_SECONDS = 12 * 3600
 POLL_UNREACHABLE_LIMIT_SECONDS = 600
 POLL_INTERVAL_SECONDS = 2
+
+
+def _typed_routing_suffix(model_id):
+    """'floor' or 'nitro' when the model id ends with that OpenRouter shortcut, else None."""
+    for suffix in ('floor', 'nitro'):
+        if str(model_id or '').endswith(f':{suffix}'):
+            return suffix
+    return None
+
+
+def reset_sidecar_version_cache():
+    _sidecar_version_cache.clear()
+
+
+def _parse_version(text):
+    """'1.3.4', '1.3.4-rc1' or 'v1.3.4' -> (1, 3, 4); None when it does not start with digits."""
+    numbers = re.match(r'v?(\d+)(?:\.(\d+))?(?:\.(\d+))?', str(text or ''))
+    if not numbers:
+        return None
+    return tuple(int(part or 0) for part in numbers.groups())
+
+
+def sidecar_version(base_url):
+    """The AI Subtitle Translator version behind ``base_url``, cached per URL.
+
+    Returns a version tuple, or None when the health endpoint is unreachable or
+    does not report a version. The probe is cheap and unauthenticated, and it is
+    cached so a job of many batches asks once.
+    """
+    base_url = (base_url or '').rstrip('/')
+    cached = _sidecar_version_cache.get(base_url)
+    if cached and cached[0] > time.monotonic():
+        return cached[1]
+    version = None
+    try:
+        response = requests.get(f"{base_url}/health", timeout=5)
+        if response.status_code == 200:
+            version = _parse_version(response.json().get('version'))
+    except (requests.exceptions.RequestException, ValueError, AttributeError) as e:
+        logger.debug("Could not read the AI Subtitle Translator version from %s: %s", base_url, e)
+    _sidecar_version_cache[base_url] = (time.monotonic() + SIDECAR_VERSION_CACHE_SECONDS, version)
+    return version
+
+
+def build_provider_config():
+    """The OpenRouter provider routing the sidecar applies to every request of a job.
+
+    Left unset the sidecar sorts providers by throughput, which is the fastest and
+    often not the cheapest endpoint; the setting lets the user pick price, latency,
+    the ``:nitro``/``:floor`` shortcuts, or OpenRouter's own load balancing. A
+    sidecar older than 1.3.4 (or one whose version cannot be read) does not know
+    the shortcuts and would hand them to OpenRouter as an invalid sort, so it gets
+    the plain sort each of them stands for.
+    """
+    routing = getattr(settings.translator, 'openrouter_provider_routing', DEFAULT_PROVIDER_ROUTING)
+    if routing not in PROVIDER_ROUTING_VALUES:
+        logger.warning("Unknown OpenRouter provider routing '%s', using %s", routing, DEFAULT_PROVIDER_ROUTING)
+        routing = DEFAULT_PROVIDER_ROUTING
+    typed = _typed_routing_suffix(getattr(settings.translator, 'openrouter_model', ''))
+    if typed:
+        # The slug already says how to route. A sidecar from 1.3.4 on drops the sort
+        # for a typed shortcut anyway; an older one forwards both, so the sort has to
+        # agree with the slug rather than with the setting.
+        return {'sort': ROUTING_PLAIN_SORT[typed]}
+    if routing in ROUTING_PLAIN_SORT:
+        version = sidecar_version(settings.translator.openrouter_url)
+        if version is None or version < ROUTING_SHORTCUTS_MIN_SIDECAR:
+            plain = ROUTING_PLAIN_SORT[routing]
+            logger.warning(
+                "AI Subtitle Translator %s does not support the '%s' provider routing (needs 1.3.4), sending %s",
+                '.'.join(map(str, version)) if version else 'of unknown version', routing, plain)
+            routing = plain
+    return {'sort': routing}
 
 
 class OpenRouterTranslatorService:
@@ -217,6 +300,7 @@ class OpenRouterTranslatorService:
                     "maxConcurrentJobs": settings.translator.openrouter_max_concurrent,
                     "parallelBatches": settings.translator.openrouter_parallel_batches,
                     "reasoning": self._build_reasoning_config(),
+                    "provider": build_provider_config(),
                 }
             }
 

@@ -201,6 +201,9 @@ declare namespace Settings {
     openrouter_model?: string;
     openrouter_temperature?: number;
     openrouter_max_concurrent?: number;
+    openrouter_reasoning?: string;
+    openrouter_parallel_batches?: number;
+    openrouter_provider_routing?: string;
   }
 
   interface Plex {

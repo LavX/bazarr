@@ -277,6 +277,7 @@ jobs:
             tests/bazarr/test_jellyfin_client.py \
             tests/bazarr/test_jellyfin_operations.py \
             tests/bazarr/test_logging_filters.py \
+            tests/bazarr/test_openrouter_provider_routing.py \
             tests/bazarr/test_openrouter_model_migration.py \
             tests/bazarr/test_openrouter_translator_partial.py \
             tests/bazarr/test_openrouter_translator.py \
