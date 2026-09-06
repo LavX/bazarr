@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   aiTranslatorConcurrentOptions,
   aiTranslatorModelOptions,
-  aiTranslatorProviderRoutingOptions,
   aiTranslatorReasoningOptions,
   translatorOption,
 } from "./options";
+import { aiTranslatorProviderRoutingOptions } from "./routing";
 
 describe("Translator options", () => {
   it("exports all required option arrays", () => {

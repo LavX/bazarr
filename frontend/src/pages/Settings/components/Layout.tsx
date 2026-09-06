@@ -1,9 +1,11 @@
 import {
+  FormEvent,
   FunctionComponent,
   ReactNode,
   useCallback,
   useEffect,
   useMemo,
+  useRef,
 } from "react";
 import {
   Badge,
@@ -51,6 +53,9 @@ const Layout: FunctionComponent<Props> = (props) => {
     },
   });
 
+  const formRef = useRef(form);
+  formRef.current = form;
+
   useOnValueChange(isRefetching, (value) => {
     if (!value) {
       form.reset();
@@ -92,24 +97,48 @@ const Layout: FunctionComponent<Props> = (props) => {
 
   useDocumentTitle(`${name} - ${useInstanceName()} (Settings)`);
 
+  // Some inputs only stage their value when they are left, so the focused field
+  // is blurred first and the submit waits a tick for that change to land.
+  // Without it a save keeps the value the field held before the user's last
+  // edit. Every route into a save goes through here: the Save button, Enter in
+  // a field, and the keyboard shortcut below.
+  const commitAndSubmit = useCallback(() => {
+    const focused = document.activeElement;
+    if (focused instanceof HTMLElement) {
+      focused.blur();
+    }
+
+    // formRef, not form: a blur handler restages values, and the closure this
+    // was created in would otherwise submit the ones captured before it ran.
+    window.setTimeout(() => formRef.current.onSubmit(submit)(), 0);
+  }, [submit]);
+
+  const onFormSubmit = useCallback(
+    (e: FormEvent<HTMLFormElement>) => {
+      e.preventDefault();
+      commitAndSubmit();
+    },
+    [commitAndSubmit],
+  );
+
   // Ctrl+S / Cmd+S keyboard shortcut
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === "s") {
         e.preventDefault();
         if (totalStagedCount > 0) {
-          form.onSubmit(submit)();
+          commitAndSubmit();
         }
       }
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [form, submit, totalStagedCount]);
+  }, [commitAndSubmit, totalStagedCount]);
 
   return (
     <SettingsProvider value={settings ?? null}>
       <LoadingProvider value={isLoading || isMutating}>
-        <form onSubmit={form.onSubmit(submit)} style={{ position: "relative" }}>
+        <form onSubmit={onFormSubmit} style={{ position: "relative" }}>
           <LoadingOverlay visible={settings === undefined} />
           <FormContext.Provider value={form}>
             <Container
