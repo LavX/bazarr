@@ -21,18 +21,26 @@ const AIModelSelector: FunctionComponent = () => {
   // routing moves to the selector that owns it. Leaving both in place would
   // send a slug and a sort that disagree, and would stop the model details
   // lookup from resolving the id.
+  //
+  // This waits for the field to be left rather than running on each keystroke.
+  // Mid-word the text can be an exact suffix of something longer, so adopting
+  // as the user types would turn "some/model:floorplan" into "some/modelplan".
+  const adopt = useCallback(() => {
+    const { modelId, routing } = splitRoutingSuffix(value ?? "");
+    if (!routing) {
+      return;
+    }
+    update(modelId);
+    setValue(routing, ROUTING_KEY);
+    setAdopted(routing);
+  }, [value, update, setValue]);
+
   const onChange = useCallback(
     (raw: string) => {
-      const { modelId, routing } = splitRoutingSuffix(raw);
-      update(modelId);
-      if (routing) {
-        setValue(routing, ROUTING_KEY);
-        setAdopted(routing);
-      } else {
-        setAdopted(null);
-      }
+      update(raw);
+      setAdopted(null);
     },
-    [update, setValue],
+    [update],
   );
 
   return (
@@ -42,6 +50,7 @@ const AIModelSelector: FunctionComponent = () => {
         data={modelData}
         value={(value as string) ?? ""}
         onChange={onChange}
+        onBlur={adopt}
         placeholder="Select or type any model ID..."
         limit={30}
       />

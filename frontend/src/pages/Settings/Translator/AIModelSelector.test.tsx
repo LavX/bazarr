@@ -55,6 +55,53 @@ function mountSelector() {
 }
 
 describe("AIModelSelector routing adoption", () => {
+  it("does not adopt half a word while the user is still typing", async () => {
+    // ":floor" is an exact suffix in the middle of typing ":floorplan", so
+    // adopting on every keystroke would eat the model id.
+    const user = userEvent.setup();
+    const stagedValues = mountSelector();
+
+    const input = screen.getByRole("combobox");
+    await user.clear(input);
+    await user.type(input, "some/model:floorplan");
+    await user.tab();
+
+    await waitFor(() => {
+      expect(stagedValues[MODEL_KEY]).toBe("some/model:floorplan");
+    });
+    expect(stagedValues[ROUTING_KEY]).toBeUndefined();
+  });
+
+  it("keeps a typo intact rather than adopting the prefix", async () => {
+    const user = userEvent.setup();
+    const stagedValues = mountSelector();
+
+    const input = screen.getByRole("combobox");
+    await user.clear(input);
+    await user.type(input, "some/model:floorr");
+    await user.tab();
+
+    await waitFor(() => {
+      expect(stagedValues[MODEL_KEY]).toBe("some/model:floorr");
+    });
+    expect(stagedValues[ROUTING_KEY]).toBeUndefined();
+  });
+
+  it("adopts a suffix typed one character at a time once the field is left", async () => {
+    const user = userEvent.setup();
+    const stagedValues = mountSelector();
+
+    const input = screen.getByRole("combobox");
+    await user.clear(input);
+    await user.type(input, "z-ai/glm-5.3-flash:nitro");
+    await user.tab();
+
+    await waitFor(() => {
+      expect(stagedValues[MODEL_KEY]).toBe("z-ai/glm-5.3-flash");
+      expect(stagedValues[ROUTING_KEY]).toBe("nitro");
+    });
+  });
+
   it("moves a typed :floor into the provider routing setting", async () => {
     const user = userEvent.setup();
     const stagedValues = mountSelector();
@@ -62,6 +109,7 @@ describe("AIModelSelector routing adoption", () => {
     const input = screen.getByRole("combobox");
     await user.clear(input);
     await user.paste("z-ai/glm-5.3-flash:floor");
+    await user.tab();
 
     await waitFor(() => {
       expect(stagedValues[MODEL_KEY]).toBe("z-ai/glm-5.3-flash");
@@ -76,6 +124,7 @@ describe("AIModelSelector routing adoption", () => {
     const input = screen.getByRole("combobox");
     await user.clear(input);
     await user.paste("deepseek/deepseek-v4-flash:nitro");
+    await user.tab();
 
     await waitFor(() => {
       expect(stagedValues[MODEL_KEY]).toBe("deepseek/deepseek-v4-flash");
@@ -90,6 +139,7 @@ describe("AIModelSelector routing adoption", () => {
     const input = screen.getByRole("combobox");
     await user.clear(input);
     await user.paste("deepseek/deepseek-chat:thinking");
+    await user.tab();
 
     await waitFor(() => {
       expect(stagedValues[MODEL_KEY]).toBe("deepseek/deepseek-chat:thinking");
@@ -104,6 +154,7 @@ describe("AIModelSelector routing adoption", () => {
     const input = screen.getByRole("combobox");
     await user.clear(input);
     await user.paste("z-ai/glm-5.3-flash:floor");
+    await user.tab();
 
     expect(
       await screen.findByText(/moved .*:floor.* into provider routing/i),
