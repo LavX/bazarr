@@ -24,23 +24,32 @@ export interface SplitModelId {
   routing: RoutingSuffix | null;
 }
 
-// Separates a routing shortcut typed into a model id from the model itself, so
+// Separates the routing shortcut typed into a model id from the model itself, so
 // the id can be looked up on OpenRouter and the routing can be shown in the
 // selector that owns it.
+//
+// Stacked shortcuts are all removed and the last one typed wins. Leaving one on
+// the id would contradict the selector, because both the Bazarr backend and the
+// sidecar read a shortcut off the model id and let it beat the configured sort.
 export function splitRoutingSuffix(rawModelId: string): SplitModelId {
-  const modelId = (rawModelId ?? "").trim();
-  const colon = modelId.lastIndexOf(":");
-  if (colon <= 0) {
-    return { modelId, routing: null };
-  }
+  let modelId = (rawModelId ?? "").trim();
+  let routing: RoutingSuffix | null = null;
 
-  const tail = modelId.slice(colon + 1).toLowerCase();
-  const routing = ROUTING_SUFFIXES.find((suffix) => suffix === tail);
-  if (!routing) {
-    return { modelId, routing: null };
-  }
+  for (;;) {
+    const colon = modelId.lastIndexOf(":");
+    if (colon <= 0) {
+      return { modelId, routing };
+    }
 
-  return { modelId: modelId.slice(0, colon), routing };
+    const tail = modelId.slice(colon + 1).toLowerCase();
+    const found = ROUTING_SUFFIXES.find((suffix) => suffix === tail);
+    if (!found) {
+      return { modelId, routing };
+    }
+
+    routing = routing ?? found;
+    modelId = modelId.slice(0, colon);
+  }
 }
 
 export function routingLabel(value: string): string {

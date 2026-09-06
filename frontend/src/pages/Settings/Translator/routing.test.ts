@@ -54,9 +54,22 @@ describe("splitRoutingSuffix", () => {
     });
   });
 
-  it("takes only one suffix, the last one", () => {
+  it("takes every stacked routing suffix off and keeps the last one typed", () => {
+    // Leaving one behind would contradict the selector: the backend reads the
+    // suffix off the model id and lets it win.
     expect(splitRoutingSuffix("z-ai/glm-5.3-flash:nitro:floor")).toEqual({
-      modelId: "z-ai/glm-5.3-flash:nitro",
+      modelId: "z-ai/glm-5.3-flash",
+      routing: "floor",
+    });
+    expect(splitRoutingSuffix("z-ai/glm-5.3-flash:floor:nitro")).toEqual({
+      modelId: "z-ai/glm-5.3-flash",
+      routing: "nitro",
+    });
+  });
+
+  it("keeps a non-routing variant that sits under stacked routing suffixes", () => {
+    expect(splitRoutingSuffix("liquid/lfm-2.5-2.6b:free:nitro:floor")).toEqual({
+      modelId: "liquid/lfm-2.5-2.6b:free",
       routing: "floor",
     });
   });
