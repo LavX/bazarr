@@ -131,7 +131,7 @@ RUNTIME_REQUIREMENTS = {
     "flask_sqlalchemy": ("flask_sqlalchemy", "==3.1.1"),
     "ftfy": ("ftfy", "==6.3.1"),
     "guess_language": ("guess_language-spirit", "==0.5.4"),
-    "guessit": ("guessit", "==3.8.0"),
+    "guessit": ("guessit", "==4.4.0"),
     "itsdangerous": ("itsdangerous", "==2.2.0"),
     "jwt": ("PyJWT", ">=2.13.0"),
     "json_tricks": ("json_tricks", "==3.17.3"),

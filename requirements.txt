@@ -40,7 +40,7 @@ Flask-SocketIO==5.6.1
 flask_sqlalchemy==3.1.1
 ftfy==6.3.1
 guess_language-spirit==0.5.4
-guessit==3.8.0
+guessit==4.4.0
 itsdangerous==2.2.0
 json_tricks==3.17.3
 knowit==0.6.1
