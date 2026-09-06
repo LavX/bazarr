@@ -355,6 +355,41 @@ def registry_archive_search(payload, display=None, selector=None, season=3, epis
     return provider, worker, subtitles[0]
 
 
+@pytest.mark.parametrize("episodes", [[1, 2], (2, 1)], ids=["list", "unsorted_tuple"])
+@pytest.mark.parametrize("name,expected", [
+    ("Show.S03E01.srt", True),
+    ("Show.S03E01E02.srt", True),
+    ("Show.S03E02.srt", False),
+    ("Show.S03E02E03.srt", False),
+    ("Show.S04E01.srt", False),
+])
+@pytest.mark.parametrize("defer", [False, True])
+@pytest.mark.parametrize("multiple", [False, True])
+def test_multi_episode_archive_keeps_minimum_episode_policy(episodes, name, expected, defer, multiple):
+    from guessit import guessit
+    from subliminal_patch.exceptions import SubtitleCandidateRejected
+    from subliminal_patch.subtitle import guess_matches
+
+    video = core.Episode("/fixtures/Show.mkv", "Show", 3, episodes)
+    assert set(video.episodes) == {1, 2}
+    assert video.episode == 1
+    matches = guess_matches(video, guessit(name, options={"type": "episode"}))
+    assert {"season", "episode"}.issubset(matches) is expected
+    members = {name: SRT}
+    if multiple:
+        members["Show.S03E09.srt"] = SRT.replace(b"Fixture", b"Unrelated")
+    worker = ArchiveSearchWorker(archive_payload(members, select_member=defer, episode=2))
+    provider = registry.HubProxyProvider(worker_client=worker)
+    provider.provider_name = "fixture"
+    subtitle = provider.list_subtitles(video, {Language("eng")})[0]
+    if expected:
+        assert provider.download_subtitle(subtitle) is True
+        assert subtitle.content == SRT
+    else:
+        with pytest.raises(SubtitleCandidateRejected):
+            provider.download_subtitle(subtitle)
+
+
 @pytest.mark.parametrize("kind", ["movie", "season_only", "unknown_season"])
 @pytest.mark.parametrize("hint", ["absent", "null", "conflicting"])
 @pytest.mark.parametrize("multiple", [False, True])

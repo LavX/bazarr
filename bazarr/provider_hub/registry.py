@@ -164,16 +164,21 @@ class HubProxyProvider(Provider):
 
         def _select_member_cb(members):
             context = getattr(subtitle, "_requested_archive_context", {})
+            selector_payload = {
+                "provider": self.provider_name,
+                "provider_payload": subtitle.provider_payload,
+                "language": language_to_payload(subtitle.language),
+                "members": members,
+                "season": context.get("season", getattr(subtitle, "season", None)),
+                "episode": context.get("episode", getattr(subtitle, "episode", None)),
+                "config": self.config,
+            }
+            if "absolute_episode" in context:
+                selector_payload["absolute_episode"] = context["absolute_episode"]
+            elif hasattr(subtitle, "absolute_episode"):
+                selector_payload["absolute_episode"] = subtitle.absolute_episode
             response = self._worker().select_archive_member(
-                {
-                    "provider": self.provider_name,
-                    "provider_payload": subtitle.provider_payload,
-                    "language": language_to_payload(subtitle.language),
-                    "members": members,
-                    "season": context.get("season", getattr(subtitle, "season", None)),
-                    "episode": context.get("episode", getattr(subtitle, "episode", None)),
-                    "config": self.config,
-                },
+                selector_payload,
                 timeout=timeout,
             )
             return response.payload
