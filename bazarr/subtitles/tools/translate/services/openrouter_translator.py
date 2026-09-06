@@ -39,6 +39,14 @@ POLL_UNREACHABLE_LIMIT_SECONDS = 600
 POLL_INTERVAL_SECONDS = 2
 
 
+def _typed_routing_suffix(model_id):
+    """'floor' or 'nitro' when the model id ends with that OpenRouter shortcut, else None."""
+    for suffix in ('floor', 'nitro'):
+        if str(model_id or '').endswith(f':{suffix}'):
+            return suffix
+    return None
+
+
 def reset_sidecar_version_cache():
     _sidecar_version_cache.clear()
 
@@ -87,6 +95,12 @@ def build_provider_config():
     if routing not in PROVIDER_ROUTING_VALUES:
         logger.warning("Unknown OpenRouter provider routing '%s', using %s", routing, DEFAULT_PROVIDER_ROUTING)
         routing = DEFAULT_PROVIDER_ROUTING
+    typed = _typed_routing_suffix(getattr(settings.translator, 'openrouter_model', ''))
+    if typed:
+        # The slug already says how to route. A sidecar from 1.3.4 on drops the sort
+        # for a typed shortcut anyway; an older one forwards both, so the sort has to
+        # agree with the slug rather than with the setting.
+        return {'sort': ROUTING_PLAIN_SORT[typed]}
     if routing in ROUTING_PLAIN_SORT:
         version = sidecar_version(settings.translator.openrouter_url)
         if version is None or version < ROUTING_SHORTCUTS_MIN_SIDECAR:

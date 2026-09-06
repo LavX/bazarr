@@ -89,6 +89,28 @@ def test_sidecar_version_is_probed_once_per_url(monkeypatch):
     assert calls == ['http://sidecar:8765/health']
 
 
+@pytest.mark.parametrize('version', ['1.3.3', '1.3.4', None])
+@pytest.mark.parametrize('suffix, setting, expected', [
+    ('floor', 'throughput', 'price'),
+    ('nitro', 'floor', 'throughput'),
+    ('floor', 'floor', 'price'),
+])
+def test_typed_routing_suffix_aligns_the_sort(monkeypatch, version, suffix, setting, expected):
+    # The slug says how to route; the sort Bazarr sends must never contradict it,
+    # whatever the setting says and whatever the sidecar version is.
+    _sidecar_health(monkeypatch, version)
+    monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_model', f'deepseek/deepseek-v4-flash:{suffix}')
+    monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_routing', setting)
+    assert openrouter_translator.build_provider_config() == {'sort': expected}
+
+
+def test_other_model_variants_do_not_touch_the_sort(monkeypatch):
+    _sidecar_health(monkeypatch, '1.3.4')
+    monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_model', 'deepseek/deepseek-chat:thinking')
+    monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_routing', 'floor')
+    assert openrouter_translator.build_provider_config() == {'sort': 'floor'}
+
+
 @pytest.mark.parametrize('version', ['1.3.4', '1.4.0', '2.0.0', '1.3.10', '1.3.4-rc1'])
 def test_versions_from_1_3_4_support_the_shortcuts(monkeypatch, version):
     _sidecar_health(monkeypatch, version)
