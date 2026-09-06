@@ -40,9 +40,9 @@ import ModelDetailsCard, { useOpenRouterModelDetails } from "./ModelDetails";
 import {
   aiTranslatorConcurrentOptions,
   aiTranslatorParallelBatchesOptions,
-  aiTranslatorProviderRoutingOptions,
   aiTranslatorReasoningOptions,
 } from "./options";
+import { aiTranslatorProviderRoutingOptions } from "./routing";
 
 const engineOptions = [
   { value: "openrouter", label: "OpenRouter" },
