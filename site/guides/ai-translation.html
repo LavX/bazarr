@@ -170,6 +170,7 @@
         <li><strong>Quality vs. speed.</strong> Larger models (Claude Opus 4.6, GPT-4.1) produce better translations but cost more. Mid-range models (Gemini 2.5 Flash, Claude Sonnet 4.5) hit a good balance. Lightweight models (Gemini 2.5 Flash Lite, Claude Haiku 4.5) are fast and cheap.</li>
         <li><strong>Free models.</strong> OpenRouter offers free tiers for select models (look for the "free" badge). Great for testing the workflow or large batches where perfect quality is not critical.</li>
         <li><strong>Context window.</strong> Subtitle files can be large. Models with bigger context windows (200k+ tokens) handle full-length movies in fewer chunks, producing more consistent translations.</li>
+        <li><strong>Provider routing.</strong> Most models are served by several OpenRouter providers at different prices and speeds. The <strong>Provider Routing</strong> selector picks between them: <em>Fastest</em> (the default) takes the highest-throughput provider, <em>Cheapest</em> the lowest price. The <code class="inline">:nitro</code> and <code class="inline">:floor</code> variants also make OpenRouter's priority and flex tiers eligible, and <em>OpenRouter default</em> leaves their load balancing on. Typing <code class="inline">:floor</code> or <code class="inline">:nitro</code> straight after a model ID works too. The two shortcut options need AI Subtitle Translator 1.3.4 or newer.</li>
       </ul>
 
       <div class="note">
@@ -216,7 +217,7 @@
         <li><strong>Premium models</strong> (Claude Opus 4.6, GPT-4.1): ~$0.15 to $0.50</li>
       </ul>
 
-      <p>These are ballpark figures. Actual costs vary with subtitle density and the length of each line. OpenRouter shows your usage and spending on their dashboard in real time.</p>
+      <p>These are ballpark figures. Actual costs vary with subtitle density, the length of each line, and the provider that serves the request: the same model can cost twice as much from a fast provider as from the cheapest one, so switch <strong>Provider Routing</strong> to <em>Cheapest</em> when price matters more than speed. OpenRouter shows your usage and spending on their dashboard in real time.</p>
 
       <div class="note note-warning">
         <strong>Watch your spending.</strong> Batch-translating hundreds of episodes with a premium model can add up. Set a spending limit on your OpenRouter account if you want a safety net. The setting is under Account &gt; Credits on their site.

@@ -246,7 +246,7 @@ Bazarr+ solves it with a **Provider Priority toggle** in Settings > Providers. W
 Upstream has Google Translate, Gemini, and Lingarr. Bazarr+ adds **OpenRouter** as a fourth translator engine, giving access to 300+ LLMs (Claude, Gemini, GPT, LLaMA, Grok, and more) plus any custom model ID from openrouter.ai. It runs as a separate microservice with an async job queue supporting 1-5 concurrent jobs and 1-8 parallel batches. Features include:
 - **Translate from the subtitle action menu**: click (...) on a missing subtitle row, pick an existing source subtitle to translate from
 - **Batch translation** for entire series/movie libraries from the Wanted pages
-- **Dedicated settings page** with 4 zones: engine picker, connection config, model tuning (temperature, reasoning mode, parallel batches), and a live status panel showing queue stats, job progress, token usage, cost, and speed
+- **Dedicated settings page** with 4 zones: engine picker, connection config, model tuning (temperature, reasoning mode, provider routing, parallel batches), and a live status panel showing queue stats, job progress, token usage, cost, and speed
 - **Model details** fetched live from the OpenRouter API with per-million token pricing, per-episode/movie cost estimates, context length, and prompt caching indicators
 - **AES-256-GCM encryption** for API keys in transit between Bazarr and the translator service, with a Test Connection button that validates encryption and API key status before saving
 - **Auto disk scan** triggers Sonarr/Radarr to rescan after translation completes

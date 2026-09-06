@@ -244,6 +244,11 @@ validators = [
     Validator('translator.openrouter_reasoning', must_exist=True, default='disabled', is_type_of=str,
               is_in=['disabled', 'low', 'medium', 'high']),
     Validator('translator.openrouter_parallel_batches', must_exist=True, default=4, is_type_of=int, gte=1, lte=8),
+    # Which OpenRouter provider serves the model: throughput (the sidecar's historical default),
+    # nitro/floor (OpenRouter's slug shortcuts, which also unlock the priority/flex tiers),
+    # price, latency, or OpenRouter's own load balancing.
+    Validator('translator.openrouter_provider_routing', must_exist=True, default='throughput', is_type_of=str,
+              is_in=['throughput', 'nitro', 'price', 'floor', 'latency', 'default']),
     Validator('translator.openrouter_encryption_key', must_exist=True, default='', is_type_of=str, cast=str),
     Validator('translator.lingarr_token', must_exist=True, default='', is_type_of=str, cast=str),
 

@@ -24,9 +24,26 @@ from .auth import get_translator_auth_headers
 
 logger = logging.getLogger(__name__)
 
+PROVIDER_ROUTING_VALUES = ('throughput', 'nitro', 'price', 'floor', 'latency', 'default')
+DEFAULT_PROVIDER_ROUTING = 'throughput'
+
 POLL_HARD_CAP_SECONDS = 12 * 3600
 POLL_UNREACHABLE_LIMIT_SECONDS = 600
 POLL_INTERVAL_SECONDS = 2
+
+
+def build_provider_config():
+    """The OpenRouter provider routing the sidecar applies to every request of a job.
+
+    Left unset the sidecar sorts providers by throughput, which is the fastest and
+    often not the cheapest endpoint; the setting lets the user pick price, latency,
+    the ``:nitro``/``:floor`` shortcuts, or OpenRouter's own load balancing.
+    """
+    routing = getattr(settings.translator, 'openrouter_provider_routing', DEFAULT_PROVIDER_ROUTING)
+    if routing not in PROVIDER_ROUTING_VALUES:
+        logger.warning("Unknown OpenRouter provider routing '%s', using %s", routing, DEFAULT_PROVIDER_ROUTING)
+        routing = DEFAULT_PROVIDER_ROUTING
+    return {'sort': routing}
 
 
 class OpenRouterTranslatorService:
@@ -217,6 +234,7 @@ class OpenRouterTranslatorService:
                     "maxConcurrentJobs": settings.translator.openrouter_max_concurrent,
                     "parallelBatches": settings.translator.openrouter_parallel_batches,
                     "reasoning": self._build_reasoning_config(),
+                    "provider": build_provider_config(),
                 }
             }
 

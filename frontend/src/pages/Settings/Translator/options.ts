@@ -70,6 +70,18 @@ export const aiTranslatorReasoningOptions: SelectorOption<string>[] = [
   { label: "High (Extended thinking)", value: "high" },
 ];
 
+// Which OpenRouter provider serves the model. Mirrors the backend validator for
+// translator.openrouter_provider_routing; the sidecar turns nitro/floor into the
+// OpenRouter slug shortcuts and the rest into provider.sort.
+export const aiTranslatorProviderRoutingOptions: SelectorOption<string>[] = [
+  { label: "Fastest (Default)", value: "throughput" },
+  { label: "Fastest + priority tier (:nitro)", value: "nitro" },
+  { label: "Cheapest", value: "price" },
+  { label: "Cheapest + flex tier (:floor)", value: "floor" },
+  { label: "Lowest latency", value: "latency" },
+  { label: "OpenRouter default (load balanced)", value: "default" },
+];
+
 export const aiTranslatorConcurrentOptions: SelectorOption<number>[] = [
   { label: "1 (Low)", value: 1 },
   { label: "2 (Default)", value: 2 },
