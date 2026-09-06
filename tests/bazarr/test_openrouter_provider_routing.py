@@ -31,15 +31,69 @@ def test_setting_defaults_to_throughput_and_pins_the_allowed_values():
     assert config.settings.translator.openrouter_provider_routing == 'throughput'
 
 
+def _sidecar_health(monkeypatch, version):
+    """Answer the sidecar's /health probe with the given version (None = unreachable)."""
+    openrouter_translator.reset_sidecar_version_cache()
+    calls = []
+
+    def _get(url, *args, **kwargs):
+        calls.append(url)
+        if version is None:
+            raise openrouter_translator.requests.exceptions.ConnectionError('down')
+        return SimpleNamespace(status_code=200, json=lambda: {'status': 'healthy', 'version': version})
+
+    monkeypatch.setattr(openrouter_translator.requests, 'get', _get)
+    return calls
+
+
 @pytest.mark.parametrize('value', ROUTING_VALUES)
 def test_build_provider_config_forwards_the_setting(monkeypatch, value):
+    _sidecar_health(monkeypatch, '1.3.4')
     monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_routing', value)
     assert openrouter_translator.build_provider_config() == {'sort': value}
 
 
 def test_build_provider_config_falls_back_to_throughput_for_unknown_values(monkeypatch):
+    _sidecar_health(monkeypatch, '1.3.4')
     monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_routing', 'cheapest')
     assert openrouter_translator.build_provider_config() == {'sort': 'throughput'}
+
+
+@pytest.mark.parametrize('value, expected', [
+    ('floor', 'price'),
+    ('nitro', 'throughput'),
+    ('default', 'throughput'),
+    ('price', 'price'),
+    ('latency', 'latency'),
+])
+def test_older_sidecars_get_the_plain_sort(monkeypatch, value, expected):
+    # Before 1.3.4 the sidecar forwards whatever it gets as provider.sort, and
+    # OpenRouter rejects nitro/floor/default there.
+    _sidecar_health(monkeypatch, '1.3.3')
+    monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_routing', value)
+    assert openrouter_translator.build_provider_config() == {'sort': expected}
+
+
+def test_unreachable_sidecar_gets_the_plain_sort(monkeypatch):
+    _sidecar_health(monkeypatch, None)
+    monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_routing', 'floor')
+    assert openrouter_translator.build_provider_config() == {'sort': 'price'}
+
+
+def test_sidecar_version_is_probed_once_per_url(monkeypatch):
+    calls = _sidecar_health(monkeypatch, '1.3.4')
+    monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_url', 'http://sidecar:8765/')
+    monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_routing', 'floor')
+    assert openrouter_translator.build_provider_config() == {'sort': 'floor'}
+    assert openrouter_translator.build_provider_config() == {'sort': 'floor'}
+    assert calls == ['http://sidecar:8765/health']
+
+
+@pytest.mark.parametrize('version', ['1.3.4', '1.4.0', '2.0.0', '1.3.10', '1.3.4-rc1'])
+def test_versions_from_1_3_4_support_the_shortcuts(monkeypatch, version):
+    _sidecar_health(monkeypatch, version)
+    monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_routing', 'nitro')
+    assert openrouter_translator.build_provider_config() == {'sort': 'nitro'}
 
 
 def _build_service():
@@ -80,6 +134,7 @@ def _translator_settings(monkeypatch, routing):
 
 def test_translate_job_sends_the_routing_in_the_config(mocker, monkeypatch):
     _translator_settings(monkeypatch, 'floor')
+    _sidecar_health(monkeypatch, '1.3.4')
     mocker.patch.object(openrouter_translator, 'get_title', return_value='Some Movie')
     mocker.patch.object(openrouter_translator, 'language_from_alpha2', lambda code: code)
     mocker.patch.object(openrouter_translator, 'language_from_alpha3', lambda code: code)
@@ -104,6 +159,7 @@ def test_content_endpoint_sends_the_routing_in_the_config(mocker, monkeypatch):
     from api.translator import translator as api_mod
 
     _translator_settings(monkeypatch, 'nitro')
+    _sidecar_health(monkeypatch, '1.3.4')
     mocker.patch.object(api_mod, 'get_translator_auth_headers', return_value={})
     post = mocker.patch.object(
         api_mod.requests,
