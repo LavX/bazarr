@@ -476,6 +476,7 @@ const SeriesUploadForm: FunctionComponent<Props> = ({
     >
       <Stack className="table-long-break">
         <Dropzone
+          data-full-page-dropzone-ignore
           onDrop={(dropped) => void addFiles(dropped)}
           loading={processing}
           multiple
