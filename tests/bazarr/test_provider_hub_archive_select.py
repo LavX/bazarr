@@ -5,11 +5,15 @@ so multilingual rar/7z archives no longer cause silent wrong-language downloads.
 """
 import base64
 import io
+import json
+from pathlib import Path
+import sys
 import zipfile
 
 import pytest
 
 import provider_hub.protocol as proto
+from subliminal_patch.exceptions import SubtitleCandidateRejected
 from subliminal_patch.providers.utils import get_archive_from_bytes
 
 _SRT = b"1\n00:00:01,000 --> 00:00:02,000\nx\n"
@@ -85,7 +89,7 @@ def test_select_member_pin_unknown_member_raises():
 
 def test_select_member_reject_raises():
     body = _zip(["show.eng.srt", "show.fre.srt"])
-    with pytest.raises(proto.WorkerProtocolError):
+    with pytest.raises(SubtitleCandidateRejected, match="No matching subtitle language"):
         _run(body, _archive_payload(body, select_member=True),
              lambda members: {"member": None, "decision": "reject"})
 
@@ -134,25 +138,254 @@ def test_worker_runner_forwards_episode_context_to_selector():
     assert seen["payload"]["url"] == "x"
 
 
+@pytest.mark.parametrize("context,expected", [
+    ({}, {"season": 99, "episode": 99}),
+    ({"season": None}, {"season": None, "episode": 99}),
+    ({"episode": None}, {"season": 99, "episode": None}),
+    ({"season": None, "episode": None}, {"season": None, "episode": None}),
+    ({"season": 3}, {"season": 3, "episode": 99}),
+    ({"episode": 1}, {"season": 99, "episode": 1}),
+    ({"season": 3, "episode": None}, {"season": 3, "episode": None}),
+    ({"season": None, "episode": 1}, {"season": None, "episode": 1}),
+    ({"season": 3, "episode": 1}, {"season": 3, "episode": 1}),
+])
+def test_selector_context_distinguishes_absent_and_null_without_mutating_payload(context, expected):
+    from provider_hub import worker_runner
+
+    opaque = {"season": 99, "episode": 99, "id": "stored-candidate"}
+
+    class Provider:
+        def select_archive_member(self, provider_payload, **kwargs):
+            assert provider_payload == {**expected, "id": "stored-candidate"}
+            provider_payload["id"] = "selector-local"
+            return {"decision": "defer"}
+
+    result = worker_runner._handle(Provider(), "select_archive_member", {
+        "provider_payload": opaque, **context,
+    })
+
+    assert result == {"decision": "defer", "member": None}
+    assert opaque == {"season": 99, "episode": 99, "id": "stored-candidate"}
+
+
+@pytest.mark.parametrize("context,expected", [({}, 99), ({"absolute_episode": None}, None),
+                                               ({"absolute_episode": 0}, 0), ({"absolute_episode": 49}, 49)])
+def test_selector_absolute_context_preserves_presence_and_payload_copy(context, expected):
+    from provider_hub import worker_runner
+
+    opaque = {"absolute_episode": 99, "id": "stored-candidate"}
+
+    class Provider:
+        def select_archive_member(self, provider_payload, **kwargs):
+            assert provider_payload["absolute_episode"] == expected
+            provider_payload["absolute_episode"] = 50
+            return {"decision": "defer"}
+
+    assert worker_runner._handle(Provider(), "select_archive_member", {
+        "provider_payload": opaque, **context,
+    }) == {"decision": "defer", "member": None}
+    assert opaque == {"absolute_episode": 99, "id": "stored-candidate"}
+
+
+@pytest.fixture
+def selector_worker(tmp_path):
+    from provider_hub.worker import ProviderWorkerClient, worker_command
+
+    # The bundle uses only stdlib and the actual isolated worker entry point.
+    (tmp_path / "provider.py").write_text('''
+class Provider:
+    def search(self, video, languages, config):
+        return [{
+            "id": "fixture", "language": languages[0],
+            "provider_payload": {"archive": config["archive"], **config["opaque"]},
+            "display": {"season": 99, "episode": 99},
+        }]
+
+    def download(self, provider_payload, language, config):
+        return provider_payload["archive"]
+
+    def select_archive_member(self, provider_payload, language, members, config):
+        if config.get("absolute_selector"):
+            number = provider_payload.get("absolute_episode")
+            if number is None:
+                number = provider_payload.get("episode")
+            member = str(number) + ".en.srt"
+            if member not in members:
+                return {"decision": "reject"}
+            decision = config["decision"]
+            return {"decision": decision, "member": member if decision == "pin" else None}
+        # A provider may use these fields to accept, pin or defer an archive.
+        # Incorrect context must be observable even when the host would defer.
+        context = {key: provider_payload.get(key) for key in ("season", "episode")}
+        if context != config["requested"]:
+            return {"decision": "pin", "member": "Stale.S99E99.srt"}
+        decision = config["decision"]
+        return {"decision": decision, "member": members[0] if decision == "pin" else None}
+''', encoding="utf-8")
+    runner = Path(__file__).parents[2] / "bazarr" / "provider_hub" / "worker_runner.py"
+    client = ProviderWorkerClient(
+        worker_command(sys.executable, runner), cwd=tmp_path,
+        env={"BAZARR_PROVIDER_HUB_BUNDLE": str(tmp_path),
+             "BAZARR_PROVIDER_HUB_MANIFEST": json.dumps({"entry_module": "provider", "entry_class": "Provider"})},
+    )
+    try:
+        yield client
+    finally:
+        process = client.process
+        client.stop()
+        if process is not None:
+            assert process.poll() is not None
+
+
+@pytest.mark.parametrize("context,expected", [
+    ({}, {"season": 99, "episode": 99}),
+    ({"season": None}, {"season": None, "episode": 99}),
+    ({"episode": None}, {"season": 99, "episode": None}),
+])
+def test_real_worker_preserves_legacy_context_only_for_absent_keys(selector_worker, context, expected):
+    response = selector_worker.select_archive_member({
+        "provider_payload": {"season": 99, "episode": 99},
+        "members": ["Requested.srt", "Stale.S99E99.srt"],
+        "config": {"requested": expected, "decision": "pin"},
+        **context,
+    }, timeout=5)
+    assert response.payload == {"decision": "pin", "member": "Requested.srt"}
+
+
+@pytest.mark.parametrize("context,member", [({}, "99.en.srt"), ({"absolute_episode": None}, "1.en.srt"),
+                                           ({"absolute_episode": 0}, "0.en.srt"),
+                                           ({"absolute_episode": 49}, "49.en.srt")])
+def test_real_worker_absolute_context_preserves_absent_null_and_zero(selector_worker, context, member):
+    response = selector_worker.select_archive_member({
+        "provider_payload": {"episode": 1, "absolute_episode": 99},
+        "members": ["99.en.srt", "1.en.srt", "0.en.srt", "49.en.srt"],
+        "config": {"absolute_selector": True, "decision": "pin"}, **context,
+    }, timeout=5)
+    assert response.payload == {"decision": "pin", "member": member}
+
+
+@pytest.mark.parametrize("absolute,member", [(49, "49.en.srt"), (0, "0.en.srt"), (None, "1.en.srt")])
+@pytest.mark.parametrize("opaque_absolute", [{}, {"absolute_episode": None}, {"absolute_episode": 99}],
+                         ids=["missing", "null", "stale"])
+@pytest.mark.parametrize("decision", ["pin", "defer", "reject"])
+def test_registry_forwards_absolute_context_to_real_selector(
+        selector_worker, absolute, member, opaque_absolute, decision):
+    from provider_hub.registry import HubProxyProvider
+    from subzero.language import Language
+    from subliminal_patch.core import Episode
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(member, _SRT)
+        archive.writestr("99.en.srt", _SRT.replace(b"\nx\n", b"\nwrong member\n"))
+    payload = _archive_payload(buffer.getvalue(), select_member=True, episode=99)
+    opaque = {"episode": 99, **opaque_absolute}
+    provider = HubProxyProvider(worker_client=selector_worker, archive=payload, opaque=opaque,
+                                absolute_selector=True, decision=decision)
+    provider.provider_name = "fixture"
+    video = Episode("/fixtures/Show.mkv", "Show", 3, 1)
+    video.absolute_episode = absolute
+    subtitle = provider.list_subtitles(video, {Language("eng")})[0]
+    # Selection uses the frozen search request, never a later video mutation.
+    video.absolute_episode = 50
+    subtitle.absolute_episode = 50
+    stored = {"archive": payload, **opaque}
+    for _ in range(2):
+        if decision == "reject":
+            with pytest.raises(SubtitleCandidateRejected):
+                provider.download_subtitle(subtitle)
+        else:
+            assert provider.download_subtitle(subtitle) is True
+            assert subtitle.content == _SRT
+        assert subtitle.provider_payload == stored
+
+
+@pytest.mark.parametrize("attributes,member", [({}, "99.en.srt"), ({"absolute_episode": None}, "1.en.srt"),
+                                              ({"absolute_episode": 0}, "0.en.srt"),
+                                              ({"absolute_episode": 49}, "49.en.srt")])
+def test_legacy_registry_selector_only_forwards_available_absolute_context(selector_worker, attributes, member):
+    from provider_hub.registry import HubProxyProvider
+    from subzero.language import Language
+    from subliminal_patch.core import Episode
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name in ["99.en.srt", "1.en.srt", "0.en.srt", "49.en.srt"]:
+            archive.writestr(name, _SRT if name == member else _SRT.replace(b"\nx\n", b"\nwrong member\n"))
+    payload = _archive_payload(buffer.getvalue(), select_member=True)
+    opaque = {"episode": 1, "absolute_episode": 99}
+    provider = HubProxyProvider(worker_client=selector_worker, archive=payload, opaque=opaque,
+                                absolute_selector=True, decision="pin")
+    provider.provider_name = "fixture"
+    subtitle = provider.list_subtitles(Episode("/fixtures/Show.mkv", "Show", 3, 1), {Language("eng")})[0]
+    del subtitle._requested_archive_context
+    assert not hasattr(subtitle, "absolute_episode")
+    for key, value in attributes.items():
+        setattr(subtitle, key, value)
+    subtitle.season, subtitle.episode = 3, 1
+    assert provider.download_subtitle(subtitle) is True
+    assert subtitle.content == _SRT
+    assert subtitle.provider_payload == {"archive": payload, **opaque}
+
+
+@pytest.mark.parametrize("kind,season,episode,member", [
+    ("movie", None, None, "Film.srt"),
+    ("season_only", 3, None, "Show.S03E01.srt"),
+    ("unknown_season", None, 1, "Show.S04E01.srt"),
+])
+@pytest.mark.parametrize("opaque", [{}, {"season": None, "episode": None}, {"season": 99, "episode": 99}],
+                         ids=["missing", "null", "stale"])
+@pytest.mark.parametrize("decision", ["pin", "defer", "reject"])
+def test_registry_selector_preserves_empty_context_through_real_worker(
+        selector_worker, kind, season, episode, member, opaque, decision):
+    from provider_hub.registry import HubProxyProvider
+    from subzero.language import Language
+    from subliminal_patch.core import Episode, Movie
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(member, _SRT)
+        archive.writestr("Stale.S99E99.srt", _SRT.replace(b"\nx\n", b"\nwrong member\n"))
+    payload = _archive_payload(buffer.getvalue(), select_member=True, season=99, episode=99)
+    provider = HubProxyProvider(worker_client=selector_worker, archive=payload, opaque=opaque,
+                                requested={"season": season, "episode": episode}, decision=decision)
+    provider.provider_name = "fixture"
+    video = (Movie("/fixtures/Film.mkv", "Film", year=2024) if kind == "movie" else
+             Episode("/fixtures/Show.mkv", "Show", season, episode))
+    subtitle = provider.list_subtitles(video, {Language("eng")})[0]
+    stored = {"archive": payload, **opaque}
+    assert subtitle.provider_payload == stored
+
+    # Repeat the download to expose mutation of the stored opaque payload.
+    for _ in range(2):
+        if decision == "reject":
+            with pytest.raises(SubtitleCandidateRejected, match="No matching subtitle language"):
+                provider.download_subtitle(subtitle)
+        else:
+            assert provider.download_subtitle(subtitle) is True
+            assert subtitle.content == _SRT
+        assert subtitle.provider_payload == stored
+
+
 def test_worker_runner_select_archive_member_rejects_when_unimplemented():
     from provider_hub import worker_runner
 
     class P:
         pass
 
-    out = worker_runner._handle(P(), "select_archive_member", {"members": ["a.srt"]})
-    assert out == {"member": None, "decision": "reject"}
+    with pytest.raises(ValueError, match="not implemented"):
+        worker_runner._handle(P(), "select_archive_member", {"members": ["a.srt"]})
 
 
-def test_worker_runner_select_archive_member_coerces_bad_decision():
+def test_worker_runner_select_archive_member_rejects_bad_decision():
     from provider_hub import worker_runner
 
     class P:
         def select_archive_member(self, provider_payload, language, members, config):
             return {"member": None, "decision": "weird"}
 
-    out = worker_runner._handle(P(), "select_archive_member", {"members": ["a.srt"]})
-    assert out["decision"] == "reject"
+    with pytest.raises(ValueError, match="invalid decision"):
+        worker_runner._handle(P(), "select_archive_member", {"members": ["a.srt"]})
 
 
 def test_select_member_callback_receives_listed_members():

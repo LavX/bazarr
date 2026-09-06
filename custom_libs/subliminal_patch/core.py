@@ -23,7 +23,7 @@ from subliminal import refiner_manager
 from concurrent.futures import as_completed
 
 from .extensions import provider_registry
-from .exceptions import APIThrottled, MustGetBlacklisted
+from .exceptions import APIThrottled, MustGetBlacklisted, SubtitleCandidateRejected
 from .score import compute_score, MAX_SCORES
 from subliminal.video import VIDEO_EXTENSIONS, Video, Episode, Movie
 from subliminal.core import guessit, ProviderPool, ThreadPoolExecutor, check_video
@@ -709,6 +709,10 @@ class SZProviderPool(ProviderPool):
                     self.post_download_hook(subtitle)
 
                 break
+            except SubtitleCandidateRejected as e:
+                logger.warning('Subtitle candidate rejected: %s', e)
+                return False
+
             except (requests.ConnectionError,
                     requests.exceptions.ProxyError,
                     requests.exceptions.SSLError,
@@ -871,10 +875,10 @@ class SZProviderPool(ProviderPool):
                 subtitle.score = score
                 downloaded_subtitles.append(subtitle)
 
-            # stop if only one subtitle is requested
-            if only_one:
-                logger.debug('Only one subtitle downloaded')
-                break
+                # stop after one successful download, not one attempted candidate
+                if only_one:
+                    logger.debug('Only one subtitle downloaded')
+                    break
 
         # --- WHISPER FALLBACK PRECONDITIONS ---
         # 1. No regular provider results with at least minimum score
