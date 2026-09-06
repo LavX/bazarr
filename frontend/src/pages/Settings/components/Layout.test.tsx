@@ -133,4 +133,36 @@ describe("Settings layout", () => {
       "typed-while-focused",
     );
   });
+
+  it("commits the focused field when Enter submits the form", async () => {
+    const submitted: LooseObject[] = [];
+    server.use(
+      http.post("/api/system/settings", async ({ request }) => {
+        const form = await request.formData();
+        submitted.push(Object.fromEntries(form.entries()));
+        return HttpResponse.json({});
+      }),
+    );
+
+    const user = userEvent.setup();
+    customRender(
+      <Layout name="Test Settings">
+        <StageChangeButton />
+        <CommitOnBlurInput />
+      </Layout>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Stage change" }));
+
+    const input = screen.getByLabelText("Commits on blur");
+    await user.click(input);
+    await user.keyboard("typed-then-enter{Enter}");
+
+    await waitFor(() => {
+      expect(submitted).toHaveLength(1);
+    });
+    expect(submitted[0]["settings-general-instance_name"]).toBe(
+      "typed-then-enter",
+    );
+  });
 });
