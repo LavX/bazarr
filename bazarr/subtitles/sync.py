@@ -5,7 +5,7 @@ import logging
 import gc
 
 from app.config import settings
-from app.jobs_queue import jobs_queue
+from app.jobs_queue import jobs_queue, JobCancelled
 from subtitles.tools.subsyncer import SubSyncer
 from subtitles.tools.subsync_engines import (
     DEFAULT_ENABLED_ENGINES,
@@ -18,6 +18,7 @@ from subtitles.tools.subsync_engines import (
     REASON_MISSING_ENGINE,
     REASON_OUTPUT_EXISTS,
     REASON_RESULT_REJECTED,
+    REASON_SOURCE_CHANGED,
     is_sync_engine_output,
     normalize_enabled_engines,
 )
@@ -38,6 +39,7 @@ _ENGINE_OUTCOME_SENTENCES = {
                              "when it cannot confidently align a file. {message}"),
     REASON_RESULT_REJECTED: "{label} result rejected: {message}",
     REASON_ENGINE_FAILED: "{label} failed: {message}",
+    REASON_SOURCE_CHANGED: "The uploaded subtitle was replaced or deleted. Sync was skipped.",
 }
 _ENGINE_MESSAGE_LIMIT = 160
 
@@ -251,7 +253,8 @@ def sync_subtitles(video_path,
                    callback=None,
                    track_job_progress=True,
                    arr_instance_id=None,
-                   owns_job_progress=True):
+                   owns_job_progress=True,
+                   source_version=None):
     # The audio-sync settings resolve against the owning instance (#227); a None
     # owner / unset override yields the global value, so legacy paths are
     # unchanged. The use_subsync gate is evaluated inline via the module-level
@@ -322,12 +325,14 @@ def sync_subtitles(video_path,
             'arr_instance_id': arr_instance_id,
         }
         sync_result = None
+        if source_version is not None:
+            sync_kwargs['source_version'] = source_version
         try:
             sync_result = subsync.sync(**sync_kwargs)
             if sync_result and sync_result.success:
-                if callback:
+                if callback and source_version is None:
                     callback()
-                elif getattr(sync_result, 'output_mode', None) == OUTPUT_MODE_KEEP_ALL:
+                elif not callback and getattr(sync_result, 'output_mode', None) == OUTPUT_MODE_KEEP_ALL:
                     _index_keep_all_outputs(
                         video_path,
                         sonarr_series_id=sonarr_series_id,
@@ -335,6 +340,8 @@ def sync_subtitles(video_path,
                         radarr_id=radarr_id,
                         arr_instance_id=arr_instance_id,
                     )
+        except JobCancelled:
+            raise
         except Exception:
             logging.exception(f'BAZARR an unhandled exception occurs during the synchronization process for this '  # noqa: G004
                               f'subtitle file: {srt_path}')
@@ -342,6 +349,8 @@ def sync_subtitles(video_path,
         else:
             return bool(sync_result and sync_result.success)
         finally:
+            if callback and source_version is not None:
+                callback()
             report(_sync_outcome_message(sync_result), value='max',
                    name=_sync_complete_job_name(srt_path, sync_result))
             del subsync

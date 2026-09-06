@@ -22,6 +22,7 @@ from subtitles.tools.subsync_engines import (
     normalize_enabled_engines,
     normalize_output_mode,
     validate_engine_result,
+    subtitle_write_lock,
 )
 from languages.get_languages import audio_language_from_name, language_from_alpha2
 from utilities.path_mappings import path_mappings
@@ -523,7 +524,7 @@ class SubSyncer:
     def sync(self, video_path, srt_path, srt_lang, hi, forced,
              max_offset_seconds, no_fix_framerate, gss, reference=None, sonarr_series_id=None, sonarr_episode_id=None,
              radarr_id=None, progress_callback=None, job_id=None, force_sync=False, output_mode=None,
-             enabled_engines=None, write_history=True, arr_instance_id=None):
+             enabled_engines=None, write_history=True, arr_instance_id=None, source_version=None):
         self.reference = video_path
         self.srtin = srt_path
         self.progress_callback = progress_callback
@@ -586,12 +587,17 @@ class SubSyncer:
             return raw_result
 
         runner = SubsyncEngineRunner()
+        source_options = {'source_version': source_version} if source_version is not None else {}
+        if source_version is not None:
+            source_options['before_publish'] = lambda: self._report_progress('Saving synchronized subtitle', None, None)
+            source_options['publication_lock'] = subtitle_write_lock(video_path, os.path.dirname(srt_path))
         self.sync_result = runner.run(
             srt_path=self.srtin,
             output_mode=output_mode,
             enabled_engines=enabled_engines,
             execute_engine=execute_engine,
             force_sync=force_sync,
+            **source_options,
         )
 
         if settings.subsync.debug:

@@ -4,7 +4,44 @@ import logging
 import os
 import tempfile
 from dataclasses import dataclass, field
+from contextlib import nullcontext
 from pathlib import Path
+from threading import Lock, RLock
+from weakref import WeakValueDictionary
+
+
+_subtitle_write_locks = WeakValueDictionary()
+_subtitle_write_locks_guard = Lock()
+
+
+def subtitle_write_lock(video_path, subtitle_directory):
+    """Coordinate one media destination, including its subtitle language variants.
+
+    The saver can change HI tags and format extensions. The target directory and
+    video stem identify their shared destination without predicting those names.
+    Weak references release idle locks once all participating operations finish.
+    """
+    key = (os.path.normcase(os.path.realpath(subtitle_directory)),
+           os.path.normcase(os.path.splitext(os.path.basename(video_path))[0]))
+    with _subtitle_write_locks_guard:
+        lock = _subtitle_write_locks.get(key)
+        if lock is None:
+            lock = RLock()
+            _subtitle_write_locks[key] = lock
+        return lock
+
+
+def subtitle_source_version(path):
+    """Identify the saved file a queued upload sync is allowed to replace."""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+class SubtitleSourceChanged(Exception):
+    """The upload was replaced or deleted while its sync was queued or running."""
 
 
 SYNC_ENGINES = ('ffsubsync', 'autosubsync', 'alass')
@@ -46,6 +83,7 @@ REASON_FAILURE_THRESHOLD = 'failure_threshold'
 REASON_ENGINE_DECLINED = 'engine_declined'
 REASON_RESULT_REJECTED = 'result_rejected'
 REASON_ENGINE_FAILED = 'engine_failed'
+REASON_SOURCE_CHANGED = 'source_changed'
 
 ENGINE_LABELS = {
     'ffsubsync': 'FFsubsync',
@@ -409,7 +447,8 @@ class SubsyncEngineRunner:
 
         return output_stat.st_size > 0 and output_stat.st_mtime_ns >= source_stat.st_mtime_ns
 
-    def run(self, srt_path, output_mode, enabled_engines, execute_engine, force_sync=False):
+    def run(self, srt_path, output_mode, enabled_engines, execute_engine, force_sync=False,
+            source_version=None, before_publish=None, publication_lock=None):
         output_mode = normalize_output_mode(output_mode)
         result = SyncRunResult(source_path=srt_path, output_mode=output_mode)
 
@@ -423,9 +462,15 @@ class SubsyncEngineRunner:
             return result
 
         for engine in normalize_enabled_engines(enabled_engines):
+            if source_version is not None and subtitle_source_version(srt_path) != source_version:
+                result.results.append(SyncEngineResult(
+                    engine=engine, status=RESULT_SKIPPED, reason=REASON_SOURCE_CHANGED,
+                    message='The uploaded subtitle was replaced or deleted.',
+                ))
+                break
             final_engine_output_path = engine_output_path(srt_path, engine)
             output_path = (
-                final_engine_output_path if output_mode == OUTPUT_MODE_KEEP_ALL
+                final_engine_output_path if output_mode == OUTPUT_MODE_KEEP_ALL and source_version is None
                 else temporary_engine_output_path(srt_path, engine)
             )
 
@@ -462,10 +507,19 @@ class SubsyncEngineRunner:
 
                 generated_path = str(output_path)
                 final_output_path = output_path
-                if output_mode == OUTPUT_MODE_OVERWRITE:
-                    os.replace(str(output_path), srt_path)
-                    final_output_path = Path(srt_path)
-                    generated_path = None
+                with publication_lock or nullcontext():
+                    if before_publish:
+                        before_publish()
+                    if source_version is not None and subtitle_source_version(srt_path) != source_version:
+                        raise SubtitleSourceChanged()
+                    if output_mode == OUTPUT_MODE_OVERWRITE:
+                        os.replace(str(output_path), srt_path)
+                        final_output_path = Path(srt_path)
+                        generated_path = None
+                    elif source_version is not None:
+                        os.replace(str(output_path), str(final_engine_output_path))
+                        final_output_path = final_engine_output_path
+                        generated_path = str(final_engine_output_path)
 
                 self.failure_store.record_success(srt_path, engine)
                 result.results.append(SyncEngineResult(
@@ -479,6 +533,14 @@ class SubsyncEngineRunner:
                 if output_mode == OUTPUT_MODE_OVERWRITE:
                     break
 
+            except SubtitleSourceChanged:
+                if output_path.is_file():
+                    output_path.unlink()
+                result.results.append(SyncEngineResult(
+                    engine=engine, status=RESULT_SKIPPED, reason=REASON_SOURCE_CHANGED,
+                    message='The uploaded subtitle was replaced or deleted.',
+                ))
+                break
             except MissingSyncEngineError as exc:
                 logging.warning('BAZARR %s sync engine skipped: %s', engine, exc)
                 result.results.append(SyncEngineResult(
@@ -519,6 +581,11 @@ class SubsyncEngineRunner:
                 ))
 
             except Exception as exc:
+                if before_publish:
+                    from app.jobs_queue import JobCancelled
+                    if isinstance(exc, JobCancelled):
+                        self._discard_engine_output(srt_path, engine, output_path, exc, record=False)
+                        raise
                 logging.exception('BAZARR %s sync engine failed for %s', engine, srt_path)
                 self._discard_engine_output(srt_path, engine, output_path, exc)
                 result.results.append(SyncEngineResult(

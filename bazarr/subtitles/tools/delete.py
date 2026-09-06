@@ -15,6 +15,7 @@ from utilities.autopulse_webhook import call_external_webhook
 from subtitles.indexer.series import store_subtitles
 from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.processing import ProcessSubtitlesResult
+from subtitles.tools.subsync_engines import subtitle_write_lock
 from sonarr.history import history_log
 from radarr.history import history_log_movie
 from sonarr.notify import notify_sonarr
@@ -81,64 +82,64 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
                                     hearing_impaired=None)
 
     if media_type == 'series':
-        try:
-            os.remove(pr(subtitles_path))
-        except OSError:
-            logging.exception(f'BAZARR cannot delete subtitles file: {subtitles_path}')  # noqa: G004
+        with subtitle_write_lock(media_path, os.path.dirname(pr(subtitles_path))):
+            try:
+                os.remove(pr(subtitles_path))
+            except OSError:
+                logging.exception(f'BAZARR cannot delete subtitles file: {subtitles_path}')  # noqa: G004
+                store_subtitles(prr(media_path), media_path, arr_instance_id=arr_instance_id)
+                return False
             store_subtitles(prr(media_path), media_path, arr_instance_id=arr_instance_id)
-            return False
-        else:
-            history_log(0, sonarr_series_id, sonarr_episode_id, result, arr_instance_id=arr_instance_id)
-            store_subtitles(prr(media_path), media_path, arr_instance_id=arr_instance_id)
-            # Route the rescan at the OWNING instance's Sonarr (#156); None
-            # owner = default server (legacy single-instance), unchanged.
-            notify_sonarr(sonarr_series_id,
-                          arr_client=client_for_instance(database, arr_instance_id, enabled_only=False))
-            event_stream(type='series', action='update', payload=sonarr_series_id)
-            event_stream(type='episode-wanted', action='update', payload=sonarr_episode_id)
+        history_log(0, sonarr_series_id, sonarr_episode_id, result, arr_instance_id=arr_instance_id)
+        # Route the rescan at the OWNING instance's Sonarr (#156); None
+        # owner = default server (legacy single-instance), unchanged.
+        notify_sonarr(sonarr_series_id,
+                      arr_client=client_for_instance(database, arr_instance_id, enabled_only=False))
+        event_stream(type='series', action='update', payload=sonarr_series_id)
+        event_stream(type='episode-wanted', action='update', payload=sonarr_episode_id)
 
-            if settings.general.use_plex and settings.plex.update_series_library:
-                plex_refresh_item(metadata.imdbId, is_movie=False, season=metadata.season,
-                                  episode=metadata.episode)
-            if settings.general.use_jellyfin and settings.jellyfin.update_series_library:
-                jellyfin_refresh_item(metadata.imdbId, is_movie=False, season=metadata.season,
-                                      episode=metadata.episode, tvdb_id=metadata.tvdbId)
+        if settings.general.use_plex and settings.plex.update_series_library:
+            plex_refresh_item(metadata.imdbId, is_movie=False, season=metadata.season,
+                              episode=metadata.episode)
+        if settings.general.use_jellyfin and settings.jellyfin.update_series_library:
+            jellyfin_refresh_item(metadata.imdbId, is_movie=False, season=metadata.season,
+                                  episode=metadata.episode, tvdb_id=metadata.tvdbId)
 
-            # Call external webhook after all processing is complete
-            call_external_webhook(
-                subtitle_path=subtitles_path,
-                media_path=media_path,
-                language=language_log,
-                media_type=media_type
-            )
+        # Call external webhook after all processing is complete
+        call_external_webhook(
+            subtitle_path=subtitles_path,
+            media_path=media_path,
+            language=language_log,
+            media_type=media_type
+        )
 
-            return True
+        return True
     else:
-        try:
-            os.remove(pr(subtitles_path))
-        except OSError:
-            logging.exception(f'BAZARR cannot delete subtitles file: {subtitles_path}')  # noqa: G004
+        with subtitle_write_lock(media_path, os.path.dirname(pr(subtitles_path))):
+            try:
+                os.remove(pr(subtitles_path))
+            except OSError:
+                logging.exception(f'BAZARR cannot delete subtitles file: {subtitles_path}')  # noqa: G004
+                store_subtitles_movie(prr(media_path), media_path, arr_instance_id=arr_instance_id)
+                return False
             store_subtitles_movie(prr(media_path), media_path, arr_instance_id=arr_instance_id)
-            return False
-        else:
-            history_log_movie(0, radarr_id, result, arr_instance_id=arr_instance_id)
-            store_subtitles_movie(prr(media_path), media_path, arr_instance_id=arr_instance_id)
-            notify_radarr(radarr_id,
-                          arr_client=client_for_instance(database, arr_instance_id, enabled_only=False))
-            event_stream(type='movie-wanted', action='update', payload=radarr_id)
+        history_log_movie(0, radarr_id, result, arr_instance_id=arr_instance_id)
+        notify_radarr(radarr_id,
+                      arr_client=client_for_instance(database, arr_instance_id, enabled_only=False))
+        event_stream(type='movie-wanted', action='update', payload=radarr_id)
 
-            if settings.general.use_plex and settings.plex.update_movie_library:
-                plex_refresh_item(metadata.imdbId, is_movie=True)
-            if settings.general.use_jellyfin and settings.jellyfin.update_movie_library:
-                jellyfin_refresh_item(metadata.imdbId, is_movie=True,
-                                      tmdb_id=metadata.tmdbId)
+        if settings.general.use_plex and settings.plex.update_movie_library:
+            plex_refresh_item(metadata.imdbId, is_movie=True)
+        if settings.general.use_jellyfin and settings.jellyfin.update_movie_library:
+            jellyfin_refresh_item(metadata.imdbId, is_movie=True,
+                                  tmdb_id=metadata.tmdbId)
 
-            # Call external webhook after all processing is complete
-            call_external_webhook(
-                subtitle_path=subtitles_path,
-                media_path=media_path,
-                language=language_log,
-                media_type=media_type
-            )
-            
-            return True
+        # Call external webhook after all processing is complete
+        call_external_webhook(
+            subtitle_path=subtitles_path,
+            media_path=media_path,
+            language=language_log,
+            media_type=media_type
+        )
+
+        return True

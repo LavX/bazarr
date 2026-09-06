@@ -4,6 +4,7 @@
 import os
 import sys
 import logging
+from functools import partial
 
 from subzero.language import Language
 from subliminal_patch.core import save_subtitles
@@ -28,14 +29,22 @@ from app.jobs_queue import jobs_queue
 from app.event_handler import event_stream
 from app.notifier import send_notifications
 from app.notifier import send_notifications_movie
-from subtitles.indexer.series import store_subtitles
-from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.processing import ProcessSubtitlesResult
+from subtitles.tools.subsync_engines import subtitle_source_version, subtitle_write_lock
 
-from .sync import sync_subtitles
+from .sync import sync_subtitles, _index_keep_all_outputs
 from .post_processing import postprocessing
 from plex.operations import plex_set_movie_added_date_now, plex_set_episode_added_date_now, plex_refresh_item
 from jellyfin.operations import jellyfin_refresh_item
+
+
+def _refresh_uploaded_subtitles(video_path, subtitle_path, sonarr_series_id=None, sonarr_episode_id=None,
+                                radarr_id=None, arr_instance_id=None):
+    # Keep the scan and its database update together with save/delete operations.
+    with subtitle_write_lock(video_path, os.path.dirname(subtitle_path)):
+        _index_keep_all_outputs(video_path, sonarr_series_id=sonarr_series_id,
+                               sonarr_episode_id=sonarr_episode_id, radarr_id=radarr_id,
+                               arr_instance_id=arr_instance_id)
 
 
 def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, filename, audio_language, job_id=None,
@@ -133,14 +142,18 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
     try:
         # ensure that formats must be a tuple of strings
         sub_format = (sub.format,) if isinstance(sub.format, str) else sub.format
-        saved_subtitles = save_subtitles(path,
-                                         [sub],
-                                         single=single,
-                                         tags=None,  # fixme
-                                         directory=get_target_folder(path),
-                                         chmod=chmod,
-                                         formats=sub_format if use_original_format else ("srt",),
-                                         path_decoder=force_unicode)
+        subtitle_directory = get_target_folder(path)
+        write_lock = subtitle_write_lock(path, subtitle_directory or os.path.dirname(path))
+        with write_lock:
+            saved_subtitles = save_subtitles(path,
+                                            [sub],
+                                            single=single,
+                                            tags=None,  # fixme
+                                            directory=subtitle_directory,
+                                            chmod=chmod,
+                                            formats=sub_format if use_original_format else ("srt",),
+                                            path_decoder=force_unicode)
+            source_version = subtitle_source_version(saved_subtitles[0].storage_path) if saved_subtitles else None
     except Exception as e:
         logging.exception(f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')  # noqa: G004
         return
@@ -185,14 +198,18 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
                              uploaded_language_code3, audio_language['name'], audio_language['code2'],
                              audio_language['code3'], 100, "1", "manual", "user", "unknown", sonarrSeriesId,
                              sonarrEpisodeId or radarrId,)
-        postprocessing(command, path)
-        set_chmod(subtitles_path=subtitle_path)
+        with write_lock:
+            if subtitle_source_version(subtitle_path) == source_version:
+                postprocessing(command, path)
+                set_chmod(subtitles_path=subtitle_path)
+                source_version = subtitle_source_version(subtitle_path)
+
+    refresh_subtitles = partial(_refresh_uploaded_subtitles, path, subtitle_path, sonarr_series_id=sonarrSeriesId,
+                                sonarr_episode_id=sonarrEpisodeId, radarr_id=radarrId,
+                                arr_instance_id=arr_instance_id)
+    refresh_subtitles()
 
     if media_type == 'series':
-        sync_subtitles(video_path=path, srt_path=subtitle_path, srt_lang=uploaded_language_code2, percent_score=100,
-                       sonarr_series_id=episode_metadata.sonarrSeriesId, forced=forced, hi=hi,
-                       sonarr_episode_id=episode_metadata.sonarrEpisodeId, job_id=job_id,
-                       arr_instance_id=arr_instance_id)
         # Reverse-map through the owning instance's path_mappings (#156); None
         # owner => global mapping (the default/single-instance path), unchanged.
         reversed_path = path_mappings.path_replace_reverse_instance(path, arr_instance_id, "series")
@@ -205,9 +222,6 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
         event_stream(type='series', action='update', payload=episode_metadata.sonarrSeriesId)
         event_stream(type='episode-wanted', action='delete', payload=episode_metadata.sonarrEpisodeId)
     else:
-        sync_subtitles(video_path=path, srt_path=subtitle_path, srt_lang=uploaded_language_code2, percent_score=100,
-                       radarr_id=movie_metadata.radarrId, forced=forced, hi=hi, job_id=job_id,
-                       arr_instance_id=arr_instance_id)
         # Reverse-map through the owning instance's path_mappings (#156); None
         # owner => global mapping (the default/single-instance path), unchanged.
         reversed_path = path_mappings.path_replace_reverse_instance(path, arr_instance_id, "movie")
@@ -242,7 +256,6 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
             if not settings.general.dont_notify_manual_actions:
                 send_notifications(sonarrSeriesId, sonarrEpisodeId, result.message,
                                    arr_instance_id=arr_instance_id)
-            store_subtitles(result.path, path, arr_instance_id=arr_instance_id)
             if settings.general.use_plex:
                 if settings.plex.update_series_library:
                     plex_refresh_item(episode_metadata.imdbId, is_movie=False,
@@ -258,7 +271,6 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
                               arr_instance_id=arr_instance_id)
             if not settings.general.dont_notify_manual_actions:
                 send_notifications_movie(radarrId, result.message, arr_instance_id=arr_instance_id)
-            store_subtitles_movie(result.path, path, arr_instance_id=arr_instance_id)
             if settings.general.use_plex:
                 if settings.plex.update_movie_library:
                     plex_refresh_item(movie_metadata.imdbId, is_movie=True)
@@ -267,5 +279,12 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
             if settings.general.use_jellyfin and settings.jellyfin.update_movie_library:
                 jellyfin_refresh_item(movie_metadata.imdbId, is_movie=True,
                                       tmdb_id=movie_metadata.tmdbId)
+
+    if source_version is not None:
+        sync_subtitles(video_path=path, srt_path=subtitle_path, srt_lang=uploaded_language_code2,
+                       percent_score=100, forced=forced, hi=hi, sonarr_series_id=sonarrSeriesId,
+                       sonarr_episode_id=sonarrEpisodeId, radarr_id=radarrId,
+                       arr_instance_id=arr_instance_id, callback=refresh_subtitles,
+                       source_version=source_version)
 
     return '', 204
