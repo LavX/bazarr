@@ -13,7 +13,7 @@ from constants import MAXIMUM_SUBTITLE_SIZE
 from app.config import settings
 from utilities.path_mappings import path_mappings
 from languages.custom_lang import CustomLanguage
-from subtitles.tools.subsync_engines import SYNC_ENGINES, sync_engine_from_output_path
+from subtitles.tools.subsync_engines import SYNC_ENGINES, sync_engine_from_output_path, sync_output_owner_is_unique
 
 import re as _re_combine
 
@@ -156,12 +156,24 @@ def add_sync_engine_outputs(dest_folder, subtitles, video_filename=None, video_p
                            for entry in media_files
                            if entry.is_file() and entry.name.lower().endswith(core.VIDEO_EXTENSIONS)}
 
+    ownership = {}
     for subtitle in os.listdir(dest_folder):
-        if subtitle in subtitles or not sync_engine_from_subtitle_name(subtitle):
+        if not sync_engine_from_subtitle_name(subtitle):
             continue
 
         subtitle_path = os.path.join(dest_folder, subtitle)
         if not os.path.isfile(subtitle_path):
+            continue
+
+        if video_path is not None:
+            stem, extension = os.path.splitext(subtitle)
+            source_path = os.path.join(dest_folder, stem.rsplit('.', 1)[0] + extension)
+            if source_path not in ownership:
+                ownership[source_path] = sync_output_owner_is_unique(video_path, source_path)
+            if not ownership[source_path]:
+                subtitles.pop(subtitle, None)
+                continue
+        if subtitle in subtitles:
             continue
 
         if video_stem is not None:

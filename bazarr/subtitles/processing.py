@@ -333,7 +333,7 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
 
         if not use_pp_threshold or (use_pp_threshold and percent_score < pp_threshold):
             logging.debug(f"BAZARR Using post-processing command: {command}")  # noqa: G004
-            postprocessing(command, path)
+            postprocessing(command, path, subtitle_path=downloaded_path)
             set_chmod(subtitles_path=downloaded_path)
         else:
             logging.debug(f"BAZARR post-processing skipped because subtitles score isn't below this "  # noqa: G004

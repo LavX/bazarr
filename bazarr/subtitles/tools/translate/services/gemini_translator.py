@@ -12,6 +12,7 @@ import logging
 
 import srt
 import pysubs2
+from subtitles.tools.subsync_engines import staged_subtitle_write
 import requests
 import unicodedata as ud
 from collections import Counter
@@ -23,7 +24,7 @@ from sonarr.history import history_log
 from radarr.history import history_log_movie
 from utilities.path_mappings import path_mappings  # noqa: F401
 from subtitles.processing import ProcessSubtitlesResult  # noqa: F401
-from app.jobs_queue import jobs_queue
+from app.jobs_queue import JobCancelled, jobs_queue
 from languages.get_languages import alpha3_from_alpha2, language_from_alpha2, language_from_alpha3  # noqa: F401
 from ..core.translator_utils import add_translator_info, get_description, create_process_result
 
@@ -99,7 +100,6 @@ class GeminiTranslatorService:
             self.gemini_api_key = self.current_api_key
             self.target_language = language_from_alpha3(self.to_lang)
             self.input_file = self.source_srt_file
-            self.output_file = self.dest_srt_file
             self.model_name = settings.translator.gemini_model
             self.batch_size = self._get_batch_size()
             self.description = get_description(self.media_type, self.radarr_id, self.sonarr_series_id,
@@ -108,15 +108,23 @@ class GeminiTranslatorService:
             if self.input_file:
                 self.progress_file = os.path.join(os.path.dirname(self.input_file), f".{os.path.basename(self.input_file)}.progress")
 
-            self._check_saved_progress()
-
             try:
-                self._translate_with_gemini()
-                add_translator_info(self.dest_srt_file, f"# Subtitles translated with {settings.translator.gemini_model} # ")
+                with staged_subtitle_write(self.video_path, self.dest_srt_file,
+                                       source_paths=(self.source_srt_file,),
+                                           before_publish=lambda: jobs_queue.update_job_progress(job_id=job_id)) as temporary:
+                    self.output_file = temporary
+                    self._check_saved_progress()
+                    self._translate_with_gemini()
+                    add_translator_info(temporary, f"# Subtitles translated with {settings.translator.gemini_model} # ")
+            except JobCancelled:
+                raise
             except Exception as e:
                 jobs_queue.update_job_progress(job_id=job_id, progress_message=f'Gemini translation error: {str(e)}')
                 raise
 
+        except JobCancelled:
+            self._clear_progress()
+            raise
         except Exception as e:
             logger.error(f'BAZARR encountered an error translating with Gemini: {str(e)}')  # noqa: G004
             raise
@@ -182,6 +190,8 @@ class GeminiTranslatorService:
 
                 if saved_line > 1 and self.start_line == 1:
                     os.remove(self.output_file)
+        except JobCancelled:
+            raise
         except Exception as e:
             jobs_queue.update_job_progress(job_id=self.job_id, progress_message=f"Error reading progress file: {e}")
 
@@ -197,7 +207,7 @@ class GeminiTranslatorService:
             jobs_queue.update_job_progress(job_id=self.job_id, progress_message=f"Failed to save progress: {e}")
 
     def _clear_progress(self):
-        """Clear the progress file on successful completion"""
+        """Remove saved progress after completion, failure, or cancellation."""
         if self.progress_file and os.path.exists(self.progress_file):
             try:
                 os.remove(self.progress_file)
@@ -367,6 +377,7 @@ class GeminiTranslatorService:
         }
 
         try:
+            jobs_queue.update_job_progress(job_id=self.job_id)
             response = requests.request("POST", url, headers=headers, data=payload)
             response.raise_for_status()  # Raise an exception for bad status codes
 
@@ -403,6 +414,8 @@ class GeminiTranslatorService:
 
             return self.current_progress
 
+        except JobCancelled:
+            raise
         except Exception as e:
             response = getattr(e, "response", None)
             if self._is_rate_limited_response(response):
@@ -543,15 +556,20 @@ class GeminiTranslatorService:
                     # Clear progress file on successful completion
                     self._clear_progress()
 
+        except JobCancelled:
+            raise
         except Exception as e:
             logger.error(f'BAZARR encountered an error translating with Gemini: {str(e)}')  # noqa: G004
             jobs_queue.update_job_progress(job_id=self.job_id, progress_value=total,
                                            progress_message=f'Gemini translation failed: {str(e)}')
-            self._clear_progress()
-            if self.output_file and os.path.exists(self.output_file):
-                try:
-                    if os.path.getsize(self.output_file) == 0:
-                        os.remove(self.output_file)
-                except OSError:
-                    pass
-            raise e
+            raise
+        finally:
+            try:
+                self._clear_progress()
+            finally:
+                if self.output_file and os.path.exists(self.output_file):
+                    try:
+                        if os.path.getsize(self.output_file) == 0:
+                            os.remove(self.output_file)
+                    except OSError:
+                        pass

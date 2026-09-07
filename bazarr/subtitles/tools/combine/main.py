@@ -3,7 +3,9 @@
 import logging
 import os
 import re
+import stat
 from dataclasses import dataclass
+from subtitles.tools.subsync_engines import staged_subtitle_write, subtitle_mutation, sync_output_owner_is_unique
 
 from .composer import compose
 from .naming import compose_combined_filename, external_subtitles_dir
@@ -84,6 +86,8 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
         # inside this video's external-subtitles directory. Re-assert it here so a
         # crafted code can never steer makedirs/open/remove outside that folder.
         safe_root = os.path.realpath(external_subtitles_dir(video_path))
+        if os.path.islink(out_path) or not sync_output_owner_is_unique(video_path, out_path):
+            return CombineResult(status="skipped", reason="combined output has no unique regular-file owner")
         out_path = os.path.realpath(out_path)
         if os.path.commonpath([safe_root, out_path]) != safe_root:
             return CombineResult(
@@ -92,35 +96,19 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
             )
 
         try:
-            content = compose(
-                primary_path=sources.primary,
-                secondary_paths=sources.secondaries,
-                format=rule["format"],
-            )
-        except Exception as e:
-            logging.exception("BAZARR combine compose failed for %s", video_path)
-            return CombineResult(status="failed", error=str(e))
-
-        try:
-            # Create the destination directory (mirrors how Bazarr's
-            # get_target_folder makedirs the configured subtitle subfolder) so a
-            # first-time combine into a not-yet-created absolute/relative folder
-            # succeeds instead of failing on open().
             out_dir = os.path.dirname(out_path)
             if out_dir:
                 os.makedirs(out_dir, exist_ok=True)
-            with open(out_path, "wb") as fh:
-                fh.write(content)
-        except OSError as e:
-            logging.exception("BAZARR combine write failed for %s", out_path)
+            with staged_subtitle_write(
+                    video_path, out_path, source_paths=(sources.primary, *sources.secondaries),
+                    after_publish=lambda: _remove_stale_combined_siblings(out_path, video_path)) as temporary:
+                content = compose(primary_path=sources.primary, secondary_paths=sources.secondaries,
+                                  format=rule["format"])
+                with open(temporary, "wb") as fh:
+                    fh.write(content)
+        except Exception as e:
+            logging.exception("BAZARR combine could not publish %s", out_path)
             return CombineResult(status="failed", error=str(e))
-
-        # A combined output is one logical subtitle. Drop any sibling combined
-        # file in a different subtitle format (left over when the profile format
-        # changes or a rebuild switches format) before re-indexing, so the same
-        # combined language is not indexed twice and the editor does not load a
-        # stale positioned ASS as overlapping cues.
-        _remove_stale_combined_siblings(out_path, video_path)
 
         _post_write(out_path, video_path, media_type,
                      sonarr_episode_id, radarr_id)
@@ -173,19 +161,22 @@ def _remove_stale_combined_siblings(out_path, video_path):
     crafted output path can never steer os.remove outside that folder."""
     safe_dir = os.path.realpath(external_subtitles_dir(video_path))
     out_real = os.path.realpath(out_path)
-    if os.path.dirname(out_real) != safe_dir:
+    if os.path.dirname(out_real) != safe_dir or not sync_output_owner_is_unique(video_path, out_path):
         return
     root, _ext = os.path.splitext(out_real)
     for ext in _COMBINED_OUTPUT_EXTS:
-        sibling = os.path.realpath(root + ext)
+        sibling = root + ext
         if sibling == out_real:
             continue
         try:
             if os.path.commonpath([safe_dir, sibling]) != safe_dir:
                 continue
-            if os.path.isfile(sibling):
-                os.remove(sibling)
+            if stat.S_ISREG(os.lstat(sibling).st_mode):
+                with subtitle_mutation(video_path, sibling):
+                    os.remove(sibling)
                 logging.info("BAZARR combine removed stale sibling %s", sibling)
+        except FileNotFoundError:
+            continue
         except OSError:
             logging.exception(
                 "BAZARR combine could not remove stale sibling %s", sibling)

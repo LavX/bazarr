@@ -13,7 +13,8 @@ from app.database import get_profiles_list, get_profile_cutoff, TableMovies, Tab
     get_audio_profile_languages, database, update, select
 from languages.get_languages import alpha2_from_alpha3, get_language_set
 from app.config import settings
-from utilities.helper import get_subtitle_destination_folder
+from utilities.helper import get_subtitle_destination_folder, get_target_folder
+from subtitles.tools.subsync_engines import subtitle_write_locks
 from utilities.path_mappings import path_mappings
 from utilities.video_analyzer import embedded_subs_reader
 from app.event_handler import event_stream
@@ -102,88 +103,91 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True, arr_inst
                         f"BAZARR error when trying to analyze this {os.path.splitext(reversed_path)[1]} file: "  # noqa: G004
                         f"{reversed_path}")
 
-        try:
-            dest_folder = get_subtitle_destination_folder()
-            core.CUSTOM_PATHS = [dest_folder] if dest_folder else []
+        destination = os.path.join(get_target_folder(reversed_path, create=False) or os.path.dirname(reversed_path),
+                                   '.destination')
+        with subtitle_write_locks(reversed_path, destination):
+            try:
+                dest_folder = get_subtitle_destination_folder()
+                core.CUSTOM_PATHS = [dest_folder] if dest_folder else []
 
-            # get previously indexed subtitles that haven't changed:
-            item = database.execute(
-                scoped(select(TableMovies.subtitles)
-                       .where(TableMovies.path == original_path),
-                       TableMovies.arr_instance_id, owner_instance_id))\
-                .first()
-            if not item:
-                previously_indexed_subtitles_to_exclude = []
-            else:
-                previously_indexed_subtitles = ast.literal_eval(item.subtitles) if item.subtitles else []
-                previously_indexed_subtitles_to_exclude = [x for x in previously_indexed_subtitles
-                                                           if len(x) == 3 and
-                                                           x[1] and
-                                                           os.path.isfile(_pr(x[1])) and
-                                                           os.stat(_pr(x[1])).st_size == x[2]]
-
-            subtitles = search_external_subtitles(reversed_path, languages=get_language_set(),
-                                                  only_one=settings.general.single_language)
-            full_dest_folder_path = os.path.dirname(reversed_path)
-            if dest_folder:
-                if settings.general.subfolder == "absolute":
-                    full_dest_folder_path = dest_folder
-                elif settings.general.subfolder == "relative":
-                    full_dest_folder_path = os.path.join(os.path.dirname(reversed_path), dest_folder)
-            subtitles = add_sync_engine_outputs(full_dest_folder_path, subtitles,
-                                                video_path=reversed_path)
-            subtitles = add_combined_outputs(full_dest_folder_path, subtitles,
-                                             video_filename=os.path.basename(reversed_path))
-            subtitles = guess_external_subtitles(full_dest_folder_path, subtitles, "movie",
-                                                 previously_indexed_subtitles_to_exclude)
-        except Exception as e:
-            logging.exception(f"BAZARR unable to index external subtitles for this file {reversed_path}: {repr(e)}")  # noqa: G004
-        else:
-            for subtitle, language in subtitles.items():
-                valid_language = False
-                if language:
-                    if hasattr(language, 'alpha3'):
-                        valid_language = alpha2_from_alpha3(language.alpha3)
+                # get previously indexed subtitles that haven't changed:
+                item = database.execute(
+                    scoped(select(TableMovies.subtitles)
+                           .where(TableMovies.path == original_path),
+                           TableMovies.arr_instance_id, owner_instance_id))\
+                    .first()
+                if not item:
+                    previously_indexed_subtitles_to_exclude = []
                 else:
-                    logging.debug(f"Skipping subtitles because we are unable to define language: {subtitle}")  # noqa: G004
-                    continue
+                    previously_indexed_subtitles = ast.literal_eval(item.subtitles) if item.subtitles else []
+                    previously_indexed_subtitles_to_exclude = [x for x in previously_indexed_subtitles
+                                                               if len(x) == 3 and
+                                                               x[1] and
+                                                               os.path.isfile(_pr(x[1])) and
+                                                               os.stat(_pr(x[1])).st_size == x[2]]
 
-                if not valid_language:
-                    logging.debug(f'{language.alpha3} is an unsupported language code.')  # noqa: G004
-                    continue
-
-                subtitle_path = get_external_subtitles_path(reversed_path, subtitle)
-
-                try:
-                    subtitle_size = os.stat(subtitle_path).st_size
-                except FileNotFoundError:
-                    logging.debug(f"BAZARR skipping missing subtitle file: {subtitle_path}")  # noqa: G004
-                    continue
-
-                custom = CustomLanguage.found_external(subtitle, subtitle_path)
-
-                if custom is not None:
-                    actual_subtitles.append([custom, _prr(subtitle_path),
-                                             subtitle_size])
-
-                elif str(language.basename) != 'und':
-                    if language.forced:
-                        language_str = f'{language}:forced'
-                    elif language.hi:
-                        language_str = f'{language}:hi'
+                subtitles = search_external_subtitles(reversed_path, languages=get_language_set(),
+                                                      only_one=settings.general.single_language)
+                full_dest_folder_path = os.path.dirname(reversed_path)
+                if dest_folder:
+                    if settings.general.subfolder == "absolute":
+                        full_dest_folder_path = dest_folder
+                    elif settings.general.subfolder == "relative":
+                        full_dest_folder_path = os.path.join(os.path.dirname(reversed_path), dest_folder)
+                subtitles = add_sync_engine_outputs(full_dest_folder_path, subtitles,
+                                                    video_path=reversed_path)
+                subtitles = add_combined_outputs(full_dest_folder_path, subtitles,
+                                                 video_filename=os.path.basename(reversed_path))
+                subtitles = guess_external_subtitles(full_dest_folder_path, subtitles, "movie",
+                                                     previously_indexed_subtitles_to_exclude)
+            except Exception as e:
+                logging.exception(f"BAZARR unable to index external subtitles for this file {reversed_path}: {repr(e)}")  # noqa: G004
+            else:
+                for subtitle, language in subtitles.items():
+                    valid_language = False
+                    if language:
+                        if hasattr(language, 'alpha3'):
+                            valid_language = alpha2_from_alpha3(language.alpha3)
                     else:
-                        language_str = str(language)
-                    language_str = subtitle_language_with_sync_modifier(language_str, subtitle)
-                    language_str = subtitle_language_with_combined_modifier(language_str, subtitle)
-                    logging.debug(f"BAZARR external subtitles detected: {language_str}")  # noqa: G004
-                    actual_subtitles.append([language_str, _prr(subtitle_path),
-                                             subtitle_size])
+                        logging.debug(f"Skipping subtitles because we are unable to define language: {subtitle}")  # noqa: G004
+                        continue
 
-        database.execute(
-            scoped(update(TableMovies)
-                   .values(subtitles=str(actual_subtitles))
-                   .where(TableMovies.path == original_path),
-                   TableMovies.arr_instance_id, owner_instance_id))
+                    if not valid_language:
+                        logging.debug(f'{language.alpha3} is an unsupported language code.')  # noqa: G004
+                        continue
+
+                    subtitle_path = get_external_subtitles_path(reversed_path, subtitle)
+
+                    try:
+                        subtitle_size = os.stat(subtitle_path).st_size
+                    except FileNotFoundError:
+                        logging.debug(f"BAZARR skipping missing subtitle file: {subtitle_path}")  # noqa: G004
+                        continue
+
+                    custom = CustomLanguage.found_external(subtitle, subtitle_path)
+
+                    if custom is not None:
+                        actual_subtitles.append([custom, _prr(subtitle_path),
+                                                 subtitle_size])
+
+                    elif str(language.basename) != 'und':
+                        if language.forced:
+                            language_str = f'{language}:forced'
+                        elif language.hi:
+                            language_str = f'{language}:hi'
+                        else:
+                            language_str = str(language)
+                        language_str = subtitle_language_with_sync_modifier(language_str, subtitle)
+                        language_str = subtitle_language_with_combined_modifier(language_str, subtitle)
+                        logging.debug(f"BAZARR external subtitles detected: {language_str}")  # noqa: G004
+                        actual_subtitles.append([language_str, _prr(subtitle_path),
+                                                 subtitle_size])
+
+            database.execute(
+                scoped(update(TableMovies)
+                       .values(subtitles=str(actual_subtitles))
+                       .where(TableMovies.path == original_path),
+                       TableMovies.arr_instance_id, owner_instance_id))
         matching_movies = database.execute(
             scoped(select(TableMovies.radarrId, TableMovies.arr_instance_id)
                    .where(TableMovies.path == original_path),

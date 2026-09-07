@@ -15,13 +15,29 @@ from utilities.autopulse_webhook import call_external_webhook
 from subtitles.indexer.series import store_subtitles
 from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.processing import ProcessSubtitlesResult
-from subtitles.tools.subsync_engines import subtitle_write_lock
+from subtitles.tools.subsync_engines import (subtitle_write_lock, subtitle_write_locks,
+                                            quarantine_sync_outputs_after_mutation)
 from sonarr.history import history_log
 from radarr.history import history_log_movie
 from sonarr.notify import notify_sonarr
 from radarr.notify import notify_radarr
 from plex.operations import plex_refresh_item
 from jellyfin.operations import jellyfin_refresh_item
+
+
+def _delete_subtitle_file(media_path, subtitle_path):
+    with subtitle_write_locks(media_path, subtitle_path):
+        state = subtitle_write_lock(media_path, os.path.dirname(subtitle_path))
+        try:
+            os.remove(subtitle_path)
+        except OSError as exc:
+            if isinstance(exc, FileNotFoundError):
+                state.changed(subtitle_path)
+            logging.exception('BAZARR cannot delete subtitles file: %s', subtitle_path)
+            return False
+        state.changed(subtitle_path)
+        quarantine_sync_outputs_after_mutation(media_path, subtitle_path)
+        return True
 
 
 def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_path, sonarr_series_id=None,
@@ -82,14 +98,10 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
                                     hearing_impaired=None)
 
     if media_type == 'series':
-        with subtitle_write_lock(media_path, os.path.dirname(pr(subtitles_path))):
-            try:
-                os.remove(pr(subtitles_path))
-            except OSError:
-                logging.exception(f'BAZARR cannot delete subtitles file: {subtitles_path}')  # noqa: G004
-                store_subtitles(prr(media_path), media_path, arr_instance_id=arr_instance_id)
-                return False
-            store_subtitles(prr(media_path), media_path, arr_instance_id=arr_instance_id)
+        removed = _delete_subtitle_file(media_path, pr(subtitles_path))
+        store_subtitles(prr(media_path), media_path, arr_instance_id=arr_instance_id)
+        if not removed:
+            return False
         history_log(0, sonarr_series_id, sonarr_episode_id, result, arr_instance_id=arr_instance_id)
         # Route the rescan at the OWNING instance's Sonarr (#156); None
         # owner = default server (legacy single-instance), unchanged.
@@ -115,14 +127,10 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
 
         return True
     else:
-        with subtitle_write_lock(media_path, os.path.dirname(pr(subtitles_path))):
-            try:
-                os.remove(pr(subtitles_path))
-            except OSError:
-                logging.exception(f'BAZARR cannot delete subtitles file: {subtitles_path}')  # noqa: G004
-                store_subtitles_movie(prr(media_path), media_path, arr_instance_id=arr_instance_id)
-                return False
-            store_subtitles_movie(prr(media_path), media_path, arr_instance_id=arr_instance_id)
+        removed = _delete_subtitle_file(media_path, pr(subtitles_path))
+        store_subtitles_movie(prr(media_path), media_path, arr_instance_id=arr_instance_id)
+        if not removed:
+            return False
         history_log_movie(0, radarr_id, result, arr_instance_id=arr_instance_id)
         notify_radarr(radarr_id,
                       arr_client=client_for_instance(database, arr_instance_id, enabled_only=False))

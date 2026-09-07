@@ -21,6 +21,7 @@ from sonarr.history import history_log
 from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.indexer.series import store_subtitles
 from subtitles.processing import ProcessSubtitlesResult
+from subtitles.tools.subsync_engines import subtitle_mutation, subtitle_write_locks
 from utilities.helper import get_target_folder
 from utilities.path_mappings import path_mappings
 
@@ -813,13 +814,6 @@ def _save_subtitle_content(media_type, media_id, language_code, arr_instance_id=
 
     subtitle_path, metadata = result
 
-    # Optimistic locking via ETag (optional but recommended)
-    if_match = request.headers.get('If-Match')
-    if if_match:
-        current_etag = generate_etag(subtitle_path)
-        if if_match.strip('"') != current_etag:
-            return 'Subtitle file has been modified since last read', 412
-
     data = request.get_json()
     if not data or 'content' not in data:
         return 'Request body must include "content" field', 400
@@ -838,8 +832,19 @@ def _save_subtitle_content(media_type, media_id, language_code, arr_instance_id=
     if len(encoded) > MAX_FILE_SIZE:
         return f'Content too large ({len(encoded)} bytes, max {MAX_FILE_SIZE})', 413
 
+    video_path = path_mappings.path_replace_instance(
+        metadata['mediaPath'], metadata.get('arrInstanceId', arr_instance_id), media_type)
     try:
-        _write_bytes_atomically(subtitle_path, encoded)
+        with subtitle_write_locks(video_path, subtitle_path):
+            if not os.path.isfile(subtitle_path):
+                return 'Subtitle file or directory not found', 404
+            if_match = request.headers.get('If-Match')
+            if if_match and if_match.strip('"') != generate_etag(subtitle_path):
+                return 'Subtitle file has been modified since last read', 412
+            with subtitle_mutation(video_path, subtitle_path):
+                _write_bytes_atomically(subtitle_path, encoded)
+                _apply_subtitle_chmod(subtitle_path)
+            new_etag = generate_etag(subtitle_path)
     except FileNotFoundError:
         return 'Subtitle file or directory not found', 404
     except PermissionError:
@@ -849,11 +854,7 @@ def _save_subtitle_content(media_type, media_id, language_code, arr_instance_id=
             return 'No space left on device', 507
         raise
 
-    _apply_subtitle_chmod(subtitle_path)
-
     _refresh_media_subtitles(media_type, media_id, metadata)
-
-    new_etag = generate_etag(subtitle_path)
     response = make_response('', 204)
     response.headers['ETag'] = f'"{new_etag}"'
     return response
@@ -900,15 +901,20 @@ def promote_sync_subtitle(media_type, media_id, target_language, source_language
     if os.path.realpath(source_path) == os.path.realpath(target_path):
         return 'Source and target subtitles are the same file', 400
 
+    video_path = path_mappings.path_replace_instance(
+        metadata['mediaPath'], metadata.get('arrInstanceId', arr_instance_id), media_type)
     try:
-        file_size = os.path.getsize(source_path)
-        if file_size > MAX_FILE_SIZE:
-            return f'Subtitle file too large ({file_size} bytes, max {MAX_FILE_SIZE})', 413
-
-        with open(source_path, 'rb') as source_file:
-            data = source_file.read()
-
-        _write_bytes_atomically(target_path, data)
+        with subtitle_write_locks(video_path, source_path, target_path):
+            file_size = os.path.getsize(source_path)
+            if file_size > MAX_FILE_SIZE:
+                return f'Subtitle file too large ({file_size} bytes, max {MAX_FILE_SIZE})', 413
+            if not os.path.isfile(target_path):
+                return 'Subtitle file or directory not found', 404
+            with open(source_path, 'rb') as source_file:
+                data = source_file.read()
+            with subtitle_mutation(video_path, target_path):
+                _write_bytes_atomically(target_path, data)
+                _apply_subtitle_chmod(target_path)
     except FileNotFoundError:
         return 'Subtitle file or directory not found', 404
     except PermissionError:
@@ -918,7 +924,7 @@ def promote_sync_subtitle(media_type, media_id, target_language, source_language
             return 'No space left on device', 507
         raise
 
-    _apply_subtitle_chmod(target_path)
+    _refresh_media_subtitles(media_type, media_id, metadata)
     _log_promoted_sync_history(
         media_type=media_type,
         media_id=media_id,
@@ -927,7 +933,6 @@ def promote_sync_subtitle(media_type, media_id, target_language, source_language
         target_path=target_path,
         metadata=metadata,
     )
-    _refresh_media_subtitles(media_type, media_id, metadata)
 
     return {
         'sourceLanguage': source_language,
@@ -1096,24 +1101,20 @@ def _create_subtitle(media_type, media_id, arr_instance_id=None):
             subtitle_path.startswith(target_folder_real + os.sep)):
         return 'Invalid subtitle path', 400
 
-    # Check for existing file
-    if os.path.isfile(subtitle_path):
-        return 'Subtitle file already exists', 409
-
     # Encode content
     encoded = content.encode('utf-8')
     if len(encoded) > MAX_FILE_SIZE:
         return f'Content too large ({len(encoded)} bytes, max {MAX_FILE_SIZE})', 413
 
-    # Write atomically
+    # Check and create under the same mutation lock as replacements.
     try:
-        fd, tmp_path = tempfile.mkstemp(dir=target_folder)
-        try:
-            os.write(fd, encoded)
-        finally:
-            os.close(fd)
+        with subtitle_write_locks(video_path, subtitle_path):
+            if os.path.isfile(subtitle_path):
+                return 'Subtitle file already exists', 409
+            with subtitle_mutation(video_path, subtitle_path):
+                _write_bytes_atomically(subtitle_path, encoded)
+                _apply_subtitle_chmod(subtitle_path)
 
-        os.replace(tmp_path, subtitle_path)
     except FileNotFoundError:
         return 'Target directory not found', 404
     except PermissionError:
@@ -1122,14 +1123,6 @@ def _create_subtitle(media_type, media_id, arr_instance_id=None):
         if e.errno == 28:  # ENOSPC
             return 'No space left on device', 507
         raise
-
-    # Apply chmod if configured
-    if settings.general.chmod_enabled:
-        try:
-            chmod_value = int(settings.general.chmod, 8)
-            os.chmod(subtitle_path, chmod_value)
-        except Exception:
-            pass
 
     # Force re-scan subtitles from disk using the media (video) path
     if media_type == 'episode':

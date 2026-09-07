@@ -19,8 +19,12 @@ from subtitles.tools.subsync_engines import (
     REASON_OUTPUT_EXISTS,
     REASON_RESULT_REJECTED,
     REASON_SOURCE_CHANGED,
+    REASON_DESTINATION_CHANGED,
+    REASON_DESTINATION_AMBIGUOUS,
     is_sync_engine_output,
     normalize_enabled_engines,
+    release_subtitle_publication,
+    release_unqueued_subtitle_publication,
 )
 
 
@@ -40,6 +44,8 @@ _ENGINE_OUTCOME_SENTENCES = {
     REASON_RESULT_REJECTED: "{label} result rejected: {message}",
     REASON_ENGINE_FAILED: "{label} failed: {message}",
     REASON_SOURCE_CHANGED: "The uploaded subtitle was replaced or deleted. Sync was skipped.",
+    REASON_DESTINATION_CHANGED: "The synchronized subtitle destination was changed or deleted. Sync was skipped.",
+    REASON_DESTINATION_AMBIGUOUS: "The synchronized subtitle destination has no unique media owner. Sync was skipped.",
 }
 _ENGINE_MESSAGE_LIMIT = 160
 
@@ -254,109 +260,134 @@ def sync_subtitles(video_path,
                    track_job_progress=True,
                    arr_instance_id=None,
                    owns_job_progress=True,
-                   source_version=None):
-    # The audio-sync settings resolve against the owning instance (#227); a None
-    # owner / unset override yields the global value, so legacy paths are
-    # unchanged. The use_subsync gate is evaluated inline via the module-level
-    # helper so NO non-signature local is created before add_job_from_function
-    # below, which re-passes the frame's locals as kwargs on re-invocation.
-    if (not _resolve_subsync_overrides(
-            arr_instance_id, bool(sonarr_episode_id), enabled_engines, max_offset_seconds)[0]
-            and not force_sync):
-        logging.debug('BAZARR automatic syncing is disabled in settings. Skipping sync routine.')
-        return False
-
-    if is_sync_engine_output(srt_path):
-        logging.debug('BAZARR generated sync output cannot be synchronized again. Skipping: %s', srt_path)
-        _report_progress(job_id, track_job_progress, owns_job_progress, 'Sync skipped',
-                         value='max', name=f"Skipped sync for {srt_path}")
-        return False
-
-    if not job_id and track_job_progress:
-        jobs_queue.add_job_from_function(
-            f"Syncing {srt_path}",
-            is_progress=True,
-            progress_max=_sync_progress_total(enabled_engines),
-        )
-        return False
-
-    # Past the enqueue point it is safe to bind locals. Resolve the per-instance
-    # overrides for the real run (the use_subsync gate already passed above).
-    (_, use_subsync_threshold, subsync_threshold,
-     enabled_engines, max_offset_seconds) = _resolve_subsync_overrides(
-        arr_instance_id, bool(sonarr_episode_id), enabled_engines, max_offset_seconds)
-    progress_total = _sync_progress_total(enabled_engines)
-
-    def report(message, value=None, total=None, name=None):
-        _report_progress(job_id, track_job_progress, owns_job_progress, message, value, total, name)
-
-    report('Preparing synchronization', value=0, total=progress_total, name=f"Syncing {srt_path}")
-
-    def update_progress(message, value, total):
-        report(message, value=value, total=total)
-
-    if forced:
-        logging.debug('BAZARR cannot sync forced subtitles. Skipping sync routine.')
-        report('Sync skipped', value='max', name=f"Skipped sync for {srt_path}")
-        return False
-
-    logging.debug(f'BAZARR automatic syncing is enabled in settings. We\'ll try to sync this '  # noqa: G004
-                  f'subtitles: {srt_path}.')
-    if not use_subsync_threshold or (use_subsync_threshold and percent_score <= float(subsync_threshold)):
-        subsync = SubSyncer()
-        sync_kwargs = {
-            'video_path': video_path,
-            'srt_path': srt_path,
-            'srt_lang': srt_lang,
-            'forced': forced,
-            'hi': hi,
-            'max_offset_seconds': max_offset_seconds,
-            'no_fix_framerate': no_fix_framerate,
-            'gss': gss,
-            'reference': reference,
-            'sonarr_series_id': sonarr_series_id,
-            'sonarr_episode_id': sonarr_episode_id,
-            'radarr_id': radarr_id,
-            'job_id': job_id,
-            'force_sync': force_sync,
-            'output_mode': output_mode,
-            'enabled_engines': enabled_engines,
-            'progress_callback': update_progress if track_job_progress else None,
-            'arr_instance_id': arr_instance_id,
-        }
-        sync_result = None
-        if source_version is not None:
-            sync_kwargs['source_version'] = source_version
-        try:
-            sync_result = subsync.sync(**sync_kwargs)
-            if sync_result and sync_result.success:
-                if callback and source_version is None:
-                    callback()
-                elif not callback and getattr(sync_result, 'output_mode', None) == OUTPUT_MODE_KEEP_ALL:
-                    _index_keep_all_outputs(
-                        video_path,
-                        sonarr_series_id=sonarr_series_id,
-                        sonarr_episode_id=sonarr_episode_id,
-                        radarr_id=radarr_id,
-                        arr_instance_id=arr_instance_id,
-                    )
-        except JobCancelled:
-            raise
-        except Exception:
-            logging.exception(f'BAZARR an unhandled exception occurs during the synchronization process for this '  # noqa: G004
-                              f'subtitle file: {srt_path}')
+                   source_version=None,
+                   on_success=None):
+    try:
+        # The audio-sync settings resolve against the owning instance (#227); a None
+        # owner / unset override yields the global value, so legacy paths are
+        # unchanged. The use_subsync gate is evaluated inline via the module-level
+        # helper so NO non-signature local is created before add_job_from_function
+        # below, which re-passes the frame's locals as kwargs on re-invocation.
+        if (not _resolve_subsync_overrides(
+                arr_instance_id, bool(sonarr_episode_id), enabled_engines, max_offset_seconds)[0]
+                and not force_sync):
+            logging.debug('BAZARR automatic syncing is disabled in settings. Skipping sync routine.')
+            release_subtitle_publication(source_version)
             return False
-        else:
-            return bool(sync_result and sync_result.success)
-        finally:
-            if callback and source_version is not None:
-                callback()
-            report(_sync_outcome_message(sync_result), value='max',
-                   name=_sync_complete_job_name(srt_path, sync_result))
-            del subsync
-            gc.collect()
 
-    logging.debug(f"BAZARR subsync skipped because subtitles score isn't below this "  # noqa: G004
-                  f"threshold value: {subsync_threshold}%")
-    report('Sync skipped', value='max', name=f"Skipped sync for {srt_path}")
-    return False
+        if is_sync_engine_output(srt_path):
+            logging.debug('BAZARR generated sync output cannot be synchronized again. Skipping: %s', srt_path)
+            _report_progress(job_id, track_job_progress, owns_job_progress, 'Sync skipped',
+                             value='max', name=f"Skipped sync for {srt_path}")
+            release_subtitle_publication(source_version)
+            return False
+
+        if not job_id and track_job_progress:
+            if not jobs_queue.add_job_from_function(
+                f"Syncing {srt_path}",
+                is_progress=True,
+                progress_max=_sync_progress_total(enabled_engines),
+            ):
+                release_unqueued_subtitle_publication(source_version, jobs_queue)
+            return False
+
+    except BaseException:
+        if job_id:
+            release_subtitle_publication(source_version)
+        else:
+            release_unqueued_subtitle_publication(source_version, jobs_queue)
+        raise
+
+    try:
+        # Past the enqueue point it is safe to bind locals. Resolve the per-instance
+        # overrides for the real run (the use_subsync gate already passed above).
+        (_, use_subsync_threshold, subsync_threshold,
+         enabled_engines, max_offset_seconds) = _resolve_subsync_overrides(
+            arr_instance_id, bool(sonarr_episode_id), enabled_engines, max_offset_seconds)
+        progress_total = _sync_progress_total(enabled_engines)
+
+        def report(message, value=None, total=None, name=None):
+            _report_progress(job_id, track_job_progress, owns_job_progress, message, value, total, name)
+
+        report('Preparing synchronization', value=0, total=progress_total, name=f"Syncing {srt_path}")
+
+        def update_progress(message, value, total):
+            report(message, value=value, total=total)
+
+        if forced:
+            logging.debug('BAZARR cannot sync forced subtitles. Skipping sync routine.')
+            report('Sync skipped', value='max', name=f"Skipped sync for {srt_path}")
+            release_subtitle_publication(source_version)
+            return False
+
+        logging.debug(f'BAZARR automatic syncing is enabled in settings. We\'ll try to sync this '  # noqa: G004
+                      f'subtitles: {srt_path}.')
+        if not use_subsync_threshold or (use_subsync_threshold and percent_score <= float(subsync_threshold)):
+            subsync = SubSyncer()
+            sync_kwargs = {
+                'video_path': video_path,
+                'srt_path': srt_path,
+                'srt_lang': srt_lang,
+                'forced': forced,
+                'hi': hi,
+                'max_offset_seconds': max_offset_seconds,
+                'no_fix_framerate': no_fix_framerate,
+                'gss': gss,
+                'reference': reference,
+                'sonarr_series_id': sonarr_series_id,
+                'sonarr_episode_id': sonarr_episode_id,
+                'radarr_id': radarr_id,
+                'job_id': job_id,
+                'force_sync': force_sync,
+                'output_mode': output_mode,
+                'enabled_engines': enabled_engines,
+                'progress_callback': update_progress if track_job_progress else None,
+                'arr_instance_id': arr_instance_id,
+            }
+            sync_result = None
+            if source_version is not None:
+                sync_kwargs['source_version'] = source_version
+            try:
+                sync_result = subsync.sync(**sync_kwargs)
+                if sync_result and sync_result.success:
+                    if callback and source_version is None:
+                        callback()
+                    elif not callback and getattr(sync_result, 'output_mode', None) == OUTPUT_MODE_KEEP_ALL:
+                        _index_keep_all_outputs(
+                            video_path,
+                            sonarr_series_id=sonarr_series_id,
+                            sonarr_episode_id=sonarr_episode_id,
+                            radarr_id=radarr_id,
+                            arr_instance_id=arr_instance_id,
+                        )
+            except JobCancelled:
+                raise
+            except Exception:
+                logging.exception(f'BAZARR an unhandled exception occurs during the synchronization process for this '  # noqa: G004
+                                  f'subtitle file: {srt_path}')
+                return False
+            else:
+                return bool(sync_result and sync_result.success)
+            finally:
+                try:
+                    try:
+                        if callback and source_version is not None:
+                            callback()
+                    finally:
+                        if on_success and (sync_result or getattr(subsync, 'sync_result', None)) and (
+                            sync_result or subsync.sync_result).success:
+                            on_success()
+                    report(_sync_outcome_message(sync_result), value='max',
+                           name=_sync_complete_job_name(srt_path, sync_result))
+                finally:
+                    release_subtitle_publication(source_version)
+                    del subsync
+                    gc.collect()
+
+        logging.debug(f"BAZARR subsync skipped because subtitles score isn't below this "  # noqa: G004
+                      f"threshold value: {subsync_threshold}%")
+        report('Sync skipped', value='max', name=f"Skipped sync for {srt_path}")
+        release_subtitle_publication(source_version)
+        return False
+    finally:
+        release_subtitle_publication(source_version)

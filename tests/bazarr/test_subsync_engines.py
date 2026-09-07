@@ -412,7 +412,7 @@ def test_successful_sync_without_history_does_not_log_error(monkeypatch, tmp_pat
     _write(subtitle, 'original')
 
     class FakeRunner:
-        def run(self, srt_path, output_mode, enabled_engines, execute_engine, force_sync=False):
+        def run(self, srt_path, output_mode, enabled_engines, execute_engine, force_sync=False, **source_options):
             result = SyncRunResult(source_path=srt_path, output_mode=output_mode)
             result.results = [
                 SyncEngineResult(
@@ -663,6 +663,7 @@ def test_subsyncer_reports_engine_progress(monkeypatch, tmp_path):
 
     subtitle = tmp_path / 'Movie.hu.srt'
     _write(subtitle, 'original')
+    (tmp_path / 'Movie.mkv').touch()
     progress = []
 
     def fake_engine(self, output_path, **kwargs):
@@ -692,6 +693,7 @@ def test_subsyncer_reports_engine_progress(monkeypatch, tmp_path):
         ('Preparing synchronization', 0, 1),
         ('Running FFsubsync (1/1)', 0, 1),
         ('Finished FFsubsync (1/1)', 1, 1),
+        ('Saving synchronized subtitle', None, None),
     ]
 
 
@@ -842,7 +844,7 @@ def test_sync_output_keeps_complete_actual_owner_stem(tmp_path, stem):
 ])
 @pytest.mark.parametrize('sibling_kind', ['media', 'directory', 'non-media', 'absent'])
 def test_tagged_sync_output_defers_only_to_an_actual_media_owner(
-        tmp_path, video_stem, subtitle_stem, sibling_stem, sibling_kind):
+        tmp_path, monkeypatch, video_stem, subtitle_stem, sibling_stem, sibling_kind):
     from subtitles.indexer.utils import add_sync_engine_outputs
 
     media_folder = tmp_path / 'media'
@@ -862,6 +864,19 @@ def test_tagged_sync_output_defers_only_to_an_actual_media_owner(
     subtitle = f'{subtitle_stem}.en.ffsubsync.srt'
     _write(subtitle_folder / subtitle, 'subtitle')
 
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from app import database as db_module
+    from app.config import settings
+    from utilities.path_mappings import path_mappings
+    monkeypatch.setattr(settings.general, 'subfolder', 'absolute')
+    monkeypatch.setattr(settings.general, 'subfolder_custom', str(subtitle_folder))
+    rows = [SimpleNamespace(path=str(path), arr_instance_id=None) for path in media_folder.iterdir()
+            if path.is_file() and path.suffix.lower() in ('.mkv', '.mp4')]
+    db = Mock()
+    db.execute.return_value.all.return_value = rows
+    monkeypatch.setattr(db_module, 'database', db)
+    monkeypatch.setattr(path_mappings, 'path_replace_instance', lambda path, *args: path)
     result = add_sync_engine_outputs(str(subtitle_folder), {}, video_path=str(video))
 
     if sibling_kind == 'media':

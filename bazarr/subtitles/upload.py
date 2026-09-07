@@ -30,7 +30,8 @@ from app.event_handler import event_stream
 from app.notifier import send_notifications
 from app.notifier import send_notifications_movie
 from subtitles.processing import ProcessSubtitlesResult
-from subtitles.tools.subsync_engines import subtitle_source_version, subtitle_write_lock
+from subtitles.tools.subsync_engines import (SubtitlePublication, write_subtitle_file,
+                                            subtitle_source_version, subtitle_write_locks)
 
 from .sync import sync_subtitles, _index_keep_all_outputs
 from .post_processing import postprocessing
@@ -40,11 +41,45 @@ from jellyfin.operations import jellyfin_refresh_item
 
 def _refresh_uploaded_subtitles(video_path, subtitle_path, sonarr_series_id=None, sonarr_episode_id=None,
                                 radarr_id=None, arr_instance_id=None):
-    # Keep the scan and its database update together with save/delete operations.
-    with subtitle_write_lock(video_path, os.path.dirname(subtitle_path)):
-        _index_keep_all_outputs(video_path, sonarr_series_id=sonarr_series_id,
-                               sonarr_episode_id=sonarr_episode_id, radarr_id=radarr_id,
-                               arr_instance_id=arr_instance_id)
+    _index_keep_all_outputs(video_path, sonarr_series_id=sonarr_series_id,
+                            sonarr_episode_id=sonarr_episode_id, radarr_id=radarr_id,
+                            arr_instance_id=arr_instance_id)
+
+
+def _notify_upload(consumer, callback, *args, **kwargs):
+    try:
+        callback(*args, **kwargs)
+    except Exception as exc:
+        logging.warning('BAZARR upload notification failed for %s (%s)', consumer, type(exc).__name__)
+
+
+def _refresh_upload_consumers(media_type, metadata, arr_instance_id):
+    callbacks = []
+    if media_type == 'series':
+        callbacks.append(('Sonarr', lambda: notify_sonarr(
+            metadata.sonarrSeriesId,
+            arr_client=client_for_instance(database, arr_instance_id, enabled_only=False))))
+        if settings.general.use_plex and settings.plex.update_series_library:
+            callbacks.append(('Plex', lambda: plex_refresh_item(
+                metadata.imdbId, is_movie=False, season=metadata.season, episode=metadata.episode)))
+        if settings.general.use_jellyfin and settings.jellyfin.update_series_library:
+            callbacks.append(('Jellyfin', lambda: jellyfin_refresh_item(
+                metadata.imdbId, is_movie=False, season=metadata.season, episode=metadata.episode,
+                tvdb_id=metadata.tvdbId)))
+    else:
+        callbacks.append(('Radarr', lambda: notify_radarr(
+            metadata.radarrId,
+            arr_client=client_for_instance(database, arr_instance_id, enabled_only=False))))
+        if settings.general.use_plex and settings.plex.update_movie_library:
+            callbacks.append(('Plex', lambda: plex_refresh_item(metadata.imdbId, is_movie=True)))
+        if settings.general.use_jellyfin and settings.jellyfin.update_movie_library:
+            callbacks.append(('Jellyfin', lambda: jellyfin_refresh_item(
+                metadata.imdbId, is_movie=True, tmdb_id=metadata.tmdbId)))
+    for consumer, callback in callbacks:
+        try:
+            callback()
+        except Exception as exc:
+            logging.warning('BAZARR upload refresh failed for %s (%s)', consumer, type(exc).__name__)
 
 
 def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, filename, audio_language, job_id=None,
@@ -96,6 +131,8 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
             .first()
 
         if episode_metadata:
+            sonarrSeriesId = episode_metadata.sonarrSeriesId
+            sonarrEpisodeId = episode_metadata.sonarrEpisodeId
             use_original_format = bool(get_profiles_list(episode_metadata.profileId)["originalFormat"])
         else:
             return
@@ -108,6 +145,7 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
             .first()
 
         if movie_metadata:
+            radarrId = movie_metadata.radarrId
             use_original_format = bool(get_profiles_list(movie_metadata.profileId)["originalFormat"])
         else:
             return
@@ -143,8 +181,8 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
         # ensure that formats must be a tuple of strings
         sub_format = (sub.format,) if isinstance(sub.format, str) else sub.format
         subtitle_directory = get_target_folder(path)
-        write_lock = subtitle_write_lock(path, subtitle_directory or os.path.dirname(path))
-        with write_lock:
+        with subtitle_write_locks(path, os.path.join(subtitle_directory or os.path.dirname(path), '.destination')):
+            written_paths = []
             saved_subtitles = save_subtitles(path,
                                             [sub],
                                             single=single,
@@ -152,8 +190,12 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
                                             directory=subtitle_directory,
                                             chmod=chmod,
                                             formats=sub_format if use_original_format else ("srt",),
-                                            path_decoder=force_unicode)
+                                            path_decoder=force_unicode,
+                                            write_subtitle=partial(write_subtitle_file, path, written_paths=written_paths))
+            saved_subtitles = [saved for saved in saved_subtitles if saved.storage_path in written_paths]
             source_version = subtitle_source_version(saved_subtitles[0].storage_path) if saved_subtitles else None
+            source_publication = (SubtitlePublication(path, saved_subtitles[0].storage_path, source_version)
+                                  if source_version is not None else None)
     except Exception as e:
         logging.exception(f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')  # noqa: G004
         return
@@ -198,11 +240,13 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
                              uploaded_language_code3, audio_language['name'], audio_language['code2'],
                              audio_language['code3'], 100, "1", "manual", "user", "unknown", sonarrSeriesId,
                              sonarrEpisodeId or radarrId,)
-        with write_lock:
+        with subtitle_write_locks(path, subtitle_path):
             if subtitle_source_version(subtitle_path) == source_version:
-                postprocessing(command, path)
+                postprocessing(command, path, subtitle_path=subtitle_path)
                 set_chmod(subtitles_path=subtitle_path)
                 source_version = subtitle_source_version(subtitle_path)
+                source_publication.release()
+                source_publication = SubtitlePublication(path, subtitle_path, source_version)
 
     refresh_subtitles = partial(_refresh_uploaded_subtitles, path, subtitle_path, sonarr_series_id=sonarrSeriesId,
                                 sonarr_episode_id=sonarrEpisodeId, radarr_id=radarrId,
@@ -217,8 +261,6 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
             subtitle_path, arr_instance_id, "series")
         # Route the rescan at the OWNING instance's server (#156). None owner =
         # default server (legacy single-instance), unchanged.
-        notify_sonarr(episode_metadata.sonarrSeriesId,
-                      arr_client=client_for_instance(database, arr_instance_id, enabled_only=False))
         event_stream(type='series', action='update', payload=episode_metadata.sonarrSeriesId)
         event_stream(type='episode-wanted', action='delete', payload=episode_metadata.sonarrEpisodeId)
     else:
@@ -227,8 +269,6 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
         reversed_path = path_mappings.path_replace_reverse_instance(path, arr_instance_id, "movie")
         reversed_subtitles_path = path_mappings.path_replace_reverse_instance(
             subtitle_path, arr_instance_id, "movie")
-        notify_radarr(movie_metadata.radarrId,
-                      arr_client=client_for_instance(database, arr_instance_id, enabled_only=False))
         event_stream(type='movie', action='update', payload=movie_metadata.radarrId)
         event_stream(type='movie-wanted', action='delete', payload=movie_metadata.radarrId)
 
@@ -254,37 +294,28 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
             history_log(4, sonarrSeriesId, sonarrEpisodeId, result, fake_provider=provider,
                         fake_score=MAX_SCORES['episode'], arr_instance_id=arr_instance_id)
             if not settings.general.dont_notify_manual_actions:
-                send_notifications(sonarrSeriesId, sonarrEpisodeId, result.message,
+                _notify_upload("user", send_notifications, sonarrSeriesId, sonarrEpisodeId, result.message,
                                    arr_instance_id=arr_instance_id)
             if settings.general.use_plex:
-                if settings.plex.update_series_library:
-                    plex_refresh_item(episode_metadata.imdbId, is_movie=False,
-                                      season=episode_metadata.season, episode=episode_metadata.episode)
                 if settings.plex.set_episode_added:
-                    plex_set_episode_added_date_now(episode_metadata)
-            if settings.general.use_jellyfin and settings.jellyfin.update_series_library:
-                jellyfin_refresh_item(episode_metadata.imdbId, is_movie=False,
-                                      season=episode_metadata.season, episode=episode_metadata.episode,
-                                      tvdb_id=episode_metadata.tvdbId)
+                    _notify_upload("Plex added date", plex_set_episode_added_date_now, episode_metadata)
         else:
             history_log_movie(4, radarrId, result, fake_provider=provider, fake_score=MAX_SCORES['movie'],
                               arr_instance_id=arr_instance_id)
             if not settings.general.dont_notify_manual_actions:
-                send_notifications_movie(radarrId, result.message, arr_instance_id=arr_instance_id)
+                _notify_upload("user", send_notifications_movie, radarrId, result.message, arr_instance_id=arr_instance_id)
             if settings.general.use_plex:
-                if settings.plex.update_movie_library:
-                    plex_refresh_item(movie_metadata.imdbId, is_movie=True)
                 if settings.plex.set_movie_added:
-                    plex_set_movie_added_date_now(movie_metadata)
-            if settings.general.use_jellyfin and settings.jellyfin.update_movie_library:
-                jellyfin_refresh_item(movie_metadata.imdbId, is_movie=True,
-                                      tmdb_id=movie_metadata.tmdbId)
+                    _notify_upload("Plex added date", plex_set_movie_added_date_now, movie_metadata)
 
-    if source_version is not None:
+    refresh_consumers = partial(_refresh_upload_consumers, media_type,
+                                episode_metadata if media_type == 'series' else movie_metadata, arr_instance_id)
+    if source_publication is not None:
         sync_subtitles(video_path=path, srt_path=subtitle_path, srt_lang=uploaded_language_code2,
                        percent_score=100, forced=forced, hi=hi, sonarr_series_id=sonarrSeriesId,
                        sonarr_episode_id=sonarrEpisodeId, radarr_id=radarrId,
                        arr_instance_id=arr_instance_id, callback=refresh_subtitles,
-                       source_version=source_version)
+                       source_version=source_publication, on_success=refresh_consumers)
+    refresh_consumers()
 
     return '', 204

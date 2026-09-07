@@ -86,6 +86,7 @@ def _subs(session, table, row_id):
 ])
 def test_sync_outputs_belong_to_the_indexed_video(schema_session, monkeypatch, tmp_path,
                                                  media_type, subfolder, naming, single_language):
+    from app import database as database_module
     from subzero.language import Language
     import subtitles.indexer.movies as mv
     import subtitles.indexer.series as se
@@ -111,6 +112,7 @@ def test_sync_outputs_belong_to_the_indexed_video(schema_session, monkeypatch, t
     monkeypatch.setattr(module.settings.general, 'subfolder_custom', custom_folder)
     monkeypatch.setattr(module.core, 'CUSTOM_PATHS', [])
     monkeypatch.setattr(module, 'database', schema_session)
+    monkeypatch.setattr(database_module, 'database', schema_session)
     monkeypatch.setattr(module, 'get_language_set', lambda: {Language.fromietf('en')})
     monkeypatch.setattr(module, 'alpha2_from_alpha3', lambda code: Language(code).alpha2)
     monkeypatch.setattr(module.path_mappings, 'path_replace_instance', lambda p, *a: p)

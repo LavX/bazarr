@@ -153,7 +153,7 @@ class TestTryCombine:
         mock_resolve.return_value = make_sources(
             tmp_path, "en_hu_sibling_en.srt", "en_hu_sibling_hu.srt"
         )
-        mock_filename.return_value = str(tmp_path / "out.srt")
+        mock_filename.return_value = str(tmp_path / "Movie.en.combined-hu.srt")
         mock_compose.side_effect = ValueError("bad SRT")
 
         result = try_combine_for_video(
