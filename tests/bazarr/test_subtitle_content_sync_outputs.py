@@ -7,6 +7,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 from flask import Flask
+import pytest
 
 import app.database  # noqa: F401
 
@@ -221,6 +222,72 @@ def test_promote_sync_output_overwrites_target_atomically(tmp_path, monkeypatch)
     assert history_calls[0][1]['result'].subs_path == str(original)
     assert 'ffsubsync' in history_calls[0][1]['result'].message
     assert events == [{'type': 'movie', 'payload': 1203}]
+
+
+@pytest.mark.parametrize('media_type', ['movie', 'episode'])
+@pytest.mark.parametrize('failure', ['index', 'event', 'history'])
+def test_promotion_preserves_confirmation_and_refresh_attempts_on_failure(schema_session, tmp_path, monkeypatch,
+                                                                        media_type, failure):
+    from app.database import TableHistory, TableHistoryMovie, select
+    from radarr import history as movie_history
+    from sonarr import history as episode_history
+
+    content = _real_module('api.subtitles.content')
+    video = tmp_path / 'Video.mkv'
+    original = tmp_path / 'Video.en.srt'
+    generated = tmp_path / 'Video.en.alass.srt'
+    video.touch()
+    original.write_text('original subtitle')
+    generated.write_text('selected subtitle')
+    metadata = {'mediaPath': str(video), 'mediaId': 10, 'mediaUpstreamId': 20,
+                'episodeId': 30, 'episodeUpstreamId': 40, 'arrInstanceId': 7}
+    media_id = 40 if media_type == 'episode' else 20
+    table = TableHistory if media_type == 'episode' else TableHistoryMovie
+    refreshed = []
+
+    monkeypatch.setattr(content, 'resolve_subtitle_path',
+                        lambda kind, item_id, lang, **kw: (str(generated if ':sync-' in lang else original), metadata))
+    monkeypatch.setattr(content, 'database', schema_session)
+    for module in (movie_history, episode_history):
+        monkeypatch.setattr(module, 'database', schema_session)
+        monkeypatch.setattr(module, 'event_stream', lambda **kw: None)
+    for name in ('path_replace_reverse', 'path_replace_reverse_movie'):
+        monkeypatch.setattr(content.path_mappings, name, lambda path: path)
+    monkeypatch.setattr(content.path_mappings, 'path_replace_instance', lambda path, *a: path)
+    monkeypatch.setattr(content, '_active_sync_job_for_path', lambda path: None)
+
+    def refresh_step(step):
+        refreshed.append(step)
+        if step == failure:
+            raise RuntimeError('controlled refresh failure')
+
+    for name in ('store_subtitles', 'store_subtitles_movie'):
+        monkeypatch.setattr(content, name, lambda *a, **kw: refresh_step('index'))
+    monkeypatch.setattr(content, 'event_stream', lambda **kw: refresh_step('event'))
+    if failure == 'history':
+        execute = schema_session.execute
+
+        def fail_history_insert(statement, *args, **kwargs):
+            if getattr(statement, 'is_insert', False):
+                raise RuntimeError('controlled refresh failure')
+            return execute(statement, *args, **kwargs)
+
+        monkeypatch.setattr(schema_session, 'execute', fail_history_insert)
+
+    with pytest.raises(RuntimeError, match='controlled refresh failure'):
+        content.promote_sync_subtitle(media_type, media_id, 'en', 'en:sync-alass', arr_instance_id=7)
+
+    assert original.read_text() == 'selected subtitle'
+    rows = schema_session.execute(select(table)).scalars().all()
+    if failure == 'history':
+        assert refreshed == (['index', 'event', 'event'] if media_type == 'episode' else ['index', 'event'])
+        assert rows == []
+        return
+    assert len(rows) == 1, 'a completed publication lost its action-5 confirmation'
+    assert (rows[0].action, rows[0].arr_instance_id, rows[0].subtitles_path) == (5, 7, str(original))
+    status, code = content.get_subtitle_sync_status(media_type, media_id, 'en', arr_instance_id=7)
+    assert code == 200
+    assert status['confirmed'] is True
 
 
 def test_promote_sync_output_rejects_different_base_language(monkeypatch):

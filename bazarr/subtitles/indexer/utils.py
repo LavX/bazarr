@@ -139,7 +139,7 @@ def _language_code_from_sync_engine_output(subtitle, video_filename=None):
     return ':'.join([language] + variants)
 
 
-def add_sync_engine_outputs(dest_folder, subtitles, video_filename=None, video_path=None):
+def add_sync_engine_outputs(dest_folder, subtitles, video_filename=None, video_path=None, ownership_index=None):
     """Add generated outputs belonging to the video, regardless of save preferences."""
     if not os.path.isdir(dest_folder):
         return subtitles
@@ -169,7 +169,8 @@ def add_sync_engine_outputs(dest_folder, subtitles, video_filename=None, video_p
             stem, extension = os.path.splitext(subtitle)
             source_path = os.path.join(dest_folder, stem.rsplit('.', 1)[0] + extension)
             if source_path not in ownership:
-                ownership[source_path] = sync_output_owner_is_unique(video_path, source_path)
+                ownership[source_path] = sync_output_owner_is_unique(video_path, source_path,
+                                                                    ownership_index=ownership_index)
             if not ownership[source_path]:
                 subtitles.pop(subtitle, None)
                 continue

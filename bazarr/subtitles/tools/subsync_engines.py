@@ -196,7 +196,67 @@ def write_subtitle_file(video_path, destination, content, written_paths=None):
             handle.write(content)
 
 
-def sync_output_owner_is_unique(video_path, source_path):
+def _normalized_media_stem(path):
+    return unicodedata.normalize('NFC', os.path.splitext(os.path.basename(path))[0].lower())
+
+
+class SyncOutputOwnerIndex:
+    """Lazily map library owners once for one sequential subtitle scan.
+
+    Only indexers share this snapshot. File mutations and queued publications
+    use fresh ownership checks so a completed scan cannot authorize a later write.
+    """
+
+    def __init__(self):
+        self._loaded = False
+        self._owners = {}
+
+    @staticmethod
+    def _load_owners():
+        from app.database import database, select, TableEpisodes, TableMovies
+        from app.config import settings
+        from utilities.path_mappings import path_mappings
+
+        subfolder = settings.general.subfolder
+        custom_folder = settings.general.subfolder_custom
+        absolute_folder = (os.path.normcase(os.path.realpath(custom_folder))
+                           if subfolder == 'absolute' else None)
+        owners = {}
+        for table, media_type in ((TableEpisodes, 'episode'), (TableMovies, 'movie')):
+            for row in database.execute(select(table.path, table.arr_instance_id)).all():
+                if not row.path:
+                    continue
+                mapped = os.path.normcase(os.path.realpath(path_mappings.path_replace_instance(
+                    row.path, row.arr_instance_id, media_type)))
+                folders = {os.path.dirname(mapped)}
+                if subfolder == 'absolute':
+                    folders.add(absolute_folder)
+                elif subfolder == 'relative':
+                    folders.add(os.path.normcase(os.path.realpath(os.path.join(
+                        os.path.dirname(mapped), custom_folder))))
+                stem = _normalized_media_stem(mapped)
+                for folder in folders:
+                    owners.setdefault((folder, stem), set()).add(mapped)
+        return owners
+
+    def is_unique(self, video, directory, conflicting_stems):
+        if not self._loaded:
+            # A failed build leaves an empty index, never a partial ownership
+            # claim or repeated full-library retries during the same scan.
+            self._loaded = True
+            self._owners = self._load_owners()
+        owned = False
+        expected_owner = {video}
+        for stem in conflicting_stems:
+            owners = self._owners.get((directory, stem))
+            if owners:
+                if owners != expected_owner:
+                    return False
+                owned = True
+        return owned
+
+
+def sync_output_owner_is_unique(video_path, source_path, ownership_index=None):
     """Prove ownership before moving or replacing an exact generated variant."""
     from subliminal_patch.core import VIDEO_EXTENSIONS
 
@@ -204,9 +264,7 @@ def sync_output_owner_is_unique(video_path, source_path):
     directory = os.path.normcase(os.path.realpath(os.path.dirname(source_path)))
     media_directory = os.path.dirname(video)
 
-    def stem(path):
-        return unicodedata.normalize('NFC', os.path.splitext(os.path.basename(path))[0].lower())
-
+    stem = _normalized_media_stem
     if stem(source_path) != stem(video) and not stem(source_path).startswith(stem(video) + '.'):
         return False
     conflicting_stems = {stem(video), stem(source_path)}
@@ -219,30 +277,11 @@ def sync_output_owner_is_unique(video_path, source_path):
         if directory == media_directory:
             return video in local_videos
 
-        # Separate media directories can share one absolute subtitle folder. The
-        # local scan cannot establish ownership there, so include mapped DB paths.
-        from app.database import database, select, TableEpisodes, TableMovies
-        from app.config import settings
-        from utilities.path_mappings import path_mappings
-
-        owners = set()
-        for table, media_type in ((TableEpisodes, 'episode'), (TableMovies, 'movie')):
-            for row in database.execute(select(table.path, table.arr_instance_id)).all():
-                if not row.path:
-                    continue
-                mapped = os.path.normcase(os.path.realpath(path_mappings.path_replace_instance(
-                    row.path, row.arr_instance_id, media_type)))
-                if stem(mapped) not in conflicting_stems:
-                    continue
-                folders = {os.path.dirname(mapped)}
-                if settings.general.subfolder == 'absolute':
-                    folders.add(os.path.normcase(os.path.realpath(settings.general.subfolder_custom)))
-                elif settings.general.subfolder == 'relative':
-                    folders.add(os.path.normcase(os.path.realpath(os.path.join(
-                        os.path.dirname(mapped), settings.general.subfolder_custom))))
-                if directory in folders:
-                    owners.add(mapped)
-        return owners == {video}
+        # Separate media directories can share a custom subtitle folder. Keep
+        # all mapped owners, amortizing that lookup only within an explicit scan.
+        if ownership_index is None:
+            ownership_index = SyncOutputOwnerIndex()
+        return ownership_index.is_unique(video, directory, conflicting_stems)
     except (OSError, ValueError):
         return False
     except Exception:

@@ -13,7 +13,7 @@ from app.database import get_profiles_list, get_profile_cutoff, TableEpisodes, T
 from languages.get_languages import alpha2_from_alpha3, get_language_set
 from app.config import settings
 from utilities.helper import get_subtitle_destination_folder, get_target_folder
-from subtitles.tools.subsync_engines import subtitle_write_locks
+from subtitles.tools.subsync_engines import SyncOutputOwnerIndex, subtitle_write_locks
 from utilities.path_mappings import path_mappings
 from utilities.video_analyzer import embedded_subs_reader
 from app.event_handler import event_stream
@@ -31,7 +31,7 @@ from arr_instances.resolution import scoped
 gc.enable()
 
 
-def store_subtitles(original_path, reversed_path, use_cache=True, arr_instance_id=None):
+def store_subtitles(original_path, reversed_path, use_cache=True, arr_instance_id=None, ownership_index=None):
     logging.debug(f'BAZARR started subtitles indexing for this file: {reversed_path}')  # noqa: G004
     actual_subtitles = []
     # The owning instance decides everything below: which per-instance
@@ -135,7 +135,7 @@ def store_subtitles(original_path, reversed_path, use_cache=True, arr_instance_i
                     elif settings.general.subfolder == "relative":
                         full_dest_folder_path = os.path.join(os.path.dirname(reversed_path), dest_folder)
                 subtitles = add_sync_engine_outputs(full_dest_folder_path, subtitles,
-                                                    video_path=reversed_path)
+                                                    video_path=reversed_path, ownership_index=ownership_index)
                 subtitles = add_combined_outputs(full_dest_folder_path, subtitles,
                                                  video_filename=os.path.basename(reversed_path))
                 subtitles = guess_external_subtitles(full_dest_folder_path, subtitles, "series",
@@ -463,6 +463,7 @@ def series_full_scan_subtitles(job_id=None, use_cache=None, wait_for_completion=
     ).all()
 
     jobs_queue.update_job_progress(job_id=job_id, progress_max=len(episodes), progress_message='Indexing')
+    ownership_index = SyncOutputOwnerIndex()
     for i, episode in enumerate(episodes, start=1):
         jobs_queue.update_job_progress(
             job_id=job_id, progress_value=i,
@@ -470,7 +471,7 @@ def series_full_scan_subtitles(job_id=None, use_cache=None, wait_for_completion=
         store_subtitles(episode.path,
                         path_mappings.path_replace_instance(episode.path,
                                                             episode.arr_instance_id, 'series'),
-                        use_cache=use_cache, arr_instance_id=episode.arr_instance_id)
+                        use_cache=use_cache, arr_instance_id=episode.arr_instance_id, ownership_index=ownership_index)
 
     logging.info('BAZARR All existing episode subtitles indexed from disk.')
 
@@ -488,8 +489,9 @@ def series_scan_subtitles(no, arr_instance_id=None):
             TableEpisodes.arr_instance_id, arr_instance_id))\
         .all()
 
+    ownership_index = SyncOutputOwnerIndex()
     for episode in episodes:
         store_subtitles(episode.path,
                         path_mappings.path_replace_instance(episode.path,
                                                             episode.arr_instance_id, 'series'),
-                        use_cache=False, arr_instance_id=episode.arr_instance_id)
+                        use_cache=False, arr_instance_id=episode.arr_instance_id, ownership_index=ownership_index)

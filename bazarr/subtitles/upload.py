@@ -310,12 +310,11 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
 
     refresh_consumers = partial(_refresh_upload_consumers, media_type,
                                 episode_metadata if media_type == 'series' else movie_metadata, arr_instance_id)
+    refresh_consumers()
     if source_publication is not None:
         sync_subtitles(video_path=path, srt_path=subtitle_path, srt_lang=uploaded_language_code2,
                        percent_score=100, forced=forced, hi=hi, sonarr_series_id=sonarrSeriesId,
                        sonarr_episode_id=sonarrEpisodeId, radarr_id=radarrId,
                        arr_instance_id=arr_instance_id, callback=refresh_subtitles,
                        source_version=source_publication, on_success=refresh_consumers)
-    refresh_consumers()
-
     return '', 204

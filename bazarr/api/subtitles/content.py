@@ -924,15 +924,17 @@ def promote_sync_subtitle(media_type, media_id, target_language, source_language
             return 'No space left on device', 507
         raise
 
-    _refresh_media_subtitles(media_type, media_id, metadata)
-    _log_promoted_sync_history(
-        media_type=media_type,
-        media_id=media_id,
-        target_language=target_language,
-        source_language=source_language,
-        target_path=target_path,
-        metadata=metadata,
-    )
+    try:
+        _refresh_media_subtitles(media_type, media_id, metadata)
+    finally:
+        _log_promoted_sync_history(
+            media_type=media_type,
+            media_id=media_id,
+            target_language=target_language,
+            source_language=source_language,
+            target_path=target_path,
+            metadata=metadata,
+        )
 
     return {
         'sourceLanguage': source_language,

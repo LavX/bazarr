@@ -136,6 +136,54 @@ def upload_flow(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("media_type", ["movie", "series"])
+@pytest.mark.parametrize("failure", ["settings", "enqueue"])
+def test_saved_upload_refreshes_consumers_when_sync_setup_fails(upload_flow, monkeypatch, media_type, failure):
+    from app.config import settings
+    from subtitles import sync, upload
+
+    flow = upload_flow
+    refreshes = []
+    monkeypatch.setattr(settings.general, 'use_plex', True)
+    monkeypatch.setattr(settings.general, 'use_jellyfin', True)
+    for service in (settings.plex, settings.jellyfin):
+        monkeypatch.setattr(service, 'update_movie_library', True)
+        monkeypatch.setattr(service, 'update_series_library', True)
+    monkeypatch.setattr(settings.plex, 'set_episode_added', False)
+    monkeypatch.setattr(settings.plex, 'set_movie_added', False)
+
+    def consumer(name):
+        def refresh(*args, **kwargs):
+            assert flow.indexes, 'consumers must see an indexed source publication'
+            refreshes.append((name, args, kwargs))
+        return refresh
+
+    for name in ('notify_sonarr', 'notify_radarr', 'plex_refresh_item', 'jellyfin_refresh_item'):
+        monkeypatch.setattr(upload, name, consumer(name))
+
+    def fail(*args, **kwargs):
+        raise RuntimeError('controlled sync setup failure')
+
+    if failure == 'settings':
+        monkeypatch.setattr(sync, '_resolve_subsync_overrides', fail)
+    else:
+        monkeypatch.setattr(flow.queue, 'add_job_from_function', fail)
+
+    with pytest.raises(RuntimeError, match='controlled sync setup failure'):
+        flow.submit(media_type, job_id='existing-upload-job')
+
+    assert 'Uploaded' in flow.video.with_suffix('.en.srt').read_text()
+    assert flow.indexes
+    assert len(flow.history) == 1
+    assert not flow.queue.jobs_pending_queue
+    assert [name for name, args, kwargs in refreshes] == [
+        'notify_sonarr' if media_type == 'series' else 'notify_radarr',
+        'plex_refresh_item', 'jellyfin_refresh_item']
+    assert refreshes[0][1] == (10 if media_type == 'series' else 30,)
+    assert refreshes[1][2]['is_movie'] == (media_type == 'movie')
+    assert refreshes[2][2]['is_movie'] == (media_type == 'movie')
+
+
+@pytest.mark.parametrize("media_type", ["movie", "series"])
 def test_saved_upload_is_visible_and_upload_completes_before_sync(upload_flow, media_type):
     flow = upload_flow
     upload_id = flow.submit(media_type)
