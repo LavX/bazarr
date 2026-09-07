@@ -68,11 +68,11 @@ def history_log(action, sonarr_series_id, sonarr_episode_id, result, fake_provid
         upgradedFromId=upgraded_from_id,
     )
 
-    # Stamp the owning instance + local refs (episode_id/series_id -> the local
-    # PKs) from the episode row so history is instance-owned, the same way INC4
-    # stamps media. Guarded: a row that can't be resolved (or a pre-backfill
-    # install) leaves the columns NULL. No-op for the default single instance
-    # beyond populating the local refs.
+    if arr_instance_id is not None:
+        values['arr_instance_id'] = arr_instance_id
+
+    # Resolve local refs when the episode is available. A missing episode must
+    # not discard an owner supplied by the caller.
     if sonarr_episode_id is not None:
         ep = _resolve_episode_owner_row(sonarr_episode_id, arr_instance_id)
         if ep is not None:
@@ -83,6 +83,12 @@ def history_log(action, sonarr_series_id, sonarr_episode_id, result, fake_provid
                 values['episode_id'] = ep.id
             if ep.series_id is not None:
                 values['series_id'] = ep.series_id
+
+    if values.get('arr_instance_id') is None:
+        logging.warning(
+            'BAZARR skipping episode history insert: unable to resolve owning instance '
+            'for sonarrEpisodeId %s', sonarr_episode_id)
+        return
 
     database.execute(insert(TableHistory).values(**values))
     event_stream(type='episode-history')

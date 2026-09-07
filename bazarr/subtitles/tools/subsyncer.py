@@ -22,6 +22,10 @@ from subtitles.tools.subsync_engines import (
     normalize_enabled_engines,
     normalize_output_mode,
     validate_engine_result,
+    subtitle_write_lock,
+    SubtitlePublication,
+    subtitle_source_version,
+    quarantine_sync_outputs_after_mutation,
 )
 from languages.get_languages import audio_language_from_name, language_from_alpha2
 from utilities.path_mappings import path_mappings
@@ -523,7 +527,7 @@ class SubSyncer:
     def sync(self, video_path, srt_path, srt_lang, hi, forced,
              max_offset_seconds, no_fix_framerate, gss, reference=None, sonarr_series_id=None, sonarr_episode_id=None,
              radarr_id=None, progress_callback=None, job_id=None, force_sync=False, output_mode=None,
-             enabled_engines=None, write_history=True, arr_instance_id=None):
+             enabled_engines=None, write_history=True, arr_instance_id=None, source_version=None):
         self.reference = video_path
         self.srtin = srt_path
         self.progress_callback = progress_callback
@@ -586,13 +590,33 @@ class SubSyncer:
             return raw_result
 
         runner = SubsyncEngineRunner()
-        self.sync_result = runner.run(
-            srt_path=self.srtin,
-            output_mode=output_mode,
-            enabled_engines=enabled_engines,
-            execute_engine=execute_engine,
-            force_sync=force_sync,
-        )
+        publication_lock = subtitle_write_lock(video_path, os.path.dirname(srt_path))
+        publication = source_version
+        if publication is None:
+            with publication_lock:
+                publication = SubtitlePublication(video_path, srt_path, subtitle_source_version(srt_path))
+
+        def publish():
+            self._report_progress('Saving synchronized subtitle', None, None)
+
+        try:
+            self.sync_result = runner.run(
+                srt_path=self.srtin,
+                output_mode=output_mode,
+                enabled_engines=enabled_engines,
+                execute_engine=execute_engine,
+                force_sync=force_sync,
+                source_version=publication,
+                before_publish=publish,
+                publication_lock=publication_lock,
+                after_publish=(lambda: quarantine_sync_outputs_after_mutation(video_path, srt_path))
+                if output_mode == OUTPUT_MODE_OVERWRITE and source_version is None else None,
+            )
+        finally:
+            # Preserve successful destinations even if a later engine is cancelled.
+            self.sync_result = getattr(runner, 'result', self.sync_result)
+            if source_version is None:
+                publication.release()
 
         if settings.subsync.debug:
             return self.sync_result

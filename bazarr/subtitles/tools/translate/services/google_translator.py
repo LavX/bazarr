@@ -2,6 +2,7 @@
 
 import logging
 import pysubs2
+from subtitles.tools.subsync_engines import staged_subtitle_write
 
 from retry.api import retry
 from app.config import settings  # noqa: F401
@@ -23,7 +24,7 @@ class GoogleTranslatorService:
 
     def __init__(self, source_srt_file, dest_srt_file, lang_obj, to_lang, from_lang, media_type,
                  video_path, orig_to_lang, forced, hi, sonarr_series_id, sonarr_episode_id,
-                 radarr_id):
+                 radarr_id, arr_instance_id=None):
         self.source_srt_file = source_srt_file
         self.dest_srt_file = dest_srt_file
         self.lang_obj = lang_obj
@@ -37,6 +38,9 @@ class GoogleTranslatorService:
         self.sonarr_series_id = sonarr_series_id
         self.sonarr_episode_id = sonarr_episode_id
         self.radarr_id = radarr_id
+        # The owning arr instance (#156): radarrId and sonarrSeriesId are only
+        # unique together with it, so every media lookup below carries it.
+        self.arr_instance_id = arr_instance_id
         self.language_code_convert_dict = {
             'he': 'iw',
             'zh': 'zh-CN',
@@ -45,67 +49,71 @@ class GoogleTranslatorService:
 
     def translate(self, job_id):
         try:
-            subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
-            subs.remove_miscellaneous_events()
-            lines_list = [x.plaintext for x in subs]
-            lines_list_len = len(lines_list)
+            with staged_subtitle_write(self.video_path, self.dest_srt_file,
+                                       source_paths=(self.source_srt_file,),
+                                       before_publish=lambda: jobs_queue.update_job_progress(job_id=job_id),
+                                       allow_empty=True) as temporary:
+                subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
+                subs.remove_miscellaneous_events()
+                lines_list = [x.plaintext for x in subs]
+                lines_list_len = len(lines_list)
 
-            jobs_queue.update_job_progress(job_id=job_id, progress_max=lines_list_len,
-                                           progress_message=self.source_srt_file)
+                jobs_queue.update_job_progress(job_id=job_id, progress_max=lines_list_len,
+                                               progress_message=self.source_srt_file)
 
-            translated_lines = []
-            logger.debug(f'starting translation for {self.source_srt_file}')  # noqa: G004
+                translated_lines = []
+                logger.debug(f'starting translation for {self.source_srt_file}')  # noqa: G004
 
-            def translate_line(line_id, subtitle_line):
+                def translate_line(line_id, subtitle_line):
+                    try:
+                        translated_text = self._translate_text(subtitle_line, job_id)
+                        translated_lines.append({'id': line_id, 'line': translated_text})
+                    except TranslationNotFound:
+                        logger.debug(f'Unable to translate line {subtitle_line}')  # noqa: G004
+                        translated_lines.append({'id': line_id, 'line': subtitle_line})
+                    finally:
+                        jobs_queue.update_job_progress(job_id=job_id, progress_value=len(translated_lines))
+
+                logger.debug(f'BAZARR is sending {lines_list_len} blocks to Google Translate')  # noqa: G004
+                pool = ThreadPoolExecutor(max_workers=10)
+                futures = []
+                for i, line in enumerate(lines_list):
+                    future = pool.submit(translate_line, i, line)
+                    futures.append(future)
+                pool.shutdown(wait=True)
+                for future in futures:
+                    try:
+                        future.result()
+                    except Exception as e:
+                        logger.error(f"Error in translation task: {e}")  # noqa: G004
+
+                for i, line in enumerate(translated_lines):
+                    lines_list[line['id']] = line['line']
+
+                logger.debug(f'BAZARR saving translated subtitles to {self.dest_srt_file}')  # noqa: G004
+                for i, line in enumerate(subs):
+                    try:
+                        if lines_list[i]:
+                            line.plaintext = lines_list[i]
+                        else:
+                            # we assume that there was nothing to translate if Google returns None. ex.: "♪♪"
+                            continue
+                    except IndexError:
+                        logger.error(f'BAZARR is unable to translate malformed subtitles: {self.source_srt_file}')  # noqa: G004
+                        jobs_queue.update_job_progress(job_id=job_id,
+                                                       progress_message=f'Translation failed: Unable to translate '
+                                                                        f'malformed subtitles for {self.source_srt_file}')
+                        raise
+
                 try:
-                    translated_text = self._translate_text(subtitle_line, job_id)
-                    translated_lines.append({'id': line_id, 'line': translated_text})
-                except TranslationNotFound:
-                    logger.debug(f'Unable to translate line {subtitle_line}')  # noqa: G004
-                    translated_lines.append({'id': line_id, 'line': subtitle_line})
-                finally:
-                    jobs_queue.update_job_progress(job_id=job_id, progress_value=len(translated_lines))
-
-            logger.debug(f'BAZARR is sending {lines_list_len} blocks to Google Translate')  # noqa: G004
-            pool = ThreadPoolExecutor(max_workers=10)
-            futures = []
-            for i, line in enumerate(lines_list):
-                future = pool.submit(translate_line, i, line)
-                futures.append(future)
-            pool.shutdown(wait=True)
-            for future in futures:
-                try:
-                    future.result()
-                except Exception as e:
-                    logger.error(f"Error in translation task: {e}")  # noqa: G004
-
-            for i, line in enumerate(translated_lines):
-                lines_list[line['id']] = line['line']
-
-            logger.debug(f'BAZARR saving translated subtitles to {self.dest_srt_file}')  # noqa: G004
-            for i, line in enumerate(subs):
-                try:
-                    if lines_list[i]:
-                        line.plaintext = lines_list[i]
-                    else:
-                        # we assume that there was nothing to translate if Google returns None. ex.: "♪♪"
-                        continue
-                except IndexError:
-                    logger.error(f'BAZARR is unable to translate malformed subtitles: {self.source_srt_file}')  # noqa: G004
+                    subs.save(temporary)
+                    add_translator_info(temporary, f"# Subtitles translated with Google Translate # ")  # noqa: F541
+                except OSError:
+                    logger.error(f'BAZARR is unable to save translated subtitles to {self.dest_srt_file}')  # noqa: G004
                     jobs_queue.update_job_progress(job_id=job_id,
-                                                   progress_message=f'Translation failed: Unable to translate '
-                                                                    f'malformed subtitles for {self.source_srt_file}')
-                    raise
-
-            try:
-                subs.save(self.dest_srt_file)
-                add_translator_info(self.dest_srt_file, f"# Subtitles translated with Google Translate # ")  # noqa: F541
-            except OSError:
-                logger.error(f'BAZARR is unable to save translated subtitles to {self.dest_srt_file}')  # noqa: G004
-                jobs_queue.update_job_progress(job_id=job_id,
-                                               progress_message=f'Translation failed: Unable to save translated '
-                                                                f'subtitles to {self.dest_srt_file}')
-                raise OSError
+                                                   progress_message=f'Translation failed: Unable to save translated '
+                                                                    f'subtitles to {self.dest_srt_file}')
+                    raise OSError
 
             message = f"{language_from_alpha2(self.from_lang)} subtitles translated to {language_from_alpha3(self.to_lang)}."
             result = create_process_result(message, self.video_path, self.orig_to_lang, self.forced, self.hi, self.dest_srt_file, self.media_type)

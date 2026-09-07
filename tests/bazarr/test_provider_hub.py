@@ -445,6 +445,7 @@ def test_worker_download_auto_selects_single_archive_member():
 
 def test_worker_download_rejects_missing_member_and_bad_archive():
     from provider_hub.protocol import WorkerProtocolError, worker_download_to_content
+    from subliminal_patch.exceptions import SubtitleCandidateRejected
 
     candidate = _hub_candidate("sub-bad")
     buffer = io.BytesIO()
@@ -452,7 +453,7 @@ def test_worker_download_rejects_missing_member_and_bad_archive():
         archive.writestr("Show.S01E01.srt", b"1\n00:00:01,000 --> 00:00:02,000\nHi\n")
     archive_bytes = buffer.getvalue()
 
-    with pytest.raises(WorkerProtocolError):
+    with pytest.raises(SubtitleCandidateRejected, match="Pinned subtitle member is absent"):
         worker_download_to_content(
             candidate,
             {

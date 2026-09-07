@@ -1,0 +1,18 @@
+{
+  "source_version": "49.0.0",
+  "master_key": "synthetic-master-key-for-version-compatibility-only",
+  "cases": [
+    {
+      "plaintext": "synthetic-provider-token",
+      "ciphertext": "enc:v1:gAAAAABqm1uaEus9uqCEc7V5GDwndiAh3HvmiIbEEuVCLpudK4OzvCXIt_jOGT-flGv-rNjFnj06Za8vLGX9SM6UNK9POzfHSc012E_Vd2wA_-zEQqis2PQ="
+    },
+    {
+      "plaintext": "synthetic-translator-token",
+      "ciphertext": "enc:v1:gAAAAABqm1uaHS6Ro_bVCFQEdgdCn2veRLwb7Bj4wcK5cJi1z5VPRpY1A-UO1u1qeddWggCYNKMH743Bw25kNLRStuSrDAv_yW90ktfxZKl7ahXKmJwEkZc="
+    },
+    {
+      "plaintext": "synthetic-unicode-árvíztűrő",
+      "ciphertext": "enc:v1:gAAAAABqm1uaQlgBNKC4euTO9bTpCe-MJ0qtKVdFu8O56EwIXx9BtLH-YGq_nQcNZi53xqMy8ft1Cyi2V8SDqqm2SoTgCxLPzcPLW3FZa9uzZXSA2HWlyJk="
+    }
+  ]
+}

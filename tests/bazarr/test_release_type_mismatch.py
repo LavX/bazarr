@@ -1013,8 +1013,11 @@ def test_the_search_clears_the_record_when_the_language_finally_lands(search, tm
         storage_path = str(written_file)
         matches = set()
 
-    search.monkeypatch.setattr(search.module, "save_subtitles",
-                               lambda *args, **kwargs: [_Written()])
+    def save(*args, **kwargs):
+        kwargs['write_subtitle'](str(written_file), b'1\n')
+        return [_Written()]
+
+    search.monkeypatch.setattr(search.module, "save_subtitles", save)
     search.monkeypatch.setattr(search.module, "process_subtitle", lambda **kwargs: None)
 
     search.run()

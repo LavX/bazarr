@@ -2,6 +2,7 @@
 
 import logging
 import pysubs2
+from subtitles.tools.subsync_engines import staged_subtitle_write
 import requests
 
 from retry.api import retry
@@ -30,7 +31,7 @@ class LingarrAuthError(Exception):
 class LingarrTranslatorService:
     def __init__(self, source_srt_file, dest_srt_file, lang_obj, to_lang, from_lang, media_type,
                  video_path, orig_to_lang, forced, hi, sonarr_series_id, sonarr_episode_id,
-                 radarr_id):
+                 radarr_id, arr_instance_id=None):
         self.source_srt_file = source_srt_file
         self.dest_srt_file = dest_srt_file
         self.lang_obj = lang_obj
@@ -44,6 +45,9 @@ class LingarrTranslatorService:
         self.sonarr_series_id = sonarr_series_id
         self.sonarr_episode_id = sonarr_episode_id
         self.radarr_id = radarr_id
+        # The owning arr instance (#156): radarrId and sonarrSeriesId are only
+        # unique together with it, so every media lookup below carries it.
+        self.arr_instance_id = arr_instance_id
         self.language_code_convert_dict = {
             'zh': 'zh-CN',
             'zt': 'zh-TW',
@@ -52,44 +56,48 @@ class LingarrTranslatorService:
 
     def translate(self, job_id=None):
         try:
-            jobs_queue.update_job_progress(job_id=job_id, progress_max=1, progress_message=self.source_srt_file)
+            with staged_subtitle_write(self.video_path, self.dest_srt_file,
+                                       source_paths=(self.source_srt_file,),
+                                       before_publish=lambda: jobs_queue.update_job_progress(job_id=job_id),
+                                       allow_empty=True) as temporary:
+                jobs_queue.update_job_progress(job_id=job_id, progress_max=1, progress_message=self.source_srt_file)
 
-            subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
-            lines_list = [x.plaintext for x in subs]
-            lines_list_len = len(lines_list)
+                subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
+                lines_list = [x.plaintext for x in subs]
+                lines_list_len = len(lines_list)
 
-            if lines_list_len == 0:
-                logger.debug('No lines to translate in subtitle file')
-                return self.dest_srt_file
+                if lines_list_len == 0:
+                    logger.debug('No lines to translate in subtitle file')
+                    return self.dest_srt_file
 
-            logger.debug(f'Starting translation for {self.source_srt_file}')  # noqa: G004
-            translated_lines = self._translate_content(lines_list, job_id=job_id)
+                logger.debug(f'Starting translation for {self.source_srt_file}')  # noqa: G004
+                translated_lines = self._translate_content(lines_list, job_id=job_id)
 
-            if translated_lines is None:
-                logger.error(f'Translation failed for {self.source_srt_file}')  # noqa: G004
-                jobs_queue.update_job_progress(job_id=job_id,
-                                               progress_message=f'Translation failed for {self.source_srt_file}')
-                raise RuntimeError(f'Translation failed for {self.source_srt_file}')
+                if translated_lines is None:
+                    logger.error(f'Translation failed for {self.source_srt_file}')  # noqa: G004
+                    jobs_queue.update_job_progress(job_id=job_id,
+                                                   progress_message=f'Translation failed for {self.source_srt_file}')
+                    raise RuntimeError(f'Translation failed for {self.source_srt_file}')
 
-            logger.debug(f'BAZARR saving Lingarr translated subtitles to {self.dest_srt_file}')  # noqa: G004
-            translation_map = {}
-            for item in translated_lines:
-                if isinstance(item, dict) and 'position' in item and 'line' in item:
-                    translation_map[item['position']] = item['line']
+                logger.debug(f'BAZARR saving Lingarr translated subtitles to {self.dest_srt_file}')  # noqa: G004
+                translation_map = {}
+                for item in translated_lines:
+                    if isinstance(item, dict) and 'position' in item and 'line' in item:
+                        translation_map[item['position']] = item['line']
 
-            for i, line in enumerate(subs):
-                if i in translation_map and translation_map[i]:
-                    line.text = translation_map[i]
+                for i, line in enumerate(subs):
+                    if i in translation_map and translation_map[i]:
+                        line.text = translation_map[i]
 
-            try:
-                subs.save(self.dest_srt_file)
-                add_translator_info(self.dest_srt_file, f"# Subtitles translated with Lingarr # ")  # noqa: F541
-            except OSError:
-                logger.error(f'BAZARR is unable to save translated subtitles to {self.dest_srt_file}')  # noqa: G004
-                jobs_queue.update_job_progress(job_id=job_id,
-                                               progress_message=f'Translation failed: Unable to save translated '
-                                                                f'subtitles to {self.dest_srt_file}')
-                raise OSError
+                try:
+                    subs.save(temporary)
+                    add_translator_info(temporary, f"# Subtitles translated with Lingarr # ")  # noqa: F541
+                except OSError:
+                    logger.error(f'BAZARR is unable to save translated subtitles to {self.dest_srt_file}')  # noqa: G004
+                    jobs_queue.update_job_progress(job_id=job_id,
+                                                   progress_message=f'Translation failed: Unable to save translated '
+                                                                    f'subtitles to {self.dest_srt_file}')
+                    raise OSError
 
             message = (f"{language_from_alpha2(self.from_lang)} subtitles translated to "
                        f"{language_from_alpha3(self.to_lang)} using Lingarr.")
@@ -139,7 +147,8 @@ class LingarrTranslatorService:
                 media_type=self.media_type,
                 radarr_id=self.radarr_id,
                 sonarr_series_id=self.sonarr_series_id,
-                sonarr_episode_id=self.sonarr_episode_id
+                sonarr_episode_id=self.sonarr_episode_id,
+                arr_instance_id=self.arr_instance_id
             )
 
             if self.media_type == 'episode':

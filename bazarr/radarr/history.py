@@ -65,10 +65,11 @@ def history_log_movie(action, radarr_id, result, fake_provider=None, fake_score=
         upgradedFromId=upgraded_from_id,
     )
 
-    # Stamp owner + local ref (movie_id -> the local PK) from the movie row so
-    # history is instance-owned (the INC4 pattern for history). Guarded; NULL
-    # for an unresolved row or pre-backfill install. No-op for the default
-    # instance beyond populating movie_id.
+    if arr_instance_id is not None:
+        values['arr_instance_id'] = arr_instance_id
+
+    # Resolve the local ref when the movie is available. A missing movie must
+    # not discard an owner supplied by the caller.
     if radarr_id is not None:
         mv = _resolve_movie_owner_row(radarr_id, arr_instance_id)
         if mv is not None:
@@ -77,6 +78,12 @@ def history_log_movie(action, radarr_id, result, fake_provider=None, fake_score=
                 values['arr_instance_id'] = owner
             if mv.id is not None:
                 values['movie_id'] = mv.id
+
+    if values.get('arr_instance_id') is None:
+        logging.warning(
+            'BAZARR skipping movie history insert: unable to resolve owning instance '
+            'for radarrId %s', radarr_id)
+        return
 
     database.execute(insert(TableHistoryMovie).values(**values))
     event_stream(type='movie-history')

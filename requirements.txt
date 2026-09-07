@@ -17,7 +17,7 @@ click-option-group>=0.5.9
 # support must not be picked up unattended. 1.2.71 is the newest release on
 # PyPI today, so this resolves to the latest version.
 cloudscraper<=1.2.71
-cryptography>=49.0.0
+cryptography>=50.0.1
 deathbycaptcha-official==4.7.1
 deep-translator==1.11.4
 dnspython==2.8.0
@@ -40,7 +40,7 @@ Flask-SocketIO==5.6.1
 flask_sqlalchemy==3.1.1
 ftfy==6.3.1
 guess_language-spirit==0.5.4
-guessit==3.8.0
+guessit==4.4.0
 itsdangerous==2.2.0
 json_tricks==3.17.3
 knowit==0.6.1
@@ -66,7 +66,7 @@ semver==3.0.4
 # which we pin above at 1.2.1. Keeping it out of the normal resolve avoids the
 # ResolutionImpossible conflict and keeps Dependabot off the transitive pin.
 six==1.17.0
-sqlalchemy==2.0.51
+sqlalchemy==2.0.52
 srt==3.5.3
 subliminal[rar]==2.6.0
 textdistance==4.6.3

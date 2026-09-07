@@ -12,7 +12,9 @@ from app.config import settings, get_array_from
 from app.jobs_queue import jobs_queue
 from languages.custom_lang import CustomLanguage
 from languages.get_languages import alpha3_from_alpha2
-from subtitles.indexer.utils import get_external_subtitles_path
+from subtitles.indexer.utils import get_subtitle_destination_path
+from utilities.helper import get_target_folder
+from subtitles.tools.subsync_engines import subtitle_write_locks, subtitle_mutation
 
 
 def has_remove_hi(mods):
@@ -145,6 +147,12 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
 
 
 def subtitles_apply_mods(language, subtitle_path, mods, video_path, arr_instance_id=None):
+    destination = os.path.join(get_target_folder(video_path, create=False) or os.path.dirname(video_path), '.destination')
+    with subtitle_write_locks(video_path, subtitle_path, destination):
+        return _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_id)
+
+
+def _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_id):
     # The mod list is user-chosen here, so only the keep-lyrics preference is
     # instance-relevant: resolve it against the media's owning instance (#227).
     # A None owner keeps the legacy global-only behaviour (single-instance).
@@ -180,18 +188,19 @@ def subtitles_apply_mods(language, subtitle_path, mods, video_path, arr_instance
 
             # get the real modded subtitles path taking into account if the user set up Bazarr to store external
             # subtitles in a custom folder or relative folder
-            modded_subtitles_path = get_external_subtitles_path(
+            modded_subtitles_path = get_subtitle_destination_path(
                 file=video_path,
                 subtitle=os.path.basename(modded_subtitles_path_if_alongside_video)
             )
         else:
             modded_subtitles_path = subtitle_path
 
-        if os.path.exists(subtitle_path):
-            os.remove(subtitle_path)
+        with subtitle_mutation(video_path, subtitle_path, modded_subtitles_path):
+            if os.path.exists(subtitle_path):
+                os.remove(subtitle_path)
 
-        if os.path.exists(modded_subtitles_path):
-            os.remove(modded_subtitles_path)
+            if os.path.exists(modded_subtitles_path):
+                os.remove(modded_subtitles_path)
 
-        with open(modded_subtitles_path, 'wb') as f:
-            f.write(content)
+            with open(modded_subtitles_path, 'wb') as f:
+                f.write(content)

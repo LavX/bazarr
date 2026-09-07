@@ -19,17 +19,13 @@ export const aiTranslatorModelOptions: SelectorOption<string>[] = [
   },
   { label: "google/gemini-2.5-flash", value: "google/gemini-2.5-flash" },
   {
-    label: "google/gemini-2.5-flash-lite-preview-09-2025",
-    value: "google/gemini-2.5-flash-lite-preview-09-2025",
+    label: "google/gemini-2.5-flash-lite",
+    value: "google/gemini-2.5-flash-lite",
   },
   { label: "google/gemini-2.5-pro", value: "google/gemini-2.5-pro" },
   {
     label: "google/gemini-3-flash-preview",
     value: "google/gemini-3-flash-preview",
-  },
-  {
-    label: "google/gemini-3-pro-preview",
-    value: "google/gemini-3-pro-preview",
   },
   {
     label: "google/gemini-3.1-flash-lite-preview",
@@ -62,8 +58,8 @@ export const aiTranslatorModelOptions: SelectorOption<string>[] = [
   { label: "openrouter/auto", value: "openrouter/auto" },
   { label: "openrouter/free", value: "openrouter/free" },
   { label: "qwen/qwen3.5-plus-02-15", value: "qwen/qwen3.5-plus-02-15" },
-  { label: "x-ai/grok-4-fast", value: "x-ai/grok-4-fast" },
-  { label: "x-ai/grok-4.20-beta", value: "x-ai/grok-4.20-beta" },
+  { label: "x-ai/grok-4.20", value: "x-ai/grok-4.20" },
+  { label: "x-ai/grok-4.6", value: "x-ai/grok-4.6" },
   { label: "z-ai/glm-4.7-flash", value: "z-ai/glm-4.7-flash" },
 ];
 

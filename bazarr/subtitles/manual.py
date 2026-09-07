@@ -4,10 +4,12 @@
 import os
 import sys
 import logging
+from functools import partial
 import subliminal
 
 from subzero.language import Language
 from subliminal_patch.core import save_subtitles
+from subtitles.tools.subsync_engines import subtitle_write_locks, write_subtitle_file
 from subliminal_patch.core_persistent import list_all_subtitles, download_subtitles
 from subliminal_patch.score import compute_score, DEFAULT_SCORES
 
@@ -196,13 +198,18 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
             try:
                 chmod = int(settings.general.chmod, 8) if not sys.platform.startswith(
                     'win') and settings.general.chmod_enabled else None
-                saved_subtitles = save_subtitles(video.original_path, [subtitle],
-                                                 single=settings.general.single_language,
-                                                 tags=None,  # fixme
-                                                 directory=get_target_folder(path),
-                                                 chmod=chmod,
-                                                 formats=(subtitle.format,),
-                                                 path_decoder=force_unicode)
+                with subtitle_write_locks(path, os.path.join(get_target_folder(path) or os.path.dirname(path), '.destination')):
+                    written_paths = []
+                    saved_subtitles = save_subtitles(video.original_path, [subtitle],
+                                                     single=settings.general.single_language,
+                                                     tags=None,  # fixme
+                                                     directory=get_target_folder(path),
+                                                     chmod=chmod,
+                                                     formats=(subtitle.format,),
+                                                     path_decoder=force_unicode,
+                                                     write_subtitle=partial(write_subtitle_file, path, written_paths=written_paths))
+                    saved_subtitles = [saved for saved in saved_subtitles if saved.storage_path in written_paths]
+
             except Exception as e:
                 logging.exception(f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')  # noqa: G004
                 return 'Error saving Subtitles file to disk'

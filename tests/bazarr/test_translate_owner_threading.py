@@ -27,12 +27,13 @@ def translate_harness(monkeypatch, tmp_path):
                         lambda to_lang, forced, hi: (Language('nld'), to_lang))
     monkeypatch.setattr(translate_main, 'get_subtitle_path',
                         lambda *a, **kw: str(tmp_path / 'video.nl.srt'))
-    monkeypatch.setattr(translate_main, 'get_external_subtitles_path',
+    monkeypatch.setattr(translate_main, 'get_subtitle_destination_path',
                         lambda file, subtitle: str(tmp_path / subtitle))
     monkeypatch.setattr(translate_main, 'alpha3_from_alpha2', lambda code: 'nld')
 
     translator = MagicMock()
     translator.translate.return_value = True
+    translator.partial_error = None
     monkeypatch.setattr(translate_main.TranslatorFactory, 'create_translator',
                         staticmethod(lambda *a, **kw: translator))
     return translate_main
@@ -80,3 +81,27 @@ def test_no_owner_still_works_for_a_single_instance_install(translate_harness):
             radarr_id=9, metadata={}, job_id='job-1')
 
     assert seen['arr_instance_id'] is None
+
+
+@pytest.mark.parametrize('partial', [False, True])
+@pytest.mark.parametrize('current_name', [None, 'Translating Example'])
+def test_translation_job_label_preserves_partial_status(translate_harness, monkeypatch, partial, current_name):
+    translate_main = translate_harness
+    translator = translate_main.TranslatorFactory.create_translator('openrouter')
+    translator.partial_error = 'Some batches failed' if partial else None
+    names = []
+    monkeypatch.setattr(translate_main.jobs_queue, 'get_job_name', lambda job_id: current_name)
+    monkeypatch.setattr(translate_main.jobs_queue, 'update_job_name',
+                        lambda **kwargs: names.append(kwargs['new_job_name']))
+
+    with (
+        patch('api.subtitles.subtitles.postprocess_subtitles', lambda *a, **kw: None),
+        patch('subtitles.tools.combine.main.try_combine_for_video', lambda **kw: None),
+    ):
+        translate_main.translate_subtitles_file(
+            video_path='/local/tv/s/e.mkv', source_srt_file='/local/tv/s/e.en.srt',
+            from_lang='en', to_lang='nl', forced=False, hi=False,
+            media_type='episode', sonarr_series_id=1, sonarr_episode_id=42,
+            radarr_id=None, metadata={}, job_id='job-1', arr_instance_id=3)
+
+    assert names[-1].startswith('Partially translated' if partial else 'Translated')

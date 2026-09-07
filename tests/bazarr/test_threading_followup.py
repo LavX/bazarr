@@ -303,7 +303,7 @@ def test_store_subtitles_uses_instance_path_mapping(schema_session, monkeypatch)
             return "en"
 
     monkeypatch.setattr(si, "search_external_subtitles", lambda *a, **k: {sub_local: _Lang()})
-    monkeypatch.setattr(si, "add_sync_engine_outputs", lambda f, s: s)
+    monkeypatch.setattr(si, "add_sync_engine_outputs", lambda f, s, **k: s)
     monkeypatch.setattr(si, "add_combined_outputs", lambda f, s, **k: s)
     monkeypatch.setattr(si, "guess_external_subtitles", lambda f, s, t, e: s)
     monkeypatch.setattr(si, "get_external_subtitles_path", lambda r, s: s)

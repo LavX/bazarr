@@ -2,6 +2,7 @@
 
 import os
 import logging
+import unicodedata
 
 from guess_language import guess_language
 from subliminal_patch import core
@@ -12,7 +13,7 @@ from constants import MAXIMUM_SUBTITLE_SIZE
 from app.config import settings
 from utilities.path_mappings import path_mappings
 from languages.custom_lang import CustomLanguage
-from subtitles.tools.subsync_engines import SYNC_ENGINES, sync_engine_from_output_path
+from subtitles.tools.subsync_engines import SYNC_ENGINES, sync_engine_from_output_path, sync_output_owner_is_unique
 
 import re as _re_combine
 
@@ -46,6 +47,23 @@ def get_external_subtitles_path(file, subtitle):
     return path
 
 
+def get_subtitle_destination_path(file, subtitle):
+    """Where a new external subtitle for ``file`` gets written.
+
+    get_external_subtitles_path() answers only for files that already exist, which is
+    right for indexing and wrong for a first-time write: in the absolute and relative
+    subfolder modes it returned None and a translation crashed on save. An existing file
+    in either location is still preferred so a re-run overwrites what the user already
+    sees; otherwise the configured folder is used and created, the way downloads do it.
+    """
+    existing = get_external_subtitles_path(file, subtitle)
+    if existing:
+        return existing
+    from utilities.helper import get_target_folder
+    folder = get_target_folder(file) or os.path.dirname(file)
+    return os.path.join(folder, subtitle)
+
+
 def normalize_subtitle_language_variant(language, forced=False, hi=False):
     language_text = str(language)
     parts = language_text.split(':')
@@ -75,14 +93,18 @@ def sync_engine_from_subtitle_name(subtitle):
     return sync_engine_from_output_path(subtitle)
 
 
-def _language_code_from_sync_engine_output(subtitle):
-    filename = os.path.basename(subtitle).lower()
+def _normalized_video_stem(stem):
+    return unicodedata.normalize('NFC', stem.lower())
+
+
+def _language_code_from_sync_engine_output(subtitle, video_filename=None):
+    filename = os.path.basename(subtitle)
     stem, extension = os.path.splitext(filename)
-    if extension not in core.SUBTITLE_EXTENSIONS:
+    if extension.lower() not in core.SUBTITLE_EXTENSIONS:
         return None
 
     parts = stem.split('.')
-    if len(parts) < 3 or parts[-1] not in SYNC_ENGINES:
+    if len(parts) < 3 or parts[-1].lower() not in SYNC_ENGINES:
         return None
 
     parts = parts[:-1]
@@ -93,40 +115,86 @@ def _language_code_from_sync_engine_output(subtitle):
     # combined output is a known limitation: it is left on disk but not indexed
     # as a tracked variant. Overwrite-mode sync of a combined file works in
     # place (it keeps the Movie.en.combined-hu.srt name) and is unaffected.
-    if parts and _COMBINED_MODIFIER_PATTERN.match(parts[-1]):
+    if parts and _COMBINED_MODIFIER_PATTERN.match(parts[-1].lower()):
         return None
     variants = []
-    if parts and parts[-1] in ['hi', 'sdh', 'cc']:
+    if parts and parts[-1].lower() in ['hi', 'sdh', 'cc']:
         variants.append('hi')
         parts = parts[:-1]
-    if parts and parts[-1] == 'forced':
+    if parts and parts[-1].lower() == 'forced':
         variants.append('forced')
         parts = parts[:-1]
     if not parts:
         return None
 
-    language = parts[-1].replace('_', '-')
+    if video_filename is not None:
+        video_stem = os.path.splitext(video_filename)[0]
+        if _normalized_video_stem('.'.join(parts[:-1])) != _normalized_video_stem(video_stem):
+            return None
+
+    language = parts[-1].lower().replace('_', '-')
     if not language:
         return None
 
     return ':'.join([language] + variants)
 
 
-def add_sync_engine_outputs(dest_folder, subtitles):
+def add_sync_engine_outputs(dest_folder, subtitles, video_filename=None, video_path=None, ownership_index=None):
+    """Add generated outputs belonging to the video, regardless of save preferences."""
     if not os.path.isdir(dest_folder):
         return subtitles
 
+    video_stem = None
+    media_stems = set()
+    if video_path is not None:
+        video_filename = os.path.basename(video_path)
+    if video_filename is not None:
+        video_stem = _normalized_video_stem(os.path.splitext(video_filename)[0])
+        media_folder = (os.path.dirname(video_path) or '.') if video_path is not None else dest_folder
+        with os.scandir(media_folder) as media_files:
+            media_stems = {_normalized_video_stem(os.path.splitext(entry.name)[0])
+                           for entry in media_files
+                           if entry.is_file() and entry.name.lower().endswith(core.VIDEO_EXTENSIONS)}
+
+    ownership = {}
     for subtitle in os.listdir(dest_folder):
-        if subtitle in subtitles or not sync_engine_from_subtitle_name(subtitle):
+        if not sync_engine_from_subtitle_name(subtitle):
             continue
 
         subtitle_path = os.path.join(dest_folder, subtitle)
         if not os.path.isfile(subtitle_path):
             continue
 
-        language_code = _language_code_from_sync_engine_output(subtitle)
+        if video_path is not None:
+            stem, extension = os.path.splitext(subtitle)
+            source_path = os.path.join(dest_folder, stem.rsplit('.', 1)[0] + extension)
+            if source_path not in ownership:
+                ownership[source_path] = sync_output_owner_is_unique(video_path, source_path,
+                                                                    ownership_index=ownership_index)
+            if not ownership[source_path]:
+                subtitles.pop(subtitle, None)
+                continue
+        if subtitle in subtitles:
+            continue
+
+        if video_stem is not None:
+            stem, extension = os.path.splitext(subtitle)
+            if extension.lower() not in core.SUBTITLE_EXTENSIONS:
+                continue
+            owner_stem = _normalized_video_stem(stem.rsplit('.', 1)[0])
+            if owner_stem == video_stem:
+                # The complete basename owns an untagged output. Detect its
+                # language normally, even if the save preference has changed.
+                subtitles[subtitle] = None
+                continue
+            if owner_stem in media_stems:
+                # Movie.en.mkv owns Movie.en.ffsubsync.srt when it exists.
+                # Without that sibling, it can be a tagged output of Movie.mkv.
+                continue
+
+        language_code = _language_code_from_sync_engine_output(subtitle, video_filename=video_filename)
         if not language_code:
-            logging.debug("BAZARR skipping generated sync subtitle with unknown language: %s", subtitle_path)
+            logging.debug("BAZARR skipping unrelated or unrecognized generated sync subtitle: %s", subtitle_path)
             continue
 
         try:

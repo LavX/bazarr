@@ -1,8 +1,10 @@
 # coding=utf-8
 
+import re
 import time
 import logging
 import pysubs2
+from subtitles.tools.subsync_engines import staged_subtitle_write, SubtitleDestinationChanged
 import requests
 from typing import Optional, List, Dict, Any
 
@@ -14,12 +16,98 @@ from languages.get_languages import language_from_alpha2, language_from_alpha3
 from radarr.history import history_log_movie
 from sonarr.history import history_log
 from app.event_handler import show_progress, hide_progress, show_message
-from app.jobs_queue import jobs_queue
+from app.jobs_queue import jobs_queue, JobCancelled
 
 from ..core.translator_utils import add_translator_info, create_process_result, get_title
 from .auth import get_translator_auth_headers
 
 logger = logging.getLogger(__name__)
+
+PROVIDER_ROUTING_VALUES = ('throughput', 'nitro', 'price', 'floor', 'latency', 'default')
+DEFAULT_PROVIDER_ROUTING = 'throughput'
+# Sidecars before this version forward provider.sort to OpenRouter verbatim, which
+# rejects nitro, floor and default; they get the plain sort each value stands for.
+ROUTING_SHORTCUTS_MIN_SIDECAR = (1, 3, 4)
+ROUTING_PLAIN_SORT = {'nitro': 'throughput', 'floor': 'price', 'default': 'throughput'}
+SIDECAR_VERSION_CACHE_SECONDS = 300
+_sidecar_version_cache = {}
+
+POLL_HARD_CAP_SECONDS = 12 * 3600
+POLL_UNREACHABLE_LIMIT_SECONDS = 600
+POLL_INTERVAL_SECONDS = 2
+
+
+def _typed_routing_suffix(model_id):
+    """'floor' or 'nitro' when the model id ends with that OpenRouter shortcut, else None."""
+    for suffix in ('floor', 'nitro'):
+        if str(model_id or '').endswith(f':{suffix}'):
+            return suffix
+    return None
+
+
+def reset_sidecar_version_cache():
+    _sidecar_version_cache.clear()
+
+
+def _parse_version(text):
+    """'1.3.4', '1.3.4-rc1' or 'v1.3.4' -> (1, 3, 4); None when it does not start with digits."""
+    numbers = re.match(r'v?(\d+)(?:\.(\d+))?(?:\.(\d+))?', str(text or ''))
+    if not numbers:
+        return None
+    return tuple(int(part or 0) for part in numbers.groups())
+
+
+def sidecar_version(base_url):
+    """The AI Subtitle Translator version behind ``base_url``, cached per URL.
+
+    Returns a version tuple, or None when the health endpoint is unreachable or
+    does not report a version. The probe is cheap and unauthenticated, and it is
+    cached so a job of many batches asks once.
+    """
+    base_url = (base_url or '').rstrip('/')
+    cached = _sidecar_version_cache.get(base_url)
+    if cached and cached[0] > time.monotonic():
+        return cached[1]
+    version = None
+    try:
+        response = requests.get(f"{base_url}/health", timeout=5)
+        if response.status_code == 200:
+            version = _parse_version(response.json().get('version'))
+    except (requests.exceptions.RequestException, ValueError, AttributeError) as e:
+        logger.debug("Could not read the AI Subtitle Translator version from %s: %s", base_url, e)
+    _sidecar_version_cache[base_url] = (time.monotonic() + SIDECAR_VERSION_CACHE_SECONDS, version)
+    return version
+
+
+def build_provider_config():
+    """The OpenRouter provider routing the sidecar applies to every request of a job.
+
+    Left unset the sidecar sorts providers by throughput, which is the fastest and
+    often not the cheapest endpoint; the setting lets the user pick price, latency,
+    the ``:nitro``/``:floor`` shortcuts, or OpenRouter's own load balancing. A
+    sidecar older than 1.3.4 (or one whose version cannot be read) does not know
+    the shortcuts and would hand them to OpenRouter as an invalid sort, so it gets
+    the plain sort each of them stands for.
+    """
+    routing = getattr(settings.translator, 'openrouter_provider_routing', DEFAULT_PROVIDER_ROUTING)
+    if routing not in PROVIDER_ROUTING_VALUES:
+        logger.warning("Unknown OpenRouter provider routing '%s', using %s", routing, DEFAULT_PROVIDER_ROUTING)
+        routing = DEFAULT_PROVIDER_ROUTING
+    typed = _typed_routing_suffix(getattr(settings.translator, 'openrouter_model', ''))
+    if typed:
+        # The slug already says how to route. A sidecar from 1.3.4 on drops the sort
+        # for a typed shortcut anyway; an older one forwards both, so the sort has to
+        # agree with the slug rather than with the setting.
+        return {'sort': ROUTING_PLAIN_SORT[typed]}
+    if routing in ROUTING_PLAIN_SORT:
+        version = sidecar_version(settings.translator.openrouter_url)
+        if version is None or version < ROUTING_SHORTCUTS_MIN_SIDECAR:
+            plain = ROUTING_PLAIN_SORT[routing]
+            logger.warning(
+                "AI Subtitle Translator %s does not support the '%s' provider routing (needs 1.3.4), sending %s",
+                '.'.join(map(str, version)) if version else 'of unknown version', routing, plain)
+            routing = plain
+    return {'sort': routing}
 
 
 class OpenRouterTranslatorService:
@@ -30,7 +118,7 @@ class OpenRouterTranslatorService:
 
     def __init__(self, source_srt_file, dest_srt_file, lang_obj, to_lang, from_lang, media_type,
                  video_path, orig_to_lang, forced, hi, sonarr_series_id, sonarr_episode_id,
-                 radarr_id):
+                 radarr_id, arr_instance_id=None):
         self.source_srt_file = source_srt_file
         self.dest_srt_file = dest_srt_file
         self.lang_obj = lang_obj
@@ -44,6 +132,10 @@ class OpenRouterTranslatorService:
         self.sonarr_series_id = sonarr_series_id
         self.sonarr_episode_id = sonarr_episode_id
         self.radarr_id = radarr_id
+        # The owning arr instance (#156): radarrId and sonarrSeriesId are only
+        # unique together with it, so every media lookup below carries it.
+        self.arr_instance_id = arr_instance_id
+        self.partial_error = None
         self.language_code_convert_dict = {
             'he': 'iw',
             'zh': 'zh-CN',
@@ -78,45 +170,53 @@ class OpenRouterTranslatorService:
         return api_key
 
     def translate(self, job_id=None):
+        self.partial_error = None
         try:
-            subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
-            lines_list: List[str] = [x.plaintext for x in subs]
-            lines_list_len = len(lines_list)
+            with staged_subtitle_write(self.video_path, self.dest_srt_file,
+                                       source_paths=(self.source_srt_file,),
+                                       before_publish=lambda: jobs_queue.update_job_progress(job_id=job_id),
+                                       allow_empty=True) as temporary:
+                subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
+                lines_list: List[str] = [x.plaintext for x in subs]
+                lines_list_len = len(lines_list)
 
-            if lines_list_len == 0:
-                logger.debug('No lines to translate in subtitle file')
-                return self.dest_srt_file
+                if lines_list_len == 0:
+                    logger.debug('No lines to translate in subtitle file')
+                    return False
 
-            logger.debug(f'Starting AI translation for {self.source_srt_file}')  # noqa: G004
+                logger.debug(f'Starting AI translation for {self.source_srt_file}')  # noqa: G004
 
-            # Submit job and poll for completion
-            translated_lines = self._submit_and_poll(lines_list, bazarr_job_id=job_id)
+                # Submit job and poll for completion
+                translated_lines = self._submit_and_poll(lines_list, bazarr_job_id=job_id)
 
-            if translated_lines is None:
-                logger.error(f'Translation failed for {self.source_srt_file}')  # noqa: G004
-                show_message(f'Translation failed for {self.source_srt_file}')
-                return False
+                if translated_lines is None:
+                    logger.error(f'Translation failed for {self.source_srt_file}')  # noqa: G004
+                    show_message(f'Translation failed for {self.source_srt_file}')
+                    return False
 
-            # Process results
-            logger.debug(f'BAZARR saving AI translated subtitles to {self.dest_srt_file}')  # noqa: G004
-            translation_map = {}
-            for item in translated_lines:
-                if isinstance(item, dict) and 'position' in item and 'line' in item:
-                    translation_map[item['position']] = item['line']
+                # Process results
+                logger.debug(f'BAZARR saving AI translated subtitles to {self.dest_srt_file}')  # noqa: G004
+                translation_map = {}
+                for item in translated_lines:
+                    if isinstance(item, dict) and 'position' in item and 'line' in item:
+                        translation_map[item['position']] = item['line']
 
-            for i, line in enumerate(subs):
-                if i in translation_map and translation_map[i]:
-                    line.text = translation_map[i]
+                missing_lines = sum(bool(source.strip()) and not translation_map.get(i, '').strip()
+                                    for i, source in enumerate(lines_list))
+                if missing_lines and not self.partial_error:
+                    self._mark_partial(f'No translated text was returned for {missing_lines} of {lines_list_len} cues.')
 
-            try:
-                subs.save(self.dest_srt_file)
-                add_translator_info(self.dest_srt_file, "# Subtitles translated with AI Subtitle Translator #")
-            except OSError:
-                logger.error(f'BAZARR is unable to save translated subtitles to {self.dest_srt_file}')  # noqa: G004
-                show_message(f'Translation failed: Unable to save translated subtitles to {self.dest_srt_file}')
-                raise OSError
+                for i, line in enumerate(subs):
+                    if i in translation_map and translation_map[i].strip():
+                        line.text = translation_map[i]
 
-            message = f"{language_from_alpha2(self.from_lang)} subtitles translated to {language_from_alpha3(self.to_lang)} using AI Subtitle Translator."
+                subs.save(temporary)
+                translated = 'partially translated' if self.partial_error else 'translated'
+                add_translator_info(temporary, f"# Subtitles {translated} with AI Subtitle Translator #")
+
+            message = f"{language_from_alpha2(self.from_lang)} subtitles {translated} to {language_from_alpha3(self.to_lang)} using AI Subtitle Translator."
+            if self.partial_error:
+                message += f' Some lines may remain in the source language. {self.partial_error}'
             result = create_process_result(message, self.video_path, self.orig_to_lang, self.forced, self.hi, self.dest_srt_file, self.media_type)
 
             if self.media_type == 'episode':
@@ -131,6 +231,8 @@ class OpenRouterTranslatorService:
 
             return self.dest_srt_file
 
+        except (JobCancelled, SubtitleDestinationChanged):
+            raise
         except Exception as e:
             logger.error(f'BAZARR encountered an error during AI translation: {str(e)}')  # noqa: G004
             show_message(f'AI translation failed: {str(e)}')
@@ -168,7 +270,8 @@ class OpenRouterTranslatorService:
                 media_type=self.media_type,
                 radarr_id=self.radarr_id,
                 sonarr_series_id=self.sonarr_series_id,
-                sonarr_episode_id=self.sonarr_episode_id
+                sonarr_episode_id=self.sonarr_episode_id,
+                arr_instance_id=self.arr_instance_id
             )
 
             api_media_type = "Episode" if self.media_type == 'episode' else "Movie"
@@ -189,6 +292,7 @@ class OpenRouterTranslatorService:
                     "maxConcurrentJobs": settings.translator.openrouter_max_concurrent,
                     "parallelBatches": settings.translator.openrouter_parallel_batches,
                     "reasoning": self._build_reasoning_config(),
+                    "provider": build_provider_config(),
                 }
             }
 
@@ -229,13 +333,38 @@ class OpenRouterTranslatorService:
             logger.error(f'AI Subtitle Translator error: {str(e)}')  # noqa: G004
             return None
 
-    def _poll_job(self, base_url: str, job_id: str, total_lines: int, bazarr_job_id=None) -> Optional[Any]:
-        """Poll job status until completion"""
-        poll_interval = 2  # seconds
-        max_wait_time = 1800  # 30 minutes
-        elapsed = 0
+    def _mark_partial(self, detail):
+        self.partial_error = ' '.join(str(detail).split())[:500] or 'Some translation batches failed.'
+        logger.warning("Translation partially completed: %s", self.partial_error)
+        show_message('Translation is partial. Some lines may remain in the source language. '
+                     f'{self.partial_error}')
 
-        while elapsed < max_wait_time:
+    def _poll_job(self, base_url: str, job_id: str, total_lines: int, bazarr_job_id=None) -> Optional[Any]:
+        """Poll until a terminal status, subject to reachability and safety limits.
+
+        The sidecar owns request timeouts and retries, so there is no normal total-time cap.
+        A slow model with reasoning enabled and a shrunk batch size can take over half an hour.
+        The old 30-minute cap discarded a translation that the sidecar finished successfully.
+        A 12-hour hard cap remains as a safety net.
+        """
+        self.partial_error = None
+        started_at = time.monotonic()
+        last_reachable_at = started_at
+
+        while True:
+            now = time.monotonic()
+            if now - started_at >= POLL_HARD_CAP_SECONDS:
+                reason = "reached the 12-hour polling hard cap"
+                user_message = "Translation stopped after 12 hours"
+                break
+
+            unreachable_seconds = now - last_reachable_at
+            if unreachable_seconds >= POLL_UNREACHABLE_LIMIT_SECONDS:
+                unreachable_minutes = int(unreachable_seconds // 60)
+                reason = f"status endpoint unreachable for {unreachable_minutes} minutes"
+                user_message = f"Translation service unreachable for {unreachable_minutes} minutes"
+                break
+
             try:
                 status_response = requests.get(
                     f"{base_url}/api/v1/jobs/{job_id}",
@@ -245,10 +374,10 @@ class OpenRouterTranslatorService:
 
                 if status_response.status_code != 200:
                     logger.error(f"Error getting job status: {status_response.status_code}")  # noqa: G004
-                    time.sleep(poll_interval)
-                    elapsed += poll_interval
+                    time.sleep(POLL_INTERVAL_SECONDS)
                     continue
 
+                last_reachable_at = time.monotonic()
                 job_status = status_response.json()
                 status = job_status.get("status")
                 progress = job_status.get("progress", 0)
@@ -275,15 +404,12 @@ class OpenRouterTranslatorService:
 
                 if status == "completed":
                     hide_progress(id=f'translate_progress_{self.dest_srt_file}')
-                    result = job_status.get("result")
-                    if result:
-                        # Handle structured response with "lines" key from AI Subtitle Translator
-                        # The service returns {"lines": [...], "model_used": ..., "tokens_used": ...}
-                        if isinstance(result, dict) and "lines" in result:
-                            logger.debug(f'Extracted {len(result["lines"])} lines from structured result')  # noqa: G004
-                            return result["lines"]
-                        # Fallback for direct list response
-                        return result
+                    lines = self._validated_result_lines(job_status.get("result"), total_lines)
+                    # An empty list is not a translation: saving it would write every source
+                    # line under the target name and record a success in History.
+                    if lines:
+                        logger.debug(f'Extracted {len(lines)} lines from job result')  # noqa: G004
+                        return lines
                     logger.error("Job completed but no result returned")
                     return None
 
@@ -296,7 +422,11 @@ class OpenRouterTranslatorService:
 
                 elif status == "partial":
                     hide_progress(id=f'translate_progress_{self.dest_srt_file}')
-                    error = job_status.get("error", message or "Partial translation")
+                    error = job_status.get("error") or message or "Partial translation"
+                    lines = self._validated_result_lines(job_status.get("result"), total_lines)
+                    if lines is not None:
+                        self._mark_partial(error)
+                        return lines
                     logger.error(f"Translation partially failed: {error}")  # noqa: G004
                     show_message(f"Translation failed (partial): {error}")
                     return None
@@ -307,19 +437,36 @@ class OpenRouterTranslatorService:
                     return None
 
                 # Still processing or queued
-                time.sleep(poll_interval)
-                elapsed += poll_interval
+                time.sleep(POLL_INTERVAL_SECONDS)
 
             except requests.exceptions.RequestException as e:
                 logger.warning(f"Error polling job status: {e}")  # noqa: G004
-                time.sleep(poll_interval)
-                elapsed += poll_interval
+                time.sleep(POLL_INTERVAL_SECONDS)
 
-        # Timeout
         hide_progress(id=f'translate_progress_{self.dest_srt_file}')
-        logger.error("Translation job timed out")
-        show_message("Translation timed out after 30 minutes")
+        logger.error(f"Translation job {job_id} {reason}")  # noqa: G004
+        show_message(user_message)
         return None
+
+    @staticmethod
+    def _validated_result_lines(result, total_lines):
+        if isinstance(result, dict):
+            result = result.get('lines')
+        if not isinstance(result, list) or not result:
+            return None
+        positions = set()
+        has_translation = False
+        for item in result:
+            if not isinstance(item, dict):
+                return None
+            position = item.get('position')
+            line = item.get('line')
+            if (type(position) is not int or not 0 <= position < total_lines
+                    or position in positions or not isinstance(line, str)):
+                return None
+            positions.add(position)
+            has_translation = has_translation or bool(line.strip())
+        return result if has_translation else None
 
     @retry(exceptions=(TooManyRequests, RequestError, requests.exceptions.RequestException), tries=3, delay=1, backoff=2, jitter=(0, 1))
     def _translate_sync(self, lines_list: List[str], payload: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
@@ -334,16 +481,7 @@ class OpenRouterTranslatorService:
         )
 
         if response.status_code == 200:
-            translated_batch = response.json()
-            if isinstance(translated_batch, list):
-                for item in translated_batch:
-                    if not isinstance(item, dict) or 'position' not in item or 'line' not in item:
-                        logger.error(f'Invalid response format: {item}')  # noqa: G004
-                        return None
-                return translated_batch
-            else:
-                logger.error(f'Unexpected response format: {translated_batch}')  # noqa: G004
-                return None
+            return self._validated_result_lines(response.json(), len(lines_list))
         elif response.status_code == 429:
             raise TooManyRequests("Rate limit exceeded")
         elif response.status_code >= 500:

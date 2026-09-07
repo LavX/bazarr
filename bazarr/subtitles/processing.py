@@ -71,15 +71,6 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
         if forced:
             return
 
-        min_score = settings.translator.min_source_score
-        if source_score_percent is not None and source_score_percent < min_score:
-            logging.info(
-                'BAZARR auto-translate skipped: source score %.1f%% '
-                'below threshold %.1f%% for %s',
-                source_score_percent, min_score, video_path,
-            )
-            return
-
         # Fetch the episode/movie row that postprocess_subtitles dereferences
         # for plex/jellyfin refresh (sonarrSeriesId, imdbId, season, episode,
         # tvdbId for episodes; imdbId, tmdbId for movies). Passing None here
@@ -140,6 +131,23 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
         if not profile:
             return
 
+        translation_targets = [
+            item for item in profile.get('items', [])
+            if item.get('translate_from') == downloaded_lang
+            and item.get('language') != downloaded_lang
+        ]
+        if not translation_targets:
+            return
+
+        min_score = settings.translator.min_source_score
+        if source_score_percent is not None and source_score_percent < min_score:
+            logging.info(
+                'BAZARR auto-translate skipped: source score %.1f%% '
+                'below threshold %.1f%% for %s',
+                source_score_percent, min_score, video_path,
+            )
+            return
+
         # Hoisted out of the loop: check_missing_languages is independent of the
         # profile item being considered, so calling it once per profile item
         # (potentially N database/indexer queries) is wasteful. Compute the
@@ -160,14 +168,8 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
             else:
                 missing_codes.add(code2)
 
-        for item in profile.get('items', []):
+        for item in translation_targets:
             target_lang = item.get('language')
-            translate_from = item.get('translate_from')
-
-            if not translate_from or translate_from != downloaded_lang:
-                continue
-            if target_lang == downloaded_lang:
-                continue
 
             target_code = profile_item_language_code(item)
             if target_code not in missing_codes:
@@ -331,7 +333,7 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
 
         if not use_pp_threshold or (use_pp_threshold and percent_score < pp_threshold):
             logging.debug(f"BAZARR Using post-processing command: {command}")  # noqa: G004
-            postprocessing(command, path)
+            postprocessing(command, path, subtitle_path=downloaded_path)
             set_chmod(subtitles_path=downloaded_path)
         else:
             logging.debug(f"BAZARR post-processing skipped because subtitles score isn't below this "  # noqa: G004

@@ -2,9 +2,337 @@
 
 import logging
 import os
+import stat
+import shutil
 import tempfile
+import unicodedata
+import uuid
 from dataclasses import dataclass, field
+from contextlib import contextmanager, ExitStack, nullcontext
 from pathlib import Path
+from threading import Lock, RLock
+from weakref import WeakValueDictionary
+
+
+_subtitle_write_locks = WeakValueDictionary()
+_subtitle_write_locks_guard = Lock()
+
+
+class _SubtitleWriteState:
+    def __init__(self):
+        self.lock = RLock()
+        self.revisions = {}
+
+    def __enter__(self):
+        self.lock.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self.lock.release()
+
+    def changed(self, path):
+        key = os.path.normcase(os.path.realpath(path))
+        self.revisions[key] = self.revisions.get(key, 0) + 1
+
+    def revision(self, path):
+        return self.revisions.setdefault(os.path.normcase(os.path.realpath(path)), 0)
+
+
+def subtitle_write_lock(video_path, subtitle_directory):
+    """Coordinate one media destination, including its subtitle language variants.
+
+    The saver can change HI tags and format extensions. The target directory and
+    video stem identify their shared destination without predicting those names.
+    Weak references release idle locks once all participating operations finish.
+    """
+    key = (os.path.normcase(os.path.realpath(subtitle_directory)),
+           os.path.normcase(os.path.splitext(os.path.basename(video_path))[0]))
+    with _subtitle_write_locks_guard:
+        lock = _subtitle_write_locks.get(key)
+        if lock is None:
+            lock = _SubtitleWriteState()
+            _subtitle_write_locks[key] = lock
+        return lock
+
+
+def subtitle_source_version(path):
+    """Identify the saved file a queued upload sync is allowed to replace."""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+class SubtitlePublication:
+    """Hold a media coordinator while a queued sync watches exact destinations."""
+
+    def __init__(self, video_path, source_path, source_version):
+        self.state = subtitle_write_lock(video_path, os.path.dirname(source_path))
+        self.source_path = source_path
+        self.source_version = source_version
+        with self.state:
+            self.source_revision = self.state.revision(source_path)
+            self.owns_destinations = sync_output_owner_is_unique(video_path, source_path)
+            self.destinations = {
+                str(path): (self.state.revision(path), subtitle_source_version(path))
+                for path in (engine_output_path(source_path, engine) for engine in SYNC_ENGINES)
+            }
+
+    def source_unchanged(self):
+        return (self.state is not None and self.source_version is not None
+                and self.state.revision(self.source_path) == self.source_revision
+                and subtitle_source_version(self.source_path) == self.source_version)
+
+    def destination_owned(self, path):
+        return self.owns_destinations and not os.path.islink(path)
+
+    def destination_unchanged(self, path):
+        expected = self.destinations.get(str(path))
+        return (self.state is not None and self.destination_owned(path) and expected is not None
+                and expected == (self.state.revision(path), subtitle_source_version(path)))
+
+    def release(self):
+        self.state = None
+
+
+def source_is_unchanged(path, version):
+    if isinstance(version, SubtitlePublication):
+        return version.source_unchanged()
+    return subtitle_source_version(path) == version
+
+
+def release_subtitle_publication(version):
+    if isinstance(version, SubtitlePublication):
+        version.release()
+
+
+def release_unqueued_subtitle_publication(version, queue):
+    if not isinstance(version, SubtitlePublication):
+        return
+    # Duplicate submission can pass the very same snapshot as the queued job.
+    # Its coordinator belongs to that job until the running call finishes.
+    with queue._queue_lock:
+        if any(job.kwargs.get('source_version') is version
+               for job in (*queue.jobs_pending_queue, *queue.jobs_running_queue)):
+            return
+    release_subtitle_publication(version)
+
+
+@contextmanager
+def subtitle_write_locks(video_path, *paths):
+    """Acquire participating subtitle directories in stable order."""
+    directories = sorted({os.path.normcase(os.path.realpath(os.path.dirname(path))) for path in (video_path, *paths)})
+    with ExitStack() as stack:
+        states = {directory: stack.enter_context(subtitle_write_lock(video_path, directory))
+                  for directory in directories}
+        yield states
+
+
+@contextmanager
+def subtitle_mutation(video_path, *paths, invalidate_outputs=True):
+    """Coordinate exact local writes and invalidate pending publications.
+
+    Network and engine work stays outside. Indexers share this coordinator for
+    their external-file scan and database update.
+    """
+    with subtitle_write_locks(video_path, *paths) as states:
+        versions = {path: subtitle_source_version(path) for path in paths}
+        try:
+            yield
+        finally:
+            for path, version in versions.items():
+                if subtitle_source_version(path) != version:
+                    directory = os.path.normcase(os.path.realpath(os.path.dirname(path)))
+                    states[directory].changed(path)
+                    if invalidate_outputs:
+                        quarantine_sync_outputs_after_mutation(video_path, path)
+
+
+@contextmanager
+def staged_subtitle_write(video_path, destination, before_publish=None, allow_empty=False,
+                          source_paths=(), after_publish=None):
+    """Compute privately, then publish only while source and destination are current."""
+    with subtitle_write_locks(video_path, destination, *source_paths) as states:
+        def version(path):
+            directory = os.path.normcase(os.path.realpath(os.path.dirname(path)))
+            return (states[directory].revision(path), subtitle_source_version(path))
+
+        destination_version = version(destination)
+        source_versions = {path: version(path) for path in source_paths}
+    temporary = os.path.join(os.path.dirname(destination), f'.bazarr-write-{uuid.uuid4().hex}{Path(destination).suffix}')
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    os.close(fd)
+    try:
+        yield temporary
+        if allow_empty and os.path.isfile(temporary) and os.path.getsize(temporary) == 0:
+            return
+        if not os.path.isfile(temporary) or os.path.getsize(temporary) == 0:
+            raise OSError('Subtitle writer did not produce a nonempty file')
+        with subtitle_write_locks(video_path, destination, *source_paths):
+            with subtitle_mutation(video_path, destination):
+                if before_publish:
+                    before_publish()
+                if destination_version != version(destination):
+                    raise SubtitleDestinationChanged('Subtitle changed during processing')
+                if any(expected[1] is None or expected != version(path) for path, expected in source_versions.items()):
+                    raise SubtitleSourceChanged('Source subtitle changed during processing')
+                if os.path.isfile(destination):
+                    shutil.copymode(destination, temporary)
+                os.replace(temporary, destination)
+                if after_publish:
+                    after_publish()
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def write_subtitle_file(video_path, destination, content, written_paths=None):
+    """Write one saver output atomically and record that exact successful path."""
+    with staged_subtitle_write(video_path, destination,
+                              after_publish=(lambda: written_paths.append(destination))
+                              if written_paths is not None else None) as temporary:
+        with open(temporary, 'wb') as handle:
+            handle.write(content)
+
+
+def _normalized_media_stem(path):
+    return unicodedata.normalize('NFC', os.path.splitext(os.path.basename(path))[0].lower())
+
+
+class SyncOutputOwnerIndex:
+    """Lazily map library owners once for one sequential subtitle scan.
+
+    Only indexers share this snapshot. File mutations and queued publications
+    use fresh ownership checks so a completed scan cannot authorize a later write.
+    """
+
+    def __init__(self):
+        self._loaded = False
+        self._owners = {}
+
+    @staticmethod
+    def _load_owners():
+        from app.database import database, select, TableEpisodes, TableMovies
+        from app.config import settings
+        from utilities.path_mappings import path_mappings
+
+        subfolder = settings.general.subfolder
+        custom_folder = settings.general.subfolder_custom
+        absolute_folder = (os.path.normcase(os.path.realpath(custom_folder))
+                           if subfolder == 'absolute' else None)
+        owners = {}
+        for table, media_type in ((TableEpisodes, 'episode'), (TableMovies, 'movie')):
+            for row in database.execute(select(table.path, table.arr_instance_id)).all():
+                if not row.path:
+                    continue
+                mapped = os.path.normcase(os.path.realpath(path_mappings.path_replace_instance(
+                    row.path, row.arr_instance_id, media_type)))
+                folders = {os.path.dirname(mapped)}
+                if subfolder == 'absolute':
+                    folders.add(absolute_folder)
+                elif subfolder == 'relative':
+                    folders.add(os.path.normcase(os.path.realpath(os.path.join(
+                        os.path.dirname(mapped), custom_folder))))
+                stem = _normalized_media_stem(mapped)
+                for folder in folders:
+                    owners.setdefault((folder, stem), set()).add(mapped)
+        return owners
+
+    def is_unique(self, video, directory, conflicting_stems):
+        if not self._loaded:
+            # A failed build leaves an empty index, never a partial ownership
+            # claim or repeated full-library retries during the same scan.
+            self._loaded = True
+            self._owners = self._load_owners()
+        owned = False
+        expected_owner = {video}
+        for stem in conflicting_stems:
+            owners = self._owners.get((directory, stem))
+            if owners:
+                if owners != expected_owner:
+                    return False
+                owned = True
+        return owned
+
+
+def sync_output_owner_is_unique(video_path, source_path, ownership_index=None):
+    """Prove ownership before moving or replacing an exact generated variant."""
+    from subliminal_patch.core import VIDEO_EXTENSIONS
+
+    video = os.path.normcase(os.path.realpath(video_path))
+    directory = os.path.normcase(os.path.realpath(os.path.dirname(source_path)))
+    media_directory = os.path.dirname(video)
+
+    stem = _normalized_media_stem
+    if stem(source_path) != stem(video) and not stem(source_path).startswith(stem(video) + '.'):
+        return False
+    conflicting_stems = {stem(video), stem(source_path)}
+    try:
+        with os.scandir(media_directory) as entries:
+            local_videos = {os.path.normcase(os.path.realpath(entry.path)) for entry in entries
+                            if entry.is_file() and entry.name.lower().endswith(VIDEO_EXTENSIONS)}
+        if any(path != video and stem(path) in conflicting_stems for path in local_videos):
+            return False
+        if directory == media_directory:
+            return video in local_videos
+
+        # Separate media directories can share a custom subtitle folder. Keep
+        # all mapped owners, amortizing that lookup only within an explicit scan.
+        if ownership_index is None:
+            ownership_index = SyncOutputOwnerIndex()
+        return ownership_index.is_unique(video, directory, conflicting_stems)
+    except (OSError, ValueError):
+        return False
+    except Exception:
+        logging.exception('BAZARR unable to verify generated subtitle ownership')
+        return False
+
+
+def quarantine_sync_outputs(video_path, source_path):
+    """Preserve proven generated siblings under names no subtitle scan accepts."""
+    if is_sync_engine_output(source_path) or not sync_output_owner_is_unique(video_path, source_path):
+        return
+    from subtitles.indexer.utils import add_sync_engine_outputs
+
+    directory = os.path.dirname(source_path)
+    with subtitle_write_lock(video_path, directory) as state:
+        owned = add_sync_engine_outputs(directory, {}, video_path=video_path)
+        for engine in SYNC_ENGINES:
+            output = engine_output_path(source_path, engine)
+            if output.name not in owned:
+                continue
+            try:
+                if not stat.S_ISREG(output.lstat().st_mode):
+                    continue
+            except FileNotFoundError:
+                continue
+            fd, quarantine = tempfile.mkstemp(prefix=f'.bazarr-sync-obsolete-{output.name[:40]}-', suffix='.bak', dir=directory)
+            os.close(fd)
+            try:
+                os.replace(output, quarantine)
+            except BaseException:
+                os.unlink(quarantine)
+                raise
+            state.changed(output)
+
+
+def quarantine_sync_outputs_after_mutation(video_path, source_path):
+    """Report cleanup failure separately from an already completed file change."""
+    try:
+        quarantine_sync_outputs(video_path, source_path)
+    except OSError as exc:
+        logging.error(
+            'BAZARR subtitle change completed for %s, but obsolete generated subtitle cleanup failed (%s). '
+            'Previous generated files may remain available.', source_path, type(exc).__name__)
+
+
+class SubtitleSourceChanged(Exception):
+    """The upload was replaced or deleted while its sync was queued or running."""
+
+
+class SubtitleDestinationChanged(Exception):
+    """A user changed or deleted this engine's destination after enqueueing."""
 
 
 SYNC_ENGINES = ('ffsubsync', 'autosubsync', 'alass')
@@ -46,6 +374,9 @@ REASON_FAILURE_THRESHOLD = 'failure_threshold'
 REASON_ENGINE_DECLINED = 'engine_declined'
 REASON_RESULT_REJECTED = 'result_rejected'
 REASON_ENGINE_FAILED = 'engine_failed'
+REASON_SOURCE_CHANGED = 'source_changed'
+REASON_DESTINATION_CHANGED = 'destination_changed'
+REASON_DESTINATION_AMBIGUOUS = 'destination_ambiguous'
 
 ENGINE_LABELS = {
     'ffsubsync': 'FFsubsync',
@@ -409,9 +740,10 @@ class SubsyncEngineRunner:
 
         return output_stat.st_size > 0 and output_stat.st_mtime_ns >= source_stat.st_mtime_ns
 
-    def run(self, srt_path, output_mode, enabled_engines, execute_engine, force_sync=False):
+    def run(self, srt_path, output_mode, enabled_engines, execute_engine, force_sync=False,
+            source_version=None, before_publish=None, publication_lock=None, after_publish=None):
         output_mode = normalize_output_mode(output_mode)
-        result = SyncRunResult(source_path=srt_path, output_mode=output_mode)
+        result = self.result = SyncRunResult(source_path=srt_path, output_mode=output_mode)
 
         if is_sync_engine_output(srt_path):
             result.results.append(SyncEngineResult(
@@ -423,11 +755,24 @@ class SubsyncEngineRunner:
             return result
 
         for engine in normalize_enabled_engines(enabled_engines):
+            if source_version is not None and not source_is_unchanged(srt_path, source_version):
+                result.results.append(SyncEngineResult(
+                    engine=engine, status=RESULT_SKIPPED, reason=REASON_SOURCE_CHANGED,
+                    message='The uploaded subtitle was replaced or deleted.',
+                ))
+                break
             final_engine_output_path = engine_output_path(srt_path, engine)
-            output_path = (
-                final_engine_output_path if output_mode == OUTPUT_MODE_KEEP_ALL
-                else temporary_engine_output_path(srt_path, engine)
-            )
+            output_path = temporary_engine_output_path(srt_path, engine)
+
+            if (output_mode == OUTPUT_MODE_KEEP_ALL and isinstance(source_version, SubtitlePublication)
+                    and not source_version.destination_unchanged(final_engine_output_path)):
+                result.results.append(SyncEngineResult(
+                    engine=engine, status=RESULT_SKIPPED,
+                    reason=(REASON_DESTINATION_CHANGED if source_version.destination_owned(final_engine_output_path)
+                            else REASON_DESTINATION_AMBIGUOUS),
+                    message='The synchronized subtitle destination changed or its owner is ambiguous.',
+                ))
+                continue
 
             if self.failure_store.should_skip(srt_path, engine) and not force_sync:
                 result.results.append(SyncEngineResult(
@@ -462,10 +807,26 @@ class SubsyncEngineRunner:
 
                 generated_path = str(output_path)
                 final_output_path = output_path
-                if output_mode == OUTPUT_MODE_OVERWRITE:
-                    os.replace(str(output_path), srt_path)
-                    final_output_path = Path(srt_path)
-                    generated_path = None
+                with publication_lock or nullcontext() as state:
+                    if before_publish:
+                        before_publish()
+                    if source_version is not None and not source_is_unchanged(srt_path, source_version):
+                        raise SubtitleSourceChanged()
+                    if (output_mode == OUTPUT_MODE_KEEP_ALL and isinstance(source_version, SubtitlePublication)
+                            and not source_version.destination_unchanged(final_engine_output_path)):
+                        raise SubtitleDestinationChanged()
+                    if output_mode == OUTPUT_MODE_OVERWRITE:
+                        os.replace(str(output_path), srt_path)
+                        final_output_path = Path(srt_path)
+                        generated_path = None
+                    else:
+                        os.replace(str(output_path), str(final_engine_output_path))
+                        final_output_path = final_engine_output_path
+                        generated_path = str(final_engine_output_path)
+                    if hasattr(state, 'changed'):
+                        state.changed(final_output_path)
+                    if after_publish:
+                        after_publish()
 
                 self.failure_store.record_success(srt_path, engine)
                 result.results.append(SyncEngineResult(
@@ -479,6 +840,24 @@ class SubsyncEngineRunner:
                 if output_mode == OUTPUT_MODE_OVERWRITE:
                     break
 
+            except SubtitleSourceChanged:
+                if output_path.is_file():
+                    output_path.unlink()
+                result.results.append(SyncEngineResult(
+                    engine=engine, status=RESULT_SKIPPED, reason=REASON_SOURCE_CHANGED,
+                    message='The uploaded subtitle was replaced or deleted.',
+                ))
+                break
+            except SubtitleDestinationChanged:
+                if output_path.is_file():
+                    output_path.unlink()
+                result.results.append(SyncEngineResult(
+                    engine=engine, status=RESULT_SKIPPED,
+                    reason=(REASON_DESTINATION_CHANGED if source_version.destination_owned(final_engine_output_path)
+                            else REASON_DESTINATION_AMBIGUOUS),
+                    message='The synchronized subtitle destination changed or its owner is ambiguous.',
+                ))
+                continue
             except MissingSyncEngineError as exc:
                 logging.warning('BAZARR %s sync engine skipped: %s', engine, exc)
                 result.results.append(SyncEngineResult(
@@ -519,6 +898,11 @@ class SubsyncEngineRunner:
                 ))
 
             except Exception as exc:
+                if before_publish:
+                    from app.jobs_queue import JobCancelled
+                    if isinstance(exc, JobCancelled):
+                        self._discard_engine_output(srt_path, engine, output_path, exc, record=False)
+                        raise
                 logging.exception('BAZARR %s sync engine failed for %s', engine, srt_path)
                 self._discard_engine_output(srt_path, engine, output_path, exc)
                 result.results.append(SyncEngineResult(

@@ -97,6 +97,19 @@ export const FullPageDropzone: FunctionComponent<FullPageDropzoneProps> = ({
       event.preventDefault();
       depth.current = 0;
       setVisible(false);
+      // Nested upload areas own their files even while disabled or loading.
+      // Observe their drop completion to clear the page overlay first.
+      if (
+        event
+          .composedPath()
+          .some(
+            (target) =>
+              target instanceof Element &&
+              target.hasAttribute("data-full-page-dropzone-ignore"),
+          )
+      ) {
+        return;
+      }
       const files = Array.from(event.dataTransfer?.files ?? []);
       if (files.length > 0) {
         onDrop(files);

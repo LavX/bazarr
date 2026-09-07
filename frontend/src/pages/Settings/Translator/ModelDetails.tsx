@@ -1,6 +1,7 @@
 import { FunctionComponent } from "react";
 import { Badge, Box, Group, SimpleGrid, Text } from "@mantine/core";
 import { useQuery } from "@tanstack/react-query";
+import { splitRoutingSuffix } from "./routing";
 
 // Average total token usage per translation (calibrated from real data)
 // Episode ~90K tokens, Movie ~180K tokens
@@ -44,7 +45,11 @@ function useOpenRouterModelDetails(modelId: string) {
     queryFn: async () => {
       const response = await fetch("https://openrouter.ai/api/v1/models");
       const data = await response.json();
-      const found = data.data?.find((m: OpenRouterModel) => m.id === modelId);
+      // :nitro and :floor are routing shortcuts rather than models, so they
+      // never appear in OpenRouter's model list. A saved config can still carry
+      // one, and the details belong to the model underneath it.
+      const { modelId: lookupId } = splitRoutingSuffix(modelId);
+      const found = data.data?.find((m: OpenRouterModel) => m.id === lookupId);
       return (found as OpenRouterModel) || null;
     },
     enabled: !!modelId,
