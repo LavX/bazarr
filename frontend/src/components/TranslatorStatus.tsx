@@ -215,7 +215,7 @@ const JobRow: FunctionComponent<JobRowProps> = ({ job }) => {
 
 interface StatCardProps {
   label: string;
-  value: number;
+  value: number | undefined;
   color: string;
 }
 
@@ -230,8 +230,13 @@ const StatCard: FunctionComponent<StatCardProps> = ({
     className={classes.statCard}
     style={{ borderLeftColor: `var(--bz-stat-${color})` }}
   >
-    <Text size="2rem" fw={700} lh={1}>
-      {value}
+    <Text
+      size="2rem"
+      fw={700}
+      lh={1}
+      aria-label={value == null ? "Count unavailable" : undefined}
+    >
+      {value ?? "-"}
     </Text>
     <Text
       size="xs"
@@ -272,17 +277,46 @@ export const TranslatorStatusPanel: FunctionComponent<
     void refetchJobs();
   }, [refetchStatus, refetchJobs]);
 
+  const availableStatus = statusError ? undefined : status;
+  const queueStats = (
+    <SimpleGrid cols={{ base: 2, sm: 4 }}>
+      <StatCard
+        label="Pending"
+        value={availableStatus?.bazarr_queue?.pending}
+        color="queued"
+      />
+      <StatCard
+        label="Processing"
+        value={availableStatus?.queue.processing}
+        color="processing"
+      />
+      <StatCard
+        label="Completed"
+        value={availableStatus?.queue.completed}
+        color="completed"
+      />
+      <StatCard
+        label="Failed"
+        value={availableStatus?.queue.failed}
+        color="failed"
+      />
+    </SimpleGrid>
+  );
+
   // Show loading state on first load
   if (statusLoading && !status) {
     return (
-      <Card withBorder mt="md" p="md">
-        <Group justify="center" py="md">
-          <FontAwesomeIcon icon={faSpinner} spin aria-hidden="true" />
-          <Text c="var(--bz-text-tertiary)">
-            Connecting to AI Subtitle Translator...
-          </Text>
-        </Group>
-      </Card>
+      <Stack gap="md" mt="md">
+        <Card withBorder p="md">
+          <Group justify="center" py="md">
+            <FontAwesomeIcon icon={faSpinner} spin aria-hidden="true" />
+            <Text c="var(--bz-text-tertiary)">
+              Connecting to AI Subtitle Translator...
+            </Text>
+          </Group>
+        </Card>
+        {queueStats}
+      </Stack>
     );
   }
 
@@ -293,26 +327,30 @@ export const TranslatorStatusPanel: FunctionComponent<
         : "The translation service isn't responding. Check that it's running at the configured URL, then hit retry.";
 
     return (
-      <Alert
-        color="yellow"
-        title="AI Subtitle Translator Unavailable"
-        mt="md"
-        icon={
-          <FontAwesomeIcon icon={faExclamationTriangle} aria-hidden="true" />
-        }
-      >
-        <Text size="sm" mb="sm">
-          {errorMessage}
-        </Text>
-        <Button
-          size="xs"
-          variant="light"
-          leftSection={<FontAwesomeIcon icon={faRefresh} aria-hidden="true" />}
-          onClick={handleRetry}
+      <Stack gap="md" mt="md">
+        <Alert
+          color="yellow"
+          title="AI Subtitle Translator Unavailable"
+          icon={
+            <FontAwesomeIcon icon={faExclamationTriangle} aria-hidden="true" />
+          }
         >
-          Retry Connection
-        </Button>
-      </Alert>
+          <Text size="sm" mb="sm">
+            {errorMessage}
+          </Text>
+          <Button
+            size="xs"
+            variant="light"
+            leftSection={
+              <FontAwesomeIcon icon={faRefresh} aria-hidden="true" />
+            }
+            onClick={handleRetry}
+          >
+            Retry Connection
+          </Button>
+        </Alert>
+        {queueStats}
+      </Stack>
     );
   }
 
@@ -350,42 +388,7 @@ export const TranslatorStatusPanel: FunctionComponent<
       </Card>
 
       {/* Queue Stats */}
-      {status &&
-        (status.queue.processing > 0 ||
-          status.queue.completed > 0 ||
-          status.queue.failed > 0 ||
-          (status.bazarr_queue?.pending ?? 0) > 0) && (
-          <SimpleGrid cols={{ base: 2, sm: 4 }}>
-            {(status.bazarr_queue?.pending ?? 0) > 0 && (
-              <StatCard
-                label="Pending"
-                value={status.bazarr_queue!.pending}
-                color="queued"
-              />
-            )}
-            {status.queue.processing > 0 && (
-              <StatCard
-                label="Processing"
-                value={status.queue.processing}
-                color="processing"
-              />
-            )}
-            {status.queue.completed > 0 && (
-              <StatCard
-                label="Completed"
-                value={status.queue.completed}
-                color="completed"
-              />
-            )}
-            {status.queue.failed > 0 && (
-              <StatCard
-                label="Failed"
-                value={status.queue.failed}
-                color="failed"
-              />
-            )}
-          </SimpleGrid>
-        )}
+      {queueStats}
 
       {/* Jobs Table */}
       <Card withBorder>
