@@ -30,7 +30,7 @@ class LingarrAuthError(Exception):
 class LingarrTranslatorService:
     def __init__(self, source_srt_file, dest_srt_file, lang_obj, to_lang, from_lang, media_type,
                  video_path, orig_to_lang, forced, hi, sonarr_series_id, sonarr_episode_id,
-                 radarr_id):
+                 radarr_id, arr_instance_id=None):
         self.source_srt_file = source_srt_file
         self.dest_srt_file = dest_srt_file
         self.lang_obj = lang_obj
@@ -44,6 +44,9 @@ class LingarrTranslatorService:
         self.sonarr_series_id = sonarr_series_id
         self.sonarr_episode_id = sonarr_episode_id
         self.radarr_id = radarr_id
+        # The owning arr instance (#156): radarrId and sonarrSeriesId are only
+        # unique together with it, so every media lookup below carries it.
+        self.arr_instance_id = arr_instance_id
         self.language_code_convert_dict = {
             'zh': 'zh-CN',
             'zt': 'zh-TW',
@@ -139,7 +142,8 @@ class LingarrTranslatorService:
                 media_type=self.media_type,
                 radarr_id=self.radarr_id,
                 sonarr_series_id=self.sonarr_series_id,
-                sonarr_episode_id=self.sonarr_episode_id
+                sonarr_episode_id=self.sonarr_episode_id,
+                arr_instance_id=self.arr_instance_id
             )
 
             if self.media_type == 'episode':

@@ -25,7 +25,8 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         jobs_queue.add_job_from_function(
             (lambda t: f'Translating {t} ({from_lang.upper()} to {to_lang.upper()})' if t else
              f'Translating {from_lang.upper()} to {to_lang.upper()}')(
-                get_title(media_type, radarr_id, sonarr_series_id, sonarr_episode_id)),
+                get_title(media_type, radarr_id, sonarr_series_id, sonarr_episode_id,
+                          arr_instance_id)),
             is_progress=True)
         return
 
@@ -70,7 +71,8 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
             hi=hi,
             sonarr_series_id=sonarr_series_id,
             sonarr_episode_id=sonarr_episode_id,
-            radarr_id=radarr_id
+            radarr_id=radarr_id,
+            arr_instance_id=arr_instance_id
         )
 
         logging.debug(f'Created translator instance: {translator.__class__.__name__}')  # noqa: G004
