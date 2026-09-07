@@ -204,6 +204,7 @@ jobs:
             tests/bazarr/test_processing_sync_substep.py \
             tests/bazarr/test_mass_download_path_mapping.py \
             tests/bazarr/test_processing_postprocessing.py \
+            tests/bazarr/test_upload_background_sync.py \
             tests/bazarr/test_sync_progress_report.py \
             tests/bazarr/test_subsync_engines.py \
             tests/bazarr/test_autosubsync_diagnostics.py \
