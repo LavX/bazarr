@@ -45,13 +45,17 @@ class SubtitleObject(typing.TypedDict):
 class GeminiTranslatorService:
 
     def __init__(self, source_srt_file, dest_srt_file, to_lang, media_type, sonarr_series_id, sonarr_episode_id,
-                 radarr_id, forced, hi, video_path, from_lang, orig_to_lang, **kwargs):
+                 radarr_id, forced, hi, video_path, from_lang, orig_to_lang,
+                 arr_instance_id=None, **kwargs):
         self.source_srt_file = source_srt_file
         self.dest_srt_file = dest_srt_file
         self.to_lang = to_lang
         self.media_type = media_type
         self.sonarr_series_id = sonarr_series_id
         self.radarr_id = radarr_id
+        # The owning arr instance (#156): radarrId and sonarrSeriesId are only
+        # unique together with it, so every media lookup below carries it.
+        self.arr_instance_id = arr_instance_id
         self.from_lang = from_lang
         self.video_path = video_path
         self.forced = forced
@@ -98,7 +102,8 @@ class GeminiTranslatorService:
             self.output_file = self.dest_srt_file
             self.model_name = settings.translator.gemini_model
             self.batch_size = self._get_batch_size()
-            self.description = get_description(self.media_type, self.radarr_id, self.sonarr_series_id)
+            self.description = get_description(self.media_type, self.radarr_id, self.sonarr_series_id,
+                                               arr_instance_id=self.arr_instance_id)
 
             if self.input_file:
                 self.progress_file = os.path.join(os.path.dirname(self.input_file), f".{os.path.basename(self.input_file)}.progress")

@@ -111,12 +111,38 @@ def add_translator_info(dest_srt_file, info):
             f.write(srt.compose(subtitles))
 
 
-def get_description(media_type, radarr_id, sonarr_series_id):
+# The callers do not agree on how to spell this: the manual translate endpoint
+# sends "movie" while the batch and mass-operation paths send "movies". Both mean
+# the same thing, and matching only one of them silently produced an empty title
+# and an empty prompt description for every movie translated from its own page.
+MOVIE_MEDIA_TYPES = ('movie', 'movies')
+
+
+def is_movie_media_type(media_type) -> bool:
+    return str(media_type or '').strip().lower() in MOVIE_MEDIA_TYPES
+
+
+def _scope(statement, table, arr_instance_id):
+    """Narrow a lookup to the owning arr instance (#156).
+
+    ``radarrId`` and ``sonarrSeriesId`` are unique only together with
+    ``arr_instance_id``, so an unscoped query can return a sibling instance's
+    media. Callers that genuinely have no owner (older paths, and the tests that
+    seed a single instance) pass None and keep the previous behaviour.
+    """
+    if arr_instance_id is None:
+        return statement
+    return statement.where(table.arr_instance_id == arr_instance_id)
+
+
+def get_description(media_type, radarr_id, sonarr_series_id, arr_instance_id=None):
     try:
-        if media_type == 'movies':
+        if is_movie_media_type(media_type):
             movie = database.execute(
-                select(TableMovies.title, TableMovies.imdbId, TableMovies.year, TableMovies.overview)
-                .where(TableMovies.radarrId == radarr_id)
+                _scope(
+                    select(TableMovies.title, TableMovies.imdbId, TableMovies.year, TableMovies.overview)
+                    .where(TableMovies.radarrId == radarr_id),
+                    TableMovies, arr_instance_id)
             ).first()
 
             if movie:
@@ -128,8 +154,10 @@ def get_description(media_type, radarr_id, sonarr_series_id):
 
         else:
             series = database.execute(
-                select(TableShows.title, TableShows.imdbId, TableShows.year, TableShows.overview)
-                .where(TableShows.sonarrSeriesId == sonarr_series_id)
+                _scope(
+                    select(TableShows.title, TableShows.imdbId, TableShows.year, TableShows.overview)
+                    .where(TableShows.sonarrSeriesId == sonarr_series_id),
+                    TableShows, arr_instance_id)
             ).first()
 
             if series:
@@ -147,15 +175,17 @@ def get_title(
         media_type: str,
         radarr_id: Union[int, None] = None,
         sonarr_series_id: Union[int, None] = None,
-        sonarr_episode_id: Union[int, None] = None
+        sonarr_episode_id: Union[int, None] = None,
+        arr_instance_id: Union[int, None] = None
 ) -> str:
     try:
-        if media_type == "movies":
+        if is_movie_media_type(media_type):
             if radarr_id is None:
                 return ""
 
             movie_row = database.execute(
-                select(TableMovies.title).where(TableMovies.radarrId == radarr_id)
+                _scope(select(TableMovies.title).where(TableMovies.radarrId == radarr_id),
+                       TableMovies, arr_instance_id)
             ).first()
 
             if movie_row is None:
@@ -176,7 +206,8 @@ def get_title(
             return ""
 
         series_row = database.execute(
-            select(TableShows.title).where(TableShows.sonarrSeriesId == sonarr_series_id)
+            _scope(select(TableShows.title).where(TableShows.sonarrSeriesId == sonarr_series_id),
+                   TableShows, arr_instance_id)
         ).first()
 
         if series_row is None:
@@ -193,8 +224,10 @@ def get_title(
         # If episode ID is provided, get episode details and format as "Series - S##E## - Episode Title"
         if sonarr_episode_id is not None:
             episode_row = database.execute(
-                select(TableEpisodes.season, TableEpisodes.episode, TableEpisodes.title)
-                .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id)
+                _scope(
+                    select(TableEpisodes.season, TableEpisodes.episode, TableEpisodes.title)
+                    .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id),
+                    TableEpisodes, arr_instance_id)
             ).first()
 
             if episode_row is not None:
