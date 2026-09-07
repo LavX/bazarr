@@ -6,9 +6,23 @@ import logging
 import subprocess
 
 from locale import getpreferredencoding
+from utilities.helper import get_target_folder
+from subtitles.tools.subsync_engines import subtitle_write_locks, subtitle_mutation
 
 
-def postprocessing(command, path):
+def postprocessing(command, path, subtitle_path=None):
+    # Configured commands can mutate subtitles in place. This is the one boundary
+    # that must hold this media's mutation locks while the external command runs.
+    destination = os.path.join(get_target_folder(path, create=False) or os.path.dirname(path), '.destination')
+    with subtitle_write_locks(path, path, destination, subtitle_path or path) as states:
+        watched_paths = {watched for state in states.values() for watched in state.revisions}
+        if subtitle_path:
+            watched_paths.add(subtitle_path)
+        with subtitle_mutation(path, *watched_paths):
+            return _postprocessing_locked(command, path)
+
+
+def _postprocessing_locked(command, path):
     try:
         encoding = getpreferredencoding()
         if os.name == 'nt':

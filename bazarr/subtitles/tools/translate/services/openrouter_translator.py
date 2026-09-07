@@ -3,10 +3,8 @@
 import re
 import time
 import logging
-import os
-import shutil
-import uuid
 import pysubs2
+from subtitles.tools.subsync_engines import staged_subtitle_write, SubtitleDestinationChanged
 import requests
 from typing import Optional, List, Dict, Any
 
@@ -18,7 +16,7 @@ from languages.get_languages import language_from_alpha2, language_from_alpha3
 from radarr.history import history_log_movie
 from sonarr.history import history_log
 from app.event_handler import show_progress, hide_progress, show_message
-from app.jobs_queue import jobs_queue
+from app.jobs_queue import jobs_queue, JobCancelled
 
 from ..core.translator_utils import add_translator_info, create_process_result, get_title
 from .auth import get_translator_auth_headers
@@ -174,59 +172,47 @@ class OpenRouterTranslatorService:
     def translate(self, job_id=None):
         self.partial_error = None
         try:
-            subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
-            lines_list: List[str] = [x.plaintext for x in subs]
-            lines_list_len = len(lines_list)
+            with staged_subtitle_write(self.video_path, self.dest_srt_file,
+                                       source_paths=(self.source_srt_file,),
+                                       before_publish=lambda: jobs_queue.update_job_progress(job_id=job_id),
+                                       allow_empty=True) as temporary:
+                subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
+                lines_list: List[str] = [x.plaintext for x in subs]
+                lines_list_len = len(lines_list)
 
-            if lines_list_len == 0:
-                logger.debug('No lines to translate in subtitle file')
-                return False
+                if lines_list_len == 0:
+                    logger.debug('No lines to translate in subtitle file')
+                    return False
 
-            logger.debug(f'Starting AI translation for {self.source_srt_file}')  # noqa: G004
+                logger.debug(f'Starting AI translation for {self.source_srt_file}')  # noqa: G004
 
-            # Submit job and poll for completion
-            translated_lines = self._submit_and_poll(lines_list, bazarr_job_id=job_id)
+                # Submit job and poll for completion
+                translated_lines = self._submit_and_poll(lines_list, bazarr_job_id=job_id)
 
-            if translated_lines is None:
-                logger.error(f'Translation failed for {self.source_srt_file}')  # noqa: G004
-                show_message(f'Translation failed for {self.source_srt_file}')
-                return False
+                if translated_lines is None:
+                    logger.error(f'Translation failed for {self.source_srt_file}')  # noqa: G004
+                    show_message(f'Translation failed for {self.source_srt_file}')
+                    return False
 
-            # Process results
-            logger.debug(f'BAZARR saving AI translated subtitles to {self.dest_srt_file}')  # noqa: G004
-            translation_map = {}
-            for item in translated_lines:
-                if isinstance(item, dict) and 'position' in item and 'line' in item:
-                    translation_map[item['position']] = item['line']
+                # Process results
+                logger.debug(f'BAZARR saving AI translated subtitles to {self.dest_srt_file}')  # noqa: G004
+                translation_map = {}
+                for item in translated_lines:
+                    if isinstance(item, dict) and 'position' in item and 'line' in item:
+                        translation_map[item['position']] = item['line']
 
-            missing_lines = sum(bool(source.strip()) and not translation_map.get(i, '').strip()
-                                for i, source in enumerate(lines_list))
-            if missing_lines and not self.partial_error:
-                self._mark_partial(f'No translated text was returned for {missing_lines} of {lines_list_len} cues.')
+                missing_lines = sum(bool(source.strip()) and not translation_map.get(i, '').strip()
+                                    for i, source in enumerate(lines_list))
+                if missing_lines and not self.partial_error:
+                    self._mark_partial(f'No translated text was returned for {missing_lines} of {lines_list_len} cues.')
 
-            for i, line in enumerate(subs):
-                if i in translation_map and translation_map[i].strip():
-                    line.text = translation_map[i]
+                for i, line in enumerate(subs):
+                    if i in translation_map and translation_map[i].strip():
+                        line.text = translation_map[i]
 
-            temporary_file = os.path.join(os.path.dirname(self.dest_srt_file),
-                                          f'.bazarr-translate-{uuid.uuid4().hex}.srt')
-            temporary_file_created = False
-            try:
-                with open(temporary_file, 'x', encoding='utf-8'):
-                    temporary_file_created = True
-                subs.save(temporary_file)
+                subs.save(temporary)
                 translated = 'partially translated' if self.partial_error else 'translated'
-                add_translator_info(temporary_file, f"# Subtitles {translated} with AI Subtitle Translator #")
-                if os.path.exists(self.dest_srt_file):
-                    shutil.copymode(self.dest_srt_file, temporary_file)
-                os.replace(temporary_file, self.dest_srt_file)
-            except OSError:
-                logger.error(f'BAZARR is unable to save translated subtitles to {self.dest_srt_file}')  # noqa: G004
-                show_message(f'Translation failed: Unable to save translated subtitles to {self.dest_srt_file}')
-                raise
-            finally:
-                if temporary_file_created and os.path.exists(temporary_file):
-                    os.remove(temporary_file)
+                add_translator_info(temporary, f"# Subtitles {translated} with AI Subtitle Translator #")
 
             message = f"{language_from_alpha2(self.from_lang)} subtitles {translated} to {language_from_alpha3(self.to_lang)} using AI Subtitle Translator."
             if self.partial_error:
@@ -245,6 +231,8 @@ class OpenRouterTranslatorService:
 
             return self.dest_srt_file
 
+        except (JobCancelled, SubtitleDestinationChanged):
+            raise
         except Exception as e:
             logger.error(f'BAZARR encountered an error during AI translation: {str(e)}')  # noqa: G004
             show_message(f'AI translation failed: {str(e)}')

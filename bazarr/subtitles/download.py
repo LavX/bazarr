@@ -4,11 +4,13 @@
 import os
 import sys
 import logging
+from functools import partial
 import subliminal
 import ast
 
 from subzero.language import Language
 from subliminal_patch.core import save_subtitles
+from subtitles.tools.subsync_engines import subtitle_write_locks, subtitle_mutation, write_subtitle_file
 from subliminal_patch.core_persistent import download_best_subtitles
 
 from app.config import settings
@@ -149,21 +151,29 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                             fld = get_target_folder(path)
                             chmod = int(settings.general.chmod, 8) if not sys.platform.startswith(
                                 'win') and settings.general.chmod_enabled else None
-                            if is_upgrade and previous_subtitles_to_delete:
-                                try:
-                                    # delete previously downloaded subtitles in case of an upgrade to prevent edge loop
-                                    # issue.
-                                    os.remove(previous_subtitles_to_delete)
-                                except (OSError, FileNotFoundError):
-                                    pass
-                            saved_subtitles = save_subtitles(video.original_path, subtitles,
-                                                             single=settings.general.single_language,
-                                                             tags=None,  # fixme
-                                                             directory=fld,
-                                                             chmod=chmod,
-                                                             formats=subtitle_formats,
-                                                             path_decoder=force_unicode
-                                                             )
+                            with subtitle_write_locks(path, os.path.join(fld or os.path.dirname(path), '.destination'),
+                                                      previous_subtitles_to_delete or path):
+                                written_paths = []
+                                saved_subtitles = save_subtitles(video.original_path, subtitles,
+                                                                 single=settings.general.single_language,
+                                                                 tags=None,  # fixme
+                                                                 directory=fld,
+                                                                 chmod=chmod,
+                                                                 formats=subtitle_formats,
+                                                                 path_decoder=force_unicode,
+                                                                 write_subtitle=partial(write_subtitle_file, path, written_paths=written_paths)
+                                                                 )
+                                if is_upgrade and previous_subtitles_to_delete and written_paths and (
+                                        os.path.normcase(os.path.realpath(previous_subtitles_to_delete)) not in
+                                        {os.path.normcase(os.path.realpath(written)) for written in written_paths}):
+                                    try:
+                                        with subtitle_mutation(path, previous_subtitles_to_delete):
+                                            os.remove(previous_subtitles_to_delete)
+                                    except OSError:
+                                        logging.exception('BAZARR unable to remove superseded subtitle: %s',
+                                                          previous_subtitles_to_delete)
+                                saved_subtitles = [saved for saved in saved_subtitles if saved.storage_path in written_paths]
+
                         except Exception as e:
                             logging.exception(
                                 f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')  # noqa: G004

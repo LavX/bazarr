@@ -1471,7 +1471,7 @@ SUBTITLE_FORMAT_EXTENSIONS = {
 
 
 def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=None, formats=("srt",),
-                   tags=None, path_decoder=None, debug_mods=False):
+                   tags=None, path_decoder=None, debug_mods=False, write_subtitle=None):
     """Save subtitles on filesystem.
 
     Subtitles are saved in the order of the list. If a subtitle with a language has already been saved, other subtitles
@@ -1486,6 +1486,7 @@ def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=Non
     :type subtitles: list of :class:`~subliminal.subtitle.Subtitle`
     :param bool single: save a single subtitle, default is to save one subtitle per language.
     :param str directory: path to directory where to save the subtitles, default is next to the video.
+    :param write_subtitle: optional callback receiving each exact destination and encoded content
     :return: the saved subtitles
     :rtype: list of :class:`~subliminal.subtitle.Subtitle`
 
@@ -1543,11 +1544,13 @@ def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=Non
             logger.debug(u"Saving %r to %r", subtitle, subtitle_path)
             content = subtitle.get_modified_content(format=format, debug=debug_mods)
             if content:
-                if os.path.exists(subtitle_path):
-                    os.remove(subtitle_path)
-
-                with open(subtitle_path, 'wb') as f:
-                    f.write(content)
+                if write_subtitle is not None:
+                    write_subtitle(subtitle_path, content)
+                else:
+                    if os.path.exists(subtitle_path):
+                        os.remove(subtitle_path)
+                    with open(subtitle_path, 'wb') as f:
+                        f.write(content)
                 subtitle.storage_path = subtitle_path
             else:
                 logger.error(u"Something went wrong when getting modified subtitle for %s", subtitle)

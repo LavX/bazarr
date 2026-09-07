@@ -129,7 +129,7 @@ def test_translate_saves_partial_subtitles_and_marks_history(tmp_path, mocker, m
     openrouter_translator.add_translator_info.assert_called_once()
     staged, footer = openrouter_translator.add_translator_info.call_args.args
     assert Path(staged).parent == destination.parent
-    assert Path(staged).name.startswith(".bazarr-translate-")
+    assert Path(staged).name.startswith(".bazarr-write-")
     assert footer == "# Subtitles partially translated with AI Subtitle Translator #"
     result = openrouter_translator.create_process_result.return_value
     if media_type == "episode":

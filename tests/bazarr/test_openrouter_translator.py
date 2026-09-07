@@ -233,9 +233,10 @@ def test_long_destination_filename_retains_atomic_saving_and_permissions(service
 def test_existing_staging_file_is_never_overwritten_or_removed(service, events, monkeypatch):
     destination = Path(service.dest_srt_file)
     destination.write_bytes(b'existing subtitle')
-    staging = destination.with_name('.bazarr-translate-fixture-collision.srt')
+    staging = destination.with_name('.bazarr-write-fixture-collision.srt')
     staging.write_bytes(b'other operation')
-    monkeypatch.setattr(module.uuid, 'uuid4', lambda: SimpleNamespace(hex='fixture-collision'))
+    from subtitles.tools import subsync_engines
+    monkeypatch.setattr(subsync_engines.uuid, 'uuid4', lambda: SimpleNamespace(hex='fixture-collision'))
     _response(monkeypatch, 'completed', [{'position': 0, 'line': 'Egy'}])
 
     assert service.translate() is False

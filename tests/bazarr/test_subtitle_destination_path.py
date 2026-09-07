@@ -173,7 +173,8 @@ def test_translation_saves_atomic_results_in_configured_folder(
     if failure == "footer":
         monkeypatch.setattr(service_module, "add_translator_info", fail_write)
     elif failure == "replace":
-        monkeypatch.setattr(service_module.os, "replace", fail_write)
+        from subtitles.tools import subsync_engines
+        monkeypatch.setattr(subsync_engines.os, "replace", fail_write)
 
     monkeypatch.setitem(sys.modules, "api.subtitles.subtitles", SimpleNamespace(
         postprocess_subtitles=lambda *args, **kwargs: postprocessed.append(args[0])))

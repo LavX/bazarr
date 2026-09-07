@@ -32,7 +32,7 @@ export interface WhatsNewSlide {
  * cutting a release. Kept as an explicit token so the wizard never has to parse the
  * fork's `version + YYMMDD` runtime string.
  */
-export const latestWhatsNewVersion = "2.6.1";
+export const latestWhatsNewVersion = "2.6.2";
 
 // v2.6.0 feature slides; v2.6.1 (a patch on the same line) leads with its
 // fix and keeps the whole Clockwork tour behind it.
@@ -87,6 +87,116 @@ const clockworkSlides: WhatsNewSlide[] = [
 ];
 
 export const whatsNew: Record<string, WhatsNewSlide[]> = {
+  "2.6.2": [
+    {
+      title: "Uploaded subtitles appear before sync finishes",
+      body: "A saved upload is listed immediately while automatic sync runs as a separate job. Failed or cancelled sync leaves the uploaded subtitle available, and older sync work cannot replace a newer upload.",
+      icon: faDownload,
+      cta: { label: "Open your series", to: "/series" },
+    },
+    {
+      title: "One upload dialog for each batch",
+      body: "Dropping files into an open upload dialog keeps the existing selection without opening another dialog, including while an archive is expanding. Closing once dismisses it.",
+      icon: faFileZipper,
+      cta: { label: "Open your movies", to: "/movies" },
+    },
+    {
+      title: "Choose how OpenRouter routes your translations",
+      body: "Pick fastest, cheapest, lowest latency or OpenRouter's default. Typed :nitro and :floor shortcuts move into the routing selector when editing finishes, keeping model details and the saved choice consistent. Full shortcut support needs translator service 1.3.4.",
+      icon: faSliders,
+      cta: { label: "Open Translator settings", to: "/settings/translator" },
+    },
+    {
+      title: "Keyboard saves keep your latest settings edit",
+      body: "When the Save bar is visible, Enter and Ctrl+S or Cmd+S now include the latest text in the focused field, including fields that finish editing when focus moves away.",
+      icon: faSliders,
+      cta: { label: "Open Translator settings", to: "/settings/translator" },
+    },
+    {
+      title: "History keeps the right server",
+      body: "Downloads keep their Sonarr or Radarr owner even if the media lookup fails, so a missing lookup no longer prevents the history entry from being saved.",
+      icon: faClockRotateLeft,
+      cta: { label: "Open History", to: "/history/series" },
+    },
+    {
+      title: "Disk scans keep sync outputs with their video",
+      body: "Keep all still stores one file per sync engine. Disk scans now keep those outputs with the owning video, including existing language-tagged files after a single-language naming change.",
+      icon: faSliders,
+      cta: { label: "Open Subtitles settings", to: "/settings/subtitles" },
+    },
+    {
+      title: "Movie translation jobs show the movie title",
+      body: "Movie translations now show the movie's name in the job list, and Gemini receives its overview. Starting a translation from a media page also keeps title and overview lookups with that media's Sonarr or Radarr server.",
+      icon: faWandMagicSparkles,
+      cta: { label: "Open your movies", to: "/movies" },
+    },
+    {
+      title: "Recover useful OpenRouter translation results",
+      body: "Usable partial OpenRouter translations are saved and marked incomplete. Missing translations retain their source text, so review incomplete files. Empty or invalid results still fail, and failed saves preserve the previous subtitle.",
+      icon: faWandMagicSparkles,
+      cta: { label: "Open Translator settings", to: "/settings/translator" },
+    },
+    {
+      title: "Long OpenRouter translation jobs can finish",
+      body: "OpenRouter translation jobs can keep running for up to 12 hours. Ten minutes without a successful status response still stops the wait.",
+      icon: faClockRotateLeft,
+      cta: { label: "Open Translator settings", to: "/settings/translator" },
+    },
+    {
+      title: "Translation and edits respect subtitle folders",
+      body: "Existing subtitles stay in their current location. New translated or modified subtitles use your configured subtitle folder, including relative and absolute custom folders.",
+      icon: faFileZipper,
+      cta: { label: "Open Subtitles settings", to: "/settings/subtitles" },
+    },
+    {
+      title: "Cancelled Gemini jobs stop retrying",
+      body: "Cancelling a Gemini translation no longer retries the request. The existing subtitle stays in place, and temporary progress files are cleaned up.",
+      icon: faWandMagicSparkles,
+      cta: { label: "Open Translator settings", to: "/settings/translator" },
+    },
+    {
+      title: "Updated translation model choices",
+      body: "Four known retired Gemini IDs in OpenRouter settings migrate to replacements. Other saved IDs stay unchanged. Removed Grok menu suggestions are not migrated automatically.",
+      icon: faWandMagicSparkles,
+      cta: { label: "Open Translator settings", to: "/settings/translator" },
+    },
+    {
+      title: "One unusable archive no longer stops the search",
+      body: "If a catalog-provider archive has no suitable subtitle, Bazarr tries the next candidate without disabling that provider. The search also continues when only one successful subtitle is requested.",
+      icon: faDownload,
+      cta: { label: "Open Subtitle Hub", to: "/subtitle-hub" },
+    },
+    {
+      title: "Provider errors keep their meaning",
+      body: "Provider Hub now preserves quota, login, rate-limit and service errors across its workers, so Bazarr applies the matching pause instead of treating them all as a generic failure.",
+      icon: faStore,
+      cta: { label: "Open Subtitle Hub", to: "/subtitle-hub" },
+    },
+    {
+      title: "See which server owns a search result",
+      body: "When you have multiple Sonarr or multiple Radarr instances, global search shows the owning instance beside that media type\u2019s results.",
+      icon: faServer,
+      cta: { label: "Open your series", to: "/series" },
+    },
+    {
+      title: "Fewer misleading translation messages",
+      body: "Automatic translation checks whether it is enabled and eligible before reporting that a source score is too low.",
+      icon: faWandMagicSparkles,
+      cta: { label: "Open Translator settings", to: "/settings/translator" },
+    },
+    {
+      title: "Dependency checks match installed versions",
+      body: "Source installs no longer request repeated repairs for dependencies that already satisfy the installation requirements. This patch also updates filename parsing, database access, shared UI components and security dependencies.",
+      icon: faShieldHalved,
+      cta: { label: "Open System Status", to: "/system/status" },
+    },
+    {
+      title: "Provider fixes are delivered separately",
+      body: "Reviewed OpenSubtitles.org, OpenSubtitles.com, Titlovi and SubDL updates are in catalog beta. Stable availability follows promotion to main; update the bundles in Subtitle Hub when available.",
+      icon: faStore,
+      cta: { label: "Open Subtitle Hub", to: "/subtitle-hub" },
+    },
+  ],
   "2.6.1": [
     {
       title: "History shows your events again",
