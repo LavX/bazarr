@@ -28,6 +28,7 @@ def _build_service(source_srt_file="input.srt", dest_srt_file="output.srt", medi
 def _mock_dependencies(mocker):
     mocker.patch.object(openrouter_translator.requests, "get", return_value=mocker.Mock(status_code=200))
     mocker.patch.object(openrouter_translator.time, "sleep")
+    mocker.patch.object(openrouter_translator, "uuid4").return_value.hex = "fixture-operation"
     for name in (
         "show_progress", "hide_progress", "show_message", "jobs_queue", "history_log", "history_log_movie",
         "add_translator_info", "create_process_result",
@@ -50,7 +51,7 @@ def test_poll_job_keeps_partial_lines_and_bounded_error(structured, caplog):
         assert service._poll_job("http://translator", "job-1", 2, bazarr_job_id="bazarr-job-1") == lines
 
     assert service.partial_error == detail
-    openrouter_translator.hide_progress.assert_called_once_with(id="translate_progress_output.srt")
+    openrouter_translator.hide_progress.assert_called_once_with(id="translate_progress_fixture-operation")
     openrouter_translator.show_message.assert_called_once_with(
         f"Translation is partial. Some lines may remain in the source language. {detail}"
     )
@@ -68,7 +69,7 @@ def test_poll_job_rejects_partial_without_lines(result, caplog):
     }
 
     assert service._poll_job("http://translator", "job-1", 1) is None
-    openrouter_translator.hide_progress.assert_called_once_with(id="translate_progress_output.srt")
+    openrouter_translator.hide_progress.assert_called_once_with(id="translate_progress_fixture-operation")
     openrouter_translator.show_message.assert_called_once_with(f"Translation failed (partial): {error}")
     assert (openrouter_translator.__name__, logging.ERROR,
             f"Translation partially failed: {error}") in caplog.record_tuples
@@ -83,7 +84,7 @@ def test_poll_job_returns_completed_lines(structured):
 
     assert service._poll_job("http://translator", "job-1", 1) == lines
     assert service.partial_error is None
-    openrouter_translator.hide_progress.assert_called_once_with(id="translate_progress_output.srt")
+    openrouter_translator.hide_progress.assert_called_once_with(id="translate_progress_fixture-operation")
     openrouter_translator.show_message.assert_not_called()
 
 
@@ -107,7 +108,7 @@ def test_translate_saves_partial_subtitles_and_marks_history(tmp_path, mocker, m
     service = _build_service(str(source), str(destination), media_type)
     error = "1 of 2 batches failed: " + "Failed to parse JSON. " * 15
 
-    def _partial_result(lines_list, bazarr_job_id=None):
+    def _partial_result(lines_list, bazarr_job_id=None, progress_id=None):
         assert lines_list == ["Hello", "Source text"]
         assert bazarr_job_id == "bazarr-job-1"
         service._mark_partial(error)
@@ -178,7 +179,7 @@ def test_poll_job_completes_after_more_than_thirty_minutes(poll_clock, mocker, s
 
     assert service._poll_job("http://translator", "job-1", 1) == lines
     assert poll_clock.elapsed == 40 * 60
-    openrouter_translator.hide_progress.assert_called_once_with(id="translate_progress_output.srt")
+    openrouter_translator.hide_progress.assert_called_once_with(id="translate_progress_fixture-operation")
     openrouter_translator.show_message.assert_not_called()
 
 
@@ -197,7 +198,7 @@ def test_poll_job_stops_when_status_endpoint_is_unreachable(poll_clock, mocker, 
 
     assert service._poll_job("http://translator", "job-1", 1) is None
     assert poll_clock.elapsed == 10 * 60
-    openrouter_translator.hide_progress.assert_called_once_with(id="translate_progress_output.srt")
+    openrouter_translator.hide_progress.assert_called_once_with(id="translate_progress_fixture-operation")
     openrouter_translator.show_message.assert_called_once()
     assert any(
         record.levelno == logging.ERROR
@@ -229,7 +230,7 @@ def test_poll_job_resets_unreachable_clock_after_http_200(poll_clock, mocker, fa
 
     assert service._poll_job("http://translator", "job-1", 1) == lines
     assert poll_clock.elapsed == 16 * 60
-    openrouter_translator.hide_progress.assert_called_once_with(id="translate_progress_output.srt")
+    openrouter_translator.hide_progress.assert_called_once_with(id="translate_progress_fixture-operation")
     openrouter_translator.show_message.assert_not_called()
 
 
@@ -240,7 +241,7 @@ def test_poll_job_stops_at_twelve_hour_hard_cap(poll_clock, caplog):
 
     assert service._poll_job("http://translator", "job-1", 1) is None
     assert poll_clock.elapsed == 12 * 3600
-    openrouter_translator.hide_progress.assert_called_once_with(id="translate_progress_output.srt")
+    openrouter_translator.hide_progress.assert_called_once_with(id="translate_progress_fixture-operation")
     openrouter_translator.show_message.assert_called_once()
     assert any(
         record.levelno == logging.ERROR

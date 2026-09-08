@@ -167,6 +167,8 @@ def test_translate_job_sends_the_routing_in_the_config(mocker, monkeypatch):
         return_value=SimpleNamespace(status_code=200, json=lambda: {'jobId': 'job-1'}),
     )
     service = _build_service()
+    mocker.patch.object(openrouter_translator, 'show_progress')
+    mocker.patch.object(openrouter_translator, 'hide_progress')
     mocker.patch.object(service, '_poll_job', return_value=[{'index': 0, 'content': 'Szia'}])
 
     result = service._submit_and_poll(['Hi'])

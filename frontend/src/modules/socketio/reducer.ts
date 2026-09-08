@@ -43,7 +43,12 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
           // is a no-op when a notification with this id is already displayed.
           showNotification(notification.progress.pending(item.id, item.header));
 
-          if (item.value >= item.count) {
+          // Translation progress can reach 100 while the sidecar is finalizing.
+          // Its explicit delete event owns completion, including failed jobs.
+          if (
+            item.value >= item.count &&
+            !item.id.startsWith("translate_progress_")
+          ) {
             updateNotification(notification.progress.end(item.id, item.header));
           } else {
             updateNotification(

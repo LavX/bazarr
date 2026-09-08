@@ -282,6 +282,7 @@ jobs:
             tests/bazarr/test_openrouter_model_migration.py \
             tests/bazarr/test_openrouter_translator_partial.py \
             tests/bazarr/test_openrouter_translator.py \
+            tests/bazarr/test_translation_progress_lifecycle.py \
             tests/bazarr/test_translator_model_migration.py \
             tests/bazarr/test_provider_hub_install_serialization.py \
             tests/bazarr/test_provider_hub_language_fallback.py \
