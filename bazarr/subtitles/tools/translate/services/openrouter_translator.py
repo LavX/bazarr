@@ -3,6 +3,8 @@
 import re
 import time
 import logging
+from contextlib import contextmanager
+from uuid import uuid4
 import pysubs2
 from sportarr.profile_hooks import sports_write_kwargs, finish_translation
 from sportarr.connection import check_cancelled
@@ -227,6 +229,28 @@ def build_provider_config():
     return build_routing_config()[1]
 
 
+@contextmanager
+def _translation_progress(progress_id=None):
+    """Own one notification across submission, polling and every exit path.
+
+    The id is unique per run, so simultaneous translations no longer share a
+    notification, and the single finally is what hides it: the scattered
+    hide_progress calls this replaces each missed at least one exit, and a
+    cancellation missed all of them, leaving a dead toast on screen.
+    """
+    owns_progress = progress_id is None
+    if owns_progress:
+        progress_id = f'translate_progress_{uuid4().hex}'
+    try:
+        if owns_progress:
+            show_progress(id=progress_id, header='Translating subtitles with AI...',
+                          name='Submitting translation...', value=0, count=100)
+        yield progress_id
+    finally:
+        if owns_progress:
+            hide_progress(id=progress_id)
+
+
 class OpenRouterTranslatorService:
     """
     Translates subtitles using external AI Subtitle Translator service.
@@ -297,206 +321,210 @@ class OpenRouterTranslatorService:
         return api_key
 
     def translate(self, job_id=None):
-        self.partial_error = None
-        self.routing_error = None
-        try:
-            with staged_subtitle_write(self.video_path, self.dest_srt_file,
-                                       on_publish=publication_callback(self.media_type, self.video_path,
-                                                                       'translate', self.arr_instance_id),
-                                       source_paths=(self.source_srt_file,),
-                                       before_publish=lambda: jobs_queue.update_job_progress(job_id=job_id),
-                                       allow_empty=not bool(self.sports_operation),
-                                       **sports_write_kwargs(self, job_id)) as temporary:
-                subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
-                lines_list: List[str] = [x.plaintext for x in subs]
-                lines_list_len = len(lines_list)
+        with _translation_progress() as progress_id:
+            self.partial_error = None
+            self.routing_error = None
+            try:
+                with staged_subtitle_write(self.video_path, self.dest_srt_file,
+                                           on_publish=publication_callback(self.media_type, self.video_path,
+                                                                           'translate', self.arr_instance_id),
+                                           source_paths=(self.source_srt_file,),
+                                           before_publish=lambda: jobs_queue.update_job_progress(job_id=job_id),
+                                           allow_empty=not bool(self.sports_operation),
+                                           **sports_write_kwargs(self, job_id)) as temporary:
+                    subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
+                    lines_list: List[str] = [x.plaintext for x in subs]
+                    lines_list_len = len(lines_list)
 
-                if lines_list_len == 0:
-                    logger.debug('No lines to translate in subtitle file')
-                    return False
+                    if lines_list_len == 0:
+                        logger.debug('No lines to translate in subtitle file')
+                        return False
 
-                logger.debug(f'Starting AI translation for {self.source_srt_file}')  # noqa: G004
+                    logger.debug(f'Starting AI translation for {self.source_srt_file}')  # noqa: G004
 
-                # Submit job and poll for completion
-                translated_lines = self._submit_and_poll(lines_list, bazarr_job_id=job_id)
+                    # Submit job and poll for completion
+                    translated_lines = self._submit_and_poll(lines_list, bazarr_job_id=job_id,
+                                                            progress_id=progress_id)
 
-                if translated_lines is None:
-                    # A routing refusal names what the user has to change, so it replaces
-                    # the generic message rather than arriving alongside it.
-                    failure = (f'AI translation failed: {self.routing_error}' if self.routing_error
-                               else f'Translation failed for {self.source_srt_file}')
-                    logger.error(failure)
-                    show_message(failure)
-                    return False
+                    if translated_lines is None:
+                        # A routing refusal names what the user has to change, so it replaces
+                        # the generic message rather than arriving alongside it.
+                        failure = (f'AI translation failed: {self.routing_error}' if self.routing_error
+                                   else f'Translation failed for {self.source_srt_file}')
+                        logger.error(failure)
+                        show_message(failure)
+                        return False
 
-                # Process results
-                logger.debug(f'BAZARR saving AI translated subtitles to {self.dest_srt_file}')  # noqa: G004
-                translation_map = {}
-                for item in translated_lines:
-                    if isinstance(item, dict) and 'position' in item and 'line' in item:
-                        translation_map[item['position']] = item['line']
+                    # Process results
+                    logger.debug(f'BAZARR saving AI translated subtitles to {self.dest_srt_file}')  # noqa: G004
+                    translation_map = {}
+                    for item in translated_lines:
+                        if isinstance(item, dict) and 'position' in item and 'line' in item:
+                            translation_map[item['position']] = item['line']
 
-                missing_lines = sum(bool(source.strip()) and not translation_map.get(i, '').strip()
-                                    for i, source in enumerate(lines_list))
-                if missing_lines and not self.partial_error:
-                    self._mark_partial(f'No translated text was returned for {missing_lines} of {lines_list_len} cues.')
+                    missing_lines = sum(bool(source.strip()) and not translation_map.get(i, '').strip()
+                                        for i, source in enumerate(lines_list))
+                    if missing_lines and not self.partial_error:
+                        self._mark_partial(f'No translated text was returned for {missing_lines} of {lines_list_len} cues.')
 
-                for i, line in enumerate(subs):
-                    if i in translation_map and translation_map[i].strip():
-                        line.text = translation_map[i]
+                    for i, line in enumerate(subs):
+                        if i in translation_map and translation_map[i].strip():
+                            line.text = translation_map[i]
 
-                subs.save(temporary)
-                translated = 'partially translated' if self.partial_error else 'translated'
-                add_translator_info(temporary, f"# Subtitles {translated} with AI Subtitle Translator #")
+                    subs.save(temporary)
+                    translated = 'partially translated' if self.partial_error else 'translated'
+                    add_translator_info(temporary, f"# Subtitles {translated} with AI Subtitle Translator #")
 
-            message = f"{language_from_alpha2(self.from_lang)} subtitles {translated} to {language_from_alpha3(self.to_lang)} using AI Subtitle Translator."
-            if self.partial_error:
-                message += f' Some lines may remain in the source language. {self.partial_error}'
-            result = create_process_result(message, self.video_path, self.orig_to_lang, self.forced, self.hi, self.dest_srt_file, self.media_type,
-                                           **({"sports_context": self.sports_operation.context}
-                                              if self.sports_operation else {}))
+                message = f"{language_from_alpha2(self.from_lang)} subtitles {translated} to {language_from_alpha3(self.to_lang)} using AI Subtitle Translator."
+                if self.partial_error:
+                    message += f' Some lines may remain in the source language. {self.partial_error}'
+                result = create_process_result(message, self.video_path, self.orig_to_lang, self.forced, self.hi, self.dest_srt_file, self.media_type,
+                                               **({"sports_context": self.sports_operation.context}
+                                                  if self.sports_operation else {}))
 
-            if finish_translation(self, result):
+                if finish_translation(self, result):
+                    return self.dest_srt_file
+                if self.media_type == 'episode':
+                    history_log(action=6,
+                                sonarr_series_id=self.sonarr_series_id,
+                                sonarr_episode_id=self.sonarr_episode_id,
+                                result=result)
+                else:
+                    history_log_movie(action=6,
+                                      radarr_id=self.radarr_id,
+                                      result=result)
+
                 return self.dest_srt_file
-            if self.media_type == 'episode':
-                history_log(action=6,
-                            sonarr_series_id=self.sonarr_series_id,
-                            sonarr_episode_id=self.sonarr_episode_id,
-                            result=result)
-            else:
-                history_log_movie(action=6,
-                                  radarr_id=self.radarr_id,
-                                  result=result)
 
-            return self.dest_srt_file
-
-        except (JobCancelled, SubtitleDestinationChanged):
-            raise
-        except Exception as e:
-            if self.sports_operation:
+            except (JobCancelled, SubtitleDestinationChanged):
                 raise
-            logger.error(f'BAZARR encountered an error during AI translation: {str(e)}')  # noqa: G004
-            show_message(f'AI translation failed: {str(e)}')
-            hide_progress(id=f'translate_progress_{self.dest_srt_file}')
-            return False
+            except Exception as e:
+                if self.sports_operation:
+                    raise
+                logger.error(f'BAZARR encountered an error during AI translation: {str(e)}')  # noqa: G004
+                show_message(f'AI translation failed: {str(e)}')
+                return False
 
-    def _submit_and_poll(self, lines_list: List[str], bazarr_job_id=None) -> Optional[List[Dict[str, Any]]]:
+    def _submit_and_poll(self, lines_list: List[str], bazarr_job_id=None,
+                         progress_id=None) -> Optional[List[Dict[str, Any]]]:
         """Submit translation job and poll for completion with progress updates"""
-        try:
-            check_cancelled(self.cancel)
-            # Prepare language codes
-            # from_lang should be alpha2 (e.g., "en")
-            # orig_to_lang should be alpha2 (e.g., "hu")
-            # to_lang is alpha3 (e.g., "hun")
-            source_lang = self.from_lang
-            target_lang = self.orig_to_lang  # Use original alpha2 code
+        with _translation_progress(progress_id) as progress_id:
+            try:
+                check_cancelled(self.cancel)
+                # Prepare language codes
+                # from_lang should be alpha2 (e.g., "en")
+                # orig_to_lang should be alpha2 (e.g., "hu")
+                # to_lang is alpha3 (e.g., "hun")
+                source_lang = self.from_lang
+                target_lang = self.orig_to_lang  # Use original alpha2 code
             
-            # Apply any special language code conversions
-            source_lang = self.language_code_convert_dict.get(source_lang, source_lang)
-            target_lang = self.language_code_convert_dict.get(target_lang, target_lang)
+                # Apply any special language code conversions
+                source_lang = self.language_code_convert_dict.get(source_lang, source_lang)
+                target_lang = self.language_code_convert_dict.get(target_lang, target_lang)
 
-            # Resolve alpha2 codes to full language names for the AI translator prompt
-            source_lang = language_from_alpha2(source_lang) or source_lang
-            target_lang = language_from_alpha2(target_lang) or target_lang
+                # Resolve alpha2 codes to full language names for the AI translator prompt
+                source_lang = language_from_alpha2(source_lang) or source_lang
+                target_lang = language_from_alpha2(target_lang) or target_lang
 
-            logger.debug(f'BAZARR translation language codes: from_lang={self.from_lang}, to_lang={self.to_lang}, '  # noqa: G004
-                         f'orig_to_lang={self.orig_to_lang}, final source={source_lang}, final target={target_lang}')
+                logger.debug(f'BAZARR translation language codes: from_lang={self.from_lang}, to_lang={self.to_lang}, '  # noqa: G004
+                             f'orig_to_lang={self.orig_to_lang}, final source={source_lang}, final target={target_lang}')
 
-            if not target_lang:
-                logger.error(f'Target language is empty! from_lang={self.from_lang}, to_lang={self.to_lang}, orig_to_lang={self.orig_to_lang}')  # noqa: G004
-                return None
+                if not target_lang:
+                    logger.error(f'Target language is empty! from_lang={self.from_lang}, to_lang={self.to_lang}, orig_to_lang={self.orig_to_lang}')  # noqa: G004
+                    return None
 
-            model, provider = build_routing_config()
-            lines_payload: List[Dict[str, Any]] = [{"position": i, "line": line} for i, line in enumerate(lines_list)]
+                model, provider = build_routing_config()
+                lines_payload: List[Dict[str, Any]] = [{"position": i, "line": line} for i, line in enumerate(lines_list)]
 
-            title = get_title(
-                media_type=self.media_type,
-                radarr_id=self.radarr_id,
-                sonarr_series_id=self.sonarr_series_id,
-                sonarr_episode_id=self.sonarr_episode_id,
-                arr_instance_id=self.arr_instance_id,
-                **({"sports_context": self.sports_operation.context}
-                   if self.sports_operation else {})
-            )
+                title = get_title(
+                    media_type=self.media_type,
+                    radarr_id=self.radarr_id,
+                    sonarr_series_id=self.sonarr_series_id,
+                    sonarr_episode_id=self.sonarr_episode_id,
+                    arr_instance_id=self.arr_instance_id,
+                    **({"sports_context": self.sports_operation.context}
+                       if self.sports_operation else {})
+                )
 
-            api_media_type = "Episode" if self.media_type == 'episode' else "Movie"
-            arr_media_id = self.sonarr_series_id if self.media_type == 'episode' else self.radarr_id or 0
+                api_media_type = "Episode" if self.media_type == 'episode' else "Movie"
+                arr_media_id = self.sonarr_series_id if self.media_type == 'episode' else self.radarr_id or 0
 
-            payload = {
-                "arrMediaId": arr_media_id,
-                "title": title,
-                "sourceLanguage": source_lang,
-                "targetLanguage": target_lang,
-                "mediaType": api_media_type,
-                "lines": lines_payload,
-                # Add configuration from Bazarr settings
-                "config": {
-                    "apiKey": self._get_api_key_value(),
-                    "model": model,
-                    "temperature": settings.translator.openrouter_temperature,
-                    "maxConcurrentJobs": settings.translator.openrouter_max_concurrent,
-                    "parallelBatches": settings.translator.openrouter_parallel_batches,
-                    "reasoning": self._build_reasoning_config(),
-                    "provider": provider,
+                payload = {
+                    "arrMediaId": arr_media_id,
+                    "title": title,
+                    "sourceLanguage": source_lang,
+                    "targetLanguage": target_lang,
+                    "mediaType": api_media_type,
+                    "lines": lines_payload,
+                    # Add configuration from Bazarr settings
+                    "config": {
+                        "apiKey": self._get_api_key_value(),
+                        "model": model,
+                        "temperature": settings.translator.openrouter_temperature,
+                        "maxConcurrentJobs": settings.translator.openrouter_max_concurrent,
+                        "parallelBatches": settings.translator.openrouter_parallel_batches,
+                        "reasoning": self._build_reasoning_config(),
+                        "provider": provider,
+                    }
                 }
-            }
 
-            if self.sports_operation:
-                payload.pop('arrMediaId')
-                payload.pop('mediaType')
+                if self.sports_operation:
+                    payload.pop('arrMediaId')
+                    payload.pop('mediaType')
 
-            base_url = settings.translator.openrouter_url.rstrip('/')
+                base_url = settings.translator.openrouter_url.rstrip('/')
 
-            # Submit job
-            logger.debug(f'BAZARR submitting {len(lines_payload)} lines to AI Subtitle Translator')  # noqa: G004
-            submit_response = requests.post(
-                f"{base_url}/api/v1/jobs/translate/content",
-                json=payload,
-                headers={"Content-Type": "application/json", **get_translator_auth_headers()},
-                timeout=30
-            )
-            check_cancelled(self.cancel)
+                # Submit job
+                logger.debug(f'BAZARR submitting {len(lines_payload)} lines to AI Subtitle Translator')  # noqa: G004
+                submit_response = requests.post(
+                    f"{base_url}/api/v1/jobs/translate/content",
+                    json=payload,
+                    headers={"Content-Type": "application/json", **get_translator_auth_headers()},
+                    timeout=30
+                )
+                check_cancelled(self.cancel)
 
-            if submit_response.status_code != 200:
-                # Fallback to sync endpoint if job queue not available
-                logger.debug('Job queue not available, falling back to sync endpoint')
-                return self._translate_sync(lines_list, payload)
+                if submit_response.status_code != 200:
+                    # Fallback to sync endpoint if job queue not available
+                    logger.debug('Job queue not available, falling back to sync endpoint')
+                    return self._translate_sync(lines_list, payload)
 
-            job_data = submit_response.json()
-            job_id = job_data.get("jobId")
-            if not job_id:
-                logger.error("No jobId returned from translation service")
+                job_data = submit_response.json()
+                job_id = job_data.get("jobId")
+                if not job_id:
+                    logger.error("No jobId returned from translation service")
+                    return None
+
+                logger.debug(f'BAZARR translation job submitted: {job_id}')  # noqa: G004
+
+                # Retain the remote job identity. It only ever lived in this local
+                # variable, so a status reader had no way to tell one host job's
+                # remote work from another's.
+                activity.note_remote_submission(activity.activity_id_for_job(bazarr_job_id),
+                                                service_id=TRANSLATOR_SERVICE_ID, remote_job_id=job_id)
+
+                # Poll for completion
+                return self._poll_job(base_url, job_id, len(lines_payload), bazarr_job_id=bazarr_job_id,
+                                      progress_id=progress_id)
+
+            except JobCancelled:
+                raise
+            except ProviderRoutingError as error:
+                # Recorded rather than announced here: translate() reports every failed
+                # submission, and showing the detail now would put two notifications on
+                # screen for one failure, the second of which says less than the first.
+                logger.error('AI Subtitle Translator routing error: %s', error)
+                self.routing_error = str(error)
                 return None
-
-            logger.debug(f'BAZARR translation job submitted: {job_id}')  # noqa: G004
-
-            # Retain the remote job identity. It only ever lived in this local
-            # variable, so a status reader had no way to tell one host job's
-            # remote work from another's.
-            activity.note_remote_submission(activity.activity_id_for_job(bazarr_job_id),
-                                            service_id=TRANSLATOR_SERVICE_ID, remote_job_id=job_id)
-
-            # Poll for completion
-            return self._poll_job(base_url, job_id, len(lines_payload), bazarr_job_id=bazarr_job_id)
-
-        except JobCancelled:
-            raise
-        except ProviderRoutingError as error:
-            # Recorded rather than announced here: translate() reports every failed
-            # submission, and showing the detail now would put two notifications on
-            # screen for one failure, the second of which says less than the first.
-            logger.error('AI Subtitle Translator routing error: %s', error)
-            self.routing_error = str(error)
-            return None
-        except requests.exceptions.Timeout:
-            logger.error('AI Subtitle Translator request timed out')
-            return None
-        except requests.exceptions.ConnectionError:
-            logger.error('AI Subtitle Translator connection error')
-            return None
-        except Exception as e:
-            logger.error(f'AI Subtitle Translator error: {str(e)}')  # noqa: G004
-            return None
+            except requests.exceptions.Timeout:
+                logger.error('AI Subtitle Translator request timed out')
+                return None
+            except requests.exceptions.ConnectionError:
+                logger.error('AI Subtitle Translator connection error')
+                return None
+            except Exception as e:
+                logger.error(f'AI Subtitle Translator error: {str(e)}')  # noqa: G004
+                return None
 
     def _mark_partial(self, detail):
         self.partial_error = ' '.join(str(detail).split())[:500] or 'Some translation batches failed.'
@@ -504,7 +532,8 @@ class OpenRouterTranslatorService:
         show_message('Translation is partial. Some lines may remain in the source language. '
                      f'{self.partial_error}')
 
-    def _poll_job(self, base_url: str, job_id: str, total_lines: int, bazarr_job_id=None) -> Optional[Any]:
+    def _poll_job(self, base_url: str, job_id: str, total_lines: int, bazarr_job_id=None,
+                  progress_id=None) -> Optional[Any]:
         """Poll until a terminal status, subject to reachability and safety limits.
 
         The sidecar owns request timeouts and retries, so there is no normal total-time cap.
@@ -512,113 +541,109 @@ class OpenRouterTranslatorService:
         The old 30-minute cap discarded a translation that the sidecar finished successfully.
         A 12-hour hard cap remains as a safety net.
         """
-        self.partial_error = None
-        started_at = time.monotonic()
-        last_reachable_at = started_at
+        with _translation_progress(progress_id) as progress_id:
+            self.partial_error = None
+            started_at = time.monotonic()
+            last_reachable_at = started_at
 
-        while True:
-            check_cancelled(self.cancel)
-            now = time.monotonic()
-            if now - started_at >= POLL_HARD_CAP_SECONDS:
-                reason = "reached the 12-hour polling hard cap"
-                user_message = "Translation stopped after 12 hours"
-                break
-
-            unreachable_seconds = now - last_reachable_at
-            if unreachable_seconds >= POLL_UNREACHABLE_LIMIT_SECONDS:
-                unreachable_minutes = int(unreachable_seconds // 60)
-                reason = f"status endpoint unreachable for {unreachable_minutes} minutes"
-                user_message = f"Translation service unreachable for {unreachable_minutes} minutes"
-                break
-
-            try:
-                status_response = requests.get(
-                    f"{base_url}/api/v1/jobs/{job_id}",
-                    headers=get_translator_auth_headers(),
-                    timeout=10
-                )
+            while True:
                 check_cancelled(self.cancel)
+                now = time.monotonic()
+                if now - started_at >= POLL_HARD_CAP_SECONDS:
+                    reason = "reached the 12-hour polling hard cap"
+                    user_message = "Translation stopped after 12 hours"
+                    break
 
-                if status_response.status_code != 200:
-                    logger.error(f"Error getting job status: {status_response.status_code}")  # noqa: G004
-                    time.sleep(POLL_INTERVAL_SECONDS)
-                    continue
+                unreachable_seconds = now - last_reachable_at
+                if unreachable_seconds >= POLL_UNREACHABLE_LIMIT_SECONDS:
+                    unreachable_minutes = int(unreachable_seconds // 60)
+                    reason = f"status endpoint unreachable for {unreachable_minutes} minutes"
+                    user_message = f"Translation service unreachable for {unreachable_minutes} minutes"
+                    break
 
-                last_reachable_at = time.monotonic()
-                job_status = status_response.json()
-                status = job_status.get("status")
-                progress = job_status.get("progress", 0)
-                message = job_status.get("message", "")
+                try:
+                    status_response = requests.get(
+                        f"{base_url}/api/v1/jobs/{job_id}",
+                        headers=get_translator_auth_headers(),
+                        timeout=10
+                    )
+                    check_cancelled(self.cancel)
 
-                # Update progress in Bazarr UI
-                show_progress(
-                    id=f'translate_progress_{self.dest_srt_file}',
-                    header='Translating subtitles with AI...',
-                    name=message,
-                    value=progress,
-                    count=100
-                )
+                    if status_response.status_code != 200:
+                        logger.error(f"Error getting job status: {status_response.status_code}")  # noqa: G004
+                        time.sleep(POLL_INTERVAL_SECONDS)
+                        continue
 
-                # Observation only: the remote phase this poll actually saw. A
-                # remote queued phase means the host is waiting, not translating.
-                activity.note_remote_phase(service_id=TRANSLATOR_SERVICE_ID, remote_job_id=job_id,
-                                           phase=status, progress=progress, total=100)
+                    last_reachable_at = time.monotonic()
+                    job_status = status_response.json()
+                    status = job_status.get("status")
+                    progress = job_status.get("progress", 0)
+                    message = job_status.get("message", "")
 
-                # Sync progress to bazarr jobs queue (for NotificationDrawer)
-                if bazarr_job_id:
-                    model_used = job_status.get("model_used", settings.translator.openrouter_model or "")
-                    jobs_queue.update_job_progress(
-                        job_id=bazarr_job_id,
-                        progress_value=progress,
-                        progress_max=100,
-                        progress_message=f'{message} [{model_used}]' if model_used else message
+                    # Update progress in Bazarr UI
+                    show_progress(
+                        id=progress_id,
+                        header='Translating subtitles with AI...',
+                        name=message,
+                        value=progress,
+                        count=100
                     )
 
-                if status == "completed":
-                    hide_progress(id=f'translate_progress_{self.dest_srt_file}')
-                    lines = self._validated_result_lines(job_status.get("result"), total_lines)
-                    # An empty list is not a translation: saving it would write every source
-                    # line under the target name and record a success in History.
-                    if lines:
-                        logger.debug(f'Extracted {len(lines)} lines from job result')  # noqa: G004
-                        return lines
-                    logger.error("Job completed but no result returned")
-                    return None
+                    # Observation only: the remote phase this poll actually saw. A
+                    # remote queued phase means the host is waiting, not translating.
+                    activity.note_remote_phase(service_id=TRANSLATOR_SERVICE_ID, remote_job_id=job_id,
+                                               phase=status, progress=progress, total=100)
 
-                elif status == "failed":
-                    hide_progress(id=f'translate_progress_{self.dest_srt_file}')
-                    error = job_status.get("error", "Unknown error")
-                    logger.error(f"Translation job failed: {error}")  # noqa: G004
-                    show_message(f"Translation failed: {error}")
-                    return None
+                    # Sync progress to bazarr jobs queue (for NotificationDrawer)
+                    if bazarr_job_id:
+                        model_used = job_status.get("model_used", settings.translator.openrouter_model or "")
+                        jobs_queue.update_job_progress(
+                            job_id=bazarr_job_id,
+                            progress_value=progress,
+                            progress_max=100,
+                            progress_message=f'{message} [{model_used}]' if model_used else message
+                        )
 
-                elif status == "partial":
-                    hide_progress(id=f'translate_progress_{self.dest_srt_file}')
-                    error = job_status.get("error") or message or "Partial translation"
-                    lines = self._validated_result_lines(job_status.get("result"), total_lines)
-                    if lines is not None:
-                        self._mark_partial(error)
-                        return lines
-                    logger.error(f"Translation partially failed: {error}")  # noqa: G004
-                    show_message(f"Translation failed (partial): {error}")
-                    return None
+                    if status == "completed":
+                        lines = self._validated_result_lines(job_status.get("result"), total_lines)
+                        # An empty list is not a translation: saving it would write every source
+                        # line under the target name and record a success in History.
+                        if lines:
+                            logger.debug(f'Extracted {len(lines)} lines from job result')  # noqa: G004
+                            return lines
+                        logger.error("Job completed but no result returned")
+                        return None
 
-                elif status == "cancelled":
-                    hide_progress(id=f'translate_progress_{self.dest_srt_file}')
-                    logger.info("Translation job was cancelled")
-                    return None
+                    elif status == "failed":
+                        error = job_status.get("error", "Unknown error")
+                        logger.error(f"Translation job failed: {error}")  # noqa: G004
+                        show_message(f"Translation failed: {error}")
+                        return None
 
-                # Still processing or queued
-                time.sleep(POLL_INTERVAL_SECONDS)
+                    elif status == "partial":
+                        error = job_status.get("error") or message or "Partial translation"
+                        lines = self._validated_result_lines(job_status.get("result"), total_lines)
+                        if lines is not None:
+                            self._mark_partial(error)
+                            return lines
+                        logger.error(f"Translation partially failed: {error}")  # noqa: G004
+                        show_message(f"Translation failed (partial): {error}")
+                        return None
 
-            except requests.exceptions.RequestException as e:
-                logger.warning(f"Error polling job status: {e}")  # noqa: G004
-                time.sleep(POLL_INTERVAL_SECONDS)
+                    elif status == "cancelled":
+                        logger.info("Translation job was cancelled")
+                        return None
 
-        hide_progress(id=f'translate_progress_{self.dest_srt_file}')
-        logger.error(f"Translation job {job_id} {reason}")  # noqa: G004
-        show_message(user_message)
-        return None
+                    # Still processing or queued
+                    time.sleep(POLL_INTERVAL_SECONDS)
+
+                except requests.exceptions.RequestException as e:
+                    logger.warning(f"Error polling job status: {e}")  # noqa: G004
+                    time.sleep(POLL_INTERVAL_SECONDS)
+
+            logger.error(f"Translation job {job_id} {reason}")  # noqa: G004
+            show_message(user_message)
+            return None
 
     @staticmethod
     def _validated_result_lines(result, total_lines):
