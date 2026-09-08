@@ -10,6 +10,7 @@ The session is flushed but NOT committed here; the HTTP boundary owns the
 transaction and commits on success.
 """
 import ast
+import json
 import logging
 
 from sqlalchemy import select, update
@@ -27,7 +28,7 @@ _CONFLICT_MESSAGE = "An instance with these connection properties already exists
 
 # Per-kind sync-job id prefix used by the scheduler fan-out (scheduler.py
 # __sonarr_update_task / __radarr_update_task register update_<noun>_<id>).
-_SYNC_JOB_PREFIX = {"sonarr": "update_series", "radarr": "update_movies"}
+_SYNC_JOB_PREFIX = {"sonarr": "update_series", "radarr": "update_movies", "sportarr": "update_sports"}
 
 
 def event_stream(*args, **kwargs):
@@ -126,7 +127,11 @@ def refresh_runtime(kind, instance_id=None, removed=False):
     # must take effect on the next sync, not on the next restart.
     clear_media_defaults_cache()
 
-    if kind not in VALID_KINDS:
+    if kind == "sportarr":
+        from sportarr.scheduler import refresh_sports_runtime
+        refresh_sports_runtime()
+        return
+    if kind not in ("sonarr", "radarr"):
         return
 
     # Keep the scalar settings.<kind>.* config mirroring the default instance so
@@ -192,7 +197,7 @@ def _connection_arg_error(args):
 
 
 def test_connection(args, http_get=None):
-    """Probe a Sonarr/Radarr instance described by raw body params.
+    """Probe an instance described by raw body params.
 
     Reads connection details (including the plaintext API key) only from the
     request body, never from the URL/query. Returns ``(result, 200)`` where
@@ -289,6 +294,15 @@ def get_instance(session, instance_id):
 
 
 def create_instance(session, args):
+    if args.get('kind') == 'sportarr':
+        from sportarr.db import needs_sports_transaction, sports_transaction
+        if needs_sports_transaction(session):
+            with sports_transaction(session) as transaction:
+                result = create_instance(transaction, args)
+                if result[1] >= 400:
+                    transaction.rollback()
+            session.expire_all()
+            return result
     arg_error = _connection_arg_error(args)
     if arg_error:
         return {"error": "invalid", "message": arg_error}, 400
@@ -301,8 +315,23 @@ def create_instance(session, args):
             args.get("media_defaults"), known_profile_ids=_known_profile_ids(session))
     except ValueError as exc:
         return {"error": "invalid", "message": str(exc)}, 400
+    from sportarr.settings import merge_sports_settings, validate_sports_settings
+    from utilities.path_mappings import validate_sports_mappings
+    try:
+        mappings = None
+        if 'path_mappings' in args:
+            if args.get('kind') != 'sportarr':
+                raise ValueError('path_mappings require a Sportarr instance')
+            mappings = json.dumps(validate_sports_mappings(args['path_mappings']))
+        sports = validate_sports_settings(args.get('sports_settings'))
+        if sports and args.get('kind') != 'sportarr':
+            raise ValueError('sports_settings require a Sportarr instance')
+    except ValueError as exc:
+        return {'error': 'invalid', 'message': str(exc)}, 400
     options = merge_media_defaults_into_options(
         merge_subtitle_settings_into_options(None, ss_blob), md_blob)
+    if args.get('kind') == 'sportarr':
+        options = merge_sports_settings(options, sports)
     repo = ArrInstanceRepository(session)
     try:
         row = repo.create(
@@ -318,6 +347,7 @@ def create_instance(session, args):
             enabled=True if args.get("enabled") is None else bool(args.get("enabled")),
             is_default=args.get("is_default"),
             options=options,
+            path_mappings=mappings,
         )
     except ValueError as exc:
         return {"error": "invalid", "message": str(exc)}, 400
@@ -335,8 +365,25 @@ def update_instance(session, instance_id, args):
     existing = repo.get(instance_id)
     if existing is None:
         return {"error": "not_found"}, 404
+    if existing.kind == 'sportarr':
+        from sportarr.db import needs_sports_transaction, sports_transaction
+        if needs_sports_transaction(session):
+            with sports_transaction(session) as transaction:
+                result = update_instance(transaction, instance_id, args)
+                if result[1] >= 400:
+                    transaction.rollback()
+            session.expire_all()
+            return result
 
     kwargs = {}
+    if 'path_mappings' in args:
+        from utilities.path_mappings import validate_sports_mappings
+        try:
+            if existing.kind != 'sportarr':
+                raise ValueError('path_mappings require a Sportarr instance')
+            kwargs['path_mappings'] = json.dumps(validate_sports_mappings(args['path_mappings']))
+        except ValueError as exc:
+            return {'error': 'invalid', 'message': str(exc)}, 400
     for field in ("name", "ip", "port", "base_url", "ssl", "verify_ssl",
                   "http_timeout", "enabled", "is_default"):
         if args.get(field) is not None:
@@ -363,6 +410,16 @@ def update_instance(session, instance_id, args):
         # so a request carrying both blobs does not drop one of them.
         kwargs["options"] = merge_media_defaults_into_options(
             kwargs.get("options", existing.options), md_blob)
+
+    if args.get('sports_settings') is not None:
+        from sportarr.settings import merge_sports_settings
+        try:
+            if existing.kind != 'sportarr':
+                raise ValueError('sports_settings require a Sportarr instance')
+            kwargs['options'] = merge_sports_settings(
+                kwargs.get('options', existing.options), args['sports_settings'])
+        except ValueError as exc:
+            return {'error': 'invalid', 'message': str(exc)}, 400
 
     try:
         row = repo.update(instance_id, **kwargs)
@@ -441,7 +498,11 @@ def reindex_after_default_profile(kind, upstream_ids, arr_instance_id, job_id=No
     Failures are logged, not raised: the profiles are already committed, and the
     scheduled indexer picks up anything missed here.
     """
-    if not upstream_ids:
+    if kind == 'sportarr':
+        from sportarr.library import refresh_league_profiles
+        refresh_league_profiles(upstream_ids, arr_instance_id)
+        return
+    if not upstream_ids or kind not in ("sonarr", "radarr"):
         return
 
     if kind == "sonarr":
@@ -481,6 +542,17 @@ def apply_default_profile(session, instance_id):
     if row is None:
         return {"error": "not_found"}, 404
 
+    if row.kind == 'sportarr':
+        from sportarr.library import apply_instance_default_profile
+        try:
+            return apply_instance_default_profile(session, instance_id), 200
+        except ValueError as exc:
+            return {'error': 'invalid', 'message': str(exc)}, 400
+
+    if row.kind not in ("sonarr", "radarr"):
+        return {"error": "unsupported",
+                "message": "Applying default profiles is not supported for this instance kind yet."}, 400
+
     has_override, profile = instance_default_profile(read_media_defaults(row.options))
     if not has_override or profile is None:
         return {"error": "invalid",
@@ -489,8 +561,10 @@ def apply_default_profile(session, instance_id):
         return {"error": "invalid",
                 "message": f"Language profile {profile} no longer exists."}, 400
 
-    table = TableShows if row.kind == "sonarr" else TableMovies
-    upstream_column = TableShows.sonarrSeriesId if row.kind == "sonarr" else TableMovies.radarrId
+    table, upstream_column = {
+        'sonarr': (TableShows, TableShows.sonarrSeriesId),
+        'radarr': (TableMovies, TableMovies.radarrId),
+    }[row.kind]
 
     # Collect the targets before the write: the UPDATE's own WHERE stops
     # matching them once profileId is set, and the caller needs the ids.

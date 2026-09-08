@@ -39,6 +39,8 @@ import type {
   ArrInstanceUpdate,
   ArrKind,
   ArrMediaDefaults,
+  ArrPathMapping,
+  ArrSportsSettings,
   ArrSubtitleSettings,
 } from "@/apis/raw/arrInstances";
 import {
@@ -54,6 +56,8 @@ import {
   normalizeBaseUrl,
   stripLeadingSlash,
 } from "./meta";
+import SportsPaths from "./SportsPaths";
+import SportsSettings from "./SportsSettings";
 import SubtitleSettingsOverrides from "./SubtitleSettingsOverrides";
 
 // How a stored API key is treated when editing. The key itself is never sent
@@ -74,6 +78,8 @@ interface FormValues {
   isDefault: boolean;
   subtitleSettings: ArrSubtitleSettings;
   mediaDefaults: ArrMediaDefaults;
+  sportsSettings: ArrSportsSettings;
+  pathMappings: ArrPathMapping[];
 }
 
 function initialValues(
@@ -95,6 +101,8 @@ function initialValues(
       isDefault: instance.is_default,
       subtitleSettings: instance.subtitle_settings ?? {},
       mediaDefaults: instance.media_defaults ?? {},
+      sportsSettings: instance.sports_settings ?? {},
+      pathMappings: instance.path_mappings ?? [],
     };
   }
   return {
@@ -111,6 +119,8 @@ function initialValues(
     isDefault: false,
     subtitleSettings: {},
     mediaDefaults: {},
+    sportsSettings: {},
+    pathMappings: [],
   };
 }
 
@@ -147,6 +157,11 @@ const InstanceFormModal: FunctionComponent<Props> = ({
   const form = useForm<FormValues>({
     initialValues: initialValues(kind, instance),
     validate: {
+      pathMappings: (value, values) =>
+        values.kind === "sportarr" &&
+        value.some((pair) => pair.some((path) => !path.trim()))
+          ? "Both paths are required for each mapping"
+          : null,
       name: (value) => (value.trim().length ? null : "Name is required"),
       ip: (value) => (value.trim().length ? null : "Address is required"),
       port: (value) => {
@@ -180,20 +195,25 @@ const InstanceFormModal: FunctionComponent<Props> = ({
   }, [opened, kind, instance]);
 
   const meta = ARR_META[form.values.kind];
-  const listLabel = form.values.kind === "sonarr" ? "Series" : "Movies";
 
   // "Use the global default" is a real, selectable choice rather than a blank
   // field: an instance that has not opted in must READ as inheriting.
   const profileOptions = useMemo(
     () => [
-      { value: GLOBAL_DEFAULT, label: "Use the global default" },
+      {
+        value: GLOBAL_DEFAULT,
+        label:
+          form.values.kind === "sportarr"
+            ? "No default profile"
+            : "Use the global default",
+      },
       { value: NO_PROFILE, label: "No profile" },
       ...(languageProfiles ?? []).map((profile) => ({
         value: String(profile.profileId),
         label: profile.name,
       })),
     ],
-    [languageProfiles],
+    [languageProfiles, form.values.kind],
   );
 
   // The apply action works off the SAVED override, so it stays disabled while
@@ -286,7 +306,18 @@ const InstanceFormModal: FunctionComponent<Props> = ({
         // stored block server-side; an absent key would instead preserve it.
         subtitle_settings: values.subtitleSettings,
         media_defaults: values.mediaDefaults,
+        ...(values.kind === "sportarr" &&
+        Object.keys(values.sportsSettings).length
+          ? { sports_settings: values.sportsSettings }
+          : {}),
       };
+      if (
+        values.kind === "sportarr" &&
+        JSON.stringify(values.pathMappings) !==
+          JSON.stringify(instance.path_mappings ?? [])
+      ) {
+        body["path_mappings"] = values.pathMappings;
+      }
       if (hasStoredKey) {
         if (keyMode === "replace" && typed.length) {
           body.api_key = typed;
@@ -324,6 +355,13 @@ const InstanceFormModal: FunctionComponent<Props> = ({
         subtitleSettings: values.subtitleSettings,
         mediaDefaults: values.mediaDefaults,
       });
+      if (
+        values.kind === "sportarr" &&
+        Object.keys(values.sportsSettings).length
+      )
+        body["sports_settings"] = values.sportsSettings;
+      if (values.kind === "sportarr" && values.pathMappings.length)
+        body["path_mappings"] = values.pathMappings;
       create.mutate(body, {
         onSuccess: () => {
           showNotification({
@@ -355,15 +393,17 @@ const InstanceFormModal: FunctionComponent<Props> = ({
               fullWidth
               value={form.values.kind}
               onChange={(value) => changeKind(value as ArrKind)}
-              data={(["sonarr", "radarr"] as const).map((value) => ({
-                value,
-                label: (
-                  <Group gap={8} justify="center" wrap="nowrap">
-                    <FontAwesomeIcon icon={ARR_META[value].icon} />
-                    <span>{ARR_META[value].label}</span>
-                  </Group>
-                ),
-              }))}
+              data={(["sonarr", "radarr", "sportarr"] as const).map(
+                (value) => ({
+                  value,
+                  label: (
+                    <Group gap={8} justify="center" wrap="nowrap">
+                      <FontAwesomeIcon icon={ARR_META[value].icon} />
+                      <span>{ARR_META[value].label}</span>
+                    </Group>
+                  ),
+                }),
+              )}
             />
           )}
 
@@ -506,15 +546,32 @@ const InstanceFormModal: FunctionComponent<Props> = ({
             />
           </Group>
 
+          {form.values.kind === "sportarr" && (
+            <>
+              <Divider label="Path mappings" labelPosition="left" />
+              <SportsPaths
+                value={form.values.pathMappings}
+                onChange={(value) => form.setFieldValue("pathMappings", value)}
+              />
+              {form.errors.pathMappings && (
+                <Text c="red" size="sm">
+                  {form.errors.pathMappings}
+                </Text>
+              )}
+            </>
+          )}
+
           <Divider label="Default language profile" labelPosition="left" />
 
           <Select
-            label={`Profile for newly synced ${meta.media}`}
+            label={`Profile for newly synced ${meta.profileMedia}`}
             description={
-              `Assigned to ${meta.media} this instance adds from now on. A matching ` +
-              `${meta.label} tag still wins over this, and this wins over the global ` +
-              `default set in Settings, Languages. ${meta.media} already in the ` +
-              `database keep the profile they have.`
+              form.values.kind === "sportarr"
+                ? "Newly synced leagues use this profile. Existing leagues keep their profiles."
+                : `Assigned to ${meta.media} this instance adds from now on. A matching ` +
+                  `${meta.label} tag still wins over this, and this wins over the global ` +
+                  `default set in Settings, Languages. ${meta.media} already in the ` +
+                  `database keep the profile they have.`
             }
             data={profileOptions}
             allowDeselect={false}
@@ -535,7 +592,7 @@ const InstanceFormModal: FunctionComponent<Props> = ({
                   : `Optional: fill this profile in on ${meta.media} from this ` +
                     `instance that have no profile yet. Items that already have ` +
                     `one are left alone; to change those, use the profile ` +
-                    `selector in the ${listLabel} list.`}
+                    `selector in the ${meta.listLabel} list.`}
               </Text>
               <Button
                 type="button"
@@ -548,6 +605,13 @@ const InstanceFormModal: FunctionComponent<Props> = ({
                 Apply to unset
               </Button>
             </Group>
+          )}
+
+          {form.values.kind === "sportarr" && (
+            <SportsSettings
+              value={form.values.sportsSettings}
+              onChange={(value) => form.setFieldValue("sportsSettings", value)}
+            />
           )}
 
           <Divider label="Subtitle settings (optional)" labelPosition="left" />

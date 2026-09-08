@@ -66,6 +66,12 @@ describe("buildArrInstanceCreateBody", () => {
 // --------------------------------------------------------------------------
 
 describe("buildWebhookUrl", () => {
+  it("does not offer a webhook URL for Sportarr", () => {
+    expect(
+      buildWebhookUrl({ ...INSTANCE, kind: "sportarr" }, "https://host", ""),
+    ).toBeNull();
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
   });

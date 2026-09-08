@@ -9,6 +9,7 @@ import type {
   ArrInstanceTest,
   ArrInstanceTestOverrides,
   ArrInstanceUpdate,
+  ArrKind,
 } from "@/apis/raw/arrInstances";
 
 const arrKey = [QueryKeys.ArrInstances];
@@ -39,7 +40,7 @@ export function useArrInstances() {
  * arr_instance_id, MultiSelect options for that kind's instances, and whether
  * there is more than one (so the instance badge/filter only show when relevant).
  */
-export function useArrInstanceLabels(kind: "sonarr" | "radarr") {
+export function useArrInstanceLabels(kind: ArrKind) {
   const { data } = useArrInstances();
   return useMemo(() => {
     const all = data ?? [];
@@ -177,6 +178,7 @@ export function useApplyArrInstanceDefaultProfile() {
       });
       client.invalidateQueries({ queryKey: [QueryKeys.Series] });
       client.invalidateQueries({ queryKey: [QueryKeys.Movies] });
+      client.invalidateQueries({ queryKey: [QueryKeys.Sports] });
     },
     onError: (error) =>
       showNotification({

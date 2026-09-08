@@ -12,7 +12,7 @@ from subliminal_patch.core_persistent import list_all_subtitles_parallel
 from app.config import settings
 from app.get_providers import get_provider_language_hook, get_providers_sorted, get_providers_auth
 from . import auth, cache as C, response_mapper as M
-from .local_subs import search_local
+from .local_subs import search_local, _UNRESOLVED_SPORTS
 from utilities.url_guard import assert_safe_outbound, resolve_safe_url, UnsafeURLError  # noqa: F401
 
 logger = logging.getLogger("bazarr.compat.service")
@@ -781,7 +781,8 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
                series_anidb_id=None, series_anidb_episode_id=None,
                moviehash_match=None,
                requested_languages=None, exclude_providers=None,
-               timeout_seconds=None, only_providers=None):
+               timeout_seconds=None, only_providers=None,
+               sports_match=_UNRESOLVED_SPORTS):
     from subliminal_patch.provider_health import get_tracker as _get_health_tracker
     from subliminal_patch.score import ComputeScore, MAX_SCORES
     health = _get_health_tracker()
@@ -814,7 +815,7 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
     if only_providers is not None:
         requested_only = {str(p).strip() for p in only_providers if str(p).strip()}
         exclude |= (set(pool.providers) - requested_only)
-        local_allowed = LOCAL_PROVIDER in requested_only
+        local_allowed = LOCAL_PROVIDER in requested_only and LOCAL_PROVIDER not in requested_exclude
     else:
         requested_only = None
         local_allowed = LOCAL_PROVIDER not in requested_exclude
@@ -939,6 +940,7 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
                 languages=requested_languages or [],
                 query=query, moviehash=moviehash,
                 moviehash_match=moviehash_match,
+                sports_match=sports_match,
             )
         except Exception as e:
             logger.warning("compat: search_local failed (continuing without locals): %s", e)
@@ -983,6 +985,10 @@ def available_providers() -> list[str]:
         return []
 
 
+class _SportsSelectionChanged(RuntimeError):
+    pass
+
+
 def search(imdb_id: str, season, episode, languages: Iterable[Language],
            media_type: str, query: str | None = None,
            moviehash: str | None = None,
@@ -1005,23 +1011,61 @@ def search(imdb_id: str, season, episode, languages: Iterable[Language],
                       exclude_providers=exclude_providers,
                       timeout_seconds=timeout_seconds,
                       only_providers=only_providers)
+    local_allowed = (LOCAL_PROVIDER not in (exclude_providers or [])
+                     and (only_providers is None or LOCAL_PROVIDER in only_providers))
+    check_sports = local_allowed and bool(settings.compat_endpoint.serve_local_subs)
+    from .sports import resolve_for_request
+
+    def resolve_sports():
+        if check_sports:
+            return resolve_for_request(
+                imdb_id, season, episode, media_type, query, moviehash, moviehash_match)
+        return None
+
     cache_ttl = int(settings.compat_endpoint.cache_ttl_seconds)
     fid_ttl = int(settings.compat_endpoint.file_id_ttl_seconds)
     ttl = min(cache_ttl, fid_ttl)
-    return C.compat_region.get_or_create(
-        key,
-        creator=lambda: _do_fanout(imdb_id, season, episode, languages,
-                                    media_type, query=query, moviehash=moviehash,
-                                    moviebytesize=moviebytesize,
-                                    series_anidb_id=series_anidb_id,
-                                    series_anidb_episode_id=series_anidb_episode_id,
-                                    moviehash_match=moviehash_match,
-                                    requested_languages=requested_languages,
-                                    exclude_providers=exclude_providers,
-                                    timeout_seconds=timeout_seconds,
-                                    only_providers=only_providers),
-        expiration_time=ttl,
-    )
+    fanout_started = False
+    for attempt in range(2):
+        sports_match = resolve_sports()
+        sports_key = sports_match.cache_key() if sports_match is not None else None
+        cache_key = key + ":sports:" + sports_key if sports_key is not None else key
+
+        def validate_selection():
+            current = resolve_sports()
+            current_key = current.cache_key() if current is not None else None
+            if current_key != sports_key:
+                raise _SportsSelectionChanged("Sports selection changed during search")
+
+        def create():
+            nonlocal fanout_started
+            validate_selection()
+            # Bind local results to the match used for this key. Explicit None
+            # also matters: a newly appearing sports file cannot enter a native key.
+            fanout_started = True
+            result = _do_fanout(
+                imdb_id, season, episode, languages, media_type,
+                query=query, moviehash=moviehash, moviebytesize=moviebytesize,
+                series_anidb_id=series_anidb_id,
+                series_anidb_episode_id=series_anidb_episode_id,
+                moviehash_match=moviehash_match,
+                requested_languages=requested_languages,
+                exclude_providers=exclude_providers,
+                timeout_seconds=timeout_seconds, only_providers=only_providers,
+                sports_match=sports_match)
+            validate_selection()
+            return result
+
+        try:
+            result = C.compat_region.get_or_create(cache_key, creator=create, expiration_time=ttl)
+            # Cache hits need the same current-selection check as new results.
+            validate_selection()
+            return result
+        except _SportsSelectionChanged:
+            if attempt == 1 or fanout_started:
+                raise
+            # Creation exceptions are not cached. Retry once before provider work
+            # starts; never spend a second fanout timeout or another admission.
 
 
 def download(file_id, base_host: str = "",
@@ -1038,7 +1082,15 @@ def download(file_id, base_host: str = "",
     ok, _payload = auth.parse_file_id(file_id)
     if not ok:
         raise FileNotFoundError("file_id invalid or expired")
-    stream_tok = auth.mint_file_stream_token(int(file_id))
+    if _payload.get("media_type") == "sports":
+        from .sports import validate_payload
+        try:
+            validate_payload(_payload)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise FileNotFoundError("Sports subtitle is no longer available") from exc
+        stream_tok = auth.mint_file_stream_token(int(file_id), sports_binding=_payload["sports"]["binding"])
+    else:
+        stream_tok = auth.mint_file_stream_token(int(file_id))
     base_url = (settings.general.base_url or "").rstrip("/")
     path = f"{base_url}/api/v1/download/stream/{quote(stream_tok, safe='')}"
     link = f"{base_host.rstrip('/')}{path}" if base_host else path
@@ -1125,6 +1177,13 @@ def serve_subtitle_content(stream_token: str) -> tuple[bytes, str]:
     ok, fpayload = auth.parse_file_id(fid)
     if not ok:
         raise FileNotFoundError("file_id expired or not found")
+
+    if fpayload.get("media_type") == "sports" or payload.get("sports") is not None:
+        from .sports import serve
+        binding = (fpayload.get("sports") or {}).get("binding")
+        if fpayload.get("media_type") != "sports" or not binding or payload.get("sports") != binding:
+            raise FileNotFoundError("Sports capability no longer matches its file")
+        return serve(fpayload)
 
     # Local-library payloads carry an explicit kind discriminator; serve
     # them from disk (with on-the-fly format conversion) instead of the

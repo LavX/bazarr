@@ -20,17 +20,16 @@ import {
 import type {
   ArrInstanceCreate,
   ArrInstanceTest,
-  ArrKind,
 } from "@/apis/raw/arrInstances";
 import type { WizardStepProps } from "./types";
 
 export interface ArrStepProps extends WizardStepProps {
-  kind: ArrKind;
+  kind: "sonarr" | "radarr";
   required?: boolean;
 }
 
 const KIND_META: Record<
-  ArrKind,
+  ArrStepProps["kind"],
   { label: string; media: string; port: number }
 > = {
   sonarr: { label: "Sonarr", media: "TV shows", port: 8989 },

@@ -124,6 +124,8 @@ class Server:
             pass
 
     def close_all(self):
+        from sportarr.sse_client import stop_sportarr_clients
+        stop_sportarr_clients()
         print("Closing database...")
         close_database()
         if self.server:
@@ -140,4 +142,3 @@ class Server:
 
 
 webserver = Server()
-

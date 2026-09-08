@@ -49,3 +49,25 @@ class TestBuildProgressPayload:
         assert job.progress_value == 30
         assert job.progress_max == 58
         assert payload["progress_message"] == "Searching opensubtitles (2/58)"
+
+
+def test_cancelled_jobs_stop_by_default_but_can_report_committed_results():
+    import pytest
+    from app.jobs_queue import JobCancelled
+    from test_sportarr_workflows import private_queue
+    from pytest import MonkeyPatch
+
+    with MonkeyPatch.context() as monkeypatch:
+        queue = private_queue(monkeypatch)
+        job = _make_job(progress_max=1)
+        job.cancelled = True
+        queue.jobs_running_queue.append(job)
+        with pytest.raises(JobCancelled):
+            queue.update_job_progress(job.job_id, progress_message="Must not continue")
+        assert job.progress_message == ""
+        assert queue.update_job_progress(job.job_id, progress_value="max",
+            progress_message="Subtitle published; remaining work cancelled", allow_cancelled=True)
+        assert job.cancelled is True and job.progress_value == 1
+        assert "published" in job.progress_message
+        with pytest.raises(JobCancelled):
+            queue.update_job_progress(job.job_id)

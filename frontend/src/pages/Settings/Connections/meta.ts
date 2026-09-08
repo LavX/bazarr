@@ -1,6 +1,7 @@
 import {
   faFilm,
   faPlay,
+  faTrophy,
   IconDefinition,
 } from "@fortawesome/free-solid-svg-icons";
 import type {
@@ -15,6 +16,8 @@ import { Environment } from "@/utilities/env";
 interface ArrKindMeta {
   label: string;
   media: string;
+  profileMedia: string;
+  listLabel: string;
   icon: IconDefinition;
   defaultPort: number;
 }
@@ -23,14 +26,26 @@ export const ARR_META: Record<ArrKind, ArrKindMeta> = {
   sonarr: {
     label: "Sonarr",
     media: "series",
+    profileMedia: "series",
+    listLabel: "Series",
     icon: faPlay,
     defaultPort: 8989,
   },
   radarr: {
     label: "Radarr",
     media: "movies",
+    profileMedia: "movies",
+    listLabel: "Movies",
     icon: faFilm,
     defaultPort: 7878,
+  },
+  sportarr: {
+    label: "Sportarr",
+    media: "sports",
+    profileMedia: "leagues",
+    listLabel: "Sports",
+    icon: faTrophy,
+    defaultPort: 1867,
   },
 };
 
@@ -56,7 +71,10 @@ export function buildWebhookUrl(
   instance: Pick<ArrInstance, "kind" | "stable_key">,
   origin = window.location.origin,
   baseUrl = Environment.baseUrl,
-): string {
+): string | null {
+  if (instance.kind === "sportarr") {
+    return null;
+  }
   return `${origin}${baseUrl}/api/webhooks/${instance.kind}/${instance.stable_key}`;
 }
 

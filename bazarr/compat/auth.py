@@ -128,7 +128,8 @@ def mint_file_id(provider: str, native_id: str, language: str, release_info: str
 def mint_local_file_id(*, path: str, lang: str, modifier: str | None,
                        fmt: str, media_type: str, media_id: int,
                        media_dir: str,
-                       allowed_roots: list[str] | None = None) -> int:
+                       allowed_roots: list[str] | None = None,
+                       sports: dict | None = None) -> int:
     """Allocate a server-side-mapped int file_id for a locally-stored subtitle.
 
     Stash the resolved path + format + allowed-roots list so /download/stream
@@ -152,6 +153,9 @@ def mint_local_file_id(*, path: str, lang: str, modifier: str | None,
         "media_dir": str(media_dir),
         "allowed_roots": roots,
     }
+    if sports is not None:
+        payload["sports"] = sports
+        payload["arr_instance_id"] = sports["context"].arr_instance_id
     return get_store().put(payload, ttl)
 
 
@@ -161,7 +165,7 @@ def parse_file_id(fid) -> Tuple[bool, dict]:
     return get_store().get(fid)
 
 
-def mint_file_stream_token(file_id: int) -> str:
+def mint_file_stream_token(file_id: int, sports_binding: dict | None = None) -> str:
     """HMAC-sign a file_id into a short-lived stream token.
 
     The file_id points at a server-side payload including the Subtitle object;
@@ -171,6 +175,8 @@ def mint_file_stream_token(file_id: int) -> str:
     secret = (settings.compat_endpoint.file_id_secret or "").encode()
     exp = int(time.time()) + int(settings.compat_endpoint.stream_token_ttl_seconds)
     payload = {"fid": int(file_id), "exp": exp, "t": "s"}
+    if sports_binding is not None:
+        payload["sports"] = sports_binding
     p_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     sig = _hmac_sign(secret, p_bytes)
     return base64.urlsafe_b64encode(p_bytes + b"." + sig).decode().rstrip("=")

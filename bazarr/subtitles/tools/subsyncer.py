@@ -527,7 +527,8 @@ class SubSyncer:
     def sync(self, video_path, srt_path, srt_lang, hi, forced,
              max_offset_seconds, no_fix_framerate, gss, reference=None, sonarr_series_id=None, sonarr_episode_id=None,
              radarr_id=None, progress_callback=None, job_id=None, force_sync=False, output_mode=None,
-             enabled_engines=None, write_history=True, arr_instance_id=None, source_version=None, on_publish=None):
+             enabled_engines=None, write_history=True, arr_instance_id=None, source_version=None,
+             on_publish=None, validate=None, publication_guard=None):
         self.reference = video_path
         self.srtin = srt_path
         self.progress_callback = progress_callback
@@ -557,6 +558,8 @@ class SubSyncer:
         self._report_progress('Preparing synchronization', 0, progress_total)
 
         def execute_engine(engine, output_path):
+            if validate is not None:
+                validate()
             engine_position = engine_positions.get(engine, 1)
             engine_label = ENGINE_LABELS.get(engine, engine)
             self._report_progress(
@@ -597,6 +600,8 @@ class SubSyncer:
                 publication = SubtitlePublication(video_path, srt_path, subtitle_source_version(srt_path))
 
         def publish():
+            if validate is not None and publication_guard is None:
+                validate()
             self._report_progress('Saving synchronized subtitle', None, None)
 
         try:
@@ -610,6 +615,7 @@ class SubSyncer:
                 before_publish=publish,
                 publication_lock=publication_lock,
                 on_publish=on_publish,
+                **({'publication_guard': publication_guard} if publication_guard is not None else {}),
                 after_publish=(lambda: quarantine_sync_outputs_after_mutation(video_path, srt_path))
                 if output_mode == OUTPUT_MODE_OVERWRITE and source_version is None else None,
             )

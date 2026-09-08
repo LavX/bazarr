@@ -9,6 +9,9 @@ request, call these, and commit.
 
 Plan: docs/superpowers/plans/2026-05-27-multiple-arr-instances-final.md (Phase 6).
 """
+import pytest
+
+pytestmark = pytest.mark.usefixtures('scheduler_runtime')
 
 
 def test_create_returns_201_and_never_echoes_api_key(schema_session):

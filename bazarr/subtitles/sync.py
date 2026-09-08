@@ -7,6 +7,8 @@ from media_servers.events import publication_callback
 
 from app.config import settings
 from app.jobs_queue import jobs_queue, JobCancelled
+from sportarr.connection import check_cancelled
+from sportarr.output import validate_output_path
 from subtitles.tools.subsyncer import SubSyncer
 from subtitles.tools.subsync_engines import (
     DEFAULT_ENABLED_ENGINES,
@@ -263,7 +265,20 @@ def sync_subtitles(video_path,
                    owns_job_progress=True,
                    source_version=None,
                    on_success=None,
-                   publication_operation='sync'):
+                   publication_operation='sync',
+                   context=None,
+                   validate=None,
+                   cancel=None,
+                   publication_guard=None):
+    if context is not None:
+        if validate is None or publication_guard is None:
+            raise ValueError('Sports sync requires its owned publication guard')
+        check_cancelled(cancel)
+        validate()
+        validate_output_path(context, srt_path)
+        if (video_path != context.mapped_path or arr_instance_id != context.arr_instance_id
+                or sonarr_series_id is not None or sonarr_episode_id is not None or radarr_id is not None):
+            raise ValueError('Sports sync requires its exact event and owner')
     try:
         # The audio-sync settings resolve against the owning instance (#227); a None
         # owner / unset override yields the global value, so legacy paths are
@@ -348,6 +363,13 @@ def sync_subtitles(video_path,
                 'on_publish': publication_callback('episode' if sonarr_episode_id is not None else 'movie',
                                                    video_path, publication_operation, arr_instance_id),
             }
+            if context is not None:
+                def validate_sports_sync():
+                    check_cancelled(cancel)
+                    validate()
+                validate_sports_sync()
+                sync_kwargs.update(write_history=False, validate=validate_sports_sync, reference=reference or 'a:0',
+                                   publication_guard=publication_guard)
             sync_result = None
             if source_version is not None:
                 sync_kwargs['source_version'] = source_version
@@ -356,7 +378,7 @@ def sync_subtitles(video_path,
                 if sync_result and sync_result.success:
                     if callback and source_version is None:
                         callback()
-                    elif not callback and getattr(sync_result, 'output_mode', None) == OUTPUT_MODE_KEEP_ALL:
+                    elif not callback and context is None and getattr(sync_result, 'output_mode', None) == OUTPUT_MODE_KEEP_ALL:
                         _index_keep_all_outputs(
                             video_path,
                             sonarr_series_id=sonarr_series_id,

@@ -1,6 +1,7 @@
 interface Badge {
   episodes: number;
   movies: number;
+  sports?: number;
   providers: number;
   status: number;
   sonarr_signalr: string;

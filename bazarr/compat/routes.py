@@ -227,8 +227,9 @@ def subtitles():
     imdb = args.get("imdb_id") or ""
     tmdb = args.get("tmdb_id") or ""
     query_filename = args.get("query") or None
-    if not imdb and not query_filename and not tmdb:
-        return compat_error("imdb_id, tmdb_id, or query required", 400, "bad-request")
+    from .sports import valid_moviehash
+    if not imdb and not query_filename and not tmdb and not valid_moviehash(args.get("moviehash")):
+        return compat_error("imdb_id, tmdb_id, query, or valid moviehash required", 400, "bad-request")
     if not imdb and tmdb:
         imdb = _resolve_tmdb_to_imdb(tmdb)
     moviehash = args.get("moviehash") or None

@@ -47,8 +47,13 @@ def refine_from_ffprobe(path, video):
                                     episode_file_id=file_id.episode_file_id,
                                     arr_instance_id=arr_instance_id)
 
+    return refine_from_metadata(video, data)
+
+
+def refine_from_metadata(video, data):
+    """Apply technical stream metadata to an already resolved provider video."""
     if not data or ('ffprobe' not in data and 'mediainfo' not in data):
-        logging.debug(f"No cache available for this file: {path}")  # noqa: G004
+        logging.debug("No stream metadata available for this video")
         return video
 
     if data['ffprobe']:

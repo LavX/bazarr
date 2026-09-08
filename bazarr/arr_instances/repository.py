@@ -17,8 +17,8 @@ from app.database import TableArrInstances
 from .media_defaults import read_media_defaults
 from .subtitle_settings import read_subtitle_settings
 
-VALID_KINDS = ("sonarr", "radarr")
-_DEFAULT_PORTS = {"sonarr": 8989, "radarr": 7878}
+VALID_KINDS = ("sonarr", "radarr", "sportarr")
+_DEFAULT_PORTS = {"sonarr": 8989, "radarr": 7878, "sportarr": 1867}
 _UNSET = object()
 
 
@@ -262,6 +262,16 @@ class ArrInstanceRepository:
         row = self.get(instance_id)
         if row is None:
             return False
+        if row.kind == 'sportarr':
+            from sqlalchemy import delete
+            from sportarr.db import sports_transaction
+            with sports_transaction(self._session) as session:
+                # The FK cascade removes this owner's metadata, never media files.
+                session.execute(delete(TableArrInstances).where(TableArrInstances.id == instance_id))
+                ArrInstanceRepository(session)._reconcile_default('sportarr', demoted_id=instance_id)
+                session.flush()
+            self._session.expire_all()
+            return True
         if self._has_owned_rows(instance_id):
             raise ValueError("cannot delete an instance that still owns rows")
         kind = row.kind
@@ -309,7 +319,11 @@ def to_safe_dict(row):
     ``api_key_set`` tells the UI whether a key exists so it can show a masked
     placeholder without ever receiving the secret.
     """
+    from sportarr.settings import get_sports_settings
+    from utilities.path_mappings import read_sports_mappings
     return {
+        **({"sports_settings": get_sports_settings(row),
+            "path_mappings": read_sports_mappings(row.path_mappings)} if row.kind == "sportarr" else {}),
         "id": row.id,
         "kind": row.kind,
         "stable_key": row.stable_key,

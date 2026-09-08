@@ -96,6 +96,8 @@ if not args.no_signalr:
         start_sonarr_signalr()
     if settings.general.use_radarr:
         start_radarr_signalr()
+    from sportarr.sse_client import refresh_sportarr_clients
+    refresh_sportarr_clients()
 
 
 if __name__ == "__main__":

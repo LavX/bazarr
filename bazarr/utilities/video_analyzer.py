@@ -114,9 +114,14 @@ def embedded_track_language(track, und_default_language=None):
 
 
 def embedded_subs_reader(file, file_size, episode_file_id=None, movie_file_id=None, use_cache=True,
-                         arr_instance_id=None):
+                         arr_instance_id=None, *, sports_event_id=None):
+    sports = {'sports_event_id': sports_event_id} if sports_event_id is not None else {}
     data = parse_video_metadata(file, file_size, episode_file_id, movie_file_id, use_cache=use_cache,
-                                arr_instance_id=arr_instance_id)
+                                arr_instance_id=arr_instance_id, **sports)
+    return embedded_subtitles_from_metadata(data)
+
+
+def embedded_subtitles_from_metadata(data):
     und_default_language = alpha3_from_alpha2(settings.general.default_und_embedded_subtitles_lang)
 
     subtitles_list = []
@@ -147,9 +152,10 @@ def embedded_subs_reader(file, file_size, episode_file_id=None, movie_file_id=No
 
 
 def embedded_audio_reader(file, file_size, episode_file_id=None, movie_file_id=None, use_cache=True,
-                          arr_instance_id=None):
+                          arr_instance_id=None, *, sports_event_id=None):
+    sports = {'sports_event_id': sports_event_id} if sports_event_id is not None else {}
     data = parse_video_metadata(file, file_size, episode_file_id, movie_file_id, use_cache=use_cache,
-                                arr_instance_id=arr_instance_id)
+                                arr_instance_id=arr_instance_id, **sports)
 
     audio_list = []
 
@@ -296,7 +302,7 @@ def subtitles_sync_references(subtitles_path, sonarr_episode_id=None, radarr_mov
 
 
 def parse_video_metadata(file, file_size, episode_file_id=None, movie_file_id=None, use_cache=True,
-                         arr_instance_id=None):
+                         arr_instance_id=None, *, sports_event_id=None):
     """
     This function return the video file properties as parsed by knowit using ffprobe or mediainfo using the cached
     value by default.
@@ -320,6 +326,12 @@ def parse_video_metadata(file, file_size, episode_file_id=None, movie_file_id=No
     @rtype: dict or None
     @return: return a dictionary including the video file properties as parsed by ffprobe or mediainfo
     """
+
+    if sports_event_id is not None:
+        if episode_file_id is not None or movie_file_id is not None:
+            raise ValueError('Sports probes cannot include episode or movie file IDs')
+        from subtitles.indexer.sports import parse_sports_video_metadata
+        return parse_sports_video_metadata(sports_event_id, arr_instance_id, use_cache, file=file)
 
     # Define default data keys value
     data = {

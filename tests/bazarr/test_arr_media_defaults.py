@@ -882,7 +882,7 @@ def test_the_health_check_still_reports_a_genuinely_missing_default(schema_sessi
     assert health.series_default_profile_is_missing() is True
 
 
-def test_the_apply_endpoint_queues_the_reindex_instead_of_running_it(monkeypatch):
+def test_the_apply_endpoint_queues_the_reindex_instead_of_running_it(monkeypatch, scheduler_runtime):
     """A library of a few thousand unprofiled series means a few thousand
     index passes, each scanning every episode and emitting events. Doing that
     inside the request holds a web worker for minutes and can outlive a proxy
@@ -988,7 +988,7 @@ def test_an_override_naming_a_deleted_profile_does_not_count(schema_session, mon
     assert health.series_default_profile_is_missing() is True
 
 
-def test_a_failed_reindex_enqueue_does_not_fail_the_apply(monkeypatch):
+def test_a_failed_reindex_enqueue_does_not_fail_the_apply(monkeypatch, scheduler_runtime):
     """The profiles are committed before the queue is touched. Raising here
     tells the client Apply failed while the library was in fact mutated, which
     invites a retry that then finds nothing left to do."""

@@ -1,5 +1,5 @@
 # coding=utf-8
-"""Per-instance Sonarr/Radarr HTTP client (#156).
+"""Per-instance Sonarr, Radarr and Sportarr HTTP client.
 
 Builds a client from an arr_instances row (or raw params, for a pre-save
 connection test). Mirrors the existing ``url_sonarr()`` URL shape and the
@@ -8,6 +8,8 @@ getter is injectable so the connection test is unit-testable without network.
 """
 from constants import HEADERS
 
+from .repository import VALID_KINDS
+
 _EMPTY_PORTS = (None, "", 0)
 
 
@@ -15,6 +17,8 @@ class ArrClient:
     def __init__(self, *, kind, ip, port, base_url="/", ssl=False,
                  verify_ssl=False, api_key="", http_timeout=60, http_get=None,
                  http_post=None):
+        if kind not in VALID_KINDS:
+            raise ValueError("invalid instance kind")
         self.kind = kind
         self.ip = ip
         self.port = port
@@ -39,14 +43,22 @@ class ArrClient:
     def _headers(self):
         return {**HEADERS, "X-Api-Key": self.api_key}
 
-    def _session_get(self, url, headers=None, timeout=None, verify=None):
+    def _session(self):
         # Reuse the kind's shared session pool (same retry config the legacy
         # sync path uses); imported lazily to avoid an import-time dependency.
         if self.kind == "radarr":
             from radarr.http_session import radarr_session
-            return radarr_session().get(url, headers=headers, timeout=timeout, verify=verify)
-        from sonarr.http_session import sonarr_session
-        return sonarr_session().get(url, headers=headers, timeout=timeout, verify=verify)
+            return radarr_session()
+        if self.kind == "sonarr":
+            from sonarr.http_session import sonarr_session
+            return sonarr_session()
+        if self.kind == "sportarr":
+            from sportarr.http_session import sportarr_session
+            return sportarr_session()
+        raise ValueError("invalid instance kind")
+
+    def _session_get(self, url, **kwargs):
+        return self._session().get(url, **kwargs)
 
     def get(self, path):
         """GET an absolute API path (e.g. '/api/v3/series/1') against this
@@ -59,14 +71,11 @@ class ArrClient:
             headers=self._headers(),
             timeout=int(self.http_timeout),
             verify=self.verify_ssl,
+            **({"allow_redirects": False} if self.kind == "sportarr" else {}),
         )
 
-    def _session_post(self, url, json=None, headers=None, timeout=None, verify=None):
-        if self.kind == "radarr":
-            from radarr.http_session import radarr_session
-            return radarr_session().post(url, json=json, headers=headers, timeout=timeout, verify=verify)
-        from sonarr.http_session import sonarr_session
-        return sonarr_session().post(url, json=json, headers=headers, timeout=timeout, verify=verify)
+    def _session_post(self, url, **kwargs):
+        return self._session().post(url, **kwargs)
 
     def post(self, path, json=None):
         """POST to an absolute API path against this instance and return the raw
@@ -78,14 +87,17 @@ class ArrClient:
             headers=self._headers(),
             timeout=int(self.http_timeout),
             verify=self.verify_ssl,
+            **({"allow_redirects": False} if self.kind == "sportarr" else {}),
         )
 
     def test_connection(self):
-        """Probe /api/v3/system/status. Returns a result dict (never raises)."""
+        """Probe the kind's authenticated status endpoint; return a result dict."""
         try:
-            resp = self.get("/api/v3/system/status")
+            path = "/api/system/status" if self.kind == "sportarr" else "/api/v3/system/status"
+            resp = self.get(path)
         except Exception as exc:
-            return {"ok": False, "error": "connection_failed", "message": str(exc)}
+            message = "Could not connect to the Sportarr instance" if self.kind == "sportarr" else str(exc)
+            return {"ok": False, "error": "connection_failed", "message": message}
 
         status_code = getattr(resp, "status_code", None)
         if status_code == 401:
@@ -94,6 +106,9 @@ class ArrClient:
         if isinstance(status_code, int) and status_code >= 400:
             return {"ok": False, "error": "http_error",
                     "message": f"HTTP {status_code}"}
+        if self.kind == "sportarr" and status_code != 200:
+            return {"ok": False, "error": "http_error",
+                    "message": "Unexpected HTTP status from the Sportarr instance"}
         try:
             data = resp.json()
         except Exception:
@@ -102,6 +117,12 @@ class ArrClient:
         if not isinstance(data, dict):
             return {"ok": False, "error": "bad_response",
                     "message": "Unexpected response shape"}
+        if self.kind == "sportarr" and (
+                data.get("appName") != "Sportarr"
+                or not isinstance(data.get("version"), str)
+                or not data["version"].strip()):
+            return {"ok": False, "error": "bad_response",
+                    "message": "Expected Sportarr system status with a version"}
         return {"ok": True, "version": data.get("version"),
                 "app_name": data.get("appName")}
 
@@ -144,6 +165,8 @@ class ArrClientFactory:
 
     def from_params(self, *, kind, ip, port=None, base_url="/", ssl=False,
                     verify_ssl=False, api_key="", http_timeout=60, http_get=None):
+        if kind == "sportarr" and port is None:
+            port = 1867
         return ArrClient(
             kind=kind, ip=ip, port=port, base_url=base_url, ssl=ssl,
             verify_ssl=verify_ssl, api_key=api_key, http_timeout=http_timeout,

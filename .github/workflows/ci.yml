@@ -188,6 +188,7 @@ jobs:
             tests/bazarr/test_archive_member_matching.py \
             tests/bazarr/test_provider_hub_worker_timeout.py \
             tests/bazarr/test_arr_instances_schema.py \
+            tests/bazarr/test_sportarr_instances.py \
             tests/bazarr/test_arr_ownership_columns.py \
             tests/bazarr/test_arr_instance_repository.py \
             tests/bazarr/test_arr_instances_api.py \
@@ -363,6 +364,20 @@ jobs:
             tests/bazarr/test_arr_atomicity_secrets.py \
             tests/bazarr/test_arr_pg_cutover_migration.py \
             tests/bazarr/test_media_server_instances_pg.py \
+            tests/bazarr/test_sportarr_kind_migration.py \
+            tests/bazarr/test_sportarr_library_migration.py \
+            tests/bazarr/test_sportarr_leagues.py \
+            tests/bazarr/test_sportarr_events.py \
+            tests/bazarr/test_sportarr_manual.py \
+            tests/bazarr/test_sportarr_profile_hooks.py \
+            tests/bazarr/test_sportarr_output.py \
+            tests/bazarr/test_subtitle_ownership_revision.py \
+            tests/bazarr/test_sportarr_workflows.py \
+            tests/bazarr/test_sportarr_blacklist_recovery.py \
+            tests/bazarr/test_sportarr_artifact_migration.py \
+            tests/bazarr/test_sportarr_indexer.py \
+            tests/bazarr/test_sportarr_indexer_cancellation.py \
+            tests/bazarr/test_sportarr_sse.py \
             tests/bazarr/test_editor_instance_scope.py \
             tests/bazarr/test_history_blacklist_scope.py \
             tests/bazarr/test_history_owner_resolution.py \

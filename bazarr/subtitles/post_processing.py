@@ -4,13 +4,24 @@
 import os
 import logging
 import subprocess
+import shutil
 
 from locale import getpreferredencoding
 from utilities.helper import get_target_folder
 from subtitles.tools.subsync_engines import subtitle_write_locks, subtitle_mutation
 
 
-def postprocessing(command, path, subtitle_path=None, *, lock_paths=None):
+def postprocessing(command, path, subtitle_path=None, *, lock_paths=None,
+                   publication_guard=None, command_builder=None):
+    if publication_guard is not None:
+        from subtitles.tools.subsync_engines import staged_subtitle_write
+        if not subtitle_path or command_builder is None:
+            raise ValueError('Guarded postprocessing requires a subtitle and command builder')
+        with staged_subtitle_write(path, subtitle_path, source_paths=(subtitle_path,),
+                                    publication_guard=publication_guard) as temporary:
+            shutil.copyfile(subtitle_path, temporary)
+            _postprocessing_locked(command_builder(temporary), path)
+        return
     # Configured commands can mutate subtitles in place. This is the one boundary
     # that must hold this media's mutation locks while the external command runs.
     if lock_paths is None:

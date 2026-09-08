@@ -7,6 +7,57 @@ import re
 from app.config import settings
 
 
+def validate_sports_mappings(value):
+    if not isinstance(value, list) or any(
+            not isinstance(pair, list) or len(pair) != 2 or
+            any(not isinstance(prefix, str) or not prefix.strip() or '\x00' in prefix for prefix in pair)
+            for pair in value):
+        raise ValueError('path_mappings must be a list of nonempty [remote, local] path pairs')
+    for side in (0, 1):
+        if len({pair[side].replace('\\', '/').rstrip('/') for pair in value}) != len(value):
+            raise ValueError('path_mappings must not repeat a remote or local prefix')
+    return value
+
+
+def read_sports_mappings(value):
+    if not value:
+        return []
+    try:
+        return validate_sports_mappings(json.loads(value))
+    except (TypeError, ValueError):
+        raise ValueError('Invalid stored Sportarr path mappings') from None
+
+
+def apply_sports_mapping(path, mapping, reverse=False):
+    if path is None:
+        return None
+    normalized = path.replace('\\', '/')
+    source, target = (1, 0) if reverse else (0, 1)
+    # Most-specific prefix wins. An interior filename substring never matches.
+    for pair in sorted(validate_sports_mappings(mapping), key=lambda pair: len(pair[source]), reverse=True):
+        prefix = pair[source].replace('\\', '/').rstrip('/')
+        if normalized.rstrip('/') == prefix:
+            return pair[target]
+        if normalized == prefix or normalized.startswith(prefix + '/'):
+            result = pair[target].rstrip('/\\') + normalized[len(prefix):]
+            if pair[target].startswith('\\\\') or re.match(r'^[a-zA-Z]:\\', pair[target]):
+                return result.replace('/', '\\')
+            return result
+    return path
+
+
+def _sports_instance_mapping(arr_instance_id):
+    from app.database import database, TableArrInstances, select
+    if type(arr_instance_id) is not int or arr_instance_id <= 0:
+        raise ValueError('A Sportarr path owner is required')
+    instance = database.execute(select(TableArrInstances).where(
+        TableArrInstances.id == arr_instance_id, TableArrInstances.kind == 'sportarr',
+        TableArrInstances.enabled == 1).execution_options(populate_existing=True)).scalar_one_or_none()
+    if instance is None:
+        raise ValueError('Enabled Sportarr path owner not found')
+    return read_sports_mappings(instance.path_mappings)
+
+
 def _apply_mapping(path, mapping, reverse):
     """Apply a single [remote, local] mapping list to ``path``.
 
@@ -87,6 +138,8 @@ class PathMappings:
         point to use wherever a media row carries an arr_instance_id, so the
         per-instance path_mappings column is no longer silently ignored.
         """
+        if media_type == 'sports':
+            return apply_sports_mapping(path, _sports_instance_mapping(arr_instance_id))
         mapping = _instance_path_mapping(arr_instance_id, media_type)
         if mapping is not None:
             return _apply_mapping(path, mapping, reverse=False)
@@ -96,6 +149,8 @@ class PathMappings:
 
     def path_replace_reverse_instance(self, path, arr_instance_id, media_type):
         """Reverse of :meth:`path_replace_instance` (local->remote)."""
+        if media_type == 'sports':
+            return apply_sports_mapping(path, _sports_instance_mapping(arr_instance_id), reverse=True)
         mapping = _instance_path_mapping(arr_instance_id, media_type)
         if mapping is not None:
             return _apply_mapping(path, mapping, reverse=True)

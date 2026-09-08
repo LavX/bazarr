@@ -1,0 +1,105 @@
+import { useState } from "react";
+import { Alert, Checkbox, Group, NativeSelect, Stack } from "@mantine/core";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { QueryKeys } from "@/apis/queries/keys";
+import sports, { SportsEvent, SportsPublication } from "@/apis/raw/sports";
+import { withModal } from "@/modules/modals";
+import {
+  useEnabledLanguages,
+  useLanguageProfileBy,
+} from "@/utilities/languages";
+import { ManualSearchView } from "./ManualSearchModal";
+
+function SportsSearchView({ item }: { item: SportsEvent }) {
+  const client = useQueryClient();
+  const { data: languages } = useEnabledLanguages();
+  const profile = useLanguageProfileBy(item.profileId);
+  const [selected, setSelected] = useState<string>();
+  const language =
+    selected ?? profile?.items[0]?.language ?? languages[0]?.code2 ?? "";
+  const [hi, setHi] = useState(false);
+  const [forced, setForced] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [publication, setPublication] = useState<SportsPublication>();
+
+  function useSearch() {
+    return useQuery({
+      queryKey: [
+        QueryKeys.Sports,
+        "search",
+        item.arr_instance_id,
+        item.id,
+        language,
+        hi,
+        forced,
+      ],
+      queryFn: () => sports.searchSubtitles(item, language, hi, forced),
+      enabled: false,
+      retry: false,
+    });
+  }
+  async function download(event: SportsEvent, candidate: SearchResultType) {
+    if (downloading) return;
+    setDownloading(true);
+    setPublication(undefined);
+    try {
+      const result = await sports.downloadSubtitle(event, candidate);
+      setPublication(result.publication);
+    } finally {
+      await client.invalidateQueries({
+        queryKey: [QueryKeys.Sports, "events"],
+      });
+      setDownloading(false);
+    }
+  }
+  return (
+    <Stack>
+      <Group>
+        <NativeSelect
+          label="Language"
+          value={language}
+          onChange={(event) => setSelected(event.currentTarget.value)}
+          data={languages.map((value) => ({
+            value: value.code2,
+            label: value.name,
+          }))}
+          disabled={downloading}
+        />
+        <Checkbox
+          label="Hearing impaired"
+          checked={hi}
+          onChange={(event) => setHi(event.currentTarget.checked)}
+          disabled={downloading}
+        />
+        <Checkbox
+          label="Forced"
+          checked={forced}
+          onChange={(event) => setForced(event.currentTarget.checked)}
+          disabled={downloading}
+        />
+      </Group>
+      {publication && (
+        <Alert color={publication.status === "published" ? "green" : "yellow"}>
+          {publication.message}
+        </Alert>
+      )}
+      <ManualSearchView
+        key={`${language}:${hi}:${forced}`}
+        item={item}
+        query={useSearch}
+        download={download}
+        preventRepeatDownload
+        searchDisabled={!language || downloading}
+      />
+    </Stack>
+  );
+}
+
+export const SportsSearchModal = withModal(
+  SportsSearchView,
+  "sports-manual-search",
+  {
+    title: "Search Subtitles",
+    size: "calc(100vw - 4rem)",
+  },
+);

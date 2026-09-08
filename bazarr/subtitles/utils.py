@@ -19,7 +19,7 @@ from app.database import get_profiles_list
 from .refiners import registered as registered_refiners
 
 
-def get_video(path, title, sceneName, providers=None, media_type="movie"):
+def get_video(path, title, sceneName, providers=None, media_type="movie", context=None, cancel=None):
     """
     Construct `Video` instance
     :param path: path to video
@@ -29,6 +29,11 @@ def get_video(path, title, sceneName, providers=None, media_type="movie"):
     :param media_type: movie/series
     :return: `Video` instance
     """
+    if media_type == 'sports':
+        from sportarr.video import get_sports_video
+        return get_sports_video(path, title, sceneName, providers, context, cancel)
+    if context is not None:
+        raise ValueError('Sports context requires sports media type')
     hints = {"title": title, "type": "movie" if media_type == "movie" else "episode"}
 
     try:
