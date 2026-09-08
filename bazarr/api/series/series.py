@@ -328,6 +328,7 @@ def _list_series_episodes(series_id, arr_instance_id=None):
                 TableEpisodes.sonarrEpisodeId,
                 TableEpisodes.sonarrSeriesId,
                 TableEpisodes.path,
+                TableEpisodes.arr_instance_id,
             ).where(TableEpisodes.sonarrSeriesId == series_id),
             TableEpisodes.arr_instance_id,
             arr_instance_id,
@@ -338,6 +339,7 @@ def _list_series_episodes(series_id, arr_instance_id=None):
             'sonarrEpisodeId': r.sonarrEpisodeId,
             'sonarrSeriesId': r.sonarrSeriesId,
             'path': r.path,
+            'arr_instance_id': r.arr_instance_id,
         }
         for r in rows
     ]
@@ -364,7 +366,8 @@ class SeriesSubtitlesCombine(Resource):
         built, skipped, failed = 0, 0, 0
         details = []
         for ep in episodes:
-            video_path = path_mappings.path_replace(ep['path'])
+            owner = ep['arr_instance_id']
+            video_path = path_mappings.path_replace_instance(ep['path'], owner, 'episode')
             r = try_combine_for_video(
                 video_path=video_path,
                 media_type='series',
@@ -373,6 +376,7 @@ class SeriesSubtitlesCombine(Resource):
                 sonarr_episode_id=ep['sonarrEpisodeId'],
                 languages=languages,
                 format=format_,
+                arr_instance_id=owner,
             )
             details.append({
                 'episodeId': ep['sonarrEpisodeId'],

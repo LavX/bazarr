@@ -15,6 +15,8 @@ from .system import api_ns_list_system
 from .webhooks import api_ns_list_webhooks
 from .plex import api_ns_list_plex
 from .jellyfin import api_ns_list_jellyfin
+from .emby import api_ns_list_emby
+from .silo import api_ns_list_silo
 from .translator import api_ns_list_translator
 from .editor import api_ns_list_editor
 from .provider_hub import api_ns_list_provider_hub
@@ -34,6 +36,8 @@ api_ns_list = [
     api_ns_list_webhooks,
     api_ns_list_plex,
     api_ns_list_jellyfin,
+    api_ns_list_emby,
+    api_ns_list_silo,
     api_ns_list_translator,
     api_ns_list_editor,
     api_ns_list_provider_hub,

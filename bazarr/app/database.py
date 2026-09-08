@@ -220,6 +220,32 @@ class TableAnnouncements(Base):
     text = mapped_column(Text)
 
 
+class TableMediaServerInstances(Base):
+    __tablename__ = 'media_server_instances'
+    __table_args__ = (
+        CheckConstraint("kind IN ('emby', 'silo')", name='ck_media_server_kind'),
+        CheckConstraint('enabled IN (0, 1)', name='ck_media_server_enabled'),
+        CheckConstraint('verify_ssl IN (0, 1)', name='ck_media_server_verify_ssl'),
+    )
+
+    id = mapped_column(Text, primary_key=True)
+    kind = mapped_column(Text, nullable=False)
+    name = mapped_column(Text, nullable=False)
+    enabled = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    url = mapped_column(Text, nullable=False)
+    api_key = mapped_column(Text, nullable=False, default='', server_default='')
+    verify_ssl = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    path_mappings = mapped_column(Text, nullable=False, default='[]', server_default='[]')
+    revision = mapped_column(Integer, nullable=False, default=1, server_default='1')
+
+
+class TableMediaServerImports(Base):
+    __tablename__ = 'media_server_imports'
+    __table_args__ = (CheckConstraint("kind IN ('emby', 'silo')", name='ck_media_server_import_kind'),)
+
+    kind = mapped_column(Text, primary_key=True)
+
+
 class TableArrInstances(Base):
     # Multiple Sonarr/Radarr instances (#156). One Bazarr+ install can connect
     # to several named Sonarr/Radarr instances - e.g. split libraries: TV,
@@ -916,6 +942,11 @@ def migrate_db(app):
         database.execute(
             insert(System)
             .values(configured='0', updated='0'))
+
+    # Native destinations retain one-time scalar import markers independently
+    # of destination lifetime. A failed kind remains unavailable to workers.
+    from media_servers.backfill import backfill_instances
+    backfill_instances(database, settings)
 
     # Multiple Sonarr/Radarr instances (#156): represent the existing scalar
     # Sonarr/Radarr config as the default arr_instances rows and stamp existing

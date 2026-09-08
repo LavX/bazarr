@@ -2,6 +2,7 @@
 
 import os
 import logging
+from media_servers.events import publication_callback
 
 from subliminal.subtitle import SUBTITLE_EXTENSIONS
 
@@ -25,7 +26,7 @@ from plex.operations import plex_refresh_item
 from jellyfin.operations import jellyfin_refresh_item
 
 
-def _delete_subtitle_file(media_path, subtitle_path):
+def _delete_subtitle_file(media_path, subtitle_path, on_publish=None):
     with subtitle_write_locks(media_path, subtitle_path):
         state = subtitle_write_lock(media_path, os.path.dirname(subtitle_path))
         try:
@@ -35,6 +36,8 @@ def _delete_subtitle_file(media_path, subtitle_path):
                 state.changed(subtitle_path)
             logging.exception('BAZARR cannot delete subtitles file: %s', subtitle_path)
             return False
+        if on_publish:
+            on_publish(subtitle_path)
         state.changed(subtitle_path)
         quarantine_sync_outputs_after_mutation(media_path, subtitle_path)
         return True
@@ -98,7 +101,8 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
                                     hearing_impaired=None)
 
     if media_type == 'series':
-        removed = _delete_subtitle_file(media_path, pr(subtitles_path))
+        removed = _delete_subtitle_file(media_path, pr(subtitles_path),
+                                        publication_callback(media_type, media_path, 'delete', arr_instance_id))
         store_subtitles(prr(media_path), media_path, arr_instance_id=arr_instance_id)
         if not removed:
             return False
@@ -127,7 +131,8 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
 
         return True
     else:
-        removed = _delete_subtitle_file(media_path, pr(subtitles_path))
+        removed = _delete_subtitle_file(media_path, pr(subtitles_path),
+                                        publication_callback(media_type, media_path, 'delete', arr_instance_id))
         store_subtitles_movie(prr(media_path), media_path, arr_instance_id=arr_instance_id)
         if not removed:
             return False

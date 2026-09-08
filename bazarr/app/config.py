@@ -129,6 +129,8 @@ validators = [
     Validator('general.use_radarr', must_exist=True, default=False, is_type_of=bool),
     Validator('general.use_plex', must_exist=True, default=False, is_type_of=bool),
     Validator('general.use_jellyfin', must_exist=True, default=False, is_type_of=bool),
+    Validator('general.use_emby', must_exist=True, default=False, is_type_of=bool),
+    Validator('general.use_silo', must_exist=True, default=False, is_type_of=bool),
     # Set True once the first-run onboarding wizard is completed or skipped, so it
     # never auto-triggers again. Defaults False on a fresh install.
     Validator('general.setup_complete', must_exist=True, default=False, is_type_of=bool),
@@ -330,6 +332,18 @@ validators = [
     Validator('plex.migration_timestamp', must_exist=True, default='', is_type_of=(int, float, str)),
     Validator('plex.disable_auto_migration', must_exist=True, default=False, is_type_of=bool),
     Validator('plex.client_identifier', must_exist=True, default='', is_type_of=str),
+
+    # emby section
+    Validator('emby.url', must_exist=True, default='', is_type_of=str),
+    Validator('emby.apikey', must_exist=True, default='', is_type_of=str),
+    Validator('emby.verify_ssl', must_exist=True, default=True, is_type_of=bool),
+    Validator('emby.path_mappings', must_exist=True, default=[], is_type_of=list),
+
+    # silo section
+    Validator('silo.url', must_exist=True, default='', is_type_of=str),
+    Validator('silo.apikey', must_exist=True, default='', is_type_of=str),
+    Validator('silo.verify_ssl', must_exist=True, default=True, is_type_of=bool),
+    Validator('silo.path_mappings', must_exist=True, default=[], is_type_of=list),
 
     # jellyfin section
     Validator('jellyfin.url', must_exist=True, default='', is_type_of=str),
@@ -687,6 +701,7 @@ decrypt_settings_in_place(settings)
 
 
 def write_config():
+    from secret_store.crypto import mark_master_key_persisted
     # On-disk shape compared in plaintext form: encrypt_secret is non-
     # deterministic (per-payload salt + timestamp), so naive ciphertext
     # comparison would always diff and rewrite config.yaml on every save.
@@ -702,24 +717,27 @@ def write_config():
 
     if in_memory_plaintext == on_disk_plaintext and not _force_first_save_migration:
         logging.debug("Nothing changed when comparing to config file. Skipping write to file.")
-        return
+        mark_master_key_persisted(in_memory_plaintext.get("general", {}).get("secrets_encryption_key"))
+        return True
 
     forced_migration = _force_first_save_migration
     if forced_migration:
         logging.info("secret_store: forcing config rewrite to encrypt plaintext credentials on disk")
 
     try:
+        encrypted_payload = encrypt_settings_dict(in_memory_plaintext)
         write(settings_path=config_yaml_file + '.tmp',
-              settings_data=encrypt_settings_dict(in_memory_plaintext),
+              settings_data=encrypted_payload,
               merge=False)
-    except Exception as error:
-        logging.exception(f"Exception raised while trying to save temporary settings file: {error}")  # noqa: G004
+    except Exception:
+        logging.error("Unable to save temporary settings file")
+        return False
     else:
         try:
             move(config_yaml_file + '.tmp', config_yaml_file)
-        except Exception as error:
-            logging.exception(f"Exception raised while trying to overwrite settings file with temporary settings "  # noqa: G004
-                              f"file: {error}")
+        except Exception:
+            logging.error("Unable to replace settings file")
+            return False
         else:
             # Only clear the forced-migration flag once the new
             # encrypted config is durably in place. Clearing it on the
@@ -730,6 +748,8 @@ def write_config():
             # never retry, leaving credentials unencrypted on disk.
             if forced_migration:
                 _force_first_save_migration = False
+            mark_master_key_persisted(encrypted_payload.get("general", {}).get("secrets_encryption_key"))
+            return True
 
 
 # OpenRouter retired these ids, including Bazarr's default and documented recommendation.
@@ -827,10 +847,13 @@ def get_settings():
     # hidden); USER_VISIBLE_SECRETS pass through unchanged because the
     # in-memory settings already hold their decrypted plaintext.
     from secret_store import is_system_secret  # noqa: PLC0415, RUF100
+    from secret_store.registry import IMPORT_ONLY_SECTIONS
     settings_to_return = {}
     for k, v in settings.as_dict().items():
         if isinstance(v, dict):
             k = k.lower()
+            if k in IMPORT_ONLY_SECTIONS:
+                continue
             settings_to_return[k] = dict()
             for subk, subv in v.items():
                 full_path = f"{k}.{subk.lower()}"
@@ -913,7 +936,40 @@ def _active_provider_hub_provider_ids():
         return set()
 
 
+_native_settings_save_lock = threading.RLock()
+
+
 def save_settings(settings_items):
+    from media_servers.http import MediaServerError, parse_verify_ssl
+    from secret_store.registry import IMPORT_ONLY_SECTIONS
+
+    settings_items = list(settings_items)
+    masters = {'settings-general-use_emby', 'settings-general-use_silo'}
+    for index, (key, value) in enumerate(settings_items):
+        parts = key.lower().split('-')
+        if len(parts) > 1 and parts[1] in IMPORT_ONLY_SECTIONS:
+            raise ValidationError('Use media server instances to edit connection settings')
+        if key in masters:
+            if isinstance(value, list) and len(value) == 1:
+                value = value[0]
+            try:
+                settings_items[index] = key, parse_verify_ssl(value)
+            except MediaServerError:
+                raise ValidationError('Invalid native media server master switch') from None
+    with _native_settings_save_lock:
+        if not any(key in masters for key, _value in settings_items):
+            return _save_settings(settings_items)
+        from media_servers.dispatcher import get_native_configuration
+        native = get_native_configuration()
+        with native.lock:
+            try:
+                return _save_settings(settings_items, native)
+            finally:
+                for kind, enabled in native.masters.items():
+                    _settings_mapping(settings, 'general')['use_' + kind] = enabled
+
+
+def _save_settings(settings_items, native_configuration=None):
     configure_debug = False
     configure_captcha = False
     update_schedule = False
@@ -1256,7 +1312,11 @@ def save_settings(settings_items):
         decrypt_settings_in_place(settings)
         raise
     else:
-        write_config()
+        persisted = write_config()
+        if native_configuration is not None:
+            if persisted is not True:
+                raise ValidationError('Unable to persist native media-server settings')
+            native_configuration.publish_masters(settings)
 
         # Set the configured state based on config.yaml file existence
         from .database import database, update, System

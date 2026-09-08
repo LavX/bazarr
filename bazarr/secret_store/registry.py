@@ -31,6 +31,10 @@ The dynaconf API serializer flattens nested settings to that form
 before checking, so this stays simple.
 """
 
+# These legacy sections remain encrypted for one-time database import, but
+# their values are never exposed or edited through the general settings API.
+IMPORT_ONLY_SECTIONS = frozenset({'emby', 'silo'})
+
 USER_VISIBLE_SECRETS = frozenset({
     # Bazarr's own admin login (username + password) and the API key that
     # the SPA uses on every authenticated request. Username is NOT
@@ -54,8 +58,10 @@ USER_VISIBLE_SECRETS = frozenset({
     "plex.token",
     "plex.username",
     "plex.email",
-    # Jellyfin
+    # Media servers
     "jellyfin.apikey",
+    "emby.apikey",
+    "silo.apikey",
     # Network proxy (full login pair).
     "proxy.username",
     "proxy.password",

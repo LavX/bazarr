@@ -29,6 +29,7 @@ import {
 import type { ArrInstance, ArrKind } from "@/apis/raw/arrInstances";
 import { Layout, Section } from "@/pages/Settings/components";
 import JellyfinSection from "@/pages/Settings/Jellyfin/JellyfinSection";
+import MediaServerSection from "@/pages/Settings/MediaServers/MediaServerSection";
 import PlexSection from "@/pages/Settings/Plex/PlexSection";
 import RadarrSection from "@/pages/Settings/Radarr/RadarrSection";
 import SonarrSection from "@/pages/Settings/Sonarr/SonarrSection";
@@ -241,6 +242,15 @@ const SettingsConnectionsView: FunctionComponent = () => {
           >
             Jellyfin
           </Tabs.Tab>
+          <Tabs.Tab value="emby" leftSection={<FontAwesomeIcon icon={faTv} />}>
+            Emby
+          </Tabs.Tab>
+          <Tabs.Tab
+            value="silo"
+            leftSection={<FontAwesomeIcon icon={faServer} />}
+          >
+            Silo
+          </Tabs.Tab>
         </Tabs.List>
 
         <Tabs.Panel value="sonarr">
@@ -273,6 +283,12 @@ const SettingsConnectionsView: FunctionComponent = () => {
 
         <Tabs.Panel value="jellyfin">
           <JellyfinSection />
+        </Tabs.Panel>
+        <Tabs.Panel value="emby">
+          <MediaServerSection kind="emby" />
+        </Tabs.Panel>
+        <Tabs.Panel value="silo">
+          <MediaServerSection kind="silo" />
         </Tabs.Panel>
       </Tabs>
 
