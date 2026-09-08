@@ -32,7 +32,7 @@ _CLIENT_MOVIEHASH_PROVIDERS = (
 _SHOOTER_HASH_RE = re.compile(r"^[0-9a-fA-F]{32}(?:;[0-9a-fA-F]{32}){3}$")
 
 
-def _get_compat_pool():
+def _get_compat_pool(*, restore_available=False):
     """Dedicated SZAsyncProviderPool instance. MUST NOT share app.get_providers._pools."""
     global _compat_pool
     with _pool_lock:
@@ -46,6 +46,20 @@ def _get_compat_pool():
                 language_hook=get_provider_language_hook(),
                 language_equals=[],
             )
+        elif restore_available:
+            # A cold pool can omit a configured provider while it is throttled.
+            # Restore availability without update() clearing unrelated discards
+            # or retiring initialized members that another search is using.
+            missing = [name for name in get_providers_sorted() or [] if name not in _compat_pool.providers]
+            if missing:
+                configs = get_providers_auth()
+                for name in missing:
+                    try:
+                        _compat_pool.adopt_provider(name, configs.get(name, {}))
+                    except KeyError:
+                        # Registration or the pool's adoption gate can change
+                        # after the availability snapshot. Coverage reports it.
+                        continue
         return _compat_pool
 
 
@@ -233,12 +247,46 @@ def _apply_anidb_ids(video, series_anidb_id: int | None = None,
     return video
 
 
-def _build_video(imdb_id: str, season: int | None, episode: int | None,
+def _build_release_query_video(query: str | None) -> Video:
+    """Parse only explicit release text into unverified provider query hints.
+
+    These hints are neither resolved metadata nor a local video association.
+    Keep the complete parse until ambiguity has been checked, without defaults
+    from Video.fromname or Episode.fromguess.
+    """
+    hints = _guessit_filename(query) if query else {}
+    kind, title, year = hints.get("type"), hints.get("title"), hints.get("year")
+    if (kind not in ("movie", "episode") or not isinstance(title, str)
+            or not any(c.isalnum() for c in title)
+            or (year is not None and (type(year) is not int or not 1870 <= year <= 2200))):
+        raise ValueError("Could not read this release name. Include a clear movie title or one numbered episode.")
+    numbering = re.findall(
+        r"(?<![a-z0-9])(?:s([0-9]{1,4})[ ._-]*e([0-9]{1,4})|([0-9]{1,4})x([0-9]{1,4}))(?![a-z0-9])",
+        query, re.IGNORECASE,
+    )
+    if kind == "episode":
+        season, episode = hints.get("season"), hints.get("episode")
+        if (type(season) is not int or not 0 <= season <= 9999
+                or type(episode) is not int or not 1 <= episode <= 9999
+                or len(numbering) != 1 or hints.get("date") is not None):
+            raise ValueError("Use one explicitly numbered episode, for example Show.S02E03. Packs and absolute numbering need an exact episode.")
+        s, e, x_s, x_e = numbering[0]
+        if (int(s or x_s), int(e or x_e)) != (season, episode):
+            raise ValueError("This release name has conflicting episode numbers. Use one explicit season and episode.")
+        return Episode(name=query, series=title, year=year, season=season, episodes=[episode])
+    if numbering or any(hints.get(key) is not None for key in ("season", "episode", "date")):
+        raise ValueError("This release name has ambiguous episode hints. Use one explicit season and episode.")
+    return Movie(name=query, title=title, year=year)
+
+
+def _build_video(imdb_id: str | None, season: int | None, episode: int | None,
                  media_type: str, query: str | None = None,
                  moviehash: str | None = None,
                  moviebytesize: int | None = None,
                  series_anidb_id: int | None = None,
-                 series_anidb_episode_id: int | None = None) -> Video:
+                 series_anidb_episode_id: int | None = None,
+                 *, title_only: bool = False, year: int | None = None,
+                 release_query: bool = False, episode_identity: dict | None = None) -> Video:
     """Construct a Video for compat fanout.
 
     Preferred path: when the imdb_id resolves to a library entry with a
@@ -253,11 +301,28 @@ def _build_video(imdb_id: str, season: int | None, episode: int | None,
     on the client's filename + OMDB/TVDB refiner lookups. Lower scoring
     signal but still better than nothing for query-only searches.
     """
+    if release_query:
+        if (title_only or imdb_id or season is not None or episode is not None or year is not None
+                or moviehash or moviebytesize is not None or series_anidb_id is not None
+                or series_anidb_episode_id is not None or episode_identity is not None):
+            raise ValueError("A release query cannot adopt identified media or file properties.")
+        return _build_release_query_video(query)
     # Normalize up front: clients (Jellyfin plugin) strip 'tt' before
     # sending. OMDB / TVDB v1 / v4 all reject the bare numeric form, so
     # carrying the normalized value through the Video avoids having to
     # re-prepend in every downstream caller.
     imdb_id = _tt(imdb_id) or imdb_id
+    if title_only:
+        if media_type == "episode":
+            identity = episode_identity or {}
+            video = Episode(name="", series=query or "", season=season, episodes=[episode],
+                            year=year, series_imdb_id=imdb_id, title=identity.get("title"),
+                            imdb_id=identity.get("imdb_id"), tvdb_id=identity.get("tvdb_id"),
+                            series_tvdb_id=identity.get("show_tvdb_id"), tmdb_id=identity.get("id"),
+                            series_tmdb_id=identity.get("show_id"))
+            video.episode_title = identity.get("title")
+            return video
+        return Movie(name="", title=query or "", year=year, imdb_id=imdb_id)
     meta = _lookup_library_metadata(imdb_id, media_type, season, episode)
 
     path = meta.get("path") or ""
@@ -631,6 +696,17 @@ _SKIP_FOR_VIRTUAL_VIDEO = frozenset({"embeddedsubtitles"})
 # name: with an allow-list active they are served only when it lists `local`;
 # with no allow-list they follow serve_local_subs unless `local` is excluded.
 LOCAL_PROVIDER = "local"
+
+
+def search_title(video, languages, pool, providers, on_outcome):
+    """Search a prebuilt title target using the shared bounded provider executor."""
+    wall = max(5, min(120, int(settings.compat_endpoint.search_timeout_seconds)))
+    return list_all_subtitles_parallel(
+        [video], set(languages), pool,
+        per_provider_timeout=max(3, int(wall * 0.6)), wall_timeout=wall,
+        exclude_providers=set(pool.providers) - set(providers),
+        on_outcome=on_outcome,
+    ).get(video, [])
 
 
 def _do_fanout(imdb_id, season, episode, languages, media_type,

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useId, useRef } from "react";
 import { useBlocker } from "react-router";
 import { Button, Group, Stack, Text } from "@mantine/core";
 import { modals } from "@mantine/modals";
@@ -7,6 +7,7 @@ export function usePrompt(
   when: boolean,
   message: string,
   onSaveAndLeave?: () => Promise<void> | void,
+  savedRefreshFailed = false,
 ) {
   const blocker = useBlocker(
     ({ currentLocation, nextLocation }) =>
@@ -15,6 +16,8 @@ export function usePrompt(
 
   const prevWhen = useRef(when);
   const previousFocus = useRef<HTMLElement | null>(null);
+  const modalId = useId();
+  const promptOpen = useRef(false);
 
   const handleStay = useCallback(() => {
     modals.closeAll();
@@ -33,7 +36,12 @@ export function usePrompt(
 
   const handleSaveAndLeave = useCallback(async () => {
     if (onSaveAndLeave) {
-      await onSaveAndLeave();
+      try {
+        await onSaveAndLeave();
+      } catch {
+        // The settings mutation reports the failure. Keep the draft and blocker.
+        return;
+      }
     }
     if (blocker.state === "blocked") {
       blocker.proceed?.();
@@ -42,11 +50,16 @@ export function usePrompt(
   }, [blocker, onSaveAndLeave]);
 
   useEffect(() => {
+    if (blocker.state !== "blocked") promptOpen.current = false;
     if (blocker.state === "blocked" && prevWhen.current === when) {
-      previousFocus.current = document.activeElement as HTMLElement;
+      if (!promptOpen.current)
+        previousFocus.current = document.activeElement as HTMLElement;
 
-      modals.open({
-        title: "Unsaved Changes",
+      const options = {
+        modalId,
+        title: savedRefreshFailed
+          ? "Application refresh failed"
+          : "Unsaved Changes",
         centered: true,
         size: "md",
         closeOnEscape: true,
@@ -78,24 +91,40 @@ export function usePrompt(
                 color="red"
                 size="sm"
                 onClick={handleDiscard}
-                aria-label="Discard unsaved changes and leave this page"
+                aria-label={
+                  savedRefreshFailed
+                    ? "Leave this page keeping saved settings"
+                    : "Discard unsaved changes and leave this page"
+                }
               >
-                Discard
+                {savedRefreshFailed ? "Leave with saved settings" : "Discard"}
               </Button>
               {onSaveAndLeave && (
                 <Button
                   color="brand"
                   size="sm"
                   onClick={handleSaveAndLeave}
-                  aria-label="Save all changes and leave this page"
+                  aria-label={
+                    savedRefreshFailed
+                      ? "Retry application refresh and leave this page"
+                      : "Save all changes and leave this page"
+                  }
                 >
-                  Save & Leave
+                  {savedRefreshFailed
+                    ? "Retry refresh & Leave"
+                    : "Save & Leave"}
                 </Button>
               )}
             </Group>
           </Stack>
         ),
-      });
+      };
+      if (promptOpen.current) {
+        modals.updateModal(options);
+      } else {
+        modals.open(options);
+        promptOpen.current = true;
+      }
     }
     prevWhen.current = when;
   }, [
@@ -106,5 +135,7 @@ export function usePrompt(
     handleDiscard,
     handleSaveAndLeave,
     onSaveAndLeave,
+    savedRefreshFailed,
+    modalId,
   ]);
 }

@@ -1,4 +1,5 @@
 import { FunctionComponent } from "react";
+import { Link } from "react-router";
 import {
   Anchor,
   AppShell,
@@ -26,9 +27,10 @@ import { useSystem, useSystemJobs, useSystemSettings } from "@/apis/hooks";
 import { Action, Search } from "@/components";
 import { useNavbar } from "@/contexts/Navbar";
 import { useIsOnline } from "@/contexts/Online";
-import { Environment, useGotoHomepage } from "@/utilities";
+import { Environment } from "@/utilities";
 import NotificationDrawer from "./NotificationDrawer";
 import styles from "./Header.module.scss";
+import discoverStyles from "@/pages/Discover/Discover.module.scss";
 
 const AppHeader: FunctionComponent = () => {
   const { data: settings } = useSystemSettings();
@@ -41,8 +43,6 @@ const AppHeader: FunctionComponent = () => {
 
   const { shutdown, restart, logout } = useSystem();
 
-  const goHome = useGotoHomepage();
-
   const { toggleColorScheme } = useMantineColorScheme();
   const dark = useComputedColorScheme("light") === "dark";
 
@@ -54,17 +54,28 @@ const AppHeader: FunctionComponent = () => {
   const { data: jobs } = useSystemJobs();
 
   return (
-    <AppShell.Header p={0} className={styles.header}>
+    <AppShell.Header
+      p={0}
+      className={`${styles.header} ${discoverStyles.appHeader}`}
+    >
       <div className={styles.headerInner}>
         <Group justify="space-between" wrap="nowrap" style={{ flex: 1 }}>
           <Group wrap="nowrap">
             <Burger
+              aria-label={showed ? "Close navigation" : "Open navigation"}
+              aria-expanded={showed}
               opened={showed}
               onClick={() => show(!showed)}
               size="sm"
               hiddenFrom="sm"
             ></Burger>
-            <Anchor onClick={goHome} underline="never">
+            <Anchor
+              component={Link}
+              to="/discover"
+              underline="never"
+              aria-label="Bazarr+ home"
+              className={discoverStyles.brandHome}
+            >
               <Group gap={6} wrap="nowrap">
                 <Avatar
                   alt="brand"
@@ -98,7 +109,10 @@ const AppHeader: FunctionComponent = () => {
               </Group>
             </Anchor>
           </Group>
-          <div style={{ flex: 1, maxWidth: 500 }}>
+          <div
+            className={discoverStyles.librarySearch}
+            style={{ flex: 1, maxWidth: 500 }}
+          >
             <Search></Search>
           </div>
           <Group gap="xs" justify="right" wrap="nowrap">

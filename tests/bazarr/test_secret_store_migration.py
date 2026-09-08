@@ -108,6 +108,14 @@ def test_decrypt_dict_inverts_encrypt(plaintext_dict):
     assert decrypted == plaintext_dict
 
 
+def test_tmdb_is_encrypted_and_roundtrips_without_double_encryption(plaintext_dict):
+    plaintext_dict["discover"] = {"tmdb_access_token": "synthetic-tmdb-token"}
+    encrypted = encrypt_settings_dict(plaintext_dict)
+    assert encrypted["discover"]["tmdb_access_token"].startswith(SECRET_MARKER_PREFIX)
+    assert encrypt_settings_dict(encrypted) == encrypted
+    assert decrypt_settings_dict(encrypted) == plaintext_dict
+
+
 def test_decrypt_dict_passes_plaintext_through(plaintext_dict):
     """Pre-migration shape: disk has plaintext. The decrypt helper must
     not corrupt it - that's how auto-migration works."""

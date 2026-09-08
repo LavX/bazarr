@@ -1,7 +1,7 @@
 # coding=utf-8
 """Registry of every sensitive setting in config.yaml.
 
-Two tiers:
+Three credential tiers:
 
 USER_VISIBLE_SECRETS - credentials the user types in, copies, or rotates
     via the Settings page. They are encrypted at rest, but the
@@ -13,6 +13,9 @@ USER_VISIBLE_SECRETS - credentials the user types in, copies, or rotates
 USER_VISIBLE_SECRET_LISTS - same tier as above, but the value is a list
     of strings (e.g. translator.gemini_keys), each item handled
     individually.
+
+WRITE_ONLY_SECRETS - credentials encrypted at rest and omitted from settings
+    responses. Only their configured status is public.
 
 SYSTEM_SECRETS - cryptographic primitives the user MUST NOT see and the
     backend MUST NOT leak. These are scoped to backend-internal use:
@@ -164,3 +167,11 @@ def is_system_secret(key: str) -> bool:
     """True iff `key` is a backend-only cryptographic primitive that
     must be masked by the API serializer."""
     return key in SYSTEM_SECRETS
+
+
+# Credentials encrypted at rest and omitted from all settings responses.
+WRITE_ONLY_SECRETS = frozenset({"discover.tmdb_access_token"})
+
+
+def is_write_only_secret(path: str) -> bool:
+    return path.lower() in WRITE_ONLY_SECRETS

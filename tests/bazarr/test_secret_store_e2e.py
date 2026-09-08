@@ -440,3 +440,21 @@ def test_legacy_plex_migration_already_unified_is_passthrough():
     migrate_legacy_plex_encryption(settings)
     assert settings.plex.apikey == unified_cipher  # left unchanged
     assert settings.plex.apikey_encrypted is False  # flag cleared
+
+
+def test_write_only_token_first_save_and_reload_preserve_plaintext_only_in_memory(stable_master_key):
+    from dynaconf import Dynaconf
+    from secret_store import has_plaintext_secrets_on_disk
+    initial = {"general": {"secrets_encryption_key": stable_master_key},
+               "discover": {"tmdb_access_token": "synthetic-write-only-token", "locale": "en-US"}}
+    live = Dynaconf(environments=False)
+    live.update(initial)
+    assert has_plaintext_secrets_on_disk(live)
+    encrypted = encrypt_settings_dict(initial)
+    assert is_encrypted(encrypted["discover"]["tmdb_access_token"])
+    rebooted = Dynaconf(environments=False)
+    rebooted.update(encrypted)
+    assert not has_plaintext_secrets_on_disk(rebooted)
+    decrypt_settings_in_place(rebooted)
+    assert rebooted.discover.tmdb_access_token == "synthetic-write-only-token"
+    assert encrypt_settings_dict(encrypted) == encrypted

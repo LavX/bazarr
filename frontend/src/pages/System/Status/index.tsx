@@ -41,6 +41,7 @@ import {
   useOpenWhatsNew,
 } from "@/components/modals/useWhatsNewAutoOpen";
 import { GithubRepoRoot } from "@/constants";
+import MetadataAttribution from "@/pages/Discover/MetadataAttribution";
 import { Environment, useInterval } from "@/utilities";
 import {
   divisorDay,
@@ -234,6 +235,7 @@ const SystemStatusView: FunctionComponent = () => {
           </Row>
         </InfoContainer>
         <InfoContainer title="Credits">
+          <MetadataAttribution />
           <Row title="TheTVDB">
             <Label icon={faPaperPlane} link="https://thetvdb.com">
               TV series metadata

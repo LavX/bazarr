@@ -10,7 +10,8 @@ from api.utils import None_Keys
 from app.database import TableLanguagesProfiles, TableSettingsLanguages, TableSettingsNotifier, \
     update_profile_id_list, database, insert, update, delete, select
 from app.event_handler import event_stream
-from app.config import settings, save_settings, get_settings
+from app.config import (settings, save_settings, get_settings, validate_metadata_settings,
+                        MetadataPersistenceError, MetadataFollowupError)
 from app.scheduler import scheduler  # noqa: F401
 from subtitles.indexer.series import list_missing_subtitles
 from subtitles.indexer.movies import list_missing_subtitles_movies
@@ -44,6 +45,10 @@ class SystemSettings(Resource):
 
     @authenticate
     def post(self):
+        try:
+            validate_metadata_settings(list(zip(request.form.keys(), request.form.listvalues())))
+        except ValidationError as error:
+            return error.message, 406
         deleted_profile_ids = []
         enabled_languages = request.form.getlist('languages-enabled')
         if len(enabled_languages) != 0:
@@ -139,6 +144,11 @@ class SystemSettings(Resource):
 
         try:
             save_settings(zip(request.form.keys(), request.form.listvalues()))
+        except MetadataPersistenceError:
+            return "Discover settings could not be saved. Try again.", 503
+        except MetadataFollowupError:
+            return {"code": "discover_settings_refresh_failed",
+                    "message": "Discover settings were saved, but application refresh failed. Reload settings before retrying."}, 503
         except ValidationError as e:
             event_stream("settings")
             return e.message, 406

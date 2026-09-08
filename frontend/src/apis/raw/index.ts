@@ -1,5 +1,6 @@
 import arrInstances from "./arrInstances";
 import badges from "./badges";
+import discover from "./discover";
 import distributionHub from "./distributionHub";
 import episodes from "./episodes";
 import files from "./files";
@@ -16,6 +17,7 @@ import utils from "./utils";
 
 const api = {
   badges,
+  discover,
   episodes,
   files,
   jellyfin,

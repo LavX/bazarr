@@ -594,6 +594,9 @@ validators = [
     # OMDB: optional title/year resolution for movies that aren't in the
     # local library. Free tier at omdbapi.com (1000 req/day). Empty = skip.
     Validator('omdb.apikey', default='', cast=str),
+    # Validate new credential input before assignment, never interpolate a stored secret.
+    Validator('discover.tmdb_access_token', default=''),
+    Validator('discover.locale', default='en-US'),
 ]
 
 
@@ -686,7 +689,21 @@ _force_first_save_migration = has_plaintext_secrets_on_disk(settings)
 decrypt_settings_in_place(settings)
 
 
-def write_config():
+class MetadataPersistenceError(Exception):
+    """The requested metadata configuration could not be persisted."""
+
+
+class MetadataFollowupError(Exception):
+    """Metadata settings were persisted, but subsequent application work failed."""
+
+
+def write_config(*, strict_metadata=False):
+    from discover.metadata import CONFIG_LOCK
+    with CONFIG_LOCK:
+        return _write_config(strict_metadata=strict_metadata)
+
+
+def _write_config(*, strict_metadata=False):
     # On-disk shape compared in plaintext form: encrypt_secret is non-
     # deterministic (per-payload salt + timestamp), so naive ciphertext
     # comparison would always diff and rewrite config.yaml on every save.
@@ -713,11 +730,15 @@ def write_config():
               settings_data=encrypt_settings_dict(in_memory_plaintext),
               merge=False)
     except Exception as error:
+        if strict_metadata:
+            raise MetadataPersistenceError("Discover settings could not be saved. Try again.") from None
         logging.exception(f"Exception raised while trying to save temporary settings file: {error}")  # noqa: G004
     else:
         try:
             move(config_yaml_file + '.tmp', config_yaml_file)
         except Exception as error:
+            if strict_metadata:
+                raise MetadataPersistenceError("Discover settings could not be saved. Try again.") from None
             logging.exception(f"Exception raised while trying to overwrite settings file with temporary settings "  # noqa: G004
                               f"file: {error}")
         else:
@@ -822,11 +843,17 @@ write_config()
 
 
 def get_settings():
+    from discover.metadata import CONFIG_LOCK
+    with CONFIG_LOCK:
+        return _get_settings()
+
+
+def _get_settings():
     # API serializer for /api/system/settings. SYSTEM_SECRETS are masked
     # with '***' (key still present so the wire shape is stable, value
     # hidden); USER_VISIBLE_SECRETS pass through unchanged because the
     # in-memory settings already hold their decrypted plaintext.
-    from secret_store import is_system_secret  # noqa: PLC0415, RUF100
+    from secret_store import is_system_secret, is_write_only_secret  # noqa: PLC0415, RUF100
     settings_to_return = {}
     for k, v in settings.as_dict().items():
         if isinstance(v, dict):
@@ -834,6 +861,10 @@ def get_settings():
             settings_to_return[k] = dict()
             for subk, subv in v.items():
                 full_path = f"{k}.{subk.lower()}"
+                if is_write_only_secret(full_path):
+                    continue
+                if k == "discover" and subk.lower() in {"tmdb_configured", "metadata_revision"}:
+                    continue
                 if is_system_secret(full_path):
                     # Keep empty values literally empty so the UI can
                     # distinguish "not configured" from "configured but
@@ -846,6 +877,10 @@ def get_settings():
                     settings_to_return[k].update({subk: get_array_from(subv)})
                 else:
                     settings_to_return[k].update({subk: subv})
+    from discover.metadata import configuration
+    metadata_config = configuration()
+    settings_to_return.setdefault("discover", {}).update({
+        "tmdb_configured": bool(metadata_config.token), "metadata_revision": metadata_config.revision})
     return settings_to_return
 
 
@@ -913,7 +948,63 @@ def _active_provider_hub_provider_ids():
         return set()
 
 
+def validate_metadata_settings(settings_items):
+    from discover.metadata import validate_token
+    allowed = {"settings-discover-tmdb_access_token", "settings-discover-locale"}
+    seen = set()
+    for key, values in settings_items:
+        if not key.lower().startswith("settings-discover-"):
+            continue
+        if key not in allowed or key in seen:
+            raise ValidationError("Invalid Discover setting.")
+        seen.add(key)
+        if not isinstance(values, list) or len(values) != 1:
+            raise ValidationError("Invalid TMDB access token." if key.endswith("tmdb_access_token")
+                                  else "Invalid metadata language.")
+        if key.endswith("tmdb_access_token"):
+            try:
+                validate_token(values[0])
+            except ValueError:
+                raise ValidationError("Invalid TMDB access token.") from None
+        elif not isinstance(values[0], str) or not re.fullmatch(r"[a-z]{2,3}(?:-[A-Z]{2})?", values[0]):
+            raise ValidationError("Invalid metadata language.")
+
+
 def save_settings(settings_items):
+    items = list(settings_items)
+    validate_metadata_settings(items)
+    from discover.metadata import CONFIG_LOCK, invalidate_metadata
+    with CONFIG_LOCK:
+        if not any(key.startswith("settings-discover-") for key, _ in items):
+            return _save_settings(items)
+        previous = dict(settings.discover)
+        effective = dict(previous)
+        for key, values in items:
+            if key.startswith("settings-discover-"):
+                field = key.removeprefix("settings-discover-")
+                if field != "tmdb_access_token" or values[0] != "***":
+                    effective[field] = values[0]
+        changed = effective != previous
+        persisted = False
+
+        def metadata_persisted():
+            nonlocal persisted
+            persisted = True
+            invalidate_metadata()
+
+        try:
+            _save_settings(items, strict_metadata=changed,
+                           on_metadata_persisted=metadata_persisted if changed else None)
+        except Exception:
+            if persisted:
+                raise MetadataFollowupError(
+                    "Discover settings were saved, but application refresh failed. Reload settings before retrying."
+                ) from None
+            settings.set("discover", previous)
+            raise
+
+
+def _save_settings(settings_items, *, strict_metadata=False, on_metadata_persisted=None):
     configure_debug = False
     configure_captcha = False
     update_schedule = False
@@ -945,6 +1036,12 @@ def save_settings(settings_items):
     for key, value in settings_items:
 
         settings_keys = key.split('-')
+
+        if key in {'settings-discover-tmdb_access_token', 'settings-discover-locale'}:
+            if key.endswith('tmdb_access_token') and value[0] == '***':
+                continue
+            settings.discover[settings_keys[-1]] = value[0]
+            continue
 
         # Make sure that text based form values aren't passed as list
         if isinstance(value, list) and len(value) == 1 and settings_keys[-1] not in array_keys:
@@ -1256,7 +1353,16 @@ def save_settings(settings_items):
         decrypt_settings_in_place(settings)
         raise
     else:
-        write_config()
+        if strict_metadata:
+            try:
+                write_config(strict_metadata=True)
+            except Exception:
+                raise MetadataPersistenceError("Discover settings could not be saved. Try again.") from None
+        else:
+            write_config()
+
+        if on_metadata_persisted is not None:
+            on_metadata_persisted()
 
         # Set the configured state based on config.yaml file existence
         from .database import database, update, System

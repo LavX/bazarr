@@ -1,5 +1,10 @@
 interface Settings {
   general: Settings.General;
+  discover?: {
+    tmdb_configured: boolean;
+    metadata_revision: string;
+    locale: string;
+  };
   log: Settings.Log;
   proxy: Settings.Proxy;
   auth: Settings.Auth;

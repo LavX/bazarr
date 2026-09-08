@@ -13,11 +13,11 @@ The model:
   there is no separate one-shot script.
 
 Two boundaries:
-1. After dynaconf finishes loading config.yaml: walk USER_VISIBLE_SECRETS
-   and decrypt anything carrying the marker prefix. After this runs, the
+1. After dynaconf finishes loading config.yaml: walk USER_VISIBLE_SECRETS and
+   WRITE_ONLY_SECRETS and decrypt anything carrying the marker prefix. After this runs, the
    live settings object holds plaintext for every credential.
 2. Inside `write_config()`: snapshot settings as a dict, encrypt every
-   USER_VISIBLE_SECRETS in the snapshot, persist that. Only the
+   USER_VISIBLE_SECRETS and WRITE_ONLY_SECRETS in the snapshot, persist that. Only the
    snapshot is encrypted; the live settings object stays plaintext.
 """
 
@@ -31,7 +31,7 @@ from . import crypto as _crypto  # module reference so test patches on
                                   # _crypto.get_master_key apply uniformly
                                   # across this module's call sites
 from .crypto import decrypt_secret, encrypt_secret, is_encrypted
-from .registry import USER_VISIBLE_SECRET_LISTS, USER_VISIBLE_SECRETS
+from .registry import USER_VISIBLE_SECRET_LISTS, USER_VISIBLE_SECRETS, WRITE_ONLY_SECRETS
 
 
 # Plex legacy encryption fields. Pre-this-package, plex.apikey / plex.token
@@ -185,7 +185,7 @@ def has_plaintext_secrets_on_disk(settings_obj) -> bool:
     same source of truth that decrypt_settings_in_place / write_config
     operate on.
     """
-    for path in USER_VISIBLE_SECRETS:
+    for path in USER_VISIBLE_SECRETS | WRITE_ONLY_SECRETS:
         try:
             section, key = _split_path(path)
             section_obj = getattr(settings_obj, section, None)
@@ -229,7 +229,7 @@ def decrypt_settings_in_place(settings_obj) -> None:
     finishes. Re-running is harmless (decrypt_secret is idempotent on
     already-plaintext values).
     """
-    for path in USER_VISIBLE_SECRETS:
+    for path in USER_VISIBLE_SECRETS | WRITE_ONLY_SECRETS:
         try:
             section, key = _split_path(path)
             section_obj = getattr(settings_obj, section, None)
@@ -306,7 +306,7 @@ def encrypt_settings_dict(plaintext_dict: Dict[str, Any]) -> Dict[str, Any]:
     if not out["general"].get("secrets_encryption_key"):
         out["general"]["secrets_encryption_key"] = master_key
 
-    for path in USER_VISIBLE_SECRETS:
+    for path in USER_VISIBLE_SECRETS | WRITE_ONLY_SECRETS:
         try:
             section_key, attr, value = _read_section_key(out, path)
             if isinstance(value, str) and value:
@@ -343,7 +343,7 @@ def decrypt_settings_dict(encrypted_dict: Dict[str, Any]) -> Dict[str, Any]:
     overwrites the bad cipher with a fresh one.
     """
     out = deepcopy(encrypted_dict)
-    for path in USER_VISIBLE_SECRETS:
+    for path in USER_VISIBLE_SECRETS | WRITE_ONLY_SECRETS:
         try:
             section_key, attr, value = _read_section_key(out, path)
             if isinstance(value, str) and is_encrypted(value):

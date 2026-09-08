@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { showNotification } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { isAxiosError } from "axios";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { notification } from "@/modules/task";
@@ -60,13 +61,42 @@ export function useSystemJobs() {
   });
 }
 
-export function useSettingsMutation() {
+export function isMetadataFollowupError(error: unknown): boolean {
+  return (
+    isAxiosError(error) &&
+    error.response?.status === 503 &&
+    error.response.data?.code === "discover_settings_refresh_failed"
+  );
+}
+
+export function useSettingsMutation(retryingMetadataRefresh = false) {
   const client = useQueryClient();
+  const retireMetadata = (changes: LooseObject, retrying = false) => {
+    const names = Object.keys(changes);
+    const tmdbChanged =
+      retrying || names.some((key) => key.startsWith("settings-discover-"));
+    const omdbChanged = names.includes("settings-omdb-apikey");
+    if (!tmdbChanged && !omdbChanged) return;
+    const filters = {
+      queryKey: [QueryKeys.Discover, "metadata"],
+      predicate: (query: { queryKey: readonly unknown[] }) => {
+        const source = query.queryKey[6];
+        if (source === "local") return false;
+        if (source === "omdb") return omdbChanged;
+        if (source === "all" || query.queryKey[2] === "fallback-configuration")
+          return true;
+        return tmdbChanged;
+      },
+    };
+    void client.cancelQueries(filters);
+    client.removeQueries(filters);
+  };
   return useMutation({
     mutationKey: [QueryKeys.System, QueryKeys.Settings],
     mutationFn: (data: LooseObject) => api.system.updateSettings(data),
 
-    onSuccess: () => {
+    onSuccess: (_, changes) => {
+      retireMetadata(changes, retryingMetadataRefresh);
       void client.invalidateQueries({
         queryKey: [QueryKeys.System],
       });
@@ -101,7 +131,20 @@ export function useSettingsMutation() {
       );
     },
 
-    onError: () => {
+    onError: (error, changes) => {
+      if (isMetadataFollowupError(error) || retryingMetadataRefresh) {
+        retireMetadata(changes, retryingMetadataRefresh);
+        void client.invalidateQueries({
+          queryKey: [QueryKeys.System, QueryKeys.Settings],
+        });
+        showNotification(
+          notification.error(
+            "Settings saved; application refresh failed",
+            "Your saved settings are kept. Retry application refresh or leave with the saved settings.",
+          ),
+        );
+        return;
+      }
       showNotification(
         notification.error(
           "Save failed",
