@@ -229,6 +229,7 @@ jobs:
             tests/bazarr/test_sportarr_subtitle_file_download.py \
             tests/bazarr/test_sportarr_editor.py \
             tests/bazarr/test_sportarr_combine.py \
+            tests/bazarr/test_sportarr_webhook.py \
             tests/bazarr/test_embedded_subtitle_extraction.py \
             tests/subliminal_patch/test_subliminal_rebase.py \
             tests/subliminal_patch/test_embeddedsubtitles.py \

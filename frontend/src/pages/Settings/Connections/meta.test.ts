@@ -66,10 +66,12 @@ describe("buildArrInstanceCreateBody", () => {
 // --------------------------------------------------------------------------
 
 describe("buildWebhookUrl", () => {
-  it("does not offer a webhook URL for Sportarr", () => {
+  it("offers a webhook URL for Sportarr too", () => {
+    // It used to return null here because no /api/webhooks/sportarr route
+    // existed, so the card offered a Sportarr user nothing to paste.
     expect(
       buildWebhookUrl({ ...INSTANCE, kind: "sportarr" }, "https://host", ""),
-    ).toBeNull();
+    ).toBe("https://host/api/webhooks/sportarr/abc-123");
   });
 
   afterEach(() => {

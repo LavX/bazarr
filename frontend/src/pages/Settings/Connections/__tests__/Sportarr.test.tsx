@@ -107,8 +107,12 @@ describe("Sportarr Connections", () => {
     );
     expect(screen.getByRole("button", { name: "Test" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Edit" })).toBeEnabled();
-    expect(screen.queryByRole("button", { name: /webhook/i })).toBeNull();
-    expect(screen.queryByText(/webhook/i)).toBeNull();
+    // Sportarr now has an /api/webhooks/sportarr route of its own, so the
+    // card offers the same copyable URL Sonarr and Radarr cards do.
+    expect(
+      screen.getByRole("button", { name: "Copy webhook URL" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/\/api\/webhooks\/sportarr\//)).toBeInTheDocument();
     expect(
       screen.queryByRole("link", { name: /sports|movies|series/i }),
     ).toBeNull();

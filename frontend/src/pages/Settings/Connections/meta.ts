@@ -72,9 +72,6 @@ export function buildWebhookUrl(
   origin = window.location.origin,
   baseUrl = Environment.baseUrl,
 ): string | null {
-  if (instance.kind === "sportarr") {
-    return null;
-  }
   return `${origin}${baseUrl}/api/webhooks/${instance.kind}/${instance.stable_key}`;
 }
 
