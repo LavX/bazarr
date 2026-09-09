@@ -196,6 +196,39 @@ def sports_history(
     return row
 
 
+def _remove_superseded_sports_subtitle(path, previous_artifact, written_paths, is_upgrade):
+    """Delete the subtitle an upgrade replaced, when it lands under a new name.
+
+    Mirrors subtitles/download.py:166. previous_artifact alone only proved the
+    old file had not changed during the search; nothing ever removed it. An
+    upgrade that changed the format or the language-variant suffix therefore
+    left the lower-scored file on disk, where the next index picked it up as an
+    additional subtitle for the event.
+
+    A rewrite in place is not a replacement, so paths are compared by realpath
+    to avoid deleting the file that was just written through a symlink or a
+    differently-cased path.
+    """
+    if not (is_upgrade and previous_artifact and written_paths):
+        return
+    previous_path = previous_artifact[0]
+    if not previous_path:
+        return
+    from subtitles.tools.subsync_engines import subtitle_mutation
+
+    if os.path.normcase(os.path.realpath(previous_path)) in {
+        os.path.normcase(os.path.realpath(written)) for written in written_paths
+    }:
+        return
+    try:
+        with subtitle_mutation(path, previous_path):
+            os.remove(previous_path)
+    except OSError:
+        logging.exception(
+            "BAZARR unable to remove superseded sports subtitle: %s", previous_path
+        )
+
+
 def save_sports_subtitle(
     video,
     subtitle,
@@ -290,6 +323,9 @@ def save_sports_subtitle(
             )
             if not saved:
                 raise OSError("Could not save sports subtitles")
+            _remove_superseded_sports_subtitle(
+                path, previous_artifact, written_paths, is_upgrade
+            )
             state["published"] = True
             phase = "processing"
             state[phase] = "running"
