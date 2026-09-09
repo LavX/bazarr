@@ -102,6 +102,17 @@ def global_sports_settings():
     return resolved
 
 
+def read_sports_overrides(instance):
+    """The instance's stored override blob, with nothing merged in.
+
+    The API serves this rather than the resolved values, because the settings
+    UI reads a present key as "overridden" and an absent one as "inherited".
+    """
+    if instance.kind != 'sportarr':
+        raise ValueError('Sports settings require a Sportarr instance')
+    return validate_sports_settings(_options(instance.options).get('sports_settings'))
+
+
 def get_sports_settings(instance):
     if instance.kind != 'sportarr':
         raise ValueError('Sports settings require a Sportarr instance')

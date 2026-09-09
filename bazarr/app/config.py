@@ -833,6 +833,8 @@ array_keys = ['excluded_tags',
               'gemini_keys',
               'path_mappings',
               'path_mappings_movie',
+              'path_mappings_sports',
+              'excluded_sports',
               'remove_profile_tags',
               'language_equals',
               'blacklisted_languages',
@@ -1171,7 +1173,7 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             value = []
 
         # Handle path mappings settings since they are array in array
-        if settings_keys[-1] in ['path_mappings', 'path_mappings_movie']:
+        if settings_keys[-1] in ['path_mappings', 'path_mappings_movie', 'path_mappings_sports']:
             value = [x.split(',') for x in value if isinstance(x, str)]
 
         if value == 'true':

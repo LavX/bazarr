@@ -184,3 +184,61 @@ def test_non_sportarr_instance_is_rejected(schema_session):
     sonarr = repo.create("sonarr", "Main")
     with pytest.raises(ValueError):
         get_sports_settings(sonarr)
+
+
+def test_list_valued_sports_keys_are_registered_as_arrays():
+    """A list key missing from array_keys is unwrapped to a scalar on save.
+
+    save_settings turns a single-element form list into a bare value unless the
+    key is registered here. The validator then rejects it for not being a list,
+    which fails the WHOLE settings POST with a 406 and silently discards every
+    other change in the same save. Caught by clicking Save in a browser, not by
+    any unit test, so it is pinned here.
+    """
+    from app.config import array_keys
+
+    assert "excluded_sports" in array_keys
+    assert "path_mappings_sports" in array_keys
+    # excluded_tags and path_mappings are matched on the bare sub-key, so the
+    # sportarr section reuses the entries the sonarr/radarr sections added.
+    assert "excluded_tags" in array_keys
+    assert "path_mappings" in array_keys
+
+
+def test_sports_path_mappings_are_parsed_as_pairs():
+    """Path mapping values arrive as "remote,local" strings and must be split.
+
+    Without the key in that list the sports mappings persist as flat strings
+    instead of [remote, local] pairs, so read_sports_mappings sees nothing
+    usable and every mapped path silently fails to resolve.
+    """
+    import inspect
+    from app import config
+
+    source = inspect.getsource(config.save_settings)
+    marker = "'path_mappings', 'path_mappings_movie', 'path_mappings_sports'"
+    assert marker in source, "path_mappings_sports missing from the pair-splitting list"
+
+
+def test_api_serves_the_override_blob_not_the_resolved_values(schema_session):
+    """to_safe_dict must expose only what the instance actually overrides.
+
+    The settings UI renders one row per setting and reads a present key as
+    "this instance overrides the global". Handing it the resolved merge showed
+    all thirteen as overridden, and saving that form would have frozen them as
+    real overrides that no longer track Connections and Scheduler settings.
+    Caught by opening the instance modal in a browser.
+    """
+    from arr_instances.repository import ArrInstanceRepository, to_safe_dict
+    from sportarr.settings import GLOBAL_SOURCES, merge_sports_settings
+
+    repo = ArrInstanceRepository(schema_session)
+    instance = repo.create("sportarr", "Main", api_key="fixture-secret")
+
+    # Nothing overridden yet: the blob is empty, every row inherits.
+    assert to_safe_dict(instance)["sports_settings"] == {}
+
+    instance.options = merge_sports_settings(instance.options, {"only_monitored": True})
+    served = to_safe_dict(instance)["sports_settings"]
+    assert served == {"only_monitored": True}
+    assert len(served) < len(GLOBAL_SOURCES), "the resolved merge leaked into the API"

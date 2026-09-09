@@ -319,10 +319,15 @@ def to_safe_dict(row):
     ``api_key_set`` tells the UI whether a key exists so it can show a masked
     placeholder without ever receiving the secret.
     """
-    from sportarr.settings import get_sports_settings
+    # The OVERRIDE blob as stored, not the resolved values. The UI renders one
+    # row per setting and treats a present key as "this instance overrides the
+    # global", so handing it the resolved merge would show all thirteen as
+    # overridden and, on the next save, freeze them as real overrides that no
+    # longer track the Connections and Scheduler settings.
+    from sportarr.settings import read_sports_overrides
     from utilities.path_mappings import read_sports_mappings
     return {
-        **({"sports_settings": get_sports_settings(row),
+        **({"sports_settings": read_sports_overrides(row),
             "path_mappings": read_sports_mappings(row.path_mappings)} if row.kind == "sportarr" else {}),
         "id": row.id,
         "kind": row.kind,
