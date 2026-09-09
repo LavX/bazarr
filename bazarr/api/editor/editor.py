@@ -16,7 +16,8 @@ from flask import Response, request, send_file
 from flask_restx import Namespace, Resource
 
 from arr_instances.resolution import scoped
-from app.database import TableEpisodes, TableMovies, TableShows, database, select  # noqa: F401
+from app.database import (TableEpisodes, TableMovies, TableShows, TableSportsEvents,  # noqa: F401
+                          database, select)
 from app.get_args import args
 from utilities.path_mappings import path_mappings
 from api.subtitles.content import resolve_subtitle_path  # noqa: F401
@@ -87,6 +88,13 @@ def _payload_arr_instance_id(data):
     return _optional_int(value, 'arrInstanceId')
 
 
+# The media types the editor works on. One tuple rather than six hardcoded
+# pairs: the copies are what left sports rejected at five separate gates while
+# the sixth already understood it.
+MEDIA_TYPES = ('episode', 'movie', 'sports')
+MEDIA_TYPE_ERROR = 'mediaType must be one of "episode", "movie", "sports"'
+
+
 def _resolve_video_path(media_type, media_id, arr_instance_id=None):
     """Look up the video file path from the database and apply path mappings.
 
@@ -116,7 +124,24 @@ def _resolve_video_path(media_type, media_id, arr_instance_id=None):
             return 'Movie not found', 404
         return path_mappings.path_replace_movie(row.path)
 
-    return 'Invalid media type, must be "episode" or "movie"', 400
+    elif media_type == 'sports':
+        # media_id is the local event id, a primary key, so scoping is about
+        # enforcing ownership rather than resolving a collision. The row's own
+        # owner drives the mapping: sports mappings are per instance and the
+        # caller is allowed to omit arr_instance_id.
+        row = database.execute(
+            scoped(
+                select(TableSportsEvents.path, TableSportsEvents.arr_instance_id)
+                .where(TableSportsEvents.id == media_id),
+                TableSportsEvents.arr_instance_id,
+                arr_instance_id,
+            )
+        ).first()
+        if not row:
+            return 'Sports event not found', 404
+        return path_mappings.path_replace_instance(row.path, row.arr_instance_id, 'sports')
+
+    return MEDIA_TYPE_ERROR, 400
 
 
 def _get_ffmpeg():
@@ -229,8 +254,8 @@ def _validate_params():
     media_type = request.args.get('mediaType')
     media_id = request.args.get('mediaId')
 
-    if not media_type or media_type not in ('episode', 'movie'):
-        return 'mediaType must be "episode" or "movie"', 400
+    if not media_type or media_type not in MEDIA_TYPES:
+        return MEDIA_TYPE_ERROR, 400
     if not media_id:
         return 'mediaId is required', 400
     try:
@@ -245,8 +270,8 @@ def _resolve_or_abort():
     """Validate params and resolve video path. Returns (video_path,) or a Flask error tuple."""
     params = _validate_params()
     # _validate_params returns (str, int) on success or (error_msg, status_code) on failure.
-    # On success media_type is "episode" or "movie", on error it's a longer message.
-    if isinstance(params[0], str) and params[0] not in ('episode', 'movie'):
+    # On success media_type is one of MEDIA_TYPES, on error it's a longer message.
+    if isinstance(params[0], str) and params[0] not in MEDIA_TYPES:
         return params
 
     media_type, media_id = params
@@ -597,8 +622,8 @@ class EditorHls(Resource):
         ffmpeg writes them. hls.js handles segment fetching, buffer management,
         and seek-back within the cached portion.
         """
-        if media_type not in ('episode', 'movie'):
-            return 'mediaType must be "episode" or "movie"', 400
+        if media_type not in MEDIA_TYPES:
+            return MEDIA_TYPE_ERROR, 400
         if not HLS_FILENAME_RE.match(filename):
             return 'Invalid HLS filename', 400
         if audio_track < 0:
@@ -938,7 +963,7 @@ class EditorSubtitles(Resource):
         """Return available subtitle files for a media item."""
         import ast
         params = _validate_params()
-        if isinstance(params[0], str) and params[0] not in ('episode', 'movie'):
+        if isinstance(params[0], str) and params[0] not in MEDIA_TYPES:
             return params
 
         media_type, media_id = params
@@ -951,6 +976,14 @@ class EditorSubtitles(Resource):
                 scoped(
                     select(TableEpisodes.subtitles).where(TableEpisodes.sonarrEpisodeId == media_id),
                     TableEpisodes.arr_instance_id,
+                    arr_instance_id,
+                )
+            ).first()
+        elif media_type == 'sports':
+            row = database.execute(
+                scoped(
+                    select(TableSportsEvents.subtitles).where(TableSportsEvents.id == media_id),
+                    TableSportsEvents.arr_instance_id,
                     arr_instance_id,
                 )
             ).first()
@@ -1125,8 +1158,8 @@ class EditorSync(Resource):
         if vad and vad not in ('subs_then_webrtc', 'subs_then_auditok', 'webrtc', 'auditok'):
             return 'Invalid vad option', 400
 
-        if not media_type or media_type not in ('episode', 'movie'):
-            return 'mediaType must be "episode" or "movie"', 400
+        if not media_type or media_type not in MEDIA_TYPES:
+            return MEDIA_TYPE_ERROR, 400
         if not media_id:
             return 'mediaId is required', 400
         if not content:

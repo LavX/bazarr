@@ -244,7 +244,7 @@ class SubtitlesApi extends BaseApi {
     etag?: string,
     arrInstanceId?: number,
   ) {
-    const base = mediaType === "episode" ? "episodes" : "movies";
+    const base = SUBTITLE_ROUTE_BASE[mediaType] ?? "movies";
     const url = `/${base}/${mediaId}/subtitles/${encodeURIComponent(language)}/content`;
     const headers: Record<string, string> = {};
     if (etag) {
@@ -265,7 +265,7 @@ class SubtitlesApi extends BaseApi {
     sourceLanguage: string,
     arrInstanceId?: number,
   ) {
-    const base = mediaType === "episode" ? "episodes" : "movies";
+    const base = SUBTITLE_ROUTE_BASE[mediaType] ?? "movies";
     const url = `/${base}/${mediaId}/subtitles/${encodeURIComponent(targetLanguage)}/promote`;
     const response = await client.axios.post<{
       sourceLanguage: string;
@@ -281,7 +281,7 @@ class SubtitlesApi extends BaseApi {
     language: string,
     arrInstanceId?: number,
   ): Promise<SubtitleSyncStatus> {
-    const base = mediaType === "episode" ? "episodes" : "movies";
+    const base = SUBTITLE_ROUTE_BASE[mediaType] ?? "movies";
     const url = `/${base}/${mediaId}/subtitles/${encodeURIComponent(language)}/sync-status`;
     const response = await client.axios.get<SubtitleSyncStatus>(url, {
       params: { arr_instance_id: arrInstanceId },
@@ -299,8 +299,11 @@ class SubtitlesApi extends BaseApi {
     hi: boolean,
     arrInstanceId?: number,
   ) {
-    const base = mediaType === "episode" ? "episodes" : "movies";
-    const url = `/${base}/${mediaId}/subtitles`;
+    const base = SUBTITLE_ROUTE_BASE[mediaType] ?? "movies";
+    // /sports/events/<id>/subtitles is the indexer's own POST, so creating a
+    // subtitle there needs its own path rather than a second handler on that one.
+    const suffix = mediaType === "sports" ? "subtitles/create" : "subtitles";
+    const url = `/${base}/${mediaId}/${suffix}`;
     const response = await client.axios.post<{
       path: string;
       language: string;

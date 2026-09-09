@@ -13,8 +13,8 @@ from flask_restx import Resource, Namespace
 from werkzeug.utils import secure_filename
 
 from app.config import settings
-from app.database import (TableEpisodes, TableHistory, TableHistoryMovie, TableMovies, TableShows,
-                          TableSportsEvents, TableSportsLeagues, database, select)
+from app.database import (TableEpisodes, TableHistory, TableHistoryMovie, TableHistorySports, TableMovies,
+                          TableShows, TableSportsEvents, TableSportsLeagues, database, select)
 from app.event_handler import event_stream
 from app.jobs_queue import jobs_queue
 from languages.get_languages import language_from_alpha2
@@ -131,6 +131,20 @@ FORMAT_MAP = {
 }
 
 FORMAT_TO_EXT = {v: k for k, v in FORMAT_MAP.items()}
+
+
+def _subtitle_filename(video_name, suffix, ext):
+    """Compose <video name>.<language suffix><ext>.
+
+    secure_filename over the whole composed name rewrote every space in the
+    video's own filename to an underscore. External subtitles are matched by
+    exact basename, so the created file no longer belonged to its video: the
+    indexer never saw it, and the on-disk fallback probe looked for a name that
+    was not there. Only the request-derived half is sanitised; video_name comes
+    off the media row, and every caller still anchors the composed path under a
+    trusted directory.
+    """
+    return f'{video_name}.{secure_filename(f"{suffix}{ext}")}'
 
 
 def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=None):
@@ -339,7 +353,7 @@ def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=N
             suffix += '.forced'
 
         for ext in ['.srt', '.ass', '.ssa', '.vtt', '.sub', '.smi', '.mpl', '.txt']:
-            filename = secure_filename(f'{video_name}.{suffix}{ext}')
+            filename = _subtitle_filename(video_name, suffix, ext)
             candidate = os.path.normpath(os.path.join(video_dir_real, filename))
             if not (candidate == video_dir_real or
                     candidate.startswith(video_dir_real + os.sep)):
@@ -355,7 +369,7 @@ def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=N
             if target_folder and target_folder != video_dir:
                 target_folder_real = os.path.realpath(target_folder)
                 for ext in ['.srt', '.ass', '.ssa', '.vtt', '.sub', '.smi', '.mpl', '.txt']:
-                    filename = secure_filename(f'{video_name}.{suffix}{ext}')
+                    filename = _subtitle_filename(video_name, suffix, ext)
                     candidate = os.path.normpath(os.path.join(target_folder_real, filename))
                     if not (candidate == target_folder_real or
                             candidate.startswith(target_folder_real + os.sep)):
@@ -583,16 +597,36 @@ def _refresh_media_subtitles(media_type, media_id, metadata):
     elif media_type == 'movie' and media_path:
         store_subtitles_movie(media_path, path_mappings.path_replace_instance(media_path, arr_instance_id, 'movie'), use_cache=False, arr_instance_id=arr_instance_id)
         event_stream(type='movie', payload=metadata.get('mediaId', media_id))
+    elif media_type == 'sports':
+        # The sports indexer takes the event id and re-reads the row itself,
+        # rather than a pair of paths, so there is no media_path to require.
+        from subtitles.indexer.sports import store_subtitles_sports
+        store_subtitles_sports(metadata.get('episodeId', media_id), arr_instance_id)
+        event_stream(type='sports', action='update', payload=metadata.get('episodeId', media_id))
 
 
-def _history_path_for_local_subtitle(media_type, subtitle_path):
+def _history_path_for_local_subtitle(media_type, subtitle_path, arr_instance_id=None):
+    if media_type == 'sports':
+        return path_mappings.path_replace_reverse_instance(subtitle_path, arr_instance_id, 'sports')
     if media_type == 'episode':
         return path_mappings.path_replace_reverse(subtitle_path)
     return path_mappings.path_replace_reverse_movie(subtitle_path)
 
 
 def _latest_sync_history_for_path(media_type, media_id, subtitle_path, arr_instance_id=None):
-    history_path = _history_path_for_local_subtitle(media_type, subtitle_path)
+    history_path = _history_path_for_local_subtitle(media_type, subtitle_path, arr_instance_id)
+    if media_type == 'sports':
+        query = (
+            select(TableHistorySports.timestamp)
+            .where(TableHistorySports.event_id == media_id)
+            .where(TableHistorySports.action == 5)
+            .where(TableHistorySports.subtitles_path == history_path)
+            .order_by(TableHistorySports.timestamp.desc())
+            .limit(1)
+        )
+        if arr_instance_id is not None:
+            query = query.where(TableHistorySports.arr_instance_id == arr_instance_id)
+        return database.execute(query).first()
     if media_type == 'episode':
         query = (
             select(TableHistory.timestamp)
@@ -653,7 +687,7 @@ def get_subtitle_sync_status(media_type, media_id, language_code, arr_instance_i
     if isinstance(result[1], int):
         return result[0], result[1]
 
-    subtitle_path, _ = result
+    subtitle_path, metadata = result
     try:
         stat = os.stat(subtitle_path)
     except FileNotFoundError:
@@ -663,7 +697,10 @@ def get_subtitle_sync_status(media_type, media_id, language_code, arr_instance_i
         media_type,
         media_id,
         subtitle_path,
-        arr_instance_id=arr_instance_id,
+        # The row's own owner when the caller did not name one. Sports path
+        # mappings are per instance, so reversing the path without an owner is
+        # not merely unscoped, it cannot be done at all.
+        arr_instance_id=arr_instance_id or metadata.get('arrInstanceId'),
     )
     last_sync_timestamp = latest_sync.timestamp if latest_sync else None
     last_modified = datetime.fromtimestamp(stat.st_mtime)
@@ -735,6 +772,24 @@ def _log_promoted_sync_history(media_type, media_id, target_language, source_lan
             result=result,
             arr_instance_id=metadata.get('arrInstanceId'),
         )
+    elif media_type == 'sports':
+        from sportarr.history import sports_history_log
+        arr_instance_id = metadata.get('arrInstanceId')
+        result = ProcessSubtitlesResult(
+            message=message,
+            reversed_path=path_mappings.path_replace_reverse_instance(media_path, arr_instance_id, 'sports'),
+            downloaded_language_code2=_language_base(target_language),
+            downloaded_provider=None,
+            score=None,
+            forced=_is_forced_language(target_language),
+            subtitle_id=None,
+            reversed_subtitles_path=path_mappings.path_replace_reverse_instance(
+                target_path, arr_instance_id, 'sports'),
+            hearing_impaired=_is_hi_language(target_language),
+        )
+        # The event id, not an upstream one: sports history is keyed on the
+        # local row the way every other sports table is.
+        sports_history_log(5, metadata.get('episodeId', media_id), arr_instance_id, result)
 
 
 def _get_media_metadata(media_type, media_id, arr_instance_id=None):
@@ -789,6 +844,30 @@ def _get_media_metadata(media_type, media_id, arr_instance_id=None):
                 'mediaId': row.id,
                 'mediaUpstreamId': row.radarrId,
                 'arrInstanceId': row.arr_instance_id,
+            }
+    elif media_type == 'sports':
+        query = (
+            select(TableSportsEvents.id, TableSportsEvents.league_id, TableSportsEvents.arr_instance_id,
+                   TableSportsEvents.path, TableSportsEvents.sportarrEventId, TableSportsEvents.title)
+            .where(TableSportsEvents.id == media_id)
+        )
+        if arr_instance_id is not None:
+            query = query.where(TableSportsEvents.arr_instance_id == arr_instance_id)
+        row = database.execute(query).first()
+        if row:
+            league_row = database.execute(
+                select(TableSportsLeagues.id, TableSportsLeagues.title, TableSportsLeagues.sportarrLeagueId)
+                .where(TableSportsLeagues.id == row.league_id,
+                       TableSportsLeagues.arr_instance_id == row.arr_instance_id)).first()
+            return {
+                'mediaTitle': league_row.title if league_row else None,
+                'mediaId': league_row.id if league_row else row.league_id,
+                'mediaUpstreamId': league_row.sportarrLeagueId if league_row else None,
+                'episodeId': row.id,
+                'episodeUpstreamId': row.sportarrEventId,
+                'arrInstanceId': row.arr_instance_id,
+                'episodeTitle': row.title,
+                'mediaPath': row.path,
             }
     return None
 
@@ -1113,6 +1192,14 @@ def _create_subtitle(media_type, media_id, arr_instance_id=None):
         if arr_instance_id is not None:
             query = query.where(TableMovies.arr_instance_id == arr_instance_id)
         row = database.execute(query).first()
+    elif media_type == 'sports':
+        query = (
+            select(TableSportsEvents.id, TableSportsEvents.path, TableSportsEvents.arr_instance_id)
+            .where(TableSportsEvents.id == media_id)
+        )
+        if arr_instance_id is not None:
+            query = query.where(TableSportsEvents.arr_instance_id == arr_instance_id)
+        row = database.execute(query).first()
     else:
         return 'Invalid media type', 400
 
@@ -1121,6 +1208,9 @@ def _create_subtitle(media_type, media_id, arr_instance_id=None):
 
     # Apply the owning instance's per-instance path_mappings when configured
     # (#156); falls back to the global mapping when the instance has none.
+    # Always the row's own owner, never the request's: sports mappings are per
+    # instance, so a caller that omitted arr_instance_id would otherwise get no
+    # mapping at all, and every re-index below now gets the correct owner too.
     arr_instance_id = row.arr_instance_id
     video_path = path_mappings.path_replace_instance(row.path, arr_instance_id, media_type)
 
@@ -1136,7 +1226,7 @@ def _create_subtitle(media_type, media_id, arr_instance_id=None):
         suffix += '.hi'
     elif forced:
         suffix += '.forced'
-    subtitle_filename = secure_filename(f'{video_name}.{suffix}{ext}')
+    subtitle_filename = _subtitle_filename(video_name, suffix, ext)
 
     # Determine target directory
     target_folder = get_target_folder(video_path)
@@ -1180,6 +1270,10 @@ def _create_subtitle(media_type, media_id, arr_instance_id=None):
     if media_type == 'episode':
         store_subtitles(row.path, video_path, use_cache=False, arr_instance_id=arr_instance_id)
         event_stream(type='episode', payload=row.id)
+    elif media_type == 'sports':
+        from subtitles.indexer.sports import store_subtitles_sports
+        store_subtitles_sports(row.id, arr_instance_id)
+        event_stream(type='sports', action='update', payload=row.id)
     else:
         store_subtitles_movie(row.path, video_path, use_cache=False, arr_instance_id=arr_instance_id)
         event_stream(type='movie', payload=row.id)
@@ -1206,3 +1300,44 @@ class MovieSubtitleCreate(Resource):
     @authenticate
     def post(self, radarrId):
         return _create_subtitle('movie', radarrId, arr_instance_id=_request_arr_instance_id())
+
+
+@api_ns_subtitle_content.route('sports/events/<int:eventId>/subtitles/<language>/content')
+class SportsEventSubtitleContent(Resource):
+    @authenticate
+    def get(self, eventId, language):
+        return _get_subtitle_content('sports', eventId, language,
+                                     arr_instance_id=_request_arr_instance_id())
+
+    @authenticate
+    def put(self, eventId, language):
+        return _save_subtitle_content('sports', eventId, language,
+                                      arr_instance_id=_request_arr_instance_id())
+
+
+@api_ns_subtitle_content.route('sports/events/<int:eventId>/subtitles/<language>/promote')
+class SportsEventSubtitlePromote(Resource):
+    @authenticate
+    def post(self, eventId, language):
+        return _promote_sync_subtitle_content('sports', eventId, language,
+                                              arr_instance_id=_request_arr_instance_id())
+
+
+@api_ns_subtitle_content.route('sports/events/<int:eventId>/subtitles/<language>/sync-status')
+class SportsEventSubtitleSyncStatus(Resource):
+    @authenticate
+    def get(self, eventId, language):
+        response, status_code = get_subtitle_sync_status('sports', eventId, language,
+                                                         arr_instance_id=_request_arr_instance_id())
+        if status_code != 200:
+            return response, status_code
+        return jsonify(response)
+
+
+# Not 'sports/events/<id>/subtitles': that path is the indexer's POST, and a
+# second Resource on it silently shadows the first.
+@api_ns_subtitle_content.route('sports/events/<int:eventId>/subtitles/create')
+class SportsEventSubtitleCreate(Resource):
+    @authenticate
+    def post(self, eventId):
+        return _create_subtitle('sports', eventId, arr_instance_id=_request_arr_instance_id())

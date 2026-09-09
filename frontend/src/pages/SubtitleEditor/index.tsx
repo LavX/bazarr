@@ -13,6 +13,7 @@ import {
 } from "@mantine/core";
 import { useSubtitleContent } from "@/apis/hooks/subtitles";
 import CueTable from "./CueTable";
+import { editorBreadcrumb } from "./editorScope";
 import { getParser } from "./parsers";
 import type { ParseResult, SubtitleFormat } from "./types";
 
@@ -79,14 +80,11 @@ export default function SubtitleEditor() {
     return null;
   }
 
-  const isSeries = mediaType === "episode" || mediaType === "series";
-  const listPath = isSeries ? "/series" : "/movies";
-  const listLabel = isSeries ? "Series" : "Movies";
-  const detailPath = data.mediaId
-    ? isSeries
-      ? `/series/${data.mediaId}`
-      : `/movies/${data.mediaId}`
-    : undefined;
+  const { listPath, listLabel, detailPath } = editorBreadcrumb(
+    mediaType,
+    data.mediaId,
+    Number.isNaN(arrInstanceId) ? undefined : arrInstanceId,
+  );
 
   return (
     <Stack gap="sm" style={{ height: "100%", padding: "0" }}>
