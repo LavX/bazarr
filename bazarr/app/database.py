@@ -1126,6 +1126,16 @@ def migrate_db(app):
     except Exception:
         logging.exception("Scalar-config reconcile from default instances failed; continuing startup")
 
+    # Sportarr's master toggle is new: before it, the Sports pages were derived
+    # from "any enabled Sportarr instance exists". Turn it on once for an
+    # install that already had a working Sportarr server, so sports do not
+    # silently vanish on upgrade. Guarded so a hiccup never blocks startup.
+    try:
+        from arr_instances.service import reconcile_sportarr_enable_flag
+        reconcile_sportarr_enable_flag(database)
+    except Exception:
+        logging.exception("Sportarr enable-flag reconcile failed; continuing startup")
+
     # And heal installs that deleted a language profile before deletion started
     # clearing what pointed at it. A dangling reference makes every save of that
     # instance fail validation with a 400, and it would silently adopt an

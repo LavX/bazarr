@@ -16,7 +16,14 @@ from subtitles.indexer.sports import sports_full_scan_subtitles
 
 
 def configure_sports_jobs(aps_scheduler, session):
-    instances = ArrInstanceRepository(session).list("sportarr", enabled_only=True)
+    # The master toggle mirrors __sonarr_update_task: off means no sports jobs
+    # at all. An empty instance list is the existing "nothing to sync" path, so
+    # the cancellation below already removes anything previously registered,
+    # including the event-stream job.
+    if settings.general.use_sportarr:
+        instances = ArrInstanceRepository(session).list("sportarr", enabled_only=True)
+    else:
+        instances = []
     cancel_disabled_jobs({instance.id for instance in instances})
     prefixes = (
         "update_sports_",

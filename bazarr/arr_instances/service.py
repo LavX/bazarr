@@ -595,3 +595,32 @@ def apply_default_profile(session, instance_id):
                  profile, len(upstream_ids), row.kind, instance_id)
     return {"updated": len(upstream_ids), "profileId": profile, "kind": row.kind,
             "upstream_ids": upstream_ids}, 200
+
+
+def reconcile_sportarr_enable_flag(session):
+    """Turn on ``general.use_sportarr`` once, for an install that already had a
+    working Sportarr server before the flag existed.
+
+    Before the master toggle, whether the Sports pages existed was derived from
+    "any enabled Sportarr instance exists". The flag defaults to False, so
+    without this an upgrading install boots with sports silently gone.
+
+    "Has the operator ever set this?" is not a question dynaconf can answer: a
+    must_exist validator writes its default at first load, so the key looks
+    explicitly set from the moment it exists. Hence the separate marker. It
+    burns on the first run whatever the outcome, so an operator who later turns
+    the flag off keeps it off, and an instance added afterwards does not
+    retroactively flip a flag nobody asked for.
+
+    Returns True when it turned the flag on. Best-effort; the caller guards it.
+    """
+    from app import config
+
+    if config.settings.sportarr.enable_reconciled:
+        return False
+    enabled_any = bool(ArrInstanceRepository(session).list('sportarr', enabled_only=True))
+    if enabled_any:
+        config.settings.general.use_sportarr = True
+    config.settings.sportarr.enable_reconciled = True
+    config.write_config()
+    return enabled_any
