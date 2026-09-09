@@ -244,3 +244,46 @@ def test_upgrade_runs_once_per_owner_not_once_per_row():
 
     assert [c.kwargs['arr_instance_id'] for c in upgrade.call_args_list] == [42, 43]
     assert result['queued'] == 2
+
+
+def test_a_disabled_owner_is_left_out_of_the_library_sweep(sports_library, schema_session):
+    """The scheduled Mass Sync runs with no items, so it sweeps everything.
+
+    A sports path mapping has no global fallback: resolving one against a
+    disabled owner raises, and that exception would come out of the collector
+    and take the whole scheduled run with it, not just the sports part.
+    """
+    from app.database import TableArrInstances
+    from subtitles.mass_operations import (_collect_sports,
+                                           _sports_event_ids_for_leagues)
+
+    schema_session.get(TableArrInstances, 42).enabled = 0
+    schema_session.commit()
+
+    items, skipped = _collect_sports()
+    assert items == []
+    assert skipped == 0
+    assert _sports_event_ids_for_leagues([51], {}) == {}
+
+
+def test_the_library_sweep_is_gated_on_the_master_toggle():
+    """Same shape as the two native media types, which gate on use_sonarr and
+    use_radarr, so turning Sportarr off stops the scheduled sync touching it."""
+    import inspect
+
+    from subtitles import mass_operations
+
+    source = inspect.getsource(mass_operations._collect_subtitle_items)
+    assert "(items is None and settings.general.use_sportarr) or sports_ids" in source
+
+
+def test_the_scheduled_mass_sync_runs_the_shared_entry_point():
+    """It calls mass_batch_operation with no items, which is library mode, so
+    the collector's own gate is what decides whether sports take part."""
+    import inspect
+
+    from app import scheduler
+
+    source = inspect.getsource(scheduler.Scheduler._Scheduler__mass_sync_task)
+    assert "mass_batch_operation" in source
+    assert "id='mass_sync_subtitles'" in source

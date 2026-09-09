@@ -5,8 +5,8 @@ import logging
 import os
 
 from app.config import settings
-from app.database import (TableEpisodes, TableMovies, TableHistory, TableHistoryMovie, TableHistorySports,
-                          TableShows, TableSportsEvents, database, select)
+from app.database import (TableArrInstances, TableEpisodes, TableMovies, TableHistory, TableHistoryMovie,
+                          TableHistorySports, TableShows, TableSportsEvents, database, select)
 from app.jobs_queue import jobs_queue
 from subtitles.sync import sync_subtitles
 from subtitles.tools.subsync_engines import is_sync_engine_output
@@ -240,7 +240,9 @@ def _sports_event_ids_for_leagues(league_ids, league_instance):
     rows = database.execute(
         select(TableSportsEvents.id, TableSportsEvents.league_id,
                TableSportsEvents.arr_instance_id)
-        .where(TableSportsEvents.league_id.in_(league_ids))
+        .join(TableArrInstances, TableSportsEvents.arr_instance_id == TableArrInstances.id)
+        .where(TableSportsEvents.league_id.in_(league_ids),
+               TableArrInstances.kind == 'sportarr', TableArrInstances.enabled == 1)
     ).all()
     expanded = {}
     for row in rows:
@@ -747,11 +749,19 @@ def _collect_sports(event_ids=None, action='sync', force_resync=False,
     An in-container track is skipped rather than half-handled.
     """
     sports_instance = sports_instance or {}
-    query = select(
-        TableSportsEvents.id,
-        TableSportsEvents.arr_instance_id,
-        TableSportsEvents.path,
-        TableSportsEvents.subtitles,
+    # Joined to the owner and filtered to enabled Sportarr instances. A sports
+    # path mapping has no global fallback: resolving one against a disabled
+    # owner raises, and in library mode that exception would come out of the
+    # collector and take the whole scheduled mass sync with it.
+    query = (
+        select(
+            TableSportsEvents.id,
+            TableSportsEvents.arr_instance_id,
+            TableSportsEvents.path,
+            TableSportsEvents.subtitles,
+        )
+        .join(TableArrInstances, TableSportsEvents.arr_instance_id == TableArrInstances.id)
+        .where(TableArrInstances.kind == 'sportarr', TableArrInstances.enabled == 1)
     )
     if event_ids:
         query = query.where(TableSportsEvents.id.in_(event_ids))
