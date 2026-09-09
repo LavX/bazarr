@@ -8,25 +8,35 @@ where an operator normally works, and the instance blob is an optional override.
 
 
 def test_global_defaults_exist_with_expected_values():
-    from app.config import settings
+    # Asserted against the DECLARED validator defaults, not the live settings
+    # object. dynaconf attributes do not round-trip through monkeypatch, so a
+    # sibling test that flips a flag (the enable reconcile does exactly that)
+    # leaks into the live values and made this order-dependent. The declared
+    # schema is what this test actually means, and nothing can mutate it.
+    from app.config import validators
 
-    assert settings.general.use_sportarr is False
-    assert settings.general.minimum_score_sports == 70
-    assert settings.general.wanted_search_frequency_sports == 6
-    assert list(settings.general.path_mappings_sports) == []
+    declared = {}
+    for validator in validators:
+        for name in getattr(validator, "names", ()):
+            declared[name] = validator.default
 
-    assert settings.sportarr.sports_sync == 60
-    assert settings.sportarr.full_update == "Daily"
-    assert settings.sportarr.full_update_day == 6
-    assert settings.sportarr.full_update_hour == 4
-    assert settings.sportarr.only_monitored is False
-    assert settings.sportarr.sync_only_monitored_leagues is False
-    assert settings.sportarr.sync_only_monitored_events is False
-    assert list(settings.sportarr.excluded_tags) == []
-    assert list(settings.sportarr.excluded_sports) == []
-    assert settings.sportarr.search_on_sync is True
-    assert settings.sportarr.use_ffprobe_cache is True
-    assert settings.sportarr.enable_reconciled is False
+    assert declared["general.use_sportarr"] is False
+    assert declared["general.minimum_score_sports"] == 70
+    assert declared["general.wanted_search_frequency_sports"] == 6
+    assert declared["general.path_mappings_sports"] == []
+
+    assert declared["sportarr.sports_sync"] == 60
+    assert declared["sportarr.full_update"] == "Daily"
+    assert declared["sportarr.full_update_day"] == 6
+    assert declared["sportarr.full_update_hour"] == 4
+    assert declared["sportarr.only_monitored"] is False
+    assert declared["sportarr.sync_only_monitored_leagues"] is False
+    assert declared["sportarr.sync_only_monitored_events"] is False
+    assert declared["sportarr.excluded_tags"] == []
+    assert declared["sportarr.excluded_sports"] == []
+    assert declared["sportarr.search_on_sync"] is True
+    assert declared["sportarr.use_ffprobe_cache"] is True
+    assert declared["sportarr.enable_reconciled"] is False
 
 
 def test_no_connection_scalars_are_declared():
