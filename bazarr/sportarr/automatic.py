@@ -10,6 +10,7 @@ from sqlalchemy import select
 from subliminal_patch.core_persistent import download_best_subtitles
 
 from app.config import settings
+from app.jobs_queue import JobCancelled
 from app.database import (
     database,
     get_audio_profile_languages,
@@ -183,6 +184,24 @@ def search_event(
                 row.failedAttempts,
             ):
                 continue
+        # Translate before searching, the way the series and movies wanted
+        # scans do. Sports only ever translated from a fresh download, so an
+        # event whose source subtitle came off disk never got its translation
+        # and was re-searched by every wanted scan forever.
+        if language is None:
+            from sportarr.profile_hooks import translate_from_existing
+
+            try:
+                if translate_from_existing(context, code, cancel=cancel):
+                    downloads += 1
+                    continue
+            except JobCancelled:
+                raise
+            except Exception:
+                logging.exception(
+                    "BAZARR sports auto-translate failed for %s, falling back to "
+                    "a provider search", code,
+                )
         language_set = _get_language_obj(
             [
                 (

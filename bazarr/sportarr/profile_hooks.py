@@ -27,6 +27,7 @@ from sportarr.subtitles import (
     sports_history,
 )
 from subtitles.language_profiles import profile_item_language_code
+from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
 from subtitles.tools.subsync_engines import (
     capture_subtitle_versions,
     subtitle_write_locks,
@@ -283,6 +284,144 @@ def queue_translations(operation, source, downloaded_lang, score, forced, cancel
             arr_instance_id=operation.context.arr_instance_id,
             sports_operation=bound,
         )
+
+
+def translate_from_existing(context, target_code, cancel=None):
+    """Translate a missing sports language from a subtitle already on disk.
+
+    The series and movies wanted scans do this: when the profile says a
+    language is translated from another and that source already exists, they
+    translate instead of searching providers. Sports only ever translated from
+    a FRESH download (queue_translations, via trigger_saved), so an event whose
+    source subtitle was indexed from disk rather than downloaded by Bazarr
+    never got its translation and stayed missing forever, re-searched by every
+    subsequent wanted scan.
+
+    Returns True when a translation was queued, in which case the caller must
+    not fall through to a provider search for this language.
+    """
+    from subtitles.tools.translate.main import translate_subtitles_file
+    from subtitles.wanted.utils import _find_existing_subtitle_path
+
+    operation = capture_profile_operation(context, candidate_signature(context), cancel=cancel)
+    if not operation.profile:
+        return False
+
+    item = next(
+        (
+            entry
+            for entry in operation.profile["items"]
+            if profile_item_language_code(entry) == target_code
+            and entry.get("translate_from")
+            and entry.get("translate_from") != entry["language"]
+        ),
+        None,
+    )
+    if item is None:
+        return False
+
+    source_lang = item["translate_from"]
+    row = database.get(TableSportsEvents, context.event_id, populate_existing=True)
+    source_srt = _find_existing_subtitle_path(
+        row.subtitles,
+        source_lang,
+        path_replace_fn=lambda path: apply_sports_mapping(
+            path, read_sports_mappings(_instance_mappings(context))
+        ),
+    )
+    if not source_srt:
+        return False
+
+    if _source_score_below_threshold(context, source_lang):
+        return False
+    if _already_translated_on_disk(context, target_code):
+        return False
+
+    hi, forced = item.get("hi") == "True", item.get("forced") == "True"
+    destination = translation_destination(
+        context.mapped_path, item["language"], forced, hi
+    )
+    bound = operation.bind(
+        (source_srt,),
+        destination,
+        target=target_code,
+        source_language=source_lang,
+        source_score=None,
+        cancel=cancel,
+    )
+    translate_subtitles_file(
+        video_path=context.mapped_path,
+        source_srt_file=source_srt,
+        from_lang=source_lang,
+        to_lang=item["language"],
+        forced=forced,
+        hi=hi,
+        media_type="sports",
+        sonarr_series_id=None,
+        sonarr_episode_id=None,
+        radarr_id=None,
+        metadata=None,
+        arr_instance_id=context.arr_instance_id,
+        sports_operation=bound,
+    )
+    return True
+
+
+def _instance_mappings(context):
+    from sportarr.sync.leagues import require_sportarr
+
+    return require_sportarr(database, context.arr_instance_id).path_mappings
+
+
+def _source_score_below_threshold(context, source_lang):
+    """Mirror of the series guard: too poor a source makes a poor translation.
+
+    No history row means the subtitle was placed by hand or predates history
+    tracking. The series path treats that as exactly at threshold and proceeds
+    rather than silently falling back to a provider search, so this does too.
+    """
+    from app.database import TableHistorySports
+
+    record = database.execute(
+        select(TableHistorySports.score)
+        .where(TableHistorySports.sportsEventId == context.event_id)
+        .where(TableHistorySports.arr_instance_id == context.arr_instance_id)
+        .where(TableHistorySports.language.like(f"{source_lang}%"))
+        .where(TableHistorySports.score.is_not(None))
+        .order_by(TableHistorySports.timestamp.desc())
+        .limit(1)
+    ).first()
+    if not record or not record.score:
+        return False
+    from subtitles.utils import MAX_SCORES
+
+    pct = round((record.score / MAX_SCORES["movie"]) * 100, 1)
+    return pct < settings.translator.min_source_score
+
+
+def _already_translated_on_disk(context, target_code):
+    """A completed translation blocks re-queuing only while its file survives.
+
+    Checking the history row alone would suppress the replacement forever if
+    the translated subtitle was later deleted or moved.
+    """
+    from app.database import TableHistorySports
+
+    record = database.execute(
+        select(TableHistorySports.subtitles_path)
+        .where(TableHistorySports.sportsEventId == context.event_id)
+        .where(TableHistorySports.arr_instance_id == context.arr_instance_id)
+        .where(TableHistorySports.language == target_code)
+        .where(TableHistorySports.action == 6)
+        .order_by(TableHistorySports.timestamp.desc())
+        .limit(1)
+    ).first()
+    if not record or not record.subtitles_path:
+        return False
+    local = apply_sports_mapping(
+        record.subtitles_path, read_sports_mappings(_instance_mappings(context))
+    )
+    return bool(local and os.path.exists(local))
 
 
 def sports_write_kwargs(translator, job_id):
