@@ -30,13 +30,16 @@ export function useSportsAvailability() {
 // filled here rather than by widening the shared type for one caller.
 export type SportsLeagueRow = Omit<
   SportsLeague,
-  "audio_language" | "path" | "poster" | "fanart" | "overview"
+  "audio_language" | "tags" | "path" | "poster" | "fanart" | "overview"
 > &
   Item.Base;
 
 export function toSportsLeagueRow(league: SportsLeague): SportsLeagueRow {
   return {
     ...league,
+    // ItemOverview reads item.tags.length unguarded, so a league synced
+    // without tags would crash the whole detail page.
+    tags: league.tags ?? [],
     path: league.path ?? "",
     poster: league.poster ?? "",
     fanart: league.fanart ?? "",

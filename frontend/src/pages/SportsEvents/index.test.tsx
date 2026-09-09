@@ -72,16 +72,16 @@ describe("sports event detail", () => {
       }),
     );
     renderDetail();
-    expect(await screen.findByText("fr · Embedded")).toBeInTheDocument();
+    expect(await screen.findByText("fr")).toBeInTheDocument();
     await userEvent.click(
-      screen.getByRole("button", { name: "Index subtitles" }),
+      screen.getByRole("button", { name: "Index Subtitles" }),
     );
     expect(
       await screen.findByText(
         "Could not index subtitles. Check the file path and try again.",
       ),
     ).toBeInTheDocument();
-    expect(await screen.findByText("No indexed subtitles")).toBeInTheDocument();
+    expect(await screen.findByText("No profile")).toBeInTheDocument();
   });
 
   it("shows subtitles per part and refreshes the selected local file", async () => {
@@ -142,21 +142,28 @@ describe("sports event detail", () => {
       }),
     );
     renderDetail();
-    const table = await screen.findByRole("table", { name: "Event files" });
-    const first = within(table).getByRole("row", { name: /Prelims/ });
-    const second = within(table).getByRole("row", { name: /Main/ });
-    expect(within(first).getByText("fr · Embedded")).toBeInTheDocument();
-    expect(within(first).getByText("en")).toBeInTheDocument();
-    expect(within(second).getByText("No language profile")).toBeInTheDocument();
+    const table = await screen.findByRole("table");
+    const rowFor = (label: string | RegExp): HTMLElement => {
+      const cell = within(table).getByText(label);
+      // eslint-disable-next-line testing-library/no-node-access
+      const row = cell.closest("tr");
+      if (!row) throw new Error(`No row for ${String(label)}`);
+      return row;
+    };
+    // The table renders before the events query resolves, so wait for the row
+    // to exist rather than reading an empty table synchronously.
+    await within(table).findByText(/Prelims/);
+    expect(within(rowFor(/Prelims/)).getByText("fr")).toBeInTheDocument();
+    expect(within(rowFor(/Prelims/)).getByText("en")).toBeInTheDocument();
+    // No profile on the second part, so there is nothing wanted to show.
+    expect(within(rowFor(/Main/)).getByText("No profile")).toBeInTheDocument();
     await userEvent.click(
-      within(first).getByRole("button", { name: "Index subtitles" }),
+      within(rowFor(/Prelims/)).getByRole("button", {
+        name: "Index Subtitles",
+      }),
     );
     expect(
-      await within(first).findByText("en:hi · External"),
-    ).toBeInTheDocument();
-    expect(within(first).getByText("None missing")).toBeInTheDocument();
-    expect(
-      within(second).getByText("No indexed subtitles"),
+      await within(rowFor(/Prelims/)).findByText("en:hi"),
     ).toBeInTheDocument();
   });
 
@@ -218,14 +225,19 @@ describe("sports event detail", () => {
       }),
     );
     renderDetail();
-    const table = await screen.findByRole("table", { name: "Event files" });
-    expect(within(table).getAllByRole("row")).toHaveLength(4);
-    expect(within(table).getByText("Prelims")).toBeInTheDocument();
-    expect(within(table).getByText("Main Card")).toBeInTheDocument();
-    expect(within(table).getByText("Full event")).toBeInTheDocument();
+    const table = await screen.findByRole("table");
+    // The shared table folds the part into the title, the way the episodes
+    // table shows an episode title, rather than giving parts their own column.
+    expect(
+      await within(table).findByText("Fixture Card (Prelims)"),
+    ).toBeInTheDocument();
+    expect(
+      within(table).getByText("Fixture Card (Main Card)"),
+    ).toBeInTheDocument();
+    // A part-less event keeps its bare title: no invented "Part 0".
+    expect(within(table).getByText("Unknown Number")).toBeInTheDocument();
+    expect(within(table).queryByText(/Part 0/)).toBeNull();
     expect(within(table).getAllByText("2026-09-01")).toHaveLength(2);
-    expect(within(table).getAllByText("Available")).toHaveLength(3);
-    expect(screen.queryByText("Part 0")).toBeNull();
     expect(scope).toBe("42");
   });
 
@@ -344,15 +356,27 @@ it.each([false, true])(
     );
     renderDetail();
     await userEvent.click(
-      await screen.findByRole("button", { name: "Search subtitles" }),
+      await screen.findByRole("button", { name: "Manual Search" }),
     );
+    // Scoped to the modal: the page toolbox now carries its own Search button,
+    // exactly as the episodes page does.
+    const dialog = within(await screen.findByRole("dialog"));
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Search" })).toBeEnabled(),
+      expect(dialog.getByRole("button", { name: "Search" })).toBeEnabled(),
     );
-    await userEvent.click(screen.getByRole("button", { name: "Search" }));
-    expect(await screen.findByText("Event.Release")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Download" }));
-    expect(await screen.findByText("en · External")).toBeInTheDocument();
+    await userEvent.click(dialog.getByRole("button", { name: "Search" }));
+    expect(await dialog.findByText("Event.Release")).toBeInTheDocument();
+    await userEvent.click(dialog.getByRole("button", { name: "Download" }));
+    // Scoped to the page table: the search modal renders a results table too,
+    // and "en" appears in both, so anything wider is ambiguous.
+    await waitFor(() => {
+      const pageTable = screen
+        .getAllByRole("table")
+        // eslint-disable-next-line testing-library/no-node-access
+        .find((t) => t.closest('[role="dialog"]') === null);
+      if (!pageTable) throw new Error("No page table");
+      expect(within(pageTable).getByText("en")).toBeInTheDocument();
+    });
     expect(
       await screen.findByText(
         warning

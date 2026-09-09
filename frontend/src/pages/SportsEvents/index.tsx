@@ -1,247 +1,208 @@
-import { useEffect, useState } from "react";
+import {
+  FunctionComponent,
+  useCallback,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Link, useParams, useSearchParams } from "react-router";
 import {
   Alert,
   Anchor,
-  Badge,
-  Button,
+  Breadcrumbs,
+  Container,
   Group,
-  Image,
-  Loader,
-  Pagination,
-  Stack,
-  Table,
   Text,
-  Title,
 } from "@mantine/core";
+import { useDocumentTitle } from "@mantine/hooks";
 import {
+  faDownload,
+  faHardDrive,
+  faHistory,
+  faServer,
+  faSync,
+  faTrophy,
+} from "@fortawesome/free-solid-svg-icons";
+import { Table as TableInstance } from "@tanstack/react-table";
+import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
+import { useInstanceName } from "@/apis/hooks/site";
+import {
+  toSportsLeagueRow,
   useIndexSportsSubtitles,
   useSportsAction,
   useSportsAvailability,
   useSportsEvents,
   useSportsLeague,
 } from "@/apis/hooks/sports";
-import { SportsSearchModal } from "@/components/modals/SportsSearchModal";
-import { useModals } from "@/modules/modals";
+import { SportsEvent } from "@/apis/raw/sports";
+import { Toolbox } from "@/components";
+import { QueryOverlay } from "@/components/async";
 import SportsJobFeedback from "@/pages/SportsActivity/JobFeedback";
+import ItemOverview from "@/pages/views/ItemOverview";
+import { navigateApp } from "@/utilities/whatsNew";
+import Table from "./table";
 
-export default function SportsEvents() {
+// The league detail page, built to match the Series episodes page: breadcrumb,
+// ItemOverview header, a Toolbox of actions, then the season-grouped table.
+// It used to be a bare Mantine table with text-link buttons in an Actions
+// column, which shared nothing with how episodes are presented.
+const SportsEventsView: FunctionComponent = () => {
   const { id } = useParams();
-  const modals = useModals();
   const [params] = useSearchParams();
+  const leagueId = Number.parseInt(id as string);
+  const ownerParam = params.get("instance");
+
   const { enabled, isLoading } = useSportsAvailability();
-  const owner = params.get("instance");
-  const league = useSportsLeague(Number(id), owner ? Number(owner) : undefined);
-  const [page, setPage] = useState(1);
+  const leagueQuery = useSportsLeague(
+    leagueId,
+    ownerParam ? Number(ownerParam) : undefined,
+  );
+  const { data: league } = leagueQuery;
+  const eventsQuery = useSportsEvents(leagueId, league?.arr_instance_id, 1);
+  const { data: eventPage } = eventsQuery;
+
+  const { multiInstance, nameById: instanceNameById } =
+    useArrInstanceLabels("sportarr");
   const indexSubtitles = useIndexSportsSubtitles();
   const automatic = useSportsAction();
-  const events = useSportsEvents(
-    Number(id),
-    league.data?.arr_instance_id,
-    page,
+
+  const events = useMemo(() => eventPage?.data ?? null, [eventPage]);
+  const overviewItem = useMemo(
+    () => (league ? toSportsLeagueRow(league) : null),
+    [league],
   );
-  useEffect(() => setPage(1), [id, owner]);
-  if (isLoading || league.isLoading) return <Loader />;
-  if (!enabled)
+
+  const details = useMemo(
+    () => [
+      ...(multiInstance && league?.arr_instance_id != null
+        ? [
+            {
+              icon: faServer,
+              text:
+                instanceNameById.get(league.arr_instance_id) ??
+                `#${league.arr_instance_id}`,
+            },
+          ]
+        : []),
+      { icon: faHardDrive, text: `${league?.eventFileCount ?? 0} files` },
+      { icon: faTrophy, text: league?.sport ?? "Sport" },
+    ],
+    [league, multiInstance, instanceNameById],
+  );
+
+  const onIndex = useCallback(
+    (event: SportsEvent) =>
+      indexSubtitles.mutate({ id: event.id, owner: event.arr_instance_id }),
+    [indexSubtitles],
+  );
+
+  useDocumentTitle(
+    `${league?.title ?? "Unknown League"} - ${useInstanceName()} (Sports)`,
+  );
+
+  const tableRef = useRef<TableInstance<SportsEvent> | null>(null);
+  const [, setIsAllRowExpanded] = useState(
+    tableRef?.current?.getIsAllRowsExpanded(),
+  );
+
+  if (isLoading) return null;
+  if (!enabled) {
     return (
-      <Text>Enable a Sportarr instance in Connections to view sports.</Text>
+      <Container px={0} fluid>
+        <Text p="md">
+          Enable a Sportarr instance in Connections to view sports.
+        </Text>
+      </Container>
     );
-  if (league.isError || !league.data)
-    return <Alert color="red">League not found.</Alert>;
+  }
+
   return (
-    <Stack p="md">
-      <Anchor component={Link} to="/sports">
-        Sports
-      </Anchor>
-      <Group justify="space-between">
-        <Title order={2}>{league.data.title}</Title>
-        <Button
-          loading={automatic.isPending}
-          disabled={league.data.profileId == null}
-          onClick={() =>
-            league.data &&
-            automatic.mutate({
-              path: `/leagues/${league.data.id}/download`,
-              owner: league.data.arr_instance_id,
-            })
+    <Container px={0} fluid>
+      <nav aria-label="Breadcrumb">
+        <Breadcrumbs mb="md" ml="xs">
+          <Anchor component={Link} to="/sports" size="sm">
+            Sports
+          </Anchor>
+          <Text size="sm" c="var(--bz-text-primary)">
+            {league?.title ?? "Loading..."}
+          </Text>
+        </Breadcrumbs>
+      </nav>
+      <QueryOverlay result={leagueQuery}>
+        <Toolbox>
+          <Group gap="xs">
+            <Toolbox.Button
+              icon={faSync}
+              disabled={!league || automatic.isPending}
+              onClick={() =>
+                league &&
+                automatic.mutate({
+                  path: `/leagues/${league.id}/sync`,
+                  owner: league.arr_instance_id,
+                })
+              }
+            >
+              Sync
+            </Toolbox.Button>
+            <Toolbox.Button
+              icon={faDownload}
+              disabled={
+                !league ||
+                league.profileId === null ||
+                league.eventFileCount === 0 ||
+                automatic.isPending
+              }
+              loading={automatic.isPending}
+              onClick={() =>
+                league &&
+                automatic.mutate({
+                  path: `/leagues/${league.id}/download`,
+                  owner: league.arr_instance_id,
+                })
+              }
+            >
+              Search
+            </Toolbox.Button>
+            <Toolbox.Button
+              icon={faHistory}
+              onClick={() =>
+                navigateApp(
+                  `/history/sports?instance=${league?.arr_instance_id ?? ""}`,
+                )
+              }
+            >
+              History
+            </Toolbox.Button>
+          </Group>
+        </Toolbox>
+        <ItemOverview item={overviewItem} details={details}></ItemOverview>
+        {automatic.isError && (
+          <Alert color="red" mb="md">
+            Could not queue the sports search.
+          </Alert>
+        )}
+        {indexSubtitles.isError && (
+          <Alert color="red" mb="md">
+            Could not index subtitles. Check the file path and try again.
+          </Alert>
+        )}
+        <SportsJobFeedback
+          queued={automatic.data}
+          owner={automatic.variables?.owner}
+        />
+        <Table
+          events={events}
+          ref={tableRef}
+          disabled={automatic.isPending}
+          indexingId={
+            indexSubtitles.isPending ? indexSubtitles.variables?.id : undefined
           }
-        >
-          Download all missing
-        </Button>
-      </Group>
-      {automatic.isError && (
-        <Alert color="red">Could not queue the sports search.</Alert>
-      )}
-      <SportsJobFeedback
-        queued={automatic.data}
-        owner={automatic.variables?.owner}
-      />
-      {league.data.fanart && (
-        <Image src={league.data.fanart} alt="" mah={240} fit="contain" />
-      )}
-      <Text>{league.data.overview}</Text>
-      <Text>
-        {league.data.eventCount} events · {league.data.eventFileCount} files
-      </Text>
-      {events.isLoading && <Loader aria-label="Loading event files" />}
-      {events.isError && <Alert color="red">Could not load event files.</Alert>}
-      {indexSubtitles.isError && (
-        <Alert color="red">
-          Could not index subtitles. Check the file path and try again.
-        </Alert>
-      )}
-      {events.data &&
-        (events.data.total === 0 ? (
-          <Text>No playable event files in this league.</Text>
-        ) : (
-          <>
-            <Table.ScrollContainer minWidth={600}>
-              <Table aria-label="Event files" striped highlightOnHover>
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Event</Table.Th>
-                    <Table.Th>Date</Table.Th>
-                    <Table.Th>Part</Table.Th>
-                    <Table.Th>File</Table.Th>
-                    <Table.Th>Subtitles</Table.Th>
-                    <Table.Th>Missing</Table.Th>
-                    <Table.Th>Actions</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {events.data.data.map((event) => (
-                    <Table.Tr key={event.id}>
-                      <Table.Td>{event.title}</Table.Td>
-                      <Table.Td>
-                        {(event.broadcastDate || event.eventDate)?.slice(
-                          0,
-                          10,
-                        ) || "Unknown date"}
-                      </Table.Td>
-                      <Table.Td>
-                        {event.partName ||
-                          (event.partNumber && event.partNumber > 0
-                            ? `Part ${event.partNumber}`
-                            : "Full event")}
-                      </Table.Td>
-                      <Table.Td>
-                        <Text size="sm">
-                          {event.hasFile ? "Available" : "Unavailable"}
-                        </Text>
-                        <Text size="xs" c="dimmed" title={event.path}>
-                          {event.path.split(/[\\/]/).pop()}
-                        </Text>
-                      </Table.Td>
-                      <Table.Td>
-                        <Group gap="xs">
-                          {event.subtitles?.length ? (
-                            event.subtitles.map(([language, path], index) => (
-                              <Badge
-                                key={`${language}-${path}-${index}`}
-                                variant="light"
-                                title={path || undefined}
-                              >
-                                {language} · {path ? "External" : "Embedded"}
-                              </Badge>
-                            ))
-                          ) : (
-                            <Text size="sm" c="dimmed">
-                              No indexed subtitles
-                            </Text>
-                          )}
-                        </Group>
-                      </Table.Td>
-                      <Table.Td>
-                        {event.profileId == null ? (
-                          <Text size="sm" c="dimmed">
-                            No language profile
-                          </Text>
-                        ) : (
-                          <Group gap="xs">
-                            {event.missing_subtitles?.length ? (
-                              event.missing_subtitles.map((language) => (
-                                <Badge
-                                  key={language}
-                                  color="orange"
-                                  variant="light"
-                                >
-                                  {language}
-                                </Badge>
-                              ))
-                            ) : (
-                              <Text size="sm">None missing</Text>
-                            )}
-                          </Group>
-                        )}
-                      </Table.Td>
-                      <Table.Td>
-                        <Button
-                          size="xs"
-                          variant="light"
-                          disabled={
-                            event.profileId == null || automatic.isPending
-                          }
-                          onClick={() =>
-                            automatic.mutate({
-                              path: `/events/${event.id}/automatic`,
-                              owner: event.arr_instance_id,
-                            })
-                          }
-                        >
-                          Download missing
-                        </Button>
-                        <Anchor
-                          component={Link}
-                          size="xs"
-                          display="block"
-                          to={`/history/sports?instance=${event.arr_instance_id}&event_id=${event.id}`}
-                        >
-                          History and release exclusions
-                        </Anchor>
-                        <Button
-                          size="xs"
-                          variant="light"
-                          disabled={indexSubtitles.isPending}
-                          loading={
-                            indexSubtitles.isPending &&
-                            indexSubtitles.variables?.id === event.id
-                          }
-                          onClick={() =>
-                            indexSubtitles.mutate({
-                              id: event.id,
-                              owner: event.arr_instance_id,
-                            })
-                          }
-                        >
-                          Index subtitles
-                        </Button>
-                        <Button
-                          size="xs"
-                          variant="subtle"
-                          disabled={!event.hasFile}
-                          onClick={() =>
-                            modals.openContextModal(SportsSearchModal, {
-                              item: event,
-                            })
-                          }
-                        >
-                          Search subtitles
-                        </Button>
-                      </Table.Td>
-                    </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
-            </Table.ScrollContainer>
-            {events.data.total > 100 && (
-              <Pagination
-                total={Math.ceil(events.data.total / 100)}
-                value={page}
-                onChange={setPage}
-              />
-            )}
-          </>
-        ))}
-    </Stack>
+          onIndex={onIndex}
+          onAllRowsExpandedChanged={setIsAllRowExpanded}
+        ></Table>
+      </QueryOverlay>
+    </Container>
   );
-}
+};
+
+export default SportsEventsView;
