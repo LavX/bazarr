@@ -382,6 +382,7 @@ jobs:
             tests/bazarr/test_sportarr_scheduler_gate.py \
             tests/bazarr/test_sportarr_audio_language.py \
             tests/bazarr/test_sportarr_notifications.py \
+            tests/bazarr/test_sportarr_download_settings.py \
             tests/bazarr/test_editor_instance_scope.py \
             tests/bazarr/test_history_blacklist_scope.py \
             tests/bazarr/test_history_owner_resolution.py \

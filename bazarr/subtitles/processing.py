@@ -248,6 +248,11 @@ def _postprocessing_config(media_type, arr_instance_id):
         threshold = int(_resolve(arr_instance_id, "general.postprocessing_threshold",
                                  settings.general.postprocessing_threshold))
     else:
+        # Movies AND sports. Sports deliberately shares the movie threshold
+        # rather than owning a key of its own: it is scored on the movie scale
+        # throughout (MAX_SCORES["movie"], a minimum_score defaulting to 70), so
+        # a percentage of that scale means exactly the same thing for both. This
+        # used to be an unremarked fall-through, which read like an oversight.
         use_threshold = _resolve(arr_instance_id, "general.use_postprocessing_threshold_movie",
                                  settings.general.use_postprocessing_threshold_movie)
         threshold = int(_resolve(arr_instance_id, "general.postprocessing_threshold_movie",

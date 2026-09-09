@@ -2,6 +2,7 @@
 
 import ast
 import logging
+import os
 from queue import Empty, Queue
 from threading import BoundedSemaphore, Thread
 
@@ -57,6 +58,12 @@ def eligibility(session, context):
 
 def _provider_result(video, languages, pool, minimum, profile, cancel):
     # A private pool keeps a cancelled search from changing a later search's state.
+    # Set here for the same reason subtitles/download.py:38 and manual.py:165
+    # set it: subliminal reads it out of the environment at download time. The
+    # sports automatic path never did, so encoding was whatever a previous
+    # non-sports search happened to leave behind.
+    os.environ["SZ_KEEP_ENCODING"] = "" if settings.general.utf8_encode else "True"
+
     # Providers finish under their own timeout; abandoned results cannot publish.
     while not _provider_slots.acquire(timeout=0.1):
         check_cancelled(cancel)
@@ -78,7 +85,7 @@ def _provider_result(video, languages, pool, minimum, profile, cancel):
                         use_original_format=profile["originalFormat"]
                         in (1, "1", True, "True"),
                         use_provider_priority=settings.general.use_provider_priority,
-                        fallback_allowed=False,
+                        fallback_allowed=settings.general.use_whisper_fallback,
                     ),
                 )
             )
