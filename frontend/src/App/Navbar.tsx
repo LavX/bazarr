@@ -97,7 +97,10 @@ function useIsActive(parent: string, route: RouteObject) {
 // Section grouping configuration.
 // Routes are matched by their path property.
 const sectionGroups = [
-  { label: "Media", paths: ["discover", "series", "movies"] },
+  // Sports is a media type like the other two. Leaving it out of this list
+  // dropped it into the catch-all "Other" group at the bottom of the sidebar
+  // instead of listing it beside Series and Movies.
+  { label: "Media", paths: ["discover", "series", "movies", "sports"] },
   { label: "Management", paths: ["history", "wanted", "blacklist"] },
   {
     label: "System",
@@ -105,7 +108,7 @@ const sectionGroups = [
   },
 ];
 
-function groupRoutes(routes: CustomRouteObject[]) {
+export function groupRoutes(routes: CustomRouteObject[]) {
   // Filter to visible nav items (have a path, not hidden, not index-only)
   const navItems = routes.filter(
     (r) => r.path !== undefined && !r.hidden && !r.path.includes(":") && r.name,
