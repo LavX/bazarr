@@ -1,5 +1,5 @@
 import { FunctionComponent, useCallback, useMemo } from "react";
-import { Button } from "@mantine/core";
+import { Button, TextInput } from "@mantine/core";
 import { faArrowCircleRight, faTrash } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
@@ -10,28 +10,34 @@ import {
   moviesEnabledKey,
   pathMappingsKey,
   pathMappingsMovieKey,
+  pathMappingsSportsKey,
   seriesEnabledKey,
+  sportsEnabledKey,
 } from "@/pages/Settings/keys";
 import { useFormActions } from "@/pages/Settings/utilities/FormValues";
 import { useSettingValue } from "@/pages/Settings/utilities/hooks";
 import { useArrayAction } from "@/utilities";
 import { Message } from "./Message";
 
-type SupportType = "sonarr" | "radarr";
+type SupportType = "sonarr" | "radarr" | "sports";
 
 function getSupportKey(type: SupportType) {
   if (type === "sonarr") {
     return pathMappingsKey;
-  } else {
+  } else if (type === "radarr") {
     return pathMappingsMovieKey;
+  } else {
+    return pathMappingsSportsKey;
   }
 }
 
 function getEnabledKey(type: SupportType) {
   if (type === "sonarr") {
     return seriesEnabledKey;
-  } else {
+  } else if (type === "radarr") {
     return moviesEnabledKey;
+  } else {
+    return sportsEnabledKey;
   }
 }
 
@@ -85,6 +91,24 @@ export const PathMappingTable: FunctionComponent<TableProps> = ({ type }) => {
         header: capitalize(type),
         accessorKey: "from",
         cell: ({ row: { original, index } }) => {
+          // Sportarr has no remote browse endpoint, so its remote column is a
+          // plain text field. That matches the per-instance sports path editor,
+          // which has never had a browser either. Offering the Bazarr browser
+          // here instead would suggest local paths for a remote server.
+          if (type === "sports") {
+            return (
+              <TextInput
+                value={original.from}
+                placeholder="/sports"
+                onChange={(event) => {
+                  action.mutate(index, {
+                    ...original,
+                    from: event.currentTarget.value,
+                  });
+                }}
+              ></TextInput>
+            );
+          }
           return (
             // These are the GLOBAL (Phase-12-gated) path-mapping settings, so
             // the browse intentionally targets the DEFAULT server (instanceId

@@ -60,7 +60,20 @@ describe("Sportarr Connections", () => {
       ),
       http.get("/api/system/settings", () =>
         HttpResponse.json({
-          general: { theme: "auto", use_sonarr: true, use_radarr: true },
+          general: {
+            theme: "auto",
+            use_sonarr: true,
+            use_radarr: true,
+            use_sportarr: true,
+            minimum_score_sports: 70,
+            path_mappings_sports: [],
+          },
+          sportarr: {
+            excluded_tags: [],
+            excluded_sports: [],
+            only_monitored: false,
+            search_on_sync: true,
+          },
         }),
       ),
     );
@@ -707,5 +720,79 @@ describe("Sportarr Connections", () => {
       }),
     );
     expect(scalarWrites).toBe(0);
+  });
+});
+
+describe("Sportarr tab layout", () => {
+  beforeEach(() => {
+    window.history.replaceState({}, "", "/#sportarr");
+    server.use(
+      http.get("/api/system/languages/profiles", () =>
+        HttpResponse.json([sportsProfile]),
+      ),
+      http.get("/api/system/arr-instances", () => HttpResponse.json([sportarr])),
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: {
+            theme: "auto",
+            use_sonarr: true,
+            use_radarr: true,
+            use_sportarr: true,
+            minimum_score_sports: 70,
+            path_mappings_sports: [],
+          },
+          sportarr: {
+            excluded_tags: [],
+            excluded_sports: [],
+            only_monitored: false,
+            search_on_sync: true,
+          },
+        }),
+      ),
+    );
+  });
+
+  afterEach(() => {
+    window.history.replaceState({}, "", "/");
+  });
+
+  it("matches the Sonarr shape: master toggle, cards, options, path mappings", async () => {
+    customRender(<SettingsConnectionsView />);
+
+    // The master toggle sits above the cards and is always visible.
+    expect(await screen.findByText("Use Sportarr")).toBeInTheDocument();
+
+    // Options and Path Mappings appear once the toggle is on.
+    await waitFor(() => {
+      expect(screen.getByText("Options")).toBeInTheDocument();
+      expect(screen.getByText("Path Mappings")).toBeInTheDocument();
+    });
+
+    expect(
+      screen.getByText("Minimum Score For Sports Events"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Excluded Tags")).toBeInTheDocument();
+    expect(screen.getByText("Excluded Sports")).toBeInTheDocument();
+    expect(screen.getByText("Download Only Monitored")).toBeInTheDocument();
+    expect(screen.getByText("Search After Sync")).toBeInTheDocument();
+  });
+
+  it("hides the options behind the master toggle", async () => {
+    const user = userEvent.setup();
+    customRender(<SettingsConnectionsView />);
+
+    // Check renders a Mantine Switch, so the role is switch, not checkbox.
+    const toggle = await screen.findByRole("switch", { name: "Enabled" });
+    await user.click(toggle);
+
+    // CollapseBox wraps children in a Mantine Collapse, which keeps them
+    // mounted and collapses the height. Presence is therefore the wrong
+    // assertion; visibility is what the toggle actually changes.
+    await waitFor(() => {
+      expect(screen.getByText("Options")).not.toBeVisible();
+      expect(screen.getByText("Path Mappings")).not.toBeVisible();
+    });
+    // The instance cards stay visible regardless, same as Sonarr.
+    expect(screen.getByText("Add instance")).toBeVisible();
   });
 });

@@ -33,6 +33,7 @@ import MediaServerSection from "@/pages/Settings/MediaServers/MediaServerSection
 import PlexSection from "@/pages/Settings/Plex/PlexSection";
 import RadarrSection from "@/pages/Settings/Radarr/RadarrSection";
 import SonarrSection from "@/pages/Settings/Sonarr/SonarrSection";
+import SportarrSection from "@/pages/Settings/Sportarr/SportarrSection";
 import InstanceCard from "./InstanceCard";
 import InstanceFormModal from "./InstanceFormModal";
 import { ARR_META } from "./meta";
@@ -284,13 +285,15 @@ const SettingsConnectionsView: FunctionComponent = () => {
         </Tabs.Panel>
 
         <Tabs.Panel value="sportarr">
-          <KindSection
-            kind="sportarr"
-            query={instances}
-            onAdd={openCreate}
-            onEdit={openEdit}
-            onDelete={openDelete}
-          />
+          <SportarrSection>
+            <KindSection
+              kind="sportarr"
+              query={instances}
+              onAdd={openCreate}
+              onEdit={openEdit}
+              onDelete={openDelete}
+            />
+          </SportarrSection>
         </Tabs.Panel>
 
         <Tabs.Panel value="plex">
