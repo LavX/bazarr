@@ -32,6 +32,11 @@ function owners(enabled = true) {
         { ...sportarrSibling, enabled },
       ]),
     ),
+    // Sports surfaces are gated on the master toggle as well as on an enabled
+    // owner, so drive both from the same flag.
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({ general: { use_sportarr: enabled } }),
+    ),
   );
 }
 

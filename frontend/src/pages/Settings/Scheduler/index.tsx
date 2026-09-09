@@ -105,7 +105,9 @@ const SettingsSchedulerView: FunctionComponent = () => {
           label="Sync Only Monitored Events"
           settingKey={"settings-sportarr-sync_only_monitored_events"}
         ></Check>
-        <CollapseBox settingKey={"settings-sportarr-sync_only_monitored_events"}>
+        <CollapseBox
+          settingKey={"settings-sportarr-sync_only_monitored_events"}
+        >
           <Message>
             If enabled, only events with a monitored status in Sportarr will be
             synced.

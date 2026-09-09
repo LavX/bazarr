@@ -1,3 +1,4 @@
+/* eslint-disable camelcase */
 import { act } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { expect, it } from "vitest";
@@ -30,6 +31,9 @@ it("adds and removes Sports navigation as the last enabled owner changes", async
     http.get("/api/system/arr-instances", () =>
       HttpResponse.json([{ ...sportarr, enabled }]),
     ),
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({ general: { use_sportarr: enabled } }),
+    ),
     http.get("/api/badges", () => HttpResponse.json({})),
   );
   customRender(<Navigation />);
@@ -38,11 +42,21 @@ it("adds and removes Sports navigation as the last enabled owner changes", async
   enabled = true;
   await act(async () => {
     await queryClient.invalidateQueries({ queryKey: [QueryKeys.ArrInstances] });
+    // The master toggle lives on the settings query, which is cached with an
+    // infinite staleTime, so it has to be invalidated alongside the instances.
+    await queryClient.invalidateQueries({
+      queryKey: [QueryKeys.System, QueryKeys.Settings],
+    });
   });
   expect(await screen.findByText("Sports")).toBeInTheDocument();
   enabled = false;
   await act(async () => {
     await queryClient.invalidateQueries({ queryKey: [QueryKeys.ArrInstances] });
+    // The master toggle lives on the settings query, which is cached with an
+    // infinite staleTime, so it has to be invalidated alongside the instances.
+    await queryClient.invalidateQueries({
+      queryKey: [QueryKeys.System, QueryKeys.Settings],
+    });
   });
   await waitFor(() => expect(screen.queryByText("Sports")).toBeNull());
 });
@@ -73,6 +87,9 @@ it("exposes sports wanted, history and exclusion tabs only for enabled owners", 
     http.get("/api/system/arr-instances", () =>
       HttpResponse.json([{ ...sportarr, enabled }]),
     ),
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({ general: { use_sportarr: enabled } }),
+    ),
     http.get("/api/badges", () => HttpResponse.json({ sports: 2 })),
   );
   customRender(<SportsTabs />);
@@ -82,6 +99,11 @@ it("exposes sports wanted, history and exclusion tabs only for enabled owners", 
   enabled = false;
   await act(async () => {
     await queryClient.invalidateQueries({ queryKey: [QueryKeys.ArrInstances] });
+    // The master toggle lives on the settings query, which is cached with an
+    // infinite staleTime, so it has to be invalidated alongside the instances.
+    await queryClient.invalidateQueries({
+      queryKey: [QueryKeys.System, QueryKeys.Settings],
+    });
   });
   await waitFor(() => expect(screen.queryByText("Missing: Sports")).toBeNull());
   expect(screen.queryByText("History: Sports")).toBeNull();

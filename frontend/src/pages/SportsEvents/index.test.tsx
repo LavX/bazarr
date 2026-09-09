@@ -2,7 +2,7 @@
 import { createMemoryRouter, RouterProvider } from "react-router";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { sportarr } from "@/pages/Settings/Connections/__tests__/fixtures";
 import { AllProviders } from "@/providers";
 import { rawRender, screen, waitFor, within } from "@/tests";
@@ -22,6 +22,14 @@ function renderDetail() {
 }
 
 describe("sports event detail", () => {
+  beforeEach(() => {
+    // Every sports surface is gated on the master toggle now.
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({ general: { use_sportarr: true } }),
+      ),
+    );
+  });
   it("refreshes cleared subtitle state when a file becomes unavailable", async () => {
     let unavailable = false;
     server.use(
@@ -259,6 +267,11 @@ it.each([false, true])(
     server.use(
       http.get("/api/system/arr-instances", () =>
         HttpResponse.json([sportarr]),
+      ),
+      // This case sits outside the describe block, so it registers the master
+      // toggle itself rather than inheriting the suite's beforeEach.
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({ general: { use_sportarr: true } }),
       ),
       http.get("/api/sports/leagues/51", () =>
         HttpResponse.json({ id: 51, arr_instance_id: 42, title: "League" }),

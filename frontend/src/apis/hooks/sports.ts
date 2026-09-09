@@ -2,16 +2,23 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import sports, { SportsFilters } from "@/apis/raw/sports";
 import { useArrInstances } from "./arrInstances";
+// Imported from the defining module, not the barrel: index re-exports this
+// file, so going through "." would close an import cycle.
+import { useSystemSettings } from "./system";
 
 export function useSportsAvailability() {
   const query = useArrInstances();
+  const { data: settings } = useSystemSettings();
+  const useSportarr = settings?.general?.use_sportarr ?? false;
   const instances =
     query.data?.filter(
       (instance) => instance.kind === "sportarr" && instance.enabled,
     ) ?? [];
   return {
     instances,
-    enabled: instances.length > 0,
+    // Both conditions matter: the master toggle is the operator's intent, and
+    // an enabled instance is what there is to actually query.
+    enabled: useSportarr && instances.length > 0,
     isLoading: query.isLoading,
   };
 }

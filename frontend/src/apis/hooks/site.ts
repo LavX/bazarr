@@ -1,12 +1,10 @@
-import { useSportsAvailability } from "./sports";
 import { useSystemSettings } from ".";
 
 export function useEnabledStatus() {
-  const { enabled: sportarr } = useSportsAvailability();
   const { data } = useSystemSettings();
 
   return {
-    sportarr,
+    sportarr: data?.general?.use_sportarr ?? false,
     sonarr: data?.general?.use_sonarr ?? false,
     radarr: data?.general?.use_radarr ?? false,
   };

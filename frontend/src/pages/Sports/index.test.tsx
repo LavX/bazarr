@@ -1,7 +1,7 @@
 /* eslint-disable camelcase */
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import {
@@ -14,6 +14,14 @@ import { act, customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 
 describe("sports library", () => {
+  beforeEach(() => {
+    // Every sports surface is gated on the master toggle now.
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({ general: { use_sportarr: true } }),
+      ),
+    );
+  });
   it("renders local-ID links, owner, art and counts and assigns a profile", async () => {
     const user = userEvent.setup();
     let assigned: unknown;

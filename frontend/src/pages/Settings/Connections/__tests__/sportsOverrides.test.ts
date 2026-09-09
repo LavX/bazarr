@@ -6,7 +6,7 @@ import {
   setSportsOverride,
   SPORTS_OVERRIDE_FIELDS,
   sportsOverrideDefault,
-} from "../sportsOverrides";
+} from "@/pages/Settings/Connections/sportsOverrides";
 
 describe("sports overrides", () => {
   it("covers every resolvable key and uses the renamed names", () => {
@@ -33,9 +33,9 @@ describe("sports overrides", () => {
   it("reports a key as overridden only when the blob carries it", () => {
     expect(isSportsOverridden({}, "only_monitored")).toBe(false);
     // False is a real override, not an absent one.
-    expect(isSportsOverridden({ only_monitored: false }, "only_monitored")).toBe(
-      true,
-    );
+    expect(
+      isSportsOverridden({ only_monitored: false }, "only_monitored"),
+    ).toBe(true);
   });
 
   it("sets and clears a single override without touching its neighbours", () => {

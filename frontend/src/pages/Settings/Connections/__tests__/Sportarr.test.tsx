@@ -51,6 +51,15 @@ async function expectOtherKindDefaults(
   await user.click(screen.getByRole("tab", { name: "Sportarr" }));
 }
 
+async function settingsLoaded() {
+  // The page mounts before the settings query resolves. That resolution
+  // re-renders the tree and closes any card Menu already open, so wait for the
+  // master toggle to reflect the loaded value before touching a card.
+  await waitFor(() =>
+    expect(screen.getByRole("switch", { name: "Enabled" })).toBeChecked(),
+  );
+}
+
 describe("Sportarr Connections", () => {
   beforeEach(() => {
     window.history.replaceState({}, "", "/#sportarr");
@@ -446,6 +455,7 @@ describe("Sportarr Connections", () => {
     expect(
       within(cardNamed("Sportarr Archive")).queryByText("Default"),
     ).toBeNull();
+    await settingsLoaded();
     await user.click(
       screen.getByRole("button", { name: "More actions for Sportarr Archive" }),
     );
@@ -574,12 +584,26 @@ describe("Sportarr Connections", () => {
         }),
       );
       customRender(<SettingsConnectionsView />);
-      await user.click(
-        await screen.findByRole("button", {
-          name: "More actions for Main Sportarr",
-        }),
+      const moreActions = await screen.findByRole("button", {
+        name: "More actions for Main Sportarr",
+      });
+      await settingsLoaded();
+      await user.click(moreActions);
+      // Two separate races here. settingsLoaded above stops the settings query
+      // re-rendering the tree and closing the menu; this waits for Mantine to
+      // actually mount the dropdown, which it does lazily into a portal behind
+      // a transition and which under coverage outruns findBy's 1s default.
+      // Removing either one brings the intermittent failure back.
+      await waitFor(() =>
+        expect(moreActions).toHaveAttribute("aria-expanded", "true"),
       );
-      await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+      await user.click(
+        await screen.findByRole(
+          "menuitem",
+          { name: "Delete" },
+          { timeout: 5000 },
+        ),
+      );
       const modal = await screen.findByRole("dialog", {
         name: "Delete instance",
       });
@@ -746,7 +770,9 @@ describe("Sportarr tab layout", () => {
       http.get("/api/system/languages/profiles", () =>
         HttpResponse.json([sportsProfile]),
       ),
-      http.get("/api/system/arr-instances", () => HttpResponse.json([sportarr])),
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([sportarr]),
+      ),
       http.get("/api/system/settings", () =>
         HttpResponse.json({
           general: {

@@ -21,8 +21,8 @@ import {
   isSportsOverridden,
   setSportsOverride,
   SPORTS_OVERRIDE_FIELDS,
-  SportsOverrideField,
   sportsOverrideDefault,
+  SportsOverrideField,
 } from "./sportsOverrides";
 
 interface ControlProps {
