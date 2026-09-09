@@ -44,10 +44,10 @@ export interface ArrMediaDefaults {
 export interface ArrSportsSettings {
   minimum_score?: number;
   wanted_search_frequency?: number;
-  sync_interval?: number;
-  full_scan?: "Manually" | "Daily" | "Weekly";
-  full_scan_day?: number;
-  full_scan_hour?: number;
+  sports_sync?: number;
+  full_update?: "Manually" | "Daily" | "Weekly";
+  full_update_day?: number;
+  full_update_hour?: number;
   only_monitored?: boolean;
   sync_only_monitored_leagues?: boolean;
   sync_only_monitored_events?: boolean;

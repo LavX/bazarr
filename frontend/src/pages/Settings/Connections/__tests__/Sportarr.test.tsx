@@ -667,7 +667,8 @@ describe("Sportarr Connections", () => {
     const instance = {
       ...sportarr,
       sports_settings: {
-        sync_interval: 13,
+        sports_sync: 180,
+        minimum_score: 80,
         excluded_sports: ["Golf"],
         search_on_sync: true,
       },
@@ -701,24 +702,39 @@ describe("Sportarr Connections", () => {
     expect(apply).toBeEnabled();
     await user.click(apply);
     await waitFor(() => expect(applied).toBe(true));
-    const interval = dialog.getByRole("textbox", {
-      name: "Sync interval (minutes)",
-    });
-    expect(interval).toHaveValue("13");
-    await user.clear(interval);
-    await user.type(interval, "15");
+    // An overridden key shows its own value; an unoverridden one reads
+    // "Inherited" and sends nothing.
+    expect(
+      dialog.getByRole("combobox", { name: "Library sync interval" }),
+    ).toHaveValue("3 Hours");
+    expect(
+      dialog.getByRole("switch", { name: "Full subtitle scan" }),
+    ).not.toBeChecked();
+
+    // Typed through rather than pasted, so every mid-word state hits the
+    // on-change handler the way a real edit does.
+    const score = dialog.getByRole("textbox", { name: "Minimum score" });
+    expect(score).toHaveValue("80");
+    await user.clear(score);
+    await user.type(score, "95");
+
+    // Turning a row's switch off drops the key entirely, so the instance goes
+    // back to inheriting the global value rather than freezing a copy of it.
     await user.click(dialog.getByRole("switch", { name: "Search after sync" }));
     await user.click(dialog.getByRole("button", { name: "Save changes" }));
     await waitFor(() =>
       expect(body).toMatchObject({
         sports_settings: {
-          sync_interval: 15,
+          sports_sync: 180,
+          minimum_score: 95,
           excluded_sports: ["Golf"],
-          search_on_sync: false,
         },
         media_defaults: { default_enabled: true, default_profile: 3 },
       }),
     );
+    expect(
+      (body as { sports_settings: Record<string, unknown> }).sports_settings,
+    ).not.toHaveProperty("search_on_sync");
     expect(scalarWrites).toBe(0);
   });
 });
