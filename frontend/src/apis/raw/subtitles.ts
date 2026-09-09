@@ -110,6 +110,15 @@ export interface ArchiveExtractResponse {
   count: number;
 }
 
+// One place mapping a media type to its subtitle route segment. It used to be
+// an inline "episode ? episodes : movies" in each caller, which silently sent
+// a sports event to the movies route.
+const SUBTITLE_ROUTE_BASE: Record<string, string> = {
+  episode: "episodes",
+  movie: "movies",
+  sports: "sports/events",
+};
+
 class SubtitlesApi extends BaseApi {
   constructor() {
     super("/subtitles");
@@ -151,6 +160,19 @@ class SubtitlesApi extends BaseApi {
     return response.data;
   }
 
+  async getRefTracksBySportsEventId(
+    subtitlesPath: string,
+    sportsEventId: number,
+    arrInstanceId?: number,
+  ) {
+    const response = await this.get<DataWrapper<Item.RefTracks>>("", {
+      subtitlesPath,
+      sportsEventId,
+      arr_instance_id: arrInstanceId,
+    });
+    return response.data;
+  }
+
   async info(names: string[]) {
     const response = await this.get<DataWrapper<SubtitleInfo[]>>(`/info`, {
       filenames: names,
@@ -181,13 +203,15 @@ class SubtitlesApi extends BaseApi {
   }
 
   async downloadFile(
-    mediaType: "episode" | "movie",
+    mediaType: "episode" | "movie" | "sports",
     mediaId: number,
     language: string,
     arrInstanceId?: number,
   ) {
     // language is the viewer/editor language key ("en", "en:hi", ...).
-    const base = mediaType === "episode" ? "episodes" : "movies";
+    // mediaId is the upstream id for episodes and movies, the local event id
+    // for sports.
+    const base = SUBTITLE_ROUTE_BASE[mediaType];
     return client.axios.get<Blob>(
       `/${base}/${mediaId}/subtitles/${encodeURIComponent(language)}/download`,
       { params: { arr_instance_id: arrInstanceId }, responseType: "blob" },
@@ -200,7 +224,7 @@ class SubtitlesApi extends BaseApi {
     language: string,
     arrInstanceId?: number,
   ) {
-    const base = mediaType === "episode" ? "episodes" : "movies";
+    const base = SUBTITLE_ROUTE_BASE[mediaType] ?? "movies";
     const url = `/${base}/${mediaId}/subtitles/${encodeURIComponent(language)}/content`;
     const response = await client.axios.get<SubtitleContentResponse>(url, {
       params: { arr_instance_id: arrInstanceId },

@@ -49,6 +49,9 @@ class Subtitles(Resource):
         "radarrMovieId", type=int, required=False, help="Radarr Movie ID"
     )
     get_request_parser.add_argument(
+        "sportsEventId", type=int, required=False, help="Local sports event id"
+    )
+    get_request_parser.add_argument(
         "arr_instance_id",
         type=int,
         required=False,
@@ -106,12 +109,14 @@ class Subtitles(Resource):
         subtitlesPath = args.get("subtitlesPath")
         episodeId = args.get("sonarrEpisodeId", None)
         movieId = args.get("radarrMovieId", None)
+        sportsEventId = args.get("sportsEventId", None)
         arr_instance_id = args.get("arr_instance_id")
 
         result = subtitles_sync_references(
             subtitles_path=subtitlesPath,
             sonarr_episode_id=episodeId,
             radarr_movie_id=movieId,
+            sports_event_id=sportsEventId,
             arr_instance_id=arr_instance_id,
         )
 

@@ -399,6 +399,12 @@ def _ambiguous_media_error(media_type, media_id, arr_instance_id):
     """400 tuple when the upstream id matches more than one instance's row
     and the caller did not disambiguate; None otherwise. Mirrors the bundle
     endpoints: resolve_subtitle_path would silently .first() one of them."""
+    if media_type == 'sports':
+        # A sports event is addressed by its LOCAL id, which is a primary key,
+        # so two instances can never both answer to it. There is nothing to
+        # disambiguate, and running the episode query on it would look up an
+        # unrelated Sonarr episode that happens to share the number.
+        return None
     if media_type == 'episode':
         query = scoped(
             select(TableEpisodes.id)
@@ -487,6 +493,18 @@ class MovieSubtitleFileDownload(Resource):
     @api_ns_subtitle_download.response(404, 'Media or subtitle not found')
     def get(self, radarrId, language):
         return _send_single_subtitle('movie', radarrId, language)
+
+
+@api_ns_subtitle_download.route('sports/events/<int:eventId>/subtitles/<language>/download')
+class SportsEventSubtitleFileDownload(Resource):
+    @authenticate
+    @api_ns_subtitle_download.doc(description='Download one sports event subtitle file')
+    @api_ns_subtitle_download.response(200, 'The subtitle file')
+    @api_ns_subtitle_download.response(400, 'Invalid language code')
+    @api_ns_subtitle_download.response(401, 'Not authenticated')
+    @api_ns_subtitle_download.response(404, 'Media or subtitle not found')
+    def get(self, eventId, language):
+        return _send_single_subtitle('sports', eventId, language)
 
 
 @api_ns_subtitle_download.route('series/<int:seriesId>/subtitles/download')

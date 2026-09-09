@@ -13,7 +13,8 @@ from flask_restx import Resource, Namespace
 from werkzeug.utils import secure_filename
 
 from app.config import settings
-from app.database import TableEpisodes, TableHistory, TableHistoryMovie, TableMovies, TableShows, database, select
+from app.database import (TableEpisodes, TableHistory, TableHistoryMovie, TableMovies, TableShows,
+                          TableSportsEvents, TableSportsLeagues, database, select)
 from app.event_handler import event_stream
 from app.jobs_queue import jobs_queue
 from languages.get_languages import language_from_alpha2
@@ -202,6 +203,39 @@ def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=N
                 'arrInstanceId': row.arr_instance_id,
                 'mediaPath': row.path,
             }
+    elif media_type == 'sports':
+        # An event is episode-shaped: the league plays the part the show does.
+        # media_id is the LOCAL event id, not an upstream one, so there is no
+        # cross-instance collision to disambiguate, only ownership to enforce.
+        query = (
+            select(TableSportsEvents.id,
+                   TableSportsEvents.league_id,
+                   TableSportsEvents.arr_instance_id,
+                   TableSportsEvents.subtitles,
+                   TableSportsEvents.path,
+                   TableSportsEvents.sportarrEventId,
+                   TableSportsEvents.title)
+            .where(TableSportsEvents.id == media_id)
+        )
+        if arr_instance_id is not None:
+            query = query.where(TableSportsEvents.arr_instance_id == arr_instance_id)
+        row = database.execute(query).first()
+        if row:
+            league_row = database.execute(
+                select(TableSportsLeagues.id, TableSportsLeagues.title,
+                       TableSportsLeagues.sportarrLeagueId)
+                .where(TableSportsLeagues.id == row.league_id,
+                       TableSportsLeagues.arr_instance_id == row.arr_instance_id)).first()
+            metadata = {
+                'mediaTitle': league_row.title if league_row else None,
+                'mediaId': league_row.id if league_row else row.league_id,
+                'mediaUpstreamId': league_row.sportarrLeagueId if league_row else None,
+                'episodeId': row.id,
+                'episodeUpstreamId': row.sportarrEventId,
+                'arrInstanceId': row.arr_instance_id,
+                'episodeTitle': row.title,
+                'mediaPath': row.path,
+            }
     else:
         return 'Invalid media type', 400
 
@@ -229,10 +263,11 @@ def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=N
         # Best-effort modified time of a DB-listed subtitle, via the trusted
         # path mapping. Returns -1 when the file can't be stat'd.
         try:
-            if media_type == 'episode':
-                real_path = path_mappings.path_replace(raw_path)
-            else:
-                real_path = path_mappings.path_replace_movie(raw_path)
+            # Through the owning instance, so a second Sportarr mounting its
+            # library elsewhere does not stat a path that exists here for a
+            # different server's file.
+            real_path = path_mappings.path_replace_instance(
+                raw_path, row.arr_instance_id, media_type)
             return os.path.getmtime(real_path)
         except OSError:
             return -1.0
@@ -360,6 +395,16 @@ def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=N
             return 'Media not found', 404
         trusted_media_path = path_mappings.path_replace_instance(
             fresh_row.path, fresh_row.arr_instance_id, 'episode')
+    elif media_type == 'sports':
+        query = select(TableSportsEvents.path, TableSportsEvents.arr_instance_id).where(
+            TableSportsEvents.id == media_id)
+        if arr_instance_id is not None:
+            query = query.where(TableSportsEvents.arr_instance_id == arr_instance_id)
+        fresh_row = database.execute(query).first()
+        if not fresh_row:
+            return 'Media not found', 404
+        trusted_media_path = path_mappings.path_replace_instance(
+            fresh_row.path, fresh_row.arr_instance_id, 'sports')
     else:
         query = select(TableMovies.path, TableMovies.arr_instance_id).where(
             TableMovies.radarrId == media_id)

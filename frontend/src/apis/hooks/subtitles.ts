@@ -296,6 +296,30 @@ export function useRefTracksByMovieId(
   });
 }
 
+export function useRefTracksBySportsEventId(
+  subtitlesPath: string,
+  sportsEventId: number,
+  isSportsEvent: boolean,
+  arrInstanceId?: number,
+) {
+  return useQuery({
+    queryKey: [
+      QueryKeys.Sports,
+      sportsEventId,
+      QueryKeys.Subtitles,
+      subtitlesPath,
+      arrInstanceId,
+    ],
+    queryFn: () =>
+      api.subtitles.getRefTracksBySportsEventId(
+        subtitlesPath,
+        sportsEventId,
+        arrInstanceId,
+      ),
+    enabled: isSportsEvent,
+  });
+}
+
 export function useUpgradableItems() {
   return useQuery({
     queryKey: [QueryKeys.Subtitles, "upgradable"],
@@ -535,7 +559,8 @@ async function downloadErrorMessage(
 
 export function useSubtitleFileDownload() {
   interface Param {
-    type: "episode" | "movie";
+    type: "episode" | "movie" | "sports";
+    // Upstream id for episodes and movies, the local event id for sports.
     mediaId: number;
     // Viewer/editor language key ("en", "en:hi", "en:forced", ...).
     language: string;

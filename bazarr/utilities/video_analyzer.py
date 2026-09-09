@@ -6,7 +6,7 @@ import pickle
 import re
 
 from app.config import settings
-from app.database import TableEpisodes, TableMovies, database, update, select
+from app.database import TableEpisodes, TableMovies, TableSportsEvents, database, update, select
 from arr_instances.resolution import scoped
 from languages.custom_lang import CustomLanguage
 from languages.get_languages import (language_from_alpha2, language_from_alpha3, alpha3_from_alpha2,
@@ -200,11 +200,33 @@ def embedded_audio_reader(file, file_size, episode_file_id=None, movie_file_id=N
     return audio_languages_from_metadata(data, file)
 
 
-def subtitles_sync_references(subtitles_path, sonarr_episode_id=None, radarr_movie_id=None, arr_instance_id=None):
+def subtitles_sync_references(subtitles_path, sonarr_episode_id=None, radarr_movie_id=None, arr_instance_id=None,
+                             sports_event_id=None):
     references_dict = {'audio_tracks': [], 'embedded_subtitles_tracks': [], 'external_subtitles_tracks': []}
     data = None
 
-    if sonarr_episode_id:
+    if sports_event_id:
+        # Without this branch the manual sync dialog opened on a sports event
+        # with an empty reference list, so the audio track and embedded
+        # subtitle track pickers had nothing to offer. parse_video_metadata has
+        # taken a sports_event_id all along; nothing passed one.
+        media_data = database.execute(
+            scoped(
+                select(TableSportsEvents.path, TableSportsEvents.file_size, TableSportsEvents.file_id,
+                       TableSportsEvents.subtitles)
+                .where(TableSportsEvents.id == sports_event_id),
+                TableSportsEvents.arr_instance_id, arr_instance_id)) \
+            .first()
+
+        if not media_data:
+            return references_dict
+
+        mapped_path = path_mappings.path_replace_instance(media_data.path, arr_instance_id, 'sports')
+
+        data = parse_video_metadata(mapped_path, media_data.file_size, None, None,
+                                    use_cache=True, arr_instance_id=arr_instance_id,
+                                    sports_event_id=sports_event_id)
+    elif sonarr_episode_id:
         media_data = database.execute(
             scoped(
                 select(TableEpisodes.path, TableEpisodes.file_size, TableEpisodes.episode_file_id,
@@ -288,20 +310,36 @@ def subtitles_sync_references(subtitles_path, sonarr_episode_id=None, radarr_mov
 
                 track_id += 1
 
+        # The stored subtitle paths are arr-side, the reference handed back to
+        # the sync engine has to be local, so both directions are needed. Named
+        # per media type rather than inlined as ternaries: a third media type
+        # made the ternary chain unreadable, and the movie branch had been
+        # reversing the path it hands out instead of mapping it to local.
+        if sports_event_id:
+            def to_stored(value):
+                return path_mappings.path_replace_reverse_instance(value, arr_instance_id, 'sports')
+
+            def to_local(value):
+                return path_mappings.path_replace_instance(value, arr_instance_id, 'sports')
+        elif sonarr_episode_id:
+            to_stored = path_mappings.path_replace_reverse
+            to_local = path_mappings.path_replace
+        else:
+            to_stored = path_mappings.path_replace_reverse_movie
+            to_local = path_mappings.path_replace_movie
+
         try:
             parsed_subtitles = ast.literal_eval(media_data.subtitles)
         except ValueError:
             pass
         else:
+            reversed_subtitles_path = to_stored(subtitles_path)
             for subtitles in parsed_subtitles:
-                reversed_subtitles_path = path_mappings.path_replace_reverse(subtitles_path) if sonarr_episode_id else (
-                    path_mappings.path_replace_reverse_movie(subtitles_path))
                 if subtitles[1] and subtitles[1] != reversed_subtitles_path:
                     language_dict = languages_from_colon_seperated_string(subtitles[0])
                     references_dict['external_subtitles_tracks'].append({
                         'name': os.path.basename(subtitles[1]),
-                        'path': path_mappings.path_replace(subtitles[1]) if sonarr_episode_id else
-                        path_mappings.path_replace_reverse_movie(subtitles[1]),
+                        'path': to_local(subtitles[1]),
                         'language': language_dict['language'],
                         'forced': language_dict['forced'],
                         'hearing_impaired': language_dict['hi'],
