@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { usePaginationQuery } from "@/apis/queries/hooks";
 import { QueryKeys } from "@/apis/queries/keys";
-import sports, { SportsFilters } from "@/apis/raw/sports";
+import sports, { SportsFilters, SportsLeague } from "@/apis/raw/sports";
 import { useArrInstances } from "./arrInstances";
 // Imported from the defining module, not the barrel: index re-exports this
 // file, so going through "." would close an import cycle.
@@ -22,6 +23,59 @@ export function useSportsAvailability() {
     isLoading: query.isLoading,
   };
 }
+// A league in the shape the shared ItemView table expects, so Sports renders
+// through the same component as Series and Movies instead of a bespoke grid.
+// The sports API predates that view: it sends audio_language as bare codes and
+// omits the fields Item.Base carries for an arr-managed title, so the gap is
+// filled here rather than by widening the shared type for one caller.
+export type SportsLeagueRow = Omit<
+  SportsLeague,
+  "audio_language" | "path" | "poster" | "fanart" | "overview"
+> &
+  Item.Base;
+
+export function toSportsLeagueRow(league: SportsLeague): SportsLeagueRow {
+  return {
+    ...league,
+    path: league.path ?? "",
+    poster: league.poster ?? "",
+    fanart: league.fanart ?? "",
+    overview: league.overview ?? "",
+    imdbId: "",
+    alternativeTitles: [],
+    year: "",
+    audio_language: (league.audio_language ?? []).map((code) => ({
+      code2: code,
+      name: code,
+    })),
+  };
+}
+
+// The table-backed leagues query. Paginates through the same start/length
+// contract the series and movies endpoints use, so usePaginationQuery drives it
+// unchanged.
+export function useSportsLeaguesPagination() {
+  const { instances, enabled } = useSportsAvailability();
+  return usePaginationQuery(
+    [QueryKeys.Sports, "leagues", instances.map((instance) => instance.id)],
+    async (param) => {
+      // Guarded inside the fetcher rather than by an enabled flag: the page
+      // still has to call this hook unconditionally, and returning an empty
+      // page here means no request is made for an install with no enabled
+      // Sportarr instead of a pointless 200 on every render.
+      if (!enabled) {
+        return { data: [], total: 0 };
+      }
+      const response = await sports.list(undefined, param.start, param.length);
+      return {
+        data: response.data.map(toSportsLeagueRow),
+        total: response.total,
+      };
+    },
+    false,
+  );
+}
+
 export function useSportsLeagues(owner?: number, page = 1) {
   const { enabled, instances } = useSportsAvailability();
   return useQuery({

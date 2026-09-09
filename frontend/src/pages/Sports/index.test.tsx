@@ -22,7 +22,7 @@ describe("sports library", () => {
       ),
     );
   });
-  it("renders local-ID links, owner, art and counts and assigns a profile", async () => {
+  it("renders leagues in the shared table with owner, sport and event counts", async () => {
     const user = userEvent.setup();
     let assigned: unknown;
     server.use(
@@ -41,10 +41,13 @@ describe("sports library", () => {
               sportarrLeagueId: 7,
               title: "Premier League",
               sport: "Football",
+              monitored: true,
+              tags: [],
+              audio_language: [],
               poster: "https://images.example/poster.jpg",
-              eventCount: 3,
-              eventFileCount: 4,
-              profileId: assigned ? 3 : null,
+              eventCount: 4,
+              eventFileCount: 3,
+              profileId: null,
             },
           ],
           total: 1,
@@ -56,28 +59,46 @@ describe("sports library", () => {
       }),
     );
     customRender(<Sports />);
+
+    // The row links to the league by local id, exactly as Series links to a show.
+    // Three queries have to settle before a row exists: the instance list, the
+    // settings that carry the master toggle, and only then the leagues page.
+    // That chain outruns findBy's 1s default when the whole suite is running.
     expect(
-      await screen.findByRole("link", { name: "Premier League" }),
+      await screen.findByRole(
+        "link",
+        { name: "Premier League" },
+        { timeout: 8000 },
+      ),
     ).toHaveAttribute("href", "/sports/51?instance=42");
-    expect(
-      screen.getByRole("img", { name: "Premier League poster" }),
-    ).toHaveAttribute("src", "https://images.example/poster.jpg");
+
+    // Same table furniture Series and Movies get, which the old poster grid had none of.
+    expect(screen.getByRole("table")).toBeInTheDocument();
+    for (const header of [
+      "Name",
+      "Sport",
+      "Audio",
+      "Languages Profile",
+      "Events",
+    ]) {
+      expect(
+        screen.getByRole("columnheader", { name: header }),
+      ).toBeInTheDocument();
+    }
     expect(screen.getByText("Football")).toBeInTheDocument();
-    expect(screen.getByText("3 events · 4 files")).toBeInTheDocument();
+    expect(screen.getByText("3/4")).toBeInTheDocument();
+    expect(screen.getByText("Main Sportarr")).toBeInTheDocument();
+
+    // Row selection drives the batch profile toolbar, as on the other two pages.
+    await user.click(
+      screen.getByRole("checkbox", { name: "Select Premier League" }),
+    );
     expect(
-      within(
-        screen.getByRole("region", { name: "Premier League league" }),
-      ).getByText("Main Sportarr"),
+      await screen.findByRole("button", { name: /change profile/i }),
     ).toBeInTheDocument();
-    await screen.findByRole("option", { name: "English Sports" });
-    await user.selectOptions(
-      screen.getByRole("combobox", { name: "Profile for Premier League" }),
-      "3",
-    );
-    await waitFor(() =>
-      expect(assigned).toEqual({ arr_instance_id: 42, profileId: 3 }),
-    );
+    expect(assigned).toBeUndefined();
   });
+
   it("does not request the library with no enabled Sportarr", async () => {
     let requests = 0;
     server.use(

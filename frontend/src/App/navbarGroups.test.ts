@@ -36,9 +36,7 @@ describe("navbar grouping", () => {
   it("keeps Sports in Media even when it is the only visible media type", () => {
     // The case that surfaced this: an install with Sonarr and Radarr off, so
     // Series and Movies are hidden and Sports is the only media route left.
-    const groups = groupRoutes(
-      mediaRoutes({ series: true, movies: true }),
-    );
+    const groups = groupRoutes(mediaRoutes({ series: true, movies: true }));
 
     expect(groups.find((g) => g.label === "Media")?.items).toHaveLength(1);
     expect(groups.find((g) => g.label === "Media")?.items[0].path).toBe(
