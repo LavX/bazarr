@@ -109,6 +109,9 @@ export default function MediaServerInstanceCard({
             </Button>
           </Group>
         </Group>
+        <Text size="sm" c="dimmed">
+          Test checks access, not refresh permission.
+        </Text>
         {update.isError && (
           <Alert color="red">
             Could not update this instance. Check its API key and path mappings
@@ -117,9 +120,9 @@ export default function MediaServerInstanceCard({
         )}
         {test.isSuccess && test.data.success && (
           <Alert color="green">
-            Read-only connection succeeded
-            {test.data.server_name ? `: ${test.data.server_name}` : ""}. This
-            does not confirm refresh permission or subtitle discovery.
+            {test.data.server_name
+              ? `Connected to ${test.data.server_name}.`
+              : "Connection succeeded."}
           </Alert>
         )}
         {(test.isError || (test.isSuccess && !test.data.success)) && (

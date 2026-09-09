@@ -16,20 +16,22 @@ import type {
 
 const statusMessages: Record<RefreshStatus["state"], string> = {
   idle: "No pending refreshes.",
-  pending:
-    "Refresh pending. Check the saved connection and retry when the server is available.",
-  requested: "Refresh requested. The server has accepted the request.",
-  confirmed: "Refresh confirmed by the server.",
-  unconfirmed:
-    "Refresh unconfirmed. The request may have reached the server, but completion could not be confirmed.",
+  pending: "Refresh pending.",
+  requested: "Refresh sent.",
+  confirmed: "Refresh confirmed.",
+  unconfirmed: "Refresh unconfirmed.",
 };
+
+function refreshCount(count: number) {
+  return `${count} refresh${count === 1 ? "" : "es"}`;
+}
 
 function getStatusErrorMessage(errorCode: RefreshStatus["error_code"]) {
   switch (errorCode) {
     case "queue_overflow":
-      return "Refresh queue capacity exceeded. Some refresh targets were not queued. Retry pending only retries retained targets and cannot recover dropped targets.";
+      return "The refresh queue overflowed. Retry pending covers the refreshes it kept, but dropped ones need a new refresh.";
     case "sidecar_unsupported":
-      return "Refresh unsupported for this subtitle location. Silo requires subtitles beside the video file. Retrying an unchanged subtitle location will not resolve this.";
+      return "Silo only refreshes subtitles stored beside the video file. Move the subtitle there, then retry.";
     default:
       return null;
   }
@@ -61,8 +63,7 @@ export default function MediaServerRefreshStatus({
         <MantineText size="sm">Loading refresh status...</MantineText>
       ) : !currentStatus ? (
         <Alert color="yellow">
-          Refresh status unavailable. No refresh outcome can be confirmed. Check
-          that the Bazarr API is available.
+          Refresh status unavailable. Check that the Bazarr API is reachable.
         </Alert>
       ) : (
         <Alert color={warning ? "yellow" : "gray"}>
@@ -71,15 +72,18 @@ export default function MediaServerRefreshStatus({
               currentStatus.state === "idle" && currentStatus.pending > 0
                 ? "pending"
                 : currentStatus.state
-            ]}{" "}
-          {currentStatus.pending} pending.
+            ]}
+          {currentStatus.pending > 0 &&
+            ` ${refreshCount(currentStatus.pending)} queued.`}
           {currentStatus.error_code !== null &&
             !statusErrorMessage &&
             " Check the saved connection, server access and path mappings."}
-          {currentStatus.state !== "idle" &&
-            " Subtitle discovery is not confirmed."}
         </Alert>
       )}
+      <MantineText size="sm" c="dimmed">
+        Confirmation means the server finished a scan, not that it found the
+        subtitle.
+      </MantineText>
       {kind === "silo" && (
         <MantineText size="sm" c="dimmed">
           When Silo runs across machines, synchronize the
@@ -118,10 +122,7 @@ export default function MediaServerRefreshStatus({
         </Button>
       </Group>
       {retry.isSuccess && (
-        <Alert color="gray">
-          Queued {retry.data.queued} pending refreshes. Queue acceptance does
-          not confirm subtitle discovery.
-        </Alert>
+        <Alert color="gray">Queued {refreshCount(retry.data.queued)}.</Alert>
       )}
       {retry.isError && (
         <Alert color="red">

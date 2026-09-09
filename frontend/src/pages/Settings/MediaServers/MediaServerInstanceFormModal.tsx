@@ -158,17 +158,16 @@ export default function MediaServerInstanceFormModal({
           />
           {kind === "silo" && (
             <Text size="sm" c="dimmed">
-              Refreshes support IP addresses and names resolved through DNS or
-              the hosts file. Names relying only on local discovery, such as
-              mDNS, are unsupported for refreshes and can still pass the
-              read-only Test.
+              Refreshes need an IP address or a name resolved by DNS or the
+              hosts file. mDNS and other local-discovery names pass the Test but
+              fail refreshes.
             </Text>
           )}
           {instance && (
             <>
               <Text size="sm">
                 {instance.api_key_set
-                  ? "An API key is stored. Keep it, replace it or explicitly clear it."
+                  ? "An API key is stored. Keep it, replace it or clear it."
                   : "No API key is stored."}
               </Text>
               <SegmentedControl
@@ -221,6 +220,9 @@ export default function MediaServerInstanceFormModal({
               Test
             </Button>
           </Group>
+          <Text size="sm" c="dimmed">
+            Test checks access, not refresh permission.
+          </Text>
           {!configured && (
             <Text size="sm" c="dimmed">
               Enter a Server URL and API Key to test this connection.
@@ -228,12 +230,13 @@ export default function MediaServerInstanceFormModal({
           )}
           {test.isSuccess && test.data.success && (
             <Alert color="green">
-              Read-only connection succeeded
-              {test.data.server_name ? `: ${test.data.server_name}` : ""}
+              {test.data.server_name
+                ? `Connected to ${test.data.server_name}`
+                : "Connection succeeded"}
               {kind === "emby" && test.data.version
                 ? ` (v${test.data.version})`
                 : ""}
-              . This does not confirm refresh permission or subtitle discovery.
+              .
             </Alert>
           )}
           {(test.isError || (test.isSuccess && !test.data.success)) && (

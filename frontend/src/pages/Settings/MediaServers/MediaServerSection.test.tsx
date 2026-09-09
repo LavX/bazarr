@@ -101,10 +101,11 @@ it.each(["emby", "silo"] as const)(
     );
     await userEvent.click(form.getByRole("button", { name: "Test" }));
     expect(
-      await form.findByText(/Read-only connection succeeded/),
-    ).toHaveTextContent(
-      /does not confirm refresh permission or subtitle discovery/,
-    );
+      await form.findByText("Connected to Living room."),
+    ).not.toHaveTextContent(/refresh permission|subtitle/i);
+    expect(
+      form.getAllByText("Test checks access, not refresh permission."),
+    ).toHaveLength(1);
     expect(form.queryByText(/vundefined/)).not.toBeInTheDocument();
     expect(testBody).toEqual({
       url: `https://${kind}.example/prefix`,
@@ -168,10 +169,10 @@ it.each(["emby", "silo"] as const)(
       await screen.findByRole("region", { name: "Living room" }),
     );
     const second = within(screen.getByRole("region", { name: "Bedroom" }));
-    expect(await first.findByText(/2 pending/)).toBeInTheDocument();
+    expect(await first.findByText(/2 refreshes queued/)).toBeInTheDocument();
     expect(await second.findByText(/No pending refreshes/)).toBeInTheDocument();
     await userEvent.click(first.getByRole("button", { name: "Retry pending" }));
-    await first.findByText(/Queued 2 pending refreshes/);
+    await first.findByText("Queued 2 refreshes.");
     await userEvent.click(
       first.getByRole("switch", { name: "Disable instance" }),
     );
@@ -305,15 +306,15 @@ it("warns about unconfirmed refreshes, retries pending work and refreshes status
     }),
   );
   expect(await screen.findByText(/Refresh unconfirmed/)).toBeInTheDocument();
-  expect(screen.getByText(/2 pending/)).toBeInTheDocument();
+  expect(screen.getByText(/2 refreshes queued/)).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Retry pending" }));
+  expect(await screen.findByText("Queued 2 refreshes.")).toBeInTheDocument();
+  expect(await screen.findByText(/Refresh sent/)).toBeInTheDocument();
   expect(
-    await screen.findByText(/Queued 2 pending refreshes/),
-  ).toBeInTheDocument();
-  expect(await screen.findByText(/Refresh requested/)).toBeInTheDocument();
-  expect(
-    screen.getByText(/Subtitle discovery is not confirmed/),
-  ).toBeInTheDocument();
+    screen.getAllByText(
+      "Confirmation means the server finished a scan, not that it found the subtitle.",
+    ),
+  ).toHaveLength(1);
 });
 
 it("disables retry when master changes are staged and shows retry failures safely", async () => {
@@ -350,9 +351,25 @@ it("does not claim there is no pending work when an idle status includes queued 
       HttpResponse.json({ pending: 2, state: "idle", error_code: null }),
     ),
   );
-  expect(await screen.findByText(/2 pending/)).toBeInTheDocument();
+  expect(await screen.findByText(/2 refreshes queued/)).toBeInTheDocument();
   expect(screen.queryByText(/No pending refreshes/)).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Retry pending" })).toBeEnabled();
+});
+
+it("counts a single queued refresh in the singular", async () => {
+  setup("emby");
+  server.use(
+    http.get(`${item}/status`, () =>
+      HttpResponse.json({ pending: 1, state: "pending", error_code: null }),
+    ),
+    http.post(`${item}/retry-pending`, () => HttpResponse.json({ queued: 1 })),
+  );
+  expect(await screen.findByText(/1 refresh queued\./)).toBeInTheDocument();
+  expect(screen.queryByText(/1 refreshes/)).not.toBeInTheDocument();
+  const retry = screen.getByRole("button", { name: "Retry pending" });
+  await waitFor(() => expect(retry).toBeEnabled());
+  await userEvent.click(retry);
+  expect(await screen.findByText("Queued 1 refresh.")).toBeInTheDocument();
 });
 
 it.each(["confirmed", "requested", "idle"] as const)(
@@ -364,14 +381,13 @@ it.each(["confirmed", "requested", "idle"] as const)(
         HttpResponse.json({ pending: 0, state, error_code: "queue_overflow" }),
       ),
     );
-    const warning = await screen.findByText(/0 pending/);
-    expect(warning).toHaveTextContent(/queue.*capacity|queue overflow/i);
-    expect(warning).toHaveTextContent(/not queued/i);
+    const warning = await screen.findByText(/refresh queue overflowed/i);
     expect(warning).toHaveTextContent(
-      /Retry pending.*cannot recover.*dropped/i,
+      /Retry pending covers the refreshes it kept/i,
     );
+    expect(warning).toHaveTextContent(/dropped ones need a new refresh/i);
     expect(warning).not.toHaveTextContent(
-      /Refresh confirmed|Refresh requested|No pending refreshes/i,
+      /Refresh confirmed|Refresh sent|No pending refreshes|0 refresh/i,
     );
     expect(
       screen.getByRole("button", { name: "Retry pending" }),
@@ -395,16 +411,16 @@ it("retries retained overflow targets and keeps the dropped-target warning after
       return HttpResponse.json({ queued: 2 });
     }),
   );
-  expect(await screen.findByText(/2 pending/)).toHaveTextContent(/not queued/i);
+  expect(await screen.findByText(/2 refreshes queued/)).toHaveTextContent(
+    /refresh queue overflowed/i,
+  );
   const retry = screen.getByRole("button", { name: "Retry pending" });
   expect(retry).toBeEnabled();
   await userEvent.click(retry);
-  expect(
-    await screen.findByText(/Queued 2 pending refreshes/),
-  ).toBeInTheDocument();
-  const warning = await screen.findByText(/0 pending/);
-  expect(warning).toHaveTextContent(/Retry pending.*cannot recover.*dropped/i);
-  expect(warning).not.toHaveTextContent(/Refresh confirmed/i);
+  expect(await screen.findByText("Queued 2 refreshes.")).toBeInTheDocument();
+  const warning = await screen.findByText(/refresh queue overflowed/i);
+  expect(warning).toHaveTextContent(/dropped ones need a new refresh/i);
+  expect(warning).not.toHaveTextContent(/Refresh confirmed|0 refresh/i);
   expect(retry).toBeDisabled();
 });
 
@@ -420,14 +436,11 @@ it("explains that an unsupported Silo subtitle location needs to change before r
       }),
     ),
   );
-  const warning = await screen.findByText(/1 pending/);
-  expect(warning).toHaveTextContent(/unsupported.*subtitle location/i);
-  expect(warning).toHaveTextContent(/subtitles.*beside the video/i);
-  expect(warning).toHaveTextContent(
-    /Retrying.*unchanged.*location.*will not resolve/i,
-  );
+  const warning = await screen.findByText(/1 refresh queued/);
+  expect(warning).toHaveTextContent(/subtitles stored beside the video file/i);
+  expect(warning).toHaveTextContent(/Move the subtitle there, then retry/i);
   expect(warning).not.toHaveTextContent(
-    /may have reached the server|Check the saved connection|private|movie\.srt/i,
+    /Refresh unconfirmed|Check the saved connection|private|movie\.srt/i,
   );
   expect(screen.getByRole("button", { name: "Retry pending" })).toBeEnabled();
 });
@@ -443,7 +456,7 @@ it("keeps unknown status errors generic without exposing the raw error", async (
       }),
     ),
   );
-  const warning = await screen.findByText(/1 pending/);
+  const warning = await screen.findByText(/1 refresh queued/);
   expect(warning).toHaveTextContent(/Refresh unconfirmed/i);
   expect(warning).toHaveTextContent(
     /Check the saved connection, server access and path mappings/i,
@@ -504,7 +517,7 @@ it.each(["emby", "silo"] as const)(
       modal.getByRole("switch", { name: "Verify SSL certificate" }),
     );
     await userEvent.click(modal.getByRole("button", { name: "Test" }));
-    await modal.findByText(/Read-only connection succeeded/);
+    await modal.findByText("Connection succeeded.");
     expect(probe).toEqual({
       url: `https://${kind}.example/prefix`,
       apikey: "0007",
@@ -671,7 +684,7 @@ it("tests a saved card by UUID using the current server-side connection", async 
     }),
   );
   await userEvent.click(await screen.findByRole("button", { name: "Test" }));
-  await screen.findByText(/Read-only connection succeeded/);
+  await screen.findByText("Connected to Living room.");
   expect(body).toEqual({});
 });
 
