@@ -152,7 +152,26 @@ export interface WantedSeriesItem {
   title: string;
 }
 
-export type WantedItem = WantedEpisodeItem | WantedMovieItem | WantedSeriesItem;
+export interface WantedSportsEventItem {
+  type: "sports";
+  sportsEventId: number;
+  arrInstanceId?: number;
+  title: string;
+}
+
+export interface WantedSportsLeagueItem {
+  type: "sportsLeague";
+  sportsLeagueId: number;
+  arrInstanceId?: number;
+  title: string;
+}
+
+export type WantedItem =
+  | WantedEpisodeItem
+  | WantedMovieItem
+  | WantedSeriesItem
+  | WantedSportsEventItem
+  | WantedSportsLeagueItem;
 
 interface Props {
   items: WantedItem[];
@@ -280,6 +299,18 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
         return {
           type: "series" as const,
           sonarrSeriesId: item.sonarrSeriesId,
+          arr_instance_id: item.arrInstanceId,
+        };
+      } else if (item.type === "sports") {
+        return {
+          type: "sports" as const,
+          sportsEventId: item.sportsEventId,
+          arr_instance_id: item.arrInstanceId,
+        };
+      } else if (item.type === "sportsLeague") {
+        return {
+          type: "sportsLeague" as const,
+          sportsLeagueId: item.sportsLeagueId,
           arr_instance_id: item.arrInstanceId,
         };
       } else {

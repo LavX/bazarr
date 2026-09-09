@@ -88,8 +88,11 @@ class BatchOperation(Resource):
         if not items:
             return {'error': 'Empty items list'}, 400
 
-        VALID_ITEM_KEYS = {'type', 'sonarrSeriesId', 'sonarrEpisodeId', 'radarrId', 'arr_instance_id'}
-        VALID_TYPES = {'episode', 'movie', 'series'}
+        VALID_ITEM_KEYS = {'type', 'sonarrSeriesId', 'sonarrEpisodeId', 'radarrId',
+                           'sportsEventId', 'sportsLeagueId', 'arr_instance_id'}
+        # 'sports' names an event, as it does everywhere else in the sports
+        # code, and 'sportsLeague' names a league the way 'series' names a show.
+        VALID_TYPES = {'episode', 'movie', 'series', 'sports', 'sportsLeague'}
 
         sanitized_items = []
         for item in items:

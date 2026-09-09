@@ -118,6 +118,78 @@ class SportsEventSubtitlesCombine(Resource):
         return body, 500 if result.status == "failed" else 200
 
 
+@api_ns_sports_subtitles.route("/sports/leagues/<int:league_id>/subtitles/combine")
+class SportsLeagueSubtitlesCombine(Resource):
+    """Combine every event in a league that has all its source languages.
+
+    The series route's counterpart, so a league selected in the library gets
+    the same batch treatment a show does.
+    """
+
+    @authenticate
+    @api_ns_sports_subtitles.response(200, "Batch combine summary")
+    @api_ns_sports_subtitles.response(401, "Not Authenticated")
+    @api_ns_sports_subtitles.response(404, "Sports league not found")
+    def post(self, league_id):
+        from sportarr.identity import resolve_event_in_session
+        from sportarr.profile_hooks import capture_profile_operation
+        from sportarr.subtitles import candidate_signature
+        from subtitles.tools.combine.main import try_combine_for_video
+
+        try:
+            body = request.get_json(silent=True) or {}
+            owner = _owner(body.get("arr_instance_id") or request.args.get("arr_instance_id"))
+        except ValueError as exc:
+            return {"message": str(exc)}, 400
+
+        event_ids = database.execute(
+            select(TableSportsEvents.id).where(
+                TableSportsEvents.league_id == league_id,
+                TableSportsEvents.arr_instance_id == owner,
+            )
+        ).scalars().all()
+        if not event_ids:
+            return {"status": "not_found"}, 404
+
+        built = skipped = failed = 0
+        details = []
+        for event_id in event_ids:
+            try:
+                context = resolve_event_in_session(database, event_id, owner)
+                operation = capture_profile_operation(context, candidate_signature(context))
+                if not operation.profile:
+                    result_status, result = "skipped", None
+                else:
+                    result = try_combine_for_video(
+                        video_path=context.mapped_path,
+                        media_type="sports",
+                        sports_operation=operation,
+                    )
+                    result_status = result.status
+            except (ValueError, OSError) as exc:
+                # One unreadable or moved recording must not end the batch.
+                result_status, result = "failed", None
+                details.append({"eventId": event_id, "status": "failed",
+                                "path": "", "reason": "", "error": str(exc)})
+            else:
+                details.append({
+                    "eventId": event_id,
+                    "status": result_status,
+                    "path": result.path if result else "",
+                    "reason": result.reason if result else "no language profile is assigned",
+                    "error": result.error if result else "",
+                })
+            if result_status == "built":
+                built += 1
+            elif result_status == "skipped":
+                skipped += 1
+            else:
+                failed += 1
+
+        return {"status": "batch_complete", "built": built, "skipped": skipped,
+                "failed": failed, "details": details}, 200
+
+
 @api_ns_sports_subtitles.route("/sports/events/<int:event_id>/subtitles/upload")
 class SportsEventSubtitleUpload(Resource):
     """Uploading a subtitle for a sports event.

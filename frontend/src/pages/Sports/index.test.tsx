@@ -99,6 +99,83 @@ describe("sports library", () => {
     expect(assigned).toBeUndefined();
   });
 
+  it("offers the same batch toolbar the other two libraries carry", async () => {
+    const user = userEvent.setup();
+    let batched: unknown;
+    server.use(
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([sportarr]),
+      ),
+      http.get("/api/sports/leagues", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: 51,
+              arr_instance_id: 42,
+              sportarrLeagueId: 7,
+              title: "Premier League",
+              sport: "Football",
+              monitored: true,
+              tags: [],
+              audio_language: [],
+              eventCount: 4,
+              eventFileCount: 3,
+              profileId: 5,
+            },
+          ],
+          total: 1,
+        }),
+      ),
+      http.post("/api/subtitles/batch", async ({ request }) => {
+        batched = await request.json();
+        return HttpResponse.json({ queued: 1, skipped: 0, errors: [] });
+      }),
+    );
+    customRender(<Sports />);
+
+    await user.click(
+      await screen.findByRole(
+        "checkbox",
+        { name: "Select Premier League" },
+        { timeout: 8000 },
+      ),
+    );
+    // Selecting rows used to offer only Change Profile: the batch endpoint
+    // dropped anything that was not an episode, a movie or a series, so none
+    // of these buttons had a backend to talk to.
+    for (const label of [
+      "Sync Subtitles",
+      "Subtitle Tools",
+      "Translate",
+      "Combine",
+      "More",
+    ]) {
+      expect(
+        await screen.findByRole("button", { name: label }),
+      ).toBeInTheDocument();
+    }
+
+    await user.click(screen.getByRole("button", { name: "More" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Scan Disk" }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: /Apply to 1 Item/ }),
+    );
+
+    await waitFor(() => expect(batched).toBeDefined());
+    // A league batches as one item, the way a series does; the backend expands
+    // it into its events. The owner travels with it because a sports path
+    // mapping is always per instance.
+    expect(batched).toEqual({
+      items: [
+        { type: "sportsLeague", sportsLeagueId: 51, arr_instance_id: 42 },
+      ],
+      action: "scan-disk",
+      options: undefined,
+    });
+  });
+
   it("does not request the library with no enabled Sportarr", async () => {
     let requests = 0;
     server.use(

@@ -5,7 +5,8 @@ import logging
 import os
 
 from app.config import settings
-from app.database import TableEpisodes, TableMovies, TableHistory, TableHistoryMovie, TableShows, database, select
+from app.database import (TableEpisodes, TableMovies, TableHistory, TableHistoryMovie, TableHistorySports,
+                          TableShows, TableSportsEvents, database, select)
 from app.jobs_queue import jobs_queue
 from subtitles.sync import sync_subtitles
 from subtitles.tools.subsync_engines import is_sync_engine_output
@@ -15,6 +16,7 @@ from subtitles.indexer.movies import movies_scan_subtitles
 from subtitles.mass_download.series import series_download_subtitles
 from subtitles.mass_download.movies import movies_download_subtitles
 from subtitles.upgrade import upgrade_episodes_subtitles, upgrade_movies_subtitles
+from sportarr.workflows import upgrade_sports_subtitles
 from utilities.path_mappings import path_mappings
 from sqlalchemy import or_
 
@@ -218,6 +220,37 @@ def _get_synced_movie_paths():
     return {r.subtitles_path for r in results if r.subtitles_path}
 
 
+def _get_synced_sports_paths():
+    """Get set of subtitle paths that have been synced (action=5) from sports history."""
+    results = database.execute(
+        select(TableHistorySports.subtitles_path)
+        .where(TableHistorySports.action == 5)
+    ).all()
+    return {r.subtitles_path for r in results if r.subtitles_path}
+
+
+def _sports_event_ids_for_leagues(league_ids, league_instance):
+    """Expand selected leagues into their event ids, keeping each event's owner.
+
+    A league selection is the sports equivalent of selecting a series, and the
+    collector below works on events the way _collect_episodes works on episodes.
+    """
+    if not league_ids:
+        return {}
+    rows = database.execute(
+        select(TableSportsEvents.id, TableSportsEvents.league_id,
+               TableSportsEvents.arr_instance_id)
+        .where(TableSportsEvents.league_id.in_(league_ids))
+    ).all()
+    expanded = {}
+    for row in rows:
+        if not _instance_filter_matches(row.arr_instance_id,
+                                        league_instance.get(row.league_id)):
+            continue
+        expanded.setdefault(row.id, set()).add(row.arr_instance_id)
+    return expanded
+
+
 def _collect_subtitle_items(items, action, options):
     """Collect subtitle items from the database for processing.
 
@@ -248,6 +281,12 @@ def _collect_subtitle_items(items, action, options):
     series_instance = {}
     episode_instance = {}
     movie_instance = {}
+    # 'sports' names an event, the way it does everywhere else in the sports
+    # code, and 'sportsLeague' names a league the way 'series' names a show.
+    sports_ids = []
+    sports_league_ids = []
+    sports_instance = {}
+    sports_league_instance = {}
 
     if items is None:
         # Entire library mode
@@ -271,6 +310,16 @@ def _collect_subtitle_items(items, action, options):
                 if rid is not None:
                     movie_ids.append(rid)
                     _add_instance_filter(movie_instance, rid, inst)
+            elif item_type == 'sports':
+                eid = item.get('sportsEventId')
+                if eid is not None:
+                    sports_ids.append(eid)
+                    _add_instance_filter(sports_instance, eid, inst)
+            elif item_type == 'sportsLeague':
+                lid = item.get('sportsLeagueId')
+                if lid is not None:
+                    sports_league_ids.append(lid)
+                    _add_instance_filter(sports_league_instance, lid, inst)
 
     all_items = []
     total_skipped = 0
@@ -316,6 +365,30 @@ def _collect_subtitle_items(items, action, options):
         )
         all_items.extend(mov_items)
         total_skipped += mov_skipped
+
+    # Collect sports subtitles
+    for event_id, owners in _sports_event_ids_for_leagues(
+            sports_league_ids, sports_league_instance).items():
+        sports_ids.append(event_id)
+        sports_instance.setdefault(event_id, set()).update(owners)
+
+    should_collect_sports = (items is None and settings.general.use_sportarr) or sports_ids
+    if should_collect_sports:
+        sports_items, sports_skipped = _collect_sports(
+            event_ids=sports_ids or None,
+            action=action,
+            force_resync=force_resync,
+            max_offset=max_offset,
+            gss=gss,
+            no_fix_framerate=no_fix_framerate,
+            output_mode=output_mode,
+            enabled_engines=enabled_engines,
+            target_lang=target_lang,
+            source_lang=source_lang,
+            sports_instance=sports_instance,
+        )
+        all_items.extend(sports_items)
+        total_skipped += sports_skipped
 
     return all_items, total_skipped
 
@@ -656,6 +729,131 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
     return items, skipped
 
 
+def _collect_sports(event_ids=None, action='sync', force_resync=False,
+                    max_offset='60', gss=True, no_fix_framerate=True,
+                    output_mode=None, enabled_engines=None, target_lang=None, source_lang=None,
+                    sports_instance=None):
+    """Collect sports event subtitles from the database.
+
+    Mirrors _collect_movies. The differences are all consequences of ownership:
+    an event is addressed by its local id rather than an upstream one, its paths
+    resolve through the owning instance's own mapping with no global fallback,
+    and the item carries that owner so the processor can build the publication
+    guard a sports write needs.
+
+    No embedded-track branch. Translating one means extracting it to a file
+    first, and the extraction helper resolves its media row by upstream id
+    through the series and movies tables, which a sports event has no place in.
+    An in-container track is skipped rather than half-handled.
+    """
+    sports_instance = sports_instance or {}
+    query = select(
+        TableSportsEvents.id,
+        TableSportsEvents.arr_instance_id,
+        TableSportsEvents.path,
+        TableSportsEvents.subtitles,
+    )
+    if event_ids:
+        query = query.where(TableSportsEvents.id.in_(event_ids))
+
+    events = database.execute(query).all()
+
+    synced_paths = set()
+    if action == 'sync' and not force_resync:
+        synced_paths = _get_synced_sports_paths()
+
+    items = []
+    skipped = 0
+
+    for event in events:
+        req_instances = sports_instance.get(event.id)
+        if not _instance_filter_matches(event.arr_instance_id, req_instances):
+            continue
+
+        subtitles = _parse_subtitles_column(event.subtitles)
+        video_path = path_mappings.path_replace_instance(
+            event.path, event.arr_instance_id, 'sports')
+
+        def _target_usable(lang_string, sub_path, _owner=event):
+            mapped = path_mappings.path_replace_instance(
+                sub_path, _owner.arr_instance_id, 'sports')
+            if not os.path.isfile(mapped):
+                return False
+            modifiers = [part.lower() for part in lang_string.split(':')[1:]]
+            if any(m.startswith('combined-') for m in modifiers):
+                return False
+            return not is_sync_engine_output(mapped)
+
+        if action == 'translate' and target_lang and _translate_item_satisfied(
+                subtitles, target_lang, source_lang, _target_usable):
+            skipped += 1
+            continue
+
+        for lang_string, sub_path in subtitles:
+            sub_lang, sub_hi, sub_forced = _subtitle_variant_key(lang_string)
+
+            if sub_forced and action in ('sync', 'translate'):
+                skipped += 1
+                continue
+
+            if action == 'translate' and source_lang and sub_lang != source_lang:
+                skipped += 1
+                continue
+
+            if action == 'translate' and target_lang and _translate_output_present(
+                    subtitles, target_lang, sub_hi, _target_usable):
+                skipped += 1
+                continue
+
+            if not sub_path:
+                skipped += 1
+                continue
+
+            mapped_sub_path = path_mappings.path_replace_instance(
+                sub_path, event.arr_instance_id, 'sports')
+            if not os.path.isfile(mapped_sub_path):
+                skipped += 1
+                continue
+
+            modifiers = [p.lower() for p in lang_string.split(':')[1:]]
+            is_combined = any(m.startswith('combined-') for m in modifiers)
+            if action in ('sync', 'translate') and (
+                    is_sync_engine_output(mapped_sub_path) or is_combined):
+                skipped += 1
+                continue
+
+            if action == 'sync' and not force_resync:
+                reversed_path = path_mappings.path_replace_reverse_instance(
+                    mapped_sub_path, event.arr_instance_id, 'sports')
+                if reversed_path in synced_paths:
+                    skipped += 1
+                    continue
+
+            items.append({
+                'video_path': video_path,
+                'srt_path': mapped_sub_path,
+                'srt_lang': sub_lang,
+                'embedded': False,
+                'forced': sub_forced,
+                'hi': sub_hi,
+                'sonarr_series_id': None,
+                'sonarr_episode_id': None,
+                'radarr_id': None,
+                'sports_event_id': event.id,
+                'arr_instance_id': event.arr_instance_id,
+                'max_offset_seconds': max_offset,
+                'no_fix_framerate': no_fix_framerate,
+                'gss': gss,
+                'output_mode': output_mode,
+                'enabled_engines': enabled_engines,
+                # A sports translation carries no native media metadata, and
+                # translate_subtitles_file refuses one that does.
+                'metadata': None,
+            })
+
+    return items, skipped
+
+
 def _process_subtitle_item(item, action, options, job_id):
     """Process a single subtitle item based on the action.
 
@@ -686,10 +884,28 @@ def _process_subtitle_item(item, action, options, job_id):
             sync_kwargs['output_mode'] = item.get('output_mode')
         if item.get('enabled_engines') is not None:
             sync_kwargs['enabled_engines'] = item.get('enabled_engines')
-        return sync_subtitles(**sync_kwargs)
+        sports_event_id = item.get('sports_event_id')
+        if sports_event_id is None:
+            return sync_subtitles(**sync_kwargs)
+        # Sports publishes under an owned boundary pinning the file signature,
+        # so a batch item collected before a resync replaced the recording
+        # cannot write over the new file. The other two media types pass None
+        # and keep their behaviour untouched.
+        from sportarr.subtitles import sports_manual_operation
+        with sports_manual_operation(
+                sports_event_id, item.get('arr_instance_id')) as (
+                    sports_context, sports_validate, sports_guard, sports_path):
+            sync_kwargs['video_path'] = sports_path
+            sync_kwargs['context'] = sports_context
+            sync_kwargs['validate'] = sports_validate
+            sync_kwargs['publication_guard'] = sports_guard
+            return sync_subtitles(**sync_kwargs)
     elif action == 'translate':
         from subtitles.tools.translate.main import translate_subtitles_file
-        media_type = 'episode' if item['sonarr_series_id'] else 'movies'
+        if item.get('sports_event_id'):
+            media_type = 'sports'
+        else:
+            media_type = 'episode' if item['sonarr_series_id'] else 'movies'
 
         source_srt_file = item['srt_path']
         if item.get('embedded'):
@@ -713,6 +929,25 @@ def _process_subtitle_item(item, action, options, job_id):
                     'BAZARR could not extract the embedded %s track from %s, skipping translation',
                     item['srt_lang'], item['video_path'])
                 return False
+        sports_operation = None
+        if media_type == 'sports':
+            # Bound per item rather than once for the batch: the guard pins one
+            # source, one destination and one file signature, so a batch-wide
+            # operation would authorise writes it never inspected.
+            from sportarr.profile_hooks import manual_translation_operation
+            try:
+                sports_operation = manual_translation_operation(
+                    item['sports_event_id'], item.get('arr_instance_id'),
+                    source_srt_file, options.get('to_lang', 'en'),
+                    from_language=options.get('from_lang', item['srt_lang']),
+                    forced=item['forced'], hi=item['hi'],
+                )
+            except ValueError as e:
+                # Most often the profile does not want this target, which is a
+                # skip for this item and not a failure of the batch.
+                logger.warning('BAZARR skipping sports translation for event %s: %s',
+                               item['sports_event_id'], e)
+                return False
         # Don't pass the batch job_id to translate. translate_subtitles_file
         # has its own job/progress lifecycle that would hijack the batch job.
         # Calling without job_id makes it queue as its own separate job.
@@ -729,6 +964,7 @@ def _process_subtitle_item(item, action, options, job_id):
             radarr_id=item['radarr_id'],
             metadata=item['metadata'],
             arr_instance_id=item.get('arr_instance_id'),
+            sports_operation=sports_operation,
         )
         return True
     elif action in MOD_ACTIONS:
@@ -743,6 +979,58 @@ def _process_subtitle_item(item, action, options, job_id):
         )
         return True
     return False
+
+
+def _scan_sports(item):
+    """Re-index a selected sports event, or every event in a selected league.
+
+    Returns False when the selection names nothing indexable, so the caller can
+    count it as skipped rather than queued.
+    """
+    from subtitles.indexer.sports import store_subtitles_sports
+
+    arr_instance_id = item.get('arr_instance_id')
+    if not arr_instance_id:
+        return False
+    if item.get('type') == 'sports':
+        event_id = item.get('sportsEventId')
+        if not event_id:
+            return False
+        store_subtitles_sports(event_id, arr_instance_id)
+        return True
+    league_id = item.get('sportsLeagueId')
+    if not league_id:
+        return False
+    rows = database.execute(
+        select(TableSportsEvents.id).where(
+            TableSportsEvents.league_id == league_id,
+            TableSportsEvents.arr_instance_id == arr_instance_id,
+        )
+    ).scalars().all()
+    for event_id in rows:
+        store_subtitles_sports(event_id, arr_instance_id)
+    return bool(rows)
+
+
+def _search_sports(item, job_id):
+    """Search the missing languages of a selected event, or of a whole league."""
+    from sportarr.automatic import search_event
+    from sportarr.workflows import sports_download_subtitles
+
+    arr_instance_id = item.get('arr_instance_id')
+    if not arr_instance_id:
+        return False
+    if item.get('type') == 'sports':
+        event_id = item.get('sportsEventId')
+        if not event_id:
+            return False
+        search_event(event_id, arr_instance_id, job_id=job_id)
+        return True
+    league_id = item.get('sportsLeagueId')
+    if not league_id:
+        return False
+    sports_download_subtitles(league_id, arr_instance_id, job_id=job_id)
+    return True
 
 
 def _process_media_action(items, action, job_id):
@@ -765,12 +1053,22 @@ def _process_media_action(items, action, job_id):
                                  if i.get('type') in ('series', 'episode') and i.get('sonarrSeriesId')]
         radarr_filters = [(i.get('radarrId'), i.get('arr_instance_id')) for i in items
                           if i.get('type') == 'movie' and i.get('radarrId')]
+        # Sports upgrades run per owner, not per selected row: the sports
+        # upgrade job builds its own candidate list from history and takes an
+        # instance, not a media filter. Deduplicated so selecting five events
+        # from one Sportarr does not run its upgrade five times.
+        sports_owners = sorted({
+            i.get('arr_instance_id') for i in items
+            if i.get('type') in ('sports', 'sportsLeague') and i.get('arr_instance_id')
+        })
         try:
             if sonarr_series_filters:
                 upgrade_episodes_subtitles(job_id=job_id, sonarr_series_filters=sonarr_series_filters)
             if radarr_filters:
                 upgrade_movies_subtitles(job_id=job_id, radarr_filters=radarr_filters)
-            queued = len(sonarr_series_filters) + len(radarr_filters)
+            for owner in sports_owners:
+                upgrade_sports_subtitles(job_id=job_id, arr_instance_id=owner)
+            queued = len(sonarr_series_filters) + len(radarr_filters) + len(sports_owners)
         except Exception as e:
             logger.error(f'Error during upgrade: {e}')  # noqa: G004
             errors.append(str(e))
@@ -808,6 +1106,11 @@ def _process_media_action(items, action, job_id):
                         movies_scan_subtitles(radarr_id)
                     else:
                         movies_scan_subtitles(radarr_id, arr_instance_id=arr_instance_id)
+                elif item_type in ('sports', 'sportsLeague'):
+                    scanned = _scan_sports(item)
+                    if not scanned:
+                        skipped += 1
+                        continue
                 else:
                     skipped += 1
                     continue
@@ -824,6 +1127,11 @@ def _process_media_action(items, action, job_id):
                         skipped += 1
                         continue
                     movies_download_subtitles(radarr_id, arr_instance_id=item.get('arr_instance_id'))
+                elif item_type in ('sports', 'sportsLeague'):
+                    searched = _search_sports(item, job_id)
+                    if not searched:
+                        skipped += 1
+                        continue
                 else:
                     skipped += 1
                     continue

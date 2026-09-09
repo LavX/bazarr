@@ -33,11 +33,18 @@ export type BatchAction =
   | "upgrade";
 
 export interface BatchItem {
-  type: "episode" | "movie" | "series";
+  // "sports" names an event, as it does everywhere else in the sports code,
+  // and "sportsLeague" names a league the way "series" names a show.
+  type: "episode" | "movie" | "series" | "sports" | "sportsLeague";
   sonarrSeriesId?: number;
   sonarrEpisodeId?: number;
   radarrId?: number;
-  // Owning Sonarr/Radarr instance id (#156) so the batch routes per instance.
+  // Local ids, not upstream ones: sports rows are addressed by primary key.
+  sportsEventId?: number;
+  sportsLeagueId?: number;
+  // Owning Sonarr/Radarr/Sportarr instance id (#156) so the batch routes per
+  // instance. Required for sports: a sports path mapping is always per
+  // instance, with no global mapping to fall back on.
   arr_instance_id?: number;
 }
 

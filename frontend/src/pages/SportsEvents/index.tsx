@@ -19,12 +19,14 @@ import {
   faDownload,
   faHardDrive,
   faHistory,
+  faLayerGroup,
   faServer,
   faSync,
   faTrophy,
 } from "@fortawesome/free-solid-svg-icons";
 import { Table as TableInstance } from "@tanstack/react-table";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
+import { useCombineSubtitles } from "@/apis/hooks/combine";
 import { useInstanceName } from "@/apis/hooks/site";
 import {
   toSportsLeagueRow,
@@ -65,6 +67,7 @@ const SportsEventsView: FunctionComponent = () => {
     useArrInstanceLabels("sportarr");
   const indexSubtitles = useIndexSportsSubtitles();
   const automatic = useSportsAction();
+  const combine = useCombineSubtitles();
 
   const events = useMemo(() => eventPage?.data ?? null, [eventPage]);
   const overviewItem = useMemo(
@@ -164,6 +167,26 @@ const SportsEventsView: FunctionComponent = () => {
               Search
             </Toolbox.Button>
             <Toolbox.Button
+              icon={faLayerGroup}
+              disabled={
+                !league || league.profileId === null || combine.isPending
+              }
+              loading={combine.isPending}
+              onClick={() =>
+                league &&
+                combine.mutate({
+                  scope: {
+                    kind: "sportsLeague",
+                    leagueId: league.id,
+                    arrInstanceId: league.arr_instance_id,
+                  },
+                  body: {},
+                })
+              }
+            >
+              Combine across league
+            </Toolbox.Button>
+            <Toolbox.Button
               icon={faHistory}
               onClick={() =>
                 navigateApp(
@@ -184,6 +207,16 @@ const SportsEventsView: FunctionComponent = () => {
         {indexSubtitles.isError && (
           <Alert color="red" mb="md">
             Could not index subtitles. Check the file path and try again.
+          </Alert>
+        )}
+        {combine.isError && (
+          <Alert color="red" mb="md">
+            Could not combine subtitles for this league.
+          </Alert>
+        )}
+        {combine.isSuccess && combine.data.status === "batch_complete" && (
+          <Alert color="blue" mb="md">
+            {`Combined ${combine.data.built ?? 0}, skipped ${combine.data.skipped ?? 0}, failed ${combine.data.failed ?? 0}.`}
           </Alert>
         )}
         <SportsJobFeedback

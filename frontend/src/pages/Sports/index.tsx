@@ -6,13 +6,24 @@ import {
   Checkbox,
   Container,
   Group,
+  Menu,
   Progress,
   Text,
   Tooltip,
 } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import { faBookmark as farBookmark } from "@fortawesome/free-regular-svg-icons";
-import { faBookmark, faSync } from "@fortawesome/free-solid-svg-icons";
+import {
+  faArrowUp,
+  faBookmark,
+  faEllipsisVertical,
+  faHardDrive,
+  faLanguage,
+  faLayerGroup,
+  faMagnifyingGlass,
+  faSync,
+  faToolbox,
+} from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
@@ -24,10 +35,19 @@ import {
   useSportsProfile,
   useSyncSports,
 } from "@/apis/hooks/sports";
+import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
 import { Toolbox } from "@/components";
 import { AudioList, InstanceBadge } from "@/components/bazarr";
 import LanguageProfileName from "@/components/bazarr/LanguageProfile";
+import { BatchModConfirmModal } from "@/components/forms/BatchModConfirmForm";
 import { ChangeProfileModal } from "@/components/forms/ChangeProfileForm";
+import { MassCombineModal } from "@/components/forms/MassCombineForm";
+import { MassSyncModal } from "@/components/forms/MassSyncForm";
+import {
+  MassTranslateModal,
+  WantedItem,
+} from "@/components/forms/MassTranslateForm";
+import { SUBTITLE_TOOL_ACTIONS } from "@/constants/batch";
 import { useModals } from "@/modules/modals";
 import ItemView from "@/pages/views/ItemView";
 import { LIBRARY_ROUTES } from "@/Router/mediaRoutes";
@@ -94,6 +114,132 @@ const Sports: FunctionComponent = () => {
       </Group>
     );
   }, [selections, modals, setProfiles]);
+
+  // The same batch toolbar Series and Movies carry. A league is the sports
+  // equivalent of a show, so it batches as one: the backend expands it into its
+  // events. Every item carries its owner because a sports path mapping is
+  // always per instance, with no global mapping to fall back on.
+  const selectionToolbar = useMemo(() => {
+    if (selections.length === 0) return undefined;
+
+    const toBatchItems = (): BatchItem[] =>
+      selections.map((league) => ({
+        type: "sportsLeague" as const,
+        sportsLeagueId: league.id,
+        arr_instance_id: league.arr_instance_id,
+      }));
+
+    const toWantedItems = (): WantedItem[] =>
+      selections.map((league) => ({
+        type: "sportsLeague" as const,
+        sportsLeagueId: league.id,
+        title: league.title,
+        arrInstanceId: league.arr_instance_id,
+      }));
+
+    return (
+      <Group gap="xs">
+        <Toolbox.Button
+          icon={faSync}
+          onClick={() =>
+            modals.openContextModal(MassSyncModal, { items: toBatchItems() })
+          }
+        >
+          Sync Subtitles
+        </Toolbox.Button>
+
+        <Menu shadow="md" width={220}>
+          <Menu.Target>
+            <div>
+              <Toolbox.Button icon={faToolbox}>Subtitle Tools</Toolbox.Button>
+            </div>
+          </Menu.Target>
+          <Menu.Dropdown>
+            {SUBTITLE_TOOL_ACTIONS.map(([action, label]) => (
+              <Menu.Item
+                key={action}
+                onClick={() =>
+                  modals.openContextModal(BatchModConfirmModal, {
+                    items: toBatchItems(),
+                    action,
+                  })
+                }
+              >
+                {label}
+              </Menu.Item>
+            ))}
+          </Menu.Dropdown>
+        </Menu>
+
+        <Toolbox.Button
+          icon={faLanguage}
+          onClick={() =>
+            modals.openContextModal(MassTranslateModal, {
+              items: toWantedItems(),
+            })
+          }
+        >
+          Translate
+        </Toolbox.Button>
+
+        <Toolbox.Button
+          icon={faLayerGroup}
+          onClick={() =>
+            modals.openContextModal(MassCombineModal, {
+              items: toWantedItems(),
+            })
+          }
+        >
+          Combine
+        </Toolbox.Button>
+
+        <Menu shadow="md" width={220}>
+          <Menu.Target>
+            <div>
+              <Toolbox.Button icon={faEllipsisVertical}>More</Toolbox.Button>
+            </div>
+          </Menu.Target>
+          <Menu.Dropdown>
+            <Menu.Item
+              leftSection={<FontAwesomeIcon icon={faHardDrive} size="sm" />}
+              onClick={() =>
+                modals.openContextModal(BatchModConfirmModal, {
+                  items: toBatchItems(),
+                  action: "scan-disk" as BatchAction,
+                })
+              }
+            >
+              Scan Disk
+            </Menu.Item>
+            <Menu.Item
+              leftSection={
+                <FontAwesomeIcon icon={faMagnifyingGlass} size="sm" />
+              }
+              onClick={() =>
+                modals.openContextModal(BatchModConfirmModal, {
+                  items: toBatchItems(),
+                  action: "search-missing" as BatchAction,
+                })
+              }
+            >
+              Search Missing
+            </Menu.Item>
+            <Menu.Item
+              leftSection={<FontAwesomeIcon icon={faArrowUp} size="sm" />}
+              onClick={() =>
+                modals.openContextModal(BatchModConfirmModal, {
+                  items: toBatchItems(),
+                  action: "upgrade" as BatchAction,
+                })
+              }
+            >
+              Upgrade
+            </Menu.Item>
+          </Menu.Dropdown>
+        </Menu>
+      </Group>
+    );
+  }, [selections, modals]);
 
   const columns = useMemo<ColumnDef<SportsLeagueRow>[]>(
     () => [
@@ -262,6 +408,7 @@ const Sports: FunctionComponent = () => {
         onInstanceValuesChange={setInstanceFilter}
         enableRowSelection
         onSelectionChanged={setSelections}
+        selectionToolbar={selectionToolbar}
         profileToolbar={profileToolbar}
       ></ItemView>
     </Container>

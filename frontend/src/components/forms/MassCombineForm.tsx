@@ -58,7 +58,17 @@ const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
     setSelected(next);
   };
 
-  const canSubmit = selected.length >= 2 && items.length > 0 && !running;
+  const sportsCount = items.filter(
+    (item) => item.type === "sports" || item.type === "sportsLeague",
+  ).length;
+  const sportsOnly = sportsCount > 0 && sportsCount === items.length;
+
+  // A sports composition publishes under the owned-file guard, which is
+  // captured from the event's assigned profile, so the engine refuses an
+  // ad-hoc override alongside it. A sports-only selection therefore needs no
+  // language picked here, and picking one changes nothing.
+  const canSubmit =
+    (sportsOnly || selected.length >= 2) && items.length > 0 && !running;
 
   const submit = async () => {
     if (selected.length < 2) return;
@@ -79,7 +89,9 @@ const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
       let scope:
         | { kind: "movie"; radarrId: number; arrInstanceId?: number }
         | { kind: "episode"; episodeId: number; arrInstanceId?: number }
-        | { kind: "series"; seriesId: number; arrInstanceId?: number };
+        | { kind: "series"; seriesId: number; arrInstanceId?: number }
+        | { kind: "sports"; eventId: number; arrInstanceId?: number }
+        | { kind: "sportsLeague"; leagueId: number; arrInstanceId?: number };
 
       if (item.type === "movie") {
         scope = {
@@ -91,6 +103,18 @@ const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
         scope = {
           kind: "series",
           seriesId: item.sonarrSeriesId,
+          arrInstanceId: itemArrInstanceId(item),
+        };
+      } else if (item.type === "sports") {
+        scope = {
+          kind: "sports",
+          eventId: item.sportsEventId,
+          arrInstanceId: itemArrInstanceId(item),
+        };
+      } else if (item.type === "sportsLeague") {
+        scope = {
+          kind: "sportsLeague",
+          leagueId: item.sportsLeagueId,
           arrInstanceId: itemArrInstanceId(item),
         };
       } else {
@@ -167,6 +191,17 @@ const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
         <Text size="sm" c="var(--bz-text-tertiary)">
           {items.length} items selected
         </Text>
+      )}
+
+      {sportsCount > 0 && (
+        <Alert color="yellow">
+          <Text size="sm">
+            {sportsOnly ? "This selection is" : `${sportsCount} of these are`}{" "}
+            sports, which follow the combine rule on their league&apos;s
+            language profile. The languages and format chosen here do not apply
+            to them.
+          </Text>
+        </Alert>
       )}
 
       <Text size="sm" fw={500}>

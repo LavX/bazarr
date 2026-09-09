@@ -6,7 +6,8 @@ type Scope =
   | { kind: "movie"; radarrId: number; arrInstanceId?: number }
   | { kind: "episode"; episodeId: number; arrInstanceId?: number }
   | { kind: "series"; seriesId: number; arrInstanceId?: number }
-  | { kind: "sports"; eventId: number; arrInstanceId?: number };
+  | { kind: "sports"; eventId: number; arrInstanceId?: number }
+  | { kind: "sportsLeague"; leagueId: number; arrInstanceId?: number };
 
 function buildPath(scope: Scope): string {
   switch (scope.kind) {
@@ -18,6 +19,8 @@ function buildPath(scope: Scope): string {
       return `/series/${scope.seriesId}/subtitles/combine`;
     case "sports":
       return `/sports/events/${scope.eventId}/subtitles/combine`;
+    case "sportsLeague":
+      return `/sports/leagues/${scope.leagueId}/subtitles/combine`;
   }
 }
 
@@ -60,6 +63,7 @@ export function useCombineSubtitles() {
           void qc.invalidateQueries({ queryKey: [QueryKeys.Series] });
           break;
         case "sports":
+        case "sportsLeague":
           // The events table is keyed under the league, which the event scope
           // does not carry, so invalidate the whole sports tree the way the
           // episode case invalidates the series tree.
