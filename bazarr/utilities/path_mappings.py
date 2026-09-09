@@ -19,9 +19,36 @@ def validate_sports_mappings(value):
     return value
 
 
-def read_sports_mappings(value):
-    if not value:
+def global_sports_mappings():
+    """The Path Mappings table on the Connections page, as [remote, local] pairs.
+
+    Stored the same way the series and movies tables are, so save_settings
+    parses it into pairs and dynaconf hands back its own list types; the copy
+    keeps a caller from mutating live config.
+    """
+    raw = [list(pair) for pair in (settings.general.path_mappings_sports or [])]
+    try:
+        return validate_sports_mappings(raw)
+    except ValueError:
+        logging.debug('BAZARR ignoring malformed global Sportarr path mappings')
         return []
+
+
+def read_sports_mappings(value, inherit=True):
+    """Resolve an instance's path mappings, global first then its own override.
+
+    ``value`` is the instance's raw ``path_mappings`` column. An instance that
+    sets none inherits the global table, which is the whole point of that table
+    existing; one that sets its own replaces it, for the operator running a
+    second Sportarr whose media is mounted somewhere else.
+
+    ``inherit=False`` returns only what the instance itself stores. The API
+    serializer needs that: the settings UI reads a present value as "this
+    instance overrides", so inheriting there would show a global mapping as an
+    instance override and persist it as one on the next save.
+    """
+    if not value:
+        return global_sports_mappings() if inherit else []
     try:
         return validate_sports_mappings(json.loads(value))
     except (TypeError, ValueError):

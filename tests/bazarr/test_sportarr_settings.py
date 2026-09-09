@@ -242,3 +242,48 @@ def test_api_serves_the_override_blob_not_the_resolved_values(schema_session):
     served = to_safe_dict(instance)["sports_settings"]
     assert served == {"only_monitored": True}
     assert len(served) < len(GLOBAL_SOURCES), "the resolved merge leaked into the API"
+
+
+def test_global_path_mappings_are_actually_used(schema_session, monkeypatch):
+    """The Path Mappings table on the Connections page must reach resolution.
+
+    It was saving to general.path_mappings_sports while all seventeen call
+    sites read only the instance's own column, so the table was decorative and
+    every sports path stayed unresolved. Found by importing a real race file
+    into Sportarr and watching mapped_path come back unchanged.
+    """
+    from app.config import settings
+    from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
+
+    monkeypatch.setattr(
+        settings.general, "path_mappings_sports", [["/media", "/host/media"]]
+    )
+
+    # An instance with no override of its own inherits the global table.
+    mapping = read_sports_mappings(None)
+    assert mapping == [["/media", "/host/media"]]
+    assert (
+        apply_sports_mapping("/media/Formula 1/race.mkv", mapping)
+        == "/host/media/Formula 1/race.mkv"
+    )
+
+    # Its own mapping replaces the global one.
+    override = read_sports_mappings('[["/media", "/elsewhere"]]')
+    assert override == [["/media", "/elsewhere"]]
+
+    # The API serializer must never inherit, or a global mapping would show as
+    # an instance override and be persisted as one on the next save.
+    assert read_sports_mappings(None, inherit=False) == []
+
+
+def test_api_serves_only_the_instance_path_mapping_override(schema_session, monkeypatch):
+    from app.config import settings
+    from arr_instances.repository import ArrInstanceRepository, to_safe_dict
+
+    monkeypatch.setattr(
+        settings.general, "path_mappings_sports", [["/media", "/host/media"]]
+    )
+    repo = ArrInstanceRepository(schema_session)
+    instance = repo.create("sportarr", "Main", api_key="fixture-secret")
+
+    assert to_safe_dict(instance)["path_mappings"] == []

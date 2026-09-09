@@ -328,7 +328,10 @@ def to_safe_dict(row):
     from utilities.path_mappings import read_sports_mappings
     return {
         **({"sports_settings": read_sports_overrides(row),
-            "path_mappings": read_sports_mappings(row.path_mappings)} if row.kind == "sportarr" else {}),
+            # inherit=False for the same reason sports_settings serves the raw
+            # override: the UI reads a present value as an instance override.
+            "path_mappings": read_sports_mappings(row.path_mappings, inherit=False)}
+           if row.kind == "sportarr" else {}),
         "id": row.id,
         "kind": row.kind,
         "stable_key": row.stable_key,
