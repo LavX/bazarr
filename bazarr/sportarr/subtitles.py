@@ -169,6 +169,39 @@ def sports_publication(candidate, cancel=None, *, outcome=None):
         yield publication
 
 
+@contextmanager
+def sports_manual_operation(event_id, arr_instance_id, cancel=None):
+    """Everything a user-initiated file operation on a sports event needs.
+
+    Yields (context, validate, publication_guard, video_path). The manual
+    toolbox (sync, translate, subzero mods) runs through the shared
+    /api/subtitles endpoint, which had no way to build these, so the endpoint
+    rejected sports outright and the whole toolbox was unavailable for it.
+
+    The guard is the same owned publication boundary the provider path uses:
+    it pins the file signature, so an operation that started before a resync
+    replaced the recording cannot publish over the new file.
+    """
+    from sportarr.identity import resolve_event_in_session
+
+    context = resolve_event_in_session(database, event_id, arr_instance_id)
+    signature = candidate_signature(context)
+
+    def validate():
+        check_cancelled(cancel)
+        instance = validate_context(context, database)
+        if _signature(context, instance) != signature:
+            raise ValueError("Sports file changed. Please try again.")
+        return instance
+
+    @contextmanager
+    def publication_guard():
+        with sports_file_publication(context, signature, cancel) as guard:
+            yield guard
+
+    yield context, validate, publication_guard, context.mapped_path
+
+
 def sports_history(
     session, context, result, action=2, upgraded_from_id=None, artifact=None
 ):
