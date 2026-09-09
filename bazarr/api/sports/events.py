@@ -50,6 +50,40 @@ class SportsEventSubtitles(Resource):
         except OSError:
             return {'message': 'Could not index this sports file. Check its accessibility and try again.'}, 409
 
+    @authenticate
+    def delete(self, event_id):
+        """Remove a subtitle Bazarr placed on this event.
+
+        Lives on the resource that already owns this path rather than a second
+        Resource registered over it, which would shadow the index POST above.
+        """
+        from sportarr.identity import resolve_event_in_session
+        from subtitles.tools.delete import delete_subtitles
+
+        try:
+            body = _body()
+            owner = _owner(body.get('arr_instance_id'))
+            language, path = body.get('language'), body.get('path')
+            if not language or not path:
+                return {'message': 'language and path are required'}, 400
+
+            context = resolve_event_in_session(database, event_id, owner)
+            removed = delete_subtitles(
+                media_type='sports',
+                language=language,
+                forced=body.get('forced', False),
+                hi=body.get('hi', False),
+                media_path=context.mapped_path,
+                subtitles_path=path,
+                arr_instance_id=context.arr_instance_id,
+                sports_event_id=context.event_id,
+            )
+            if not removed:
+                return {'message': 'Could not delete this subtitle.'}, 409
+            return '', 204
+        except ValueError as exc:
+            return {'message': str(exc)}, 400
+
 
 @api_ns_sports_events.route('/sports/rootfolders')
 class SportsRootfolders(Resource):
