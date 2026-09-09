@@ -151,12 +151,16 @@ def embedded_subtitles_from_metadata(data):
     return subtitles_list
 
 
-def embedded_audio_reader(file, file_size, episode_file_id=None, movie_file_id=None, use_cache=True,
-                          arr_instance_id=None, *, sports_event_id=None):
-    sports = {'sports_event_id': sports_event_id} if sports_event_id is not None else {}
-    data = parse_video_metadata(file, file_size, episode_file_id, movie_file_id, use_cache=use_cache,
-                                arr_instance_id=arr_instance_id, **sports)
+def audio_languages_from_metadata(data, file):
+    """Audio track languages from an already-parsed metadata blob.
 
+    Split out of embedded_audio_reader so a caller that has just parsed the
+    file (the sports indexer does, to read embedded subtitles) can derive the
+    audio languages from the same blob instead of probing a second time.
+
+    Returns language NAMES, not ISO codes: get_audio_profile_languages resolves
+    entries by name, and handing it a code makes it return code2 None.
+    """
     audio_list = []
 
     if not data:
@@ -186,6 +190,14 @@ def embedded_audio_reader(file, file_size, episode_file_id=None, movie_file_id=N
                 audio_list.append(language)
 
     return audio_list
+
+
+def embedded_audio_reader(file, file_size, episode_file_id=None, movie_file_id=None, use_cache=True,
+                          arr_instance_id=None, *, sports_event_id=None):
+    sports = {'sports_event_id': sports_event_id} if sports_event_id is not None else {}
+    data = parse_video_metadata(file, file_size, episode_file_id, movie_file_id, use_cache=use_cache,
+                                arr_instance_id=arr_instance_id, **sports)
+    return audio_languages_from_metadata(data, file)
 
 
 def subtitles_sync_references(subtitles_path, sonarr_episode_id=None, radarr_movie_id=None, arr_instance_id=None):

@@ -27,6 +27,7 @@ from subtitles.indexer.utils import (add_combined_outputs, add_sync_engine_outpu
 from subtitles.tools.subsync_engines import SyncOutputOwnerIndex, subtitle_write_locks
 from utilities.helper import get_subtitle_destination_folder, get_target_folder
 from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
+from utilities.video_analyzer import audio_languages_from_metadata
 from utilities.video_analyzer import embedded_subtitles_from_metadata
 
 
@@ -219,8 +220,12 @@ def store_subtitles_sports(event_id, arr_instance_id=None, *, use_cache=None, ow
             session.flush()
         data = cached | {'sports_file': signature}
         actual = []
-        if settings.general.use_embedded_subs:
+        # Parsed once and shared: embedded subtitles and audio track languages
+        # come out of the same blob, and probing a multi-GB file twice for it
+        # would be wasteful.
+        if settings.general.use_embedded_subs or settings.general.parse_embedded_audio_track:
             data = _metadata(context, signature, cached, use_cache, cancel)
+        if settings.general.use_embedded_subs:
             for language, forced, hi, codec in embedded_subtitles_from_metadata(data):
                 if codec and ((settings.general.ignore_pgs_subs and codec.lower() == 'pgs') or
                               (settings.general.ignore_vobsub_subs and codec.lower() == 'vobsub') or
@@ -233,6 +238,12 @@ def store_subtitles_sports(event_id, arr_instance_id=None, *, use_cache=None, ow
         with sports_transaction(database) as session:
             row = _validated_row(session, context, signature, cancel)
             row.subtitles = str(actual)
+            # Written BEFORE _missing reads it: the audio_exclude and
+            # audio_only_include profile rules are evaluated off this column,
+            # and Sportarr itself reports no audio metadata at all, so ffprobe
+            # is the only source there has ever been.
+            if settings.general.parse_embedded_audio_track:
+                row.audio_language = str(audio_languages_from_metadata(data, context.mapped_path))
             row.missing_subtitles = str(_missing(context.profile_id, actual, row.audio_language, row.failedAttempts))
             row.ffprobe_cache = pickle.dumps(data | {'sports_indexed': True}, pickle.HIGHEST_PROTOCOL)
             session.flush()

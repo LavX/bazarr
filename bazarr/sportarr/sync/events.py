@@ -9,6 +9,7 @@ from arr_instances.client import ArrClientFactory
 from sportarr.connection import check_cancelled, connection_identity, owner_sync_lock, revalidate
 from sportarr.db import sports_transaction
 from sportarr.parser import parse_events, positive_id
+from app.config import settings
 from sportarr.settings import get_sports_settings
 from sportarr.sync.leagues import notify, require_sportarr
 from utilities.sql_limits import in_chunks
@@ -144,11 +145,20 @@ def sync_events(league_id, arr_instance_id, *, page_size=1000, cancel=None, expe
             for row in existing:
                 row.partNumber = -row.id
             transaction.flush()
+            # With embedded audio parsing on, audio_language belongs to the
+            # indexer: Sportarr reports no audio metadata, so the parser can
+            # only ever offer '[]'. Letting the sync write that back would both
+            # erase what ffprobe found AND, because the column takes part in the
+            # new_file comparison below, make the next sync judge the file to be
+            # new and wipe the subtitle index with it.
+            indexer_owns_audio = settings.general.parse_embedded_audio_track
+            compared = ('file_id', 'path', 'file_size', 'format', 'resolution',
+                        'video_codec', 'audio_codec', 'sceneName')
+            if not indexer_owns_audio:
+                compared += ('audio_language',)
             for item, row in zip(parsed, matches):
                 now = datetime.now()
-                new_file = row is None or any(getattr(row, key) != item[key]
-                                            for key in ('file_id', 'path', 'file_size', 'format', 'resolution',
-                                                        'video_codec', 'audio_codec', 'audio_language', 'sceneName'))
+                new_file = row is None or any(getattr(row, key) != item[key] for key in compared)
                 if row is None:
                     row = TableSportsEvents(arr_instance_id=arr_instance_id, league_id=league_id,
                                             created_at_timestamp=now)
@@ -157,6 +167,8 @@ def sync_events(league_id, arr_instance_id, *, page_size=1000, cancel=None, expe
                     row.ffprobe_cache = None
                     row.subtitles = row.missing_subtitles = row.failedAttempts = '[]'
                 for key, value in item.items():
+                    if key == 'audio_language' and indexer_owns_audio and not new_file:
+                        continue
                     setattr(row, key, value)
                 row.updated_at_timestamp = now
                 transaction.flush()
