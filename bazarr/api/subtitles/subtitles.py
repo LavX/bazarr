@@ -496,6 +496,18 @@ class Subtitles(Resource):
                 return "Invalid source language code", 400
 
             try:
+                # A sports translation publishes under the owned boundary and
+                # carries no native media metadata; translate_subtitles_file
+                # refuses one without a bound operation, so this request used
+                # to be accepted and then die inside the queued job.
+                sports_operation = None
+                if media_type == "sports":
+                    from sportarr.profile_hooks import manual_translation_operation
+
+                    sports_operation = manual_translation_operation(
+                        id, arr_instance_id, subtitles_path, dest_language,
+                        from_language=from_language, forced=forced, hi=hi,
+                    )
                 translate_subtitles_file(
                     video_path=video_path,
                     source_srt_file=subtitles_path,
@@ -509,9 +521,12 @@ class Subtitles(Resource):
                     else None,
                     sonarr_episode_id=id if media_type == "episode" else None,
                     radarr_id=id if media_type == "movie" else None,
-                    metadata=metadata,
+                    metadata=None if media_type == "sports" else metadata,
                     arr_instance_id=arr_instance_id,
+                    sports_operation=sports_operation,
                 )
+            except ValueError as exc:
+                return str(exc), 409
             except OSError:
                 return "Unable to edit subtitles file. Check logs.", 409
         else:

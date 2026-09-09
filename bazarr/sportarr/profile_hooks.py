@@ -238,6 +238,46 @@ def translation_destination(video_path, language, forced, hi):
     )
 
 
+def manual_translation_operation(event_id, arr_instance_id, source_path, to_language,
+                                 from_language=None, forced=False, hi=False, cancel=None):
+    """A bound profile operation for a user-initiated sports translation.
+
+    translate_subtitles_file refuses a sports translation without one, so the
+    manual toolbox and the batch runner had no way to translate a sports
+    subtitle at all: the request was accepted and the queued job then died on
+    "An exact sports profile operation is required".
+
+    The target is bound, not omitted. sports_write_kwargs compares the
+    translation's own target against the operation's before it will hand over a
+    publication guard, so an operation without one is rejected at write time
+    just as loudly as no operation at all. Binding it also keeps the rule that
+    makes the sports model coherent: a sports subtitle is only ever written for
+    a language its profile asks for and does not yet have, because the owned
+    publication boundary is defined in those terms. A request outside that is
+    refused here with a reason rather than accepted and dropped in a job.
+    """
+    from subtitles.language_profiles import profile_item_language_code
+    from sportarr.identity import resolve_event_in_session
+
+    context = resolve_event_in_session(database, event_id, arr_instance_id)
+    operation = capture_profile_operation(
+        context, candidate_signature(context), source=source_path, cancel=cancel
+    )
+    target = profile_item_language_code(
+        dict(language=to_language, forced=str(forced), hi=str(hi))
+    )
+    if target not in missing_languages(context):
+        raise ValueError(
+            f"The language profile for this sports event does not want a missing {target} "
+            f"subtitle, so there is nothing for a translation to publish"
+        )
+    destination = translation_destination(context.mapped_path, to_language, forced, hi)
+    return operation.bind(
+        (source_path,), destination, target=target,
+        source_language=from_language, cancel=cancel,
+    )
+
+
 def queue_translations(operation, source, downloaded_lang, score, forced, cancel=None):
     from subtitles.tools.translate.main import translate_subtitles_file
 
