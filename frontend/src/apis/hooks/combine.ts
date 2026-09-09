@@ -5,7 +5,8 @@ import client from "@/apis/raw/client";
 type Scope =
   | { kind: "movie"; radarrId: number; arrInstanceId?: number }
   | { kind: "episode"; episodeId: number; arrInstanceId?: number }
-  | { kind: "series"; seriesId: number; arrInstanceId?: number };
+  | { kind: "series"; seriesId: number; arrInstanceId?: number }
+  | { kind: "sports"; eventId: number; arrInstanceId?: number };
 
 function buildPath(scope: Scope): string {
   switch (scope.kind) {
@@ -15,6 +16,8 @@ function buildPath(scope: Scope): string {
       return `/episodes/${scope.episodeId}/subtitles/combine`;
     case "series":
       return `/series/${scope.seriesId}/subtitles/combine`;
+    case "sports":
+      return `/sports/events/${scope.eventId}/subtitles/combine`;
   }
 }
 
@@ -55,6 +58,12 @@ export function useCombineSubtitles() {
           // Likewise: the scope carries the upstream sonarrSeriesId and series
           // queries are cached under the local id.
           void qc.invalidateQueries({ queryKey: [QueryKeys.Series] });
+          break;
+        case "sports":
+          // The events table is keyed under the league, which the event scope
+          // does not carry, so invalidate the whole sports tree the way the
+          // episode case invalidates the series tree.
+          void qc.invalidateQueries({ queryKey: [QueryKeys.Sports] });
           break;
       }
     },

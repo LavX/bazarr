@@ -3,6 +3,7 @@
 import os
 from io import BytesIO
 
+from flask import request
 from flask_restx import Namespace, Resource, reqparse
 from werkzeug.datastructures import FileStorage
 
@@ -61,6 +62,60 @@ class SportsDownload(Resource):
             return {
                 "message": "Subtitle was not published. Check the file and provider before trying again."
             }, 409
+
+
+@api_ns_sports_subtitles.route("/sports/events/<int:event_id>/subtitles/combine")
+class SportsEventSubtitlesCombine(Resource):
+    """Build (or rebuild) the combined subtitle file for a sports event.
+
+    The combine engine has understood sports since it was written, but only
+    ever ran as a side effect of a download or a translation. Episodes and
+    movies both have a manual trigger; sports had none, so a combined file
+    could not be rebuilt after its sources changed on disk.
+
+    No ad-hoc languages/format override here, unlike the episode and movie
+    routes: a sports composition publishes through the owned-file guard, which
+    is captured from the event's assigned profile, and try_combine_for_video
+    rejects an override alongside it rather than publishing something the
+    profile did not ask for.
+    """
+
+    @authenticate
+    @api_ns_sports_subtitles.response(200, "Result of combine attempt")
+    @api_ns_sports_subtitles.response(401, "Not Authenticated")
+    @api_ns_sports_subtitles.response(404, "Sports event not found")
+    @api_ns_sports_subtitles.response(500, "Combine failed")
+    def post(self, event_id):
+        from sportarr.identity import resolve_event_in_session
+        from sportarr.profile_hooks import capture_profile_operation
+        from sportarr.subtitles import candidate_signature
+        from subtitles.tools.combine.main import try_combine_for_video
+
+        try:
+            body = request.get_json(silent=True) or {}
+            owner = _owner(body.get("arr_instance_id") or request.args.get("arr_instance_id"))
+            context = resolve_event_in_session(database, event_id, owner)
+            operation = capture_profile_operation(context, candidate_signature(context))
+        except ValueError as exc:
+            return {"message": str(exc)}, 400
+
+        if not operation.profile:
+            return {"status": "skipped", "path": "", "alignment": "",
+                    "reason": "no language profile is assigned", "error": ""}, 200
+
+        result = try_combine_for_video(
+            video_path=context.mapped_path,
+            media_type="sports",
+            sports_operation=operation,
+        )
+        body = {
+            "status": result.status,
+            "path": result.path,
+            "alignment": result.alignment,
+            "reason": result.reason,
+            "error": result.error,
+        }
+        return body, 500 if result.status == "failed" else 200
 
 
 @api_ns_sports_subtitles.route("/sports/events/<int:event_id>/subtitles/upload")
