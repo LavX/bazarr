@@ -388,6 +388,7 @@ jobs:
             tests/bazarr/test_sportarr_observability.py \
             tests/bazarr/test_sportarr_release_mismatch.py \
             tests/bazarr/test_sportarr_manual_toolbox.py \
+            tests/bazarr/test_sportarr_subtitle_delete.py \
             tests/bazarr/test_editor_instance_scope.py \
             tests/bazarr/test_history_blacklist_scope.py \
             tests/bazarr/test_history_owner_resolution.py \

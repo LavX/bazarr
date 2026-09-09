@@ -44,7 +44,8 @@ def _delete_subtitle_file(media_path, subtitle_path, on_publish=None):
 
 
 def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_path, sonarr_series_id=None,
-                     sonarr_episode_id=None, radarr_id=None, arr_instance_id=None):
+                     sonarr_episode_id=None, radarr_id=None, arr_instance_id=None,
+                     sports_event_id=None):
     if not subtitles_path:
         logging.error('No subtitles to delete.')
         return False
@@ -66,7 +67,17 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
     # secondary instance can have a different on-disk prefix, so the delete /
     # re-index must resolve paths through that instance's mapping. arr_instance_id
     # None => global mapping (the default/single-instance path), unchanged.
-    if media_type == 'series':
+    if media_type == 'sports':
+        def pr(p):
+            return path_mappings.path_replace_instance(p, arr_instance_id, "sports")
+
+        def prr(p):
+            return path_mappings.path_replace_reverse_instance(p, arr_instance_id, "sports")
+
+        # A sports event has no imdb or tvdb id to refresh a media server with,
+        # so nothing is looked up here.
+        metadata = None
+    elif media_type == 'series':
         def pr(p):
             return path_mappings.path_replace_instance(p, arr_instance_id, "series")
 
@@ -99,6 +110,30 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
                                     subtitle_id=None,
                                     reversed_subtitles_path=prr(subtitles_path),
                                     hearing_impaired=None)
+
+    if media_type == 'sports':
+        from sportarr.history import sports_history_log
+        from subtitles.indexer.sports import store_subtitles_sports
+
+        removed = _delete_subtitle_file(media_path, pr(subtitles_path))
+        store_subtitles_sports(sports_event_id, arr_instance_id)
+        if not removed:
+            return False
+        sports_history_log(0, sports_event_id, arr_instance_id, result)
+        event_stream(type='sports', action='update', payload=sports_event_id)
+
+        # No Sportarr rescan and no media-server refresh: Sportarr exposes only
+        # an untargeted whole-library scan, and the refresh helpers key on an
+        # imdbId a sports event does not have. Same constraint the download
+        # path records.
+        call_external_webhook(
+            subtitle_path=subtitles_path,
+            media_path=media_path,
+            language=language_log,
+            media_type=media_type
+        )
+
+        return True
 
     if media_type == 'series':
         removed = _delete_subtitle_file(media_path, pr(subtitles_path),

@@ -56,3 +56,43 @@ class SportsDownload(Resource):
             return {
                 "message": "Subtitle was not published. Check the file and provider before trying again."
             }, 409
+
+
+@api_ns_sports_subtitles.route("/sports/events/<int:event_id>/subtitles")
+class SportsEventSubtitleFile(Resource):
+    """Removing a subtitle Bazarr placed on a sports event.
+
+    Episodes and movies have had this since forever; sports had no route at
+    all, so a bad sports subtitle could not be removed from Bazarr and the
+    only way out was deleting the file by hand and waiting for a re-index.
+    """
+
+    @authenticate
+    def delete(self, event_id):
+        from sportarr.identity import resolve_event_in_session
+        from subtitles.tools.delete import delete_subtitles
+
+        try:
+            body = _body()
+            owner = _owner(body.get("arr_instance_id"))
+            language = body.get("language")
+            path = body.get("path")
+            if not language or not path:
+                return {"message": "language and path are required"}, 400
+
+            context = resolve_event_in_session(database, event_id, owner)
+            removed = delete_subtitles(
+                media_type="sports",
+                language=language,
+                forced=body.get("forced", False),
+                hi=body.get("hi", False),
+                media_path=context.mapped_path,
+                subtitles_path=path,
+                arr_instance_id=context.arr_instance_id,
+                sports_event_id=context.event_id,
+            )
+            if not removed:
+                return {"message": "Could not delete this subtitle."}, 409
+            return "", 204
+        except ValueError as exc:
+            return {"message": str(exc)}, 400

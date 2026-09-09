@@ -8,7 +8,9 @@ import tempfile
 import logging
 from types import SimpleNamespace
 
-from sqlalchemy import delete, func, select
+from datetime import datetime
+
+from sqlalchemy import delete, func, insert, select
 
 from app.database import (
     database,
@@ -85,6 +87,39 @@ def list_records(
         item["timestamp"] = row.timestamp.isoformat() if row.timestamp else None
         data.append(item | {"title": title})
     return {"data": data, "total": total}
+
+
+def sports_history_log(action, event_id, arr_instance_id, result):
+    """Record a non-provider sports history entry, such as a deletion.
+
+    sports_history writes the provider-download shape and reads fields a
+    ProcessSubtitlesResult does not carry (subs_id, matched, not_matched), so a
+    deletion needs its own small writer rather than a contorted call into that
+    one. Mirrors history_log_movie, which exists for the same reason.
+    """
+    from sportarr.identity import resolve_event_in_session
+
+    context = resolve_event_in_session(database, event_id, arr_instance_id)
+    database.execute(
+        insert(TableHistorySports).values(
+            event_id=context.event_id,
+            league_id=context.league_id,
+            arr_instance_id=context.arr_instance_id,
+            action=action,
+            timestamp=datetime.now(),
+            description=result.message,
+            # ProcessSubtitlesResult renames its constructor arguments: the
+            # reversed paths land on .path and .subs_path, and the language
+            # arrives already carrying its :hi or :forced modifier.
+            video_path=result.path,
+            language=result.language_code,
+            provider=result.provider,
+            score=result.score,
+            subs_id=result.subs_id,
+            subtitles_path=result.subs_path,
+        )
+    )
+    database.commit()
 
 
 def remove_blacklist(session, entry_id, arr_instance_id):
