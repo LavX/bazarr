@@ -299,6 +299,23 @@ class SportarrClientManager:
 _manager = SportarrClientManager()
 
 
+def all_sportarr_sse_connected():
+    """True when every enabled Sportarr has a live event stream.
+
+    The per-client `connected` flag was maintained and then read by nothing, so
+    a dead Sportarr stream was undetectable from the UI while Sonarr and Radarr
+    both surface theirs as a badge.
+
+    No enabled instance means nothing is expected to be connected, which is
+    healthy rather than down, matching all_sonarr_signalr_connected.
+    """
+    with _manager._lock:
+        clients = list(_manager.clients.values())
+    if not clients:
+        return True
+    return all(client.connected and client.is_alive() for client in clients)
+
+
 def refresh_sportarr_clients():
     from app.get_args import args
     if not args.no_signalr:

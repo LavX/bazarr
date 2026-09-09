@@ -22,6 +22,7 @@ from app.signalr_client import (
     all_radarr_signalr_connected,
 )
 from app.announcements import get_all_announcements
+from sportarr.sse_client import all_sportarr_sse_connected
 from utilities.health import get_health_issues
 
 from ..utils import authenticate
@@ -45,6 +46,7 @@ class Badges(Resource):
             "status": fields.Integer(),
             "sonarr_signalr": fields.String(),
             "radarr_signalr": fields.String(),
+            "sportarr_sse": fields.String(),
             "announcements": fields.Integer(),
         },
     )
@@ -101,6 +103,7 @@ class Badges(Resource):
             "status": health_issues,
             "sonarr_signalr": live_str if all_sonarr_signalr_connected() else "DOWN",
             "radarr_signalr": live_str if all_radarr_signalr_connected() else "DOWN",
+            "sportarr_sse": live_str if all_sportarr_sse_connected() else "DOWN",
             "announcements": len(get_all_announcements()),
         }
         return marshal(result, self.get_model)

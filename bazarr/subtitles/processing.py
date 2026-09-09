@@ -300,6 +300,21 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
     logging.debug("Sync checker: %s", sync_checker)
 
     if media_type == 'sports':
+        # No arr rescan and no media-server refresh here, and both are blocked
+        # rather than forgotten:
+        #
+        # Sportarr exposes no targeted rescan. /api/library/rescan ignores a
+        # leagueId or a path and always walks every root folder, so firing it
+        # per subtitle would turn a cheap write into a full library scan.
+        # Sonarr and Radarr each take a per-item Rescan command, which is why
+        # they get one below.
+        #
+        # plex_refresh_item and jellyfin_refresh_item are keyed on imdbId and
+        # search settings.plex.movie_library / series_library. A sports event
+        # has no imdbId (PRD 0021 records this as inherent, not missing data)
+        # and there is no sports library setting to search, so an item refresh
+        # has nothing to look up. Giving sports one needs a new library setting,
+        # which is a feature rather than a fix.
         instance = validate()
         if path != context.mapped_path:
             raise ValueError('Sports subtitle path does not match its event')

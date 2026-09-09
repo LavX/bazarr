@@ -385,6 +385,7 @@ jobs:
             tests/bazarr/test_sportarr_download_settings.py \
             tests/bazarr/test_sportarr_upgrade_cleanup.py \
             tests/bazarr/test_sportarr_wanted_translate.py \
+            tests/bazarr/test_sportarr_observability.py \
             tests/bazarr/test_editor_instance_scope.py \
             tests/bazarr/test_history_blacklist_scope.py \
             tests/bazarr/test_history_owner_resolution.py \

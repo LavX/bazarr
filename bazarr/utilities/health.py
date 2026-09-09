@@ -7,7 +7,8 @@ import json
 from sqlalchemy import func
 
 from app.config import settings
-from app.database import (TableShowsRootfolder, TableMoviesRootfolder, TableLanguagesProfiles, database, select,
+from app.database import (TableShowsRootfolder, TableMoviesRootfolder, TableSportsLeaguesRootfolder,
+                          TableLanguagesProfiles, database, select,
                           TableShows, TableMovies)
 from app.event_handler import event_stream
 from app.jobs_queue import jobs_queue
@@ -146,6 +147,24 @@ def get_health_issues():
         for item in rootfolder:
             health_issues.append({'object': path_mappings.path_replace_movie(item.path),  # noqa: PERF401
                                   'issue': item.error})
+
+    # get Sportarr rootfolder issues
+    # sportarr/rootfolder.py already writes accessible and error per league
+    # root; nothing read them, so a broken sports path mapping produced no
+    # health issue and no status badge, and downloads just failed per event.
+    if settings.general.use_sportarr:
+        rootfolder = database.execute(
+            select(TableSportsLeaguesRootfolder.path,
+                   TableSportsLeaguesRootfolder.accessible,
+                   TableSportsLeaguesRootfolder.error,
+                   TableSportsLeaguesRootfolder.arr_instance_id)
+            .where(TableSportsLeaguesRootfolder.accessible == 0)) \
+            .all()
+        health_issues.extend(
+            {'object': path_mappings.path_replace_instance(
+                item.path, item.arr_instance_id, 'sports'),
+             'issue': item.error}
+            for item in rootfolder)
 
     # get languages profiles duplicate ids issues when there's a cutoff set
     languages_profiles = database.execute(
