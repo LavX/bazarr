@@ -428,9 +428,9 @@ def test_owner_specific_scan_schedules_and_removal(indexed_library, monkeypatch)
             options=json.dumps(
                 {
                     "sports_settings": {
-                        "full_scan": "Weekly",
-                        "full_scan_day": 2,
-                        "full_scan_hour": 8,
+                        "full_update": "Weekly",
+                        "full_update_day": 2,
+                        "full_update_hour": 8,
                     }
                 }
             )
@@ -439,7 +439,7 @@ def test_owner_specific_scan_schedules_and_removal(indexed_library, monkeypatch)
     session.execute(
         sa.update(TableArrInstances)
         .where(TableArrInstances.id == 2)
-        .values(options=json.dumps({"sports_settings": {"full_scan": "Manually"}}))
+        .values(options=json.dumps({"sports_settings": {"full_update": "Manually"}}))
     )
     scheduler = BackgroundScheduler()
     configure_sports_jobs(scheduler, session)

@@ -94,15 +94,15 @@ def test_disabled_owner_and_transaction_failure(library, monkeypatch):
 def test_sports_settings_merge_and_validation(schema_session):
     from arr_instances.service import create_instance, update_instance
     from arr_instances.repository import ArrInstanceRepository
-    body, status = create_instance(schema_session, {'kind': 'sportarr', 'name': 'Sports', 'sports_settings': {'sync_interval': 13, 'excluded_sports': ['Golf']}, 'subtitle_settings': {'general': {'use_postprocessing': True}}})
-    assert status == 201 and body['sports_settings']['sync_interval'] == 13
-    changed, status = update_instance(schema_session, body['id'], {'sports_settings': {'full_scan': 'Weekly'}})
-    assert status == 200 and changed['sports_settings']['sync_interval'] == 13
+    body, status = create_instance(schema_session, {'kind': 'sportarr', 'name': 'Sports', 'sports_settings': {'sports_sync': 13, 'excluded_sports': ['Golf']}, 'subtitle_settings': {'general': {'use_postprocessing': True}}})
+    assert status == 201 and body['sports_settings']['sports_sync'] == 13
+    changed, status = update_instance(schema_session, body['id'], {'sports_settings': {'full_update': 'Weekly'}})
+    assert status == 200 and changed['sports_settings']['sports_sync'] == 13
     assert changed['sports_settings']['excluded_sports'] == ['Golf']
     assert changed['subtitle_settings']['general']['use_postprocessing'] is True
     opts = json.loads(ArrInstanceRepository(schema_session).get(body['id']).options)
-    assert opts['sports_settings']['full_scan'] == 'Weekly'
-    for bad in [{'sync_interval': 0}, {'sync_interval': True}, {'full_scan': 'Hourly'}, {'full_scan_hour': 24}, {'full_scan_day': -1}, {'only_monitored': 1}, {'excluded_tags': 'tag'}, {'api_key': 'private'}]:
+    assert opts['sports_settings']['full_update'] == 'Weekly'
+    for bad in [{'sports_sync': 0}, {'sports_sync': True}, {'full_update': 'Hourly'}, {'full_update_hour': 24}, {'full_update_day': -1}, {'only_monitored': 1}, {'excluded_tags': 'tag'}, {'api_key': 'private'}]:
         _, status = update_instance(schema_session, body['id'], {'sports_settings': bad})
         assert status == 400
 
@@ -150,7 +150,7 @@ def test_jobs_only_enabled_sportarr_and_stale_removal(schema_session, monkeypatc
     configure_sports_jobs(aps, schema_session)
     assert aps.get_jobs() == []
     repo.create('sonarr', 'TV')
-    first = repo.create('sportarr', 'One', options=json.dumps({'sports_settings': {'sync_interval': 13}}))
+    first = repo.create('sportarr', 'One', options=json.dumps({'sports_settings': {'sports_sync': 13}}))
     second = repo.create('sportarr', 'Two')
     disabled = repo.create('sportarr', 'Disabled', enabled=False)
     configure_sports_jobs(aps, schema_session)
@@ -260,8 +260,8 @@ def test_sportarr_crud_and_profile_application_under_real_autocommit(library):
     body, status = service.create_instance(session, {'kind': 'sportarr', 'name': 'Third', 'media_defaults': {'default_enabled': True, 'default_profile': 1}})
     assert status == 201
     owner = body['id']
-    body, status = service.update_instance(session, owner, {'sports_settings': {'sync_interval': 17}})
-    assert status == 200 and body['sports_settings']['sync_interval'] == 17
+    body, status = service.update_instance(session, owner, {'sports_settings': {'sports_sync': 17}})
+    assert status == 200 and body['sports_settings']['sports_sync'] == 17
     session.execute(sa.insert(TableSportsLeagues).values(id=51, arr_instance_id=owner, sportarrLeagueId=7, title='Third'))
     session.execute(sa.insert(TableSportsEvents).values(id=51, arr_instance_id=owner, league_id=51, sportarrEventId=8, file_id=9, path='/third.mkv', title='Third'))
     session.execute(sa.insert(TableHistorySports).values(arr_instance_id=owner, league_id=51, event_id=51))
@@ -309,14 +309,14 @@ def test_sportarr_http_crud_on_both_database_engines(library, monkeypatch):
     api.add_namespace(endpoints.api_ns_system_arr_instances, path='/')
     client = app.test_client()
     headers = {'X-API-KEY': settings.auth.apikey}
-    created = client.post('/system/arr-instances', headers=headers, json={'kind': 'sportarr', 'name': 'HTTP', 'sports_settings': {'sync_interval': 19}})
+    created = client.post('/system/arr-instances', headers=headers, json={'kind': 'sportarr', 'name': 'HTTP', 'sports_settings': {'sports_sync': 19}})
     assert created.status_code == 201
     owner = created.json['id']
     url = f'/system/arr-instances/{owner}'
-    patched = client.patch(url, headers=headers, json={'enabled': False, 'sports_settings': {'full_scan': 'Weekly'}})
+    patched = client.patch(url, headers=headers, json={'enabled': False, 'sports_settings': {'full_update': 'Weekly'}})
     assert patched.status_code == 200 and patched.json['enabled'] is False
-    assert patched.json['sports_settings']['sync_interval'] == 19
-    assert patched.json['sports_settings']['full_scan'] == 'Weekly'
+    assert patched.json['sports_settings']['sports_sync'] == 19
+    assert patched.json['sports_settings']['full_update'] == 'Weekly'
     assert client.patch(url, headers=headers, json={'enabled': True, 'is_default': True}).status_code == 200
     assert client.delete(url, headers=headers).status_code == 204
     assert session.execute(sa.select(TableArrInstances.id).order_by(TableArrInstances.id)).scalars().all() == [1, 2]

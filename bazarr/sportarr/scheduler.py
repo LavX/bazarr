@@ -32,7 +32,7 @@ def configure_sports_jobs(aps_scheduler, session):
         aps_scheduler.add_job(
             update_sports_for_instance,
             "interval",
-            minutes=get_sports_settings(instance)["sync_interval"],
+            minutes=get_sports_settings(instance)["sports_sync"],
             max_instances=1,
             coalesce=True,
             misfire_grace_time=15,
@@ -42,10 +42,10 @@ def configure_sports_jobs(aps_scheduler, session):
             kwargs={"arr_instance_id": instance.id},
         )
         scan = get_sports_settings(instance)
-        trigger = {"hour": scan["full_scan_hour"]}
-        if scan["full_scan"] == "Weekly":
-            trigger["day_of_week"] = scan["full_scan_day"]
-        elif scan["full_scan"] == "Manually":
+        trigger = {"hour": scan["full_update_hour"]}
+        if scan["full_update"] == "Weekly":
+            trigger["day_of_week"] = scan["full_update_day"]
+        elif scan["full_update"] == "Manually":
             trigger = {"year": datetime.now().year + 100}
         aps_scheduler.add_job(
             sports_full_scan_subtitles,
