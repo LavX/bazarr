@@ -221,6 +221,10 @@ def test_scheduled_wanted_job_is_owner_scoped_and_removed_on_disable(
     from app.get_args import args
 
     _, _, _, _, session, _ = workflow_library
+    # configure_sports_jobs is gated on the master toggle, so a job test
+    # has to turn it on the way a configured install does.
+    from app.config import settings
+    monkeypatch.setattr(settings.general, "use_sportarr", True)
     monkeypatch.setattr(args, "no_signalr", True)
     scheduler = BackgroundScheduler()
     configure_sports_jobs(scheduler, session)
@@ -559,6 +563,10 @@ def test_disabling_owner_removes_pending_and_cancels_only_its_running_jobs(
 
     _, _, workflows, _, session, _ = workflow_library
     monkeypatch.setattr(args, "no_signalr", True)
+    # configure_sports_jobs is gated on the master toggle, so a job test
+    # has to turn it on the way a configured install does.
+    from app.config import settings
+    monkeypatch.setattr(settings.general, "use_sportarr", True)
     queue = workflows.jobs_queue
     pending = workflows.automatic_search_sports(61, 1)
     sibling = workflows.automatic_search_sports(62, 2)

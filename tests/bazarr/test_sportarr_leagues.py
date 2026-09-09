@@ -145,6 +145,9 @@ def test_jobs_only_enabled_sportarr_and_stale_removal(schema_session, monkeypatc
     from sportarr.scheduler import configure_sports_jobs
     from app.config import settings
     monkeypatch.setattr(settings.general, "upgrade_subs", True)
+    # configure_sports_jobs is gated on the master toggle, so a job test
+    # has to turn it on the way a configured install does.
+    monkeypatch.setattr(settings.general, "use_sportarr", True)
     repo = ArrInstanceRepository(schema_session)
     aps = BackgroundScheduler()
     configure_sports_jobs(aps, schema_session)

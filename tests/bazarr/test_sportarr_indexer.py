@@ -421,6 +421,10 @@ def test_owner_specific_scan_schedules_and_removal(indexed_library, monkeypatch)
 
     session, _ = indexed_library
     monkeypatch.setattr(args, "no_signalr", True)
+    # configure_sports_jobs is gated on the master toggle, so a job test
+    # has to turn it on the way a configured install does.
+    from app.config import settings
+    monkeypatch.setattr(settings.general, "use_sportarr", True)
     session.execute(
         sa.update(TableArrInstances)
         .where(TableArrInstances.id == 1)
