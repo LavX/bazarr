@@ -211,6 +211,7 @@ def save_sports_subtitle(
     replacement_state=None,
 ):
     """Reusable save entrypoint for manual and automatic sports provider downloads."""
+    from app.notifier import send_notifications_sports
     from subtitles.manual import _save_downloaded_subtitles
     from subtitles.processing import process_subtitle
     from subtitles.tools.mods import get_subzero_mods
@@ -334,6 +335,18 @@ def save_sports_subtitle(
                     artifact=artifact,
                 )
             state[phase] = "committed"
+            # Series and movies notify as soon as the download is recorded;
+            # sports never did, so with Apprise configured every sports
+            # download, upgrade and translate was invisible. Guarded because a
+            # notifier fault must not push this state machine into the
+            # "published but history uncertain" branch below.
+            try:
+                send_notifications_sports(
+                    context.event_id, result.message,
+                    arr_instance_id=context.arr_instance_id,
+                )
+            except Exception:
+                logging.exception("BAZARR could not send a sports notification")
             phase = "index"
             outcome.refresh(candidate, database, cancel)
             if state["index"] != "completed":
