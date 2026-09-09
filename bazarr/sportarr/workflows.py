@@ -72,7 +72,16 @@ def list_wanted(session, arr_instance_id=None, start=0, length=100):
     if start < 0 or not 1 <= length <= 1000:
         raise ValueError("Invalid pagination")
     rows = wanted_rows(session, arr_instance_id)
-    return {"data": rows[start : start + length], "total": len(rows)}
+    page = rows[start : start + length]
+    # The same flag the episodes and movies wanted endpoints carry, so a
+    # "subtitles exist but only for another release" diagnosis reaches the
+    # sports page instead of being recorded and never shown.
+    from subtitles.mismatch import flagged_media_ids
+
+    mismatched = flagged_media_ids(session, "sports", [row["id"] for row in page])
+    for row in page:
+        row["release_mismatch"] = row["id"] in mismatched
+    return {"data": page, "total": len(rows)}
 
 
 def wanted_badge(session):

@@ -57,7 +57,7 @@ def eligibility(session, context):
     return None
 
 
-def _provider_result(video, languages, pool, minimum, profile, cancel):
+def _provider_result(video, languages, pool, minimum, profile, cancel, candidate_sink=None):
     # A private pool keeps a cancelled search from changing a later search's state.
     # Set here for the same reason subtitles/download.py:38 and manual.py:165
     # set it: subliminal reads it out of the environment at download time. The
@@ -69,6 +69,11 @@ def _provider_result(video, languages, pool, minimum, profile, cancel):
     while not _provider_slots.acquire(timeout=0.1):
         check_cancelled(cancel)
     result = Queue(maxsize=1)
+    # Every candidate the search scores lands here, the rejected ones included.
+    # When a search comes back empty they are the only evidence of what the
+    # providers actually hold, and reading them costs no extra request.
+    if candidate_sink is None:
+        candidate_sink = []
 
     def run():
         try:
@@ -87,6 +92,7 @@ def _provider_result(video, languages, pool, minimum, profile, cancel):
                         in (1, "1", True, "True"),
                         use_provider_priority=settings.general.use_provider_priority,
                         fallback_allowed=settings.general.use_whisper_fallback,
+                        candidate_sink=candidate_sink,
                     ),
                 )
             )
@@ -235,9 +241,30 @@ def search_event(
         if not video:
             pool.terminate()
             raise OSError("Could not analyze sports video")
+        candidate_sink = []
         selected = _provider_result(
-            video, language_set, pool, threshold, profile, cancel
+            video, language_set, pool, threshold, profile, cancel,
+            candidate_sink=candidate_sink,
         )
+        if not selected and language is None and upgraded_from_id is None:
+            # Series and movies report this from generate_subtitles, which the
+            # sports path bypasses, so the "subtitles exist but only for another
+            # release" diagnosis was unavailable for sports. Only on a plain
+            # wanted search: an upgrade or a forced minimum rejects candidates
+            # by construction, so reporting there would be pure noise.
+            from subtitles.mismatch import report_release_type_mismatch
+
+            try:
+                report_release_type_mismatch(
+                    video, "sports", code, candidate_sink, int(threshold),
+                    arr_instance_id=context.arr_instance_id,
+                )
+            except Exception:
+                # A report must never cost the user a search.
+                logging.exception(
+                    "BAZARR Error checking for a release type mismatch for "
+                    "sports event %s", context.event_id,
+                )
         for subtitle in selected:
             candidate = bind_candidate(context, subtitle, signature)
             if eligibility(database, context):

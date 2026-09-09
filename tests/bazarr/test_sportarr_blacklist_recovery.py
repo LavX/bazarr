@@ -68,7 +68,7 @@ def test_blacklist_replacement_preserves_file_installed_during_provider(
     original = automatic._provider_result
     replacement = b"newer subtitle installed during replacement provider work"
 
-    def changed(*args):
+    def changed(*args, **kwargs):
         selected = original(*args)
         assert not current.exists(), "The old artifact should already have been deleted"
         current.write_bytes(replacement)
@@ -283,7 +283,7 @@ def test_replacement_skip_is_exposed_by_actual_owned_job(workflow_library, monke
     current = folder / "1/event.en.srt"
     provider = automatic._provider_result
 
-    def replace(*args):
+    def replace(*args, **kwargs):
         result = provider(*args)
         current.write_bytes(b"new subtitle during owned job")
         return result

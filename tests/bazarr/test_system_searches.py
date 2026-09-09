@@ -14,10 +14,11 @@ def _run_search(query):
         return Searches.get.__wrapped__(Searches())
 
 
-def _search_settings(use_sonarr=False, use_radarr=False, apikey="secret"):
+def _search_settings(use_sonarr=False, use_radarr=False, use_sportarr=False, apikey="secret"):
     return SimpleNamespace(
         auth=SimpleNamespace(apikey=apikey),
-        general=SimpleNamespace(use_sonarr=use_sonarr, use_radarr=use_radarr),
+        general=SimpleNamespace(use_sonarr=use_sonarr, use_radarr=use_radarr,
+                                use_sportarr=use_sportarr),
     )
 
 

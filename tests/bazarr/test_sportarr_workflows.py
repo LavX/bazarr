@@ -285,7 +285,7 @@ def test_automatic_rejects_file_changes_during_actual_provider_search(
     original = automatic._provider_result
     cancel = Event()
 
-    def changed(*args):
+    def changed(*args, **kwargs):
         selected = original(*args)
         if change == "file":
             with (folder / "1/event.mkv").open("ab") as stream:
@@ -541,7 +541,7 @@ def test_upgrade_preserves_replacement_installed_during_provider_work(
     original = automatic._provider_result
     path = folder / "1/event.en.srt"
 
-    def replacement(*args):
+    def replacement(*args, **kwargs):
         selected = original(*args)
         path.write_text("a newer replacement")
         return selected
