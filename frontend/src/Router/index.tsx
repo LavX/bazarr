@@ -131,6 +131,11 @@ export function useRoutes(): CustomRouteObject[] {
             icon: faTrophy,
             name: "Sports",
             path: "sports",
+            // The event stream's live state, the counterpart of the SignalR
+            // badges on Series and Movies. The endpoint has reported it all
+            // along and the nav never showed it, so there was no way to see at
+            // a glance whether Bazarr was still connected to Sportarr.
+            badge: data?.sportarr_sse,
             hidden: !sportarr,
             children: [
               { index: true, element: <Sports /> },
@@ -424,6 +429,7 @@ export function useRoutes(): CustomRouteObject[] {
       data?.providers,
       data?.sonarr_signalr,
       data?.radarr_signalr,
+      data?.sportarr_sse,
       data?.announcements,
       data?.status,
       radarr,

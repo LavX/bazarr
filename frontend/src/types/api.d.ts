@@ -6,6 +6,9 @@ interface Badge {
   status: number;
   sonarr_signalr: string;
   radarr_signalr: string;
+  /** Live state of the Sportarr event stream, the sports counterpart of the
+   *  SignalR indicators above. */
+  sportarr_sse?: string;
   announcements: number;
 }
 
