@@ -9,6 +9,7 @@ from utilities.path_mappings import path_mappings
 from utilities.security_guards import subtitle_path_within_area
 from .leagues import _body, _owner
 from ..utils import authenticate
+from sportarr.errors import SportsNotFound
 
 api_ns_sports_events = Namespace('Sports Events', description='Owned playable sports files')
 
@@ -22,6 +23,8 @@ class SportsEvents(Resource):
             owner = _owner(owner) if owner is not None else None
             start, length = int(request.args.get('start', 0)), int(request.args.get('length', 100))
             return library.list_events(database, league_id, owner, start, length), 200
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {'message': str(exc)}, 400
 
@@ -35,6 +38,8 @@ class SportsEvent(Resource):
             owner = _owner(owner) if owner is not None else None
             result = library.get_event(database, event_id, owner)
             return (result, 200) if result else ({'message': 'Event not found'}, 404)
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {'message': str(exc)}, 400
 
@@ -48,6 +53,8 @@ class SportsEventSubtitles(Resource):
             owner = _owner(_body().get('arr_instance_id'))
             store_subtitles_sports(event_id, owner, use_cache=False)
             return library.get_event(database, event_id, owner), 200
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {'message': str(exc)}, 400
         except OSError:
@@ -101,6 +108,8 @@ class SportsEventSubtitles(Resource):
             if not removed:
                 return {'message': 'Could not delete this subtitle.'}, 409
             return '', 204
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {'message': str(exc)}, 400
 
@@ -111,5 +120,7 @@ class SportsRootfolders(Resource):
     def get(self):
         try:
             return rootfolder.list_rootfolders(database, _owner(request.args.get('arr_instance_id'))), 200
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {'message': str(exc)}, 400

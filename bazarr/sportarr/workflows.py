@@ -21,23 +21,44 @@ from sportarr.identity import resolve_event_in_session
 from sportarr.library import _event_query, _serialize_event, get_league
 from sportarr.pagination import validate_page
 from sportarr.sync.leagues import require_sportarr
+from sportarr.errors import SportsNotFound
 
 
 class SportsJobSignal:
+    # How long an "is this instance still enabled" answer stays good for.
+    # is_set() is called from tight wait loops (the ffprobe wait polls it, the
+    # provider search wait polls it), and each call used to issue a SELECT plus
+    # a job-progress update. A 60-second ffprobe cost roughly twelve thousand
+    # of each, which is real contention against request threads on SQLite. An
+    # instance disabled a second ago is still worth stopping for; a second of
+    # staleness against a 120-second analysis is not worth the round trips.
+    OWNER_CACHE_SECONDS = 1.0
+
     def __init__(self, owner, job_id=None, parent=None):
         self.owner, self.job_id, self.parent = owner, job_id, parent
+        self._owner_checked_at = None
+        self._owner_enabled = True
+
+    def _owner_is_enabled(self):
+        now = time.monotonic()
+        if (self._owner_checked_at is not None
+                and now - self._owner_checked_at < self.OWNER_CACHE_SECONDS):
+            return self._owner_enabled
+        enabled = database.execute(
+            select(TableArrInstances.enabled).where(
+                TableArrInstances.id == self.owner, TableArrInstances.kind == "sportarr"
+            )
+        ).scalar_one_or_none()
+        self._owner_enabled = enabled == 1
+        self._owner_checked_at = now
+        return self._owner_enabled
 
     def is_set(self):
         if self.job_id:
             jobs_queue.update_job_progress(self.job_id)
         if self.parent is not None and self.parent.is_set():
             return True
-        owner = database.execute(
-            select(TableArrInstances.enabled).where(
-                TableArrInstances.id == self.owner, TableArrInstances.kind == "sportarr"
-            )
-        ).scalar_one_or_none()
-        return owner != 1
+        return not self._owner_is_enabled()
 
     def wait(self, timeout):
         if self.parent is not None:
@@ -54,7 +75,7 @@ def wanted_rows(session, arr_instance_id=None, league_id=None):
         league_id is not None
         and get_league(session, league_id, arr_instance_id) is None
     ):
-        raise ValueError("Sports league not found for this owner")
+        raise SportsNotFound("Sports league not found for this owner")
     query = _event_query(arr_instance_id).where(
         TableSportsEvents.missing_subtitles.is_not(None),
         TableSportsEvents.missing_subtitles != "[]",
@@ -88,7 +109,7 @@ def wanted_badge(session):
     return sum(len(row["missing_subtitles"]) for row in wanted_rows(session))
 
 
-def _run_events(rows, job_id, adaptive=False):
+def _run_events(rows, job_id, adaptive=False, language=None):
     outcomes = []
     failures = []
     jobs_queue.update_job_progress(job_id, progress_max=len(rows) or 1)
@@ -103,6 +124,10 @@ def _run_events(rows, job_id, adaptive=False):
                     job_id=job_id,
                     cancel=signal,
                     adaptive=adaptive,
+                    # A per-row language when the caller asked for one, so a
+                    # single missing-language badge can be actioned on its own
+                    # the way PATCH episodes/subtitles does for an episode.
+                    language=row.get("language", language),
                 )
                 outcomes.append(
                     {"event_id": row["id"], "arr_instance_id": row["arr_instance_id"]}
@@ -157,13 +182,24 @@ def _run_events(rows, job_id, adaptive=False):
     return {"message": message, "data": outcomes}
 
 
-def automatic_search_sports(event_id, arr_instance_id, job_id=None):
+def automatic_search_sports(event_id, arr_instance_id, job_id=None, language=None):
+    """Search one event, optionally for a single language.
+
+    Without ``language`` this searches every missing language on the event,
+    which is all it could ever do. Episodes and movies have had a
+    "download this one language now" path since forever (PATCH
+    episodes/subtitles), so the sports Wanted page had to substitute a manual
+    search modal for a single missing-language badge.
+    """
     if not job_id:
         resolve_event_in_session(database, event_id, arr_instance_id)
         return jobs_queue.add_job_from_function(
             "Searching sports subtitles", is_progress=True
         )
-    return _run_events([{"id": event_id, "arr_instance_id": arr_instance_id}], job_id)
+    return _run_events(
+        [{"id": event_id, "arr_instance_id": arr_instance_id, "language": language}],
+        job_id,
+    )
 
 
 def wanted_search_missing_subtitles_sports(
@@ -183,7 +219,7 @@ def wanted_search_missing_subtitles_sports(
 def sports_download_subtitles(league_id, arr_instance_id, job_id=None):
     if not job_id:
         if get_league(database, league_id, arr_instance_id) is None:
-            raise ValueError("Sports league not found for this owner")
+            raise SportsNotFound("Sports league not found for this owner")
         return jobs_queue.add_job_from_function(
             "Downloading missing league subtitles", is_progress=True
         )
@@ -212,6 +248,54 @@ def blacklist_sports_subtitle(history_id, arr_instance_id, job_id=None):
         allow_cancelled=bool(result["replacement"]["downloads"]),
     )
     return result
+
+
+def upgradable_history_ids(session, history_ids):
+    """The subset of ``history_ids`` the upgrade run would consider, cheaply.
+
+    Deliberately NOT upgrade_rows: that walks the whole history and hashes the
+    subtitle file on disk for every candidate, which is right for the upgrade
+    job and far too expensive for a history page request. This applies the
+    criteria that need no IO, which is what the flag is for, and leaves the
+    artifact verification where it belongs, in the run itself. The episodes
+    endpoint has the same character: it marks a row upgradable and then
+    re-checks the paths before acting.
+    """
+    from subtitles.upgrade import (
+        get_queries_condition_parameters,
+        _language_still_desired,
+    )
+    from sportarr.identity import resolve_event_in_session
+
+    if not settings.general.upgrade_subs or not history_ids:
+        return set()
+    minimum_timestamp, actions = get_queries_condition_parameters()
+    rows = session.execute(
+        select(TableHistorySports)
+        .join(TableArrInstances,
+              TableHistorySports.arr_instance_id == TableArrInstances.id)
+        .where(TableArrInstances.kind == "sportarr", TableArrInstances.enabled == 1,
+               TableHistorySports.id.in_(list(history_ids)))
+    ).scalars().all()
+    upgradable = set()
+    for row in rows:
+        if (row.action not in actions
+                or not row.timestamp
+                or row.timestamp <= minimum_timestamp
+                or row.score is None
+                or row.score >= (row.score_out_of or 180) - 3
+                or not row.artifact):
+            continue
+        try:
+            context = resolve_event_in_session(session, row.event_id, row.arr_instance_id)
+        except ValueError:
+            continue
+        if eligibility(session, context) or not _language_still_desired(
+            row.language, context.profile_id
+        ):
+            continue
+        upgradable.add(row.id)
+    return upgradable
 
 
 def upgrade_rows(session, arr_instance_id=None, job_id=None):

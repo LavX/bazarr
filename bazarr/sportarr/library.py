@@ -9,6 +9,7 @@ from sportarr.db import sports_transaction
 from sportarr.sync.leagues import require_sportarr
 from sportarr.pagination import validate_page
 from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
+from sportarr.errors import SportsNotFound
 
 
 def _query():
@@ -75,6 +76,41 @@ def assign_profile(session, league_id, arr_instance_id, profile_id):
         return result.rowcount == 1
 
 
+def assign_profiles(session, assignments):
+    """Assign profiles to many leagues in ONE transaction.
+
+    Mass-editing from the library page fired one PATCH per league, each opening
+    its own transaction and its own re-index, so 200 leagues meant 200 requests
+    and a partial failure left the selection half-applied with no aggregate
+    status. ``assignments`` is an iterable of (league_id, arr_instance_id,
+    profile_id); the whole batch commits or none of it does.
+
+    Returns the (league_id, arr_instance_id) pairs actually updated, so the
+    caller can re-index exactly those against their own owners.
+    """
+    assignments = list(assignments)
+    if not assignments:
+        return []
+    updated = []
+    with sports_transaction(session) as transaction:
+        owners = {owner for _, owner, _ in assignments}
+        for owner in owners:
+            require_sportarr(transaction, owner)
+        profiles = {profile for _, _, profile in assignments if profile is not None}
+        for profile_id in profiles:
+            if type(profile_id) is not int or profile_id <= 0:
+                raise ValueError('profileId must be a positive language profile ID or null')
+            if transaction.get(TableLanguagesProfiles, profile_id) is None:
+                raise ValueError('Language profile does not exist')
+        for league_id, owner, profile_id in assignments:
+            result = transaction.execute(update(TableSportsLeagues).where(
+                TableSportsLeagues.id == league_id,
+                TableSportsLeagues.arr_instance_id == owner).values(profileId=profile_id))
+            if result.rowcount == 1:
+                updated.append((league_id, owner))
+    return updated
+
+
 def apply_instance_default_profile(session, arr_instance_id):
     with sports_transaction(session) as transaction:
         instance = require_sportarr(transaction, arr_instance_id)
@@ -132,7 +168,7 @@ def list_events(session, league_id, arr_instance_id=None, start=0, length=100):
     limit = validate_page(start, length)
     league = get_league(session, league_id, arr_instance_id)
     if league is None:
-        raise ValueError('League not found for this owner')
+        raise SportsNotFound('League not found for this owner')
     query = _event_query(league['arr_instance_id']).where(TableSportsEvents.league_id == league_id)
     count = session.execute(select(func.count()).select_from(query.subquery())).scalar_one()
     rows = session.execute(query.order_by(TableSportsEvents.eventDate.desc(), TableSportsEvents.sportarrEventId,

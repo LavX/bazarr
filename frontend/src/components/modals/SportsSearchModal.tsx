@@ -75,9 +75,12 @@ function SportsSearchView({
       const result = await sports.downloadSubtitle(event, candidate);
       setPublication(result.publication);
     } finally {
-      await client.invalidateQueries({
-        queryKey: [QueryKeys.Sports, "events"],
-      });
+      // The sports root, not just "events". Wanted, history and blacklist are
+      // all cached under [Sports, <kind>, ...], so invalidating only "events"
+      // left a downloaded language still showing as missing on the Wanted
+      // page until a manual reload. Badges carries the sidebar count.
+      await client.invalidateQueries({ queryKey: [QueryKeys.Sports] });
+      await client.invalidateQueries({ queryKey: [QueryKeys.Badges] });
       setDownloading(false);
     }
   }

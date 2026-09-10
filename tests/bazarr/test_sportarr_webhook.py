@@ -71,8 +71,23 @@ def test_a_test_hook_touches_nothing(webhook, monkeypatch):
     assert calls == []
 
 
+def _single_instance(session):
+    """Leave exactly one enabled Sportarr, which is what the keyless URL means.
+
+    The fixture configures two so the keyed routes can be exercised. The
+    keyless route is only unambiguous with one: with several, a file id from
+    instance B collides with an unrelated event on instance A, because every
+    Sportarr numbers its files from 1.
+    """
+    from app.database import TableArrInstances
+
+    session.get(TableArrInstances, 43).enabled = 0
+    session.commit()
+
+
 def test_an_import_indexes_and_searches_the_event(webhook, monkeypatch):
-    _, namespace, calls = webhook
+    session, namespace, calls = webhook
+    _single_instance(session)
     message, status = _post(monkeypatch, namespace, calls, {
         'eventType': 'Download',
         'episodes': [{'id': 9}],
@@ -107,10 +122,26 @@ def test_the_key_in_the_url_picks_the_owner(webhook, monkeypatch):
 
 
 def test_no_key_means_the_default_instance(webhook, monkeypatch):
-    _, namespace, calls = webhook
+    session, namespace, calls = webhook
+    _single_instance(session)
     _post(monkeypatch, namespace, calls,
           {'eventType': 'Download', 'episodeFiles': [{'id': 71}]})
     assert calls == [('index', 61, 42), ('search', 61, 42)]
+
+
+def test_no_key_is_refused_when_several_instances_are_enabled(webhook, monkeypatch):
+    """The keyless URL is a guess once there is more than one enabled Sportarr,
+    and a wrong guess is worse than a refusal: file ids restart from 1 on every
+    server, so instance B's import can match an unrelated event on the default
+    instance A, download a subtitle for the wrong event on the wrong server,
+    and leave B's actual import unindexed. 200 regardless, because an arr marks
+    a webhook unhealthy on anything else and the user fixes this in Settings by
+    using the per-instance URL."""
+    _, namespace, calls = webhook
+    message, status = _post(monkeypatch, namespace, calls,
+                            {'eventType': 'Download', 'episodeFiles': [{'id': 71}]})
+    assert status == 200
+    assert calls == []
 
 
 def test_a_disabled_owner_is_answered_200(webhook, monkeypatch):
@@ -130,6 +161,7 @@ def test_a_disabled_owner_is_answered_200(webhook, monkeypatch):
 
 def test_one_unreadable_file_does_not_cost_the_rest_of_the_batch(webhook, monkeypatch):
     session, namespace, calls = webhook
+    _single_instance(session)
     from app.database import TableSportsEvents
 
     session.add(TableSportsEvents(id=62, arr_instance_id=42, league_id=51,

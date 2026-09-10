@@ -13,8 +13,8 @@ import zipfile
 from flask import request, send_file
 from flask_restx import Resource, Namespace
 
-from app.database import (TableEpisodes, TableMovies, TableShows, TableSportsEvents,
-                          TableSportsLeagues, database, select)
+from app.database import (TableArrInstances, TableEpisodes, TableMovies, TableShows,
+                          TableSportsEvents, TableSportsLeagues, database, select)
 from arr_instances.resolution import scoped
 from utilities.helper import get_target_folder
 from utilities.path_mappings import path_mappings
@@ -585,10 +585,19 @@ class SportsLeagueSubtitleBundleDownload(Resource):
         # A league id is a primary key, so there is no ambiguity to refuse the
         # way the series and movies routes must. The owner still has to be
         # resolvable: sports paths map per instance with no global fallback.
+        # Joined to an ENABLED sportarr owner. Without the join a disabled
+        # instance still matched here, and the per-instance sports mapping,
+        # which requires an enabled owner, then raised out of the handler as a
+        # 500. A disabled owner's league is not reachable, so 404 is the honest
+        # answer and it is what every sports-native reader already gives.
         league_row = database.execute(
             scoped(
                 select(TableSportsLeagues.title, TableSportsLeagues.arr_instance_id)
-                .where(TableSportsLeagues.id == leagueId),
+                .join(TableArrInstances,
+                      TableSportsLeagues.arr_instance_id == TableArrInstances.id)
+                .where(TableSportsLeagues.id == leagueId,
+                       TableArrInstances.kind == 'sportarr',
+                       TableArrInstances.enabled == 1),
                 TableSportsLeagues.arr_instance_id, _request_arr_instance_id())
         ).first()
         if not league_row:

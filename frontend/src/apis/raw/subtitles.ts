@@ -99,11 +99,18 @@ interface UpgradableSeriesKey {
   arr_instance_id?: number | null;
 }
 
+export interface UpgradableSportsKey {
+  sportsLeagueId: number;
+  arr_instance_id?: number | null;
+}
+
 export interface UpgradableResponse {
   movies: number[];
   series: number[];
+  sports?: number[];
   movieKeys?: UpgradableMovieKey[];
   seriesKeys?: UpgradableSeriesKey[];
+  sportsKeys?: UpgradableSportsKey[];
 }
 
 export interface ArchiveExtractedFile {

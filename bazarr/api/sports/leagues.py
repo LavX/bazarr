@@ -7,6 +7,7 @@ from app.jobs_queue import jobs_queue
 from sportarr import library
 from sportarr.sync.leagues import require_sportarr
 from ..utils import authenticate
+from sportarr.errors import SportsNotFound
 
 api_ns_sports_leagues = Namespace('Sports Leagues', description='Owned sports leagues')
 
@@ -17,6 +18,22 @@ def _owner(value):
     if type(value) is not int or value <= 0:
         raise ValueError('arr_instance_id is required and must be a positive integer')
     return value
+
+
+def _optional_owner(value):
+    """The owner when the caller sent one, None when they did not.
+
+    A local event or league id is a primary key and already unique across
+    instances, so these endpoints do not need an owner to find the row; they
+    need one only to enforce ownership when the caller asserts it. Routing
+    everything through _owner made arr_instance_id mandatory in practice while
+    the parser and the Swagger doc both advertised it as optional, so an
+    upload without it answered 400 instead of working the way the episode and
+    movie equivalents do.
+    """
+    if value is None or value == '':
+        return None
+    return _owner(value)
 
 
 def _body():
@@ -37,8 +54,29 @@ def _queue(func, kwargs):
     # wrong rather than merely long, silently labelling it as a profile refresh
     # and dispatching it to the wrong module.
     job_name, module = _JOBS.get(func, ('Refresh sports profiles', 'sportarr.library'))
-    jobs_queue.feed_jobs_pending_queue(
+    # Return the id. feed_jobs_pending_queue answers False when an identical
+    # job is already pending or running, and discarding that meant both sync
+    # routes reported 202 "queued" for work that was dropped, with no job_id
+    # for the client to poll.
+    return jobs_queue.feed_jobs_pending_queue(
         job_name=job_name, module=module, func=func, kwargs=kwargs, is_progress=False)
+
+
+def _queued(job_id, queued_message):
+    """The SportsJob shape the client declares, matching api/sports/workflows.
+
+    202 only when something was actually queued; a duplicate is a 200 saying
+    so, which is what every other sports job endpoint already returns.
+    """
+    return (
+        {
+            'queued': bool(job_id),
+            'job_id': job_id or None,
+            'message': queued_message if job_id
+            else 'No work queued; a matching sync is already active',
+        },
+        202 if job_id else 200,
+    )
 
 
 @api_ns_sports_leagues.route('/sports/leagues')
@@ -56,8 +94,53 @@ class SportsLeagues(Resource):
             # could not fetch every row and its filters only ever searched the
             # page currently on screen.
             return library.list_leagues(database, owner, start, length), 200
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {'message': str(exc)}, 400
+
+
+@api_ns_sports_leagues.route('/sports/leagues/profiles')
+class SportsLeagueProfiles(Resource):
+    """Assign a language profile to many leagues in one request.
+
+    Series and movies have taken parallel id/profileid arrays since forever;
+    sports had only the single-league PATCH, so mass-editing 200 leagues fired
+    200 requests, each with its own transaction and its own re-index, and a
+    partial failure left the selection half-applied with no aggregate status.
+    """
+
+    @authenticate
+    def post(self):
+        try:
+            body = _body()
+            ids = body.get('id')
+            owners = body.get('arr_instance_id')
+            profiles = body.get('profileId')
+            if not isinstance(ids, list) or not ids:
+                raise ValueError('id must be a non-empty list of league ids')
+            if not isinstance(owners, list) or len(owners) != len(ids):
+                raise ValueError('arr_instance_id must be a list matching id')
+            if not isinstance(profiles, list) or len(profiles) != len(ids):
+                raise ValueError('profileId must be a list matching id')
+            assignments = [
+                (_owner(league_id), _owner(owner),
+                 None if profile is None else _owner(profile))
+                for league_id, owner, profile in zip(ids, owners, profiles)
+            ]
+            updated = library.assign_profiles(database, assignments)
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
+        except ValueError as exc:
+            return {'message': str(exc)}, 400
+        # Re-index per owner, not with a None owner: the sports indexer resolves
+        # paths against the owning instance's mappings.
+        by_owner = {}
+        for league_id, owner in updated:
+            by_owner.setdefault(owner, []).append(league_id)
+        for owner, league_ids in by_owner.items():
+            library.refresh_league_profiles(league_ids, owner)
+        return {'updated': len(updated), 'requested': len(assignments)}, 200
 
 
 @api_ns_sports_leagues.route('/sports/leagues/<int:league_id>')
@@ -68,6 +151,8 @@ class SportsLeague(Resource):
             owner = request.args.get('arr_instance_id')
             result = library.get_league(database, league_id, _owner(owner) if owner is not None else None)
             return (result, 200) if result else ({'message': 'League not found'}, 404)
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {'message': str(exc)}, 400
 
@@ -80,10 +165,14 @@ class SportsLeague(Resource):
                 raise ValueError('profileId is required')
             if not library.assign_profile(database, league_id, owner, body['profileId']):
                 return {'message': 'League not found'}, 404
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {'message': str(exc)}, 400
         library.refresh_league_profiles([league_id], owner)
-        return {}, 204
+        # 204 carries no body, and every episode/movie/series equivalent
+        # returns the empty string here.
+        return '', 204
 
 
 @api_ns_sports_leagues.route('/sports/leagues/<int:league_id>/sync')
@@ -102,11 +191,14 @@ class SportsLeagueEventSync(Resource):
         try:
             owner = _owner(_body().get('arr_instance_id'))
             if library.get_league(database, league_id, owner) is None:
-                raise ValueError('Sports league not found for this owner')
+                raise SportsNotFound('Sports league not found for this owner')
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {'message': str(exc)}, 400
-        _queue('sync_one_league', {'league_id': league_id, 'arr_instance_id': owner})
-        return {'queued': True}, 202
+        return _queued(
+            _queue('sync_one_league', {'league_id': league_id, 'arr_instance_id': owner}),
+            'League sync queued')
 
 
 @api_ns_sports_leagues.route('/sports/leagues/sync')
@@ -116,7 +208,10 @@ class SportsLeagueSync(Resource):
         try:
             owner = _owner(_body().get('arr_instance_id'))
             require_sportarr(database, owner)
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {'message': str(exc)}, 400
-        _queue('update_sports_for_instance', {'arr_instance_id': owner})
-        return {'queued': True}, 202
+        return _queued(
+            _queue('update_sports_for_instance', {'arr_instance_id': owner}),
+            'Library sync queued')

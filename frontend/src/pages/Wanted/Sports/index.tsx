@@ -1,7 +1,7 @@
 /* eslint-disable camelcase */
 import { FunctionComponent, useCallback, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router";
-import { Anchor, Badge, Container, Group, Text } from "@mantine/core";
+import { Anchor, Badge, Checkbox, Container, Group, Text } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
 import { faSearch } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
@@ -27,34 +27,46 @@ import tableStyles from "@/components/tables/BaseTable.module.scss";
 // component with History and Blacklist, switched by a `kind` prop, rendering a
 // raw Mantine table that reached none of the shared filtering, paging or
 // styling the other two media types get.
-// One badge, one language. Clicking a badge used to post the event-wide
-// /automatic action, which calls search_event with language=None and so
-// searches, and may download, every missing language on that event rather than
-// the one the user picked. The Movies wanted page downloads exactly the
-// language whose badge was clicked, and this is the sports equivalent: the
-// manual search opened on that language and its modifiers.
+// One badge, one language, downloaded automatically, which is exactly what
+// the Episodes and Movies wanted pages do. This used to open a manual search
+// modal instead, because the event-wide /automatic action calls search_event
+// with language=None and so searches, and may download, every missing language
+// on the event rather than the one the user picked. That endpoint takes a
+// single language now, so sports behaves like the other two media types.
+// Right-clicking still opens the manual search for the same language, for the
+// cases where the automatic pick is not the wanted one.
 //
-// Its own component because it needs the modals hook, and a hook object in the
-// columns useMemo deps rebuilds every column on each render.
+// Its own component because it needs hooks, and a hook object in the columns
+// useMemo deps rebuilds every column on each render.
 const MissingLanguages: FunctionComponent<{ row: SportsWantedRow }> = ({
   row,
 }) => {
   const modals = useModals();
+  const action = useSportsAction();
   return (
     <Group gap="sm">
       {row.missing_subtitles.map((item, idx) => (
         <Badge
+          color={action.isPending ? "gray" : undefined}
           leftSection={<FontAwesomeIcon icon={faSearch} />}
           key={BuildKey(idx, item.code2)}
           style={{ cursor: "pointer" }}
           onClick={() =>
+            action.mutate({
+              path: `/events/${row.id}/automatic`,
+              owner: row.arr_instance_id,
+              language: item.code2,
+            })
+          }
+          onContextMenu={(event) => {
+            event.preventDefault();
             modals.openContextModal(SportsSearchModal, {
               item: row,
               language: item.code2,
               hi: item.hi,
               forced: item.forced,
-            })
-          }
+            });
+          }}
         >
           <Language.Text value={item}></Language.Text>
         </Badge>
@@ -125,6 +137,33 @@ const WantedSportsView: FunctionComponent = () => {
 
   const columns = useMemo<ColumnDef<SportsWantedRow>[]>(
     () => [
+      // Without this the shared WantedView still renders its "Mass Translate"
+      // button, but nothing can ever be selected, so the button sits disabled
+      // forever and getWantedItem below is unreachable. Episodes and Movies
+      // both declare it; sports was the only wanted page missing it.
+      {
+        id: "selection",
+        header: ({ table }) => {
+          return (
+            <Checkbox
+              id="table-header-selection"
+              indeterminate={table.getIsSomeRowsSelected()}
+              checked={table.getIsAllRowsSelected()}
+              onChange={table.getToggleAllRowsSelectedHandler()}
+            />
+          );
+        },
+        cell: ({ row: { index, getIsSelected, getToggleSelectedHandler } }) => {
+          return (
+            <Checkbox
+              id={`table-cell-${index}`}
+              checked={getIsSelected()}
+              onChange={getToggleSelectedHandler()}
+              onClick={getToggleSelectedHandler()}
+            />
+          );
+        },
+      },
       {
         header: "Name",
         accessorKey: "title",

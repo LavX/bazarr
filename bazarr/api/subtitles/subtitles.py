@@ -55,7 +55,7 @@ class Subtitles(Resource):
         "arr_instance_id",
         type=int,
         required=False,
-        help="Owning Sonarr/Radarr instance id (#156)",
+        help="Owning Sonarr/Radarr/Sportarr instance id",
     )
 
     audio_tracks_data_model = api_ns_subtitles.model(
@@ -168,7 +168,7 @@ class Subtitles(Resource):
         "arr_instance_id",
         type=int,
         required=False,
-        help="Owning Sonarr/Radarr instance id (#156)",
+        help="Owning Sonarr/Radarr/Sportarr instance id",
     )
     patch_request_parser.add_argument(
         "forced",
@@ -333,6 +333,7 @@ class Subtitles(Resource):
                     TableSportsEvents.path,
                     TableSportsEvents.subtitles,
                     TableSportsEvents.league_id,
+                    TableSportsEvents.arr_instance_id,
                 ).where(TableSportsEvents.id == id),
                 TableSportsEvents.arr_instance_id,
                 arr_instance_id,
@@ -341,6 +342,18 @@ class Subtitles(Resource):
 
             if not metadata:
                 return "Sports event not found", 404
+
+            # Take the owner off the row when the caller did not send one.
+            # arr_instance_id is optional on this parser and scoped() is a
+            # no-op for None, so the row was found and then the sports mapping,
+            # which requires an enabled owner, raised ValueError out of the
+            # handler as a 500. The local event id already identifies the row
+            # uniquely, so the row's own owner is the right one, and every
+            # sports branch in content.py, editor.py and download.py resolves
+            # it this way. Binding it here also fixes the owner that the
+            # sports operation, sync and translate guards below compare
+            # against.
+            arr_instance_id = arr_instance_id or metadata.arr_instance_id
 
             video_path = path_mappings.path_replace_instance(
                 metadata.path, arr_instance_id, 'sports')

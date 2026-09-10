@@ -9,6 +9,7 @@ from sportarr.identity import resolve_event_in_session
 from sportarr.sync.leagues import require_sportarr
 from .leagues import _body, _owner
 from ..utils import authenticate
+from sportarr.errors import SportsNotFound
 
 api_ns_sports_workflows = Namespace(
     "Sports Workflows", description="Owned automatic subtitle workflows"
@@ -56,6 +57,8 @@ class SportsWanted(Resource):
                 filters["start"],
                 filters["length"],
             ), 200
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {"message": str(exc)}, 400
 
@@ -67,6 +70,8 @@ class SportsWanted(Resource):
             return _queued(
                 workflows.wanted_search_missing_subtitles_sports(arr_instance_id=owner)
             )
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {"message": str(exc)}, 400
 
@@ -76,11 +81,20 @@ class SportsAutomatic(Resource):
     @authenticate
     def post(self, event_id):
         try:
+            body = _body()
+            # An optional single language, so one missing-language badge can be
+            # actioned on its own instead of searching every missing language
+            # on the event. Omitted, the behaviour is unchanged.
+            language = body.get("language")
+            if language is not None and (not isinstance(language, str) or not language):
+                raise ValueError("language must be a non-empty language code")
             return _queued(
                 workflows.automatic_search_sports(
-                    event_id, _owner(_body().get("arr_instance_id"))
+                    event_id, _owner(body.get("arr_instance_id")), language=language
                 )
             )
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {"message": str(exc)}, 400
 
@@ -95,6 +109,8 @@ class SportsMassDownload(Resource):
                     league_id, _owner(_body().get("arr_instance_id"))
                 )
             )
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {"message": str(exc)}, 400
 
@@ -107,6 +123,8 @@ class SportsUpgrade(Resource):
             owner = _owner(_body().get("arr_instance_id"))
             require_sportarr(database, owner)
             return _queued(workflows.upgrade_sports_subtitles(arr_instance_id=owner))
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {"message": str(exc)}, 400
 
@@ -117,6 +135,8 @@ class SportsHistory(Resource):
     def get(self):
         try:
             return history.list_records(database, "history", **_filters()), 200
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {"message": str(exc)}, 400
 
@@ -140,6 +160,8 @@ class SportsBlacklistHistory(Resource):
                 )
             resolve_event_in_session(database, row.event_id, owner)
             return _queued(workflows.blacklist_sports_subtitle(history_id, owner))
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {"message": str(exc)}, 400
 
@@ -150,6 +172,8 @@ class SportsBlacklist(Resource):
     def get(self):
         try:
             return history.list_records(database, "blacklist", **_filters()), 200
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {"message": str(exc)}, 400
 
@@ -161,6 +185,8 @@ class SportsBlacklist(Resource):
                     database, _owner(request.args.get("arr_instance_id"))
                 )
             }, 200
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {"message": str(exc)}, 400
 
@@ -178,6 +204,8 @@ class SportsBlacklistEntry(Resource):
                 if removed
                 else ({"message": "Exclusion not found"}, 404)
             )
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {"message": str(exc)}, 400
 
@@ -195,5 +223,7 @@ class SportsJob(Resource):
                 if result is not None
                 else ({"message": "Sports job not found for this owner"}, 404)
             )
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {"message": str(exc)}, 400

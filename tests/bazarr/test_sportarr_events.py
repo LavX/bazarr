@@ -501,7 +501,17 @@ def test_authenticated_event_and_rootfolder_http_scope(library, monkeypatch):
     result = client.get("/sports/leagues/51/events?arr_instance_id=1", headers=headers)
     assert result.status_code == 200 and result.json["data"][0]["id"] == a
     assert b not in [r["id"] for r in result.json["data"]]
-    for query in ["arr_instance_id=2", "arr_instance_id=0", "length=0", "start=-1"]:
+    # A league this owner does not have is NOT FOUND, matching the series and
+    # movies equivalents; it used to be reported as a malformed request
+    # because every sports helper raised a bare ValueError.
+    assert (
+        client.get(
+            "/sports/leagues/51/events?arr_instance_id=2", headers=headers
+        ).status_code
+        == 404
+    )
+    # A malformed owner or page window stays a bad request.
+    for query in ["arr_instance_id=0", "length=0", "start=-1"]:
         assert (
             client.get(
                 "/sports/leagues/51/events?" + query, headers=headers

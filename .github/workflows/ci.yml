@@ -236,6 +236,7 @@ jobs:
             tests/bazarr/test_provider_blacklist_attribution.py \
             tests/bazarr/test_sportarr_translate_source.py \
             tests/bazarr/test_sportarr_league_sync_route.py \
+            tests/bazarr/test_sportarr_review_round.py \
             tests/bazarr/test_embedded_subtitle_extraction.py \
             tests/subliminal_patch/test_subliminal_rebase.py \
             tests/subliminal_patch/test_embeddedsubtitles.py \

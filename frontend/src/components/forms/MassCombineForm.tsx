@@ -71,7 +71,10 @@ const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
     (sportsOnly || selected.length >= 2) && items.length > 0 && !running;
 
   const submit = async () => {
-    if (selected.length < 2) return;
+    // Same condition as canSubmit. Gating on selected.length alone left the
+    // sports-only case with an enabled button that did nothing at all: the
+    // notice above says no language is needed, then the click returned here.
+    if (!sportsOnly && selected.length < 2) return;
 
     if (items.length >= 50) {
       const confirmed = window.confirm(
@@ -126,9 +129,15 @@ const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
       }
 
       try {
+        // A sports composition publishes under the owned-file guard captured
+        // from the event's profile, and the engine refuses an ad-hoc language
+        // override alongside it, so send no override for sports scopes. This
+        // matches what the league-level combine in SportsEvents already does.
+        const sportsScope =
+          scope.kind === "sports" || scope.kind === "sportsLeague";
         const result = await mutateAsync({
           scope,
-          body: { languages: selected, format },
+          body: sportsScope ? {} : { languages: selected, format },
         });
 
         if (result.status === "batch_complete") {

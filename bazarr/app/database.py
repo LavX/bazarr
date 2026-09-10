@@ -979,10 +979,13 @@ def init_db():
         pass
 
     # Create tables if they don't exist.
-    # The sports history migration validates its original schema before adding
-    # later publication fields. Let that migration create a missing history table.
-    metadata.create_all(engine, tables=[table for table in metadata.sorted_tables
-                                       if table.name != "table_history_sports"])
+    # table_history_sports used to be excluded here, because the sports
+    # adoption guard compared its column set for exact equality and the
+    # artifact column that create_all builds is added by a later migration, so
+    # a created-then-verified history table aborted every fresh install. The
+    # guard is a subset test now, so this can create every table like any
+    # other and the special case is gone.
+    metadata.create_all(engine)
 
     # Resolve the DB engine/version and current migration revision once, at startup, and
     # stash them in env vars for /system/status to read. The status endpoint used to open a

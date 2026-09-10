@@ -465,13 +465,17 @@ def test_public_api_job_results_and_owner_checks(workflow_library, monkeypatch):
         ).status_code
         == 401
     )
+    # An event this owner does not have is NOT FOUND, matching the episodes and
+    # movies equivalents. It used to be reported as a malformed request,
+    # because every sports resolution helper raised a bare ValueError and every
+    # handler mapped ValueError onto 400.
     assert (
         client.post(
             "/api/sports/events/61/automatic",
             json={"arr_instance_id": 2},
             headers=headers,
         ).status_code
-        == 400
+        == 404
     )
     response = client.post(
         "/api/sports/events/61/automatic", json={"arr_instance_id": 1}, headers=headers

@@ -87,7 +87,11 @@ class Badges(Resource):
 
         from sportarr.workflows import wanted_badge
 
-        missing_sports_count = wanted_badge(database)
+        # Gated on the master toggle, the way the global search and the health
+        # check are. With Sportarr off the nav item is hidden, so this count
+        # was queried on every badge poll and then never displayed.
+        missing_sports_count = (
+            wanted_badge(database) if settings.general.use_sportarr else 0)
 
         throttled_providers = len(get_throttled_providers())
 

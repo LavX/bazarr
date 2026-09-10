@@ -1,7 +1,6 @@
 import { FunctionComponent, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import {
-  ActionIcon,
   Anchor,
   Badge,
   Button,
@@ -13,7 +12,6 @@ import {
 } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import { faTrash } from "@fortawesome/free-solid-svg-icons";
-import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
 import { useInstanceName } from "@/apis/hooks/site";
@@ -24,6 +22,7 @@ import {
   useSportsBlacklistPagination,
 } from "@/apis/hooks/sports";
 import { QueryPageTable } from "@/components";
+import MutateAction from "@/components/async/MutateAction";
 import { InstanceBadge } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
 import TextPopover from "@/components/TextPopover";
@@ -46,6 +45,14 @@ const BlacklistSportsView: FunctionComponent = () => {
   const [language, setLanguage] = useState("");
   const [provider, setProvider] = useState("");
   const [confirmClear, setConfirmClear] = useState<number | null>(null);
+  // The bulk clear needs its own pending flag. `remove` is one shared mutation
+  // object, so keying the Remove All button off remove.isPending made it spin
+  // whenever any single row was removed.
+  const [clearing, setClearing] = useState(false);
+  // Likewise the confirmation line: remove.isSuccess stays true forever once
+  // the first removal succeeds, so the notice never went away. This clears
+  // when another removal starts.
+  const [removedNotice, setRemovedNotice] = useState(false);
 
   const query = useSportsBlacklistPagination({
     owner,
@@ -116,20 +123,25 @@ const BlacklistSportsView: FunctionComponent = () => {
       },
       {
         id: "remove",
+        // MutateAction, not a bare ActionIcon driven by remove.isPending: the
+        // mutation object is shared by every row, so one click spun every
+        // trash icon in the table and the Remove All button with it. This is
+        // what the movies exclusion table already uses, and it keeps the
+        // spinner on the button that was actually clicked.
         cell: ({ row: { original } }) => (
-          <ActionIcon
-            aria-label="Remove exclusion"
-            variant="subtle"
-            loading={remove.isPending}
-            onClick={() =>
-              remove.mutate({
+          <MutateAction
+            label="Remove exclusion"
+            icon={faTrash}
+            mutation={remove}
+            args={() => {
+              setRemovedNotice(false);
+              return {
                 owner: original.arr_instance_id,
                 id: original.id,
-              })
-            }
-          >
-            <FontAwesomeIcon size="sm" icon={faTrash} />
-          </ActionIcon>
+              };
+            }}
+            onSuccess={() => setRemovedNotice(true)}
+          ></MutateAction>
         ),
       },
     ],
@@ -160,10 +172,10 @@ const BlacklistSportsView: FunctionComponent = () => {
           actionLabel="Remove All"
           actionColor="red"
           actionDisabled={query.paginationStatus.totalCount === 0}
-          actionLoading={remove.isPending}
+          actionLoading={clearing}
           onAction={setConfirmClear}
         />
-        {remove.isSuccess && (
+        {removedNotice && (
           <Text size="sm">
             Exclusion removed. The release is eligible for future searches.
           </Text>
@@ -192,14 +204,22 @@ const BlacklistSportsView: FunctionComponent = () => {
             </Button>
             <Button
               color="red"
-              loading={remove.isPending}
-              onClick={() =>
-                confirmClear !== null &&
+              loading={clearing}
+              onClick={() => {
+                if (confirmClear === null) return;
+                setClearing(true);
+                setRemovedNotice(false);
                 remove.mutate(
                   { owner: confirmClear },
-                  { onSuccess: () => setConfirmClear(null) },
-                )
-              }
+                  {
+                    onSuccess: () => {
+                      setConfirmClear(null);
+                      setRemovedNotice(true);
+                    },
+                    onSettled: () => setClearing(false),
+                  },
+                );
+              }}
             >
               Clear exclusions
             </Button>

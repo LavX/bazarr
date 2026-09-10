@@ -96,7 +96,41 @@ def list_records(
             item["timestamp"] = None
             item["parsed_timestamp"] = None
         data.append(item | {"title": title})
+    if kind == "history":
+        _mark_history_flags(session, data)
     return {"data": data, "total": total}
+
+
+def _mark_history_flags(session, data):
+    """Fill in the blacklisted and upgradable flags the shared History view reads.
+
+    The sports rows carried neither, so the frontend hardcoded both to false.
+    An entry the user had already excluded still rendered an active Blacklist
+    action, and re-posting it was accepted, queuing a duplicate exclusion and
+    another replacement search.
+    """
+    from sportarr.workflows import upgradable_history_ids
+
+    if not data:
+        return
+    owners = {item["arr_instance_id"] for item in data if item.get("arr_instance_id")}
+    excluded = set()
+    if owners:
+        excluded = {
+            (row.provider or "", row.subs_id or "", row.arr_instance_id)
+            for row in session.execute(
+                select(TableBlacklistSports.provider, TableBlacklistSports.subs_id,
+                       TableBlacklistSports.arr_instance_id)
+                .where(TableBlacklistSports.arr_instance_id.in_(list(owners)))
+            )
+        }
+    upgradable = upgradable_history_ids(session, [item["id"] for item in data if item.get("id")])
+    for item in data:
+        item["blacklisted"] = (
+            (item.get("provider") or "", item.get("subs_id") or "",
+             item.get("arr_instance_id")) in excluded
+        )
+        item["upgradable"] = item.get("id") in upgradable
 
 
 def sports_history_log(action, event_id, arr_instance_id, result):

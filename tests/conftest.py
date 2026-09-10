@@ -28,3 +28,15 @@ _TEST_CONFIG_DIR = os.environ.setdefault(
 )
 for _subdirectory in ("", "backup", "cache", "config", "db", "log", "restore"):
     os.makedirs(os.path.join(_TEST_CONFIG_DIR, _subdirectory), exist_ok=True)
+
+# The database is deliberately NOT cleared here. It is tempting to, because the
+# directory is shared and a second run on the same machine inherits the rows
+# the first one wrote, so the compat contract suite passes once and then fails
+# on a duplicate movie id. Clearing it costs more than it saves: CI runs its
+# third pytest step one file per process, and Base.metadata.create_all only
+# builds the tables whose models that process imported, so an isolated session
+# starting from an empty file gets a PARTIAL schema. Those runs depend on the
+# fully populated database the earlier step leaves behind;
+# test_threading_followup fails with "no such table: table_settings_languages"
+# without it. Re-running the compat suite locally needs
+# `rm -rf $TMPDIR/bazarr-test-data` first.

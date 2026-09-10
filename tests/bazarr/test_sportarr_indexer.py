@@ -495,15 +495,19 @@ def test_authenticated_reindex_updates_exact_local_event(indexed_library, monkey
     headers = {"X-API-KEY": settings.auth.apikey}
     url = "/sports/events/61/subtitles"
     assert client.post(url, json={"arr_instance_id": 1}).status_code == 401
+    # An event another owner holds, and an event that does not exist, are both
+    # NOT FOUND now, matching the episodes and movies equivalents. They were
+    # reported as malformed requests because every sports resolution helper
+    # raised a bare ValueError and every handler mapped that onto 400.
     assert (
         client.post(url, json={"arr_instance_id": 2}, headers=headers).status_code
-        == 400
+        == 404
     )
     assert (
         client.post(
             "/sports/events/8/subtitles", json={"arr_instance_id": 1}, headers=headers
         ).status_code
-        == 400
+        == 404
     )
     response = client.post(url, json={"arr_instance_id": 1}, headers=headers)
     assert response.status_code == 200
@@ -695,6 +699,10 @@ def test_profile_editor_changes_recompute_sports_missing(indexed_library, monkey
     monkeypatch.setattr(endpoint, "forget_deleted_language_profiles", lambda *a: None)
     monkeypatch.setattr(settings.general, "use_sonarr", False)
     monkeypatch.setattr(settings.general, "use_radarr", False)
+    # The sports recompute is gated on the master toggle now, like the sonarr
+    # and radarr ones. This fixture has an enabled Sportarr instance, which in
+    # a real install means the toggle is on.
+    monkeypatch.setattr(settings.general, "use_sportarr", True)
     app = Flask(__name__)
     Api(app).add_namespace(endpoint.api_ns_system_settings, path="/")
     response = app.test_client().post(

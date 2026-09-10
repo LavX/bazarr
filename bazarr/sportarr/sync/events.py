@@ -1,5 +1,6 @@
 """Atomic native pagination and file-first, owner-scoped reconciliation."""
 
+import logging
 from datetime import datetime
 
 from sqlalchemy import delete, or_, select
@@ -13,6 +14,7 @@ from app.config import settings
 from sportarr.settings import get_sports_settings
 from sportarr.sync.leagues import notify, require_sportarr
 from utilities.sql_limits import in_chunks
+from sportarr.errors import SportsNotFound
 
 
 def read_events(client, upstream_league_id, page_size=1000, cancel=None):
@@ -60,7 +62,7 @@ def _league(session, league_id, owner):
         TableSportsLeagues.id == league_id, TableSportsLeagues.arr_instance_id == owner)
         .execution_options(populate_existing=True)).scalar_one_or_none()
     if row is None:
-        raise ValueError('Sports league not found for this owner')
+        raise SportsNotFound('Sports league not found for this owner')
     return row
 
 
@@ -68,6 +70,17 @@ def _prune_events(session, league_id, owner, keep):
     existing = session.execute(select(TableSportsEvents.id).where(
         TableSportsEvents.league_id == league_id, TableSportsEvents.arr_instance_id == owner)).scalars()
     stale = set(existing) - set(keep)
+    if not stale:
+        return
+    # Drop the mismatches of the events about to disappear, the way the sonarr
+    # and radarr sync paths do. The link is a plain integer, not a foreign key,
+    # so nothing removes these on its own, and SQLite reuses a deleted row id
+    # for a later insert, which would badge an unrelated new event.
+    try:
+        from subtitles.mismatch import forget_media
+        forget_media(session, 'sports', list(stale))
+    except Exception:
+        logging.exception('BAZARR could not forget the pruned sports events mismatches')
     for batch in in_chunks(stale):
         session.execute(delete(TableSportsEvents).where(
             TableSportsEvents.league_id == league_id, TableSportsEvents.arr_instance_id == owner,
@@ -121,8 +134,9 @@ def sync_one_league(league_id, arr_instance_id, job_id=None, *, cancel=None):
     return sync_events(league_id, arr_instance_id, cancel=cancel)
 
 
-def sync_events(league_id, arr_instance_id, *, page_size=1000, cancel=None, expected_connection=None, http_get=None):
-    with owner_sync_lock(arr_instance_id, cancel):
+def sync_events(league_id, arr_instance_id, *, page_size=1000, cancel=None, expected_connection=None,
+                http_get=None, lock_timeout=None):
+    with owner_sync_lock(arr_instance_id, cancel, timeout=lock_timeout):
         instance = require_sportarr(database, arr_instance_id)
         expected = connection_identity(instance)
         if expected_connection is not None and expected_connection != expected:
@@ -169,6 +183,11 @@ def sync_events(league_id, arr_instance_id, *, page_size=1000, cancel=None, expe
             if not indexer_owns_audio:
                 compared += ('audio_language',)
             for item, row in zip(parsed, matches):
+                # Per row, not just once before the loop. A league with
+                # thousands of events flushes once per row here, and without
+                # this a restart or a disabled instance had to wait for the
+                # whole loop to drain before the thread could notice.
+                check_cancelled(cancel)
                 now = datetime.now()
                 new_file = row is None or any(getattr(row, key) != item[key] for key in compared)
                 if row is None:

@@ -17,6 +17,7 @@ import { faBookmark as farBookmark } from "@fortawesome/free-regular-svg-icons";
 import {
   faArrowUp,
   faBookmark,
+  faCircleDown,
   faEllipsisVertical,
   faHardDrive,
   faLanguage,
@@ -35,8 +36,10 @@ import {
   useSportsAvailability,
   useSportsLeaguesPagination,
   useSportsProfile,
+  useSportsProfiles,
   useSyncSports,
 } from "@/apis/hooks/sports";
+import { useUpgradableItems } from "@/apis/hooks/subtitles";
 import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
 import { Toolbox } from "@/components";
 import { AudioList, InstanceBadge } from "@/components/bazarr";
@@ -192,7 +195,21 @@ const Sports: FunctionComponent = () => {
     excludeLanguages.length > 0 ||
     instanceFilter.length > 0;
   const query = useSportsLeaguesPagination(hasActiveFilter);
-  const assign = useSportsProfile();
+  // The same low-score marker Series and Movies show. Sports had no way to
+  // consume /api/subtitles/upgradable because the endpoint sent no sports key,
+  // so a league whose subtitles would benefit from an upgrade looked identical
+  // to one that would not.
+  const { data: upgradableData } = useUpgradableItems();
+  const upgradableLeagueKeys = useMemo(
+    () =>
+      new Set(
+        upgradableData?.sportsKeys?.map(
+          (item) => `${item.sportsLeagueId}:${item.arr_instance_id ?? ""}`,
+        ) ?? [],
+      ),
+    [upgradableData],
+  );
+  const assignMany = useSportsProfiles();
   const sync = useSyncSports();
 
   const syncLeagues = useCallback(
@@ -200,19 +217,22 @@ const Sports: FunctionComponent = () => {
     [sync, instances],
   );
 
-  // Applied one league at a time because the sports profile endpoint is scoped
-  // to a single league and its owning instance, unlike the series bulk endpoint.
+  // One request for the whole selection, matching what Series and Movies do.
+  // This used to fire one PATCH per league, each with its own transaction and
+  // its own re-index, so a 200-league edit meant 200 requests and a partial
+  // failure left the selection half-applied with no aggregate status.
   const setProfiles = useCallback(
     (profileId: number | null) => {
-      selections.forEach((league) =>
-        assign.mutate({
+      if (selections.length === 0) return;
+      void assignMany.mutateAsync(
+        selections.map((league) => ({
           id: league.id,
           owner: league.arr_instance_id,
           profileId,
-        }),
+        })),
       );
     },
-    [selections, assign],
+    [selections, assignMany],
   );
 
   const profileToolbar = useMemo(() => {
@@ -398,6 +418,21 @@ const Sports: FunctionComponent = () => {
         ),
       },
       {
+        id: "upgradable",
+        cell: ({ row: { original } }) =>
+          upgradableLeagueKeys.has(
+            `${original.id}:${original.arr_instance_id ?? ""}`,
+          ) ? (
+            <Tooltip label="Low match score, upgrading may find a better subtitle">
+              <FontAwesomeIcon
+                icon={faCircleDown}
+                color="var(--bz-text-tertiary)"
+                size="sm"
+              />
+            </Tooltip>
+          ) : null,
+      },
+      {
         header: "Name",
         accessorKey: "title",
         cell: ({ row: { original } }) => (
@@ -490,7 +525,9 @@ const Sports: FunctionComponent = () => {
         cell: ({ row: { original } }) => <LeagueRowActions league={original} />,
       },
     ],
-    [multiInstance, instanceDefaultId, instanceNameById],
+    // upgradableLeagueKeys is a memoised Set, so it is stable between
+    // fetches and does not rebuild the columns on every render.
+    [multiInstance, instanceDefaultId, instanceNameById, upgradableLeagueKeys],
   );
 
   useDocumentTitle(`Sports - ${useInstanceName()}`);

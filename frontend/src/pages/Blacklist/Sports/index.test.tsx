@@ -128,3 +128,61 @@ it("does not request exclusions when every owner is disabled", async () => {
   ).toBeInTheDocument();
   expect(calls).toBe(0);
 });
+
+it("spins only the row that was clicked, not every remove button", async () => {
+  // `remove` is one shared mutation object. Driving each row's icon and the
+  // Remove All button off remove.isPending meant a single row removal put
+  // every trash icon and the red Remove All button into a spinner, reading as
+  // though the whole list were being cleared.
+  owners();
+  const second = { ...record, id: 10, title: "Semi" };
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  server.use(
+    http.get("/api/sports/blacklist", () =>
+      HttpResponse.json({ data: [record, second], total: 2 }),
+    ),
+    http.delete("/api/sports/blacklist/9", async () => {
+      await pending;
+      return HttpResponse.json({ removed: true });
+    }),
+  );
+  customRender(<BlacklistSportsView />);
+
+  // These sports pages settle three queries before the table renders, so the
+  // default timeout is too short once the whole suite runs together.
+  const firstRow = await screen.findByRole(
+    "row",
+    { name: /Final/ },
+    { timeout: 8000 },
+  );
+  const secondRow = await screen.findByRole(
+    "row",
+    { name: /Semi/ },
+    { timeout: 8000 },
+  );
+  const firstButton = within(firstRow).getByRole("button", {
+    name: "Remove exclusion",
+  });
+  const secondButton = within(secondRow).getByRole("button", {
+    name: "Remove exclusion",
+  });
+
+  try {
+    await userEvent.setup().click(firstButton);
+
+    await waitFor(() =>
+      expect(firstButton).toHaveAttribute("data-loading", "true"),
+    );
+    expect(secondButton).not.toHaveAttribute("data-loading", "true");
+    expect(
+      screen.getByRole("button", { name: "Remove All" }),
+    ).not.toHaveAttribute("data-loading", "true");
+  } finally {
+    // Always release, or a failure above leaves this handler pending and the
+    // next test inherits a stuck request.
+    release();
+  }
+});

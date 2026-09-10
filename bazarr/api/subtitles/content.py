@@ -13,8 +13,9 @@ from flask_restx import Resource, Namespace
 from werkzeug.utils import secure_filename
 
 from app.config import settings
-from app.database import (TableEpisodes, TableHistory, TableHistoryMovie, TableHistorySports, TableMovies,
-                          TableShows, TableSportsEvents, TableSportsLeagues, database, select)
+from app.database import (TableArrInstances, TableEpisodes, TableHistory, TableHistoryMovie,
+                          TableHistorySports, TableMovies, TableShows, TableSportsEvents,
+                          TableSportsLeagues, database, select)
 from app.event_handler import event_stream
 from app.jobs_queue import jobs_queue
 from languages.get_languages import language_from_alpha2
@@ -229,7 +230,14 @@ def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=N
                    TableSportsEvents.path,
                    TableSportsEvents.sportarrEventId,
                    TableSportsEvents.title)
-            .where(TableSportsEvents.id == media_id)
+            # Joined to an ENABLED sportarr owner: callers downstream map this
+            # path per instance, and that mapping refuses a disabled owner by
+            # raising, which surfaces as a 500 rather than a 404.
+            .join(TableArrInstances,
+                  TableSportsEvents.arr_instance_id == TableArrInstances.id)
+            .where(TableSportsEvents.id == media_id,
+                   TableArrInstances.kind == 'sportarr',
+                   TableArrInstances.enabled == 1)
         )
         if arr_instance_id is not None:
             query = query.where(TableSportsEvents.arr_instance_id == arr_instance_id)
@@ -1195,7 +1203,11 @@ def _create_subtitle(media_type, media_id, arr_instance_id=None):
     elif media_type == 'sports':
         query = (
             select(TableSportsEvents.id, TableSportsEvents.path, TableSportsEvents.arr_instance_id)
-            .where(TableSportsEvents.id == media_id)
+            .join(TableArrInstances,
+                  TableSportsEvents.arr_instance_id == TableArrInstances.id)
+            .where(TableSportsEvents.id == media_id,
+                   TableArrInstances.kind == 'sportarr',
+                   TableArrInstances.enabled == 1)
         )
         if arr_instance_id is not None:
             query = query.where(TableSportsEvents.arr_instance_id == arr_instance_id)

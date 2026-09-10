@@ -22,6 +22,7 @@ import logging
 from flask_restx import Resource, Namespace, fields
 
 from app.database import TableSportsEvents, database, select
+from sportarr.connection import SportsSyncBusy
 from arr_instances.repository import ArrInstanceRepository
 from arr_instances.resolution import scoped
 
@@ -51,6 +52,16 @@ def _resolve_owner(stable_key):
     instance = repository.get_default("sportarr")
     if instance is None or not instance.enabled:
         return None, "no enabled default Sportarr instance"
+    # With more than one enabled instance the keyless URL is a guess, and a
+    # wrong guess is worse than a refusal here: file ids restart from 1 on
+    # every Sportarr, so attributing instance B's import to the default
+    # instance A can match A's unrelated event with the same file id and
+    # download a subtitle for the wrong event on the wrong server, while B's
+    # actual import is never indexed at all. The keyed URL is unambiguous, and
+    # the settings page hands it out per instance.
+    if len(repository.list("sportarr", enabled_only=True)) > 1:
+        return None, ("multiple Sportarr instances are enabled; use the per-instance "
+                      "webhook URL from Settings, /api/webhooks/sportarr/<key>")
     return instance.id, None
 
 
@@ -145,6 +156,11 @@ class WebHooksSportarr(Resource):
                           arr_instance_id)
             try:
                 _reconcile(arr_instance_id, upstream_event_ids)
+            except SportsSyncBusy:
+                # A sync is already running and will pick these files up. Not
+                # an error, and not worth a traceback.
+                logging.debug("Sportarr owner %s is already syncing; its running sync will "
+                              "pick up the webhook's files.", arr_instance_id)
             except Exception:
                 logging.exception("Could not sync Sportarr owner %s for its webhook.",
                                   arr_instance_id)
@@ -166,6 +182,14 @@ class WebHooksSportarr(Resource):
         return "Finished processing subtitles.", 200
 
 
+# This reconcile runs inline on the Waitress worker that is serving the
+# webhook, so its wait for the instance's sync lock has to be bounded. A
+# scheduled full sync can hold that lock for minutes while it ffprobes every
+# event, and an unbounded wait here parked one request thread per webhook
+# until the whole pool was gone and the UI stopped answering.
+WEBHOOK_SYNC_LOCK_TIMEOUT = 20
+
+
 def _reconcile(arr_instance_id, upstream_event_ids):
     from sportarr.connection import connection_identity
     from sportarr.sse_client import PendingWork, reconcile_work
@@ -176,4 +200,5 @@ def _reconcile(arr_instance_id, upstream_event_ids):
         event_id for event_id in upstream_event_ids if isinstance(event_id, int) and event_id > 0
     })
     reconcile_work(arr_instance_id, batch, cancel=None,
-                   expected_connection=connection_identity(instance))
+                   expected_connection=connection_identity(instance),
+                   lock_timeout=WEBHOOK_SYNC_LOCK_TIMEOUT)

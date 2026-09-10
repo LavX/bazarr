@@ -136,8 +136,12 @@ class SystemSettings(Resource):
                 list_missing_subtitles()
             if settings.general.use_radarr:
                 list_missing_subtitles_movies()
-            from subtitles.indexer.sports import list_missing_subtitles_sports
-            list_missing_subtitles_sports()
+            # Gated like its two siblings above. Ungated, saving any setting on
+            # an install with Sportarr switched off still walked every sports
+            # event row, one transaction and one locking select each.
+            if settings.general.use_sportarr:
+                from subtitles.indexer.sports import list_missing_subtitles_sports
+                list_missing_subtitles_sports()
 
         # Update Notification
         notifications = request.form.getlist('notifications-providers')

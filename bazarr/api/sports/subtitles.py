@@ -4,23 +4,66 @@ import os
 from io import BytesIO
 
 from flask import request
-from flask_restx import Namespace, Resource, reqparse
+from flask_restx import fields, marshal, Namespace, Resource, reqparse
 from werkzeug.datastructures import FileStorage
 
-from app.database import database, select, TableSportsEvents
+from app.database import (database, select, TableArrInstances, TableSportsEvents,
+                          TableSportsLeagues)
 from subliminal_patch.core import SUBTITLE_EXTENSIONS
 from sportarr import library
 from sportarr.subtitles import manual_search_sports, manual_download_sports
-from .leagues import _body, _owner
+from .leagues import _body, _optional_owner, _owner
 from ..utils import authenticate
+from sportarr.errors import SportsNotFound
 
 api_ns_sports_subtitles = Namespace(
     "Sports Subtitles", description="Sports subtitle search and download"
 )
 
 
+def _league_owner(league_id, owner):
+    """Resolve a league's owning instance, enforcing it when the caller sent one."""
+    query = (
+        select(TableSportsLeagues.arr_instance_id)
+        .join(TableArrInstances,
+              TableSportsLeagues.arr_instance_id == TableArrInstances.id)
+        .where(TableSportsLeagues.id == league_id,
+               TableArrInstances.kind == 'sportarr',
+               TableArrInstances.enabled == 1)
+    )
+    if owner is not None:
+        query = query.where(TableSportsLeagues.arr_instance_id == owner)
+    found = database.execute(query).scalar_one_or_none()
+    if found is None:
+        raise SportsNotFound('Sports league not found for this owner')
+    return found
+
+
 @api_ns_sports_subtitles.route("/sports/events/<int:event_id>/search")
 class SportsSearch(Resource):
+    # The same model the providers episodes/movies endpoints marshal through.
+    # Unmarshalled, this endpoint returned manual_search's raw dicts, so
+    # original_format came back as a JSON boolean while the series and movies
+    # searches return the string "False". Both feed the one shared
+    # SearchResultType in the frontend, so a consumer comparing against
+    # "True" read every sports row as false.
+    get_response_model = api_ns_sports_subtitles.model('SportsSearchResult', {
+        'dont_matches': fields.List(fields.String),
+        'forced': fields.String(),
+        'hearing_impaired': fields.String(),
+        'language': fields.String(),
+        'matches': fields.List(fields.String),
+        'original_format': fields.String(),
+        'orig_score': fields.Integer(),
+        'provider': fields.String(),
+        'release_info': fields.List(fields.String),
+        'score': fields.Integer(),
+        'score_without_hash': fields.Integer(),
+        'subtitle': fields.String(),
+        'uploader': fields.String(),
+        'url': fields.String(),
+    })
+
     @authenticate
     def post(self, event_id):
         try:
@@ -32,7 +75,9 @@ class SportsSearch(Resource):
                 body.get("forced", False),
                 _owner(body.get("arr_instance_id")),
             )
-            return {"data": results}, 200
+            return {"data": marshal(results, self.get_response_model)}, 200
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {"message": str(exc)}, 400
         except OSError:
@@ -56,6 +101,8 @@ class SportsDownload(Resource):
                 # not turn the response into an ordinary failed download.
                 event = None
             return {"event": event, "publication": result.publication}, 200
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {"message": str(exc)}, 400
         except OSError:
@@ -93,9 +140,11 @@ class SportsEventSubtitlesCombine(Resource):
 
         try:
             body = request.get_json(silent=True) or {}
-            owner = _owner(body.get("arr_instance_id") or request.args.get("arr_instance_id"))
+            owner = _optional_owner(body.get("arr_instance_id") or request.args.get("arr_instance_id"))
             context = resolve_event_in_session(database, event_id, owner)
             operation = capture_profile_operation(context, candidate_signature(context))
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {"message": str(exc)}, 400
 
@@ -138,7 +187,13 @@ class SportsLeagueSubtitlesCombine(Resource):
 
         try:
             body = request.get_json(silent=True) or {}
-            owner = _owner(body.get("arr_instance_id") or request.args.get("arr_instance_id"))
+            owner = _optional_owner(body.get("arr_instance_id") or request.args.get("arr_instance_id"))
+            # A league id is a primary key, so resolve the owner from the row
+            # when the caller omitted it. Without this, owner=None compiled to
+            # `arr_instance_id IS NULL` below and matched no events at all.
+            owner = _league_owner(league_id, owner)
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {"message": str(exc)}, 400
 
@@ -224,8 +279,10 @@ class SportsEventSubtitleUpload(Resource):
             return {"message": "A subtitle of an invalid format was uploaded."}, 400
 
         try:
-            owner = _owner(args.get('arr_instance_id'))
+            owner = _optional_owner(args.get('arr_instance_id'))
             context = resolve_event_in_session(database, event_id, owner)
+        except SportsNotFound as exc:
+            return {'message': str(exc)}, 404
         except ValueError as exc:
             return {"message": str(exc)}, 400
 

@@ -58,15 +58,21 @@ class PendingWork:
     event_ids: set[int] = field(default_factory=set)
 
 
-def reconcile_work(owner, batch, *, cancel, expected_connection, http_get=None):
-    """Resolve native IDs only within the stream's owner, then use local sync IDs."""
+def reconcile_work(owner, batch, *, cancel, expected_connection, http_get=None, lock_timeout=None):
+    """Resolve native IDs only within the stream's owner, then use local sync IDs.
+
+    ``lock_timeout`` bounds the wait for the owner's sync lock. The SSE repair
+    thread leaves it None; the webhook, which runs on a request thread, passes
+    one so it cannot park a Waitress worker behind a scheduled full sync.
+    """
     from sportarr.sync.leagues import require_sportarr, update_sports_for_instance
     from sportarr.sync.events import sync_events
     check_cancelled(cancel)
     instance = require_sportarr(database, owner)
     if connection_identity(instance) != expected_connection:
         raise ValueError('Sportarr stream connection changed')
-    kwargs = dict(cancel=cancel, expected_connection=expected_connection, http_get=http_get)
+    kwargs = dict(cancel=cancel, expected_connection=expected_connection, http_get=http_get,
+                  lock_timeout=lock_timeout)
     if batch.full:
         update_sports_for_instance(owner, **kwargs)
         return
@@ -126,10 +132,23 @@ class SportarrSSEClient:
         if self._threads or self._stop.is_set():
             return
         self.enqueue(full=True)
-        self._threads = [Thread(target=self._read, name=f'sportarr-stream-{self.owner}', daemon=True),
-                         Thread(target=self._work, name=f'sportarr-repair-{self.owner}', daemon=True)]
-        for thread in self._threads:
-            thread.start()
+        threads = [Thread(target=self._read, name=f'sportarr-stream-{self.owner}', daemon=True),
+                   Thread(target=self._work, name=f'sportarr-repair-{self.owner}', daemon=True)]
+        started = []
+        try:
+            for thread in threads:
+                thread.start()
+                started.append(thread)
+        except RuntimeError:
+            # The process can refuse a new thread (a pids cap, or simply too
+            # many workers). Publish only what actually started, then stop it,
+            # so the manager sees a dead client and builds a fresh one on the
+            # next refresh instead of keeping a half-started one forever.
+            self._threads = started
+            self.stop(timeout=6)
+            self._threads = []
+            raise
+        self._threads = started
 
     def enqueue(self, *, full=False, league_id=None, event_id=None):
         with self._lock:
@@ -203,7 +222,11 @@ class SportarrSSEClient:
                     self.dispatch(frame)
             except Exception:
                 if not self._stop.is_set():
-                    logging.debug('Sportarr stream disconnected for instance %s', self.owner)
+                    # exc_info: a network blip and a programming error in the
+                    # dispatch path produce the identical line without it, and
+                    # the second kind then retries forever unexplained.
+                    logging.debug('Sportarr stream disconnected for instance %s',
+                                  self.owner, exc_info=True)
             finally:
                 self.connected = False
                 transport.close()
@@ -234,7 +257,11 @@ class SportarrSSEClient:
                     delay = self.retry_min
                 except Exception:
                     if not self._stop.is_set():
-                        logging.warning('Sportarr reconciliation will retry for instance %s', self.owner)
+                        # Same reason as _read above: without exc_info a renamed
+                        # column or a bad kwarg here retries every 30 seconds
+                        # forever while the log says only "will retry".
+                        logging.warning('Sportarr reconciliation will retry for instance %s',
+                                        self.owner, exc_info=True)
                         if not self._stop.wait(delay):
                             self.enqueue(full=True)
                         delay = min(self.retry_max, delay * 2)
@@ -247,7 +274,14 @@ class SportarrSSEClient:
             _release_database_session()
 
     def is_alive(self):
-        return any(thread.is_alive() for thread in self._threads)
+        # Both threads are required, so `all`, not `any`: _read streams the
+        # events and _work reconciles them. A client whose _work thread died
+        # while _read survived still reports connected and still sets the LIVE
+        # badge, but nothing it receives is ever applied. With `any` such a
+        # client also looked healthy to refresh(), so it was never replaced.
+        # An empty thread list is not alive either.
+        return bool(self._threads) and all(
+            thread.is_alive() for thread in self._threads)
 
     def stop(self, timeout=6):
         self._stop.set()
@@ -294,20 +328,50 @@ class SportarrClientManager:
             for owner, client in list(self.clients.items()):
                 row = wanted.get(owner)
                 if row is None or client.identity != connection_identity(row) or not client.is_alive():
-                    if client.stop(timeout=35):
+                    # The class default, not 35s. This refresh job runs every
+                    # 30 seconds, so a single stale client could hold it past
+                    # its own interval.
+                    if client.stop(timeout=6):
                         del self.clients[owner]
             for owner, row in wanted.items():
                 if owner not in self.clients:
                     client = self._factory(owner, connection_identity(row), ArrClientFactory().from_row(row))
-                    self.clients[owner] = client
+                    # Start first, publish second. Publishing before start()
+                    # meant a client that failed to start was still in the map
+                    # on the next refresh, where `owner not in self.clients`
+                    # skipped it and it was never retried.
                     client.start()
+                    self.clients[owner] = client
 
-    def stop(self):
+    def stop(self, timeout=6):
+        """Stop every client, in parallel, without holding the manager lock.
+
+        This ran serially at timeout=35 per client, roughly six times the
+        client's own default, and it held _lock throughout. A restart with two
+        instances could stall about seventy seconds with the database still
+        open, and any /api/badges poll in that window blocked on the same lock,
+        so the UI hung rather than showing the restart. The threads are daemons,
+        so a client that will not stop does not keep the process alive.
+        """
         with self._lock:
             self._shutdown = True
-            for owner, client in list(self.clients.items()):
-                if client.stop(timeout=35):
-                    del self.clients[owner]
+            clients = list(self.clients.items())
+        if not clients:
+            return
+        stopped = {}
+        threads = []
+        for owner, client in clients:
+            def _stop(owner=owner, client=client):
+                stopped[owner] = client.stop(timeout=timeout)
+            thread = Thread(target=_stop, name=f'sportarr-stop-{owner}', daemon=True)
+            thread.start()
+            threads.append(thread)
+        for thread in threads:
+            thread.join(timeout + 1)
+        with self._lock:
+            for owner, was_stopped in stopped.items():
+                if was_stopped:
+                    self.clients.pop(owner, None)
 
 
 _manager = SportarrClientManager()
@@ -324,10 +388,28 @@ def all_sportarr_sse_connected():
     healthy rather than down, matching all_sonarr_signalr_connected.
     """
     with _manager._lock:
-        clients = list(_manager.clients.values())
-    if not clients:
-        return True
-    return all(client.connected and client.is_alive() for client in clients)
+        clients = dict(_manager.clients)
+    # A client that exists and is not streaming is down, whatever the database
+    # says. This check comes first so a dead or disconnected client is never
+    # masked by the expectation set below.
+    if any(not client.connected or not client.is_alive() for client in clients.values()):
+        return False
+    # Then the other half: an empty client map used to mean two very different
+    # things and both read as healthy, namely nothing is enabled, which is
+    # fine, or the streams were never started, which is not. So an install run
+    # with --no-signalr, or one whose startup refresh raised, showed a LIVE
+    # badge with no event stream at all. Sonarr reports DOWN in that same
+    # situation because its singleton client is simply not connected.
+    expected = set()
+    if settings.general.use_sportarr:
+        try:
+            expected = {row.id for row in
+                        ArrInstanceRepository(database).list('sportarr', enabled_only=True)}
+        except Exception:
+            # A badge poll must not fail on a lookup problem; fall back to
+            # reporting on the clients alone, which is the old behaviour.
+            return True
+    return expected <= set(clients)
 
 
 def refresh_sportarr_clients():

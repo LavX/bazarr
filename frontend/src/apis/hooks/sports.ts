@@ -141,6 +141,15 @@ export function useSportsProfile() {
     onSuccess: () => client.invalidateQueries({ queryKey: [QueryKeys.Sports] }),
   });
 }
+export function useSportsProfiles() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (
+      assignments: { id: number; owner: number; profileId: number | null }[],
+    ) => sports.assignProfiles(assignments),
+    onSuccess: () => client.invalidateQueries({ queryKey: [QueryKeys.Sports] }),
+  });
+}
 export function useSportsEvents(id: number, owner?: number, page = 1) {
   const { instances } = useSportsAvailability();
   return useQuery({
@@ -256,13 +265,15 @@ export function toSportsActivityRow(record: SportsRecord): SportsActivityRow {
         : undefined,
     score_value: record.score ?? null,
     subs_id: record.subs_id ?? undefined,
-    // The sports tables record none of these, and the shared History columns
-    // read them unguarded. Stated here rather than left undefined so a column
-    // that reaches for a `.length` cannot crash the page. Exclusion state is
-    // not one of them: a sports exclusion lives in its own table keyed on the
-    // provider release, not as a flag on the history row.
-    blacklisted: false,
-    upgradable: false,
+    // The API sends these two now: blacklisted is an exact match against the
+    // sports exclusion table on (provider, subs_id, owner), and upgradable is
+    // the display-level check the upgrade run refines. They were hardcoded
+    // false, so an already-excluded entry still offered an active Blacklist
+    // action and re-posting it queued a duplicate exclusion.
+    blacklisted: record.blacklisted ?? false,
+    upgradable: record.upgradable ?? false,
+    // The rest the sports tables genuinely do not record. Stated rather than
+    // left undefined so a shared column reaching for a `.length` cannot crash.
     monitored: true,
     tags: [],
     matches: [],
@@ -340,8 +351,15 @@ export function useSportsBlacklistPagination(filters: SportsFilters) {
 export function useSportsAction() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: ({ path, owner }: { path: string; owner: number }) =>
-      sports.runAction(path, owner),
+    mutationFn: ({
+      path,
+      owner,
+      language,
+    }: {
+      path: string;
+      owner: number;
+      language?: string;
+    }) => sports.runAction(path, owner, language),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: [QueryKeys.Sports] });
     },

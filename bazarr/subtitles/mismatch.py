@@ -555,8 +555,15 @@ def report_release_type_mismatch(video, media_type, language, candidates, min_sc
     # polling and no refetch on focus, so without it a page that is already open
     # shows the new badge on the next manual reload and not before.
     try:
-        event_stream(type='episode-wanted' if media_type == 'series' else 'movie-wanted',
-                     action='update', payload=media_id)
+        # Sports has its own event type, which the socket reducer maps onto the
+        # whole Sports query root. Sending 'movie-wanted' for a sports media_id
+        # refreshed the movies Wanted page with an id that is not a movie, and
+        # left the sports Wanted page showing no badge until a manual reload.
+        if media_type == 'sports':
+            event_stream(type='sports', action='update', payload=media_id)
+        else:
+            event_stream(type='episode-wanted' if media_type == 'series' else 'movie-wanted',
+                         action='update', payload=media_id)
     except Exception:
         logger.exception('BAZARR could not announce the release-type mismatch')
 

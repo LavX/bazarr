@@ -12,6 +12,7 @@ from pathlib import Path
 from sportarr.connection import check_cancelled
 
 
+POLL_INTERVAL = 0.25
 ANALYSIS_TIMEOUT = 120
 MAX_RESULT = 32 * 1024 * 1024
 WORKER_PATH = Path(__file__).with_name('analysis_worker.py')
@@ -70,10 +71,15 @@ def parse_video_metadata(file, file_size, use_cache=False, *, cancel=None):
                     check_cancelled(cancel)
                     if time.monotonic() >= deadline:
                         raise TimeoutError('Sports video analysis timed out')
+                    # A quarter second, not 10ms. Each iteration polled the
+                    # cancel signal twice, and that signal reads the database,
+                    # so a 60-second analysis issued tens of thousands of
+                    # queries purely to notice a cancellation it could equally
+                    # notice a fraction of a second later.
                     if cancel is not None:
-                        cancel.wait(0.01)
+                        cancel.wait(POLL_INTERVAL)
                     else:
-                        time.sleep(0.01)
+                        time.sleep(POLL_INTERVAL)
                 check_cancelled(cancel)
                 if process.returncode:
                     raise OSError('Could not analyze sports video')

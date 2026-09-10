@@ -243,7 +243,14 @@ def test_authenticated_local_league_endpoints(schema_session, monkeypatch):
     schema_session.execute(sa.insert(TableLanguagesProfiles).values(profileId=1, name='English', items='[]'))
     monkeypatch.setattr(module, 'database', schema_session)
     queued = []
-    monkeypatch.setattr(module.jobs_queue, 'feed_jobs_pending_queue', lambda **kwargs: queued.append(kwargs))
+    # Returns a job id, as the real feed_jobs_pending_queue does. A stub
+    # returning None (list.append does) now reads as "nothing was queued",
+    # because the route reports the queue's answer instead of assuming 202.
+    def _queue_stub(**kwargs):
+        queued.append(kwargs)
+        return len(queued)
+
+    monkeypatch.setattr(module.jobs_queue, 'feed_jobs_pending_queue', _queue_stub)
     monkeypatch.setattr(library, 'refresh_league_profiles', lambda *a: None)
     app = Flask(__name__)
     api = Api(app)

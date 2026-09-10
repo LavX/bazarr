@@ -91,6 +91,10 @@ export interface SportsRecord {
   score?: number | null;
   score_out_of?: number | null;
   subtitles_path?: string | null;
+  /** True when this release is in the sports exclusion table for its owner. */
+  blacklisted?: boolean;
+  /** The upgrade run's display-level check; it refines this before acting. */
+  upgradable?: boolean;
 }
 export interface SportsJob {
   queued: boolean;
@@ -154,9 +158,14 @@ class SportsApi extends BaseApi {
       },
     );
   }
-  async runAction(path: string, owner: number) {
-    return (await this.postRaw<SportsJob>(path, { arr_instance_id: owner }))
-      .data;
+  async runAction(path: string, owner: number, language?: string) {
+    return (
+      await this.postRaw<SportsJob>(path, {
+        arr_instance_id: owner,
+        // Only when asked for: omitted, the event-wide search is unchanged.
+        ...(language ? { language } : {}),
+      })
+    ).data;
   }
   async removeExclusion(owner: number, id?: number) {
     return (
@@ -191,6 +200,16 @@ class SportsApi extends BaseApi {
     return this.patchRaw(`/leagues/${id}`, {
       arr_instance_id: owner,
       profileId,
+    });
+  }
+  /** One request for a whole selection, in a single backend transaction. */
+  assignProfiles(
+    assignments: { id: number; owner: number; profileId: number | null }[],
+  ) {
+    return this.postRaw("/leagues/profiles", {
+      id: assignments.map((item) => item.id),
+      arr_instance_id: assignments.map((item) => item.owner),
+      profileId: assignments.map((item) => item.profileId),
     });
   }
   sync(owner: number) {

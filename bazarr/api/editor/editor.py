@@ -16,8 +16,8 @@ from flask import Response, request, send_file
 from flask_restx import Namespace, Resource
 
 from arr_instances.resolution import scoped
-from app.database import (TableEpisodes, TableMovies, TableShows, TableSportsEvents,  # noqa: F401
-                          database, select)
+from app.database import (TableArrInstances, TableEpisodes, TableMovies, TableShows,  # noqa: F401
+                          TableSportsEvents, database, select)
 from app.get_args import args
 from utilities.path_mappings import path_mappings
 from api.subtitles.content import resolve_subtitle_path  # noqa: F401
@@ -129,10 +129,16 @@ def _resolve_video_path(media_type, media_id, arr_instance_id=None):
         # enforcing ownership rather than resolving a collision. The row's own
         # owner drives the mapping: sports mappings are per instance and the
         # caller is allowed to omit arr_instance_id.
+        # Joined to an ENABLED sportarr owner: the sports mapping below refuses
+        # a disabled one and would raise a 500 out of this handler instead.
         row = database.execute(
             scoped(
                 select(TableSportsEvents.path, TableSportsEvents.arr_instance_id)
-                .where(TableSportsEvents.id == media_id),
+                .join(TableArrInstances,
+                      TableSportsEvents.arr_instance_id == TableArrInstances.id)
+                .where(TableSportsEvents.id == media_id,
+                       TableArrInstances.kind == 'sportarr',
+                       TableArrInstances.enabled == 1),
                 TableSportsEvents.arr_instance_id,
                 arr_instance_id,
             )

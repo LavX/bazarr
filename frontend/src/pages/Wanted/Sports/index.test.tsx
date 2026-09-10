@@ -55,7 +55,41 @@ it("pages through the shared start/length contract instead of a page number", as
   expect(Number(query!.get("length"))).toBeGreaterThan(0);
 });
 
-it("searches only the language whose badge was clicked", async () => {
+it("downloads only the language whose badge was clicked", async () => {
+  // Episodes and Movies download exactly the language whose badge was
+  // clicked. Sports had to open a manual search modal instead, because the
+  // event-wide /automatic action calls search_event with language=None and so
+  // searches, and may download, every missing language on the event. That
+  // endpoint takes a single language now.
+  owners();
+  let posted: unknown;
+  server.use(
+    http.get("/api/sports/wanted", () =>
+      HttpResponse.json({ data: [event], total: 1 }),
+    ),
+    http.post("/api/sports/events/11/automatic", async ({ request }) => {
+      posted = await request.json();
+      return HttpResponse.json({ queued: true, job_id: 1, message: "queued" });
+    }),
+    http.post("/api/sports/events/11/search", () => {
+      throw new Error("a badge click must not open a manual search");
+    }),
+  );
+  customRender(<WantedSportsView />);
+  const row = await screen.findByRole(
+    "row",
+    { name: /Final/ },
+    { timeout: 8000 },
+  );
+
+  await userEvent.setup().click(within(row).getByText("hu:HI"));
+
+  await waitFor(() =>
+    expect(posted).toEqual({ arr_instance_id: 42, language: "hu" }),
+  );
+});
+
+it("still offers the manual search for one language on right-click", async () => {
   owners();
   let searched: unknown;
   server.use(
@@ -71,9 +105,6 @@ it("searches only the language whose badge was clicked", async () => {
       searched = await request.json();
       return HttpResponse.json({ data: [] });
     }),
-    http.post("/api/sports/events/11/automatic", () => {
-      throw new Error("the event-wide action must not be used for one badge");
-    }),
   );
   customRender(<WantedSportsView />);
   const row = await screen.findByRole(
@@ -82,10 +113,10 @@ it("searches only the language whose badge was clicked", async () => {
     { timeout: 8000 },
   );
 
-  // Clicking a badge used to post the event-wide /automatic action, which
-  // calls search_event with language=None and so searches, and may download,
-  // every missing language rather than the one picked.
-  await userEvent.setup().click(within(row).getByText("hu:HI"));
+  await userEvent.setup().pointer({
+    target: within(row).getByText("hu:HI"),
+    keys: "[MouseRight]",
+  });
   const dialog = within(await screen.findByRole("dialog"));
   await userEvent.setup().click(dialog.getByRole("button", { name: "Search" }));
 
@@ -135,4 +166,33 @@ it("does not request the wanted list when every owner is disabled", async () => 
     ),
   ).toBeInTheDocument();
   expect(calls).toBe(0);
+});
+
+it("offers a selection checkbox so the shared Mass Translate button can be used", async () => {
+  // The page declared no selection column, but the shared WantedView still
+  // renders its "Mass Translate (N)" button. Nothing could ever be selected,
+  // so the button sat disabled forever and getWantedItem was unreachable.
+  // Episodes and Movies both ship this column.
+  owners();
+  server.use(
+    http.get("/api/sports/wanted", () =>
+      HttpResponse.json({ data: [event], total: 1 }),
+    ),
+  );
+  customRender(<WantedSportsView />);
+
+  const row = await screen.findByRole(
+    "row",
+    { name: /Final/ },
+    { timeout: 8000 },
+  );
+  const checkbox = within(row).getByRole("checkbox");
+  expect(checkbox).not.toBeChecked();
+
+  await userEvent.click(checkbox);
+
+  await waitFor(() => expect(checkbox).toBeChecked());
+  expect(
+    await screen.findByRole("button", { name: /Mass Translate \(1\)/ }),
+  ).toBeEnabled();
 });

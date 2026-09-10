@@ -356,6 +356,17 @@ def save_sports_subtitle(
             )
             if not saved:
                 raise OSError("Could not save sports subtitles")
+            # The sports branch returns from manual.py before it reaches
+            # clear_mismatch_after_manual_save, so a release-type badge the
+            # user was actively resolving stayed up after they resolved it.
+            # Clear it here, where the write is known to have happened.
+            try:
+                from subtitles.manual import clear_mismatch_after_manual_save
+                clear_mismatch_after_manual_save(
+                    video, "sports", saved, context.arr_instance_id)
+            except Exception:
+                logging.exception(
+                    "BAZARR could not clear the sports release-type mismatch after a save")
             _remove_superseded_sports_subtitle(
                 path, previous_artifact, written_paths, is_upgrade
             )

@@ -985,7 +985,7 @@ def available_providers() -> list[str]:
         return []
 
 
-class _SportsSelectionChanged(RuntimeError):
+class SportsSelectionChanged(RuntimeError):
     pass
 
 
@@ -1035,7 +1035,7 @@ def search(imdb_id: str, season, episode, languages: Iterable[Language],
             current = resolve_sports()
             current_key = current.cache_key() if current is not None else None
             if current_key != sports_key:
-                raise _SportsSelectionChanged("Sports selection changed during search")
+                raise SportsSelectionChanged("Sports selection changed during search")
 
         def create():
             nonlocal fanout_started
@@ -1061,7 +1061,7 @@ def search(imdb_id: str, season, episode, languages: Iterable[Language],
             # Cache hits need the same current-selection check as new results.
             validate_selection()
             return result
-        except _SportsSelectionChanged:
+        except SportsSelectionChanged:
             if attempt == 1 or fanout_started:
                 raise
             # Creation exceptions are not cached. Retry once before provider work

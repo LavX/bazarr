@@ -6,6 +6,7 @@ from sqlalchemy import select
 from app.database import database, TableArrInstances, TableSportsEvents, TableSportsLeagues
 from sportarr.parser import positive_id
 from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
+from sportarr.errors import SportsNotFound
 
 
 @dataclass(frozen=True)
@@ -39,7 +40,7 @@ def resolve_event_in_session(session, event_id, arr_instance_id=None, enabled_on
         query = query.where(TableArrInstances.enabled == 1)
     found = session.execute(query.execution_options(populate_existing=True)).first()
     if found is None:
-        raise ValueError('Sports event not found for this owner')
+        raise SportsNotFound('Sports event not found for this owner')
     event, league, instance = found
     return SportsEventContext(event.id, league.id, instance.id, event.sportarrEventId,
                               league.sportarrLeagueId, event.file_id, event.path,

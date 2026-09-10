@@ -76,8 +76,9 @@ def notify(local_ids):
         logging.exception('Could not notify sports library listeners')
 
 
-def sync_leagues(arr_instance_id, *, cancel=None, expected_connection=None, http_get=None):
-    with owner_sync_lock(arr_instance_id, cancel):
+def sync_leagues(arr_instance_id, *, cancel=None, expected_connection=None, http_get=None,
+                 lock_timeout=None):
+    with owner_sync_lock(arr_instance_id, cancel, timeout=lock_timeout):
         return _sync_leagues(arr_instance_id, cancel, expected_connection, http_get)
 
 
@@ -133,12 +134,19 @@ def _sync_leagues(arr_instance_id, cancel, expected_connection, http_get):
     return local_ids
 
 
-def update_sports_for_instance(arr_instance_id, job_id=None, *, cancel=None, expected_connection=None, http_get=None):
-    """Startup and periodic repair of one complete owned sports library."""
+def update_sports_for_instance(arr_instance_id, job_id=None, *, cancel=None, expected_connection=None,
+                               http_get=None, lock_timeout=None):
+    """Startup and periodic repair of one complete owned sports library.
+
+    ``lock_timeout`` is threaded through so a request-thread caller can bound
+    its wait; background callers leave it None and wait as they always have.
+    """
     from sportarr.rootfolder import sync_rootfolders
     from sportarr.sync.events import sync_events
-    with owner_sync_lock(arr_instance_id, cancel):
+    with owner_sync_lock(arr_instance_id, cancel, timeout=lock_timeout):
         expected = expected_connection or connection_identity(require_sportarr(database, arr_instance_id))
+        # The lock is re-entrant and already held here, so the nested calls
+        # cannot block on it; they take the same owner's RLock again.
         kwargs = dict(cancel=cancel, expected_connection=expected, http_get=http_get)
         sync_rootfolders(arr_instance_id, **kwargs)
         ids = sync_leagues(arr_instance_id, **kwargs)

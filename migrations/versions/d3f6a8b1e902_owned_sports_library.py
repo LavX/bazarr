@@ -147,8 +147,29 @@ def _verify_existing(bind, table):
                               tuple(element.column.name for element in constraint.elements),
                               _delete_action(constraint.ondelete))
                              for constraint in table.foreign_key_constraints}
-    if actual != expected or not required_uniques <= uniques or not required_foreign_keys <= foreign_keys:
-        raise ValueError('Cannot adopt the existing sports schema without verified ownership constraints')
+    # A SUBSET test, not equality. This snapshot is frozen at this revision,
+    # so any column a LATER migration adds is a column this one has never
+    # heard of; with `actual != expected` such a column aborted the upgrade and
+    # every fresh install crash-looped. table_history_sports.artifact, added by
+    # e7a9c2d4b601, is already one, which is why init_db had to exclude that
+    # one table from create_all to stay bootable. Extra columns are not the
+    # hazard this guard exists for: it is here to refuse a sports schema that
+    # lacks the ownership columns, uniques and foreign keys, and a subset test
+    # refuses exactly that while tolerating later additions.
+    #
+    # Column TYPES are deliberately not compared. The reflected type string
+    # differs between SQLite and PostgreSQL for the same column, so comparing
+    # them would reintroduce the same false-rejection crash-loop across
+    # backends that this change removes.
+    missing = {name: nullable for name, nullable in expected.items()
+               if actual.get(name, object()) != nullable}
+    if missing or not required_uniques <= uniques or not required_foreign_keys <= foreign_keys:
+        raise ValueError(
+            f'Cannot adopt the existing sports schema for {table.name} without verified '
+            f'ownership constraints (missing or mismatched columns: '
+            f'{sorted(missing) or "none"}; missing uniques: '
+            f'{sorted(required_uniques - uniques) or "none"}; missing foreign keys: '
+            f'{sorted(str(item) for item in required_foreign_keys - foreign_keys) or "none"})')
 
 
 def upgrade():
