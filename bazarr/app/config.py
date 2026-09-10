@@ -129,6 +129,8 @@ validators = [
     Validator('general.use_radarr', must_exist=True, default=False, is_type_of=bool),
     Validator('general.use_plex', must_exist=True, default=False, is_type_of=bool),
     Validator('general.use_jellyfin', must_exist=True, default=False, is_type_of=bool),
+    Validator('general.use_emby', must_exist=True, default=False, is_type_of=bool),
+    Validator('general.use_silo', must_exist=True, default=False, is_type_of=bool),
     # Set True once the first-run onboarding wizard is completed or skipped, so it
     # never auto-triggers again. Defaults False on a fresh install.
     Validator('general.setup_complete', must_exist=True, default=False, is_type_of=bool),
@@ -330,6 +332,18 @@ validators = [
     Validator('plex.migration_timestamp', must_exist=True, default='', is_type_of=(int, float, str)),
     Validator('plex.disable_auto_migration', must_exist=True, default=False, is_type_of=bool),
     Validator('plex.client_identifier', must_exist=True, default='', is_type_of=str),
+
+    # emby section
+    Validator('emby.url', must_exist=True, default='', is_type_of=str),
+    Validator('emby.apikey', must_exist=True, default='', is_type_of=str),
+    Validator('emby.verify_ssl', must_exist=True, default=True, is_type_of=bool),
+    Validator('emby.path_mappings', must_exist=True, default=[], is_type_of=list),
+
+    # silo section
+    Validator('silo.url', must_exist=True, default='', is_type_of=str),
+    Validator('silo.apikey', must_exist=True, default='', is_type_of=str),
+    Validator('silo.verify_ssl', must_exist=True, default=True, is_type_of=bool),
+    Validator('silo.path_mappings', must_exist=True, default=[], is_type_of=list),
 
     # jellyfin section
     Validator('jellyfin.url', must_exist=True, default='', is_type_of=str),
@@ -704,6 +718,7 @@ def write_config(*, strict_metadata=False):
 
 
 def _write_config(*, strict_metadata=False):
+    from secret_store.crypto import mark_master_key_persisted
     # On-disk shape compared in plaintext form: encrypt_secret is non-
     # deterministic (per-payload salt + timestamp), so naive ciphertext
     # comparison would always diff and rewrite config.yaml on every save.
@@ -719,20 +734,23 @@ def _write_config(*, strict_metadata=False):
 
     if in_memory_plaintext == on_disk_plaintext and not _force_first_save_migration:
         logging.debug("Nothing changed when comparing to config file. Skipping write to file.")
-        return
+        mark_master_key_persisted(in_memory_plaintext.get("general", {}).get("secrets_encryption_key"))
+        return True
 
     forced_migration = _force_first_save_migration
     if forced_migration:
         logging.info("secret_store: forcing config rewrite to encrypt plaintext credentials on disk")
 
     try:
+        encrypted_payload = encrypt_settings_dict(in_memory_plaintext)
         write(settings_path=config_yaml_file + '.tmp',
-              settings_data=encrypt_settings_dict(in_memory_plaintext),
+              settings_data=encrypted_payload,
               merge=False)
     except Exception as error:
         if strict_metadata:
             raise MetadataPersistenceError("Discover settings could not be saved. Try again.") from None
         logging.exception(f"Exception raised while trying to save temporary settings file: {error}")  # noqa: G004
+        return False
     else:
         try:
             move(config_yaml_file + '.tmp', config_yaml_file)
@@ -741,6 +759,7 @@ def _write_config(*, strict_metadata=False):
                 raise MetadataPersistenceError("Discover settings could not be saved. Try again.") from None
             logging.exception(f"Exception raised while trying to overwrite settings file with temporary settings "  # noqa: G004
                               f"file: {error}")
+            return False
         else:
             # Only clear the forced-migration flag once the new
             # encrypted config is durably in place. Clearing it on the
@@ -751,6 +770,8 @@ def _write_config(*, strict_metadata=False):
             # never retry, leaving credentials unencrypted on disk.
             if forced_migration:
                 _force_first_save_migration = False
+            mark_master_key_persisted(encrypted_payload.get("general", {}).get("secrets_encryption_key"))
+            return True
 
 
 # OpenRouter retired these ids, including Bazarr's default and documented recommendation.
@@ -854,10 +875,13 @@ def _get_settings():
     # hidden); USER_VISIBLE_SECRETS pass through unchanged because the
     # in-memory settings already hold their decrypted plaintext.
     from secret_store import is_system_secret, is_write_only_secret  # noqa: PLC0415, RUF100
+    from secret_store.registry import IMPORT_ONLY_SECTIONS
     settings_to_return = {}
     for k, v in settings.as_dict().items():
         if isinstance(v, dict):
             k = k.lower()
+            if k in IMPORT_ONLY_SECTIONS:
+                continue
             settings_to_return[k] = dict()
             for subk, subv in v.items():
                 full_path = f"{k}.{subk.lower()}"
@@ -975,13 +999,64 @@ def validate_metadata_settings(settings_items):
             raise ValidationError("Invalid metadata language.")
 
 
+def restore_persisted_settings():
+    """Return the live settings object to what is actually saved on disk.
+
+    Re-decrypt after reload: settings.reload() pulls the on-disk ciphertext back
+    into the live Dynaconf object, so without this second pass downstream code
+    would see `enc:v1:` strings for API keys, auth credentials, provider
+    passwords, and compat tokens until the next process restart.
+    """
+    settings.reload()
+    migrate_legacy_plex_encryption(settings)
+    decrypt_settings_in_place(settings)
+
+
+_native_settings_save_lock = threading.RLock()
+
+NATIVE_MASTER_KEYS = {'settings-general-use_emby', 'settings-general-use_silo'}
+
+
+def _save_settings_with_native(settings_items, *, strict_metadata=False, on_metadata_persisted=None):
+    """Apply the media-server master-switch handling around a settings save."""
+    with _native_settings_save_lock:
+        if not any(key in NATIVE_MASTER_KEYS for key, _value in settings_items):
+            return _save_settings(settings_items, strict_metadata=strict_metadata,
+                                  on_metadata_persisted=on_metadata_persisted)
+        from media_servers.dispatcher import get_native_configuration
+        native = get_native_configuration()
+        with native.lock:
+            try:
+                return _save_settings(settings_items, native, strict_metadata=strict_metadata,
+                                      on_metadata_persisted=on_metadata_persisted)
+            finally:
+                for kind, enabled in native.masters.items():
+                    _settings_mapping(settings, 'general')['use_' + kind] = enabled
+
+
 def save_settings(settings_items):
+    from media_servers.http import MediaServerError, parse_verify_ssl
+    from secret_store.registry import IMPORT_ONLY_SECTIONS
+
     items = list(settings_items)
     validate_metadata_settings(items)
+
+    for index, (key, value) in enumerate(items):
+        parts = key.lower().split('-')
+        if len(parts) > 1 and parts[1] in IMPORT_ONLY_SECTIONS:
+            raise ValidationError('Use media server instances to edit connection settings')
+        if key in NATIVE_MASTER_KEYS:
+            if isinstance(value, list) and len(value) == 1:
+                value = value[0]
+            try:
+                items[index] = key, parse_verify_ssl(value)
+            except MediaServerError:
+                raise ValidationError('Invalid native media server master switch') from None
+
     from discover.metadata import CONFIG_LOCK, invalidate_metadata
     with CONFIG_LOCK:
         if not any(key.startswith("settings-discover-") for key, _ in items):
-            return _save_settings(items)
+            return _save_settings_with_native(items)
         previous = dict(settings.discover)
         effective = dict(previous)
         for key, values in items:
@@ -998,8 +1073,8 @@ def save_settings(settings_items):
             invalidate_metadata()
 
         try:
-            _save_settings(items, strict_metadata=changed,
-                           on_metadata_persisted=metadata_persisted if changed else None)
+            _save_settings_with_native(items, strict_metadata=changed,
+                                       on_metadata_persisted=metadata_persisted if changed else None)
         except Exception:
             if persisted:
                 raise MetadataFollowupError(
@@ -1009,7 +1084,8 @@ def save_settings(settings_items):
             raise
 
 
-def _save_settings(settings_items, *, strict_metadata=False, on_metadata_persisted=None):
+def _save_settings(settings_items, native_configuration=None, *, strict_metadata=False,
+                   on_metadata_persisted=None):
     configure_debug = False
     configure_captcha = False
     update_schedule = False
@@ -1348,23 +1424,31 @@ def _save_settings(settings_items, *, strict_metadata=False, on_metadata_persist
         settings.validators.validate()
         validate_log_regex()
     except ValidationError:
-        # Re-decrypt after reload: settings.reload() pulls the on-disk
-        # ciphertext back into the live Dynaconf object, so without this
-        # second pass downstream code would see `enc:v1:` strings for
-        # API keys, auth credentials, provider passwords, and compat
-        # tokens until the next process restart.
-        settings.reload()
-        migrate_legacy_plex_encryption(settings)
-        decrypt_settings_in_place(settings)
+        restore_persisted_settings()
         raise
     else:
         if strict_metadata:
             try:
-                write_config(strict_metadata=True)
+                saved = write_config(strict_metadata=True)
             except Exception:
+                restore_persisted_settings()
                 raise MetadataPersistenceError("Discover settings could not be saved. Try again.") from None
         else:
-            write_config()
+            saved = write_config()
+
+        if saved is not True:
+            # The request is refused, so none of it may stay applied. Every
+            # submitted value is already on the live settings object by now,
+            # and when a media-server master switch travelled with it the
+            # caller's `finally` restores only those two switches: without this
+            # the process would keep running values that reached no file, tell
+            # the user they were saved, and revert them at the next restart.
+            # Nothing about that is particular to a master switch, so the check
+            # covers every save rather than only those.
+            restore_persisted_settings()
+            raise ValidationError('Unable to save settings to disk')
+        if native_configuration is not None:
+            native_configuration.publish_masters(settings)
 
         if on_metadata_persisted is not None:
             on_metadata_persisted()

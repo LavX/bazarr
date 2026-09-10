@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 from datetime import datetime, timedelta
+from media_servers.events import publication_callback
 
 from flask import make_response, jsonify, request
 from flask_restx import Resource, Namespace
@@ -843,6 +844,7 @@ def _save_subtitle_content(media_type, media_id, language_code, arr_instance_id=
                 return 'Subtitle file has been modified since last read', 412
             with subtitle_mutation(video_path, subtitle_path):
                 _write_bytes_atomically(subtitle_path, encoded)
+                publication_callback(media_type, video_path, 'edit', metadata.get('arrInstanceId'))(subtitle_path)
                 _apply_subtitle_chmod(subtitle_path)
             new_etag = generate_etag(subtitle_path)
     except FileNotFoundError:
@@ -914,6 +916,7 @@ def promote_sync_subtitle(media_type, media_id, target_language, source_language
                 data = source_file.read()
             with subtitle_mutation(video_path, target_path):
                 _write_bytes_atomically(target_path, data)
+                publication_callback(media_type, video_path, 'sync', metadata.get('arrInstanceId'))(target_path)
                 _apply_subtitle_chmod(target_path)
     except FileNotFoundError:
         return 'Subtitle file or directory not found', 404
@@ -1051,7 +1054,7 @@ def _create_subtitle(media_type, media_id, arr_instance_id=None):
     # Look up the media to get the video file path
     if media_type == 'episode':
         query = (
-            select(TableEpisodes.id, TableEpisodes.path)
+            select(TableEpisodes.id, TableEpisodes.path, TableEpisodes.arr_instance_id)
             .where(TableEpisodes.sonarrEpisodeId == media_id)
         )
         if arr_instance_id is not None:
@@ -1059,7 +1062,7 @@ def _create_subtitle(media_type, media_id, arr_instance_id=None):
         row = database.execute(query).first()
     elif media_type == 'movie':
         query = (
-            select(TableMovies.id, TableMovies.path)
+            select(TableMovies.id, TableMovies.path, TableMovies.arr_instance_id)
             .where(TableMovies.radarrId == media_id)
         )
         if arr_instance_id is not None:
@@ -1073,6 +1076,7 @@ def _create_subtitle(media_type, media_id, arr_instance_id=None):
 
     # Apply the owning instance's per-instance path_mappings when configured
     # (#156); falls back to the global mapping when the instance has none.
+    arr_instance_id = row.arr_instance_id
     video_path = path_mappings.path_replace_instance(row.path, arr_instance_id, media_type)
 
     # Build the subtitle filename. `language` was already validated against
@@ -1115,6 +1119,7 @@ def _create_subtitle(media_type, media_id, arr_instance_id=None):
                 return 'Subtitle file already exists', 409
             with subtitle_mutation(video_path, subtitle_path):
                 _write_bytes_atomically(subtitle_path, encoded)
+                publication_callback(media_type, video_path, 'edit', arr_instance_id)(subtitle_path)
                 _apply_subtitle_chmod(subtitle_path)
 
     except FileNotFoundError:

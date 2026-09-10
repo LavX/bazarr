@@ -20,7 +20,10 @@ from .jobs import api_ns_system_jobs
 from .compat_admin import api_ns_compat_admin
 from .arr_instances import api_ns_system_arr_instances
 
+from .media_server_instances import api_ns_system_media_server_instances
+
 api_ns_list_system = [
+    api_ns_system_media_server_instances,
     api_ns_system,
     api_ns_system_account,
     api_ns_system_announcements,

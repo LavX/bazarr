@@ -49,7 +49,7 @@ const LayoutModal: FunctionComponent<Props> = (props) => {
       if (Object.keys(settings).length > 0) {
         const settingsToSubmit = { ...settings };
         runHooks(hooks, settingsToSubmit);
-        LOG("info", "submitting settings", settingsToSubmit);
+        LOG("info", "submitting settings", Object.keys(settingsToSubmit));
         mutate(settingsToSubmit);
         // wait for settings to be validated before callback
         // let the user see the spinning indicator on the Save button before the modal closes

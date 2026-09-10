@@ -120,6 +120,7 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
                 sonarr_series_id=sonarr_series_id,
                 sonarr_episode_id=sonarr_episode_id,
                 radarr_id=radarr_id,
+                arr_instance_id=arr_instance_id,
             )
         except Exception:
             logging.exception("BAZARR combine-after-translate failed for %s", video_path)

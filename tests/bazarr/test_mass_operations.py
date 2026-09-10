@@ -90,7 +90,19 @@ class TestProcessSubtitleItem:
         result = _process_subtitle_item(item, 'remove_HI', {}, 'test_job')
         assert result is True
         mock_mods.assert_called_once_with('en', '/subs/test.en.srt', ['remove_HI'],
-                                          '/video/test.mkv', arr_instance_id=None)
+                                          '/video/test.mkv', arr_instance_id=None,
+                                          media_type='episode')
+
+    @patch('subtitles.mass_operations.subtitles_apply_mods')
+    def test_mod_action_on_a_movie_carries_the_movie_media_type(self, mock_mods):
+        # The media type reaches the mods so the rewritten subtitle can be
+        # published to the native destinations; a movie item has no series id.
+        from subtitles.mass_operations import _process_subtitle_item
+        item = self._make_item(sonarr_series_id=None, sonarr_episode_id=None, radarr_id=30)
+        assert _process_subtitle_item(item, 'remove_HI', {}, 'test_job') is True
+        mock_mods.assert_called_once_with('en', '/subs/test.en.srt', ['remove_HI'],
+                                          '/video/test.mkv', arr_instance_id=None,
+                                          media_type='movies')
 
     @patch('subtitles.mass_operations.subtitles_apply_mods')
     def test_mod_action_ocr_fixes(self, mock_mods):
@@ -99,7 +111,8 @@ class TestProcessSubtitleItem:
         result = _process_subtitle_item(item, 'OCR_fixes', {}, 'test_job')
         assert result is True
         mock_mods.assert_called_once_with('en', '/subs/test.en.srt', ['OCR_fixes'],
-                                          '/video/test.mkv', arr_instance_id=None)
+                                          '/video/test.mkv', arr_instance_id=None,
+                                          media_type='episode')
 
     @patch('subtitles.mass_operations.subtitles_apply_mods')
     def test_mod_action_threads_owning_instance(self, mock_mods):
@@ -111,7 +124,8 @@ class TestProcessSubtitleItem:
         result = _process_subtitle_item(item, 'remove_HI', {}, 'test_job')
         assert result is True
         mock_mods.assert_called_once_with('en', '/subs/test.en.srt', ['remove_HI'],
-                                          '/video/test.mkv', arr_instance_id=7)
+                                          '/video/test.mkv', arr_instance_id=7,
+                                          media_type='episode')
 
     @patch('subtitles.tools.translate.main.translate_subtitles_file', return_value=True)
     def test_translate_action(self, mock_translate):

@@ -8,7 +8,7 @@ from dynaconf.validator import ValidationError
 
 from api.utils import None_Keys
 from app.database import TableLanguagesProfiles, TableSettingsLanguages, TableSettingsNotifier, \
-    update_profile_id_list, database, insert, update, delete, select
+    normalize_profile_items, update_profile_id_list, database, insert, update, delete, select
 from app.event_handler import event_stream
 from app.config import (settings, save_settings, get_settings, validate_metadata_settings,
                         MetadataPersistenceError, MetadataFollowupError)
@@ -80,6 +80,11 @@ class SystemSettings(Resource):
                     except CombineRuleError as error:
                         return f"Invalid combine rule for profile '{item.get('name')}': {error}", 400
                 combine_value = json.dumps(combine_rule) if combine_rule else None
+                # A client may omit the optional per-language keys, and the
+                # migration that adds them runs at startup only. Storing the
+                # item as sent left every indexing pass raising KeyError on it
+                # until the next restart, so fill them in here instead.
+                normalize_profile_items(item['items'])
                 if item['profileId'] in existing:
                     # Update existing profiles
                     database.execute(

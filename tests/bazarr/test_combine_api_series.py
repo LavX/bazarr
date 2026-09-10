@@ -145,11 +145,11 @@ _module_isolation.restore(_SYS_BEFORE)
 @patch.object(series_module, 'try_combine_for_video')
 @patch.object(series_module, 'path_mappings')
 def test_series_batch_combine(mock_paths, mock_combine, mock_list):
-    mock_paths.path_replace.side_effect = lambda p: p
+    mock_paths.path_replace_instance.side_effect = lambda p, owner, kind: p
     mock_list.return_value = [
-        {'sonarrEpisodeId': 1, 'path': '/tv/Show/S01E01.mkv', 'sonarrSeriesId': 5},
-        {'sonarrEpisodeId': 2, 'path': '/tv/Show/S01E02.mkv', 'sonarrSeriesId': 5},
-        {'sonarrEpisodeId': 3, 'path': '/tv/Show/S01E03.mkv', 'sonarrSeriesId': 5},
+        {'sonarrEpisodeId': 1, 'path': '/tv/Show/S01E01.mkv', 'sonarrSeriesId': 5, 'arr_instance_id': 7},
+        {'sonarrEpisodeId': 2, 'path': '/tv/Show/S01E02.mkv', 'sonarrSeriesId': 5, 'arr_instance_id': 7},
+        {'sonarrEpisodeId': 3, 'path': '/tv/Show/S01E03.mkv', 'sonarrSeriesId': 5, 'arr_instance_id': 7},
     ]
     mock_combine.side_effect = [
         type('R', (), {'status': 'built', 'path': '/x1.srt',

@@ -3,6 +3,7 @@
 
 import logging
 import gc
+from media_servers.events import publication_callback
 
 from app.config import settings
 from app.jobs_queue import jobs_queue, JobCancelled
@@ -261,7 +262,8 @@ def sync_subtitles(video_path,
                    arr_instance_id=None,
                    owns_job_progress=True,
                    source_version=None,
-                   on_success=None):
+                   on_success=None,
+                   publication_operation='sync'):
     try:
         # The audio-sync settings resolve against the owning instance (#227); a None
         # owner / unset override yields the global value, so legacy paths are
@@ -343,6 +345,8 @@ def sync_subtitles(video_path,
                 'enabled_engines': enabled_engines,
                 'progress_callback': update_progress if track_job_progress else None,
                 'arr_instance_id': arr_instance_id,
+                'on_publish': publication_callback('episode' if sonarr_episode_id is not None else 'movie',
+                                                   video_path, publication_operation, arr_instance_id),
             }
             sync_result = None
             if source_version is not None:

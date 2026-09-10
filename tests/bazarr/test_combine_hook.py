@@ -21,6 +21,7 @@ class TestTriggerCombine:
             radarr_id=42,
             sonarr_series_id=None,
             sonarr_episode_id=None,
+            arr_instance_id=None,
         )
 
     @patch("subtitles.processing.try_combine_for_video")
@@ -38,6 +39,7 @@ class TestTriggerCombine:
             radarr_id=None,
             sonarr_series_id=5,
             sonarr_episode_id=99,
+            arr_instance_id=None,
         )
 
     @patch("subtitles.processing.try_combine_for_video")

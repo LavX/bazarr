@@ -33,7 +33,6 @@ import {
   FormValues,
   runHooks,
 } from "@/pages/Settings/utilities/FormValues";
-import { settingsLogValues } from "@/pages/Settings/utilities/settingsLog";
 import { SettingsProvider } from "@/pages/Settings/utilities/SettingsProvider";
 import { useOnValueChange } from "@/utilities";
 import { LOG } from "@/utilities/console";
@@ -91,7 +90,7 @@ const Layout: FunctionComponent<Props> = (props) => {
       if (Object.keys(settings).length > 0 || metadataRefreshFailed) {
         const settingsToSubmit = { ...settings };
         runHooks(hooks, settingsToSubmit);
-        LOG("info", "submitting settings", settingsLogValues(settingsToSubmit));
+        LOG("info", "submitting settings", Object.keys(settingsToSubmit));
         mutate(settingsToSubmit, {
           onSuccess: () => {
             setMetadataRefreshFailed(false);
@@ -114,7 +113,7 @@ const Layout: FunctionComponent<Props> = (props) => {
     if (Object.keys(settings).length > 0 || metadataRefreshFailed) {
       const settingsToSubmit = { ...settings };
       runHooks(hooks, settingsToSubmit);
-      LOG("info", "save & leave", settingsLogValues(settingsToSubmit));
+      LOG("info", "save & leave", Object.keys(settingsToSubmit));
       try {
         await mutateAsync(settingsToSubmit);
         setMetadataRefreshFailed(false);

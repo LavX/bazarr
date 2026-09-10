@@ -5,6 +5,7 @@ import os
 import sys
 import logging
 from functools import partial
+from media_servers.events import publication_callback
 import subliminal
 
 from subzero.language import Language
@@ -18,7 +19,7 @@ from app.config import settings
 from utilities.helper import get_target_folder, force_unicode
 from utilities.path_mappings import path_mappings
 from app.database import (database, get_profiles_list, select, TableEpisodes, TableShows, get_audio_profile_languages,
-                          get_profile_id, TableMovies)
+                          TableMovies)
 from app import activity
 from app.jobs_queue import jobs_queue
 from app.notifier import send_notifications, send_notifications_movie
@@ -218,7 +219,10 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
                                                      chmod=chmod,
                                                      formats=(subtitle.format,),
                                                      path_decoder=force_unicode,
-                                                     write_subtitle=partial(write_subtitle_file, path, written_paths=written_paths))
+                                                     write_subtitle=partial(
+                                                         write_subtitle_file, path, written_paths=written_paths,
+                                                         on_publish=publication_callback(
+                                                             media_type, path, 'download', arr_instance_id)))
                     saved_subtitles = [saved for saved in saved_subtitles if saved.storage_path in written_paths]
 
             except Exception as e:
@@ -233,7 +237,7 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
                         processed_subtitle = process_subtitle(subtitle=saved_subtitle, media_type=media_type,
                                                               audio_language=audio_language, is_upgrade=False,
                                                               is_manual=True, path=path, max_score=max_score,
-                                                              job_id=job_id)
+                                                              job_id=job_id, arr_instance_id=arr_instance_id)
                         if processed_subtitle:
                             return processed_subtitle
                         else:
@@ -263,7 +267,9 @@ def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode
             TableEpisodes.sceneName,
             TableEpisodes.season,
             TableEpisodes.episode,
+            TableEpisodes.arr_instance_id,
             TableEpisodes.title.label('episodeTitle'),
+            TableShows.profileId,
             TableShows.title)
         .select_from(TableEpisodes)
         .join(TableShows)
@@ -284,7 +290,8 @@ def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode
     jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Manually downloading Subtitles for {title} - "
                                                            f"S{episodeInfo.season:02d}E{episodeInfo.episode:02d} - "
                                                            f"{episodeInfo.episodeTitle}")
-    episodePath = path_mappings.path_replace(episodeInfo.path)
+    arr_instance_id = episodeInfo.arr_instance_id
+    episodePath = path_mappings.path_replace_instance(episodeInfo.path, arr_instance_id, 'series')
     sceneName = episodeInfo.sceneName or "None"
 
     audio_language_list = get_audio_profile_languages(episodeInfo.audio_language)
@@ -296,7 +303,7 @@ def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode
     try:
         result = manual_download_subtitle(episodePath, audio_language, hi, forced, subtitle, selected_provider,
                                           sceneName, title, 'series', use_original_format,
-                                          profile_id=get_profile_id(episode_id=sonarr_episode_id), job_id=job_id,
+                                          profile_id=episodeInfo.profileId, job_id=job_id,
                                           arr_instance_id=arr_instance_id)
     except OSError:
         return 'Unable to save subtitles file', 500
@@ -334,6 +341,8 @@ def movie_manually_download_specific_subtitle(radarr_id, hi, forced, use_origina
                TableMovies.year,
                TableMovies.path,
                TableMovies.sceneName,
+               TableMovies.arr_instance_id,
+               TableMovies.profileId,
                TableMovies.audio_language)
         .where(TableMovies.radarrId == radarr_id),
         TableMovies.arr_instance_id, arr_instance_id)) \
@@ -348,7 +357,8 @@ def movie_manually_download_specific_subtitle(radarr_id, hi, forced, use_origina
                                  arr_instance_id=arr_instance_id, upstream_movie_id=radarr_id)
     jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Manually downloading Subtitles for {title} "
                                                            f"({movieInfo.year})")
-    moviePath = path_mappings.path_replace_movie(movieInfo.path)
+    arr_instance_id = movieInfo.arr_instance_id
+    moviePath = path_mappings.path_replace_instance(movieInfo.path, arr_instance_id, 'movie')
     sceneName = movieInfo.sceneName or "None"
 
     audio_language_list = get_audio_profile_languages(movieInfo.audio_language)
@@ -360,7 +370,7 @@ def movie_manually_download_specific_subtitle(radarr_id, hi, forced, use_origina
     try:
         result = manual_download_subtitle(moviePath, audio_language, hi, forced, subtitle, selected_provider,
                                           sceneName, title, 'movie', use_original_format,
-                                          profile_id=get_profile_id(movie_id=radarr_id), job_id=job_id,
+                                          profile_id=movieInfo.profileId, job_id=job_id,
                                           arr_instance_id=arr_instance_id)
     except OSError:
         return 'Unable to save subtitles file', 500

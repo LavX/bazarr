@@ -1,7 +1,6 @@
 import { createContext, useCallback, useContext, useRef } from "react";
 import type { UseFormReturnType } from "@mantine/form";
 import { LOG } from "@/utilities/console";
-import { settingsLogValue, settingsLogValues } from "./settingsLog";
 
 export const FormContext = createContext<UseFormReturnType<FormValues> | null>(
   null,
@@ -29,7 +28,7 @@ export function useFormActions() {
   formRef.current = form;
 
   const update = useCallback((object: LooseObject) => {
-    LOG("info", `Updating values`, settingsLogValues(object));
+    LOG("info", `Updating values`, Object.keys(object));
     formRef.current.setValues((values) => {
       const changes = { ...values.settings, ...object };
       return { ...values, settings: changes };
@@ -37,7 +36,7 @@ export function useFormActions() {
   }, []);
 
   const setValue = useCallback((v: unknown, key: string, hook?: HookType) => {
-    LOG("info", `Updating value of ${key}`, settingsLogValue(key, v));
+    LOG("info", `Updating value of ${key}`);
     formRef.current.setValues((values) => {
       const changes = { ...values.settings, [key]: v };
       const hooks = { ...values.hooks };
@@ -77,21 +76,11 @@ export function runHooks(
 ) {
   for (const key in settings) {
     if (key in hooks) {
-      LOG(
-        "info",
-        "Running submit hook for",
-        key,
-        settingsLogValue(key, settings[key]),
-      );
+      LOG("info", "Running submit hook for", key);
       const value = settings[key];
       const fn = hooks[key];
       settings[key] = fn(value);
-      LOG(
-        "info",
-        "Finish submit hook",
-        key,
-        settingsLogValue(key, settings[key]),
-      );
+      LOG("info", "Finish submit hook", key);
     }
   }
 }

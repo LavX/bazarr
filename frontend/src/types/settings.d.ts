@@ -85,6 +85,8 @@ declare namespace Settings {
     upgrade_manual: boolean;
     use_embedded_subs: boolean;
     use_jellyfin?: boolean;
+    use_emby?: boolean;
+    use_silo?: boolean;
     use_plex?: boolean;
     use_postprocessing: boolean;
     use_postprocessing_threshold: boolean;
