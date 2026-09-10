@@ -37,21 +37,36 @@ def apply_settings(configuration, settings):
 
 @pytest.fixture
 def dispatch():
+    from media_servers import resolution
     from media_servers.dispatcher import NativeConfiguration, RefreshDispatcher
+    from media_servers.resolution import MediaMetadata
     configuration = NativeConfiguration(native_settings(), snapshots=native_snapshots(native_settings()))
     calls = {"emby": [], "silo": []}
     # Emby resolves the item itself, so the media type it was asked for is the
     # only evidence that an episode publication actually reached the client.
     emby_items = []
+    # Every rung the dispatcher climbed, in order, per destination.
+    rungs = []
+    library_calls = []
+    identifier_calls = []
+    # Identifier rungs miss by default, which is what a server that has not
+    # matched the item does; the library rung resolves, as a real one would.
+    resolves = {resolution.LIBRARY}
+    metadata = MediaMetadata(imdb_id="tt0017136", tmdb_id="19", tvdb_id=78874,
+                             title="Metropolis", year=1927, season=1, episode=2)
+    metadata_box = [metadata]
     started, release = Event(), Event()
     failures = set()
     failed_paths = set()
+    missing_paths = set()
     libraries = [{"id": "7", "type": "movies", "paths": ["/media"]}]
 
     class Client:
         def __init__(self, server, snapshot):
             self.server = server
             self.snapshot = snapshot
+            self.REFRESH_STEPS = (resolution.CHAIN if server == "emby"
+                                  else (resolution.PATH, resolution.LIBRARY))
 
         def __enter__(self):
             return self
@@ -62,25 +77,48 @@ def dispatch():
         def get_libraries(self):
             return libraries
 
+        def _rung(self, name, ensure_current):
+            rungs.append((self.server, name))
+            ensure_current()
+            return {"status": "requested"} if name in resolves else None
+
+        def refresh_by_provider_id(self, media_type, media_metadata, *, ensure_current):
+            identifier_calls.append((self.server, resolution.PROVIDER_ID, media_type, media_metadata))
+            return self._rung(resolution.PROVIDER_ID, ensure_current)
+
+        def refresh_by_title_year(self, media_type, media_metadata, *, ensure_current):
+            identifier_calls.append((self.server, resolution.TITLE_YEAR, media_type, media_metadata))
+            return self._rung(resolution.TITLE_YEAR, ensure_current)
+
+        def refresh_library(self, *args, ensure_current):
+            library_calls.append((self.server, args))
+            return self._rung(resolution.LIBRARY, ensure_current)
+
         def refresh_item(self, media_type, path, *, ensure_current):
             emby_items.append((media_type, path))
             return self.refresh_file(None, path, ensure_current=ensure_current)
 
         def refresh_file(self, library_id, path, *, ensure_current):
             from media_servers.http import MediaServerError
+            rungs.append((self.server, resolution.PATH))
             calls[self.server].append((path, self.snapshot))
             if self.server == "silo" and len(calls["silo"]) == 1:
                 started.set()
                 assert release.wait(3)
             ensure_current()
+            if path in missing_paths:
+                raise MediaServerError("item_missing" if self.server == "emby" else "request_rejected")
             if self.server in failures or path in failed_paths:
                 raise MediaServerError("scan_incomplete")
             return {"status": "confirmed" if self.server == "silo" else "requested"}
 
-    dispatcher = RefreshDispatcher(configuration, client_factory=Client)
+    dispatcher = RefreshDispatcher(configuration, client_factory=Client,
+                                   metadata_factory=lambda event: metadata_box[0])
     yield SimpleNamespace(dispatcher=dispatcher, config=configuration, calls=calls, started=started,
                           release=release, failures=failures, libraries=libraries, failed_paths=failed_paths,
-                          emby_items=emby_items)
+                          emby_items=emby_items, rungs=rungs, resolves=resolves, library_calls=library_calls,
+                          identifier_calls=identifier_calls, missing_paths=missing_paths,
+                          metadata=metadata, metadata_box=metadata_box)
     release.set()
     assert dispatcher.wait_idle(3)
 
@@ -166,25 +204,115 @@ def test_disabled_connection_retains_pending_without_new_requests(dispatch):
 
 
 @pytest.mark.parametrize('media_type', ['movie', 'episode'])
-@pytest.mark.parametrize('operation', ['delete', 'sync', 'translate', 'combine', 'edit'])
-def test_emby_only_consumes_download_and_upload(dispatch, operation, media_type):
-    dispatch.libraries[0]['type'] = 'movies' if media_type == 'movie' else 'series'
-    dispatch.release.set()
-    dispatch.dispatcher.notify(movie_event(media_type=media_type, operation=operation))
-    assert dispatch.dispatcher.wait_idle(3)
-    assert dispatch.calls["emby"] == []
-    assert dispatch.emby_items == []
-
-
-@pytest.mark.parametrize('media_type', ['movie', 'episode'])
-@pytest.mark.parametrize('operation', ['download', 'upload'])
-def test_emby_accepts_each_supported_publication_for_movies_and_episodes(dispatch, operation, media_type):
+@pytest.mark.parametrize('operation', ['download', 'upload', 'delete', 'sync', 'translate', 'combine', 'edit'])
+def test_emby_consumes_every_publication_silo_does(dispatch, operation, media_type):
     dispatch.libraries[0]['type'] = 'movies' if media_type == 'movie' else 'series'
     dispatch.release.set()
     dispatch.dispatcher.notify(movie_event(media_type=media_type, operation=operation))
     assert dispatch.dispatcher.wait_idle(3)
     assert dispatch.emby_items == [(media_type, '/media/A.mkv')]
     assert dispatch.dispatcher.status(IDS['emby']) == {'pending': 0, 'state': 'requested', 'error_code': None}
+
+
+def test_no_publication_reaches_one_destination_and_not_the_other():
+    from media_servers.dispatcher import _OPERATIONS
+    assert _OPERATIONS == {'download', 'upload', 'delete', 'sync', 'translate', 'combine', 'edit'}
+
+
+# ------------------------------------------------------------ resolution ladder
+
+
+@pytest.mark.parametrize('media_type', ['movie', 'episode'])
+@pytest.mark.parametrize('resolving', ['provider_id', 'title_year', 'path', 'library'])
+def test_emby_climbs_the_ladder_and_stops_at_the_first_rung_that_resolves(dispatch, resolving, media_type):
+    from media_servers import resolution
+    order = list(resolution.CHAIN)
+    dispatch.libraries[0]['type'] = 'movies' if media_type == 'movie' else 'series'
+    dispatch.resolves.clear()
+    dispatch.resolves.add(resolving)
+    if resolving != resolution.PATH:
+        dispatch.missing_paths.add('/media/A.mkv')
+    dispatch.release.set()
+    dispatch.dispatcher.notify(movie_event(media_type=media_type))
+    assert dispatch.dispatcher.wait_idle(3)
+    climbed = [name for server, name in dispatch.rungs if server == 'emby']
+    assert climbed == order[:order.index(resolving) + 1], 'a resolved rung must never reach a later one'
+    assert dispatch.dispatcher.status(IDS['emby']) == {'pending': 0, 'state': 'requested', 'error_code': None}
+
+
+@pytest.mark.parametrize('media_type', ['movie', 'episode'])
+def test_emby_identifier_rungs_receive_the_stored_media_identifiers(dispatch, media_type):
+    from media_servers import resolution
+    dispatch.libraries[0]['type'] = 'movies' if media_type == 'movie' else 'series'
+    dispatch.release.set()
+    dispatch.dispatcher.notify(movie_event(media_type=media_type))
+    assert dispatch.dispatcher.wait_idle(3)
+    assert dispatch.identifier_calls == [
+        ('emby', resolution.PROVIDER_ID, media_type, dispatch.metadata),
+        ('emby', resolution.TITLE_YEAR, media_type, dispatch.metadata),
+    ]
+
+
+def test_identifiers_are_never_read_for_a_destination_that_cannot_use_them(dispatch):
+    reads = []
+    dispatch.dispatcher.metadata_factory = lambda event: reads.append(event) or dispatch.metadata
+    dispatch.release.set()
+    dispatch.dispatcher.notify(movie_event())
+    assert dispatch.dispatcher.wait_idle(3)
+    assert len(dispatch.calls['silo']) == 1
+    assert [call[0] for call in dispatch.identifier_calls] == ['emby', 'emby']
+    assert len(reads) == 1, 'Silo declares no identifier rungs, so it must not read the database'
+
+
+def test_unreadable_identifiers_skip_straight_to_the_path(dispatch):
+    from media_servers import resolution
+    dispatch.metadata_box[0] = None
+    dispatch.release.set()
+    dispatch.dispatcher.notify(movie_event())
+    assert dispatch.dispatcher.wait_idle(3)
+    assert dispatch.identifier_calls == []
+    assert [name for server, name in dispatch.rungs if server == 'emby'] == [resolution.PATH]
+    assert dispatch.emby_items == [('movie', '/media/A.mkv')]
+
+
+def test_a_path_emby_has_not_indexed_falls_back_to_the_library_holding_it(dispatch):
+    dispatch.missing_paths.add('/media/A.mkv')
+    dispatch.release.set()
+    dispatch.dispatcher.notify(movie_event())
+    assert dispatch.dispatcher.wait_idle(3)
+    assert ('emby', ('movie', '/media/A.mkv')) in dispatch.library_calls
+    assert dispatch.dispatcher.status(IDS['emby']) == {'pending': 0, 'state': 'requested', 'error_code': None}
+
+
+def test_a_file_scan_silo_refuses_falls_back_to_scanning_the_whole_library(dispatch):
+    dispatch.missing_paths.add('/media/A.mkv')
+    dispatch.release.set()
+    dispatch.dispatcher.notify(movie_event())
+    assert dispatch.dispatcher.wait_idle(3)
+    assert ('silo', ('7',)) in dispatch.library_calls
+    assert dispatch.dispatcher.status(IDS['silo']) == {'pending': 0, 'state': 'requested', 'error_code': None}
+
+
+def test_a_scan_that_ran_and_fell_short_is_a_failure_not_a_missing_file(dispatch):
+    dispatch.failures.add('silo')
+    dispatch.release.set()
+    dispatch.dispatcher.notify(movie_event())
+    assert dispatch.dispatcher.wait_idle(3)
+    assert dispatch.library_calls == [], 'a scan that ran is not a path Silo could not find'
+    assert dispatch.dispatcher.status(IDS['silo']) == {
+        'pending': 1, 'state': 'unconfirmed', 'error_code': 'scan_incomplete'}
+    assert dispatch.dispatcher.status(IDS['emby'])['state'] == 'requested'
+
+
+@pytest.mark.parametrize('kind', ['emby', 'silo'])
+def test_a_ladder_that_resolves_nothing_reports_the_item_as_missing(dispatch, kind):
+    dispatch.resolves.clear()
+    dispatch.missing_paths.add('/media/A.mkv')
+    dispatch.release.set()
+    dispatch.dispatcher.notify(movie_event())
+    assert dispatch.dispatcher.wait_idle(3)
+    assert dispatch.dispatcher.status(IDS[kind]) == {
+        'pending': 1, 'state': 'unconfirmed', 'error_code': 'item_missing'}
 
 
 @pytest.mark.parametrize(("event", "code"), [
@@ -436,3 +564,20 @@ def test_incomplete_connection_still_excludes_disjoint_publications(kind):
     dispatcher.notify(movie_event())
     assert dispatcher.wait_idle(3)
     assert dispatcher.status(snapshot.id) == {'pending': 1, 'state': 'unconfirmed', 'error_code': 'invalid_url'}
+
+
+def test_a_rung_that_answers_with_the_wrong_status_is_not_a_refresh(dispatch):
+    dispatch.resolves.add('provider_id')
+    dispatch.release.set()
+    original = dispatch.dispatcher._ladder
+
+    def confused(client, server, event, mapped, guard):
+        return [(name, lambda: {'status': 'whatever'}, expected)
+                for name, _call, expected in original(client, server, event, mapped, guard)]
+
+    dispatch.dispatcher._ladder = confused
+    dispatch.dispatcher.notify(movie_event())
+    assert dispatch.dispatcher.wait_idle(3)
+    for kind in ('emby', 'silo'):
+        assert dispatch.dispatcher.status(IDS[kind]) == {
+            'pending': 1, 'state': 'unconfirmed', 'error_code': 'invalid_response'}

@@ -65,3 +65,17 @@ def map_media_path(video_path: str, mappings: list[dict], *, require_library: bo
         if destination_component.anchor or destination_component.parts != (component,):
             raise MediaServerError("path_invalid")
     return {"path": str(remote.joinpath(*relative.parts)), "library_id": library_id}
+
+
+def media_path_contains(root: str, path: str) -> bool:
+    """Whether ``path`` sits inside ``root``, within one path flavor.
+
+    Comparing across flavors is not a comparison at all: a Windows library
+    root and a POSIX media path describe different filesystems, so neither
+    can contain the other, and a malformed root simply holds nothing.
+    """
+    try:
+        container, media = _media_path(root), _media_path(path)
+    except MediaServerError:
+        return False
+    return type(container) is type(media) and media.is_relative_to(container)

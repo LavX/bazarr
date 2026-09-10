@@ -402,13 +402,44 @@ async def _refresh(http, library_id, video_path, timeout, ensure_current=None):
             return result
 
 
-def refresh_file(http, library_id, video_path, *, timeout=90.0, ensure_current=None):
+def native_library_id(library_id):
+    """The saved library id as the native integer Silo answers to."""
     if (not isinstance(library_id, str) or not library_id or not library_id.isascii() or not library_id.isdecimal()
             or len(library_id.lstrip("0")) > 19):
         raise MediaServerError("library_invalid")
     native_id = int(library_id.lstrip("0") or "0")
     if not 0 < native_id <= 2**63 - 1:
         raise MediaServerError("library_invalid")
+    return native_id
+
+
+def refresh_library(http, library_id, *, ensure_current=None):
+    """Ask Silo to rescan a whole library, when it cannot scan the file itself.
+
+    Silo's file scan reads a closed set of containers and refuses any path it
+    cannot place in the library, and retrying that request cannot change the
+    answer. The library scan is the broad request Jellyfin falls back to.
+
+    It is submitted rather than observed, unlike the file scan: a full scan
+    outlives any deadline worth holding a worker on, and Silo deduplicates a
+    second one silently while still answering 202, so a completion event is
+    not evidence that this request caused anything.
+    """
+    native_id = native_library_id(library_id)
+    if ensure_current:
+        ensure_current()
+    result = http.request_json("POST", "/api/v1/scan", json={"library_id": native_id},
+                               success_statuses=(202,))
+    if (not isinstance(result, dict) or result.get("status") != "accepted" or result.get("mode") != "library"
+            or type(result.get("library_id")) is not int or result["library_id"] != native_id):
+        raise MediaServerError("invalid_response")
+    if ensure_current:
+        ensure_current()
+    return {"status": "requested"}
+
+
+def refresh_file(http, library_id, video_path, *, timeout=90.0, ensure_current=None):
+    native_id = native_library_id(library_id)
     if not media_paths_equal(video_path, video_path):
         raise MediaServerError("path_invalid")
     if type(timeout) not in {int, float} or timeout <= 0 or (type(timeout) is float and not math.isfinite(timeout)):

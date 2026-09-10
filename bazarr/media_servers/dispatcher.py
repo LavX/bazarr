@@ -5,6 +5,7 @@ import logging
 from dataclasses import dataclass, field, replace
 from threading import Condition, RLock, Thread
 
+from . import resolution
 from .events import SubtitleMutation
 from .http import MediaServerError
 from .paths import _media_path, map_media_path
@@ -93,6 +94,27 @@ class _ServerState:
     overflow: bool = False
 
 
+def _misses_on(call, codes):
+    """Read a refusal this rung declared as "not here", not as a failure.
+
+    Two client methods predate the ladder and answer "no such item" by
+    raising. Translating that lives here, at the adapter boundary, so the
+    walk itself never has to know one destination's vocabulary.
+    """
+    def attempt():
+        try:
+            return call()
+        except MediaServerError as error:
+            if error.code in codes:
+                return None
+            raise
+    return attempt
+
+
+def _metadata(event):
+    return resolution.media_metadata(event.media_type, event.video_path, event.arr_instance_id)
+
+
 def _client(server, snapshot):
     if server == "emby":
         from emby.client import EmbyClient
@@ -104,9 +126,10 @@ def _client(server, snapshot):
 class RefreshDispatcher:
     PENDING_LIMIT = 128
 
-    def __init__(self, configuration, *, client_factory=_client):
+    def __init__(self, configuration, *, client_factory=_client, metadata_factory=_metadata):
         self.configuration = configuration
         self.client_factory = client_factory
+        self.metadata_factory = metadata_factory
         self.condition = Condition(RLock())
         self.servers = {}
 
@@ -147,8 +170,6 @@ class RefreshDispatcher:
             for snapshot in self.configuration.list():
                 server = snapshot.id
                 state = self._server(server)
-                if snapshot.kind == "emby" and event.operation not in {"download", "upload"}:
-                    continue
                 _revision, snapshot, changing = self._connection(server, state)
                 if not snapshot.enabled:
                     continue
@@ -209,9 +230,7 @@ class RefreshDispatcher:
             raise MediaServerError("sidecar_unsupported")
         with self.client_factory(server, snapshot) as client:
             guard()
-            if server == "emby":
-                result = client.refresh_item(event.media_type, mapped["path"], ensure_current=guard)
-            else:
+            if server == "silo":
                 libraries = client.get_libraries()
                 library = next((row for row in libraries if row["id"].lstrip("0") ==
                                 mapped["library_id"].lstrip("0")), None)
@@ -220,12 +239,56 @@ class RefreshDispatcher:
                                    for root in library["paths"])):
                     raise MediaServerError("library_invalid")
                 guard()
-                result = client.refresh_file(mapped["library_id"], mapped["path"], ensure_current=guard)
+            resolved = resolution.walk(self._ladder(client, server, event, mapped, guard))
             guard()
-            expected = "requested" if server == "emby" else "confirmed"
+            if resolved is None:
+                # Every rung this destination has missed, so it holds no such file.
+                raise MediaServerError("item_missing")
+            _rung, result, expected = resolved
             if result != {"status": expected}:
                 raise MediaServerError("invalid_response")
             return expected
+
+    def _ladder(self, client, server, event, mapped, guard):
+        """The rungs this destination declared it can climb, in ladder order.
+
+        The identifiers come out of the rows Bazarr already wrote, read here
+        rather than carried through every publication callback, and the rungs
+        that need them disappear when they cannot be read.
+        """
+        supported = set(getattr(client, "REFRESH_STEPS", ()) or ())
+        metadata = (self.metadata_factory(event)
+                    if supported & {resolution.PROVIDER_ID, resolution.TITLE_YEAR} else None)
+        if metadata is None:
+            supported -= {resolution.PROVIDER_ID, resolution.TITLE_YEAR}
+        if server == "emby":
+            # item_missing is Emby saying it holds no such file, which is a
+            # miss; item_ambiguous and every strict acceptance refusal are not,
+            # and must not be laundered into a refresh of something broader.
+            available = {
+                resolution.PROVIDER_ID: (lambda: client.refresh_by_provider_id(
+                    event.media_type, metadata, ensure_current=guard), "requested"),
+                resolution.TITLE_YEAR: (lambda: client.refresh_by_title_year(
+                    event.media_type, metadata, ensure_current=guard), "requested"),
+                resolution.PATH: (_misses_on(lambda: client.refresh_item(
+                    event.media_type, mapped["path"], ensure_current=guard), ("item_missing",)), "requested"),
+                resolution.LIBRARY: (lambda: client.refresh_library(
+                    event.media_type, mapped["path"], ensure_current=guard), "requested"),
+            }
+        else:
+            # Silo answers every path it cannot place, and every container its
+            # scanner does not read, with one 400. That is a miss: no retry of
+            # the same file scan can change it. A scan that ran and fell short
+            # is a failure and keeps its own code.
+            available = {
+                resolution.PATH: (_misses_on(lambda: client.refresh_file(
+                    mapped["library_id"], mapped["path"], ensure_current=guard),
+                    ("request_rejected",)), "confirmed"),
+                resolution.LIBRARY: (lambda: client.refresh_library(
+                    mapped["library_id"], ensure_current=guard), "requested"),
+            }
+        return [(name, *available[name]) for name in resolution.CHAIN
+                if name in supported and name in available]
 
     def _run(self, server, state):
         while True:

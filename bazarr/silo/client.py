@@ -1,13 +1,21 @@
 # coding=utf-8
 """Native Silo authentication, library selection and observed file scans."""
 
+from media_servers import resolution
 from media_servers.http import MediaServerError, MediaServerHTTP
 from typing import Callable
 
-from .scans import refresh_file
+from .scans import refresh_file, refresh_library
 
 
 class SiloClient:
+    # No identifier rungs, and not for want of asking: Silo's Jellyfin
+    # compatibility layer (10.12.0) answers /Items with no ProviderIds key on
+    # any item, so there is nothing a provider-id or title match could compare
+    # against. Bazarr talks to the native API, which addresses media by path
+    # and library, so the path is the first rung Silo can actually climb.
+    REFRESH_STEPS = (resolution.PATH, resolution.LIBRARY)
+
     def __init__(self, url: str, apikey: str, verify_ssl: bool = True):
         if not isinstance(apikey, str) or not apikey.strip() or any(ord(char) < 32 for char in apikey):
             raise MediaServerError("missing_credentials")
@@ -51,3 +59,7 @@ class SiloClient:
     def refresh_file(self, library_id: str, video_path: str, *, timeout: float = 90.0,
                      ensure_current: Callable[[], None] | None = None) -> dict:
         return refresh_file(self.http, library_id, video_path, timeout=timeout, ensure_current=ensure_current)
+
+    def refresh_library(self, library_id: str, *,
+                        ensure_current: Callable[[], None] | None = None) -> dict:
+        return refresh_library(self.http, library_id, ensure_current=ensure_current)

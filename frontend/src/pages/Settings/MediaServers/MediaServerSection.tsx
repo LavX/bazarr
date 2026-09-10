@@ -86,7 +86,7 @@ export default function MediaServerSection({
         <Check label="Enabled" settingKey={enabledKey} />
         <Text size="sm" c="dimmed">
           {kind === "emby"
-            ? "Notify Emby about movie and episode subtitle additions."
+            ? "Notify Emby about movie and episode subtitle changes."
             : "Notify Silo about movie and episode subtitle changes. Subtitle sidecars must be beside the video file."}
         </Text>
       </Section>

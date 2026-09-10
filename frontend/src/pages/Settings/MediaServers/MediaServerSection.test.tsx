@@ -703,3 +703,18 @@ it("shows an instance loading failure and retries the list without a settings wr
   await userEvent.click(screen.getByRole("button", { name: "Retry" }));
   await screen.findByText("No Emby instances yet");
 });
+
+it.each([
+  ["emby", "Notify Emby about movie and episode subtitle changes."],
+  [
+    "silo",
+    "Notify Silo about movie and episode subtitle changes. Subtitle sidecars must be beside the video file.",
+  ],
+] as const)(
+  "says every subtitle change reaches %s, not only new ones",
+  async (kind, copy) => {
+    setup(kind);
+    expect(await screen.findByText(copy)).toBeInTheDocument();
+    expect(screen.queryByText(/subtitle additions/i)).not.toBeInTheDocument();
+  },
+);

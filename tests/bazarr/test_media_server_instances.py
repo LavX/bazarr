@@ -40,6 +40,7 @@ def test_two_same_kind_destinations_keep_uuid_on_rename_and_safe_keys(schema_ses
 
 @pytest.mark.parametrize('kind', ['emby', 'silo'])
 def test_same_path_fanout_and_failure_retry_are_destination_scoped(schema_session, kind):
+    from media_servers import resolution
     from media_servers.repository import MediaServerInstanceRepository
     from media_servers.dispatcher import NativeConfiguration, RefreshDispatcher
     from media_servers.events import SubtitleMutation
@@ -51,6 +52,9 @@ def test_same_path_fanout_and_failure_retry_are_destination_scoped(schema_sessio
     calls, failures = [], {first.id}
 
     class Client:
+        # These fakes are about destination isolation, not about resolution, so
+        # they declare only the rung they implement: the exact path.
+        REFRESH_STEPS = (resolution.PATH,)
         def __init__(self, _kind, snapshot):
             self.snapshot = snapshot
         def __enter__(self):
@@ -86,7 +90,7 @@ def test_same_path_fanout_and_failure_retry_are_destination_scoped(schema_sessio
 @pytest.fixture
 def blocked_pair(schema_session, monkeypatch, request):
     from threading import Event
-    from media_servers import dispatcher as module
+    from media_servers import dispatcher as module, resolution
     from media_servers.repository import MediaServerInstanceRepository
     from app import config
     kind = request.param
@@ -98,6 +102,9 @@ def blocked_pair(schema_session, monkeypatch, request):
     first_id = first.id
     calls, started, release = [], Event(), Event()
     class Client:
+        # These fakes are about destination isolation, not about resolution, so
+        # they declare only the rung they implement: the exact path.
+        REFRESH_STEPS = (resolution.PATH,)
         def __init__(self, _kind, snapshot):
             self.snapshot = snapshot
         def __enter__(self):
