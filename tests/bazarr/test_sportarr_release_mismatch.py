@@ -102,7 +102,10 @@ def test_the_flag_is_computed_for_the_page_not_the_whole_library():
     from sportarr import workflows
 
     source = inspect.getsource(workflows.list_wanted)
-    page_at = source.index("page = rows[start : start + length]")
+    # The slice is taken first, whatever its exact shape: it now has to handle
+    # a fetch-all page, where the limit is None and the slice runs to the end.
+    page_at = source.index("page = rows[")
     flag_at = source.index("flagged_media_ids(")
     assert page_at < flag_at
     assert 'for row in page' in source
+    assert 'rows[start:]' in source and 'rows[start : start + limit]' in source
