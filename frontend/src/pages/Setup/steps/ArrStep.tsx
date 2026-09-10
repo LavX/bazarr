@@ -24,7 +24,7 @@ import type {
 import type { WizardStepProps } from "./types";
 
 export interface ArrStepProps extends WizardStepProps {
-  kind: "sonarr" | "radarr";
+  kind: "sonarr" | "radarr" | "sportarr";
   required?: boolean;
 }
 
@@ -34,6 +34,7 @@ const KIND_META: Record<
 > = {
   sonarr: { label: "Sonarr", media: "TV shows", port: 8989 },
   radarr: { label: "Radarr", media: "movies", port: 7878 },
+  sportarr: { label: "Sportarr", media: "sports events", port: 1867 },
 };
 
 function normalizeBaseUrl(value: string) {

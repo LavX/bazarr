@@ -25,6 +25,7 @@ function freshSettings(overrides: Partial<Settings.General> = {}) {
       general: {
         use_sonarr: false,
         use_radarr: false,
+        use_sportarr: false,
         enabled_providers: [],
         setup_complete: false,
         ...overrides,
@@ -75,6 +76,18 @@ describe("useOnboardingState", () => {
 
   it("returns needsOnboarding=false when use_radarr is true", () => {
     mockedSettings.mockReturnValue(freshSettings({ use_radarr: true }));
+    mockedInstances.mockReturnValue(instances([]));
+
+    const { result } = renderHook(() => useOnboardingState());
+
+    expect(result.current.needsOnboarding).toBe(false);
+  });
+
+  it("returns needsOnboarding=false when only Sportarr is turned on", () => {
+    // Left out of the check, a user who had configured Sportarr and nothing
+    // else was shown the first-run wizard as though the install were
+    // untouched.
+    mockedSettings.mockReturnValue(freshSettings({ use_sportarr: true }));
     mockedInstances.mockReturnValue(instances([]));
 
     const { result } = renderHook(() => useOnboardingState());
