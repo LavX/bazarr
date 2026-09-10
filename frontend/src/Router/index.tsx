@@ -27,11 +27,13 @@ import Authentication from "@/pages/Authentication";
 import BlacklistMoviesView from "@/pages/Blacklist/Movies";
 import BlacklistSeriesView from "@/pages/Blacklist/Series";
 import DiscoverView from "@/pages/Discover";
+import BlacklistSportsView from "@/pages/Blacklist/Sports";
 import DistributionHubView from "@/pages/DistributionHub";
 import Episodes from "@/pages/Episodes";
 import NotFound from "@/pages/errors/NotFound";
 import MoviesHistoryView from "@/pages/History/Movies";
 import SeriesHistoryView from "@/pages/History/Series";
+import SportsHistoryView from "@/pages/History/Sports";
 import MovieView from "@/pages/Movies";
 import MovieDetailView from "@/pages/Movies/Details";
 import SeriesView from "@/pages/Series";
@@ -47,7 +49,6 @@ import SettingsTranslatorView from "@/pages/Settings/Translator";
 import SettingsUIView from "@/pages/Settings/UI";
 import OnboardingWizardView from "@/pages/Setup/OnboardingWizard";
 import Sports from "@/pages/Sports";
-import SportsActivity from "@/pages/SportsActivity";
 import SportsEvents from "@/pages/SportsEvents";
 import SystemAnnouncementsView from "@/pages/System/Announcements";
 import SystemBackupsView from "@/pages/System/Backups";
@@ -57,6 +58,7 @@ import SystemReleasesView from "@/pages/System/Releases";
 import SystemTasksView from "@/pages/System/Tasks";
 import WantedMoviesView from "@/pages/Wanted/Movies";
 import WantedSeriesView from "@/pages/Wanted/Series";
+import WantedSportsView from "@/pages/Wanted/Sports";
 import { Environment } from "@/utilities";
 import Redirector from "./Redirector";
 import { RouterNames } from "./RouterNames";
@@ -145,8 +147,7 @@ export function useRoutes(): CustomRouteObject[] {
                 path: "sports",
                 name: "Sports",
                 hidden: !sportarr,
-
-                element: <SportsActivity kind="history" />,
+                element: <SportsHistoryView></SportsHistoryView>,
               },
               {
                 path: "series",
@@ -182,7 +183,7 @@ export function useRoutes(): CustomRouteObject[] {
                 name: "Sports",
                 hidden: !sportarr,
                 badge: data?.sports,
-                element: <SportsActivity kind="wanted" />,
+                element: <WantedSportsView></WantedSportsView>,
               },
               {
                 name: "Episodes",
@@ -210,8 +211,7 @@ export function useRoutes(): CustomRouteObject[] {
                 path: "sports",
                 name: "Sports",
                 hidden: !sportarr,
-
-                element: <SportsActivity kind="blacklist" />,
+                element: <BlacklistSportsView></BlacklistSportsView>,
               },
               {
                 path: "series",

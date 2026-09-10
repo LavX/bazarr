@@ -76,7 +76,10 @@ export interface SportsRecord {
   league_id: number;
   event_id: number;
   title: string;
+  /** Relative form for the column, as the episodes and movies endpoints send. */
   timestamp: string | null;
+  /** Exact date, shown in the column's popover. */
+  parsed_timestamp?: string | null;
   language: string | null;
   provider: string | null;
   subs_id: string | null;
@@ -126,7 +129,15 @@ class SportsApi extends BaseApi {
   jobStatus(id: number, owner: number) {
     return this.get<SportsJobStatus>(`/jobs/${id}`, { arr_instance_id: owner });
   }
-  activity(kind: "wanted" | "history" | "blacklist", filters: SportsFilters) {
+  // start/length rather than a page number, which is the contract every other
+  // paginated endpoint speaks and what usePaginationQuery sends. length -1 asks
+  // for the whole list, which the shared views use for library-wide filtering.
+  activity(
+    kind: "wanted" | "history" | "blacklist",
+    filters: SportsFilters,
+    start = 0,
+    length = 100,
+  ) {
     return this.get<{ data: (SportsEvent | SportsRecord)[]; total: number }>(
       `/${kind}`,
       {
@@ -135,8 +146,8 @@ class SportsApi extends BaseApi {
         language: filters.language || undefined,
         provider: filters.provider || undefined,
         action: filters.action || undefined,
-        start: ((filters.page ?? 1) - 1) * 100,
-        length: 100,
+        start,
+        length,
       },
     );
   }

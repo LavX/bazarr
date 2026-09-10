@@ -33,8 +33,10 @@ from sportarr.subtitles import (
     sports_file_publication,
     sports_history,
 )
+from sportarr.pagination import validate_page
 from sportarr.sync.leagues import notify, require_sportarr
 from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
+from utilities.pretty_date import pretty_date
 
 
 def list_records(
@@ -48,8 +50,7 @@ def list_records(
     provider=None,
     action=None,
 ):
-    if start < 0 or not 1 <= length <= 1000:
-        raise ValueError("Invalid pagination")
+    limit = validate_page(start, length)
     table = TableHistorySports if kind == "history" else TableBlacklistSports
     query = (
         select(table, TableSportsEvents.title)
@@ -80,11 +81,20 @@ def list_records(
     for row, title in session.execute(
         query.order_by(table.timestamp.desc(), table.id.desc())
         .offset(start)
-        .limit(length)
+        .limit(limit)
     ):
         item = row.to_dict()
         item.pop("artifact", None)
-        item["timestamp"] = row.timestamp.isoformat() if row.timestamp else None
+        # The same pair the episodes and movies history endpoints send: a
+        # relative form for the column and the exact date for its popover. The
+        # raw ISO string went out under both names, so the sports table printed
+        # a machine timestamp where the other two read "2 hours ago".
+        if row.timestamp:
+            item["timestamp"] = pretty_date(row.timestamp)
+            item["parsed_timestamp"] = row.timestamp.strftime("%x %X")
+        else:
+            item["timestamp"] = None
+            item["parsed_timestamp"] = None
         data.append(item | {"title": title})
     return {"data": data, "total": total}
 

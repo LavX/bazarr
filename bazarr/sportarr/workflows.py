@@ -19,6 +19,7 @@ from sportarr.connection import check_cancelled
 from sportarr.history import blacklist_history
 from sportarr.identity import resolve_event_in_session
 from sportarr.library import _event_query, _serialize_event, get_league
+from sportarr.pagination import validate_page
 from sportarr.sync.leagues import require_sportarr
 
 
@@ -69,10 +70,9 @@ def wanted_rows(session, arr_instance_id=None, league_id=None):
 
 
 def list_wanted(session, arr_instance_id=None, start=0, length=100):
-    if start < 0 or not 1 <= length <= 1000:
-        raise ValueError("Invalid pagination")
+    limit = validate_page(start, length)
     rows = wanted_rows(session, arr_instance_id)
-    page = rows[start : start + length]
+    page = rows[start:] if limit is None else rows[start : start + limit]
     # The same flag the episodes and movies wanted endpoints carry, so a
     # "subtitles exist but only for another release" diagnosis reaches the
     # sports page instead of being recorded and never shown.

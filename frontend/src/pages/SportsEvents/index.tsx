@@ -39,7 +39,7 @@ import {
 import { SportsEvent } from "@/apis/raw/sports";
 import { Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
-import SportsJobFeedback from "@/pages/SportsActivity/JobFeedback";
+import { SportsJobFeedback } from "@/components/bazarr";
 import ItemOverview from "@/pages/views/ItemOverview";
 import { navigateApp } from "@/utilities/whatsNew";
 import Table from "./table";

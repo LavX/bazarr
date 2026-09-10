@@ -1,0 +1,157 @@
+/* eslint-disable camelcase */
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { expect, it } from "vitest";
+import SportsHistoryView from "@/pages/History/Sports";
+import {
+  sportarr,
+  sportarrSibling,
+} from "@/pages/Settings/Connections/__tests__/fixtures";
+import { customRender, screen, waitFor, within } from "@/tests";
+import server from "@/tests/mocks/node";
+
+function owners(enabled = true) {
+  server.use(
+    http.get("/api/system/arr-instances", () =>
+      HttpResponse.json([
+        { ...sportarr, enabled },
+        { ...sportarrSibling, enabled },
+      ]),
+    ),
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({ general: { use_sportarr: enabled } }),
+    ),
+  );
+}
+
+const record = {
+  id: 9,
+  arr_instance_id: 42,
+  league_id: 7,
+  event_id: 11,
+  title: "Final",
+  timestamp: "2 hours ago",
+  parsed_timestamp: "09/08/26 10:00:00",
+  language: "en",
+  provider: "fixture",
+  subs_id: "release",
+  action: 1,
+  score: 100,
+  score_out_of: 180,
+};
+
+it("filters history and cancels, reopens, then excludes only the selected owner", async () => {
+  owners();
+  const user = userEvent.setup();
+  let filtered = false;
+  let posted: unknown;
+  server.use(
+    http.get("/api/sports/history", ({ request }) => {
+      filtered = new URL(request.url).searchParams.get("language") === "en";
+      return HttpResponse.json({ data: [record], total: 1 });
+    }),
+    http.post("/api/sports/history/9/blacklist", async ({ request }) => {
+      posted = await request.json();
+      return HttpResponse.json({
+        queued: true,
+        job_id: 100,
+        message: "Search queued",
+      });
+    }),
+    http.get("/api/sports/jobs/100", () =>
+      HttpResponse.json({
+        status: "completed",
+        message: "Release excluded",
+        result: {
+          file_status: "preserved",
+          replacement: {
+            message:
+              "File preserved because its current artifact could not be proven",
+          },
+        },
+      }),
+    ),
+  );
+  customRender(<SportsHistoryView />);
+  await screen.findByText("Final", undefined, { timeout: 8000 });
+  await user.type(screen.getByRole("textbox", { name: "Language" }), "en");
+  await waitFor(() => expect(filtered).toBe(true));
+  await user.click(screen.getByRole("button", { name: "Exclude" }));
+  let dialog = within(await screen.findByRole("dialog"));
+  await user.click(dialog.getByRole("button", { name: "Cancel" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(posted).toBeUndefined();
+  await user.click(screen.getByRole("button", { name: "Exclude" }));
+  dialog = within(await screen.findByRole("dialog"));
+  await user.click(dialog.getByRole("button", { name: "Exclude release" }));
+  expect(
+    await screen.findByText(
+      "File preserved because its current artifact could not be proven",
+    ),
+  ).toBeInTheDocument();
+  expect(posted).toEqual({ arr_instance_id: 42 });
+});
+
+it("offers no exclusion for a record that names no release", async () => {
+  owners();
+  server.use(
+    http.get("/api/sports/history", () =>
+      HttpResponse.json({
+        // A deletion. Excluding names a provider release, and a deletion,
+        // upload or sync has none to name.
+        data: [{ ...record, action: 0, provider: null, subs_id: null }],
+        total: 1,
+      }),
+    ),
+  );
+  customRender(<SportsHistoryView />);
+  await screen.findByText("Final", undefined, { timeout: 8000 });
+  expect(screen.queryByRole("button", { name: "Exclude" })).toBeNull();
+});
+
+it("shows the relative date the other history pages show", async () => {
+  owners();
+  server.use(
+    http.get("/api/sports/history", () =>
+      HttpResponse.json({ data: [record], total: 1 }),
+    ),
+  );
+  customRender(<SportsHistoryView />);
+  // The raw ISO string used to go out under both names, so this column printed
+  // a machine timestamp where Series and Movies read "2 hours ago".
+  expect(
+    await screen.findByText("2 hours ago", undefined, { timeout: 8000 }),
+  ).toBeInTheDocument();
+});
+
+it("shows the score as a percentage of what was available", async () => {
+  owners();
+  server.use(
+    http.get("/api/sports/history", () =>
+      HttpResponse.json({ data: [record], total: 1 }),
+    ),
+  );
+  customRender(<SportsHistoryView />);
+  // 100 of a possible 180.
+  expect(
+    await screen.findByText("56%", undefined, { timeout: 8000 }),
+  ).toBeInTheDocument();
+});
+
+it("does not request history when every owner is disabled", async () => {
+  owners(false);
+  let calls = 0;
+  server.use(
+    http.get("/api/sports/history", () => {
+      calls++;
+      return HttpResponse.json({ data: [], total: 0 });
+    }),
+  );
+  customRender(<SportsHistoryView />);
+  expect(
+    await screen.findByText(
+      "Enable a Sportarr instance in Connections to view sports.",
+    ),
+  ).toBeInTheDocument();
+  expect(calls).toBe(0);
+});

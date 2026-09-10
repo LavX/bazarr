@@ -349,6 +349,11 @@ export function useBatchAction() {
       void client.invalidateQueries({
         queryKey: [QueryKeys.System, QueryKeys.History],
       });
+      // Sports rows can be in a batch now, and their library, wanted, history
+      // and exclusion queries all live under this one root.
+      void client.invalidateQueries({
+        queryKey: [QueryKeys.Sports],
+      });
       void client.invalidateQueries({
         queryKey: [QueryKeys.Translator],
       });

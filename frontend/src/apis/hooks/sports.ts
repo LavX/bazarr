@@ -1,7 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { usePaginationQuery } from "@/apis/queries/hooks";
 import { QueryKeys } from "@/apis/queries/keys";
-import sports, { SportsFilters, SportsLeague } from "@/apis/raw/sports";
+import sports, {
+  SportsEvent,
+  SportsFilters,
+  SportsLeague,
+  SportsRecord,
+} from "@/apis/raw/sports";
 import { useArrInstances } from "./arrInstances";
 // Imported from the defining module, not the barrel: index re-exports this
 // file, so going through "." would close an import cycle.
@@ -164,25 +169,163 @@ export function useIndexSportsSubtitles() {
   });
 }
 
-export function useSportsActivity(
+// A sports event in the shape the shared WantedView table expects. The sports
+// API sends missing_subtitles as bare language keys ("en", "hu:hi") while
+// Wanted.Base carries Subtitle objects, so the gap is closed here rather than by
+// widening the shared type for one caller.
+export type SportsWantedRow = Wanted.Base & {
+  id: number;
+  arr_instance_id: number;
+  league_id: number;
+  title: string;
+};
+
+function toSubtitle(key: string): Subtitle {
+  const [code2, ...modifiers] = key.split(":");
+  const lower = modifiers.map((modifier) => modifier.toLowerCase());
+  return {
+    code2,
+    name: code2,
+    hi: lower.includes("hi"),
+    forced: lower.includes("forced"),
+    // A wanted language names a file that does not exist yet.
+    path: null,
+  };
+}
+
+export function toSportsWantedRow(event: SportsEvent): SportsWantedRow {
+  return {
+    id: event.id,
+    arr_instance_id: event.arr_instance_id,
+    league_id: event.league_id,
+    title: event.title,
+    monitored: true,
+    tags: [],
+    sceneName: event.sceneName ?? undefined,
+    hearing_impaired: false,
+    missing_subtitles: (event.missing_subtitles ?? []).map(toSubtitle),
+    release_mismatch: (event as SportsEvent & { release_mismatch?: boolean })
+      .release_mismatch,
+  };
+}
+
+// A sports history or exclusion record in the shape the shared HistoryView and
+// blacklist tables expect.
+export type SportsActivityRow = Omit<
+  SportsRecord,
+  "language" | "description" | "provider" | "score" | "subs_id"
+> &
+  History.Base & {
+    league_id: number;
+    event_id: number;
+    title: string;
+    score_out_of?: number | null;
+    /** The raw indexed key ("en", "en:hi"), which the filter matches on. */
+    language_key: string | null;
+    /** The raw provider score, which the percentage column divides. */
+    score_value: number | null;
+  };
+
+export function toSportsActivityRow(record: SportsRecord): SportsActivityRow {
+  return {
+    ...record,
+    action: record.action ?? -1,
+    description: record.description ?? "",
+    // The shared History columns render a Language.Info, while the sports
+    // tables store the indexed key. Both are kept: the badge needs the object,
+    // the filter matches the key.
+    language: record.language ? toSubtitle(record.language) : undefined,
+    language_key: record.language,
+    provider: record.provider ?? undefined,
+    // History.Base types score as the display string; the raw number stays
+    // beside it because the sports column shows a percentage of score_out_of.
+    score:
+      record.score != null && record.score_out_of
+        ? `${Math.round((record.score * 100) / record.score_out_of)}%`
+        : undefined,
+    score_value: record.score ?? null,
+    subs_id: record.subs_id ?? undefined,
+    // The sports tables record none of these, and the shared History columns
+    // read them unguarded. Stated here rather than left undefined so a column
+    // that reaches for a `.length` cannot crash the page. Exclusion state is
+    // not one of them: a sports exclusion lives in its own table keyed on the
+    // provider release, not as a flag on the history row.
+    blacklisted: false,
+    upgradable: false,
+    monitored: true,
+    tags: [],
+    matches: [],
+    dont_matches: [],
+    parsed_timestamp: record.parsed_timestamp ?? "",
+    timestamp: record.timestamp ?? "",
+    subtitles_path: record.subtitles_path ?? "",
+  };
+}
+
+function useSportsActivityPagination<T extends object>(
   kind: "wanted" | "history" | "blacklist",
   filters: SportsFilters,
+  map: (row: never) => T,
+  fetchAll = false,
 ) {
   const { enabled, instances } = useSportsAvailability();
-  return useQuery({
-    queryKey: [
-      QueryKeys.Sports,
-      kind,
-      filters,
-      instances.map((instance) => instance.id),
-    ],
-    queryFn: () => sports.activity(kind, filters),
-    enabled:
-      enabled &&
-      (filters.owner === undefined ||
-        instances.some((instance) => instance.id === filters.owner)),
-  });
+  const ownerKnown =
+    filters.owner === undefined ||
+    instances.some((instance) => instance.id === filters.owner);
+  return usePaginationQuery<T>(
+    [QueryKeys.Sports, kind, filters, instances.map((instance) => instance.id)],
+    async (param) => {
+      // Guarded inside the fetcher rather than by an enabled flag, the way the
+      // leagues query is: the page calls this hook unconditionally, and an
+      // empty page here means no request goes out for an install with no
+      // enabled Sportarr, or for an owner that has just been disabled.
+      if (!enabled || !ownerKnown) {
+        return { data: [], total: 0 };
+      }
+      const response = await sports.activity(
+        kind,
+        filters,
+        param.start,
+        param.length,
+      );
+      return {
+        data: response.data.map(map as (row: unknown) => T),
+        total: response.total,
+      };
+    },
+    false,
+    fetchAll,
+  );
 }
+
+export function useSportsWantedPagination(
+  filters: SportsFilters,
+  fetchAll = false,
+) {
+  return useSportsActivityPagination<SportsWantedRow>(
+    "wanted",
+    filters,
+    toSportsWantedRow as (row: never) => SportsWantedRow,
+    fetchAll,
+  );
+}
+
+export function useSportsHistoryPagination(filters: SportsFilters) {
+  return useSportsActivityPagination<SportsActivityRow>(
+    "history",
+    filters,
+    toSportsActivityRow as (row: never) => SportsActivityRow,
+  );
+}
+
+export function useSportsBlacklistPagination(filters: SportsFilters) {
+  return useSportsActivityPagination<SportsActivityRow>(
+    "blacklist",
+    filters,
+    toSportsActivityRow as (row: never) => SportsActivityRow,
+  );
+}
+
 export function useSportsAction() {
   const client = useQueryClient();
   return useMutation({

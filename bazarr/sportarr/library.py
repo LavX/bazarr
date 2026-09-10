@@ -7,6 +7,7 @@ from app.database import TableArrInstances, TableSportsLeagues, TableSportsEvent
 from arr_instances.media_defaults import instance_default_profile, read_media_defaults
 from sportarr.db import sports_transaction
 from sportarr.sync.leagues import require_sportarr
+from sportarr.pagination import validate_page
 from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
 
 
@@ -41,13 +42,14 @@ def _serialize(row):
 
 
 def list_leagues(session, arr_instance_id=None, start=0, length=100):
+    limit = validate_page(start, length)
     query = _query()
     if arr_instance_id is not None:
         require_sportarr(session, arr_instance_id)
         query = query.where(TableSportsLeagues.arr_instance_id == arr_instance_id)
     total = session.execute(select(func.count()).select_from(query.subquery())).scalar_one()
     rows = session.execute(query.order_by(TableSportsLeagues.sortTitle, TableSportsLeagues.id)
-                           .offset(start).limit(length)).all()
+                           .offset(start).limit(limit)).all()
     return {'data': [_serialize(row) for row in rows], 'total': total}
 
 
@@ -127,8 +129,7 @@ def _serialize_event(row):
 
 
 def list_events(session, league_id, arr_instance_id=None, start=0, length=100):
-    if start < 0 or not 1 <= length <= 1000:
-        raise ValueError('Invalid pagination')
+    limit = validate_page(start, length)
     league = get_league(session, league_id, arr_instance_id)
     if league is None:
         raise ValueError('League not found for this owner')
@@ -136,7 +137,7 @@ def list_events(session, league_id, arr_instance_id=None, start=0, length=100):
     count = session.execute(select(func.count()).select_from(query.subquery())).scalar_one()
     rows = session.execute(query.order_by(TableSportsEvents.eventDate.desc(), TableSportsEvents.sportarrEventId,
                                          TableSportsEvents.partNumber, TableSportsEvents.id)
-                           .offset(start).limit(length)).all()
+                           .offset(start).limit(limit)).all()
     return {'data': [_serialize_event(row) for row in rows], 'total': count}
 
 
