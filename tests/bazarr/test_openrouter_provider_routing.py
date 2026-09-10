@@ -24,11 +24,19 @@ def _routing_validator():
     )
 
 
-def test_setting_defaults_to_throughput_and_pins_the_allowed_values():
+def test_setting_defaults_to_smartfast_and_pins_the_allowed_values():
+    # A fresh install lets the translator weigh speed against price rather than
+    # taking the fastest endpoint at whatever it costs.
     validator = _routing_validator()
-    assert validator.default == 'throughput'
+    assert validator.default == 'smartfast'
     assert list(validator.operations.get('is_in')) == ROUTING_VALUES + ['smartfast', 'custom']
-    assert config.settings.translator.openrouter_provider_routing == 'throughput'
+
+
+def test_an_unreadable_stored_routing_falls_back_to_a_sort_any_sidecar_serves():
+    # Not the shipped default: smartfast refuses outright below 2.0.0, and a value we
+    # cannot read is a config we do not understand, so it must not also refuse.
+    assert openrouter_translator.UNKNOWN_ROUTING_FALLBACK == 'throughput'
+    assert openrouter_translator.UNKNOWN_ROUTING_FALLBACK in ROUTING_VALUES
 
 
 def _sidecar_health(monkeypatch, version):

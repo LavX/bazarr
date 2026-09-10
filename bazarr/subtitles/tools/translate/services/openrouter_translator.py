@@ -25,7 +25,11 @@ from .auth import get_translator_auth_headers
 logger = logging.getLogger(__name__)
 
 PROVIDER_ROUTING_VALUES = ('throughput', 'nitro', 'price', 'floor', 'latency', 'default', 'smartfast', 'custom')
-DEFAULT_PROVIDER_ROUTING = 'throughput'
+DEFAULT_PROVIDER_ROUTING = 'smartfast'
+# What a value outside PROVIDER_ROUTING_VALUES falls back to, which is deliberately not
+# the shipped default: a stored value we cannot read is a config we do not understand, and
+# smartfast refuses outright on an older sidecar. The plain sort translates on any of them.
+UNKNOWN_ROUTING_FALLBACK = 'throughput'
 # Sidecars before this version forward provider.sort to OpenRouter verbatim, which
 # rejects nitro, floor and default; a selector set to one of those three gets the plain
 # sort each value stands for. Custom routing is gated on the same version because that is
@@ -132,8 +136,8 @@ def build_routing_config():
     """
     routing = getattr(settings.translator, 'openrouter_provider_routing', DEFAULT_PROVIDER_ROUTING)
     if routing not in PROVIDER_ROUTING_VALUES:
-        logger.warning("Unknown OpenRouter provider routing '%s', using %s", routing, DEFAULT_PROVIDER_ROUTING)
-        routing = DEFAULT_PROVIDER_ROUTING
+        logger.warning("Unknown OpenRouter provider routing '%s', using %s", routing, UNKNOWN_ROUTING_FALLBACK)
+        routing = UNKNOWN_ROUTING_FALLBACK
     model = getattr(settings.translator, 'openrouter_model', '')
     typed = _typed_routing_suffix(model)
     if routing not in ('smartfast', 'custom') and typed == 'smartfast':

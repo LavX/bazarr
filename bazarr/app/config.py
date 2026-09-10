@@ -262,11 +262,15 @@ validators = [
     Validator('translator.openrouter_reasoning', must_exist=True, default='disabled', is_type_of=str,
               is_in=['disabled', 'low', 'medium', 'high']),
     Validator('translator.openrouter_parallel_batches', must_exist=True, default=4, is_type_of=int, gte=1, lte=8),
-    # Which OpenRouter provider serves the model: throughput (the sidecar's historical default),
-    # nitro/floor (OpenRouter's slug shortcuts, which also unlock the priority/flex tiers),
-    # price, latency, OpenRouter's own load balancing, smartfast (the sidecar weighs speed
-    # against price itself, per model and per session), or explicit provider selection.
-    Validator('translator.openrouter_provider_routing', must_exist=True, default='throughput', is_type_of=str,
+    # Which OpenRouter provider serves the model: smartfast (the default, where the sidecar
+    # weighs speed against price itself, per model and per session), throughput (the sidecar's
+    # historical default, fastest and often needlessly expensive), nitro/floor (OpenRouter's
+    # slug shortcuts, which also unlock the priority/flex tiers), price, latency, OpenRouter's
+    # own load balancing, or explicit provider selection.
+    #
+    # smartfast needs AI Subtitle Translator 2.0.0. A new install pointed at an older one is
+    # told to update rather than being routed some other way behind the user's back.
+    Validator('translator.openrouter_provider_routing', must_exist=True, default='smartfast', is_type_of=str,
               is_in=['throughput', 'nitro', 'price', 'floor', 'latency', 'default', 'smartfast', 'custom']),
     Validator('translator.openrouter_provider_order', must_exist=True, default=[], is_type_of=list,
               cast=normalize_openrouter_provider_order),

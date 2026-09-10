@@ -61,10 +61,12 @@ describe("Translator options", () => {
     ]);
   });
 
-  it("provider routing marks throughput as the default", () => {
-    const throughput = aiTranslatorProviderRoutingOptions.find(
-      (o) => o.value === "throughput",
+  it("provider routing marks smartfast as the default, and only smartfast", () => {
+    // The selector is where a user learns what an untouched install does, so exactly
+    // one option may claim it and it has to be the one the backend validator ships.
+    const labelled = aiTranslatorProviderRoutingOptions.filter((o) =>
+      o.label.includes("Default"),
     );
-    expect(throughput?.label).toContain("Default");
+    expect(labelled.map((o) => o.value)).toEqual(["smartfast"]);
   });
 });

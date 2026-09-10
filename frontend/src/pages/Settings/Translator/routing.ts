@@ -4,9 +4,9 @@ import { SelectorOption } from "@/components/inputs/Selector";
 // translator.openrouter_provider_routing; the sidecar turns nitro and floor into
 // OpenRouter slug shortcuts; SmartFast and Custom are sent through the translator API.
 export const aiTranslatorProviderRoutingOptions: SelectorOption<string>[] = [
-  { label: "SmartFast (speed + price)", value: "smartfast" },
+  { label: "SmartFast (speed + price, Default)", value: "smartfast" },
   { label: "Custom (selected providers)", value: "custom" },
-  { label: "Fastest (Default)", value: "throughput" },
+  { label: "Fastest", value: "throughput" },
   { label: "Fastest + priority tier (:nitro)", value: "nitro" },
   { label: "Cheapest", value: "price" },
   { label: "Cheapest + flex tier (:floor)", value: "floor" },
