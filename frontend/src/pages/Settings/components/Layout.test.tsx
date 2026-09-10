@@ -118,7 +118,6 @@ describe("Settings layout", () => {
       </Layout>,
     );
 
-    // Something has to be staged, or the shortcut does nothing at all.
     await user.click(screen.getByRole("button", { name: "Stage change" }));
 
     const input = screen.getByLabelText("Commits on blur");
@@ -164,5 +163,60 @@ describe("Settings layout", () => {
     expect(submitted[0]["settings-general-instance_name"]).toBe(
       "typed-then-enter",
     );
+  });
+});
+
+describe("Settings layout keyboard save", () => {
+  it("saves a blur-staged field that is the only change", async () => {
+    // The staged count used to be read before the blur, so a field that stages only
+    // when it is left was not counted yet when the keystroke arrived. The shortcut
+    // then returned without submitting, and silently threw the typing away.
+    const submitted: LooseObject[] = [];
+    server.use(
+      http.post("/api/system/settings", async ({ request }) => {
+        const form = await request.formData();
+        submitted.push(Object.fromEntries(form.entries()));
+        return HttpResponse.json({});
+      }),
+    );
+
+    const user = userEvent.setup();
+    customRender(
+      <Layout name="Test Settings">
+        <CommitOnBlurInput />
+      </Layout>,
+    );
+
+    await user.click(screen.getByLabelText("Commits on blur"));
+    await user.keyboard("only-change");
+    await user.keyboard("{Control>}s{/Control}");
+
+    await waitFor(() => {
+      expect(submitted).toHaveLength(1);
+    });
+    expect(submitted[0]["settings-general-instance_name"]).toBe("only-change");
+  });
+
+  it("submits nothing when there is nothing to save", async () => {
+    const submitted: LooseObject[] = [];
+    server.use(
+      http.post("/api/system/settings", async ({ request }) => {
+        const form = await request.formData();
+        submitted.push(Object.fromEntries(form.entries()));
+        return HttpResponse.json({});
+      }),
+    );
+
+    const user = userEvent.setup();
+    customRender(
+      <Layout name="Test Settings">
+        <Text>Nothing staged</Text>
+      </Layout>,
+    );
+
+    await user.keyboard("{Control>}s{/Control}");
+
+    expect(await screen.findByText("Nothing staged")).toBeInTheDocument();
+    expect(submitted).toHaveLength(0);
   });
 });

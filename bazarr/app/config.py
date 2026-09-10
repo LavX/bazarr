@@ -264,7 +264,8 @@ validators = [
     Validator('translator.openrouter_parallel_batches', must_exist=True, default=4, is_type_of=int, gte=1, lte=8),
     # Which OpenRouter provider serves the model: throughput (the sidecar's historical default),
     # nitro/floor (OpenRouter's slug shortcuts, which also unlock the priority/flex tiers),
-    # price, latency, OpenRouter's own load balancing, or explicit provider selection.
+    # price, latency, OpenRouter's own load balancing, smartfast (the sidecar weighs speed
+    # against price itself, per model and per session), or explicit provider selection.
     Validator('translator.openrouter_provider_routing', must_exist=True, default='throughput', is_type_of=str,
               is_in=['throughput', 'nitro', 'price', 'floor', 'latency', 'default', 'smartfast', 'custom']),
     Validator('translator.openrouter_provider_order', must_exist=True, default=[], is_type_of=list,
@@ -934,14 +935,46 @@ def _active_provider_hub_provider_ids():
         return set()
 
 
+def _require_provider_order_for_custom_routing(settings_items):
+    """Refuse custom OpenRouter routing that names no provider.
+
+    The routing and the provider list arrive in the same request and only mean anything
+    together. Stored apart, custom with an empty list saves cleanly and then fails every
+    translation, and by that point the only signal is a failed job. The pair is checked
+    against what the request leaves behind, so clearing the list of a routing that is
+    already custom is refused the same way as selecting custom with nothing chosen.
+    """
+    submitted = {key.split('-')[-1].lower(): value for key, value in settings_items}
+    routing = submitted.get('openrouter_provider_routing',
+                            getattr(settings.translator, 'openrouter_provider_routing', ''))
+    if isinstance(routing, list):
+        routing = routing[0] if routing else ''
+    if str(routing).lower() != 'custom':
+        return
+    order = submitted.get('openrouter_provider_order',
+                          getattr(settings.translator, 'openrouter_provider_order', []))
+    if not order:
+        raise ValidationError('OpenRouter custom routing requires at least one provider slug. '
+                              'Choose a provider, or pick another routing option.')
+
+
 def save_settings(settings_items):
     # Validate repeated form values before applying any changes, including the
-    # single-value and empty-list representations used by the settings editor.
+    # single-value and empty-list representations used by the settings editor. The form
+    # key is matched on its last segment because the settings store underneath is
+    # case-insensitive: an exact-case comparison would let a case variant of the same key
+    # past the normalizer and leave a second, unvalidated copy of it in the config file.
+    # The key is rewritten to its canonical form, not just matched loosely: every later
+    # step here compares the last segment against array_keys and str_keys exactly, so a
+    # case variant that only got past this line would still be unwrapped into a bare
+    # string further down and stored as one.
     settings_items = [
-        (key, normalize_openrouter_provider_order([] if value == [''] else value))
-        if key == 'settings-translator-openrouter_provider_order' else (key, value)
+        ('settings-translator-openrouter_provider_order',
+         normalize_openrouter_provider_order([] if value == [''] else value))
+        if key.split('-')[-1].lower() == 'openrouter_provider_order' else (key, value)
         for key, value in settings_items
     ]
+    _require_provider_order_for_custom_routing(settings_items)
     configure_debug = False
     configure_captcha = False
     update_schedule = False

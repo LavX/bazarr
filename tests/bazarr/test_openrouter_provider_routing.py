@@ -228,7 +228,7 @@ def submit_request(mocker, monkeypatch):
         ):
             return api_mod.TranslatorJobs.post.__wrapped__(api_mod.TranslatorJobs())
 
-    return SimpleNamespace(send=send, post=post, messages=messages)
+    return SimpleNamespace(send=send, post=post, messages=messages, service=service)
 
 
 @pytest.mark.parametrize('boundary', ['queued', 'manual'])
@@ -345,7 +345,8 @@ def test_unsupported_selection_fails_clearly_without_submission(
         message = body['error']
     else:
         assert result is None
-        message = ' '.join(submit_request.messages)
+        assert submit_request.messages == []
+        message = submit_request.service.routing_error
     assert minimum in message
     assert routing in message.lower()
 
@@ -368,7 +369,8 @@ def test_invalid_custom_order_fails_before_any_network(
         assert 'provider' in result[0]['error'].lower()
     else:
         assert result is None
-        assert any('provider' in message.lower() for message in submit_request.messages)
+        assert submit_request.messages == []
+        assert 'provider' in (submit_request.service.routing_error or '').lower()
 
 
 def test_encrypted_queued_custom_request_preserves_routing(monkeypatch, submit_request):
@@ -442,4 +444,78 @@ def test_old_service_cannot_receive_a_typed_smartfast_model(monkeypatch, submit_
         assert '2.0.0' in result[0]['error']
     else:
         assert result is None
-        assert any('2.0.0' in message for message in submit_request.messages)
+        assert submit_request.messages == []
+        assert '2.0.0' in (submit_request.service.routing_error or '')
+
+
+@pytest.mark.parametrize('model, expected_model, expected_sort', [
+    # The last shortcut is the one the settings page adopted, and it is the only one that
+    # may survive: the sidecar reads a single trailing shortcut, so an earlier one left in
+    # place goes to OpenRouter as part of the model id and is rejected there.
+    ('deepseek/example:smartfast:nitro', 'deepseek/example:nitro', 'throughput'),
+    ('deepseek/example:nitro:floor', 'deepseek/example:floor', 'price'),
+    ('deepseek/example:nitro:free', 'deepseek/example:free:nitro', 'throughput'),
+    ('deepseek/example:free:floor', 'deepseek/example:free:floor', 'price'),
+])
+def test_a_stacked_model_id_keeps_only_the_adopted_shortcut(monkeypatch, model, expected_model, expected_sort):
+    _sidecar_health(monkeypatch, '1.3.4')
+    monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_model', model)
+    monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_routing', 'throughput')
+
+    assert openrouter_translator.build_routing_config() == (expected_model, {'sort': expected_sort})
+
+
+def test_a_smartfast_shortcut_in_front_of_a_variant_still_selects_smartfast(monkeypatch):
+    # Reading only the final colon segment missed this and forwarded :smartfast to
+    # OpenRouter, which has never heard of it.
+    _sidecar_health(monkeypatch, '2.0.0')
+    monkeypatch.setattr(openrouter_translator.settings.translator,
+                        'openrouter_model', 'deepseek/example:smartfast:thinking')
+    monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_routing', 'throughput')
+
+    assert openrouter_translator.build_routing_config() == (
+        'deepseek/example:thinking', {'sort': 'smartfast'})
+
+
+@pytest.mark.parametrize('routing, model, expected', [
+    ('throughput', '  deepseek/example:nitro  ', 'deepseek/example:nitro'),
+    ('throughput', '  deepseek/example  ', 'deepseek/example'),
+    ('price', ' deepseek/example:free ', 'deepseek/example:free'),
+])
+def test_a_padded_model_id_is_trimmed_before_it_is_sent(monkeypatch, routing, model, expected):
+    # A leading space still matched the old trailing-suffix test, so a padded id was
+    # detected, rewritten and sent with the padding intact.
+    _sidecar_health(monkeypatch, '1.3.4')
+    monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_model', model)
+    monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_routing', routing)
+
+    assert openrouter_translator.build_routing_config()[0] == expected
+
+
+def test_an_unknown_version_is_probed_again_soon(monkeypatch):
+    # Both new routings refuse outright on an unknown version, so a restarting sidecar's
+    # silence must not keep failing translations for the full five-minute interval.
+    calls = _sidecar_health(monkeypatch, None)
+    monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_url', 'http://sidecar:8765')
+    now = [0]
+    monkeypatch.setattr(openrouter_translator.time, 'monotonic', lambda: now[0])
+
+    assert openrouter_translator.sidecar_version('http://sidecar:8765') is None
+    now[0] = openrouter_translator.SIDECAR_VERSION_UNKNOWN_CACHE_SECONDS + 1
+    assert openrouter_translator.sidecar_version('http://sidecar:8765') is None
+
+    assert calls == ['http://sidecar:8765/health', 'http://sidecar:8765/health']
+    assert openrouter_translator.SIDECAR_VERSION_UNKNOWN_CACHE_SECONDS < openrouter_translator.SIDECAR_VERSION_CACHE_SECONDS
+
+
+def test_a_known_version_is_still_cached_for_the_full_interval(monkeypatch):
+    calls = _sidecar_health(monkeypatch, '1.3.4')
+    monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_url', 'http://sidecar:8765')
+    now = [0]
+    monkeypatch.setattr(openrouter_translator.time, 'monotonic', lambda: now[0])
+
+    assert openrouter_translator.sidecar_version('http://sidecar:8765') == (1, 3, 4)
+    now[0] = openrouter_translator.SIDECAR_VERSION_UNKNOWN_CACHE_SECONDS + 1
+    assert openrouter_translator.sidecar_version('http://sidecar:8765') == (1, 3, 4)
+
+    assert calls == ['http://sidecar:8765/health']

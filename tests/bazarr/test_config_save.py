@@ -216,3 +216,113 @@ def test_invalid_provider_order_does_not_partially_apply_settings(monkeypatch):
 
     assert config.settings.translator.openrouter_provider_routing == 'throughput'
     assert config.settings.translator.openrouter_provider_order == ['deepinfra']
+
+
+def _settings_save_harness(monkeypatch):
+    """save_settings with its persistence and schedule side effects stubbed out."""
+    from app import config
+
+    saved = []
+    monkeypatch.setattr(config, 'write_config', lambda: saved.append(dict(
+        routing=config.settings.translator.openrouter_provider_routing,
+        order=list(config.settings.translator.openrouter_provider_order),
+    )))
+    monkeypatch.setattr(config, 'validate_log_regex', lambda: None)
+    monkeypatch.setitem(sys.modules, 'app.database', SimpleNamespace(
+        database=SimpleNamespace(execute=lambda _statement: None),
+        update=lambda _model: _FakeUpdate(), System=object,
+    ))
+    return saved
+
+
+@pytest.mark.parametrize('starting_routing, starting_order, items', [
+    # Selecting custom while nothing is chosen, and nothing is stored either.
+    ('throughput', [], [('settings-translator-openrouter_provider_routing', ['custom'])]),
+    ('throughput', ['deepinfra'], [('settings-translator-openrouter_provider_routing', ['custom']),
+                                   ('settings-translator-openrouter_provider_order', [''])]),
+    # Clearing the list of a routing that is already custom.
+    ('custom', ['deepinfra'], [('settings-translator-openrouter_provider_order', [''])]),
+])
+def test_custom_routing_without_a_provider_is_refused_at_the_settings_boundary(
+        monkeypatch, starting_routing, starting_order, items):
+    # Stored apart, the pair saves cleanly and then fails every translation, and by then
+    # the only signal is a failed job. Both keys arrive in the same request, so the
+    # contradiction is visible here.
+    from dynaconf.validator import ValidationError
+    from app import config
+
+    saved = _settings_save_harness(monkeypatch)
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_routing', starting_routing)
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_order', starting_order)
+
+    with pytest.raises(ValidationError) as refusal:
+        config.save_settings(items)
+
+    assert 'provider' in str(refusal.value).lower()
+    assert saved == []
+    assert config.settings.translator.openrouter_provider_routing == starting_routing
+    assert config.settings.translator.openrouter_provider_order == starting_order
+
+
+@pytest.mark.parametrize('items, expected_order', [
+    ([('settings-translator-openrouter_provider_routing', ['custom']),
+      ('settings-translator-openrouter_provider_order', ['DeepInfra'])], ['deepinfra']),
+    # The list already stored counts: changing only the routing is allowed when it does.
+    ([('settings-translator-openrouter_provider_routing', ['custom'])], ['deepinfra']),
+])
+def test_custom_routing_with_a_provider_saves(monkeypatch, items, expected_order):
+    from app import config
+
+    saved = _settings_save_harness(monkeypatch)
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_routing', 'throughput')
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_order',
+                        ['deepinfra'] if len(items) == 1 else [])
+
+    config.save_settings(items)
+
+    assert saved == [{'routing': 'custom', 'order': expected_order}]
+
+
+@pytest.mark.parametrize('routing', ['throughput', 'smartfast'])
+def test_an_empty_provider_list_is_fine_for_every_other_routing(monkeypatch, routing):
+    from app import config
+
+    saved = _settings_save_harness(monkeypatch)
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_routing', 'custom')
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_order', ['deepinfra'])
+
+    config.save_settings([
+        ('settings-translator-openrouter_provider_routing', [routing]),
+        ('settings-translator-openrouter_provider_order', ['']),
+    ])
+
+    assert saved == [{'routing': routing, 'order': []}]
+
+
+def test_a_case_variant_of_the_provider_order_key_is_normalized_too(monkeypatch):
+    # The settings store underneath is case-insensitive, so matching the form key
+    # exactly let a case variant past the normalizer and left a second, unvalidated
+    # copy of the same setting in the config file.
+    from app import config
+
+    saved = _settings_save_harness(monkeypatch)
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_routing', 'throughput')
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_order', [])
+
+    config.save_settings([('settings-translator-OPENROUTER_PROVIDER_ORDER', [' DeepInfra ', 'deepinfra'])])
+
+    assert saved == [{'routing': 'throughput', 'order': ['deepinfra']}]
+
+
+def test_a_case_variant_carrying_an_invalid_list_is_refused_too(monkeypatch):
+    from dynaconf.validator import ValidationError
+    from app import config
+
+    _settings_save_harness(monkeypatch)
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_routing', 'throughput')
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_order', ['deepinfra'])
+
+    with pytest.raises(ValidationError):
+        config.save_settings([('settings-translator-OPENROUTER_PROVIDER_ORDER', ['bad provider'])])
+
+    assert config.settings.translator.openrouter_provider_order == ['deepinfra']

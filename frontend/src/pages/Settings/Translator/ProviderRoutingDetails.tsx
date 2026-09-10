@@ -25,10 +25,18 @@ function CustomProviders() {
   const order = useSettingValue<string[]>(ORDER_KEY) ?? [];
   const { setValue } = useFormActions();
   const { modelId } = splitRoutingSuffix(model ?? "");
+  // encodeURIComponent leaves dots alone, so a dot segment typed into the model field
+  // would survive it and the URL parser would then walk it back up out of /models/,
+  // turning a metadata lookup into a request for some other path on openrouter.ai.
+  const lookupId = modelId
+    .split("/")
+    .every((segment) => segment !== "." && segment !== "..")
+    ? modelId
+    : "";
   const catalog = useQuery({
-    queryKey: ["openrouter", "endpoints", modelId],
+    queryKey: ["openrouter", "endpoints", lookupId],
     queryFn: async ({ signal }) => {
-      const path = modelId.split("/").map(encodeURIComponent).join("/");
+      const path = lookupId.split("/").map(encodeURIComponent).join("/");
       const response = await fetch(
         `https://openrouter.ai/api/v1/models/${path}/endpoints`,
         {
@@ -39,23 +47,27 @@ function CustomProviders() {
       if (!response.ok) throw new Error("Provider metadata unavailable");
       return parseProviderEndpoints(await response.json());
     },
-    enabled: !!modelId,
+    enabled: !!lookupId,
     staleTime: 60_000,
     retry: false,
   });
   const [entryError, setEntryError] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
   const update = (values: string[]) => {
     const normalized = [
       ...new Set(
         values.map((value) => value.trim().toLowerCase()).filter(Boolean),
       ),
     ];
-    if (
-      normalized.length > 20 ||
-      normalized.some((slug) => !PROVIDER_SLUG.test(slug))
-    ) {
+    const rejected = normalized.filter((slug) => !PROVIDER_SLUG.test(slug));
+    if (normalized.length > 20 || rejected.length) {
+      // TagsInput clears its own search box before it tells us the value changed, so a
+      // rejected entry is already gone from the field by now. Naming it is what lets the
+      // user see what was wrong with it and type it again.
       setEntryError(
-        "Enter a valid provider slug, up to 160 characters, with no empty slash segments.",
+        rejected.length
+          ? `"${rejected[0]}" is not a valid provider slug. Use letters, numbers, dots, underscores, hyphens, and slashes between nonempty parts.`
+          : "Choose at most 20 providers.",
       );
       return;
     }
@@ -90,7 +102,12 @@ function CustomProviders() {
         }
         searchable
         value={null}
-        disabled={!modelId || order.length >= 20}
+        // A null value makes Mantine treat this as controlled, and a controlled Select
+        // never clears its own search text. Left to itself the box kept the term that
+        // found the provider just added, which the next search then filtered to nothing.
+        searchValue={search}
+        onSearchChange={setSearch}
+        disabled={!lookupId || order.length >= 20}
         data={(catalog.data ?? [])
           .filter((endpoint) => !order.includes(endpoint.tag))
           .map((endpoint) => ({
@@ -99,7 +116,10 @@ function CustomProviders() {
             disabled: !endpoint.available,
           }))}
         onChange={(value) => {
-          if (value) update([...order, value]);
+          if (value) {
+            update([...order, value]);
+            setSearch("");
+          }
         }}
         nothingFoundMessage="No available endpoints. You can enter a provider slug below."
       />
@@ -130,9 +150,15 @@ function CustomProviders() {
           <Group key={slug} justify="space-between" wrap="wrap">
             <Text size="xs">
               {index + 1}. {slug}
+              {/* A slug missing from a catalog that loaded is not merely unchecked:
+                  the catalog is the list of endpoints that serve this model, so its
+                  absence is proof. Since the request excludes every provider outside
+                  this list, saying so here is the only warning the user gets. */}
               {endpoint
                 ? ` | Input ${priceLabel(endpoint.inputPrice)}, output ${priceLabel(endpoint.outputPrice)}${endpoint.available ? "" : " | Unavailable"}`
-                : " | Price and availability unverified"}
+                : catalog.data
+                  ? " | Does not serve this model"
+                  : " | Price and availability unverified"}
             </Text>
             <Group gap={4}>
               <Button

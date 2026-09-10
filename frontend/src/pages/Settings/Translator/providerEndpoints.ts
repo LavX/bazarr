@@ -41,7 +41,13 @@ export function parseProviderEndpoints(payload: unknown): ProviderEndpoint[] {
       available: endpoint.status === 0,
       inputPrice: number(pricing.prompt),
       outputPrice: number(pricing.completion),
-      throughput: number(record(endpoint.throughput_last_30m).p50),
+      // OpenRouter reports this as a plain number of tokens per second, alongside
+      // latency_last_30m and uptime_last_30m, and sends null when it has no recent
+      // measurement. The object form is what the request parameter takes, not what
+      // the response carries, so it is only read as a fallback.
+      throughput:
+        number(endpoint.throughput_last_30m) ??
+        number(record(endpoint.throughput_last_30m).p50),
     });
   }
   return [...parsed.values()];

@@ -248,3 +248,51 @@ def test_poll_job_stops_at_twelve_hour_hard_cap(poll_clock, caplog):
         and "hard cap" in record.message
         for record in caplog.records
     )
+
+
+def _failing_service(tmp_path, mocker, failure):
+    """A service whose submission fails, with ``failure`` applied before it returns None."""
+    source = tmp_path / "input.srt"
+    destination = tmp_path / "output.srt"
+    source.write_text("1\n00:00:00,000 --> 00:00:02,000\nHello\n\n", encoding="utf-8")
+    service = _build_service(str(source), str(destination))
+
+    def _fail(lines_list, bazarr_job_id=None):
+        failure(service)
+        return None
+
+    mocker.patch.object(service, "_submit_and_poll", side_effect=_fail)
+    mocker.patch.object(openrouter_translator, "language_from_alpha2", return_value="English")
+    mocker.patch.object(openrouter_translator, "language_from_alpha3", return_value="Hungarian")
+    return service, source
+
+
+def test_translate_reports_a_routing_refusal_once_and_names_the_cause(tmp_path, mocker):
+    # _submit_and_poll records the refusal rather than announcing it, because translate()
+    # already reports every failed submission. Announcing in both put two notifications on
+    # screen for one failure, and the second one said less than the first.
+    detail = "OpenRouter custom routing requires at least one provider slug."
+    service, _ = _failing_service(tmp_path, mocker, lambda svc: setattr(svc, "routing_error", detail))
+
+    assert service.translate() is False
+
+    openrouter_translator.show_message.assert_called_once_with(f"AI translation failed: {detail}")
+
+
+def test_translate_keeps_the_generic_message_when_nothing_named_the_cause(tmp_path, mocker):
+    service, source = _failing_service(tmp_path, mocker, lambda svc: None)
+
+    assert service.translate() is False
+
+    openrouter_translator.show_message.assert_called_once_with(f"Translation failed for {source}")
+
+
+def test_translate_clears_a_routing_refusal_between_runs(tmp_path, mocker):
+    # routing_error outliving its run would relabel an unrelated later failure with a
+    # routing cause the user has already fixed.
+    service, source = _failing_service(tmp_path, mocker, lambda svc: None)
+    service.routing_error = "a refusal from an earlier run"
+
+    assert service.translate() is False
+
+    openrouter_translator.show_message.assert_called_once_with(f"Translation failed for {source}")

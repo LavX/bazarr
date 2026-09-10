@@ -27,9 +27,11 @@ function SwitchMode() {
 }
 function Harness({
   order = [],
+  model = "test/routing-free:free:smartfast",
   onValues,
 }: {
   order?: string[];
+  model?: string;
   onValues: (values: LooseObject) => void;
 }) {
   const form = useForm<FormValues>({
@@ -41,7 +43,7 @@ function Harness({
       value={
         {
           translator: {
-            openrouter_model: "test/routing-free:free:smartfast",
+            openrouter_model: model,
             openrouter_provider_routing: "custom",
             openrouter_provider_order: order,
           },
@@ -151,7 +153,11 @@ describe("custom provider settings", () => {
       "bad//slug{Enter}",
     );
     expect(staged[ORDER]).toEqual(["existing", "new-provider"]);
-    expect(screen.getByText(/Enter a valid provider slug/)).toBeInTheDocument();
+    // The message names the entry that was rejected: TagsInput has already cleared
+    // its own box by the time we see the change, so this is the only way back to it.
+    expect(
+      screen.getByText(/"bad\/\/slug" is not a valid provider slug/),
+    ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Use SmartFast" }));
     expect(staged[ROUTING]).toBe("smartfast");
     expect(staged[ORDER]).toEqual(["existing", "new-provider"]);
@@ -188,5 +194,119 @@ describe("provider metadata", () => {
     expect(priceLabel(0)).toBe("Free");
     expect(priceLabel(0.00000025)).toBe("$0.25/M");
     expect(() => parseProviderEndpoints({})).toThrow();
+  });
+});
+
+describe("provider metadata", () => {
+  const endpoint = (extra: LooseObject) => ({
+    ok: true,
+    json: async () => ({
+      data: {
+        endpoints: [
+          {
+            tag: "novita",
+            provider_name: "Novita",
+            status: 0,
+            pricing: { prompt: "0.0000005", completion: "0.000001" },
+            ...extra,
+          },
+        ],
+      },
+    }),
+  });
+
+  it("shows the throughput OpenRouter actually reports, a plain number of tokens per second", async () => {
+    // The response carries throughput_last_30m as a scalar next to latency_last_30m.
+    // Reading it as an object with a p50 key made the value null for every endpoint,
+    // so the speed signal the picker exists to give never appeared.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(endpoint({ throughput_last_30m: 62.4 })),
+    );
+    customRender(<Harness onValues={() => {}} />);
+    const user = userEvent.setup();
+
+    await user.click(
+      screen.getByRole("combobox", { name: "Add a provider for this model" }),
+    );
+
+    expect(
+      await screen.findByRole("option", { name: /62 tokens\/s/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("still reads a throughput object, should the response ever carry one", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(endpoint({ throughput_last_30m: { p50: 41 } })),
+    );
+    customRender(<Harness onValues={() => {}} />);
+    const user = userEvent.setup();
+
+    await user.click(
+      screen.getByRole("combobox", { name: "Add a provider for this model" }),
+    );
+
+    expect(
+      await screen.findByRole("option", { name: /41 tokens\/s/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("never looks up a model id carrying a dot segment", async () => {
+    // encodeURIComponent leaves dots alone, so "../../../../v1/auth/keys" would have
+    // resolved to a different path on openrouter.ai entirely.
+    const fetcher = vi.fn().mockResolvedValue(endpoint({}));
+    vi.stubGlobal("fetch", fetcher);
+
+    customRender(
+      <Harness model="../../../../v1/auth/keys" onValues={() => {}} />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("combobox", { name: "Add a provider for this model" }),
+      ).toBeDisabled(),
+    );
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("clears the search box after a provider is added", async () => {
+    // A null value makes the Select controlled, and a controlled Select does not clear
+    // its own search text. The leftover term then filtered the next search to nothing.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(endpoint({})));
+    customRender(<Harness onValues={() => {}} />);
+    const user = userEvent.setup();
+    const search = screen.getByRole("combobox", {
+      name: "Add a provider for this model",
+    });
+
+    await user.click(search);
+    await user.type(search, "nov");
+    await user.click(await screen.findByRole("option", { name: /Novita/ }));
+
+    await waitFor(() => expect(search).toHaveValue(""));
+  });
+
+  it("says a chosen provider cannot serve the model, rather than that it could not be checked", async () => {
+    // The catalog lists the endpoints that serve this model, so a slug missing from a
+    // catalog that loaded is proven wrong, not merely unchecked. The request excludes
+    // every provider outside the list, so this is the only warning the user gets.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(endpoint({})));
+
+    customRender(<Harness order={["deepinfra"]} onValues={() => {}} />);
+
+    expect(
+      await screen.findByText(/deepinfra \| Does not serve this model/),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps saying availability is unverified when the lookup failed", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
+
+    customRender(<Harness order={["deepinfra"]} onValues={() => {}} />);
+
+    expect(
+      await screen.findByText(/deepinfra \| Price and availability unverified/),
+    ).toBeInTheDocument();
   });
 });

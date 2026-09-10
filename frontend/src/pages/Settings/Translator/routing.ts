@@ -34,24 +34,28 @@ export interface SplitModelId {
 // the id would contradict the selector, because both the Bazarr backend and the
 // sidecar read a shortcut off the model id and let it beat the configured sort.
 export function splitRoutingSuffix(rawModelId: string): SplitModelId {
-  let modelId = (rawModelId ?? "").trim();
-  let routing: RoutingSuffix | null = null;
-
-  for (;;) {
-    const colon = modelId.lastIndexOf(":");
-    if (colon <= 0) {
-      return { modelId, routing };
-    }
-
-    const tail = modelId.slice(colon + 1).toLowerCase();
-    const found = ROUTING_SUFFIXES.find((suffix) => suffix === tail);
-    if (!found) {
-      return { modelId, routing };
-    }
-
-    routing = routing ?? found;
-    modelId = modelId.slice(0, colon);
+  const trimmed = (rawModelId ?? "").trim();
+  const colon = trimmed.indexOf(":");
+  if (colon <= 0) {
+    return { modelId: trimmed, routing: null };
   }
+
+  // Every position is examined, not just the tail. A shortcut sitting in front of a
+  // genuine variant, as in model:nitro:free, is still a shortcut, and the Bazarr
+  // backend removes it from anywhere; stopping at the first non-routing tail here
+  // left the two disagreeing about which model the request is even for.
+  const asSuffix = (part: string) =>
+    ROUTING_SUFFIXES.find((suffix) => suffix === part.toLowerCase()) ?? null;
+  const variants = trimmed.slice(colon + 1).split(":");
+  const shortcuts = variants.map(asSuffix).filter((s) => s !== null);
+
+  return {
+    modelId: [
+      trimmed.slice(0, colon),
+      ...variants.filter((p) => !asSuffix(p)),
+    ].join(":"),
+    routing: shortcuts.length ? shortcuts[shortcuts.length - 1] : null,
+  };
 }
 
 export function routingLabel(value: string): string {

@@ -102,16 +102,30 @@ const Layout: FunctionComponent<Props> = (props) => {
   // Without it a save keeps the value the field held before the user's last
   // edit. Every route into a save goes through here: the Save button, Enter in
   // a field, and the keyboard shortcut below.
-  const commitAndSubmit = useCallback(() => {
-    const focused = document.activeElement;
-    if (focused instanceof HTMLElement) {
-      focused.blur();
-    }
+  const commitAndSubmit = useCallback(
+    (onlyWhenStaged = false) => {
+      const focused = document.activeElement;
+      if (focused instanceof HTMLElement) {
+        focused.blur();
+      }
 
-    // formRef, not form: a blur handler restages values, and the closure this
-    // was created in would otherwise submit the ones captured before it ran.
-    window.setTimeout(() => formRef.current.onSubmit(submit)(), 0);
-  }, [submit]);
+      // formRef, not form: a blur handler restages values, and the closure this
+      // was created in would otherwise submit the ones captured before it ran.
+      window.setTimeout(() => {
+        // Counted after the blur, never before it. A field that stages only on blur
+        // is not in the count yet when a keystroke arrives, so gating on the earlier
+        // number silently discarded whatever the user had just typed into one.
+        if (
+          onlyWhenStaged &&
+          !Object.keys(formRef.current.values.settings).length
+        ) {
+          return;
+        }
+        formRef.current.onSubmit(submit)();
+      }, 0);
+    },
+    [submit],
+  );
 
   const onFormSubmit = useCallback(
     (e: FormEvent<HTMLFormElement>) => {
@@ -126,14 +140,12 @@ const Layout: FunctionComponent<Props> = (props) => {
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === "s") {
         e.preventDefault();
-        if (totalStagedCount > 0) {
-          commitAndSubmit();
-        }
+        commitAndSubmit(true);
       }
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [commitAndSubmit, totalStagedCount]);
+  }, [commitAndSubmit]);
 
   return (
     <SettingsProvider value={settings ?? null}>

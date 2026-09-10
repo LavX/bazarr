@@ -22,9 +22,14 @@ function RoutingSetter() {
   const { setValue } = useFormActions();
 
   return (
-    <button type="button" onClick={() => setValue("throughput", ROUTING_KEY)}>
-      Set routing to throughput
-    </button>
+    <>
+      <button type="button" onClick={() => setValue("throughput", ROUTING_KEY)}>
+        Set routing to throughput
+      </button>
+      <button type="button" onClick={() => setValue("custom", ROUTING_KEY)}>
+        Set routing to custom
+      </button>
+    </>
   );
 }
 
@@ -243,5 +248,45 @@ describe("AIModelSelector routing adoption", () => {
     expect(
       await screen.findByText(/moved .*:floor.* into provider routing/i),
     ).toBeInTheDocument();
+  });
+});
+
+describe("AIModelSelector against an explicit Custom selection", () => {
+  it("keeps Custom routing and only takes the shortcut off the model id", async () => {
+    // Custom names providers. A shortcut typed into this field used to flip the
+    // selector away from it on blur, orphaning that list without saying so, which
+    // is the opposite of how the backend resolves the same pair.
+    const user = userEvent.setup();
+    const stagedValues = mountSelector();
+    await user.click(
+      screen.getByRole("button", { name: "Set routing to custom" }),
+    );
+
+    const input = screen.getByRole("combobox");
+    await user.clear(input);
+    await user.type(input, "some/model:floor");
+    await user.tab();
+
+    await waitFor(() => expect(stagedValues[MODEL_KEY]).toBe("some/model"));
+    expect(stagedValues[ROUTING_KEY]).toBe("custom");
+    expect(
+      screen.getByText(/Provider Routing stays.*Custom/),
+    ).toBeInTheDocument();
+  });
+
+  it("still adopts a shortcut for every other routing", async () => {
+    const user = userEvent.setup();
+    const stagedValues = mountSelector();
+    await user.click(
+      screen.getByRole("button", { name: "Set routing to throughput" }),
+    );
+
+    const input = screen.getByRole("combobox");
+    await user.clear(input);
+    await user.type(input, "some/model:floor");
+    await user.tab();
+
+    await waitFor(() => expect(stagedValues[ROUTING_KEY]).toBe("floor"));
+    expect(stagedValues[MODEL_KEY]).toBe("some/model");
   });
 });
