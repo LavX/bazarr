@@ -1,24 +1,7 @@
 import os
 import logging
-import tempfile
 
 import pytest
-
-# A dedicated data directory for the whole suite. Importing a module that
-# pulls in app.database creates the engine and its tables eagerly, and with the
-# default location that lands a real bazarr.db inside the checkout. The boot
-# test that runs after pytest in CI then starts against those tables, which
-# were built from the ORM metadata rather than by a migration, and the sports
-# migration refuses to adopt a schema it cannot verify. Bazarr+ fails to start.
-# One directory for the whole run, not one per process: a pid-keyed path gives
-# every pytest invocation an empty tree, and a test that opens the real engine
-# then fails on a db/ directory that was never created. The tree is built here
-# rather than left to bazarr.init, which only runs for a full application boot.
-_TEST_CONFIG_DIR = os.environ.setdefault(
-    "BAZARR_CONFIG_DIR", os.path.join(tempfile.gettempdir(), "bazarr-test-data")
-)
-for _subdirectory in ("", "backup", "cache", "config", "db", "log", "restore"):
-    os.makedirs(os.path.join(_TEST_CONFIG_DIR, _subdirectory), exist_ok=True)
 
 os.environ["NO_CLI"] = "true"
 os.environ["SZ_USER_AGENT"] = "test"
