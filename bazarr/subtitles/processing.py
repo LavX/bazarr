@@ -309,12 +309,18 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         # Sonarr and Radarr each take a per-item Rescan command, which is why
         # they get one below.
         #
-        # plex_refresh_item and jellyfin_refresh_item are keyed on imdbId and
-        # search settings.plex.movie_library / series_library. A sports event
-        # has no imdbId (PRD 0021 records this as inherent, not missing data)
-        # and there is no sports library setting to search, so an item refresh
-        # has nothing to look up. Giving sports one needs a new library setting,
-        # which is a feature rather than a fix.
+        # plex_refresh_item resolves its item with getGuid("imdb://<id>"), and
+        # a sports event has no imdbId: that is inherent to sports, not missing
+        # data. jellyfin_refresh_item is NOT imdbId-bound, it falls back to
+        # title and year, so that one is not the blocker there.
+        #
+        # What blocks both is the library setting. Each searches
+        # settings.plex.movie_library / series_library, or the Jellyfin
+        # movie_library_ids / series_library_ids, and returns early when the
+        # matching one is empty. There is no sports library setting for them to
+        # look in, and pointing sports at the movie or series library is a
+        # decision for the user to make, not one to assume here. Giving sports
+        # its own setting is a feature rather than a fix.
         instance = validate()
         if path != context.mapped_path:
             raise ValueError('Sports subtitle path does not match its event')
