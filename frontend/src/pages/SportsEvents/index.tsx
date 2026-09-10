@@ -16,6 +16,7 @@ import {
 } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import {
+  faBriefcase,
   faDownload,
   faHardDrive,
   faHistory,
@@ -40,6 +41,10 @@ import { SportsEvent } from "@/apis/raw/sports";
 import { Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import { SportsJobFeedback } from "@/components/bazarr";
+import SubtitleToolsModal, {
+  SportsToolsItem,
+} from "@/components/modals/SubtitleToolsModal";
+import { useModals } from "@/modules/modals";
 import ItemOverview from "@/pages/views/ItemOverview";
 import { navigateApp } from "@/utilities/whatsNew";
 import Table from "./table";
@@ -68,8 +73,37 @@ const SportsEventsView: FunctionComponent = () => {
   const indexSubtitles = useIndexSportsSubtitles();
   const automatic = useSportsAction();
   const combine = useCombineSubtitles();
+  const modals = useModals();
 
   const events = useMemo(() => eventPage?.data ?? null, [eventPage]);
+
+  // The shared Subtitle Tools modal reads Subtitle objects; a sports event
+  // stores its subtitles as [language, path, size] tuples, so the shapes are
+  // reconciled here rather than by widening the modal for one caller.
+  const toolsPayload = useMemo<SportsToolsItem[]>(
+    () =>
+      (events ?? []).map((event) => ({
+        id: event.id,
+        title: event.title,
+        // eslint-disable-next-line camelcase
+        arr_instance_id: event.arr_instance_id,
+        isSports: true as const,
+        subtitles: (event.subtitles ?? [])
+          .filter(([, path]) => Boolean(path))
+          .map(([key, path]) => {
+            const [code2, ...modifiers] = key.split(":");
+            const lower = modifiers.map((modifier) => modifier.toLowerCase());
+            return {
+              code2,
+              name: code2,
+              hi: lower.includes("hi"),
+              forced: lower.includes("forced"),
+              path,
+            };
+          }),
+      })),
+    [events],
+  );
   const overviewItem = useMemo(
     () => (league ? toSportsLeagueRow(league) : null),
     [league],
@@ -165,6 +199,18 @@ const SportsEventsView: FunctionComponent = () => {
               }
             >
               Search
+            </Toolbox.Button>
+            <Toolbox.Button
+              icon={faBriefcase}
+              disabled={!league || league.eventFileCount === 0}
+              onClick={() =>
+                events &&
+                modals.openContextModal(SubtitleToolsModal, {
+                  payload: toolsPayload,
+                })
+              }
+            >
+              Mass Edit
             </Toolbox.Button>
             <Toolbox.Button
               icon={faLayerGroup}

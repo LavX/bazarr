@@ -18,6 +18,7 @@ import {
   useSystemProviders,
 } from "@/apis/hooks";
 import { useInstanceName } from "@/apis/hooks/site";
+import { useSportsAvailability } from "@/apis/hooks/sports";
 import { Selector, Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import { useSelectorOptions } from "@/utilities";
@@ -41,6 +42,7 @@ const HistoryStats: FunctionComponent = () => {
   const [lang, setLanguage] = useState<Nullable<Language.Server>>(null);
   const [provider, setProvider] = useState<Nullable<System.Provider>>(null);
 
+  const { enabled: sportsEnabled } = useSportsAvailability();
   const stats = useHistoryStats(timeFrame, action, provider, lang);
   const { data } = stats;
 
@@ -54,8 +56,12 @@ const HistoryStats: FunctionComponent = () => {
         date: v.date,
         series: v.count,
       }));
+      const sports = (data.sports ?? []).map((v) => ({
+        date: v.date,
+        sports: v.count,
+      }));
 
-      return merge(movies, series);
+      return merge(merge(movies, series), sports);
     } else {
       return [];
     }
@@ -117,6 +123,17 @@ const HistoryStats: FunctionComponent = () => {
                 dataKey="movies"
                 fill={theme.colors.yellow[4]}
               ></Bar>
+              {/* The endpoint has counted sports downloads all along; the
+                  chart simply never plotted them, so a Sportarr user's
+                  activity was invisible here. Hidden without Sportarr so a
+                  two-media install does not gain an empty legend entry. */}
+              {sportsEnabled && (
+                <Bar
+                  name="Sports"
+                  dataKey="sports"
+                  fill={theme.colors.grape[4]}
+                ></Bar>
+              )}
             </BarChart>
           </ResponsiveContainer>
         </Box>

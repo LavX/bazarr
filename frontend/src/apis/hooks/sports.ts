@@ -347,6 +347,43 @@ export function useRemoveSportsExclusion() {
   });
 }
 
+// The per-subtitle actions the shared Subtitle Tools modal needs: search for a
+// specific language, and remove a file Bazarr placed. Named to match
+// useEpisodeSubtitleModification and useMovieSubtitleModification, because the
+// modal picks one of the three by media type.
+export function useSportsSubtitleModification() {
+  const client = useQueryClient();
+  const invalidate = () => {
+    void client.invalidateQueries({ queryKey: [QueryKeys.Sports] });
+  };
+  return {
+    download: useMutation({
+      mutationKey: [QueryKeys.Sports, QueryKeys.Subtitles, "download"],
+      mutationFn: ({ eventId, owner }: { eventId: number; owner: number }) =>
+        sports.runAction(`/events/${eventId}/automatic`, owner),
+      onSuccess: invalidate,
+    }),
+    remove: useMutation({
+      mutationKey: [QueryKeys.Sports, QueryKeys.Subtitles, "remove"],
+      mutationFn: ({
+        eventId,
+        owner,
+        form,
+      }: {
+        eventId: number;
+        owner: number;
+        form: {
+          language: string;
+          path: string;
+          hi?: boolean;
+          forced?: boolean;
+        };
+      }) => sports.removeSubtitle(eventId, owner, form),
+      onSuccess: invalidate,
+    }),
+  };
+}
+
 export function useSportsJob(id?: number | null, owner?: number) {
   const { instances } = useSportsAvailability();
   return useQuery({

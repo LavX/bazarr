@@ -274,6 +274,7 @@ declare namespace History {
   type Stat = {
     movies: StatItem[];
     series: StatItem[];
+    sports?: StatItem[];
   };
 
   type TimeFrameOptions = "week" | "month" | "trimester" | "year";
@@ -448,6 +449,11 @@ type ItemSearchResult = Partial<SeriesIdType> &
     title: string;
     year: string;
     poster: string | null;
+    id?: number;
+    arr_instance_id?: number;
+    /** Present on a sports league. A league has a sport, not a year. */
+    sportarrLeagueId?: number;
+    sport?: string | null;
   };
 
 type BackendError = {

@@ -1,5 +1,6 @@
 /* eslint-disable camelcase */
 import BaseApi from "./base";
+import client from "./client";
 
 export interface SportsLeague {
   id: number;
@@ -223,6 +224,21 @@ class SportsApi extends BaseApi {
     );
     return response.data;
   }
+  // Removing a subtitle Bazarr placed on an event. DELETE on the indexer's own
+  // path, which owns it: a second Resource registered there would shadow the
+  // index POST.
+  async removeSubtitle(
+    id: number,
+    owner: number,
+    form: { language: string; path: string; hi?: boolean; forced?: boolean },
+  ) {
+    // client.axios directly rather than the BaseApi helper: that one encodes
+    // its body as FormData, and this route reads a JSON object.
+    await client.axios.delete(`/sports/events/${id}/subtitles`, {
+      data: { arr_instance_id: owner, ...form },
+    });
+  }
+
   indexSubtitles(id: number, owner: number) {
     return this.postRaw<SportsEvent>(`/events/${id}/subtitles`, {
       arr_instance_id: owner,

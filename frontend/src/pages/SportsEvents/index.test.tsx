@@ -241,6 +241,83 @@ describe("sports event detail", () => {
     expect(scope).toBe("42");
   });
 
+  it("opens the shared Subtitle Tools on the event's own subtitles", async () => {
+    let removed: unknown;
+    server.use(
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([sportarr]),
+      ),
+      http.get("/api/sports/leagues/51", () =>
+        HttpResponse.json({
+          id: 51,
+          arr_instance_id: 42,
+          title: "Fixture League",
+          eventCount: 1,
+          eventFileCount: 1,
+        }),
+      ),
+      http.get("/api/sports/leagues/51/events", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: 61,
+              arr_instance_id: 42,
+              league_id: 51,
+              title: "Event",
+              path: "/sports/event.mkv",
+              hasFile: true,
+              profileId: 5,
+              subtitles: [
+                ["en:hi", "/sports/event.en.hi.srt", 50],
+                // An embedded track has no file, so there is nothing for the
+                // tools to act on and it must not reach the list.
+                ["fr", null, null],
+              ],
+              missing_subtitles: [],
+            },
+          ],
+          total: 1,
+        }),
+      ),
+      http.delete("/api/sports/events/61/subtitles", async ({ request }) => {
+        removed = await request.json();
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    renderDetail();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Mass Edit" }));
+    const dialog = within(await screen.findByRole("dialog"));
+    expect(dialog.getByText("event.en.hi.srt")).toBeInTheDocument();
+    expect(dialog.queryByText(/event\.fr/)).toBeNull();
+
+    // The tools table checkboxes carry ids rather than labels, so the row
+    // is selected by position: there is exactly one file-backed subtitle.
+    await user.click(dialog.getAllByRole("checkbox")[1]);
+    await user.click(dialog.getByRole("button", { name: "Select Action" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Delete..." }),
+    );
+    // Deleting a file asks first, and the confirmation lists what goes.
+    const confirm = within(
+      await screen.findByRole("dialog", { name: /deleted/ }),
+    );
+    expect(confirm.getByText("/sports/event.en.hi.srt")).toBeInTheDocument();
+    await user.click(confirm.getByRole("button", { name: "Delete" }));
+
+    // The local event id and its owner, not the series/movie id pair the
+    // other two media types build.
+    await waitFor(() =>
+      expect(removed).toEqual({
+        arr_instance_id: 42,
+        language: "en",
+        path: "/sports/event.en.hi.srt",
+        hi: true,
+        forced: false,
+      }),
+    );
+  });
+
   it("does not load events for a disabled owner", async () => {
     let requests = 0;
     server.use(
