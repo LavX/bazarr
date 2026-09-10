@@ -13,7 +13,22 @@ type Scope =
       // combination that would bundle nothing is never offered.
       languagesBySeason: Record<number, string[]>;
     }
-  | { kind: "movie"; radarrId: number; arrInstanceId?: number };
+  | { kind: "movie"; radarrId: number; arrInstanceId?: number }
+  | {
+      kind: "sports";
+      leagueId: number;
+      arrInstanceId?: number;
+      seasons: number[];
+      languagesBySeason: Record<number, string[]>;
+    };
+
+// Series and sports both bundle by season, so the season picker and its
+// language narrowing are shared rather than written twice.
+type SeasonScope = Extract<Scope, { seasons: number[] }>;
+
+function hasSeasons(scope: Scope): scope is SeasonScope {
+  return scope.kind === "series" || scope.kind === "sports";
+}
 
 interface Props {
   scope: Scope;
@@ -32,7 +47,7 @@ const SubtitleDownloadForm: FunctionComponent<Props> = ({
   const modals = useModals();
 
   const languageOptions =
-    scope.kind === "series" && season !== ALL
+    hasSeasons(scope) && season !== ALL
       ? (scope.languagesBySeason[Number(season)] ?? [])
       : availableLanguages;
 
@@ -43,6 +58,14 @@ const SubtitleDownloadForm: FunctionComponent<Props> = ({
         await mutateAsync({
           kind: "series",
           seriesId: scope.seriesId,
+          season: season === ALL ? undefined : Number(season),
+          language: languageFilter,
+          arrInstanceId: scope.arrInstanceId,
+        });
+      } else if (scope.kind === "sports") {
+        await mutateAsync({
+          kind: "sports",
+          leagueId: scope.leagueId,
           season: season === ALL ? undefined : Number(season),
           language: languageFilter,
           arrInstanceId: scope.arrInstanceId,
@@ -66,10 +89,16 @@ const SubtitleDownloadForm: FunctionComponent<Props> = ({
     <Stack>
       <Alert>
         Downloads a zip of the subtitle files already on disk
-        {scope.kind === "series" ? " for this series" : " for this movie"}.
-        Embedded tracks are not included.
+        {
+          {
+            series: " for this series",
+            sports: " for this league",
+            movie: " for this movie",
+          }[scope.kind]
+        }
+        . Embedded tracks are not included.
       </Alert>
-      {scope.kind === "series" && (
+      {hasSeasons(scope) && (
         <Select
           label="Season"
           allowDeselect={false}

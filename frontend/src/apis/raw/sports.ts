@@ -239,6 +239,45 @@ class SportsApi extends BaseApi {
     });
   }
 
+  // Zip of a league's external subtitle files, optionally narrowed to one
+  // season and/or one base language. The counterpart of the series route; a
+  // sports season is the year rather than a run of a show.
+  downloadSubtitlesArchive(
+    leagueId: number,
+    options: {
+      season?: number;
+      language?: string;
+      arrInstanceId?: number;
+    } = {},
+  ) {
+    return client.axios.get<Blob>(
+      `/sports/leagues/${leagueId}/subtitles/download`,
+      {
+        params: {
+          season: options.season,
+          language: options.language,
+
+          arr_instance_id: options.arrInstanceId,
+        },
+        responseType: "blob",
+      },
+    );
+  }
+
+  // Multipart upload for one event. Its own path: /events/<id>/subtitles is
+  // the indexer's POST, and a second Resource there would shadow it.
+  async uploadSubtitle(
+    eventId: number,
+    owner: number,
+    form: { file: File; language: string; hi: boolean; forced: boolean },
+  ) {
+    await this.post(`/events/${eventId}/subtitles/upload`, {
+      ...form,
+
+      arr_instance_id: owner,
+    });
+  }
+
   indexSubtitles(id: number, owner: number) {
     return this.postRaw<SportsEvent>(`/events/${id}/subtitles`, {
       arr_instance_id: owner,

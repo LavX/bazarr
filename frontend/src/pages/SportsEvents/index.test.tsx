@@ -464,6 +464,8 @@ it.each([false, true])(
     expect(
       screen.queryByText("Download failed. Search again and retry."),
     ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Download" })).toBeDisabled();
+    // Scoped to the modal: the page toolbox carries its own Download button
+    // for the league's subtitle bundle, so an unscoped query is ambiguous.
+    expect(dialog.getByRole("button", { name: "Download" })).toBeDisabled();
   },
 );

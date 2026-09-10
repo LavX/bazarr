@@ -94,3 +94,48 @@ def test_the_route_exists_and_resolves_as_sports():
     source = inspect.getsource(download)
     assert "'sports/events/<int:eventId>/subtitles/<language>/download'" in source
     assert "_send_single_subtitle('sports', eventId, language)" in source
+
+
+def test_the_league_bundle_route_exists_and_folders_by_season():
+    """The counterpart of the series bundle route.
+
+    Sports had a single-file download but no way to take a whole league's
+    subtitles, which is what the Download button on a detail page offers for
+    the other two media types.
+    """
+    import inspect
+
+    from api.subtitles import download
+
+    source = inspect.getsource(download)
+    assert "'sports/leagues/<int:leagueId>/subtitles/download'" in source
+    assert "collect_sports_bundle_entries(event_rows, season=season, language=language)" in source
+    # Foldered like a series, because a sports library is season shaped too.
+    collector = inspect.getsource(download._collect_bundle_entries)
+    assert "if media_type in ('episode', 'sports') and row.season is not None:" in collector
+
+
+def test_a_league_id_needs_no_ambiguity_check():
+    """A league id is a primary key, unlike sonarrSeriesId and radarrId, so
+    there is no cross-instance collision for the route to refuse."""
+    import inspect
+
+    from api.subtitles import download
+
+    source = inspect.getsource(download.SportsLeagueSubtitleBundleDownload)
+    assert "Ambiguous" not in source
+    # The owner still has to resolve: sports paths map per instance with no
+    # global mapping to fall back on.
+    assert "TableSportsLeagues.arr_instance_id, _request_arr_instance_id()" in source
+
+
+def test_a_season_without_a_file_produces_no_bundle_entry(tmp_path):
+    """The picker only offers seasons that have a file, and the collector has
+    to agree: a season filter matching nothing must bundle nothing, not
+    everything."""
+    from types import SimpleNamespace
+
+    from api.subtitles.download import collect_sports_bundle_entries
+
+    rows = [SimpleNamespace(season=2026, path=None, subtitles=None, arr_instance_id=42)]
+    assert collect_sports_bundle_entries(rows, season=2025) == []

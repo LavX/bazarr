@@ -363,6 +363,19 @@ export function useSportsSubtitleModification() {
         sports.runAction(`/events/${eventId}/automatic`, owner),
       onSuccess: invalidate,
     }),
+    upload: useMutation({
+      mutationKey: [QueryKeys.Sports, QueryKeys.Subtitles, "upload"],
+      mutationFn: ({
+        eventId,
+        owner,
+        form,
+      }: {
+        eventId: number;
+        owner: number;
+        form: { file: File; language: string; hi: boolean; forced: boolean };
+      }) => sports.uploadSubtitle(eventId, owner, form),
+      onSuccess: invalidate,
+    }),
     remove: useMutation({
       mutationKey: [QueryKeys.Sports, QueryKeys.Subtitles, "remove"],
       mutationFn: ({

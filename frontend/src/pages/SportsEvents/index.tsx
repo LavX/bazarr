@@ -12,19 +12,27 @@ import {
   Breadcrumbs,
   Container,
   Group,
+  Menu,
   Text,
 } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
+import { showNotification } from "@mantine/notifications";
 import {
   faBriefcase,
+  faCircleChevronDown,
+  faCircleChevronRight,
+  faCloudUploadAlt,
   faDownload,
+  faEllipsisVertical,
   faHardDrive,
   faHistory,
   faLayerGroup,
   faServer,
   faSync,
   faTrophy,
+  faWrench,
 } from "@fortawesome/free-solid-svg-icons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { Table as TableInstance } from "@tanstack/react-table";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
 import { useCombineSubtitles } from "@/apis/hooks/combine";
@@ -36,15 +44,21 @@ import {
   useSportsAvailability,
   useSportsEvents,
   useSportsLeague,
+  useSportsProfile,
 } from "@/apis/hooks/sports";
+import { useBatchAction } from "@/apis/hooks/subtitles";
 import { SportsEvent } from "@/apis/raw/sports";
-import { Toolbox } from "@/components";
+import { FullPageDropzone, Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import { SportsJobFeedback } from "@/components/bazarr";
+import { ChangeProfileModal } from "@/components/forms/ChangeProfileForm";
+import { SportsUploadModal } from "@/components/forms/SportsUploadForm";
+import { SubtitleDownloadModal } from "@/components/forms/SubtitleDownloadForm";
 import SubtitleToolsModal, {
   SportsToolsItem,
 } from "@/components/modals/SubtitleToolsModal";
 import { useModals } from "@/modules/modals";
+import { notification } from "@/modules/task";
 import ItemOverview from "@/pages/views/ItemOverview";
 import { navigateApp } from "@/utilities/whatsNew";
 import Table from "./table";
@@ -74,12 +88,75 @@ const SportsEventsView: FunctionComponent = () => {
   const automatic = useSportsAction();
   const combine = useCombineSubtitles();
   const modals = useModals();
+  const batch = useBatchAction();
+  const openDropzone = useRef<VoidFunction>(null);
+
+  const onDrop = useCallback(
+    (dropped: File[]) => {
+      // A league with no profile has no languages to offer, so the form would
+      // open with an unfillable Language column.
+      if (league && league.profileId !== null) {
+        modals.openContextModal(SportsUploadModal, { files: dropped, league });
+      } else {
+        showNotification(
+          notification.warn(
+            "Cannot Upload Files",
+            "league or language profile is not ready",
+          ),
+        );
+      }
+    },
+    [modals, league],
+  );
+  const assignProfile = useSportsProfile();
 
   const events = useMemo(() => eventPage?.data ?? null, [eventPage]);
 
   // The shared Subtitle Tools modal reads Subtitle objects; a sports event
   // stores its subtitles as [language, path, size] tuples, so the shapes are
   // reconciled here rather than by widening the modal for one caller.
+  // Every base language with a file on disk, sync and combined outputs
+  // included: the bundle ships whatever exists, not just original subtitles.
+  const downloadableLangs = useMemo(() => {
+    const seen = new Set<string>();
+    for (const event of events ?? []) {
+      for (const [key, path] of event.subtitles ?? []) {
+        if (path) seen.add(key.split(":")[0]);
+      }
+    }
+    return Array.from(seen).sort();
+  }, [events]);
+
+  const languagesBySeason = useMemo(() => {
+    const seen = new Map<number, Set<string>>();
+    for (const event of events ?? []) {
+      if (event.season == null) continue;
+      for (const [key, path] of event.subtitles ?? []) {
+        if (!path) continue;
+        if (!seen.has(event.season)) seen.set(event.season, new Set());
+        seen.get(event.season)!.add(key.split(":")[0]);
+      }
+    }
+    return Object.fromEntries(
+      Array.from(seen, ([season, codes]) => [season, Array.from(codes).sort()]),
+    );
+  }, [events]);
+
+  // Only seasons that actually have a file: offering an empty one would just
+  // produce a guaranteed 404 bundle.
+  const seasons = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          (events ?? [])
+            .filter((event) => (event.subtitles ?? []).some(([, p]) => p))
+            .map((event) => event.season)
+            .filter((season): season is number => season != null),
+        ),
+      ).sort((a, b) => a - b),
+    [events],
+  );
+
   const toolsPayload = useMemo<SportsToolsItem[]>(
     () =>
       (events ?? []).map((event) => ({
@@ -138,7 +215,7 @@ const SportsEventsView: FunctionComponent = () => {
   );
 
   const tableRef = useRef<TableInstance<SportsEvent> | null>(null);
-  const [, setIsAllRowExpanded] = useState(
+  const [isAllRowExpanded, setIsAllRowExpanded] = useState(
     tableRef?.current?.getIsAllRowsExpanded(),
   );
 
@@ -166,6 +243,11 @@ const SportsEventsView: FunctionComponent = () => {
         </Breadcrumbs>
       </nav>
       <QueryOverlay result={leagueQuery}>
+        <FullPageDropzone
+          openRef={openDropzone}
+          active={league?.profileId != null}
+          onDrop={onDrop}
+        />
         <Toolbox>
           <Group gap="xs">
             <Toolbox.Button
@@ -180,6 +262,13 @@ const SportsEventsView: FunctionComponent = () => {
               }
             >
               Sync
+            </Toolbox.Button>
+            <Toolbox.Button
+              icon={faCloudUploadAlt}
+              disabled={!league || league.profileId === null}
+              onClick={() => openDropzone.current?.()}
+            >
+              Upload
             </Toolbox.Button>
             <Toolbox.Button
               icon={faDownload}
@@ -233,6 +322,25 @@ const SportsEventsView: FunctionComponent = () => {
               Combine across league
             </Toolbox.Button>
             <Toolbox.Button
+              icon={faDownload}
+              disabled={!league || downloadableLangs.length === 0}
+              onClick={() =>
+                league &&
+                modals.openContextModal(SubtitleDownloadModal, {
+                  scope: {
+                    kind: "sports",
+                    leagueId: league.id,
+                    arrInstanceId: league.arr_instance_id,
+                    seasons,
+                    languagesBySeason,
+                  },
+                  availableLanguages: downloadableLangs,
+                })
+              }
+            >
+              Download
+            </Toolbox.Button>
+            <Toolbox.Button
               icon={faHistory}
               onClick={() =>
                 navigateApp(
@@ -242,6 +350,68 @@ const SportsEventsView: FunctionComponent = () => {
             >
               History
             </Toolbox.Button>
+          </Group>
+          <Group gap="xs">
+            <Toolbox.Button
+              icon={
+                isAllRowExpanded ? faCircleChevronRight : faCircleChevronDown
+              }
+              onClick={() => tableRef.current?.toggleAllRowsExpanded()}
+            >
+              {isAllRowExpanded ? "Collapse All" : "Expand All"}
+            </Toolbox.Button>
+            <Menu shadow="md" width={200}>
+              <Menu.Target>
+                <div>
+                  <Toolbox.Button icon={faEllipsisVertical}>
+                    More
+                  </Toolbox.Button>
+                </div>
+              </Menu.Target>
+              <Menu.Dropdown>
+                <Menu.Item
+                  leftSection={<FontAwesomeIcon icon={faHardDrive} size="sm" />}
+                  disabled={!league || batch.isPending}
+                  onClick={() =>
+                    league &&
+                    batch.mutate({
+                      items: [
+                        {
+                          type: "sportsLeague",
+                          sportsLeagueId: league.id,
+                          // eslint-disable-next-line camelcase
+                          arr_instance_id: league.arr_instance_id,
+                        },
+                      ],
+                      action: "scan-disk",
+                    })
+                  }
+                >
+                  Scan Disk
+                </Menu.Item>
+                <Menu.Item
+                  leftSection={<FontAwesomeIcon icon={faWrench} size="sm" />}
+                  disabled={!league}
+                  onClick={() =>
+                    league &&
+                    modals.openContextModal(
+                      ChangeProfileModal,
+                      {
+                        onSelect: (profileId: number | null) =>
+                          assignProfile.mutate({
+                            id: league.id,
+                            owner: league.arr_instance_id,
+                            profileId,
+                          }),
+                      },
+                      { title: league.title },
+                    )
+                  }
+                >
+                  Change Profile
+                </Menu.Item>
+              </Menu.Dropdown>
+            </Menu>
           </Group>
         </Toolbox>
         <ItemOverview item={overviewItem} details={details}></ItemOverview>

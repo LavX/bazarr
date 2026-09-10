@@ -617,21 +617,47 @@ export function useSubtitleArchiveDownload() {
         radarrId: number;
         language?: string;
         arrInstanceId?: number;
+      }
+    | {
+        kind: "sports";
+        leagueId: number;
+        season?: number;
+        language?: string;
+        arrInstanceId?: number;
       };
   return useMutation({
     mutationKey: [QueryKeys.Subtitles, "download-archive"],
     mutationFn: async (param: Param) => {
-      const response =
-        param.kind === "series"
-          ? await api.series.downloadSubtitlesArchive(param.seriesId, {
-              season: param.season,
+      // A lookup on the kind rather than a ternary, so a third one cannot be
+      // silently routed to the movies endpoint.
+      const response = await {
+        series: () =>
+          api.series.downloadSubtitlesArchive(
+            (param as { seriesId: number }).seriesId,
+            {
+              season: (param as { season?: number }).season,
               language: param.language,
               arrInstanceId: param.arrInstanceId,
-            })
-          : await api.movies.downloadSubtitlesArchive(param.radarrId, {
+            },
+          ),
+        movie: () =>
+          api.movies.downloadSubtitlesArchive(
+            (param as { radarrId: number }).radarrId,
+            {
               language: param.language,
               arrInstanceId: param.arrInstanceId,
-            });
+            },
+          ),
+        sports: () =>
+          api.sports.downloadSubtitlesArchive(
+            (param as { leagueId: number }).leagueId,
+            {
+              season: (param as { season?: number }).season,
+              language: param.language,
+              arrInstanceId: param.arrInstanceId,
+            },
+          ),
+      }[param.kind]();
       assertDownloadPayload(response.data);
       saveBlobAs(
         response.data,
