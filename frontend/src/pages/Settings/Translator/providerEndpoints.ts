@@ -41,10 +41,10 @@ export function parseProviderEndpoints(payload: unknown): ProviderEndpoint[] {
       available: endpoint.status === 0,
       inputPrice: number(pricing.prompt),
       outputPrice: number(pricing.completion),
-      // OpenRouter reports this as a plain number of tokens per second, alongside
-      // latency_last_30m and uptime_last_30m, and sends null when it has no recent
-      // measurement. The object form is what the request parameter takes, not what
-      // the response carries, so it is only read as a fallback.
+      // Read as a plain number of tokens per second first, with the {p50} object as a
+      // fallback. Captured responses carry null here and AI Subtitle Translator reads
+      // only the object form, so the two halves of the product disagree about the shape
+      // and both are accepted until one of them is shown to be right.
       throughput:
         number(endpoint.throughput_last_30m) ??
         number(record(endpoint.throughput_last_30m).p50),
@@ -57,4 +57,14 @@ export function priceLabel(price: number | null): string {
   if (price === null || !Number.isFinite(price * 1_000_000)) return "Unknown";
   if (price === 0) return "Free";
   return `$${(price * 1_000_000).toLocaleString("en-US", { maximumSignificantDigits: 5 })}/M`;
+}
+
+// Whether a slug the user chose selects this endpoint. OpenRouter accepts a bare
+// provider slug where the endpoint tag is qualified, so "deepinfra" selects
+// "deepinfra/fp8", and AI Subtitle Translator resolves the two namespaces the same way.
+// Comparing tags alone told users a working provider does not serve their model.
+export function endpointMatchesSlug(tag: string, slug: string): boolean {
+  const a = tag.toLowerCase();
+  const b = slug.toLowerCase();
+  return a === b || (!b.includes("/") && a.startsWith(`${b}/`));
 }

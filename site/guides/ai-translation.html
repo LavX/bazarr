@@ -177,14 +177,14 @@
         <strong>Recommendation:</strong> Start with <code class="inline">google/gemini-2.5-flash-lite</code>. It handles subtitle translation well and costs fractions of a cent per episode. Switch to Claude Sonnet 4.5 if you need higher quality for difficult content.
       </div>
 
-      <h2 id="provider-routing">Provider routing</h2>
+      <h2 id="provider-routing">Provider routing <span class="badge-new" aria-label="New in v2.7">v2.7</span></h2>
       <p>Most OpenRouter models are served by more than one provider, at different prices and different speeds, for the same model and the same output. The provider that serves a request is what decides its cost. <strong>Settings &gt; AI Translator &gt; Provider Routing</strong> is where you say how that choice is made.</p>
 
       <p>This only changes anything when a model has more than one provider. Around half of OpenRouter's catalogue is served by exactly one, and for those every option below does the same thing.</p>
 
       <p>Every option below is carried out by AI Subtitle Translator, so the <em>Needs</em> column is the version of that service, not of Bazarr+.</p>
 
-      <table>
+      <table class="opts">
         <thead>
           <tr><th>Option</th><th>What it does</th><th>Needs</th></tr>
         </thead>
@@ -206,7 +206,7 @@
       <p>The reason it is the default is measurable. In the September provider benchmarks, plain throughput routing repeatedly landed on endpoints priced around twice the cheapest that served the same model, with nothing on screen to say so. SmartFast gives up a little speed for that.</p>
 
       <div class="note">
-        <strong>Upgrading?</strong> Only new installations pick up SmartFast automatically. An existing install keeps whatever routing it was already set to, so switch it by hand if you want it.
+        <strong>Upgrading?</strong> SmartFast is picked up automatically only by a new installation. An existing install keeps the routing it was already using, and an install from before this setting existed keeps <em>Fastest</em>, which every version of the translator serves. Either way nothing changes under you, so switch it by hand if you want SmartFast.
       </div>
 
       <h3 id="custom-providers">Custom providers</h3>

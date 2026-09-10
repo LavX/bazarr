@@ -29,6 +29,9 @@ function RoutingSetter() {
       <button type="button" onClick={() => setValue("custom", ROUTING_KEY)}>
         Set routing to custom
       </button>
+      <button type="button" onClick={() => setValue("smartfast", ROUTING_KEY)}>
+        Set routing to smartfast
+      </button>
     </>
   );
 }
@@ -288,5 +291,40 @@ describe("AIModelSelector against an explicit Custom selection", () => {
 
     await waitFor(() => expect(stagedValues[ROUTING_KEY]).toBe("floor"));
     expect(stagedValues[MODEL_KEY]).toBe("some/model");
+  });
+});
+
+describe("AIModelSelector against an explicit SmartFast selection", () => {
+  it("keeps SmartFast, matching how the backend resolves the same pair", async () => {
+    // The backend rule is `routing in ('smartfast', 'custom')`. Honouring only half of
+    // it meant the new default could be silently swapped out by a pasted model id.
+    const user = userEvent.setup();
+    const stagedValues = mountSelector();
+    await user.click(
+      screen.getByRole("button", { name: "Set routing to smartfast" }),
+    );
+
+    const input = screen.getByRole("combobox");
+    await user.clear(input);
+    await user.type(input, "some/model:nitro");
+    await user.tab();
+
+    await waitFor(() => expect(stagedValues[MODEL_KEY]).toBe("some/model"));
+    expect(stagedValues[ROUTING_KEY]).toBe("smartfast");
+    expect(
+      screen.getByText(/Provider Routing stays.*SmartFast/),
+    ).toBeInTheDocument();
+  });
+
+  it("stages nothing when the field is blurred without an edit", async () => {
+    // Blur fires when the user clicks away from a field they were only reading. Adopting
+    // there rewrote a stored id into staged changes nobody made, which Ctrl+S submitted.
+    const user = userEvent.setup();
+    const stagedValues = mountSelector();
+
+    await user.click(screen.getByRole("combobox"));
+    await user.tab();
+
+    expect(Object.keys(stagedValues)).toHaveLength(0);
   });
 });

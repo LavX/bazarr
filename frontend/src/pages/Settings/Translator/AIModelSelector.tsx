@@ -19,6 +19,7 @@ const AIModelSelector: FunctionComponent = () => {
   const { setValue } = useFormActions();
   const [adopted, setAdopted] = useState<string | null>(null);
   const [declined, setDeclined] = useState<string | null>(null);
+  const [edited, setEdited] = useState(false);
   // The selector that owns the routing lives elsewhere on the page, so the
   // notice below follows the setting rather than asserting what it once was.
   const routing = useSettingValue<string>(ROUTING_KEY);
@@ -34,6 +35,12 @@ const AIModelSelector: FunctionComponent = () => {
   // Mid-word the text can be an exact suffix of something longer, so adopting
   // as the user types would turn "some/model:floorplan" into "some/modelplan".
   const adopt = useCallback(() => {
+    // Only a field the user edited is adopted. Blur fires when they merely click away
+    // from a field they were reading, and rewriting a stored id there staged changes
+    // they never made, which the Ctrl+S shortcut then submitted for them.
+    if (!edited) {
+      return;
+    }
     const raw = value ?? "";
     const { modelId, routing: typed } = splitRoutingSuffix(raw);
     // The details lookup works on the normalised id, so the setting has to hold
@@ -43,26 +50,31 @@ const AIModelSelector: FunctionComponent = () => {
       update(modelId);
     }
     if (!typed) {
+      setEdited(false);
       return;
     }
-    // Custom routing names providers, and a shortcut typed into this field would
-    // orphan that list without ever saying so. The explicit selection wins and the
-    // shortcut only comes off the id, which is how the backend resolves the pair too.
-    if (routing === "custom") {
+    // An explicit SmartFast or Custom selection wins over a shortcut typed here, which
+    // is exactly how the backend resolves the same pair: it keeps the selected sort and
+    // only strips the shortcut off the id. Custom additionally names providers that
+    // switching away would orphan without ever saying so.
+    if (routing === "custom" || routing === "smartfast") {
       setAdopted(null);
       setDeclined(typed);
+      setEdited(false);
       return;
     }
     setDeclined(null);
     setValue(typed, ROUTING_KEY);
     setAdopted(typed);
-  }, [value, update, setValue, routing]);
+    setEdited(false);
+  }, [value, update, setValue, routing, edited]);
 
   const onChange = useCallback(
     (raw: string) => {
       update(raw);
       setAdopted(null);
       setDeclined(null);
+      setEdited(true);
     },
     [update],
   );
@@ -84,13 +96,14 @@ const AIModelSelector: FunctionComponent = () => {
           {routingLabel(adopted)}.
         </MantineText>
       )}
-      {declined !== null && routing === "custom" && (
-        <MantineText size="xs" c="yellow.6" mt={4}>
-          Removed :{declined} from the model id. Provider Routing stays{" "}
-          {routingLabel("custom")}, which uses the providers you chose. Switch
-          it to {routingLabel(declined)} if you want that instead.
-        </MantineText>
-      )}
+      {declined !== null &&
+        (routing === "custom" || routing === "smartfast") && (
+          <MantineText size="xs" c="yellow.6" mt={4}>
+            Removed :{declined} from the model id. Provider Routing stays{" "}
+            {routingLabel(routing)}. Switch it to {routingLabel(declined)} if
+            you want that instead.
+          </MantineText>
+        )}
     </>
   );
 };

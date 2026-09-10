@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Alert,
   Button,
@@ -12,6 +12,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useFormActions } from "@/pages/Settings/utilities/FormValues";
 import { useSettingValue } from "@/pages/Settings/utilities/hooks";
 import {
+  endpointMatchesSlug,
   parseProviderEndpoints,
   priceLabel,
   PROVIDER_SLUG,
@@ -53,6 +54,9 @@ function CustomProviders() {
   });
   const [entryError, setEntryError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  // A filter term typed for one model would otherwise still be filtering the next
+  // model's endpoints, which shows "No available endpoints" for a model that has plenty.
+  useEffect(() => setSearch(""), [lookupId]);
   const update = (values: string[]) => {
     const normalized = [
       ...new Set(
@@ -109,7 +113,10 @@ function CustomProviders() {
         onSearchChange={setSearch}
         disabled={!lookupId || order.length >= 20}
         data={(catalog.data ?? [])
-          .filter((endpoint) => !order.includes(endpoint.tag))
+          .filter(
+            (endpoint) =>
+              !order.some((slug) => endpointMatchesSlug(endpoint.tag, slug)),
+          )
           .map((endpoint) => ({
             value: endpoint.tag,
             label: `${endpoint.name} (${endpoint.tag}) | Input ${priceLabel(endpoint.inputPrice)}, output ${priceLabel(endpoint.outputPrice)}${endpoint.throughput === null ? "" : ` | ${endpoint.throughput.toFixed(0)} tokens/s`}${endpoint.available ? "" : " | Unavailable"}`,
@@ -145,7 +152,9 @@ function CustomProviders() {
         clearable
       />
       {order.map((slug, index) => {
-        const endpoint = catalog.data?.find((item) => item.tag === slug);
+        const endpoint = catalog.data?.find((item) =>
+          endpointMatchesSlug(item.tag, slug),
+        );
         return (
           <Group key={slug} justify="space-between" wrap="wrap">
             <Text size="xs">

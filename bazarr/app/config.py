@@ -75,6 +75,12 @@ def normalize_openrouter_provider_order(value):
     return normalized
 
 
+# What a new install gets, and what an install that predates the setting gets instead.
+# smartfast needs AI Subtitle Translator 2.0.0; throughput is served by every version, so
+# an upgrade is never moved onto a routing its translator might refuse.
+DEFAULT_PROVIDER_ROUTING = 'smartfast'
+UPGRADED_PROVIDER_ROUTING = 'throughput'
+
 ONE_HUNDRED_YEARS_IN_MINUTES = 52560000
 ONE_HUNDRED_YEARS_IN_HOURS = 876000
 
@@ -270,7 +276,8 @@ validators = [
     #
     # smartfast needs AI Subtitle Translator 2.0.0. A new install pointed at an older one is
     # told to update rather than being routed some other way behind the user's back.
-    Validator('translator.openrouter_provider_routing', must_exist=True, default='smartfast', is_type_of=str,
+    Validator('translator.openrouter_provider_routing', must_exist=True,
+              default=DEFAULT_PROVIDER_ROUTING, is_type_of=str,
               is_in=['throughput', 'nitro', 'price', 'floor', 'latency', 'default', 'smartfast', 'custom']),
     Validator('translator.openrouter_provider_order', must_exist=True, default=[], is_type_of=list,
               cast=normalize_openrouter_provider_order),
@@ -661,6 +668,23 @@ settings = Dynaconf(
 
 settings.validators.register(*validators)
 
+# An install that predates the provider-routing setting keeps the behaviour it had.
+#
+# The validator default is written for a NEW install. Applying it to an upgrade would
+# move an install that has been translating happily onto a routing its translator may not
+# implement, and smartfast refuses rather than degrades, so the first symptom would be
+# every translation failing on a service the user never had reason to touch. The setting
+# first shipped in v2.6.2, so every config written before that lacks the key entirely and
+# would otherwise be indistinguishable from a fresh one.
+#
+# A brand new install is the empty file created just above; anything with content in it
+# is an existing config, and existing configs get the sort they were already using.
+if (os.path.getsize(config_yaml_file) > 0
+        and settings.get('translator.openrouter_provider_routing') is None):
+    settings['translator.openrouter_provider_routing'] = UPGRADED_PROVIDER_ROUTING
+    logging.info("Existing configuration has no OpenRouter provider routing; keeping %s, "
+                 "which every AI Subtitle Translator version serves.", UPGRADED_PROVIDER_ROUTING)
+
 failed_validator = True
 while failed_validator:
     try:
@@ -939,24 +963,53 @@ def _active_provider_hub_provider_ids():
         return set()
 
 
+def _translator_field(settings_items, name):
+    """The value a request carries for ``settings-translator-<name>``, or None.
+
+    Matched on the whole key rather than its last segment. The settings store underneath
+    is case-insensitive, so the name is compared case-insensitively, but the section is
+    not: a key naming some other section must never be read as, or written to, this one.
+    """
+    for key, value in settings_items:
+        parts = key.split('-')
+        if len(parts) == 3 and parts[0] == 'settings' and parts[1] == 'translator' and parts[2].lower() == name:
+            return value
+    return None
+
+
+def _is_provider_order_key(key):
+    """True for settings-translator-openrouter_provider_order in any casing of the name."""
+    parts = key.split('-')
+    return (len(parts) == 3 and parts[0] == 'settings' and parts[1] == 'translator'
+            and parts[2].lower() == 'openrouter_provider_order')
+
+
 def _require_provider_order_for_custom_routing(settings_items):
     """Refuse custom OpenRouter routing that names no provider.
 
     The routing and the provider list arrive in the same request and only mean anything
     together. Stored apart, custom with an empty list saves cleanly and then fails every
-    translation, and by that point the only signal is a failed job. The pair is checked
-    against what the request leaves behind, so clearing the list of a routing that is
-    already custom is refused the same way as selecting custom with nothing chosen.
+    translation, and by that point the only signal is a failed job.
+
+    Only a request that actually carries one of the two keys is checked. Reading the pair
+    off stored settings for every save made one bad translator config reject saves on
+    every other settings page, which is a worse failure than the one being prevented and
+    lands on a page that cannot fix it.
     """
-    submitted = {key.split('-')[-1].lower(): value for key, value in settings_items}
-    routing = submitted.get('openrouter_provider_routing',
-                            getattr(settings.translator, 'openrouter_provider_routing', ''))
+    submitted_routing = _translator_field(settings_items, 'openrouter_provider_routing')
+    submitted_order = _translator_field(settings_items, 'openrouter_provider_order')
+    if submitted_routing is None and submitted_order is None:
+        return
+    routing = submitted_routing
+    if routing is None:
+        routing = getattr(settings.translator, 'openrouter_provider_routing', '')
     if isinstance(routing, list):
         routing = routing[0] if routing else ''
     if str(routing).lower() != 'custom':
         return
-    order = submitted.get('openrouter_provider_order',
-                          getattr(settings.translator, 'openrouter_provider_order', []))
+    order = submitted_order
+    if order is None:
+        order = getattr(settings.translator, 'openrouter_provider_order', [])
     if not order:
         raise ValidationError('OpenRouter custom routing requires at least one provider slug. '
                               'Choose a provider, or pick another routing option.')
@@ -964,18 +1017,20 @@ def _require_provider_order_for_custom_routing(settings_items):
 
 def save_settings(settings_items):
     # Validate repeated form values before applying any changes, including the
-    # single-value and empty-list representations used by the settings editor. The form
-    # key is matched on its last segment because the settings store underneath is
-    # case-insensitive: an exact-case comparison would let a case variant of the same key
-    # past the normalizer and leave a second, unvalidated copy of it in the config file.
-    # The key is rewritten to its canonical form, not just matched loosely: every later
-    # step here compares the last segment against array_keys and str_keys exactly, so a
-    # case variant that only got past this line would still be unwrapped into a bare
-    # string further down and stored as one.
+    # single-value and empty-list representations used by the settings editor.
+    #
+    # The settings store underneath is case-insensitive, so a case variant of the name
+    # would reach the same key while skipping this normalizer and leaving a second,
+    # unvalidated copy in the config file. The name is therefore compared case
+    # insensitively and rewritten to its canonical form, because every later step here
+    # compares the last segment against array_keys and str_keys exactly.
+    #
+    # The section is compared exactly. Matching the name alone let a key naming any other
+    # section be redirected into the translator's, which is a silent cross-section write.
     settings_items = [
         ('settings-translator-openrouter_provider_order',
          normalize_openrouter_provider_order([] if value == [''] else value))
-        if key.split('-')[-1].lower() == 'openrouter_provider_order' else (key, value)
+        if _is_provider_order_key(key) else (key, value)
         for key, value in settings_items
     ]
     _require_provider_order_for_custom_routing(settings_items)

@@ -334,9 +334,10 @@ def test_typed_legacy_routing_canonicalizes_only_the_routing_token(
 
 @pytest.mark.parametrize('boundary', ['queued', 'manual'])
 @pytest.mark.parametrize('routing, version, minimum', [
-    ('smartfast', '1.3.4', '2.0.0'), ('smartfast', None, '2.0.0'),
-    ('smartfast', 'unknown', '2.0.0'), ('custom', '1.3.3', '1.3.4'),
-    ('custom', None, '1.3.4'),
+    # A version we READ and that is too old is actionable: name the version to install.
+    # An unreadable version only refuses for custom, which has no safe fallback.
+    ('smartfast', '1.3.4', '2.0.0'), ('custom', '1.3.3', '1.3.4'),
+    ('custom', None, '1.3.4'), ('custom', 'unknown', '1.3.4'),
 ])
 def test_unsupported_selection_fails_clearly_without_submission(
         monkeypatch, submit_request, boundary, routing, version, minimum):
@@ -509,11 +510,14 @@ def test_an_unknown_version_is_probed_again_soon(monkeypatch):
     monkeypatch.setattr(openrouter_translator.time, 'monotonic', lambda: now[0])
 
     assert openrouter_translator.sidecar_version('http://sidecar:8765') is None
-    now[0] = openrouter_translator.SIDECAR_VERSION_UNKNOWN_CACHE_SECONDS + 1
-    assert openrouter_translator.sidecar_version('http://sidecar:8765') is None
+    now[0] = openrouter_translator.SIDECAR_VERSION_ACTIONABLE_CACHE_SECONDS + 1
+    assert openrouter_translator.sidecar_version(
+        'http://sidecar:8765',
+        max_age=openrouter_translator.SIDECAR_VERSION_ACTIONABLE_CACHE_SECONDS) is None
 
     assert calls == ['http://sidecar:8765/health', 'http://sidecar:8765/health']
-    assert openrouter_translator.SIDECAR_VERSION_UNKNOWN_CACHE_SECONDS < openrouter_translator.SIDECAR_VERSION_CACHE_SECONDS
+    assert (openrouter_translator.SIDECAR_VERSION_ACTIONABLE_CACHE_SECONDS
+            < openrouter_translator.SIDECAR_VERSION_CACHE_SECONDS)
 
 
 def test_a_known_version_is_still_cached_for_the_full_interval(monkeypatch):
@@ -523,7 +527,89 @@ def test_a_known_version_is_still_cached_for_the_full_interval(monkeypatch):
     monkeypatch.setattr(openrouter_translator.time, 'monotonic', lambda: now[0])
 
     assert openrouter_translator.sidecar_version('http://sidecar:8765') == (1, 3, 4)
-    now[0] = openrouter_translator.SIDECAR_VERSION_UNKNOWN_CACHE_SECONDS + 1
+    now[0] = openrouter_translator.SIDECAR_VERSION_ACTIONABLE_CACHE_SECONDS + 1
     assert openrouter_translator.sidecar_version('http://sidecar:8765') == (1, 3, 4)
 
     assert calls == ['http://sidecar:8765/health']
+
+
+@pytest.mark.parametrize('version', [None, 'unknown'])
+def test_smartfast_degrades_rather_than_failing_when_the_version_cannot_be_read(monkeypatch, version):
+    # /health may be hidden behind a reverse proxy, or answer without a version, while the
+    # job API works. Refusing there failed every translation on a service that supports
+    # smartfast, and throughput is the default for installs that never chose anything.
+    _sidecar_health(monkeypatch, version)
+    monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_routing', 'smartfast')
+    monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_model', 'deepseek/example:free')
+
+    assert openrouter_translator.build_routing_config() == (
+        'deepseek/example:free', {'sort': openrouter_translator.UNKNOWN_ROUTING_FALLBACK})
+
+
+def test_custom_still_refuses_when_the_version_cannot_be_read(monkeypatch):
+    # Custom has no safe fallback: degrading would send the job to a provider the user
+    # excluded, which is the one outcome the mode exists to prevent.
+    _sidecar_health(monkeypatch, None)
+    monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_routing', 'custom')
+    monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_order', ['deepinfra'])
+
+    with pytest.raises(openrouter_translator.ProviderRoutingError):
+        openrouter_translator.build_routing_config()
+
+
+def test_a_refusal_reads_a_fresh_version_so_the_user_s_fix_is_seen(monkeypatch):
+    # The user is told to update the translator. Answering their retry from a five-minute
+    # old reading of the version they just replaced says their fix did not work.
+    openrouter_translator.reset_sidecar_version_cache()
+    reported = ['1.3.4']
+    calls = []
+
+    def _get(url, *args, **kwargs):
+        calls.append(url)
+        return SimpleNamespace(status_code=200, json=lambda: {'version': reported[0]})
+
+    monkeypatch.setattr(openrouter_translator.requests, 'get', _get)
+    monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_routing', 'smartfast')
+    now = [0]
+    monkeypatch.setattr(openrouter_translator.time, 'monotonic', lambda: now[0])
+
+    with pytest.raises(openrouter_translator.ProviderRoutingError):
+        openrouter_translator.build_routing_config()
+
+    reported[0] = '2.0.0'
+    now[0] = openrouter_translator.SIDECAR_VERSION_ACTIONABLE_CACHE_SECONDS + 1
+    assert openrouter_translator.build_routing_config()[1] == {'sort': 'smartfast'}
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize('stored', [None, '', 'a-routing-we-removed'])
+def test_a_routing_we_cannot_read_never_lands_on_one_that_refuses(monkeypatch, stored):
+    # Both an absent and an unusable value are configs we do not understand, and a
+    # :smartfast suffix must not promote either back out of the safe fallback.
+    _sidecar_health(monkeypatch, '1.3.4')
+    if stored is None:
+        monkeypatch.delattr(openrouter_translator.settings.translator, 'openrouter_provider_routing',
+                            raising=False)
+    else:
+        monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_routing', stored)
+    monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_model', 'deepseek/example:smartfast')
+
+    model, provider = openrouter_translator.build_routing_config()
+
+    assert provider == {'sort': openrouter_translator.UNKNOWN_ROUTING_FALLBACK}
+    assert model == 'deepseek/example'
+
+
+@pytest.mark.parametrize('model, expected', [
+    ('deepseek/example:nitro:', 'deepseek/example:nitro'),
+    ('deepseek/example::nitro', 'deepseek/example:nitro'),
+    ('deepseek/example:', 'deepseek/example'),
+])
+def test_an_empty_colon_segment_never_reaches_the_wire(monkeypatch, model, expected):
+    # A trailing-colon typo used to survive stripping as "author/model:", which the
+    # legacy branch then rebuilt into "author/model::nitro".
+    _sidecar_health(monkeypatch, '1.3.4')
+    monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_model', model)
+    monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_routing', 'throughput')
+
+    assert openrouter_translator.build_routing_config()[0] == expected

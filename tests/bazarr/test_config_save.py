@@ -326,3 +326,51 @@ def test_a_case_variant_carrying_an_invalid_list_is_refused_too(monkeypatch):
         config.save_settings([('settings-translator-OPENROUTER_PROVIDER_ORDER', ['bad provider'])])
 
     assert config.settings.translator.openrouter_provider_order == ['deepinfra']
+
+
+def test_a_save_touching_neither_routing_key_is_never_blocked_by_them(monkeypatch):
+    # Reading the pair off stored settings for every save made one bad translator config
+    # reject saves on every other settings page, which is a worse failure than the one
+    # being prevented and lands on a page that cannot fix it.
+    from app import config
+
+    saved = _settings_save_harness(monkeypatch)
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_routing', 'custom')
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_order', [])
+
+    config.save_settings([('settings-general-instance_name', ['Home'])])
+
+    assert saved and config.settings.general.instance_name == 'Home'
+
+
+def test_a_decoy_key_in_another_section_cannot_satisfy_the_custom_routing_check(monkeypatch):
+    # The check used to key on the last dash-segment across every section, so a key
+    # naming any other section answered for the translator's.
+    from dynaconf.validator import ValidationError
+    from app import config
+
+    _settings_save_harness(monkeypatch)
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_routing', 'custom')
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_order', ['deepinfra'])
+
+    with pytest.raises(ValidationError):
+        config.save_settings([
+            ('settings-translator-openrouter_provider_order', ['']),
+            ('settings-zzz-openrouter_provider_routing', ['throughput']),
+        ])
+
+    assert config.settings.translator.openrouter_provider_order == ['deepinfra']
+
+
+def test_another_section_cannot_be_redirected_into_the_translator_provider_order(monkeypatch):
+    # Canonicalising on the name alone rewrote any section's key into the translator's,
+    # which is a silent cross-section write.
+    from app import config
+
+    _settings_save_harness(monkeypatch)
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_routing', 'throughput')
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_order', ['deepinfra'])
+
+    config.save_settings([('settings-general-openrouter_provider_order', ['parasail'])])
+
+    assert config.settings.translator.openrouter_provider_order == ['deepinfra']

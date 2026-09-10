@@ -310,3 +310,69 @@ describe("provider metadata", () => {
     ).toBeInTheDocument();
   });
 });
+
+describe("provider slug granularity", () => {
+  const qualified = {
+    ok: true,
+    json: async () => ({
+      data: {
+        endpoints: [
+          {
+            tag: "deepinfra/fp8",
+            provider_name: "DeepInfra",
+            status: 0,
+            pricing: { prompt: "0.0000005", completion: "0.000001" },
+          },
+        ],
+      },
+    }),
+  };
+
+  it("accepts a bare provider slug for a qualified endpoint tag", async () => {
+    // The field description and the guide both tell the user to type "deepinfra".
+    // Claiming it does not serve the model pushes them to delete a provider that works.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(qualified));
+
+    customRender(<Harness order={["deepinfra"]} onValues={() => {}} />);
+
+    expect(
+      await screen.findByText(/deepinfra \| Input .*output/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Does not serve this model/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("still reports a slug the catalog genuinely does not serve", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(qualified));
+
+    customRender(<Harness order={["novita"]} onValues={() => {}} />);
+
+    expect(
+      await screen.findByText(/novita \| Does not serve this model/),
+    ).toBeInTheDocument();
+  });
+
+  it("clears a stale filter term when the model changes", async () => {
+    // A term typed for one model kept filtering the next model's endpoints, which
+    // showed "No available endpoints" for a model that has plenty.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(qualified));
+    const { rerender } = customRender(
+      <Harness model="author/one" onValues={() => {}} />,
+    );
+    const user = userEvent.setup();
+    const search = screen.getByRole("combobox", {
+      name: "Add a provider for this model",
+    });
+    await user.type(search, "zzz");
+    expect(search).toHaveValue("zzz");
+
+    rerender(<Harness model="author/two" onValues={() => {}} />);
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("combobox", { name: "Add a provider for this model" }),
+      ).toHaveValue(""),
+    );
+  });
+});

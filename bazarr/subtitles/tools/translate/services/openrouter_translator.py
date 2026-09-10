@@ -26,9 +26,10 @@ logger = logging.getLogger(__name__)
 
 PROVIDER_ROUTING_VALUES = ('throughput', 'nitro', 'price', 'floor', 'latency', 'default', 'smartfast', 'custom')
 DEFAULT_PROVIDER_ROUTING = 'smartfast'
-# What a value outside PROVIDER_ROUTING_VALUES falls back to, which is deliberately not
-# the shipped default: a stored value we cannot read is a config we do not understand, and
-# smartfast refuses outright on an older sidecar. The plain sort translates on any of them.
+# What a routing we cannot make sense of falls back to, which is deliberately not the
+# shipped default. A stored value outside PROVIDER_ROUTING_VALUES, or no stored value at
+# all, is a config we do not understand, and smartfast refuses outright on an older
+# sidecar. The plain sort translates on every version.
 UNKNOWN_ROUTING_FALLBACK = 'throughput'
 # Sidecars before this version forward provider.sort to OpenRouter verbatim, which
 # rejects nitro, floor and default; a selector set to one of those three gets the plain
@@ -43,10 +44,12 @@ SMARTFAST_MIN_SIDECAR = (2, 0, 0)
 ROUTING_PLAIN_SORT = {'nitro': 'throughput', 'floor': 'price', 'default': 'throughput'}
 MODEL_ROUTING_SUFFIXES = ('floor', 'nitro', 'smartfast')
 SIDECAR_VERSION_CACHE_SECONDS = 300
-# A version that could not be read is cached far more briefly than one that could. Both
-# new routings refuse outright on an unknown version, so caching a restarting sidecar's
-# silence for the full interval would keep failing translations long after it came back.
-SIDECAR_VERSION_UNKNOWN_CACHE_SECONDS = 10
+# How stale a reading may be when the caller is about to refuse work over it. A user told
+# to update the translator will do so and retry within seconds, and answering that retry
+# from a five-minute-old reading of the version they just replaced tells them their fix
+# did not work. Only the refusing paths ask for a reading this fresh; the paths that
+# merely degrade keep the full interval, because re-probing changes nothing they do.
+SIDECAR_VERSION_ACTIONABLE_CACHE_SECONDS = 10
 _sidecar_version_cache = {}
 
 POLL_HARD_CAP_SECONDS = 12 * 3600
@@ -79,7 +82,10 @@ def _typed_routing_suffix(model_id):
 def _strip_routing_suffixes(model_id):
     """``model_id`` without any routing shortcut, keeping genuine variants such as :free."""
     base, variants = _model_variants(model_id)
-    return ':'.join([base] + [part for part in variants if part.lower() not in MODEL_ROUTING_SUFFIXES])
+    # Empty segments go too. A trailing-colon typo used to survive as "author/model:",
+    # which the legacy branch then rebuilt into "author/model::nitro".
+    return ':'.join([base] + [part for part in variants
+                              if part and part.lower() not in MODEL_ROUTING_SUFFIXES])
 
 
 def reset_sidecar_version_cache():
@@ -94,16 +100,21 @@ def _parse_version(text):
     return tuple(int(part or 0) for part in numbers.groups())
 
 
-def sidecar_version(base_url):
+def sidecar_version(base_url, max_age=None):
     """The AI Subtitle Translator version behind ``base_url``, cached per URL.
 
     Returns a version tuple, or None when the health endpoint is unreachable or
     does not report a version. The probe is cheap and unauthenticated, and it is
     cached so a job of many batches asks once.
+
+    ``max_age`` is how stale a cached reading the caller will accept, in seconds. A
+    caller about to refuse work over the answer passes a short one so the user's retry
+    is answered by a fresh probe rather than by the reading that failed them.
     """
     base_url = (base_url or '').rstrip('/')
+    max_age = SIDECAR_VERSION_CACHE_SECONDS if max_age is None else max_age
     cached = _sidecar_version_cache.get(base_url)
-    if cached and cached[0] > time.monotonic():
+    if cached and time.monotonic() - cached[0] < max_age:
         return cached[1]
     version = None
     try:
@@ -112,19 +123,37 @@ def sidecar_version(base_url):
             version = _parse_version(response.json().get('version'))
     except (requests.exceptions.RequestException, ValueError, AttributeError) as e:
         logger.debug("Could not read the AI Subtitle Translator version from %s: %s", base_url, e)
-    cache_seconds = SIDECAR_VERSION_CACHE_SECONDS if version else SIDECAR_VERSION_UNKNOWN_CACHE_SECONDS
-    _sidecar_version_cache[base_url] = (time.monotonic() + cache_seconds, version)
+    _sidecar_version_cache[base_url] = (time.monotonic(), version)
     return version
 
 
-def _require_routing_support(routing, minimum):
-    version = sidecar_version(settings.translator.openrouter_url)
-    if version is None or version < minimum:
-        required = '.'.join(map(str, minimum))
-        detected = '.'.join(map(str, version)) if version else 'unknown'
+def _require_routing_support(routing, minimum, degrade_on_unknown=False):
+    """True when the service behind the configured URL can honor ``routing``.
+
+    A version we read that is below the floor is actionable, so it raises and the message
+    names the version to install. A version we could not read is not evidence of an old
+    one: /health may be hidden behind a reverse proxy, or answer without a version field,
+    while the job API works perfectly. Refusing there would fail every translation on a
+    service that supports the routing, which is the failure this returns False to avoid.
+
+    ``degrade_on_unknown`` says the caller has a plain sort it can safely fall back to.
+    Custom has none: falling back would send the job to a provider the user excluded,
+    which is the one outcome that mode exists to prevent, so it asks for a refusal.
+    """
+    version = sidecar_version(settings.translator.openrouter_url,
+                              max_age=SIDECAR_VERSION_ACTIONABLE_CACHE_SECONDS)
+    required = '.'.join(map(str, minimum))
+    if version is None:
+        if degrade_on_unknown:
+            return False
+        raise ProviderRoutingError(
+            f"OpenRouter {routing} routing requires AI Subtitle Translator {required} or newer, and its "
+            f"version could not be read from the service URL. Check the service URL and the translator.")
+    if version < minimum:
         raise ProviderRoutingError(
             f"OpenRouter {routing} routing requires AI Subtitle Translator {required} or newer "
-            f"(detected version: {detected}). Check the service URL and update the translator.")
+            f"(detected version: {'.'.join(map(str, version))}). Update the translator.")
+    return True
 
 
 def build_routing_config():
@@ -134,13 +163,18 @@ def build_routing_config():
     preserving genuine model variants. Older shortcut selections retain their
     historical compatibility behavior.
     """
-    routing = getattr(settings.translator, 'openrouter_provider_routing', DEFAULT_PROVIDER_ROUTING)
-    if routing not in PROVIDER_ROUTING_VALUES:
-        logger.warning("Unknown OpenRouter provider routing '%s', using %s", routing, UNKNOWN_ROUTING_FALLBACK)
+    routing = getattr(settings.translator, 'openrouter_provider_routing', None)
+    # A missing setting is a weaker signal than an unreadable one, so both land on the
+    # fallback rather than on the shipped default, which can refuse.
+    understood = routing in PROVIDER_ROUTING_VALUES
+    if not understood:
+        logger.warning("Unusable OpenRouter provider routing %r, using %s", routing, UNKNOWN_ROUTING_FALLBACK)
         routing = UNKNOWN_ROUTING_FALLBACK
     model = getattr(settings.translator, 'openrouter_model', '')
     typed = _typed_routing_suffix(model)
-    if routing not in ('smartfast', 'custom') and typed == 'smartfast':
+    # Only a routing we understood may be upgraded by a suffix. Promoting a config we
+    # could not read into smartfast would undo the fallback on the next line.
+    if understood and routing not in ('smartfast', 'custom') and typed == 'smartfast':
         routing = 'smartfast'
     if routing in ('smartfast', 'custom'):
         if routing == 'custom':
@@ -154,10 +188,17 @@ def build_routing_config():
             _require_routing_support(routing, ROUTING_SHORTCUTS_MIN_SIDECAR)
             provider = {'sort': 'default', 'order': order, 'only': list(order), 'allowFallbacks': False}
         else:
-            _require_routing_support(routing, SMARTFAST_MIN_SIDECAR)
+            if not _require_routing_support(routing, SMARTFAST_MIN_SIDECAR, degrade_on_unknown=True):
+                logger.warning(
+                    "Could not read the AI Subtitle Translator version, so smartfast routing cannot be "
+                    "confirmed; sending %s instead of failing the translation", UNKNOWN_ROUTING_FALLBACK)
+                return _strip_routing_suffixes(model), {'sort': UNKNOWN_ROUTING_FALLBACK}
             provider = {'sort': 'smartfast'}
         return _strip_routing_suffixes(model), provider
-    if typed:
+    # Only a shortcut that stands for a plain sort is honored here. :smartfast reaches
+    # this point when the stored routing could not be read, and it has no plain sort, so
+    # it comes off the id and the fallback below decides.
+    if typed in ROUTING_PLAIN_SORT:
         # The slug already says how to route. A sidecar from 1.3.4 on drops the sort
         # for a typed shortcut anyway; an older one forwards both, so the sort has to
         # agree with the slug rather than with the setting. Only the adopted shortcut
