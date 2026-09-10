@@ -121,7 +121,20 @@ def get_sports_settings(instance):
 
 
 def merge_sports_settings(options_json, blob):
+    """Return an ``options`` JSON string with sports_settings set to ``blob``,
+    preserving any other key already in options.
+
+    The submitted blob is the complete set of overrides, not an addition to
+    what is stored. Unioning it with the previous value meant an override could
+    never go back to inheriting the global: the UI drops a key when the
+    operator switches that override off, and the union put it straight back.
+    An empty blob removes the block entirely, so clearing the last override
+    works too. Same contract as merge_subtitle_settings_into_options.
+    """
     options = _options(options_json)
-    previous = validate_sports_settings(options.get('sports_settings'))
-    options['sports_settings'] = previous | validate_sports_settings(blob)
+    validated = validate_sports_settings(blob)
+    if validated:
+        options['sports_settings'] = validated
+    else:
+        options.pop('sports_settings', None)
     return json.dumps(options)

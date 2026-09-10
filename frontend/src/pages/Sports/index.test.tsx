@@ -46,7 +46,7 @@ describe("sports library", () => {
               audio_language: [],
               poster: "https://images.example/poster.jpg",
               eventCount: 4,
-              eventFileCount: 3,
+              eventFileCount: 4,
               profileId: null,
             },
           ],
@@ -86,7 +86,10 @@ describe("sports library", () => {
       ).toBeInTheDocument();
     }
     expect(screen.getByText("Football")).toBeInTheDocument();
-    expect(screen.getByText("3/4")).toBeInTheDocument();
+    // A count, not a ratio. Files can never be fewer than events (every row in
+    // the sports events table is a playable file), so the only real divergence
+    // is a multipart event, which the dedicated test below covers.
+    expect(screen.getByText("4")).toBeInTheDocument();
     expect(screen.getByText("Main Sportarr")).toBeInTheDocument();
 
     // Row selection drives the batch profile toolbar, as on the other two pages.
@@ -174,6 +177,43 @@ describe("sports library", () => {
       action: "scan-disk",
       options: undefined,
     });
+  });
+
+  it("does not present event and file counts as a completion ratio", async () => {
+    server.use(
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([sportarr]),
+      ),
+      http.get("/api/sports/leagues", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: 51,
+              arr_instance_id: 42,
+              sportarrLeagueId: 7,
+              title: "Premier League",
+              sport: "Football",
+              monitored: true,
+              tags: [],
+              audio_language: [],
+              // One two-part event: one distinct upstream event, two playable
+              // files. As a ratio this is 2/1, a bar past 100% that also
+              // colours a complete league yellow.
+              eventCount: 1,
+              eventFileCount: 2,
+              profileId: 5,
+            },
+          ],
+          total: 1,
+        }),
+      ),
+    );
+    customRender(<Sports />);
+
+    expect(
+      await screen.findByText("1 (2 files)", undefined, { timeout: 8000 }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("2/1")).toBeNull();
   });
 
   it("does not request the library with no enabled Sportarr", async () => {

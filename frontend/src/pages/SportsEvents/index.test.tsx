@@ -560,7 +560,12 @@ it.each([false, true])(
     );
     await userEvent.click(dialog.getByRole("button", { name: "Search" }));
     expect(await dialog.findByText("Event.Release")).toBeInTheDocument();
-    await userEvent.click(dialog.getByRole("button", { name: "Download" }));
+    // findBy, not getBy: the results table is re-rendered as the sports
+    // queries settle, so a one-shot query can land between the old rows going
+    // and the new ones mounting, with the release text already matched.
+    await userEvent.click(
+      await dialog.findByRole("button", { name: "Download" }),
+    );
     // Scoped to the page table: the search modal renders a results table too,
     // and "en" appears in both, so anything wider is ambiguous.
     await waitFor(() => {

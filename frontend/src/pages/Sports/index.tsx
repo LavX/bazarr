@@ -183,7 +183,15 @@ const Sports: FunctionComponent = () => {
     options: instanceOptions,
   } = useArrInstanceLabels("sportarr");
 
-  const query = useSportsLeaguesPagination();
+  // ItemView filters what is in query.data, so a filter that is active has to
+  // see the whole library rather than the page on screen. Same shape as the
+  // Series and Movies pages.
+  const hasActiveFilter =
+    search.length > 0 ||
+    audioLanguages.length > 0 ||
+    excludeLanguages.length > 0 ||
+    instanceFilter.length > 0;
+  const query = useSportsLeaguesPagination(hasActiveFilter);
   const assign = useSportsProfile();
   const sync = useSyncSports();
 
@@ -450,33 +458,30 @@ const Sports: FunctionComponent = () => {
         header: "Events",
         accessorKey: "eventFileCount",
         cell: ({ row: { original } }) => {
-          const { eventCount, eventFileCount, profileId, title } = original;
-          const label = `${eventFileCount}/${eventCount}`;
+          // Counts, not a completion ratio. These two measure different
+          // things: eventCount is distinct upstream events, eventFileCount is
+          // playable files, and one two-part event makes that "2/1" and drives
+          // a progress bar past 100% while colouring a complete league yellow.
+          //
+          // There is no fraction to show here in the first place. Every row in
+          // the sports events table is a playable file, so a league has no
+          // known-but-missing events the way a series has episodes without
+          // files. Showing both numbers plainly says what is actually known.
+          const { eventCount, eventFileCount } = original;
+          const parts = eventFileCount > eventCount;
           return (
-            <Progress.Root
-              key={title}
-              size="xl"
-              radius="xl"
-              style={{ minWidth: 80, background: "var(--bz-hover-bg)" }}
+            <Tooltip
+              withArrow
+              label={
+                parts
+                  ? `${eventFileCount} playable files across ${eventCount} events`
+                  : `${eventCount} events`
+              }
             >
-              <Tooltip label={label} withArrow>
-                <Progress.Section
-                  value={
-                    eventCount === 0 || !profileId
-                      ? 0
-                      : (eventFileCount / eventCount) * 100.0
-                  }
-                  color={eventFileCount === eventCount ? "brand" : "yellow"}
-                  style={{ borderRadius: "var(--bz-radius-xl)" }}
-                >
-                  <Progress.Label
-                    style={{ fontSize: "0.75rem", fontWeight: 600 }}
-                  >
-                    {label}
-                  </Progress.Label>
-                </Progress.Section>
-              </Tooltip>
-            </Progress.Root>
+              <Text size="sm">
+                {parts ? `${eventCount} (${eventFileCount} files)` : eventCount}
+              </Text>
+            </Tooltip>
           );
         },
       },

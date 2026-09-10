@@ -1119,6 +1119,7 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
     update_schedule = False
     sonarr_changed = False
     radarr_changed = False
+    sportarr_changed = False
     update_path_map = False
     configure_proxy = False
     exclusion_updated = False
@@ -1250,6 +1251,14 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
         if key in ['settings-general-use_radarr', 'settings-radarr-ip', 'settings-radarr-port',
                    'settings-radarr-base_url', 'settings-radarr-ssl', 'settings-radarr-apikey']:
             radarr_changed = True
+
+        # Sports has no scalar connection block: its instances live in
+        # arr_instances and their own edits already refresh the runtime. The
+        # master toggle is the one sports setting that does not, and without
+        # this the event streams kept running after it was switched off, until
+        # a restart or an unrelated instance edit happened to refresh them.
+        if key == 'settings-general-use_sportarr':
+            sportarr_changed = True
 
         if key in ['settings-general-path_mappings', 'settings-general-path_mappings_movie',
                    'settings-general-path_mappings_sports']:
@@ -1528,6 +1537,16 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             from .signalr_client import restart_radarr_signalr
             try:
                 restart_radarr_signalr()
+            except Exception:
+                pass
+
+        if sportarr_changed:
+            # Streams and jobs together: configure_sports_jobs is gated on the
+            # same toggle, so leaving it out would stop the streams and leave
+            # the scheduled sports jobs registered.
+            from sportarr.scheduler import refresh_sports_runtime
+            try:
+                refresh_sports_runtime()
             except Exception:
                 pass
 

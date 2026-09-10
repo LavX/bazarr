@@ -17,6 +17,8 @@ import { useBatchAction } from "@/apis/hooks/subtitles";
 import { InstanceBadge, ReleaseMismatchBadge } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
 import { WantedItem } from "@/components/forms/MassTranslateForm";
+import { SportsSearchModal } from "@/components/modals/SportsSearchModal";
+import { useModals } from "@/modules/modals";
 import WantedView from "@/pages/views/WantedView";
 import { BuildKey } from "@/utilities";
 import tableStyles from "@/components/tables/BaseTable.module.scss";
@@ -25,6 +27,42 @@ import tableStyles from "@/components/tables/BaseTable.module.scss";
 // component with History and Blacklist, switched by a `kind` prop, rendering a
 // raw Mantine table that reached none of the shared filtering, paging or
 // styling the other two media types get.
+// One badge, one language. Clicking a badge used to post the event-wide
+// /automatic action, which calls search_event with language=None and so
+// searches, and may download, every missing language on that event rather than
+// the one the user picked. The Movies wanted page downloads exactly the
+// language whose badge was clicked, and this is the sports equivalent: the
+// manual search opened on that language and its modifiers.
+//
+// Its own component because it needs the modals hook, and a hook object in the
+// columns useMemo deps rebuilds every column on each render.
+const MissingLanguages: FunctionComponent<{ row: SportsWantedRow }> = ({
+  row,
+}) => {
+  const modals = useModals();
+  return (
+    <Group gap="sm">
+      {row.missing_subtitles.map((item, idx) => (
+        <Badge
+          leftSection={<FontAwesomeIcon icon={faSearch} />}
+          key={BuildKey(idx, item.code2)}
+          style={{ cursor: "pointer" }}
+          onClick={() =>
+            modals.openContextModal(SportsSearchModal, {
+              item: row,
+              language: item.code2,
+              hi: item.hi,
+              forced: item.forced,
+            })
+          }
+        >
+          <Language.Text value={item}></Language.Text>
+        </Badge>
+      ))}
+    </Group>
+  );
+};
+
 const WantedSportsView: FunctionComponent = () => {
   const { enabled, isLoading } = useSportsAvailability();
   const [params] = useSearchParams();
@@ -121,29 +159,10 @@ const WantedSportsView: FunctionComponent = () => {
       {
         header: "Missing",
         accessorKey: "missing_subtitles",
-        cell: ({ row: { original } }) => (
-          <Group gap="sm">
-            {original.missing_subtitles.map((item, idx) => (
-              <Badge
-                color={run.isPending ? "gray" : undefined}
-                leftSection={<FontAwesomeIcon icon={faSearch} />}
-                key={BuildKey(idx, item.code2)}
-                style={{ cursor: "pointer" }}
-                onClick={() =>
-                  run.mutate({
-                    path: `/events/${original.id}/automatic`,
-                    owner: original.arr_instance_id,
-                  })
-                }
-              >
-                <Language.Text value={item}></Language.Text>
-              </Badge>
-            ))}
-          </Group>
-        ),
+        cell: ({ row: { original } }) => <MissingLanguages row={original} />,
       },
     ],
-    [run, multiInstance, instanceNameById, instanceDefaultId],
+    [multiInstance, instanceNameById, instanceDefaultId],
   );
 
   const getWantedItem = useCallback(

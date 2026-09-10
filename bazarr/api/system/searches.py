@@ -4,7 +4,8 @@ from flask_restx import Resource, Namespace, reqparse
 from unidecode import unidecode
 
 from app.config import base_url, settings
-from app.database import TableShows, TableMovies, TableSportsLeagues, database, select
+from app.database import (TableArrInstances, TableShows, TableMovies, TableSportsLeagues,
+                          database, select)
 
 from ..utils import authenticate, image_proxy_path_with_instance
 
@@ -64,6 +65,11 @@ class Searches(Resource):
                 # Sports leagues were absent from the global search entirely,
                 # so a Sportarr user's library was unreachable from the search
                 # bar even though the tab existed in the nav.
+                # Filtered to enabled owners, the way the sports library and
+                # detail queries are. A disabled instance keeps its league
+                # rows, so an unfiltered search kept offering them while the
+                # pages they link to refuse to load, giving the user a result
+                # that goes nowhere.
                 search_list += database.execute(
                     select(TableSportsLeagues.title,
                            TableSportsLeagues.id,
@@ -71,6 +77,10 @@ class Searches(Resource):
                            TableSportsLeagues.sportarrLeagueId,
                            TableSportsLeagues.poster,
                            TableSportsLeagues.sport)
+                    .join(TableArrInstances,
+                          TableSportsLeagues.arr_instance_id == TableArrInstances.id)
+                    .where(TableArrInstances.kind == 'sportarr',
+                           TableArrInstances.enabled == 1)
                     .order_by(TableSportsLeagues.title)) \
                     .all()
 

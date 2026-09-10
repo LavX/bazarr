@@ -2,7 +2,10 @@ import { useState } from "react";
 import { Alert, Checkbox, Group, NativeSelect, Stack } from "@mantine/core";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
-import sports, { SportsEvent, SportsPublication } from "@/apis/raw/sports";
+import sports, {
+  SportsEventReference,
+  SportsPublication,
+} from "@/apis/raw/sports";
 import { withModal } from "@/modules/modals";
 import {
   useEnabledLanguages,
@@ -10,13 +13,23 @@ import {
 } from "@/utilities/languages";
 import { ManualSearchView } from "./ManualSearchModal";
 
+// What the modal actually needs: the ids the sports routes are keyed on, plus
+// the profile it offers languages from. Typed to that rather than to a full
+// SportsEvent so a caller holding a row rather than an event, the wanted page,
+// can open it without inventing the fields it never reads.
+export type SportsSearchTarget = SportsEventReference & {
+  profileId: number | null;
+  /** Shown as the release hint when the indexer recorded one. */
+  sceneName?: string;
+};
+
 function SportsSearchView({
   item,
   language: initialLanguage,
   hi: initialHi = false,
   forced: initialForced = false,
 }: {
-  item: SportsEvent;
+  item: SportsSearchTarget;
   // Opened from a missing-language badge, the search starts on that language
   // and its modifiers rather than on the profile's first entry, which is
   // rarely the one the user just clicked.
@@ -51,7 +64,10 @@ function SportsSearchView({
       retry: false,
     });
   }
-  async function download(event: SportsEvent, candidate: SearchResultType) {
+  async function download(
+    event: SportsSearchTarget,
+    candidate: SearchResultType,
+  ) {
     if (downloading) return;
     setDownloading(true);
     setPublication(undefined);

@@ -96,12 +96,27 @@ def test_sports_settings_merge_and_validation(schema_session):
     from arr_instances.repository import ArrInstanceRepository
     body, status = create_instance(schema_session, {'kind': 'sportarr', 'name': 'Sports', 'sports_settings': {'sports_sync': 13, 'excluded_sports': ['Golf']}, 'subtitle_settings': {'general': {'use_postprocessing': True}}})
     assert status == 201 and body['sports_settings']['sports_sync'] == 13
+
+    # The submitted blob is the complete set of overrides, not an addition to
+    # what is stored. This used to union with the previous value, which meant
+    # an override could never go back to inheriting the global: the UI drops a
+    # key when the operator switches that override off, and the union put it
+    # straight back.
     changed, status = update_instance(schema_session, body['id'], {'sports_settings': {'full_update': 'Weekly'}})
-    assert status == 200 and changed['sports_settings']['sports_sync'] == 13
-    assert changed['sports_settings']['excluded_sports'] == ['Golf']
+    assert status == 200
+    assert changed['sports_settings'] == {'full_update': 'Weekly'}
+    # A different blob on the same instance leaves its neighbours alone.
     assert changed['subtitle_settings']['general']['use_postprocessing'] is True
     opts = json.loads(ArrInstanceRepository(schema_session).get(body['id']).options)
-    assert opts['sports_settings']['full_update'] == 'Weekly'
+    assert opts['sports_settings'] == {'full_update': 'Weekly'}
+
+    # And an empty blob clears the block entirely, which is how the last
+    # remaining override is removed.
+    cleared, status = update_instance(schema_session, body['id'], {'sports_settings': {}})
+    assert status == 200 and cleared['sports_settings'] == {}
+    opts = json.loads(ArrInstanceRepository(schema_session).get(body['id']).options)
+    assert 'sports_settings' not in opts
+    assert opts['subtitle_settings']['general']['use_postprocessing'] is True
     for bad in [{'sports_sync': 0}, {'sports_sync': True}, {'full_update': 'Hourly'}, {'full_update_hour': 24}, {'full_update_day': -1}, {'only_monitored': 1}, {'excluded_tags': 'tag'}, {'api_key': 'private'}]:
         _, status = update_instance(schema_session, body['id'], {'sports_settings': bad})
         assert status == 400
@@ -318,8 +333,9 @@ def test_sportarr_http_crud_on_both_database_engines(library, monkeypatch):
     url = f'/system/arr-instances/{owner}'
     patched = client.patch(url, headers=headers, json={'enabled': False, 'sports_settings': {'full_update': 'Weekly'}})
     assert patched.status_code == 200 and patched.json['enabled'] is False
-    assert patched.json['sports_settings']['sports_sync'] == 19
-    assert patched.json['sports_settings']['full_update'] == 'Weekly'
+    # Replacement, not a union: the blob names every override that should
+    # survive, so sports_sync is gone because the patch did not resend it.
+    assert patched.json['sports_settings'] == {'full_update': 'Weekly'}
     assert client.patch(url, headers=headers, json={'enabled': True, 'is_default': True}).status_code == 200
     assert client.delete(url, headers=headers).status_code == 204
     assert session.execute(sa.select(TableArrInstances.id).order_by(TableArrInstances.id)).scalars().all() == [1, 2]

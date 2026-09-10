@@ -306,8 +306,10 @@ const InstanceFormModal: FunctionComponent<Props> = ({
         // stored block server-side; an absent key would instead preserve it.
         subtitle_settings: values.subtitleSettings,
         media_defaults: values.mediaDefaults,
-        ...(values.kind === "sportarr" &&
-        Object.keys(values.sportsSettings).length
+        // Always sent for a Sportarr, for the same reason subtitle_settings
+        // above is: the blob is the complete set of overrides, so omitting it
+        // when empty made clearing the last one impossible.
+        ...(values.kind === "sportarr"
           ? { sports_settings: values.sportsSettings }
           : {}),
       };
@@ -355,10 +357,7 @@ const InstanceFormModal: FunctionComponent<Props> = ({
         subtitleSettings: values.subtitleSettings,
         mediaDefaults: values.mediaDefaults,
       });
-      if (
-        values.kind === "sportarr" &&
-        Object.keys(values.sportsSettings).length
-      )
+      if (values.kind === "sportarr")
         body["sports_settings"] = values.sportsSettings;
       if (values.kind === "sportarr" && values.pathMappings.length)
         body["path_mappings"] = values.pathMappings;

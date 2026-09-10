@@ -216,9 +216,15 @@ def test_cancel_between_files_leaves_rest_of_batch_pending(
 
 
 def test_manager_replaces_owner_while_analysis_is_blocked(indexed_library, monkeypatch):
+    from app.config import settings
     from app.database import TableArrInstances
     from sportarr import sse_client
     from sportarr.connection import connection_identity
+
+    # The manager refuses to hold a stream while the master toggle is off. This
+    # test exercises the owner-replacement lifecycle underneath that gate, so
+    # it states the precondition a configured install would have.
+    monkeypatch.setattr(settings.general, 'use_sportarr', True)
 
     _, path = indexed_library
     marker, release = blocked_probe(path, monkeypatch)

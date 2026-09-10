@@ -3,6 +3,7 @@ import { usePaginationQuery } from "@/apis/queries/hooks";
 import { QueryKeys } from "@/apis/queries/keys";
 import sports, {
   SportsEvent,
+  SportsEventReference,
   SportsFilters,
   SportsLeague,
   SportsRecord,
@@ -62,7 +63,7 @@ export function toSportsLeagueRow(league: SportsLeague): SportsLeagueRow {
 // The table-backed leagues query. Paginates through the same start/length
 // contract the series and movies endpoints use, so usePaginationQuery drives it
 // unchanged.
-export function useSportsLeaguesPagination() {
+export function useSportsLeaguesPagination(fetchAll = false) {
   const { instances, enabled } = useSportsAvailability();
   return usePaginationQuery(
     [QueryKeys.Sports, "leagues", instances.map((instance) => instance.id)],
@@ -81,6 +82,11 @@ export function useSportsLeaguesPagination() {
       };
     },
     false,
+    // The library page filters by title, audio language and instance on the
+    // client, over query.data only. Without fetch-all those filters silently
+    // searched one page, exactly as the Series and Movies pages would if they
+    // did not request every row while a filter is active.
+    fetchAll,
   );
 }
 
@@ -146,7 +152,13 @@ export function useSportsEvents(id: number, owner?: number, page = 1) {
       page,
       instances.map((instance) => instance.id),
     ],
-    queryFn: () => sports.events(id, owner!, (page - 1) * 100),
+    // Every event, not the first hundred. The detail page never exposed a page
+    // control, and its table, upload picker, subtitle-tools payload and
+    // archive language/season choices are all derived from this one list, so a
+    // league with more than one page of playable files silently lost the rest
+    // from every one of them. -1 is the fetch-all length the shared endpoints
+    // already speak.
+    queryFn: () => sports.events(id, owner!, (page - 1) * 100, -1),
     enabled:
       Number.isInteger(id) &&
       id > 0 &&
@@ -173,12 +185,13 @@ export function useIndexSportsSubtitles() {
 // API sends missing_subtitles as bare language keys ("en", "hu:hi") while
 // Wanted.Base carries Subtitle objects, so the gap is closed here rather than by
 // widening the shared type for one caller.
-export type SportsWantedRow = Wanted.Base & {
-  id: number;
-  arr_instance_id: number;
-  league_id: number;
-  title: string;
-};
+export type SportsWantedRow = Wanted.Base &
+  SportsEventReference & {
+    title: string;
+    // Carried so a row can open the manual search, which offers languages from
+    // the event's profile.
+    profileId: number | null;
+  };
 
 function toSubtitle(key: string): Subtitle {
   const [code2, ...modifiers] = key.split(":");
@@ -195,9 +208,7 @@ function toSubtitle(key: string): Subtitle {
 
 export function toSportsWantedRow(event: SportsEvent): SportsWantedRow {
   return {
-    id: event.id,
-    arr_instance_id: event.arr_instance_id,
-    league_id: event.league_id,
+    ...event,
     title: event.title,
     monitored: true,
     tags: [],

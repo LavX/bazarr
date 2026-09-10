@@ -7,7 +7,8 @@ import json
 from sqlalchemy import func
 
 from app.config import settings
-from app.database import (TableShowsRootfolder, TableMoviesRootfolder, TableSportsLeaguesRootfolder,
+from app.database import (TableArrInstances, TableShowsRootfolder, TableMoviesRootfolder,
+                          TableSportsLeaguesRootfolder,
                           TableLanguagesProfiles, database, select,
                           TableShows, TableMovies)
 from app.event_handler import event_stream
@@ -153,12 +154,22 @@ def get_health_issues():
     # root; nothing read them, so a broken sports path mapping produced no
     # health issue and no status badge, and downloads just failed per event.
     if settings.general.use_sportarr:
+        # Joined to the owner and filtered to enabled Sportarr instances. The
+        # rows of a disabled instance survive, and mapping one below calls
+        # path_replace_instance, whose sports owner lookup requires an enabled
+        # instance and raises otherwise. Unfiltered, disabling an instance that
+        # had an inaccessible root folder took down the whole health and badges
+        # request rather than just hiding its issue.
         rootfolder = database.execute(
             select(TableSportsLeaguesRootfolder.path,
                    TableSportsLeaguesRootfolder.accessible,
                    TableSportsLeaguesRootfolder.error,
                    TableSportsLeaguesRootfolder.arr_instance_id)
-            .where(TableSportsLeaguesRootfolder.accessible == 0)) \
+            .join(TableArrInstances,
+                  TableSportsLeaguesRootfolder.arr_instance_id == TableArrInstances.id)
+            .where(TableSportsLeaguesRootfolder.accessible == 0,
+                   TableArrInstances.kind == 'sportarr',
+                   TableArrInstances.enabled == 1)) \
             .all()
         health_issues.extend(
             {'object': path_mappings.path_replace_instance(

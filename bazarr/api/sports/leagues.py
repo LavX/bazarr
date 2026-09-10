@@ -50,8 +50,11 @@ class SportsLeagues(Resource):
             owner = _owner(owner) if owner is not None else None
             start = int(request.args.get('start', 0))
             length = int(request.args.get('length', 100))
-            if start < 0 or not 1 <= length <= 1000:
-                raise ValueError('Invalid pagination')
+            # No bespoke bounds check here: list_leagues validates through the
+            # shared definition, which also accepts the fetch-all length of -1.
+            # The copy that used to live here rejected -1, so the library page
+            # could not fetch every row and its filters only ever searched the
+            # page currently on screen.
             return library.list_leagues(database, owner, start, length), 200
         except ValueError as exc:
             return {'message': str(exc)}, 400

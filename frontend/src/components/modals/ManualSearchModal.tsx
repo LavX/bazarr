@@ -20,15 +20,18 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { UseQueryResult } from "@tanstack/react-query";
 import { ColumnDef } from "@tanstack/react-table";
 import { isString } from "lodash";
-import { SportsEvent } from "@/apis/raw/sports";
 import { Action } from "@/components";
 import Language from "@/components/bazarr/Language";
+import type { SportsSearchTarget } from "@/components/modals/SportsSearchModal";
 import StateIcon from "@/components/StateIcon";
 import PageTable from "@/components/tables/PageTable";
 import { withModal } from "@/modules/modals";
 import { GetItemId } from "@/utilities";
 
-type SupportType = Item.Movie | Item.Episode | SportsEvent;
+// A sports caller may hold only the ids and the profile, not a whole event:
+// the wanted page opens this from a row. It reads sceneName optionally and
+// keys on league_id, both of which survive the narrower shape.
+type SupportType = Item.Movie | Item.Episode | SportsSearchTarget;
 
 interface Props<T extends SupportType> {
   download: (item: T, result: SearchResultType) => Promise<void>;

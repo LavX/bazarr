@@ -186,6 +186,10 @@ describe("Sportarr Connections", () => {
       http_timeout: 60,
       enabled: true,
       api_key: "new-test-key",
+      // Always present for a Sportarr, even empty. The blob is the complete
+      // set of overrides, so omitting it when empty made clearing the last
+      // override impossible: the server kept whatever it already had.
+      sports_settings: {},
     });
     expect(createdBody).not.toHaveProperty("is_default");
     expect(createdBody).not.toHaveProperty("media_defaults");
@@ -351,6 +355,10 @@ describe("Sportarr Connections", () => {
       enabled: true,
       is_default: true,
       subtitle_settings: {},
+      // Sent alongside subtitle_settings and for the same reason: the blob is
+      // the complete set of overrides, so an absent key preserved whatever the
+      // server already had and the last override could never be cleared.
+      sports_settings: {},
       media_defaults: { default_enabled: true, default_profile: 3 },
     });
     expect(updateBody).not.toHaveProperty("api_key");

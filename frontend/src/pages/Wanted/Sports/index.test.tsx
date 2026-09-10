@@ -55,40 +55,24 @@ it("pages through the shared start/length contract instead of a page number", as
   expect(Number(query!.get("length"))).toBeGreaterThan(0);
 });
 
-it("shows a completed no-result reason from the owned job endpoint", async () => {
+it("searches only the language whose badge was clicked", async () => {
   owners();
-  let posted: unknown;
+  let searched: unknown;
   server.use(
     http.get("/api/sports/wanted", () =>
       HttpResponse.json({ data: [event], total: 1 }),
     ),
-    http.post("/api/sports/events/11/automatic", async ({ request }) => {
-      posted = await request.json();
-      return HttpResponse.json({
-        queued: true,
-        job_id: 99,
-        message: "Search queued",
-      });
+    http.get("/api/system/languages", () =>
+      HttpResponse.json([
+        { code2: "en", code3: "eng", name: "English", enabled: true },
+      ]),
+    ),
+    http.post("/api/sports/events/11/search", async ({ request }) => {
+      searched = await request.json();
+      return HttpResponse.json({ data: [] });
     }),
-    http.get("/api/sports/jobs/99", ({ request }) => {
-      expect(new URL(request.url).searchParams.get("arr_instance_id")).toBe(
-        "42",
-      );
-      return HttpResponse.json({
-        job_id: 99,
-        arr_instance_id: 42,
-        status: "completed",
-        message: "No eligible subtitle met the configured threshold",
-        result: {
-          data: [
-            {
-              status: "no_result",
-              message: "No eligible subtitle met the configured threshold",
-              downloads: 0,
-            },
-          ],
-        },
-      });
+    http.post("/api/sports/events/11/automatic", () => {
+      throw new Error("the event-wide action must not be used for one badge");
     }),
   );
   customRender(<WantedSportsView />);
@@ -97,10 +81,22 @@ it("shows a completed no-result reason from the owned job endpoint", async () =>
     { name: /Final/ },
     { timeout: 8000 },
   );
-  // Clicking the missing language searches for it, the way the Series and
-  // Movies wanted pages work, rather than a text button in an Actions column.
-  await userEvent.setup().click(within(row).getByText("en"));
-  await waitFor(() => expect(posted).toEqual({ arr_instance_id: 42 }));
+
+  // Clicking a badge used to post the event-wide /automatic action, which
+  // calls search_event with language=None and so searches, and may download,
+  // every missing language rather than the one picked.
+  await userEvent.setup().click(within(row).getByText("hu:HI"));
+  const dialog = within(await screen.findByRole("dialog"));
+  await userEvent.setup().click(dialog.getByRole("button", { name: "Search" }));
+
+  await waitFor(() =>
+    expect(searched).toEqual({
+      arr_instance_id: 42,
+      language: "hu",
+      hi: true,
+      forced: false,
+    }),
+  );
 });
 
 it("splits a modified language key into a real language badge", async () => {

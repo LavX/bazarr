@@ -1081,3 +1081,22 @@ def test_the_master_toggle_stops_every_stream(schema_session, monkeypatch):
     monkeypatch.setattr(settings.general, 'use_sportarr', True)
     manager.refresh(schema_session)
     assert len(manager.clients) == 2
+
+
+def test_saving_the_master_toggle_refreshes_the_sports_runtime():
+    """Gating the manager is only half of it: nothing re-ran the manager when
+    the toggle was saved, so the streams and the scheduled sports jobs both
+    kept running until a restart or an unrelated instance edit happened to
+    refresh them. Sonarr and Radarr each restart their SignalR client from the
+    same block for the same reason."""
+    import inspect
+
+    from app import config
+
+    source = inspect.getsource(config.save_settings)
+    assert "sportarr_changed = True" in source
+    assert "settings-general-use_sportarr" in source
+    hook = source[source.index("if sportarr_changed:"):]
+    # Streams and jobs together: configure_sports_jobs is gated on the same
+    # toggle, so refreshing only the streams would leave the jobs registered.
+    assert "refresh_sports_runtime()" in hook.split("if update_path_map")[0]
