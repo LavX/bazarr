@@ -318,6 +318,63 @@ describe("sports event detail", () => {
     );
   });
 
+  it("searches one missing language from its badge", async () => {
+    let searched: unknown;
+    server.use(
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([sportarr]),
+      ),
+      http.get("/api/system/languages", () =>
+        HttpResponse.json([
+          { code2: "en", code3: "eng", name: "English", enabled: true },
+        ]),
+      ),
+      http.get("/api/sports/leagues/51", () =>
+        HttpResponse.json({ id: 51, arr_instance_id: 42, title: "League" }),
+      ),
+      http.get("/api/sports/leagues/51/events", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: 61,
+              arr_instance_id: 42,
+              league_id: 51,
+              title: "Event",
+              path: "/sports/event.mkv",
+              hasFile: true,
+              profileId: 5,
+              subtitles: [],
+              missing_subtitles: ["en:hi"],
+            },
+          ],
+          total: 1,
+        }),
+      ),
+      http.post("/api/sports/events/61/search", async ({ request }) => {
+        searched = await request.json();
+        return HttpResponse.json({ data: [] });
+      }),
+    );
+    renderDetail();
+    const user = userEvent.setup();
+    // The badges used to be inert, so acting on one missing language meant
+    // the row's search, which searches every missing language.
+    await user.click(await screen.findByText("en:hi"));
+    const dialog = within(await screen.findByRole("dialog"));
+    await user.click(dialog.getByRole("button", { name: "Search" }));
+
+    // Opened on the clicked language and its modifier, not the profile's
+    // first entry.
+    await waitFor(() =>
+      expect(searched).toEqual({
+        arr_instance_id: 42,
+        language: "en",
+        hi: true,
+        forced: false,
+      }),
+    );
+  });
+
   it("does not load events for a disabled owner", async () => {
     let requests = 0;
     server.use(

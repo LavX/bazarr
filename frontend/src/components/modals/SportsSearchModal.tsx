@@ -10,15 +10,28 @@ import {
 } from "@/utilities/languages";
 import { ManualSearchView } from "./ManualSearchModal";
 
-function SportsSearchView({ item }: { item: SportsEvent }) {
+function SportsSearchView({
+  item,
+  language: initialLanguage,
+  hi: initialHi = false,
+  forced: initialForced = false,
+}: {
+  item: SportsEvent;
+  // Opened from a missing-language badge, the search starts on that language
+  // and its modifiers rather than on the profile's first entry, which is
+  // rarely the one the user just clicked.
+  language?: string;
+  hi?: boolean;
+  forced?: boolean;
+}) {
   const client = useQueryClient();
   const { data: languages } = useEnabledLanguages();
   const profile = useLanguageProfileBy(item.profileId);
-  const [selected, setSelected] = useState<string>();
+  const [selected, setSelected] = useState<string | undefined>(initialLanguage);
   const language =
     selected ?? profile?.items[0]?.language ?? languages[0]?.code2 ?? "";
-  const [hi, setHi] = useState(false);
-  const [forced, setForced] = useState(false);
+  const [hi, setHi] = useState(initialHi);
+  const [forced, setForced] = useState(initialForced);
   const [downloading, setDownloading] = useState(false);
   const [publication, setPublication] = useState<SportsPublication>();
 

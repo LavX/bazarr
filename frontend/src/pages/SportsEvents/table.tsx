@@ -118,15 +118,36 @@ const Table = forwardRef<TableInstance<SportsEvent> | null, Props>(
           accessorKey: "missing_subtitles",
           cell: ({ row: { original } }) => (
             <Group gap="xs" wrap="nowrap">
-              {original.missing_subtitles?.map((language, index) => (
-                <Badge
-                  key={BuildKey(index, language, "missing")}
-                  color="yellow"
-                  variant="light"
-                >
-                  {language}
-                </Badge>
-              ))}
+              {original.missing_subtitles?.map((language, index) => {
+                // Clicking a missing language searches for that one, the way
+                // the episodes table and the wanted pages do. The badges used
+                // to be inert, so the only way to act on one missing language
+                // was the row's search, which searches every missing language.
+                const [code2, ...modifiers] = language.split(":");
+                const lower = modifiers.map((modifier) =>
+                  modifier.toLowerCase(),
+                );
+                return (
+                  <Badge
+                    key={BuildKey(index, language, "missing")}
+                    color="yellow"
+                    variant="light"
+                    style={{ cursor: original.hasFile ? "pointer" : undefined }}
+                    leftSection={<FontAwesomeIcon icon={faMagnifyingGlass} />}
+                    onClick={() => {
+                      if (!original.hasFile) return;
+                      modals.openContextModal(SportsSearchModal, {
+                        item: original,
+                        language: code2,
+                        hi: lower.includes("hi"),
+                        forced: lower.includes("forced"),
+                      });
+                    }}
+                  >
+                    {language}
+                  </Badge>
+                );
+              })}
               {original.subtitles?.map(([language, path], index) => (
                 <Badge
                   key={BuildKey(index, language, "present")}

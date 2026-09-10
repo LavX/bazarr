@@ -1,6 +1,7 @@
 import { FunctionComponent, useCallback, useMemo, useState } from "react";
 import { Link } from "react-router";
 import {
+  ActionIcon,
   Anchor,
   Badge,
   Checkbox,
@@ -23,6 +24,7 @@ import {
   faMagnifyingGlass,
   faSync,
   faToolbox,
+  faWrench,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
@@ -56,6 +58,114 @@ import { LIBRARY_ROUTES } from "@/Router/mediaRoutes";
 // to be a bespoke grid of poster cards with its own instance select and its own
 // pagination, which meant none of the shared filtering, row selection or batch
 // tooling reached it and it looked nothing like the other two media types.
+// The per-row menu Series and Movies carry. A league had none at all, so
+// acting on one meant ticking its checkbox first.
+//
+// Its own component rather than an inline cell: the menu needs the modals and
+// profile hooks, and hook objects get a new identity on every render. Listing
+// them in the columns useMemo deps rebuilt the whole column set on each render,
+// which unmounted the open dropdown before anything could be clicked.
+const LeagueRowActions: FunctionComponent<{ league: SportsLeagueRow }> = ({
+  league,
+}) => {
+  const modals = useModals();
+  const assign = useSportsProfile();
+
+  const batchItem: BatchItem = {
+    type: "sportsLeague",
+    sportsLeagueId: league.id,
+    arr_instance_id: league.arr_instance_id,
+  };
+  const wantedItem: WantedItem = {
+    type: "sportsLeague",
+    sportsLeagueId: league.id,
+    title: league.title,
+    arrInstanceId: league.arr_instance_id,
+  };
+  const batchAction = (action: BatchAction) => () =>
+    modals.openContextModal(BatchModConfirmModal, {
+      items: [batchItem],
+      action,
+    });
+
+  return (
+    <Menu shadow="md" width={220} position="bottom-end">
+      <Menu.Target>
+        <Tooltip label="Actions">
+          <ActionIcon aria-label="Actions" variant="subtle" size="sm">
+            <FontAwesomeIcon icon={faEllipsisVertical} />
+          </ActionIcon>
+        </Tooltip>
+      </Menu.Target>
+      <Menu.Dropdown>
+        <Menu.Item
+          leftSection={<FontAwesomeIcon icon={faWrench} size="sm" />}
+          onClick={() =>
+            modals.openContextModal(
+              ChangeProfileModal,
+              {
+                onSelect: (profileId: number | null) =>
+                  assign.mutate({
+                    id: league.id,
+                    owner: league.arr_instance_id,
+                    profileId,
+                  }),
+              },
+              { title: league.title },
+            )
+          }
+        >
+          Change Profile
+        </Menu.Item>
+        <Menu.Divider />
+        <Menu.Item
+          leftSection={<FontAwesomeIcon icon={faSync} size="sm" />}
+          onClick={() =>
+            modals.openContextModal(MassSyncModal, { items: [batchItem] })
+          }
+        >
+          Sync Subtitles
+        </Menu.Item>
+        <Menu.Item
+          leftSection={<FontAwesomeIcon icon={faLanguage} size="sm" />}
+          onClick={() =>
+            modals.openContextModal(MassTranslateModal, { items: [wantedItem] })
+          }
+        >
+          Translate
+        </Menu.Item>
+        <Menu.Item
+          leftSection={<FontAwesomeIcon icon={faLayerGroup} size="sm" />}
+          onClick={() =>
+            modals.openContextModal(MassCombineModal, { items: [wantedItem] })
+          }
+        >
+          Combine Subtitles
+        </Menu.Item>
+        <Menu.Divider />
+        <Menu.Item
+          leftSection={<FontAwesomeIcon icon={faHardDrive} size="sm" />}
+          onClick={batchAction("scan-disk")}
+        >
+          Scan Disk
+        </Menu.Item>
+        <Menu.Item
+          leftSection={<FontAwesomeIcon icon={faMagnifyingGlass} size="sm" />}
+          onClick={batchAction("search-missing")}
+        >
+          Search Missing
+        </Menu.Item>
+        <Menu.Item
+          leftSection={<FontAwesomeIcon icon={faArrowUp} size="sm" />}
+          onClick={batchAction("upgrade")}
+        >
+          Upgrade
+        </Menu.Item>
+      </Menu.Dropdown>
+    </Menu>
+  );
+};
+
 const Sports: FunctionComponent = () => {
   const { instances, enabled, isLoading } = useSportsAvailability();
   const modals = useModals();
@@ -369,6 +479,10 @@ const Sports: FunctionComponent = () => {
             </Progress.Root>
           );
         },
+      },
+      {
+        id: "actions",
+        cell: ({ row: { original } }) => <LeagueRowActions league={original} />,
       },
     ],
     [multiInstance, instanceDefaultId, instanceNameById],
