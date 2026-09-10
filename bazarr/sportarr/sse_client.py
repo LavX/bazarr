@@ -7,6 +7,7 @@ from time import monotonic
 
 from sqlalchemy import select
 
+from app.config import settings
 from app.database import database, TableSportsEvents, TableSportsLeagues
 from arr_instances.client import ArrClientFactory
 from arr_instances.repository import ArrInstanceRepository
@@ -275,7 +276,20 @@ class SportarrClientManager:
         with self._lock:
             if self._shutdown:
                 return
-            instances = ArrInstanceRepository(session).list('sportarr', enabled_only=True)
+            # The master toggle first, then the per-instance flag. Selecting on
+            # the per-instance flag alone meant turning Sportarr off left every
+            # enabled instance's stream running, and each client enqueues a full
+            # reconciliation on start, which can reach search_after_sync. So the
+            # feature kept syncing libraries and downloading subtitles after the
+            # operator switched it off. An empty list here is the existing
+            # "nothing to stream" path: the loop below stops and drops whatever
+            # was running, which is exactly what turning the toggle off should
+            # do. Mirrors main.py, where Sonarr and Radarr each start their
+            # SignalR client only behind their own use_ flag.
+            instances = (
+                ArrInstanceRepository(session).list('sportarr', enabled_only=True)
+                if settings.general.use_sportarr else []
+            )
             wanted = {row.id: row for row in instances}
             for owner, client in list(self.clients.items()):
                 row = wanted.get(owner)

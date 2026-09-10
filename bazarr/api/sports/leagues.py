@@ -26,11 +26,19 @@ def _body():
     return body
 
 
+_JOBS = {
+    'update_sports_for_instance': ('Sync sports library', 'sportarr.sync.leagues'),
+    'sync_one_league': ('Sync league events', 'sportarr.sync.events'),
+}
+
+
 def _queue(func, kwargs):
+    # A table rather than a pair of ternaries: a third job made the ternaries
+    # wrong rather than merely long, silently labelling it as a profile refresh
+    # and dispatching it to the wrong module.
+    job_name, module = _JOBS.get(func, ('Refresh sports profiles', 'sportarr.library'))
     jobs_queue.feed_jobs_pending_queue(
-        job_name='Sync sports library' if func == 'update_sports_for_instance' else 'Refresh sports profiles',
-        module='sportarr.sync.leagues' if func == 'update_sports_for_instance' else 'sportarr.library',
-        func=func, kwargs=kwargs, is_progress=False)
+        job_name=job_name, module=module, func=func, kwargs=kwargs, is_progress=False)
 
 
 @api_ns_sports_leagues.route('/sports/leagues')
@@ -73,6 +81,29 @@ class SportsLeague(Resource):
             return {'message': str(exc)}, 400
         library.refresh_league_profiles([league_id], owner)
         return {}, 204
+
+
+@api_ns_sports_leagues.route('/sports/leagues/<int:league_id>/sync')
+class SportsLeagueEventSync(Resource):
+    """Re-sync one league's events from its Sportarr.
+
+    The league detail page has had a Sync button since it was built, posting
+    here. Nothing served this path, so the button 405'd and the user got no
+    sync and no error worth reading. The whole-instance route below is the
+    wrong target for it: this button sits on one league, and the episodes page
+    it mirrors syncs its own series.
+    """
+
+    @authenticate
+    def post(self, league_id):
+        try:
+            owner = _owner(_body().get('arr_instance_id'))
+            if library.get_league(database, league_id, owner) is None:
+                raise ValueError('Sports league not found for this owner')
+        except ValueError as exc:
+            return {'message': str(exc)}, 400
+        _queue('sync_one_league', {'league_id': league_id, 'arr_instance_id': owner})
+        return {'queued': True}, 202
 
 
 @api_ns_sports_leagues.route('/sports/leagues/sync')

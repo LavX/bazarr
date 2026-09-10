@@ -93,3 +93,35 @@ def test_the_history_writer_uses_the_result_attributes_not_its_kwargs():
     assert "result.subs_path" in source
     assert "result.language_code" in source
     assert "reversed_path" not in source.replace("reversed paths", "")
+
+
+def test_a_path_outside_the_event_directory_is_refused():
+    """The only check on a caller-supplied path was its file extension, so an
+    authenticated DELETE naming any subtitle Bazarr can reach, including one
+    belonging to a different media item, had it removed. The route now applies
+    the same containment guard the shared toolbox endpoint does."""
+    import inspect
+
+    from api.sports import events
+
+    source = inspect.getsource(events.SportsEventSubtitles.delete)
+    guard_at = source.index("subtitle_path_within_area(")
+    delete_at = source.index("delete_subtitles(")
+    assert guard_at < delete_at
+    assert "'Subtitle path is outside the media library.'" in source
+    # The mapped path is what gets removed, so the mapped path is what has to
+    # be contained; checking the stored remote path would prove nothing.
+    mapped_at = source.index("path_replace_instance(")
+    assert mapped_at < guard_at
+
+
+def test_the_guard_is_the_shared_one():
+    """A second implementation would drift from the toolbox endpoint's."""
+    import inspect
+
+    from api.sports import events
+    from utilities.security_guards import subtitle_path_within_area
+
+    assert "subtitle_path_within_area" in inspect.getsource(events)
+    assert subtitle_path_within_area("/media/x/a.srt", "/media/x/a.mkv") is True
+    assert subtitle_path_within_area("/etc/passwd.srt", "/media/x/a.mkv") is False

@@ -2,8 +2,11 @@
 from flask import request
 from flask_restx import Namespace, Resource
 
+from app.config import settings
 from app.database import database
 from sportarr import library, rootfolder
+from utilities.path_mappings import path_mappings
+from utilities.security_guards import subtitle_path_within_area
 from .leagues import _body, _owner
 from ..utils import authenticate
 
@@ -68,6 +71,23 @@ class SportsEventSubtitles(Resource):
                 return {'message': 'language and path are required'}, 400
 
             context = resolve_event_in_session(database, event_id, owner)
+
+            # Containment, the same guard the shared toolbox endpoint applies
+            # (#GHSA). Without it the only check on a caller-supplied path was
+            # its file extension, so an authenticated request could name any
+            # subtitle Bazarr can reach, including one belonging to a different
+            # media item, and have it removed. The mapped path is what gets
+            # deleted, so the mapped path is what has to be contained.
+            mapped_subtitle = path_mappings.path_replace_instance(
+                path, context.arr_instance_id, 'sports')
+            if not subtitle_path_within_area(
+                mapped_subtitle,
+                context.mapped_path,
+                subfolder_mode=settings.general.subfolder,
+                custom_subfolder=settings.general.subfolder_custom,
+            ):
+                return {'message': 'Subtitle path is outside the media library.'}, 403
+
             removed = delete_subtitles(
                 media_type='sports',
                 language=language,

@@ -424,7 +424,7 @@ def _source_score_below_threshold(context, source_lang):
 
     record = database.execute(
         select(TableHistorySports.score)
-        .where(TableHistorySports.sportsEventId == context.event_id)
+        .where(TableHistorySports.event_id == context.event_id)
         .where(TableHistorySports.arr_instance_id == context.arr_instance_id)
         .where(TableHistorySports.language.like(f"{source_lang}%"))
         .where(TableHistorySports.score.is_not(None))
@@ -449,7 +449,7 @@ def _already_translated_on_disk(context, target_code):
 
     record = database.execute(
         select(TableHistorySports.subtitles_path)
-        .where(TableHistorySports.sportsEventId == context.event_id)
+        .where(TableHistorySports.event_id == context.event_id)
         .where(TableHistorySports.arr_instance_id == context.arr_instance_id)
         .where(TableHistorySports.language == target_code)
         .where(TableHistorySports.action == 6)

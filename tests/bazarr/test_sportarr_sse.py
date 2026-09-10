@@ -8,6 +8,16 @@ from types import SimpleNamespace
 import pytest
 
 
+
+@pytest.fixture
+def sportarr_enabled(monkeypatch):
+    """The manager now refuses to start a stream while the master toggle is
+    off, which is the point of the gate. These tests exercise the per-instance
+    lifecycle underneath it, so they state the precondition explicitly."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings.general, 'use_sportarr', True)
+
 def test_sse_complete_frames_and_no_id_resync():
     from sportarr.sse_client import parse_sse
 
@@ -198,9 +208,7 @@ def test_reconnect_uses_cursor_and_bounded_backoff():
     assert all(t.closed.is_set() for t in transports)
 
 
-def test_manager_only_enabled_owners_replaces_changed_connection_and_joins(
-    schema_session,
-):
+def test_manager_only_enabled_owners_replaces_changed_connection_and_joins(schema_session, sportarr_enabled):
     from arr_instances.repository import ArrInstanceRepository
     from sportarr.sse_client import SportarrClientManager
 
@@ -243,7 +251,7 @@ def test_manager_only_enabled_owners_replaces_changed_connection_and_joins(
     manager.stop()
 
 
-def test_manager_never_starts_replacement_before_old_workers_stop(schema_session):
+def test_manager_never_starts_replacement_before_old_workers_stop(schema_session, sportarr_enabled):
     from arr_instances.repository import ArrInstanceRepository
     from sportarr.sse_client import SportarrClientManager
 
@@ -420,7 +428,7 @@ def test_frame_cursor_acknowledgment_requires_safe_enqueue():
     assert client.last_event_id == "1"
 
 
-def test_manager_disables_and_deletes_actual_readers(schema_session):
+def test_manager_disables_and_deletes_actual_readers(schema_session, sportarr_enabled):
     from arr_instances.repository import ArrInstanceRepository
     from sportarr.sse_client import SportarrClientManager, SportarrSSEClient
 
@@ -846,9 +854,7 @@ def test_oversized_worker_message_is_rejected_and_reaped(tmp_path, monkeypatch):
     assert transport._process.poll() is not None
 
 
-def test_manager_replacement_and_shutdown_reap_actual_setup_helpers(
-    schema_session, slow_headers_server
-):
+def test_manager_replacement_and_shutdown_reap_actual_setup_helpers(schema_session, slow_headers_server, sportarr_enabled):
     from arr_instances.repository import ArrInstanceRepository
     from sportarr.sse_client import (
         OwnedHTTPTransport,
@@ -1026,3 +1032,52 @@ def test_lost_parent_control_pipe_exits_blocked_helper(slow_headers_server):
     finally:
         transport.close()
         thread.join(2)
+
+
+def test_the_master_toggle_stops_every_stream(schema_session, monkeypatch):
+    """Selecting on the per-instance flag alone left every enabled instance's
+    stream running after the operator turned Sportarr off, and each client
+    enqueues a full reconciliation on start, which can reach search_after_sync.
+    So the feature kept syncing and downloading after being switched off."""
+    from app.config import settings
+    from arr_instances.repository import ArrInstanceRepository
+    from sportarr.sse_client import SportarrClientManager
+
+    created = []
+
+    class Managed:
+        def __init__(self, owner, identity, client):
+            self.owner, self.identity = owner, identity
+            self.running = False
+            created.append(self)
+
+        def start(self):
+            self.running = True
+
+        def stop(self, timeout=6):
+            self.running = False
+            return True
+
+        def is_alive(self):
+            return self.running
+
+    repo = ArrInstanceRepository(schema_session)
+    repo.create("sportarr", "A")
+    repo.create("sportarr", "B")
+
+    manager = SportarrClientManager(client_factory=Managed)
+    monkeypatch.setattr(settings.general, 'use_sportarr', True)
+    manager.refresh(schema_session)
+    assert len(manager.clients) == 2
+    assert all(client.running for client in created)
+
+    # Turning the toggle off drops them, without anything else changing.
+    monkeypatch.setattr(settings.general, 'use_sportarr', False)
+    manager.refresh(schema_session)
+    assert manager.clients == {}
+    assert not any(client.running for client in created)
+
+    # And back on brings them up again, so the gate is not one-way.
+    monkeypatch.setattr(settings.general, 'use_sportarr', True)
+    manager.refresh(schema_session)
+    assert len(manager.clients) == 2

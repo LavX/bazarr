@@ -109,6 +109,18 @@ def _match_events(existing, parsed):
     return matches
 
 
+def sync_one_league(league_id, arr_instance_id, job_id=None, *, cancel=None):
+    """Queue-callable wrapper for a single league's event sync.
+
+    The jobs queue injects job_id into every job's kwargs, and sync_events does
+    not take one, so queueing it directly raised TypeError the moment the job
+    ran: the request returned 202 and the sync never happened. Mirrors
+    update_sports_for_instance, which accepts and ignores job_id for the same
+    reason.
+    """
+    return sync_events(league_id, arr_instance_id, cancel=cancel)
+
+
 def sync_events(league_id, arr_instance_id, *, page_size=1000, cancel=None, expected_connection=None, http_get=None):
     with owner_sync_lock(arr_instance_id, cancel):
         instance = require_sportarr(database, arr_instance_id)
