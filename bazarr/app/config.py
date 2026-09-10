@@ -1318,16 +1318,18 @@ def _save_settings(settings_items, native_configuration=None):
         restore_persisted_settings()
         raise
     else:
-        persisted = write_config()
+        if write_config() is not True:
+            # The request is refused, so none of it may stay applied. Every
+            # submitted value is already on the live settings object by now,
+            # and when a media-server master switch travelled with it the
+            # caller's `finally` restores only those two switches: without this
+            # the process would keep running values that reached no file, tell
+            # the user they were saved, and revert them at the next restart.
+            # Nothing about that is particular to a master switch, so the check
+            # covers every save rather than only those.
+            restore_persisted_settings()
+            raise ValidationError('Unable to save settings to disk')
         if native_configuration is not None:
-            if persisted is not True:
-                # The request is refused, so none of it may stay applied. Every
-                # submitted value is already on the live settings object by now,
-                # and the caller's `finally` restores only the two master
-                # switches: without this the process would keep running values
-                # that reached no file and revert at the next restart.
-                restore_persisted_settings()
-                raise ValidationError('Unable to persist native media-server settings')
             native_configuration.publish_masters(settings)
 
         # Set the configured state based on config.yaml file existence

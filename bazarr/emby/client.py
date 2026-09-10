@@ -6,7 +6,7 @@ from typing import Callable
 
 from media_servers import resolution
 from media_servers.http import MediaServerError, MediaServerHTTP
-from media_servers.paths import media_path_contains, media_paths_equal
+from media_servers.paths import is_media_path, media_path_contains, media_paths_equal
 
 # Emby stores both libraries as items refreshed the same way. Only the type it
 # is asked to resolve differs, and an unlisted media type never becomes one.
@@ -33,6 +33,30 @@ def _accepted_items(result, item_type):
         if item.get("Type") == item_type:
             accepted.append(item)
     return accepted
+
+
+def _item_paths(item):
+    """Every path an item claims: its own, then each media source's."""
+    sources = item.get("MediaSources")
+    if sources is None:
+        sources = []
+    if not isinstance(sources, list) or any(not isinstance(source, dict) for source in sources):
+        raise MediaServerError("invalid_response")
+    return [path for path in (item.get("Path"), *(source.get("Path") for source in sources))
+            if isinstance(path, str) and path]
+
+
+def _holds_path(item, video_path):
+    """Whether an item Emby returned can be the one that holds this file.
+
+    Only the weak title rung asks, and both of its lookups already request
+    ``Path``. A movie answers the file, a series answers the folder its
+    episodes live under, so containment is the test rather than equality. An
+    item Emby returned with no path at all contradicts nothing, and the exact
+    name and the production year still had to match for it to get this far.
+    """
+    paths = _item_paths(item)
+    return not paths or any(media_path_contains(path, video_path) for path in paths)
 
 
 def _encoded_id(item, key="Id"):
@@ -109,13 +133,25 @@ class EmbyClient:
                    and type(item.get("ParentIndexNumber")) is int and item["ParentIndexNumber"] == season]
         return matches[0] if len(matches) == 1 else None
 
-    def _refresh_resolved(self, media_type, parent, metadata, ensure_current):
+    def _refresh_resolved(self, media_type, parent, metadata, ensure_current, *, video_path=None):
+        """Refresh what a rung resolved, or nothing when it did not prove it.
+
+        ``video_path`` is the mapped file the publication is about, and it is
+        passed only by the weak title rung. The identifier rung leaves it out
+        deliberately: a provider id names the item on its own, and outliving a
+        path mapping that is wrong is the whole reason it is asked first, so
+        confirming it against that same mapping would throw the rung away.
+        """
         if parent is None:
+            return None
+        if video_path is not None and not _holds_path(parent, video_path):
             return None
         if media_type == "movie":
             return self._refresh(_encoded_id(parent), ensure_current)
         episode = self._find_episode(parent, metadata.season, metadata.episode, ensure_current)
-        return None if episode is None else self._refresh(_encoded_id(episode), ensure_current)
+        if episode is None or (video_path is not None and not _holds_path(episode, video_path)):
+            return None
+        return self._refresh(_encoded_id(episode), ensure_current)
 
     def refresh_by_provider_id(self, media_type, metadata, *,
                                ensure_current: Callable[[], None] | None = None) -> dict | None:
@@ -131,36 +167,46 @@ class EmbyClient:
         if not metadata.locatable(media_type):
             return None
         for provider, value in metadata.provider_ids(media_type):
+            if "," in value:
+                # The filter is comma-delimited, so a stored id carrying one
+                # would silently become the combined query this avoids.
+                continue
             parent = self._find_parent(media_type, {"AnyProviderIdEquals": f"{provider}.{value}"}, ensure_current)
             result = self._refresh_resolved(media_type, parent, metadata, ensure_current)
             if result is not None:
                 return result
         return None
 
-    def refresh_by_title_year(self, media_type, metadata, *,
+    def refresh_by_title_year(self, media_type, metadata, video_path, *,
                               ensure_current: Callable[[], None] | None = None) -> dict | None:
-        """Resolve the item by an exact title, narrowed by production year.
+        """Resolve the item by an exact title, an exact year and the file it holds.
 
         NameStartsWith is a prefix filter, so it bounds the response rather
         than deciding anything; the name still has to match exactly, case
         insensitively, the way Jellyfin's title fallback matches.
+
+        A title is a weak identifier, so all three have to agree. Titles repeat
+        across remakes, which means a row whose year Bazarr never parsed cannot
+        ask this rung at all: sending the prefix alone and accepting whichever
+        single film came back is how a 1922 film gets refreshed for a 2024 one,
+        with the publication reported as requested and the rungs below it never
+        tried. No year is a reason to climb the next rung, not to guess.
         """
         if media_type not in _PARENT_TYPES:
             raise MediaServerError("internal_error")
-        if not metadata.title or not metadata.locatable(media_type):
+        if not metadata.title or not metadata.year or not metadata.locatable(media_type):
             return None
-        params = {"NameStartsWith": metadata.title}
-        if metadata.year:
-            params["Years"] = str(metadata.year)
-        parent = self._find_parent(media_type, params, ensure_current, name=metadata.title)
-        return self._refresh_resolved(media_type, parent, metadata, ensure_current)
+        parent = self._find_parent(media_type, {"NameStartsWith": metadata.title,
+                                                "Years": str(metadata.year)},
+                                   ensure_current, name=metadata.title)
+        return self._refresh_resolved(media_type, parent, metadata, ensure_current, video_path=video_path)
 
     def refresh_item(self, media_type: str, video_path: str, *,
                      ensure_current: Callable[[], None] | None = None) -> dict:
         item_type = _ITEM_TYPES.get(media_type) if isinstance(media_type, str) else None
         if item_type is None:
             raise MediaServerError("internal_error")
-        if not media_paths_equal(video_path, video_path):
+        if not is_media_path(video_path):
             raise MediaServerError("path_invalid")
         if ensure_current:
             ensure_current()
@@ -168,16 +214,8 @@ class EmbyClient:
             "Path": video_path, "IncludeItemTypes": item_type, "Recursive": "true",
             "Fields": "Path,ProviderIds,MediaStreams,MediaSources",
         }), item_type)
-        matches = []
-        for item in items:
-            sources = item.get("MediaSources")
-            if sources is None:
-                sources = []
-            if not isinstance(sources, list) or any(not isinstance(source, dict) for source in sources):
-                raise MediaServerError("invalid_response")
-            paths = [item.get("Path"), *(source.get("Path") for source in sources)]
-            if any(media_paths_equal(path, video_path) for path in paths):
-                matches.append(item)
+        matches = [item for item in items
+                   if any(media_paths_equal(path, video_path) for path in _item_paths(item))]
         if not matches:
             raise MediaServerError("item_missing")
         if len(matches) != 1:
@@ -185,18 +223,26 @@ class EmbyClient:
         return self._refresh(_encoded_id(matches[0]), ensure_current)
 
     def refresh_library(self, media_type: str, video_path: str, *,
-                        ensure_current: Callable[[], None] | None = None) -> dict | None:
+                        ensure_current: Callable[[], None] | None = None,
+                        coalesce: Callable[[str], bool] | None = None) -> dict | None:
         """Rescan the library holding this file, when the file itself is unknown.
 
         Scoped to the library the path mapping points into, not to every
         library of that type: a library scan is expensive, and Bazarr has no
         setting through which a user sanctioned scanning the rest of the
         server. A path in no library leaves nothing sensible to refresh.
+
+        The scan is recursive, so one of them serves every file in that
+        library. ``coalesce(library)`` answers whether the caller has already
+        asked for this one, and records it when it has not; the library only
+        becomes known here, which is why the decision is taken here rather than
+        by the caller. A library it suppresses was still asked to rescan, so
+        the answer is the same either way.
         """
         collection_type = _COLLECTION_TYPES.get(media_type) if isinstance(media_type, str) else None
         if collection_type is None:
             raise MediaServerError("internal_error")
-        if not media_paths_equal(video_path, video_path):
+        if not is_media_path(video_path):
             raise MediaServerError("path_invalid")
         if ensure_current:
             ensure_current()
@@ -220,5 +266,7 @@ class EmbyClient:
         if not targets:
             return None
         for encoded_id in targets:
+            if coalesce is not None and coalesce(encoded_id):
+                continue
             self._refresh(encoded_id, ensure_current, recursive=True)
         return {"status": "requested"}

@@ -435,6 +435,38 @@ def test_invalid_http_acceptance_cannot_confirm_even_with_clean_events(silo_fixt
     assert error.value.code in {"invalid_response", "request_rejected"}
 
 
+def test_the_documented_refusal_of_a_path_is_a_miss_not_a_failure(silo_fixture):
+    """Silo answers 400 for a path it cannot place and for a container its
+    scanner does not read. Retrying that scan cannot change the answer, so the
+    file rung has nothing left to say and the ladder climbs on."""
+    server = silo_fixture(post_reply=(400, {"error": "bad_request"}))
+    assert refresh(server) is None
+
+
+@pytest.mark.parametrize("status", [409, 422, 429])
+def test_a_rejected_scan_request_is_a_failure_not_a_path_silo_cannot_place(silo_fixture, status):
+    """A conflict, an unprocessable body or a rate limit are all the server
+    refusing this request, not the server saying it holds no such file. Reading
+    them as a miss escalates a working destination to whole-library scans and
+    reports every one of them as a success."""
+    from media_servers.http import MediaServerError
+    server = silo_fixture(post_reply=(status, {}))
+    with pytest.raises(MediaServerError) as error:
+        refresh(server)
+    assert str(error.value) == "request_rejected"
+
+
+def test_a_refused_event_stream_handshake_is_never_a_missing_file(silo_fixture):
+    """The file scan is observed over /api/v1/events/ws. A handshake the server
+    refuses breaks every per-file refresh, and it has to surface as one."""
+    from media_servers.http import MediaServerError
+    server = silo_fixture(ws_status=400)
+    with pytest.raises(MediaServerError) as error:
+        refresh(server)
+    assert str(error.value) == "request_rejected"
+    assert all("/api/v1/scan" not in record["path"] for record in server.records)
+
+
 @pytest.mark.parametrize("endpoint", ["ws", "post"])
 @pytest.mark.parametrize(("status", "code"), [(302, "redirect_denied"), (307, "redirect_denied"),
                                             (401, "unauthorized"), (403, "forbidden"), (500, "server_error")])

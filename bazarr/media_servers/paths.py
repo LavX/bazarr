@@ -38,6 +38,20 @@ def media_paths_equal(left, right):
         return False
 
 
+def is_media_path(value) -> bool:
+    """Whether this is a path a media server could hold a file at.
+
+    The same rule :func:`map_media_path` applies, asked as a question rather
+    than answered by comparing a path with itself, which reads like a typo and
+    invites someone to "fix" it into a no-op.
+    """
+    try:
+        _media_path(value)
+    except MediaServerError:
+        return False
+    return True
+
+
 def map_media_path(video_path: str, mappings: list[dict], *, require_library: bool = False) -> dict:
     path = _media_path(video_path)
     validate_path_mappings(mappings)

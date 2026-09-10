@@ -105,6 +105,25 @@ def test_library_rung_submits_one_whole_library_scan(http_fixture):
     assert records[0]["headers"]["Authorization"] == "Bearer synthetic-key"
 
 
+def test_a_library_already_scanned_in_this_pass_is_not_scanned_again(http_fixture):
+    """Silo's library scan is the same broad request for every file in it."""
+    from silo.client import SiloClient
+    base, records = http_fixture([(202, ACCEPTED, {}), (202, {**ACCEPTED, "library_id": 8}, {})])
+    scanned = set()
+
+    def coalesce(library):
+        seen = library in scanned
+        scanned.add(library)
+        return seen
+
+    with SiloClient(base, "synthetic-key") as client:
+        assert client.refresh_library("0007", coalesce=coalesce) == {"status": "requested"}
+        assert client.refresh_library("7", coalesce=coalesce) == {"status": "requested"}
+        assert client.refresh_library("8", coalesce=coalesce) == {"status": "requested"}
+    from json import loads
+    assert [loads(record["body"]) for record in records] == [{"library_id": 7}, {"library_id": 8}]
+
+
 @pytest.mark.parametrize("body", [
     {**ACCEPTED, "status": "queued"}, {**ACCEPTED, "mode": "file"}, {**ACCEPTED, "library_id": 8},
     {**ACCEPTED, "library_id": "7"}, [ACCEPTED],

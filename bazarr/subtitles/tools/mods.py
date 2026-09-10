@@ -15,7 +15,8 @@ from languages.get_languages import alpha3_from_alpha2
 from subtitles.indexer.utils import get_subtitle_destination_path
 from utilities.helper import get_target_folder
 from media_servers.events import publication_callback
-from subtitles.tools.subsync_engines import subtitle_write_locks, subtitle_mutation
+from subtitles.tools.subsync_engines import (_report_subtitle_publication, subtitle_mutation,
+                                            subtitle_write_locks)
 
 
 def has_remove_hi(mods):
@@ -209,7 +210,14 @@ def _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_i
             # The mod rewrote the subtitle, and Remove HI can rename it on the
             # way. Publish the file this leaves behind, here rather than at each
             # caller, so every route into the mods (the subtitle toolbar, a bulk
-            # action, the job queue) reaches the same destinations.
+            # action, the job queue) reaches the same destinations. Through the
+            # same guarded reporter every other publication inside a mutation
+            # uses: the file is already written, so nothing raised here may
+            # take the mod down with it.
             if media_type:
-                publication_callback(media_type, video_path, 'edit',
-                                     arr_instance_id)(modded_subtitles_path)
+                _report_subtitle_publication(
+                    publication_callback(media_type, video_path, 'edit', arr_instance_id),
+                    modded_subtitles_path)
+            else:
+                logging.debug('BAZARR mod on %s published nothing: no media type was given',
+                              video_path)

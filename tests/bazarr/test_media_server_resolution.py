@@ -92,10 +92,15 @@ def test_a_rung_that_resolves_hands_back_what_it_promised_for_checking():
     assert log == [resolution.PATH, resolution.PATH]
 
 
-def test_ladder_order_is_identifiers_then_path_then_library():
+def test_the_exact_path_outranks_the_weak_title_rung():
+    """A provider id identifies the item on its own, so it stays first.
+
+    A title and a year do not: they are a guess narrowed by two fields, and a
+    guess must never pre-empt the one rung that proves which file this is.
+    """
     from media_servers import resolution
-    assert resolution.CHAIN == (resolution.PROVIDER_ID, resolution.TITLE_YEAR,
-                                resolution.PATH, resolution.LIBRARY)
+    assert resolution.CHAIN == (resolution.PROVIDER_ID, resolution.PATH,
+                                resolution.TITLE_YEAR, resolution.LIBRARY)
 
 
 @pytest.mark.parametrize(("media_type", "expected"), [

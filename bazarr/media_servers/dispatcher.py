@@ -93,20 +93,61 @@ class _ServerState:
     state: str = "idle"
     error_code: str | None = None
     overflow: bool = False
+    # How much scannable work this destination has been handed. A library scan
+    # covers what was published before it, and nothing after it.
+    publications: int = 0
+
+
+def _coalescer(scanned, publications):
+    """One scan of a library per drain, until new work arrives for it.
+
+    A library scan is recursive, so a single one serves every file the library
+    holds. Without this, a bulk mod or a season pack that lands each of its
+    targets on the library rung asks the same library to rescan itself once per
+    video, up to the whole pending queue.
+
+    A publication that arrives after a scan was submitted is not covered by it,
+    so the count of publications the destination has taken is part of the key.
+    That errs towards one scan too many rather than one too few, which is the
+    side to err on: a suppressed scan the file needed would never be asked for
+    again.
+    """
+    def already_requested(library):
+        key = str(library)
+        if scanned.get(key) == publications:
+            return True
+        scanned[key] = publications
+        return False
+    return already_requested
+
+
+def _refusal_code(error):
+    """The refusal code an error carries, whatever generation raised it.
+
+    This module binds ``MediaServerError`` when it is imported and builds its
+    clients lazily, at the first refresh. Nothing makes those two moments share
+    a module generation: test isolation evicts and re-imports these modules,
+    and an identically named class from another generation is a different
+    object, which ``except MediaServerError`` does not catch. Every generation
+    agrees on the code, so that is what is matched, and a refusal keeps its
+    meaning instead of collapsing into internal_error.
+    """
+    code = getattr(error, "code", None)
+    return code if isinstance(code, str) else None
 
 
 def _misses_on(call, codes):
     """Read a refusal this rung declared as "not here", not as a failure.
 
-    Two client methods predate the ladder and answer "no such item" by
+    One client method predates the ladder and answers "no such item" by
     raising. Translating that lives here, at the adapter boundary, so the
     walk itself never has to know one destination's vocabulary.
     """
     def attempt():
         try:
             return call()
-        except MediaServerError as error:
-            if error.code in codes:
+        except Exception as error:
+            if _refusal_code(error) in codes:
                 return None
             raise
     return attempt
@@ -216,8 +257,10 @@ class RefreshDispatcher:
                         target.event = event
                         target.generation += 1
                         target.ready = True
+                        state.publications += 1
                 elif len(state.targets) < self.PENDING_LIMIT:
                     target = state.targets[key] = _Target(event)
+                    state.publications += 1
                 else:
                     state.overflow = True
                     continue
@@ -236,7 +279,7 @@ class RefreshDispatcher:
                                   name=kind + "-subtitle-refresh", daemon=True)
             state.worker.start()
 
-    def _refresh(self, instance_id, revision, snapshot, event):
+    def _refresh(self, instance_id, revision, snapshot, event, coalesce):
         server = snapshot.kind
         from subtitles.tools.subsync_engines import subtitle_write_locks
 
@@ -264,7 +307,7 @@ class RefreshDispatcher:
                                    for root in library["paths"])):
                     raise MediaServerError("library_invalid")
                 guard()
-            resolved = resolution.walk(self._ladder(client, server, event, mapped, guard))
+            resolved = resolution.walk(self._ladder(client, server, event, mapped, guard, coalesce))
             guard()
             if resolved is None:
                 # Every rung this destination has missed, so it holds no such file.
@@ -274,7 +317,7 @@ class RefreshDispatcher:
                 raise MediaServerError("invalid_response")
             return expected
 
-    def _ladder(self, client, server, event, mapped, guard):
+    def _ladder(self, client, server, event, mapped, guard, coalesce):
         """The rungs this destination declared it can climb, in ladder order.
 
         The identifiers come out of the rows Bazarr already wrote, read here
@@ -294,28 +337,32 @@ class RefreshDispatcher:
                 resolution.PROVIDER_ID: (lambda: client.refresh_by_provider_id(
                     event.media_type, metadata, ensure_current=guard), "requested"),
                 resolution.TITLE_YEAR: (lambda: client.refresh_by_title_year(
-                    event.media_type, metadata, ensure_current=guard), "requested"),
+                    event.media_type, metadata, mapped["path"], ensure_current=guard), "requested"),
                 resolution.PATH: (_misses_on(lambda: client.refresh_item(
                     event.media_type, mapped["path"], ensure_current=guard), ("item_missing",)), "requested"),
                 resolution.LIBRARY: (lambda: client.refresh_library(
-                    event.media_type, mapped["path"], ensure_current=guard), "requested"),
+                    event.media_type, mapped["path"], ensure_current=guard,
+                    coalesce=coalesce), "requested"),
             }
         else:
-            # Silo answers every path it cannot place, and every container its
-            # scanner does not read, with one 400. That is a miss: no retry of
-            # the same file scan can change it. A scan that ran and fell short
-            # is a failure and keeps its own code.
+            # Silo's file rung decides its own miss and answers with nothing,
+            # because only Silo can tell the documented 400 for a path it cannot
+            # place from the conflicts, rate limits and refused event-stream
+            # handshakes it folds into the same code. A scan that ran and fell
+            # short, and every refusal, is a failure and keeps its own code.
             available = {
-                resolution.PATH: (_misses_on(lambda: client.refresh_file(
-                    mapped["library_id"], mapped["path"], ensure_current=guard),
-                    ("request_rejected",)), "confirmed"),
+                resolution.PATH: (lambda: client.refresh_file(
+                    mapped["library_id"], mapped["path"], ensure_current=guard), "confirmed"),
                 resolution.LIBRARY: (lambda: client.refresh_library(
-                    mapped["library_id"], ensure_current=guard), "requested"),
+                    mapped["library_id"], ensure_current=guard, coalesce=coalesce), "requested"),
             }
         return [(name, *available[name]) for name in resolution.CHAIN
                 if name in supported and name in available]
 
     def _run(self, server, state):
+        # One drain, one scan per library. The memo dies with this worker, so a
+        # later pass asks again rather than inheriting a stale suppression.
+        scanned = {}
         while True:
             with self.condition:
                 try:
@@ -340,17 +387,19 @@ class RefreshDispatcher:
                     return
                 key, target = target_pair
                 event, generation = target.event, target.generation
+                publications = state.publications
                 target.ready = False
                 target.error_code = None
                 state.state = "pending"
             try:
-                result = self._refresh(server, revision, snapshot, event)
+                result = self._refresh(server, revision, snapshot, event,
+                                       _coalescer(scanned, publications))
                 error_code = None
-            except MediaServerError as error:
+            except Exception as error:
+                # Classified by the code, not the class: see _refusal_code.
+                code = _refusal_code(error)
                 result = "unconfirmed"
-                error_code = error.code if error.code in _ERROR_CODES else "internal_error"
-            except Exception:
-                result, error_code = "unconfirmed", "internal_error"
+                error_code = code if code in _ERROR_CODES else "internal_error"
             with self.condition:
                 if self.servers.get(server) is not state:
                     state.worker = None
@@ -416,6 +465,10 @@ class RefreshDispatcher:
                     target.generation += 1
                     target.error_code = None
                 target.ready = True
+            # Retry is the user asking again. A library scan submitted before
+            # they pressed it is not the answer to it, so a pass still running
+            # must not treat one as already covered.
+            state.publications += 1
             self._start(server, state)
             return len(state.targets)
 

@@ -197,10 +197,17 @@ def test_a_save_that_never_reached_disk_leaves_nothing_applied(saved_config, mon
 def test_a_failed_save_keeps_credentials_readable(saved_config, monkeypatch):
     """settings.reload() pulls the on-disk ciphertext back in, so the rollback
     has to decrypt again or every secret stays an ``enc:v1:`` string until the
-    process restarts."""
+    process restarts.
+
+    The co-submitted page size is what makes the key assertion mean anything:
+    without a rollback nothing touches the apikey either, so the plaintext set
+    below survives trivially and the test cannot tell "reloaded and decrypted
+    again" from "never reloaded".
+    """
     config, _path = saved_config
     config.settings.auth.apikey = 'synthetic-rollback-key'
-    config.save_settings([('settings-general-use_emby', ['false'])])
+    config.save_settings([('settings-general-use_emby', ['false']),
+                          ('settings-general-page_size', ['25'])])
 
     def fail(*args, **kwargs):
         raise OSError('synthetic-sensitive-remote-text')
@@ -209,4 +216,28 @@ def test_a_failed_save_keeps_credentials_readable(saved_config, monkeypatch):
     with pytest.raises(ValidationError):
         config.save_settings([('settings-general-use_emby', ['true']),
                               ('settings-general-page_size', ['250'])])
+    assert config.settings.general.page_size == 25, 'the rollback did not reload'
     assert config.settings.auth.apikey == 'synthetic-rollback-key'
+
+
+@pytest.mark.parametrize('failure', ['write', 'move'])
+def test_an_ordinary_save_that_never_reached_disk_is_refused(saved_config, monkeypatch, failure):
+    """Every save, not only the ones carrying a media-server master switch.
+
+    A settings request applies each submitted value to the live object before
+    config.yaml is written. A write that fails and is ignored answers success
+    to the frontend and leaves the process running a configuration that is on
+    no disk and reverts silently at the next restart.
+    """
+    config, path = saved_config
+    config.save_settings([('settings-general-page_size', ['25'])])
+    before_disk = path.read_bytes()
+
+    def fail(*args, **kwargs):
+        raise OSError('synthetic-sensitive-remote-text')
+
+    monkeypatch.setattr(config, failure, fail)
+    with pytest.raises(ValidationError):
+        config.save_settings([('settings-general-page_size', ['250'])])
+    assert path.read_bytes() == before_disk
+    assert config.settings.general.page_size == 25

@@ -7,6 +7,11 @@ same ladder, with one rung added: the exact file path, which Jellyfin never had
 and which is the only evidence that proves a single file. Every destination
 publishes the rungs it can actually climb, so a capability that a server does
 not have is absent rather than faked.
+
+The added rung also moves the weakest one. Jellyfin had nothing better than a
+title, so it asked for one early; here the exact path sits above it, because
+binding the wrong item is worse than resolving nothing at all: the walk stops
+at the first rung that answers and reports the publication as requested.
 """
 
 import logging
@@ -18,10 +23,12 @@ TITLE_YEAR = 'title_year'
 PATH = 'path'
 LIBRARY = 'library'
 
-# Identifiers first because they survive a wrong path mapping, the exact path
-# next because it is the only proof of one file, and the library last because
-# it is the broadest thing we can ask a server to do.
-CHAIN = (PROVIDER_ID, TITLE_YEAR, PATH, LIBRARY)
+# A provider id first, because it names the item on its own and that is what
+# survives a wrong path mapping. The exact path next, because it is the only
+# proof of one file. A title and a year after it, because two metadata fields
+# are a guess and a guess must not pre-empt proof. The library last, because it
+# is the broadest thing we can ask a server to do.
+CHAIN = (PROVIDER_ID, PATH, TITLE_YEAR, LIBRARY)
 
 
 @dataclass(frozen=True)

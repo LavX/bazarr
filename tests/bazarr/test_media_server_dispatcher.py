@@ -59,7 +59,16 @@ def dispatch():
     failures = set()
     failed_paths = set()
     missing_paths = set()
+    # Non-empty means the clients raise from another module generation.
+    generation = []
+    # Every refusal Silo folds into request_rejected that is not the documented
+    # 400: a refused event-stream handshake, a conflict, a rate limit.
+    rejected_paths = set()
     libraries = [{"id": "7", "type": "movies", "paths": ["/media"]}]
+
+    def server_error(code):
+        from media_servers.http import MediaServerError
+        return (generation[0] if generation else MediaServerError)(code)
 
     class Client:
         def __init__(self, server, snapshot):
@@ -83,33 +92,45 @@ def dispatch():
             return {"status": "requested"} if name in resolves else None
 
         def refresh_by_provider_id(self, media_type, media_metadata, *, ensure_current):
-            identifier_calls.append((self.server, resolution.PROVIDER_ID, media_type, media_metadata))
+            identifier_calls.append((self.server, resolution.PROVIDER_ID, media_type, media_metadata, None))
             return self._rung(resolution.PROVIDER_ID, ensure_current)
 
-        def refresh_by_title_year(self, media_type, media_metadata, *, ensure_current):
-            identifier_calls.append((self.server, resolution.TITLE_YEAR, media_type, media_metadata))
+        def refresh_by_title_year(self, media_type, media_metadata, video_path, *, ensure_current):
+            identifier_calls.append((self.server, resolution.TITLE_YEAR, media_type, media_metadata, video_path))
             return self._rung(resolution.TITLE_YEAR, ensure_current)
 
-        def refresh_library(self, *args, ensure_current):
-            library_calls.append((self.server, args))
-            return self._rung(resolution.LIBRARY, ensure_current)
+        def refresh_library(self, *args, ensure_current, coalesce=None):
+            # The real clients decide the library themselves and skip a scan
+            # this pass already asked for, answering the same either way.
+            rungs.append((self.server, resolution.LIBRARY))
+            ensure_current()
+            if resolution.LIBRARY not in resolves:
+                return None
+            library = args[-1] if self.server == "silo" else "emby-library"
+            if coalesce is None or not coalesce(library):
+                library_calls.append((self.server, args))
+            return {"status": "requested"}
 
         def refresh_item(self, media_type, path, *, ensure_current):
             emby_items.append((media_type, path))
             return self.refresh_file(None, path, ensure_current=ensure_current)
 
         def refresh_file(self, library_id, path, *, ensure_current):
-            from media_servers.http import MediaServerError
             rungs.append((self.server, resolution.PATH))
             calls[self.server].append((path, self.snapshot))
             if self.server == "silo" and len(calls["silo"]) == 1:
                 started.set()
                 assert release.wait(3)
             ensure_current()
+            if path in rejected_paths:
+                raise server_error("request_rejected")
             if path in missing_paths:
-                raise MediaServerError("item_missing" if self.server == "emby" else "request_rejected")
+                if self.server == "emby":
+                    raise server_error("item_missing")
+                # Silo's file rung answers a path it cannot place with nothing.
+                return None
             if self.server in failures or path in failed_paths:
-                raise MediaServerError("scan_incomplete")
+                raise server_error("scan_incomplete")
             return {"status": "confirmed" if self.server == "silo" else "requested"}
 
     dispatcher = RefreshDispatcher(configuration, client_factory=Client,
@@ -118,7 +139,8 @@ def dispatch():
                           release=release, failures=failures, libraries=libraries, failed_paths=failed_paths,
                           emby_items=emby_items, rungs=rungs, resolves=resolves, library_calls=library_calls,
                           identifier_calls=identifier_calls, missing_paths=missing_paths,
-                          metadata=metadata, metadata_box=metadata_box)
+                          rejected_paths=rejected_paths, metadata=metadata, metadata_box=metadata_box,
+                          generation=generation)
     release.set()
     assert dispatcher.wait_idle(3)
 
@@ -244,18 +266,22 @@ def test_emby_climbs_the_ladder_and_stops_at_the_first_rung_that_resolves(dispat
 def test_emby_identifier_rungs_receive_the_stored_media_identifiers(dispatch, media_type):
     from media_servers import resolution
     dispatch.libraries[0]['type'] = 'movies' if media_type == 'movie' else 'series'
+    # The exact path outranks the title, so the weak rung is only reached once
+    # the file itself missed.
+    dispatch.missing_paths.add('/media/A.mkv')
     dispatch.release.set()
     dispatch.dispatcher.notify(movie_event(media_type=media_type))
     assert dispatch.dispatcher.wait_idle(3)
     assert dispatch.identifier_calls == [
-        ('emby', resolution.PROVIDER_ID, media_type, dispatch.metadata),
-        ('emby', resolution.TITLE_YEAR, media_type, dispatch.metadata),
+        ('emby', resolution.PROVIDER_ID, media_type, dispatch.metadata, None),
+        ('emby', resolution.TITLE_YEAR, media_type, dispatch.metadata, '/media/A.mkv'),
     ]
 
 
 def test_identifiers_are_never_read_for_a_destination_that_cannot_use_them(dispatch):
     reads = []
     dispatch.dispatcher.metadata_factory = lambda event: reads.append(event) or dispatch.metadata
+    dispatch.missing_paths.add('/media/A.mkv')
     dispatch.release.set()
     dispatch.dispatcher.notify(movie_event())
     assert dispatch.dispatcher.wait_idle(3)
@@ -291,6 +317,86 @@ def test_a_file_scan_silo_refuses_falls_back_to_scanning_the_whole_library(dispa
     assert dispatch.dispatcher.wait_idle(3)
     assert ('silo', ('7',)) in dispatch.library_calls
     assert dispatch.dispatcher.status(IDS['silo']) == {'pending': 0, 'state': 'requested', 'error_code': None}
+
+
+def other_generation():
+    """A second execution of media_servers.http, which is what test isolation
+    leaves behind: the same class by name, a different object by identity."""
+    import importlib.util
+    from media_servers.http import MediaServerError as live
+    spec = importlib.util.find_spec('media_servers.http')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.MediaServerError is not live
+    return module.MediaServerError
+
+
+@pytest.mark.parametrize(('lever', 'expected'), [
+    ('missing_paths', {'pending': 0, 'state': 'requested', 'error_code': None}),
+    ('failures', {'pending': 1, 'state': 'unconfirmed', 'error_code': 'scan_incomplete'}),
+])
+def test_a_refusal_from_another_module_generation_keeps_its_meaning(dispatch, lever, expected):
+    """The dispatcher binds MediaServerError when it is imported and builds its
+    clients lazily, at the first refresh, so nothing makes the two share a
+    module generation. ``except MediaServerError`` catches a class, not a
+    vocabulary: once they split, an honest miss stops falling through to the
+    next rung and every refusal is reported as internal_error."""
+    dispatch.generation.append(other_generation())
+    if lever == 'missing_paths':
+        dispatch.missing_paths.add('/media/A.mkv')
+    else:
+        dispatch.failures.add('emby')
+    dispatch.release.set()
+    dispatch.dispatcher.notify(movie_event())
+    assert dispatch.dispatcher.wait_idle(3)
+    assert dispatch.dispatcher.status(IDS['emby']) == expected
+
+
+def test_a_refused_scan_request_never_escalates_to_the_whole_library(dispatch):
+    """Silo folds a refused event-stream handshake, a 409 and a 429 into the
+    same request_rejected as its documented 400. Reading all of them as "this
+    path is not here" turns a broken destination into a stream of library scans
+    reported as success, with no signal to the user at all."""
+    dispatch.rejected_paths.add('/media/A.mkv')
+    dispatch.release.set()
+    dispatch.dispatcher.notify(movie_event())
+    assert dispatch.dispatcher.wait_idle(3)
+    assert dispatch.library_calls == [], 'a refused request is not a path Silo could not place'
+    assert dispatch.dispatcher.status(IDS['silo']) == {
+        'pending': 1, 'state': 'unconfirmed', 'error_code': 'request_rejected'}
+
+
+@pytest.mark.parametrize('kind', ['emby', 'silo'])
+def test_one_library_scan_covers_every_target_the_pass_already_held(dispatch, kind):
+    """A bulk mod or a season pack against a mapping that is slightly wrong
+    lands every one of its targets on the library rung, and the scan there is
+    recursive over the whole library. One per video is a hundred-odd identical
+    rescans of the same library."""
+    dispatcher = dispatch.dispatcher
+    dispatch.release.set()
+    with dispatcher.condition:
+        for number in range(8):
+            dispatch.missing_paths.add(f'/media/{number}.mkv')
+            dispatcher.notify(movie_event(video_path=f'/movies/{number}.mkv'))
+    assert dispatcher.wait_idle(10)
+    assert len(dispatch.calls[kind]) == 8, 'every file is still asked for on its own'
+    assert [call for call in dispatch.library_calls if call[0] == kind] == [
+        (kind, ('movie', '/media/0.mkv') if kind == 'emby' else ('7',))]
+    assert dispatcher.status(IDS[kind]) == {'pending': 0, 'state': 'requested', 'error_code': None}
+
+
+def test_a_publication_that_arrived_after_a_scan_is_not_counted_as_covered(dispatch):
+    """A recursive scan covers the files that were there when it was submitted.
+    A subtitle written after that gets its own, or it waits for a scan nobody
+    is going to ask for."""
+    dispatcher = dispatch.dispatcher
+    dispatch.missing_paths.update({'/media/A.mkv', '/media/B.mkv'})
+    dispatcher.notify(movie_event())
+    assert dispatch.started.wait(3)
+    dispatcher.notify(movie_event(video_path='/movies/B.mkv'))
+    dispatch.release.set()
+    assert dispatcher.wait_idle(10)
+    assert [call for call in dispatch.library_calls if call[0] == 'silo'] == [('silo', ('7',))] * 2
 
 
 def test_a_scan_that_ran_and_fell_short_is_a_failure_not_a_missing_file(dispatch):
@@ -641,9 +747,9 @@ def test_a_rung_that_answers_with_the_wrong_status_is_not_a_refresh(dispatch):
     dispatch.release.set()
     original = dispatch.dispatcher._ladder
 
-    def confused(client, server, event, mapped, guard):
+    def confused(client, server, event, mapped, guard, coalesce):
         return [(name, lambda: {'status': 'whatever'}, expected)
-                for name, _call, expected in original(client, server, event, mapped, guard)]
+                for name, _call, expected in original(client, server, event, mapped, guard, coalesce)]
 
     dispatch.dispatcher._ladder = confused
     dispatch.dispatcher.notify(movie_event())

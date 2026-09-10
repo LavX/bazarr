@@ -57,9 +57,10 @@ class SiloClient:
         return result
 
     def refresh_file(self, library_id: str, video_path: str, *, timeout: float = 90.0,
-                     ensure_current: Callable[[], None] | None = None) -> dict:
+                     ensure_current: Callable[[], None] | None = None) -> dict | None:
         return refresh_file(self.http, library_id, video_path, timeout=timeout, ensure_current=ensure_current)
 
     def refresh_library(self, library_id: str, *,
-                        ensure_current: Callable[[], None] | None = None) -> dict:
-        return refresh_library(self.http, library_id, ensure_current=ensure_current)
+                        ensure_current: Callable[[], None] | None = None,
+                        coalesce: Callable[[str], bool] | None = None) -> dict:
+        return refresh_library(self.http, library_id, ensure_current=ensure_current, coalesce=coalesce)

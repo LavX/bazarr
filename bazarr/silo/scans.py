@@ -16,7 +16,7 @@ import dns.asyncresolver
 import dns.exception
 
 from media_servers.http import MediaServerError, MediaServerHTTP
-from media_servers.paths import map_media_path, media_paths_equal
+from media_servers.paths import is_media_path, map_media_path, media_paths_equal
 
 
 _ACTIVE = {"accepted", "running"}
@@ -97,6 +97,22 @@ def _status_error(status):
         status, "server_error" if status >= 500 else "request_rejected")
 
 
+class _Unscannable(MediaServerError):
+    """Silo's documented 400: this path is not one it can scan, ever.
+
+    Every other refusal Silo can answer with also collapses into
+    ``request_rejected`` through :func:`_status_error` - a 409, a 422, a rate
+    limit, and a refused handshake on the event stream. Those say the request
+    or the connection failed, not that the file is not here, and the caller has
+    to be able to tell the two apart. Carrying the same code keeps the
+    distinction private to this module: nothing outside it ever sees a refusal
+    it does not already know.
+    """
+
+    def __init__(self):
+        super().__init__("request_rejected")
+
+
 async def _reject_redirect(_session, _context, params):
     # ws_connect has no allow_redirects argument. This hook runs before aiohttp
     # follows Location, including same-origin redirects that retain the key.
@@ -137,9 +153,9 @@ def _validate_run(row):
         raise MediaServerError("invalid_response")
     if row["mode"] == "library":
         if "path" in row and (not isinstance(row["path"], str)
-                              or row["path"] and not media_paths_equal(row["path"], row["path"])):
+                              or row["path"] and not is_media_path(row["path"])):
             raise MediaServerError("invalid_response")
-    elif not media_paths_equal(row.get("path"), row.get("path")):
+    elif not is_media_path(row.get("path")):
         raise MediaServerError("invalid_response")
     result = row.get("result")
     if result is not None and (not isinstance(result, dict) or any(
@@ -298,6 +314,8 @@ async def _listen(ws, state):
 async def _post_scan(session, url, library_id, video_path, verify_ssl):
     async with session.post(url + "/api/v1/scan", json={"library_id": library_id, "path": video_path},
                             ssl=verify_ssl, allow_redirects=False) as response:
+        if response.status == 400:
+            raise _Unscannable()
         if response.status != 202:
             raise MediaServerError(_status_error(response.status))
         if response.content_length is not None and response.content_length > MediaServerHTTP.RESPONSE_LIMIT:
@@ -413,7 +431,7 @@ def native_library_id(library_id):
     return native_id
 
 
-def refresh_library(http, library_id, *, ensure_current=None):
+def refresh_library(http, library_id, *, ensure_current=None, coalesce=None):
     """Ask Silo to rescan a whole library, when it cannot scan the file itself.
 
     Silo's file scan reads a closed set of containers and refuses any path it
@@ -424,10 +442,17 @@ def refresh_library(http, library_id, *, ensure_current=None):
     outlives any deadline worth holding a worker on, and Silo deduplicates a
     second one silently while still answering 202, so a completion event is
     not evidence that this request caused anything.
+
+    One scan covers every file in the library. ``coalesce(library)`` answers
+    whether the caller already asked for this one and records it when it has
+    not, so a batch that lands every target on this rung submits one scan
+    rather than one per video.
     """
     native_id = native_library_id(library_id)
     if ensure_current:
         ensure_current()
+    if coalesce is not None and coalesce(native_id):
+        return {"status": "requested"}
     result = http.request_json("POST", "/api/v1/scan", json={"library_id": native_id},
                                success_statuses=(202,))
     if (not isinstance(result, dict) or result.get("status") != "accepted" or result.get("mode") != "library"
@@ -439,8 +464,18 @@ def refresh_library(http, library_id, *, ensure_current=None):
 
 
 def refresh_file(http, library_id, video_path, *, timeout=90.0, ensure_current=None):
+    """The observed scan of one file, or nothing when Silo cannot scan it.
+
+    Nothing means the documented 400 and only that: a path Silo cannot place in
+    the library, or a container its scanner does not read. No retry of the same
+    request changes either answer, so this rung has nothing left to say and the
+    ladder climbs on. Everything else - a refused handshake on the event
+    stream, a conflict, a rate limit, a scan that ran and fell short - keeps its
+    own refusal, because a broken destination must not read as an absent file
+    and quietly escalate every publication to a whole-library scan.
+    """
     native_id = native_library_id(library_id)
-    if not media_paths_equal(video_path, video_path):
+    if not is_media_path(video_path):
         raise MediaServerError("path_invalid")
     if type(timeout) not in {int, float} or timeout <= 0 or (type(timeout) is float and not math.isfinite(timeout)):
         raise MediaServerError("invalid_timeout")
@@ -448,6 +483,8 @@ def refresh_file(http, library_id, video_path, *, timeout=90.0, ensure_current=N
         raise MediaServerError("invalid_timeout")
     try:
         return asyncio.run(_refresh(http, native_id, video_path, min(timeout, 90.0), ensure_current))
+    except _Unscannable:
+        return None
     except MediaServerError:
         raise
     except TimeoutError:

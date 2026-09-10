@@ -207,6 +207,20 @@ EPISODES = {"Items": [
     {"Id": "37", "Type": "Episode", "Name": "Serenity", "IndexNumber": 1, "ParentIndexNumber": 1},
     {"Id": "38", "Type": "Episode", "Name": "The Train Job", "IndexNumber": 2, "ParentIndexNumber": 1},
 ], "TotalRecordCount": 2}
+# The mapped file each title-rung publication is about. The weak rung binds
+# nothing that contradicts it.
+TITLE_PATHS = {"movie": "/media/Firefly.mkv", "episode": "/media/Firefly/Season 1/S01E02.mkv"}
+# A 2024 remake Bazarr published a subtitle beside. Emby holds the 1922 film.
+NOSFERATU_2024 = "/media/movies/Nosferatu (2024)/Nosferatu (2024) Bluray-1080p.mkv"
+
+
+def _title_replies(media_type, items):
+    """Everything a title lookup that resolved would consume, so a rung that
+    binds the wrong item fails on the assertion rather than on a short fixture."""
+    replies = [(200, {"Items": items, "TotalRecordCount": len(items)}, {})]
+    if media_type == "episode":
+        replies.append((200, EPISODES, {}))
+    return replies + [(204, b"", {})]
 
 
 def metadata(**overrides):
@@ -246,6 +260,17 @@ def test_provider_lookup_tries_imdb_first_then_the_type_specific_id(http_fixture
     assert urlsplit(records[-1]["path"]).path == (
         "/Items/38/Refresh" if media_type == "episode" else "/Items/opaque/Refresh")
     assert parse_qs(urlsplit(records[-1]["path"]).query)["Recursive"] == ["false"]
+
+
+def test_a_stored_identifier_carrying_the_filter_delimiter_is_never_sent(http_fixture):
+    """AnyProviderIdEquals is comma-delimited. A comma in a stored id would turn
+    the deliberate one-at-a-time query into the combined one it avoids, which
+    answers "one of these matched" and loses which."""
+    from emby.client import EmbyClient
+    base, records = http_fixture([(200, {"Items": [], "TotalRecordCount": 0}, {})] * 2)
+    with EmbyClient(base, "synthetic-key") as client:
+        assert client.refresh_by_provider_id("movie", metadata(imdb_id="tt0303461,tt0017136")) is None
+    assert [query(record)["AnyProviderIdEquals"] for record in records] == [["tmdb.19"]]
 
 
 def test_provider_lookup_stops_at_the_first_identifier_that_resolves(http_fixture):
@@ -296,7 +321,8 @@ def test_title_lookup_narrows_by_name_and_year_then_matches_the_name_exactly(htt
     replies.append((204, b"", {}))
     base, records = http_fixture(replies)
     with EmbyClient(base, "synthetic-key") as client:
-        assert client.refresh_by_title_year(media_type, metadata()) == {"status": "requested"}
+        assert client.refresh_by_title_year(
+            media_type, metadata(), TITLE_PATHS[media_type]) == {"status": "requested"}
     assert query(records[0])["NameStartsWith"] == ["Firefly"]
     assert query(records[0])["Years"] == ["2002"]
     assert query(records[0])["IncludeItemTypes"] == [PARENT_TYPES[media_type]]
@@ -304,16 +330,78 @@ def test_title_lookup_narrows_by_name_and_year_then_matches_the_name_exactly(htt
         "/Items/38/Refresh" if media_type == "episode" else "/Items/right/Refresh")
 
 
-def test_title_lookup_omits_an_unknown_year_and_misses_without_a_title(http_fixture):
+@pytest.mark.parametrize("media_type", MEDIA_TYPES)
+@pytest.mark.parametrize("missing", ["title", "year"])
+def test_the_title_rung_never_runs_without_both_a_title_and_a_year(http_fixture, missing, media_type):
+    """A title on its own is not an identifier, so it is not asked as one.
+
+    Titles collide constantly through remakes, and a row whose year Bazarr
+    never parsed would otherwise send a bare prefix and accept whatever single
+    film came back.
+    """
     from emby.client import EmbyClient
-    base, records = http_fixture([
-        (200, {"Items": [{"Id": "1", "Type": "Movie", "Name": "Firefly"}], "TotalRecordCount": 1}, {}),
-        (204, b"", {})])
+    items = [{"Id": "1", "Type": PARENT_TYPES[media_type], "Name": "Firefly", "Path": "/media/Firefly"}]
+    base, records = http_fixture(_title_replies(media_type, items))
     with EmbyClient(base, "synthetic-key") as client:
-        assert client.refresh_by_title_year("movie", metadata(title=None)) is None
-        assert client.refresh_by_title_year("movie", metadata(year=None)) == {"status": "requested"}
-    assert "Years" not in query(records[0])
+        assert client.refresh_by_title_year(
+            media_type, metadata(**{missing: None}), TITLE_PATHS[media_type]) is None
+    assert records == [], "no year is a reason to climb the next rung, not to guess"
+
+
+def test_the_title_rung_never_binds_a_film_that_only_shares_a_prefix(http_fixture):
+    """NameStartsWith bounds the response; it never decides anything."""
+    from emby.client import EmbyClient
+    items = [{"Id": "33", "Type": "Movie", "Name": "Nosferatu the Vampyre",
+              "Path": "/media/movies/Nosferatu the Vampyre (1979)/Nosferatu the Vampyre.mkv"}]
+    base, records = http_fixture([(200, {"Items": items, "TotalRecordCount": 1}, {})])
+    with EmbyClient(base, "synthetic-key") as client:
+        assert client.refresh_by_title_year(
+            "movie", metadata(title="Nosferatu", year=2024), NOSFERATU_2024) is None
+    assert len(records) == 1, "a prefix match is not a title match"
+
+
+@pytest.mark.parametrize("media_type", MEDIA_TYPES)
+def test_the_title_rung_never_binds_an_item_that_holds_another_file(http_fixture, media_type):
+    """The same exact title in the same year, at a path this file is not under.
+
+    Emby answers Path on both lookups already. A title and a year are a weak
+    identifier, so the path it comes back with has to agree before anything is
+    refreshed; the alternative is refreshing a different film and reporting the
+    publication as requested.
+    """
+    from emby.client import EmbyClient
+    elsewhere = {"movie": "/media/movies/Nosferatu (1922)/Nosferatu (1922) Bluray-1080p.mkv",
+                 "episode": "/media/series/Nosferatu (1922)"}
+    items = [{"Id": "33", "Type": PARENT_TYPES[media_type], "Name": "Nosferatu",
+              "Path": elsewhere[media_type]}]
+    base, records = http_fixture(_title_replies(media_type, items))
+    with EmbyClient(base, "synthetic-key") as client:
+        assert client.refresh_by_title_year(
+            media_type, metadata(title="Nosferatu", year=2024), NOSFERATU_2024) is None
+    assert len(records) == 1, "nothing may be refreshed, and the episodes of a wrong series never listed"
+
+
+def test_the_title_rung_never_binds_an_episode_of_another_series_folder(http_fixture):
+    """The series matched the title; the episode Emby returned is elsewhere."""
+    from emby.client import EmbyClient
+    episodes = {"Items": [{"Id": "38", "Type": "Episode", "IndexNumber": 2, "ParentIndexNumber": 1,
+                           "Path": "/media/series/Firefly/Specials/S01E02.mkv"}], "TotalRecordCount": 1}
+    base, records = http_fixture([(200, {"Items": [SERIES], "TotalRecordCount": 1}, {}),
+                                  (200, episodes, {}), (204, b"", {})])
+    with EmbyClient(base, "synthetic-key") as client:
+        assert client.refresh_by_title_year("episode", metadata(), "/media/Firefly/Season 1/S01E02.mkv") is None
     assert len(records) == 2
+
+
+def test_an_identifier_still_binds_an_item_the_path_mapping_cannot_reach(http_fixture):
+    """A provider id is proof of identity, and outliving a wrong mapping is why it is asked first."""
+    from emby.client import EmbyClient
+    items = [{"Id": "33", "Type": "Movie", "Name": "Nosferatu",
+              "Path": "/somewhere/else/entirely/Nosferatu (2024).mkv"}]
+    base, records = http_fixture([(200, {"Items": items, "TotalRecordCount": 1}, {}), (204, b"", {})])
+    with EmbyClient(base, "synthetic-key") as client:
+        assert client.refresh_by_provider_id("movie", metadata()) == {"status": "requested"}
+    assert urlsplit(records[-1]["path"]).path == "/Items/33/Refresh"
 
 
 def test_a_series_without_the_published_episode_misses(http_fixture):
@@ -322,7 +410,8 @@ def test_a_series_without_the_published_episode_misses(http_fixture):
         (200, {"Items": [SERIES], "TotalRecordCount": 1}, {}),
         (200, {"Items": [], "TotalRecordCount": 0}, {})])
     with EmbyClient(base, "synthetic-key") as client:
-        assert client.refresh_by_title_year("episode", metadata(episode=9)) is None
+        assert client.refresh_by_title_year("episode", metadata(episode=9),
+                                            TITLE_PATHS["episode"]) is None
     assert urlsplit(records[1]["path"]).path == "/Shows/35/Episodes"
     assert query(records[1])["Season"] == ["1"]
 
@@ -333,7 +422,7 @@ def test_an_episode_of_another_season_is_never_refreshed(http_fixture):
              "TotalRecordCount": 1}
     base, records = http_fixture([(200, {"Items": [SERIES], "TotalRecordCount": 1}, {}), (200, other, {})])
     with EmbyClient(base, "synthetic-key") as client:
-        assert client.refresh_by_title_year("episode", metadata()) is None
+        assert client.refresh_by_title_year("episode", metadata(), TITLE_PATHS["episode"]) is None
     assert len(records) == 2
 
 
@@ -375,7 +464,10 @@ def test_identifier_rungs_honour_the_revision_guard(monkeypatch, media_type, pha
         monkeypatch.setattr(client.http, "request_empty", lambda *args, **kwargs: requests.append("post"))
         with pytest.raises(MediaServerError, match="configuration_changed"):
             client.refresh_by_provider_id(media_type, metadata(), ensure_current=guard)
-    assert requests == [] if phase == "lookup" else requests[0] == "/Items"
+    if phase == "lookup":
+        assert requests == []
+    else:
+        assert requests[0] == "/Items"
 
 
 # ------------------------------------------------------------- library rung
@@ -386,6 +478,30 @@ FOLDERS = [
     {"Name": "TV A", "ItemId": "19", "CollectionType": "tvshows", "Locations": ["/media/series"]},
     {"Name": "Music", "ItemId": "21", "CollectionType": "music", "Locations": ["/media"]},
 ]
+
+
+def test_one_recursive_library_scan_serves_every_file_in_it(http_fixture):
+    """A recursive rescan of a library covers every file in that library, so a
+    bulk mod or a season pack against a slightly wrong mapping must not issue
+    one per video. A second library is still its own scan."""
+    from emby.client import EmbyClient
+    # Exactly what the coalesced sequence consumes: look, scan, look, look, scan.
+    base, records = http_fixture([(200, FOLDERS, {}), (204, b"", {}),
+                                  (200, FOLDERS, {}), (200, FOLDERS, {}), (204, b"", {})])
+    scanned = {}
+
+    def coalesce(library):
+        seen = library in scanned
+        scanned[library] = True
+        return seen
+
+    with EmbyClient(base, "synthetic-key") as client:
+        assert client.refresh_library("movie", "/media/movies/A.mkv", coalesce=coalesce) == {"status": "requested"}
+        assert client.refresh_library("movie", "/media/movies/B.mkv", coalesce=coalesce) == {"status": "requested"}
+        assert client.refresh_library("episode", "/media/series/F/S01E01.mkv",
+                                      coalesce=coalesce) == {"status": "requested"}
+    posts = [record for record in records if record["method"] == "POST"]
+    assert [urlsplit(post["path"]).path for post in posts] == ["/Items/3/Refresh", "/Items/19/Refresh"]
 
 
 @pytest.mark.parametrize(("media_type", "path", "item_id"), [
