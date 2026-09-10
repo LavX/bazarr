@@ -8,12 +8,19 @@ out was deleting the file by hand and waiting for a re-index to notice.
 
 
 def test_the_route_exists():
+    """On api.sports.events, which owns that path.
+
+    Delete started out in api.sports.subtitles. Adding upload moved it onto the
+    resource that already owned the path, because registering a second
+    flask_restx Resource there silently shadows the first, and this assertion
+    was left pointing at the module delete had just left.
+    """
     import inspect
 
-    from api.sports import subtitles
+    from api.sports import events
 
-    source = inspect.getsource(subtitles)
-    assert '"/sports/events/<int:event_id>/subtitles"' in source
+    source = inspect.getsource(events)
+    assert "'/sports/events/<int:event_id>/subtitles'" in source
     assert "def delete(self, event_id):" in source
 
 
