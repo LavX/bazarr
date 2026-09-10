@@ -10,8 +10,9 @@ from typing import Optional, List, Dict, Any
 
 from retry.api import retry
 from deep_translator.exceptions import TooManyRequests, RequestError
+from dynaconf.validator import ValidationError
 
-from app.config import settings
+from app.config import settings, normalize_openrouter_provider_order
 from languages.get_languages import language_from_alpha2, language_from_alpha3
 from radarr.history import history_log_movie
 from sonarr.history import history_log
@@ -23,12 +24,14 @@ from .auth import get_translator_auth_headers
 
 logger = logging.getLogger(__name__)
 
-PROVIDER_ROUTING_VALUES = ('throughput', 'nitro', 'price', 'floor', 'latency', 'default')
+PROVIDER_ROUTING_VALUES = ('throughput', 'nitro', 'price', 'floor', 'latency', 'default', 'smartfast', 'custom')
 DEFAULT_PROVIDER_ROUTING = 'throughput'
 # Sidecars before this version forward provider.sort to OpenRouter verbatim, which
 # rejects nitro, floor and default; they get the plain sort each value stands for.
 ROUTING_SHORTCUTS_MIN_SIDECAR = (1, 3, 4)
+SMARTFAST_MIN_SIDECAR = (2, 0, 0)
 ROUTING_PLAIN_SORT = {'nitro': 'throughput', 'floor': 'price', 'default': 'throughput'}
+MODEL_ROUTING_SUFFIXES = ('floor', 'nitro', 'smartfast')
 SIDECAR_VERSION_CACHE_SECONDS = 300
 _sidecar_version_cache = {}
 
@@ -37,10 +40,14 @@ POLL_UNREACHABLE_LIMIT_SECONDS = 600
 POLL_INTERVAL_SECONDS = 2
 
 
+class ProviderRoutingError(ValueError):
+    """The selected provider routing cannot be honored safely."""
+
+
 def _typed_routing_suffix(model_id):
-    """'floor' or 'nitro' when the model id ends with that OpenRouter shortcut, else None."""
-    for suffix in ('floor', 'nitro'):
-        if str(model_id or '').endswith(f':{suffix}'):
+    """The routing shortcut at the end of a model id, if present."""
+    for suffix in MODEL_ROUTING_SUFFIXES:
+        if str(model_id or '').lower().endswith(f':{suffix}'):
             return suffix
     return None
 
@@ -79,26 +86,54 @@ def sidecar_version(base_url):
     return version
 
 
-def build_provider_config():
-    """The OpenRouter provider routing the sidecar applies to every request of a job.
+def _require_routing_support(routing, minimum):
+    version = sidecar_version(settings.translator.openrouter_url)
+    if version is None or version < minimum:
+        required = '.'.join(map(str, minimum))
+        detected = '.'.join(map(str, version)) if version else 'unknown'
+        raise ProviderRoutingError(
+            f"OpenRouter {routing} routing requires AI Subtitle Translator {required} or newer "
+            f"(detected version: {detected}). Check the service URL and update the translator.")
 
-    Left unset the sidecar sorts providers by throughput, which is the fastest and
-    often not the cheapest endpoint; the setting lets the user pick price, latency,
-    the ``:nitro``/``:floor`` shortcuts, or OpenRouter's own load balancing. A
-    sidecar older than 1.3.4 (or one whose version cannot be read) does not know
-    the shortcuts and would hand them to OpenRouter as an invalid sort, so it gets
-    the plain sort each of them stands for.
+
+def build_routing_config():
+    """Resolve the outgoing model and provider settings together for both job APIs.
+
+    Explicit smartfast/custom selections supersede old routing suffixes while
+    preserving genuine model variants. Older shortcut selections retain their
+    historical compatibility behavior.
     """
     routing = getattr(settings.translator, 'openrouter_provider_routing', DEFAULT_PROVIDER_ROUTING)
     if routing not in PROVIDER_ROUTING_VALUES:
         logger.warning("Unknown OpenRouter provider routing '%s', using %s", routing, DEFAULT_PROVIDER_ROUTING)
         routing = DEFAULT_PROVIDER_ROUTING
-    typed = _typed_routing_suffix(getattr(settings.translator, 'openrouter_model', ''))
+    model = getattr(settings.translator, 'openrouter_model', '')
+    typed = _typed_routing_suffix(model)
+    if routing not in ('smartfast', 'custom') and typed == 'smartfast':
+        routing = 'smartfast'
+    if routing in ('smartfast', 'custom'):
+        if routing == 'custom':
+            try:
+                order = normalize_openrouter_provider_order(
+                    getattr(settings.translator, 'openrouter_provider_order', []))
+            except ValidationError as error:
+                raise ProviderRoutingError(str(error)) from error
+            if not order:
+                raise ProviderRoutingError('OpenRouter custom routing requires at least one provider slug.')
+            _require_routing_support(routing, ROUTING_SHORTCUTS_MIN_SIDECAR)
+            provider = {'sort': 'default', 'order': order, 'only': list(order), 'allowFallbacks': False}
+        else:
+            _require_routing_support(routing, SMARTFAST_MIN_SIDECAR)
+            provider = {'sort': 'smartfast'}
+        parts = str(model or '').strip().split(':')
+        model = ':'.join([parts[0]] + [part for part in parts[1:] if part.lower() not in MODEL_ROUTING_SUFFIXES])
+        return model, provider
     if typed:
         # The slug already says how to route. A sidecar from 1.3.4 on drops the sort
         # for a typed shortcut anyway; an older one forwards both, so the sort has to
         # agree with the slug rather than with the setting.
-        return {'sort': ROUTING_PLAIN_SORT[typed]}
+        model = f'{model.rsplit(":", 1)[0]}:{typed}'
+        return model, {'sort': ROUTING_PLAIN_SORT[typed]}
     if routing in ROUTING_PLAIN_SORT:
         version = sidecar_version(settings.translator.openrouter_url)
         if version is None or version < ROUTING_SHORTCUTS_MIN_SIDECAR:
@@ -107,7 +142,11 @@ def build_provider_config():
                 "AI Subtitle Translator %s does not support the '%s' provider routing (needs 1.3.4), sending %s",
                 '.'.join(map(str, version)) if version else 'of unknown version', routing, plain)
             routing = plain
-    return {'sort': routing}
+    return model, {'sort': routing}
+
+
+def build_provider_config():
+    return build_routing_config()[1]
 
 
 class OpenRouterTranslatorService:
@@ -264,6 +303,7 @@ class OpenRouterTranslatorService:
                 logger.error(f'Target language is empty! from_lang={self.from_lang}, to_lang={self.to_lang}, orig_to_lang={self.orig_to_lang}')  # noqa: G004
                 return None
 
+            model, provider = build_routing_config()
             lines_payload: List[Dict[str, Any]] = [{"position": i, "line": line} for i, line in enumerate(lines_list)]
 
             title = get_title(
@@ -287,12 +327,12 @@ class OpenRouterTranslatorService:
                 # Add configuration from Bazarr settings
                 "config": {
                     "apiKey": self._get_api_key_value(),
-                    "model": settings.translator.openrouter_model,
+                    "model": model,
                     "temperature": settings.translator.openrouter_temperature,
                     "maxConcurrentJobs": settings.translator.openrouter_max_concurrent,
                     "parallelBatches": settings.translator.openrouter_parallel_batches,
                     "reasoning": self._build_reasoning_config(),
-                    "provider": build_provider_config(),
+                    "provider": provider,
                 }
             }
 
@@ -323,6 +363,10 @@ class OpenRouterTranslatorService:
             # Poll for completion
             return self._poll_job(base_url, job_id, len(lines_payload), bazarr_job_id=bazarr_job_id)
 
+        except ProviderRoutingError as error:
+            logger.error('AI Subtitle Translator routing error: %s', error)
+            show_message(f'AI translation failed: {error}')
+            return None
         except requests.exceptions.Timeout:
             logger.error('AI Subtitle Translator request timed out')
             return None

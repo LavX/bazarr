@@ -27,7 +27,7 @@ def _routing_validator():
 def test_setting_defaults_to_throughput_and_pins_the_allowed_values():
     validator = _routing_validator()
     assert validator.default == 'throughput'
-    assert list(validator.operations.get('is_in')) == ROUTING_VALUES
+    assert list(validator.operations.get('is_in')) == ROUTING_VALUES + ['smartfast', 'custom']
     assert config.settings.translator.openrouter_provider_routing == 'throughput'
 
 
@@ -199,3 +199,247 @@ def test_content_endpoint_sends_the_routing_in_the_config(mocker, monkeypatch):
     assert body == {'jobId': 'job-2'}
     payload = post.call_args.kwargs['json']
     assert payload['config']['provider'] == {'sort': 'nitro'}
+
+
+@pytest.fixture
+def submit_request(mocker, monkeypatch):
+    from api.translator import translator as api_mod
+
+    _translator_settings(monkeypatch, 'throughput')
+    mocker.patch.object(openrouter_translator, 'get_title', return_value='Some Movie')
+    mocker.patch.object(openrouter_translator, 'language_from_alpha2', lambda code: code)
+    mocker.patch.object(openrouter_translator, 'get_translator_auth_headers', return_value={})
+    mocker.patch.object(api_mod, 'get_translator_auth_headers', return_value={})
+    post = mocker.patch.object(
+        openrouter_translator.requests, 'post',
+        return_value=SimpleNamespace(status_code=200, json=lambda: {'jobId': 'selection-job'}),
+    )
+    service = _build_service()
+    mocker.patch.object(service, '_poll_job', return_value=[{'position': 0, 'line': 'Szia'}])
+    messages = []
+    monkeypatch.setattr(openrouter_translator, 'show_message', messages.append)
+
+    def send(boundary):
+        if boundary == 'queued':
+            return service._submit_and_poll(['Hi'])
+        app = Flask(__name__)
+        with app.test_request_context(
+            '/api/translator/jobs', method='POST', json={'lines': ['Hi'], 'targetLanguage': 'hu'}
+        ):
+            return api_mod.TranslatorJobs.post.__wrapped__(api_mod.TranslatorJobs())
+
+    return SimpleNamespace(send=send, post=post, messages=messages)
+
+
+@pytest.mark.parametrize('boundary', ['queued', 'manual'])
+@pytest.mark.parametrize('model', [
+    'deepseek/example', 'deepseek/example:free', 'deepseek/example:thinking',
+    'deepseek/example:nitro', 'deepseek/example:free:floor',
+])
+def test_smartfast_request_preserves_variants_and_clears_custom_providers(
+        monkeypatch, submit_request, boundary, model):
+    _sidecar_health(monkeypatch, '2.0.0-rc1')
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_routing', 'smartfast')
+    monkeypatch.setattr(config.settings.translator, 'openrouter_model', model)
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_order', ['stale-provider'])
+
+    submit_request.send(boundary)
+
+    payload = submit_request.post.call_args.kwargs['json']['config']
+    expected_model = {
+        'deepseek/example:nitro': 'deepseek/example',
+        'deepseek/example:free:floor': 'deepseek/example:free',
+    }.get(model, model)
+    assert payload['model'] == expected_model
+    assert payload['provider'] == {'sort': 'smartfast'}
+
+
+@pytest.mark.parametrize('boundary', ['queued', 'manual'])
+@pytest.mark.parametrize('order', [['deepinfra'], [' DeepInfra ', 'deepinfra', 'PARASAIL/fp8']])
+@pytest.mark.parametrize('suffix', ['nitro', 'floor', 'smartfast'])
+def test_custom_request_keeps_only_selected_providers_in_order(
+        monkeypatch, submit_request, boundary, order, suffix):
+    _sidecar_health(monkeypatch, '1.3.4')
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_routing', 'custom')
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_order', order)
+    monkeypatch.setattr(config.settings.translator, 'openrouter_model', f'deepseek/example:free:{suffix}')
+
+    submit_request.send(boundary)
+
+    payload = submit_request.post.call_args.kwargs['json']['config']
+    expected_order = ['deepinfra'] if len(order) == 1 else ['deepinfra', 'parasail/fp8']
+    assert payload['model'] == 'deepseek/example:free'
+    assert payload['provider'] == {
+        'sort': 'default', 'order': expected_order, 'only': expected_order, 'allowFallbacks': False,
+    }
+    assert config.settings.translator.openrouter_model == f'deepseek/example:free:{suffix}'
+
+
+@pytest.mark.parametrize('boundary', ['queued', 'manual'])
+@pytest.mark.parametrize('suffix', ['smartfast', 'SMARTFAST'])
+def test_typed_smartfast_selects_smartfast_with_legacy_routing(monkeypatch, submit_request, boundary, suffix):
+    _sidecar_health(monkeypatch, '2.0.0')
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_routing', 'floor')
+    monkeypatch.setattr(config.settings.translator, 'openrouter_model', f'deepseek/example:{suffix}')
+
+    submit_request.send(boundary)
+
+    payload = submit_request.post.call_args.kwargs['json']['config']
+    assert payload['model'] == 'deepseek/example'
+    assert payload['provider'] == {'sort': 'smartfast'}
+
+
+@pytest.mark.parametrize('boundary', ['queued', 'manual'])
+@pytest.mark.parametrize('routing', ['smartfast', 'custom'])
+@pytest.mark.parametrize('suffix', ['NITRO', 'FLOOR', 'SMARTFAST'])
+def test_selection_strips_routing_tokens_case_insensitively_without_changing_variants(
+        monkeypatch, submit_request, boundary, routing, suffix):
+    _sidecar_health(monkeypatch, '2.0.0')
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_routing', routing)
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_order', ['deepinfra'])
+    monkeypatch.setattr(config.settings.translator, 'openrouter_model', f'DeepSeek/Example:Free:{suffix}:Thinking')
+
+    submit_request.send(boundary)
+
+    payload = submit_request.post.call_args.kwargs['json']['config']
+    assert payload['model'] == 'DeepSeek/Example:Free:Thinking'
+    assert payload['provider']['sort'] == ('default' if routing == 'custom' else 'smartfast')
+    assert config.settings.translator.openrouter_model == f'DeepSeek/Example:Free:{suffix}:Thinking'
+
+
+@pytest.mark.parametrize('boundary', ['queued', 'manual'])
+@pytest.mark.parametrize('suffix, expected_model, expected_sort', [
+    ('NITRO', 'DeepSeek/Example:Free:nitro', 'throughput'),
+    ('FLOOR', 'DeepSeek/Example:Free:floor', 'price'),
+])
+def test_typed_legacy_routing_canonicalizes_only_the_routing_token(
+        monkeypatch, submit_request, boundary, suffix, expected_model, expected_sort):
+    _sidecar_health(monkeypatch, '1.3.4')
+    monkeypatch.setattr(config.settings.translator, 'openrouter_model', f'DeepSeek/Example:Free:{suffix}')
+
+    submit_request.send(boundary)
+
+    payload = submit_request.post.call_args.kwargs['json']['config']
+    assert payload['model'] == expected_model
+    assert payload['provider'] == {'sort': expected_sort}
+
+
+@pytest.mark.parametrize('boundary', ['queued', 'manual'])
+@pytest.mark.parametrize('routing, version, minimum', [
+    ('smartfast', '1.3.4', '2.0.0'), ('smartfast', None, '2.0.0'),
+    ('smartfast', 'unknown', '2.0.0'), ('custom', '1.3.3', '1.3.4'),
+    ('custom', None, '1.3.4'),
+])
+def test_unsupported_selection_fails_clearly_without_submission(
+        monkeypatch, submit_request, boundary, routing, version, minimum):
+    _sidecar_health(monkeypatch, version)
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_routing', routing)
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_order', ['deepinfra'])
+
+    result = submit_request.send(boundary)
+
+    submit_request.post.assert_not_called()
+    if boundary == 'manual':
+        body, status = result
+        assert status == 400
+        message = body['error']
+    else:
+        assert result is None
+        message = ' '.join(submit_request.messages)
+    assert minimum in message
+    assert routing in message.lower()
+
+
+@pytest.mark.parametrize('boundary', ['queued', 'manual'])
+@pytest.mark.parametrize('order', [[], [' '], ['invalid provider'], ['https://provider.example'], ['../provider'],
+                                  ['deepinfra', 1], 'deepinfra', ['provider'] * 21, ['p' * 161]])
+def test_invalid_custom_order_fails_before_any_network(
+        monkeypatch, submit_request, boundary, order):
+    health_calls = _sidecar_health(monkeypatch, '2.0.0')
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_routing', 'custom')
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_order', order)
+
+    result = submit_request.send(boundary)
+
+    assert health_calls == []
+    submit_request.post.assert_not_called()
+    if boundary == 'manual':
+        assert result[1] == 400
+        assert 'provider' in result[0]['error'].lower()
+    else:
+        assert result is None
+        assert any('provider' in message.lower() for message in submit_request.messages)
+
+
+def test_encrypted_queued_custom_request_preserves_routing(monkeypatch, submit_request):
+    import base64
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    _sidecar_health(monkeypatch, '2.0.0')
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_routing', 'custom')
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_order', ['parasail/fp8', 'deepinfra'])
+    monkeypatch.setattr(config.settings.translator, 'openrouter_encryption_key', 'ab' * 32)
+
+    submit_request.send('queued')
+
+    payload = submit_request.post.call_args.kwargs['json']['config']
+    encrypted = payload['apiKey']
+    assert encrypted.startswith('enc:')
+    raw = base64.b64decode(encrypted[4:])
+    assert AESGCM(bytes.fromhex('ab' * 32)).decrypt(raw[:12], raw[12:], None) == b'sk-or-key'
+    assert payload['provider'] == {
+        'sort': 'default', 'order': ['parasail/fp8', 'deepinfra'],
+        'only': ['parasail/fp8', 'deepinfra'], 'allowFallbacks': False,
+    }
+
+
+@pytest.mark.parametrize('routing, expected', [
+    ('smartfast', {'sort': 'smartfast'}),
+    ('custom', {'sort': 'default', 'order': ['deepinfra'], 'only': ['deepinfra'], 'allowFallbacks': False}),
+])
+def test_sync_endpoint_fallback_preserves_selected_routing(monkeypatch, submit_request, routing, expected):
+    _sidecar_health(monkeypatch, '2.0.0')
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_routing', routing)
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_order', ['deepinfra'])
+    monkeypatch.setattr(config.settings.translator, 'openrouter_model', 'deepseek/example:free:nitro')
+    submit_request.post.side_effect = [
+        SimpleNamespace(status_code=404),
+        SimpleNamespace(status_code=200, json=lambda: [{'position': 0, 'line': 'Szia'}]),
+    ]
+
+    assert submit_request.send('queued') == [{'position': 0, 'line': 'Szia'}]
+
+    assert [call.args[0] for call in submit_request.post.call_args_list] == [
+        'http://sidecar:8765/api/v1/jobs/translate/content',
+        'http://sidecar:8765/api/v1/translate/content',
+    ]
+    for call in submit_request.post.call_args_list:
+        assert call.kwargs['json']['config']['provider'] == expected
+        assert call.kwargs['json']['config']['model'] == 'deepseek/example:free'
+
+
+def test_smartfast_support_uses_version_even_when_upstream_is_unhealthy(monkeypatch):
+    openrouter_translator.reset_sidecar_version_cache()
+    monkeypatch.setattr(config.settings.translator, 'openrouter_provider_routing', 'smartfast')
+    monkeypatch.setattr(openrouter_translator.requests, 'get', lambda *args, **kwargs: SimpleNamespace(
+        status_code=200,
+        json=lambda: {'status': 'unhealthy', 'version': '2.0.0', 'openrouterConfigured': True},
+    ))
+
+    assert openrouter_translator.build_provider_config() == {'sort': 'smartfast'}
+
+
+@pytest.mark.parametrize('boundary', ['queued', 'manual'])
+def test_old_service_cannot_receive_a_typed_smartfast_model(monkeypatch, submit_request, boundary):
+    _sidecar_health(monkeypatch, '1.3.4')
+    monkeypatch.setattr(config.settings.translator, 'openrouter_model', 'deepseek/example:smartfast')
+
+    result = submit_request.send(boundary)
+
+    submit_request.post.assert_not_called()
+    if boundary == 'manual':
+        assert result[1] == 400
+        assert '2.0.0' in result[0]['error']
+    else:
+        assert result is None
+        assert any('2.0.0' in message for message in submit_request.messages)

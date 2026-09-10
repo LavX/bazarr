@@ -50,6 +50,8 @@ describe("Translator options", () => {
   it("provider routing options match the backend setting values", () => {
     const values = aiTranslatorProviderRoutingOptions.map((o) => o.value);
     expect(values).toEqual([
+      "smartfast",
+      "custom",
       "throughput",
       "nitro",
       "price",

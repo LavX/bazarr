@@ -116,6 +116,19 @@ describe("AIModelSelector routing adoption", () => {
     });
   });
 
+  it("moves SmartFast into routing while preserving the free model variant", async () => {
+    const user = userEvent.setup();
+    const stagedValues = mountSelector();
+    const input = screen.getByRole("combobox");
+    await user.clear(input);
+    await user.paste("liquid/lfm-2.5-2.6b:free:smartfast");
+    await user.tab();
+    await waitFor(() => {
+      expect(stagedValues[MODEL_KEY]).toBe("liquid/lfm-2.5-2.6b:free");
+      expect(stagedValues[ROUTING_KEY]).toBe("smartfast");
+    });
+  });
+
   it("moves a typed :floor into the provider routing setting", async () => {
     const user = userEvent.setup();
     const stagedValues = mountSelector();

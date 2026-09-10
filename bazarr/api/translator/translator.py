@@ -8,7 +8,7 @@ from flask_restx import Resource, Namespace
 from app.config import settings
 from app.jobs_queue import jobs_queue
 from subtitles.tools.translate.services.auth import get_translator_auth_headers
-from subtitles.tools.translate.services.openrouter_translator import build_provider_config
+from subtitles.tools.translate.services.openrouter_translator import build_routing_config, ProviderRoutingError
 from ..utils import authenticate
 
 api_ns_translator = Namespace('Translator', description='AI Subtitle Translator service operations')
@@ -105,6 +105,11 @@ class TranslatorJobs(Resource):
         if not data.get("lines") or not data.get("targetLanguage"):
             return {"error": "Missing required fields: lines, targetLanguage"}, 400
 
+        try:
+            model, provider = build_routing_config()
+        except ProviderRoutingError as error:
+            return {"error": str(error)}, 400
+
         from subtitles.tools.translate.services.encryption import encrypt_api_key
 
         api_key = settings.translator.openrouter_api_key
@@ -123,9 +128,9 @@ class TranslatorJobs(Resource):
             "mediaType": data.get("mediaType", ""),
             "config": {
                 "apiKey": api_key,
-                "model": settings.translator.openrouter_model,
+                "model": model,
                 "temperature": settings.translator.openrouter_temperature,
-                "provider": build_provider_config(),
+                "provider": provider,
             }
         }
 

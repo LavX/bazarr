@@ -2,8 +2,10 @@ import { SelectorOption } from "@/components/inputs/Selector";
 
 // Which OpenRouter provider serves the model. Mirrors the backend validator for
 // translator.openrouter_provider_routing; the sidecar turns nitro and floor into
-// the OpenRouter slug shortcuts and the rest into provider.sort.
+// OpenRouter slug shortcuts; SmartFast and Custom are sent through the translator API.
 export const aiTranslatorProviderRoutingOptions: SelectorOption<string>[] = [
+  { label: "SmartFast (speed + price)", value: "smartfast" },
+  { label: "Custom (selected providers)", value: "custom" },
   { label: "Fastest (Default)", value: "throughput" },
   { label: "Fastest + priority tier (:nitro)", value: "nitro" },
   { label: "Cheapest", value: "price" },
@@ -12,10 +14,10 @@ export const aiTranslatorProviderRoutingOptions: SelectorOption<string>[] = [
   { label: "OpenRouter default (load balanced)", value: "default" },
 ];
 
-// The two OpenRouter shortcuts that can be appended to a model id. Every other
+// Routing shortcuts that can be appended to a model id. Every other
 // variant, :free, :thinking, :online, :extended, :exacto and :batch among them,
 // names a different model rather than a way to route to the same one.
-const ROUTING_SUFFIXES = ["nitro", "floor"] as const;
+const ROUTING_SUFFIXES = ["nitro", "floor", "smartfast"] as const;
 
 export type RoutingSuffix = (typeof ROUTING_SUFFIXES)[number];
 

@@ -57,6 +57,24 @@ def validate_tags(tags):
     return all(re.match( r'^[a-z0-9_-]+$', item) for item in tags)
 
 
+def normalize_openrouter_provider_order(value):
+    if not isinstance(value, list) or len(value) > 20:
+        raise ValidationError('OpenRouter providers must be a list of at most 20 provider slugs.')
+    normalized = []
+    for provider in value:
+        if not isinstance(provider, str):
+            raise ValidationError('OpenRouter provider slugs must be text.')
+        provider = provider.strip().lower()
+        if len(provider) > 160:
+            raise ValidationError('OpenRouter provider slugs must be at most 160 characters.')
+        if not re.fullmatch(r'[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*', provider):
+            raise ValidationError('OpenRouter providers must contain nonempty provider or endpoint slugs, '
+                                  'such as deepinfra or parasail/fp8.')
+        if provider not in normalized:
+            normalized.append(provider)
+    return normalized
+
+
 ONE_HUNDRED_YEARS_IN_MINUTES = 52560000
 ONE_HUNDRED_YEARS_IN_HOURS = 876000
 
@@ -246,9 +264,11 @@ validators = [
     Validator('translator.openrouter_parallel_batches', must_exist=True, default=4, is_type_of=int, gte=1, lte=8),
     # Which OpenRouter provider serves the model: throughput (the sidecar's historical default),
     # nitro/floor (OpenRouter's slug shortcuts, which also unlock the priority/flex tiers),
-    # price, latency, or OpenRouter's own load balancing.
+    # price, latency, OpenRouter's own load balancing, or explicit provider selection.
     Validator('translator.openrouter_provider_routing', must_exist=True, default='throughput', is_type_of=str,
-              is_in=['throughput', 'nitro', 'price', 'floor', 'latency', 'default']),
+              is_in=['throughput', 'nitro', 'price', 'floor', 'latency', 'default', 'smartfast', 'custom']),
+    Validator('translator.openrouter_provider_order', must_exist=True, default=[], is_type_of=list,
+              cast=normalize_openrouter_provider_order),
     Validator('translator.openrouter_encryption_key', must_exist=True, default='', is_type_of=str, cast=str),
     Validator('translator.lingarr_token', must_exist=True, default='', is_type_of=str, cast=str),
 
@@ -763,6 +783,7 @@ array_keys = ['excluded_tags',
               'enabled_integrations',
               'enabled_engines',
               'gemini_keys',
+              'openrouter_provider_order',
               'path_mappings',
               'path_mappings_movie',
               'remove_profile_tags',
@@ -914,6 +935,13 @@ def _active_provider_hub_provider_ids():
 
 
 def save_settings(settings_items):
+    # Validate repeated form values before applying any changes, including the
+    # single-value and empty-list representations used by the settings editor.
+    settings_items = [
+        (key, normalize_openrouter_provider_order([] if value == [''] else value))
+        if key == 'settings-translator-openrouter_provider_order' else (key, value)
+        for key, value in settings_items
+    ]
     configure_debug = False
     configure_captcha = False
     update_schedule = False
@@ -963,7 +991,8 @@ def save_settings(settings_items):
                     pass
 
         # Make sure empty language list are stored correctly
-        if settings_keys[-1] in array_keys and value[0] in empty_values:
+        if (settings_keys[-1] in array_keys and settings_keys[-1] != 'openrouter_provider_order'
+                and value and value[0] in empty_values):
             value = []
 
         # Handle path mappings settings since they are array in array
