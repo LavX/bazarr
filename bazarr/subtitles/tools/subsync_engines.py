@@ -151,7 +151,7 @@ def subtitle_mutation(video_path, *paths, invalidate_outputs=True):
 
 @contextmanager
 def staged_subtitle_write(video_path, destination, before_publish=None, allow_empty=False,
-                          source_paths=(), after_publish=None):
+                          source_paths=(), after_publish=None, on_publish=None):
     """Compute privately, then publish only while source and destination are current."""
     with subtitle_write_locks(video_path, destination, *source_paths) as states:
         def version(path):
@@ -180,6 +180,7 @@ def staged_subtitle_write(video_path, destination, before_publish=None, allow_em
                 if os.path.isfile(destination):
                     shutil.copymode(destination, temporary)
                 os.replace(temporary, destination)
+                _report_subtitle_publication(on_publish, destination)
                 if after_publish:
                     after_publish()
     finally:
@@ -187,9 +188,18 @@ def staged_subtitle_write(video_path, destination, before_publish=None, allow_em
             os.unlink(temporary)
 
 
-def write_subtitle_file(video_path, destination, content, written_paths=None):
+def _report_subtitle_publication(callback, path):
+    if callback:
+        try:
+            callback(str(path))
+        except Exception:
+            logging.warning('BAZARR subtitle publication notification failed')
+
+
+def write_subtitle_file(video_path, destination, content, written_paths=None, on_publish=None):
     """Write one saver output atomically and record that exact successful path."""
     with staged_subtitle_write(video_path, destination,
+                              on_publish=on_publish,
                               after_publish=(lambda: written_paths.append(destination))
                               if written_paths is not None else None) as temporary:
         with open(temporary, 'wb') as handle:
@@ -741,7 +751,7 @@ class SubsyncEngineRunner:
         return output_stat.st_size > 0 and output_stat.st_mtime_ns >= source_stat.st_mtime_ns
 
     def run(self, srt_path, output_mode, enabled_engines, execute_engine, force_sync=False,
-            source_version=None, before_publish=None, publication_lock=None, after_publish=None):
+            source_version=None, before_publish=None, publication_lock=None, after_publish=None, on_publish=None):
         output_mode = normalize_output_mode(output_mode)
         result = self.result = SyncRunResult(source_path=srt_path, output_mode=output_mode)
 
@@ -823,6 +833,7 @@ class SubsyncEngineRunner:
                         os.replace(str(output_path), str(final_engine_output_path))
                         final_output_path = final_engine_output_path
                         generated_path = str(final_engine_output_path)
+                    _report_subtitle_publication(on_publish, final_output_path)
                     if hasattr(state, 'changed'):
                         state.changed(final_output_path)
                     if after_publish:

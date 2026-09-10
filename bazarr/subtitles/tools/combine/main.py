@@ -6,6 +6,7 @@ import re
 import stat
 from dataclasses import dataclass
 from subtitles.tools.subsync_engines import staged_subtitle_write, subtitle_mutation, sync_output_owner_is_unique
+from media_servers.events import publication_callback
 
 from .composer import compose
 from .naming import compose_combined_filename, external_subtitles_dir
@@ -25,7 +26,7 @@ class CombineResult:
 
 def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                             sonarr_episode_id=None, radarr_id=None,
-                            languages=None, format=None):
+                            languages=None, format=None, arr_instance_id=None):
     """Single entry point: build (or rebuild) a combined subtitle file
     for the given video. Best-effort, never raises.
 
@@ -36,6 +37,7 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
         rule = _resolve_rule(
             media_type, sonarr_series_id, sonarr_episode_id, radarr_id,
             override_languages=languages, override_format=format,
+            video_path=video_path, arr_instance_id=arr_instance_id,
         )
         if rule is None:
             return CombineResult(status="skipped", reason="no rule")
@@ -101,7 +103,10 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
                 os.makedirs(out_dir, exist_ok=True)
             with staged_subtitle_write(
                     video_path, out_path, source_paths=(sources.primary, *sources.secondaries),
-                    after_publish=lambda: _remove_stale_combined_siblings(out_path, video_path)) as temporary:
+                    on_publish=publication_callback(media_type, video_path, 'combine', arr_instance_id),
+                    after_publish=lambda: _remove_stale_combined_siblings(
+                        out_path, video_path, publication_callback(media_type, video_path, 'combine', arr_instance_id))
+                    ) as temporary:
                 content = compose(primary_path=sources.primary, secondary_paths=sources.secondaries,
                                   format=rule["format"])
                 with open(temporary, "wb") as fh:
@@ -111,7 +116,7 @@ def try_combine_for_video(video_path, media_type, sonarr_series_id=None,
             return CombineResult(status="failed", error=str(e))
 
         _post_write(out_path, video_path, media_type,
-                     sonarr_episode_id, radarr_id)
+                     sonarr_episode_id, radarr_id, arr_instance_id=arr_instance_id)
 
         logging.info(
             "BAZARR combine built %s for %s", out_path, video_path,
@@ -152,7 +157,7 @@ def _normalize_language_codes(languages):
 _COMBINED_OUTPUT_EXTS = (".srt", ".ass", ".ssa")
 
 
-def _remove_stale_combined_siblings(out_path, video_path):
+def _remove_stale_combined_siblings(out_path, video_path, on_publish=None):
     """Remove combined-output siblings that share this output's stem but use a
     different subtitle extension (e.g. a stale `.ass` left next to a freshly
     written `.srt`). Best-effort: never raises.
@@ -174,6 +179,8 @@ def _remove_stale_combined_siblings(out_path, video_path):
             if stat.S_ISREG(os.lstat(sibling).st_mode):
                 with subtitle_mutation(video_path, sibling):
                     os.remove(sibling)
+                    if on_publish:
+                        on_publish(sibling)
                 logging.info("BAZARR combine removed stale sibling %s", sibling)
         except FileNotFoundError:
             continue
@@ -183,34 +190,53 @@ def _remove_stale_combined_siblings(out_path, video_path):
 
 
 def _resolve_rule(media_type, sonarr_series_id, sonarr_episode_id, radarr_id,
-                   override_languages, override_format):
+                   override_languages, override_format, video_path=None, arr_instance_id=None):
     if override_languages and override_format:
         return {"languages": list(override_languages), "format": override_format}
     profile = _profile_for(
         media_type, sonarr_series_id, sonarr_episode_id, radarr_id,
+        video_path=video_path, arr_instance_id=arr_instance_id,
     )
     return get_combine_rule(profile) if profile else None
 
 
-def _profile_for(media_type, sonarr_series_id, sonarr_episode_id, radarr_id):
-    from app.database import get_profile_id, get_profiles_list
-    # Accept both media-type conventions: the REST endpoints pass 'movies'
-    # (plural), but the auto-combine path forwards process_subtitle's 'movie'
-    # (singular). Treating only the plural as a movie silently skipped every
-    # automatic movie combine.
-    if media_type in ("movies", "movie"):
-        profile_id = get_profile_id(movie_id=radarr_id)
-    else:
-        profile_id = (
-            get_profile_id(episode_id=sonarr_episode_id)
-            or get_profile_id(series_id=sonarr_series_id)
-        )
-    if not profile_id:
+def _profile_for(media_type, sonarr_series_id, sonarr_episode_id, radarr_id,
+                 video_path=None, arr_instance_id=None):
+    from app.database import get_profiles_list
+    metadata = _metadata_for(video_path, media_type, sonarr_episode_id, radarr_id, arr_instance_id)
+    if metadata is None or not metadata.profileId:
         return None
-    return get_profiles_list(profile_id=profile_id)
+    return get_profiles_list(profile_id=metadata.profileId)
 
 
-def _post_write(out_path, video_path, media_type, sonarr_episode_id, radarr_id):
+def _metadata_for(video_path, media_type, sonarr_episode_id, radarr_id, arr_instance_id):
+    from app.database import TableEpisodes, TableShows, TableMovies, database, select
+    from arr_instances.resolution import scoped
+    from utilities.path_mappings import path_mappings
+    from media_servers.paths import media_paths_equal
+    if media_type in ('movies', 'movie'):
+        query = select(TableMovies.path, TableMovies.subtitles, TableMovies.imdbId, TableMovies.tmdbId,
+                       TableMovies.arr_instance_id, TableMovies.profileId).where(TableMovies.radarrId == radarr_id)
+        owner = TableMovies.arr_instance_id
+        kind = 'movie'
+    elif media_type in ('series', 'episode'):
+        query = select(TableEpisodes.path, TableEpisodes.sonarrSeriesId, TableEpisodes.subtitles,
+                       TableEpisodes.season, TableEpisodes.episode, TableShows.imdbId, TableShows.tvdbId,
+                       TableShows.profileId, TableEpisodes.arr_instance_id).join(TableShows).where(
+                           TableEpisodes.sonarrEpisodeId == sonarr_episode_id)
+        owner = TableEpisodes.arr_instance_id
+        kind = 'episode'
+    else:
+        return None
+    # Upstream IDs select candidates only. The actual file and explicit owner
+    # must agree before profile resolution or postprocessing can use a row.
+    rows = database.execute(scoped(query, owner, arr_instance_id)).all()
+    matches = [row for row in rows if media_paths_equal(
+        path_mappings.path_replace_instance(row.path, row.arr_instance_id, kind), video_path)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _post_write(out_path, video_path, media_type, sonarr_episode_id, radarr_id, arr_instance_id=None):
     """Hook into the same postprocess chain a downloaded subtitle uses.
 
     postprocess_subtitles uses the 'episode'/'movie' media-type convention and
@@ -221,26 +247,12 @@ def _post_write(out_path, video_path, media_type, sonarr_episode_id, radarr_id):
     endpoint does instead of passing None."""
     try:
         from api.subtitles.subtitles import postprocess_subtitles
-        from app.database import (TableEpisodes, TableShows, TableMovies,
-                                  database, select)
         is_movie = media_type in ("movies", "movie")
-        if is_movie:
-            metadata = database.execute(
-                select(TableMovies.path, TableMovies.subtitles,
-                       TableMovies.imdbId, TableMovies.tmdbId)
-                .where(TableMovies.radarrId == radarr_id)
-            ).first()
-            postprocess_subtitles(out_path, video_path, "movie", metadata, radarr_id)
-        else:
-            metadata = database.execute(
-                select(TableEpisodes.path, TableEpisodes.sonarrSeriesId,
-                       TableEpisodes.subtitles, TableEpisodes.season,
-                       TableEpisodes.episode, TableShows.imdbId, TableShows.tvdbId)
-                .join(TableShows)
-                .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id)
-            ).first()
-            postprocess_subtitles(out_path, video_path, "episode", metadata,
-                                  sonarr_episode_id)
+        metadata = _metadata_for(video_path, media_type, sonarr_episode_id, radarr_id, arr_instance_id)
+        if metadata is not None:
+            postprocess_subtitles(out_path, video_path, "movie" if is_movie else "episode", metadata,
+                                  radarr_id if is_movie else sonarr_episode_id,
+                                  arr_instance_id=metadata.arr_instance_id)
     except Exception:
         logging.exception("BAZARR combine post-write hook failed")
 

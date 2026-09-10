@@ -14,7 +14,8 @@ def test_save_settings_creates_missing_provider_section_for_hub_config(monkeypat
     provider_id = "testhubdynamic"
     executed = []
 
-    monkeypatch.setattr(config, "write_config", lambda: None)
+    # A write that reached disk. Anything else is refused.
+    monkeypatch.setattr(config, "write_config", lambda: True)
     monkeypatch.setattr(config, "validate_log_regex", lambda: None)
     monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
     monkeypatch.setitem(
@@ -52,7 +53,8 @@ def test_save_settings_resets_compat_pool_for_dynamic_provider_hub_config(monkey
     def record_compat_pool_reset():
         reset_calls.append(config.settings[provider_id]["flaresolverr_url"])
 
-    monkeypatch.setattr(config, "write_config", lambda: None)
+    # A write that reached disk. Anything else is refused.
+    monkeypatch.setattr(config, "write_config", lambda: True)
     monkeypatch.setattr(config, "validate_log_regex", lambda: None)
     monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
     monkeypatch.setitem(
@@ -98,7 +100,8 @@ def test_save_settings_invalidates_the_compat_cache_for_a_score_modifier(monkeyp
     executed = []
     invalidations = []
 
-    monkeypatch.setattr(config, "write_config", lambda: None)
+    # A write that reached disk. Anything else is refused.
+    monkeypatch.setattr(config, "write_config", lambda: True)
     monkeypatch.setattr(config, "validate_log_regex", lambda: None)
     monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
     monkeypatch.setitem(
@@ -134,7 +137,8 @@ def test_save_settings_leaves_the_compat_cache_alone_for_an_unrelated_setting(mo
 
     invalidations = []
 
-    monkeypatch.setattr(config, "write_config", lambda: None)
+    # A write that reached disk. Anything else is refused.
+    monkeypatch.setattr(config, "write_config", lambda: True)
     monkeypatch.setattr(config, "validate_log_regex", lambda: None)
     monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
     monkeypatch.setitem(

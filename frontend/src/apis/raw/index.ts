@@ -5,6 +5,7 @@ import episodes from "./episodes";
 import files from "./files";
 import history from "./history";
 import jellyfin from "./jellyfin";
+import mediaServers from "./mediaServers";
 import movies from "./movies";
 import plex from "./plex";
 import providerHub from "./providerHub";
@@ -20,6 +21,7 @@ const api = {
   files,
   jellyfin,
   movies,
+  mediaServers,
   series,
   providers,
   history,

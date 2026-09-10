@@ -2,16 +2,19 @@
 # fmt: off
 
 import logging
+import os
+from media_servers.events import observe_subtitle_change
 
 from app.config import settings, sync_checker as _defaul_sync_checker
 from utilities.path_mappings import path_mappings
 from utilities.post_processing import pp_replace, set_chmod
 from utilities.autopulse_webhook import call_external_webhook
+from utilities.helper import get_target_folder
 from languages.get_languages import alpha2_from_alpha3, alpha2_from_language, alpha3_from_language, language_from_alpha3
 from app.database import TableShows, TableEpisodes, TableMovies, database, select
 from radarr.notify import notify_radarr
 from sonarr.notify import notify_sonarr
-from arr_instances.resolution import client_for_instance
+from arr_instances.resolution import client_for_instance, scoped
 from plex.operations import plex_set_movie_added_date_now, plex_update_library, plex_set_episode_added_date_now, plex_refresh_item  # noqa: F401
 from jellyfin.operations import jellyfin_refresh_item
 from app.event_handler import event_stream
@@ -21,6 +24,7 @@ from .post_processing import postprocessing
 from .utils import _get_scores
 from .language_profiles import profile_item_language_code
 from .tools.combine.main import try_combine_for_video
+from .tools.subsync_engines import subtitle_write_locks
 
 
 class ProcessSubtitlesResult:
@@ -202,7 +206,7 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
         logging.exception('BAZARR error in _trigger_auto_translation')
 
 
-def _trigger_combine(video_path, media_type, radarr_id, series_id, episode_id):
+def _trigger_combine(video_path, media_type, radarr_id, series_id, episode_id, arr_instance_id=None):
     """After a subtitle download/upgrade/translate completes, try to build or
     rebuild the combined subtitle file for the video's profile rule. Best-effort:
     never raises, never blocks the caller."""
@@ -213,6 +217,7 @@ def _trigger_combine(video_path, media_type, radarr_id, series_id, episode_id):
             radarr_id=radarr_id,
             sonarr_series_id=series_id,
             sonarr_episode_id=episode_id,
+            arr_instance_id=arr_instance_id,
         )
     except Exception:
         logging.exception("BAZARR error in _trigger_combine")
@@ -241,7 +246,7 @@ def _postprocessing_config(media_type, arr_instance_id):
 
 
 def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_upgrade=False, is_manual=False,
-                     job_id=None):
+                     job_id=None, arr_instance_id=None):
     downloaded_provider = subtitle.provider_name
     uploader = subtitle.uploader
     release_info = subtitle.release_info
@@ -275,12 +280,13 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
     logging.debug("Sync checker: %s", sync_checker)
 
     if media_type == 'series':
-        episode_metadata = database.execute(
+        episode_metadata = database.execute(scoped(
             select(TableShows.imdbId, TableShows.tvdbId, TableEpisodes.sonarrSeriesId,
                    TableEpisodes.sonarrEpisodeId, TableEpisodes.season, TableEpisodes.episode,
                    TableEpisodes.arr_instance_id)
                 .join(TableShows)\
-                .where(TableEpisodes.path == path_mappings.path_replace_reverse(path)))\
+                .where(TableEpisodes.path == path_mappings.path_replace_reverse_instance(path, arr_instance_id, 'series')),
+                TableEpisodes.arr_instance_id, arr_instance_id))\
             .first()
         if not episode_metadata:
             return
@@ -299,11 +305,12 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                            sonarr_episode_id=episode_metadata.sonarrEpisodeId,
                            job_id=job_id,
                            arr_instance_id=episode_metadata.arr_instance_id,
-                           owns_job_progress=False)
+                           owns_job_progress=False, publication_operation='download')
     else:
-        movie_metadata = database.execute(
+        movie_metadata = database.execute(scoped(
             select(TableMovies.radarrId, TableMovies.imdbId, TableMovies.tmdbId, TableMovies.arr_instance_id)
-                .where(TableMovies.path == path_mappings.path_replace_reverse_movie(path)))\
+                .where(TableMovies.path == path_mappings.path_replace_reverse_instance(path, arr_instance_id, 'movie')),
+                TableMovies.arr_instance_id, arr_instance_id))\
             .first()
         if not movie_metadata:
             return
@@ -321,7 +328,7 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                            radarr_id=movie_metadata.radarrId,
                            job_id=job_id,
                            arr_instance_id=movie_metadata.arr_instance_id,
-                           owns_job_progress=False)
+                           owns_job_progress=False, publication_operation='download')
 
     use_postprocessing, postprocessing_cmd, use_pp_threshold, pp_threshold = _postprocessing_config(
         media_type, owner_instance_id)
@@ -333,8 +340,13 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
 
         if not use_pp_threshold or (use_pp_threshold and percent_score < pp_threshold):
             logging.debug(f"BAZARR Using post-processing command: {command}")  # noqa: G004
-            postprocessing(command, path, subtitle_path=downloaded_path)
-            set_chmod(subtitles_path=downloaded_path)
+            destination = os.path.join(get_target_folder(path, create=False) or os.path.dirname(path), '.destination')
+            lock_paths = (path, destination, downloaded_path)
+            # Match the command's complete lock set before observing any bytes.
+            with subtitle_write_locks(path, *lock_paths):
+                with observe_subtitle_change(media_type, path, downloaded_path, 'download', owner_instance_id):
+                    postprocessing(command, path, subtitle_path=downloaded_path, lock_paths=lock_paths)
+                    set_chmod(subtitles_path=downloaded_path)
         else:
             logging.debug(f"BAZARR post-processing skipped because subtitles score isn't below this "  # noqa: G004
                           f"threshold value: {pp_threshold}%")
@@ -416,6 +428,7 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         radarr_id=movie_metadata.radarrId if media_type != 'series' else None,
         series_id=series_id if media_type == 'series' else None,
         episode_id=episode_id if media_type == 'series' else None,
+        arr_instance_id=owner_instance_id,
     )
 
     return ProcessSubtitlesResult(message=message,

@@ -5,6 +5,7 @@ import os
 import sys
 import logging
 from functools import partial
+from media_servers.events import publication_callback, observe_subtitle_change
 
 from subzero.language import Language
 from subliminal_patch.core import save_subtitles
@@ -212,7 +213,9 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
                                             chmod=chmod,
                                             formats=sub_format if use_original_format else ("srt",),
                                             path_decoder=force_unicode,
-                                            write_subtitle=partial(write_subtitle_file, path, written_paths=written_paths))
+                                            write_subtitle=partial(
+                                                write_subtitle_file, path, written_paths=written_paths,
+                                                on_publish=publication_callback(media_type, path, 'upload', arr_instance_id)))
             saved_subtitles = [saved for saved in saved_subtitles if saved.storage_path in written_paths]
             source_version = subtitle_source_version(saved_subtitles[0].storage_path) if saved_subtitles else None
             source_publication = (SubtitlePublication(path, saved_subtitles[0].storage_path, source_version)
@@ -263,8 +266,9 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
                              sonarrEpisodeId or radarrId,)
         with subtitle_write_locks(path, subtitle_path):
             if subtitle_source_version(subtitle_path) == source_version:
-                postprocessing(command, path, subtitle_path=subtitle_path)
-                set_chmod(subtitles_path=subtitle_path)
+                with observe_subtitle_change(media_type, path, subtitle_path, 'upload', arr_instance_id):
+                    postprocessing(command, path, subtitle_path=subtitle_path)
+                    set_chmod(subtitles_path=subtitle_path)
                 source_version = subtitle_source_version(subtitle_path)
                 source_publication.release()
                 source_publication = SubtitlePublication(path, subtitle_path, source_version)

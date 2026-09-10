@@ -476,6 +476,7 @@ class Subtitles(Resource):
                     video_path=video_path,
                     # Resolve keep-lyrics against the owning instance (#227).
                     arr_instance_id=arr_instance_id,
+                    media_type=media_type,
                 )
                 postprocess_subtitles(
                     subtitles_path, video_path, media_type, metadata, id,

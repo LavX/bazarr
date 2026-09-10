@@ -5,6 +5,7 @@ import time
 import logging
 import pysubs2
 from subtitles.tools.subsync_engines import staged_subtitle_write, SubtitleDestinationChanged
+from media_servers.events import publication_callback
 import requests
 from typing import Optional, List, Dict, Any
 
@@ -173,6 +174,8 @@ class OpenRouterTranslatorService:
         self.partial_error = None
         try:
             with staged_subtitle_write(self.video_path, self.dest_srt_file,
+                                       on_publish=publication_callback(self.media_type, self.video_path,
+                                                                       'translate', self.arr_instance_id),
                                        source_paths=(self.source_srt_file,),
                                        before_publish=lambda: jobs_queue.update_job_progress(job_id=job_id),
                                        allow_empty=True) as temporary:

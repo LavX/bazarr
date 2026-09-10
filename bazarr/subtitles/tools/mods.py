@@ -14,7 +14,9 @@ from languages.custom_lang import CustomLanguage
 from languages.get_languages import alpha3_from_alpha2
 from subtitles.indexer.utils import get_subtitle_destination_path
 from utilities.helper import get_target_folder
-from subtitles.tools.subsync_engines import subtitle_write_locks, subtitle_mutation
+from media_servers.events import publication_callback
+from subtitles.tools.subsync_engines import (_report_subtitle_publication, subtitle_mutation,
+                                            subtitle_write_locks)
 
 
 def has_remove_hi(mods):
@@ -97,7 +99,7 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
     try:
         subtitles_apply_mods(language=language, subtitle_path=subtitle_path,
                              mods=mods, video_path=video_path,
-                             arr_instance_id=arr_instance_id)
+                             arr_instance_id=arr_instance_id, media_type=media_type)
     except Exception:
         jobs_queue.update_job_name(
             job_id=job_id,
@@ -146,13 +148,13 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
     )
 
 
-def subtitles_apply_mods(language, subtitle_path, mods, video_path, arr_instance_id=None):
+def subtitles_apply_mods(language, subtitle_path, mods, video_path, arr_instance_id=None, media_type=None):
     destination = os.path.join(get_target_folder(video_path, create=False) or os.path.dirname(video_path), '.destination')
     with subtitle_write_locks(video_path, subtitle_path, destination):
-        return _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_id)
+        return _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_id, media_type)
 
 
-def _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_id):
+def _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_id, media_type=None):
     # The mod list is user-chosen here, so only the keep-lyrics preference is
     # instance-relevant: resolve it against the media's owning instance (#227).
     # A None owner keeps the legacy global-only behaviour (single-instance).
@@ -204,3 +206,18 @@ def _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_i
 
             with open(modded_subtitles_path, 'wb') as f:
                 f.write(content)
+
+            # The mod rewrote the subtitle, and Remove HI can rename it on the
+            # way. Publish the file this leaves behind, here rather than at each
+            # caller, so every route into the mods (the subtitle toolbar, a bulk
+            # action, the job queue) reaches the same destinations. Through the
+            # same guarded reporter every other publication inside a mutation
+            # uses: the file is already written, so nothing raised here may
+            # take the mod down with it.
+            if media_type:
+                _report_subtitle_publication(
+                    publication_callback(media_type, video_path, 'edit', arr_instance_id),
+                    modded_subtitles_path)
+            else:
+                logging.debug('BAZARR mod on %s published nothing: no media type was given',
+                              video_path)
