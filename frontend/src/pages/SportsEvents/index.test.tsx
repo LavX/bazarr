@@ -375,6 +375,66 @@ describe("sports event detail", () => {
     );
   });
 
+  it("shows the audio languages and combines one event from its row", async () => {
+    let combined: unknown;
+    server.use(
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([sportarr]),
+      ),
+      http.get("/api/sports/leagues/51", () =>
+        HttpResponse.json({ id: 51, arr_instance_id: 42, title: "League" }),
+      ),
+      http.get("/api/sports/leagues/51/events", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: 61,
+              arr_instance_id: 42,
+              league_id: 51,
+              title: "Event",
+              path: "/sports/event.mkv",
+              hasFile: true,
+              profileId: 5,
+              audio_language: ["hu", "en"],
+              subtitles: [["hu", "/sports/event.hu.srt", 40]],
+              missing_subtitles: [],
+            },
+          ],
+          total: 1,
+        }),
+      ),
+      http.post(
+        "/api/sports/events/61/subtitles/combine",
+        async ({ request }) => {
+          combined = await request.json();
+          return HttpResponse.json({
+            status: "built",
+            path: "/sports/out.srt",
+          });
+        },
+      ),
+    );
+    renderDetail();
+    const table = await screen.findByRole("table");
+    // The indexer reads these off the file and the table never showed them,
+    // though the audio is exactly what decides whether a subtitle is wanted.
+    await within(table).findByText("Event");
+    expect(
+      within(table).getByRole("columnheader", { name: "Audio" }),
+    ).toBeInTheDocument();
+    // "en" is audio only here; the event's one indexed subtitle is Hungarian,
+    // so this cannot be satisfied by the Subtitles column.
+    expect(within(table).getByText("en")).toBeInTheDocument();
+
+    await userEvent
+      .setup()
+      .click(within(table).getByRole("button", { name: "Combine Subtitles" }));
+
+    // No languages or format: a sports composition follows its league
+    // profile's rule, and the engine refuses an override alongside it.
+    await waitFor(() => expect(combined).toEqual({}));
+  });
+
   it("does not load events for a disabled owner", async () => {
     let requests = 0;
     server.use(
@@ -521,8 +581,20 @@ it.each([false, true])(
     expect(
       screen.queryByText("Download failed. Search again and retry."),
     ).not.toBeInTheDocument();
-    // Scoped to the modal: the page toolbox carries its own Download button
-    // for the league's subtitle bundle, so an unscoped query is ambiguous.
-    expect(dialog.getByRole("button", { name: "Download" })).toBeDisabled();
+    // Re-queried rather than reusing the handle captured above: the modal
+    // re-renders when the sports query is invalidated, which can replace the
+    // dialog node and leave the old handle pointing at a detached tree.
+    // Scoped to it either way, because the page toolbox carries its own
+    // Download button for the league's subtitle bundle.
+    // The whole lookup retries, not just the dialog: the modal re-renders when
+    // the sports query is invalidated, so a one-shot query inside it can land
+    // between the results table being replaced and the new one mounting.
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole("dialog")).getByRole("button", {
+          name: "Download",
+        }),
+      ).toBeDisabled(),
+    );
   },
 );

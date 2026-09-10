@@ -1,16 +1,24 @@
-import React, { forwardRef, useEffect, useMemo } from "react";
+import React, {
+  forwardRef,
+  FunctionComponent,
+  useEffect,
+  useMemo,
+} from "react";
 import { Badge, Group, Text, Tooltip } from "@mantine/core";
 import { faBookmark as farBookmark } from "@fortawesome/free-regular-svg-icons";
 import {
   faBookmark,
   faHistory,
+  faLayerGroup,
   faMagnifyingGlass,
   faSync,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef, Table as TableInstance } from "@tanstack/react-table";
+import { useCombineSubtitles } from "@/apis/hooks/combine";
 import { SportsEvent } from "@/apis/raw/sports";
 import { Action, GroupTable } from "@/components";
+import { AudioList } from "@/components/bazarr";
 import { SportsSearchModal } from "@/components/modals/SportsSearchModal";
 import TextPopover from "@/components/TextPopover";
 import { useModals } from "@/modules/modals";
@@ -26,6 +34,127 @@ interface Props {
   onAllRowsExpandedChanged: (isAllRowsExpanded: boolean) => void;
 }
 
+// Extracted for the same reason as EventRowActions below: it needs the modals
+// hook, and hook objects change identity every render.
+const EventSubtitles: FunctionComponent<{ event: SportsEvent }> = ({
+  event,
+}) => {
+  const modals = useModals();
+  return (
+    <Group gap="xs" wrap="nowrap">
+      {event.missing_subtitles?.map((language, index) => {
+        // Clicking a missing language searches for that one, the way the
+        // episodes table and the wanted pages do. The badges used to be inert,
+        // so the only way to act on one missing language was the row's search,
+        // which searches every missing language.
+        const [code2, ...modifiers] = language.split(":");
+        const lower = modifiers.map((modifier) => modifier.toLowerCase());
+        return (
+          <Badge
+            key={BuildKey(index, language, "missing")}
+            color="yellow"
+            variant="light"
+            style={{ cursor: event.hasFile ? "pointer" : undefined }}
+            leftSection={<FontAwesomeIcon icon={faMagnifyingGlass} />}
+            onClick={() => {
+              if (!event.hasFile) return;
+              modals.openContextModal(SportsSearchModal, {
+                item: event,
+                language: code2,
+                hi: lower.includes("hi"),
+                forced: lower.includes("forced"),
+              });
+            }}
+          >
+            {language}
+          </Badge>
+        );
+      })}
+      {event.subtitles?.map(([language, path], index) => (
+        <Badge
+          key={BuildKey(index, language, "present")}
+          variant="light"
+          title={path || "Embedded"}
+        >
+          {language}
+        </Badge>
+      ))}
+      {!event.missing_subtitles?.length && !event.subtitles?.length ? (
+        <Text size="sm" c="dimmed">
+          {event.profileId == null ? "No profile" : "None"}
+        </Text>
+      ) : null}
+    </Group>
+  );
+};
+
+// Its own component rather than an inline cell. Built inline it needed the
+// modals and combine hooks in the columns useMemo deps, and those objects get a
+// new identity on every render, so the whole column set was rebuilt each time
+// and anything the row had opened, a menu or a modal, was unmounted underneath
+// the user.
+const EventRowActions: FunctionComponent<{
+  event: SportsEvent;
+  disabled?: boolean;
+  indexing: boolean;
+  onIndex: (event: SportsEvent) => void;
+}> = ({ event, disabled, indexing, onIndex }) => {
+  const modals = useModals();
+  const combine = useCombineSubtitles();
+
+  return (
+    <Group gap="xs" wrap="nowrap">
+      <Action
+        label="Manual Search"
+        disabled={disabled || !event.hasFile}
+        className={tableStyles.actionIcon}
+        onClick={() => {
+          modals.openContextModal(SportsSearchModal, { item: event });
+        }}
+        icon={faMagnifyingGlass}
+      ></Action>
+      <Action
+        label="Index Subtitles"
+        disabled={disabled || !event.hasFile}
+        loading={indexing}
+        className={tableStyles.actionIcon}
+        onClick={() => onIndex(event)}
+        icon={faSync}
+      ></Action>
+      <Action
+        label="Combine Subtitles"
+        disabled={disabled || combine.isPending || !event.hasFile}
+        loading={combine.isPending}
+        className={tableStyles.actionIcon}
+        onClick={() =>
+          combine.mutate({
+            scope: {
+              kind: "sports",
+              eventId: event.id,
+              arrInstanceId: event.arr_instance_id,
+            },
+            // No languages or format: a sports composition follows the combine
+            // rule on its league's profile, and the engine refuses an override
+            // alongside an owned publication.
+            body: {},
+          })
+        }
+        icon={faLayerGroup}
+      ></Action>
+      <Action
+        label="History"
+        className={tableStyles.actionIcon}
+        onClick={() =>
+          navigateApp(
+            `/history/sports?instance=${event.arr_instance_id}&event_id=${event.id}`,
+          )
+        }
+        icon={faHistory}
+      ></Action>
+    </Group>
+  );
+};
+
 // Mirrors the Episodes table: same grouping by season, same column order, same
 // icon actions. Sports events carry their subtitles as [language, path] tuples
 // rather than the Subtitle objects episodes use, so the cells render badges
@@ -35,7 +164,6 @@ const Table = forwardRef<TableInstance<SportsEvent> | null, Props>(
     { events, disabled, indexingId, onIndex, onAllRowsExpandedChanged },
     ref,
   ) => {
-    const modals = useModals();
     const tableRef =
       ref as React.MutableRefObject<TableInstance<SportsEvent> | null>;
 
@@ -114,96 +242,39 @@ const Table = forwardRef<TableInstance<SportsEvent> | null, Props>(
           ),
         },
         {
+          header: "Audio",
+          accessorKey: "audio_language",
+          cell: ({ row: { original } }) => (
+            // The indexer reads these off the file and the table never showed
+            // them, though which audio an event carries is exactly what
+            // decides whether a subtitle is wanted. Bare codes here, not the
+            // Language.Info objects the episodes rows carry.
+            <AudioList
+              audios={(original.audio_language ?? []).map((code) => ({
+                code2: code,
+                name: code,
+              }))}
+            ></AudioList>
+          ),
+        },
+        {
           header: "Subtitles",
           accessorKey: "missing_subtitles",
-          cell: ({ row: { original } }) => (
-            <Group gap="xs" wrap="nowrap">
-              {original.missing_subtitles?.map((language, index) => {
-                // Clicking a missing language searches for that one, the way
-                // the episodes table and the wanted pages do. The badges used
-                // to be inert, so the only way to act on one missing language
-                // was the row's search, which searches every missing language.
-                const [code2, ...modifiers] = language.split(":");
-                const lower = modifiers.map((modifier) =>
-                  modifier.toLowerCase(),
-                );
-                return (
-                  <Badge
-                    key={BuildKey(index, language, "missing")}
-                    color="yellow"
-                    variant="light"
-                    style={{ cursor: original.hasFile ? "pointer" : undefined }}
-                    leftSection={<FontAwesomeIcon icon={faMagnifyingGlass} />}
-                    onClick={() => {
-                      if (!original.hasFile) return;
-                      modals.openContextModal(SportsSearchModal, {
-                        item: original,
-                        language: code2,
-                        hi: lower.includes("hi"),
-                        forced: lower.includes("forced"),
-                      });
-                    }}
-                  >
-                    {language}
-                  </Badge>
-                );
-              })}
-              {original.subtitles?.map(([language, path], index) => (
-                <Badge
-                  key={BuildKey(index, language, "present")}
-                  variant="light"
-                  title={path || "Embedded"}
-                >
-                  {language}
-                </Badge>
-              ))}
-              {!original.missing_subtitles?.length &&
-              !original.subtitles?.length ? (
-                <Text size="sm" c="dimmed">
-                  {original.profileId == null ? "No profile" : "None"}
-                </Text>
-              ) : null}
-            </Group>
-          ),
+          cell: ({ row: { original } }) => <EventSubtitles event={original} />,
         },
         {
           header: "Actions",
           cell: ({ row: { original } }) => (
-            <Group gap="xs" wrap="nowrap">
-              <Action
-                label="Manual Search"
-                disabled={disabled || !original.hasFile}
-                className={tableStyles.actionIcon}
-                onClick={() => {
-                  modals.openContextModal(SportsSearchModal, {
-                    item: original,
-                  });
-                }}
-                icon={faMagnifyingGlass}
-              ></Action>
-              <Action
-                label="Index Subtitles"
-                disabled={disabled || !original.hasFile}
-                loading={indexingId === original.id}
-                className={tableStyles.actionIcon}
-                onClick={() => onIndex(original)}
-                icon={faSync}
-              ></Action>
-              <Action
-                label="History"
-                className={tableStyles.actionIcon}
-                onClick={() =>
-                  navigateApp(
-                    `/history/sports?instance=${original.arr_instance_id}&event_id=${original.id}`,
-                  )
-                }
-                icon={faHistory}
-              ></Action>
-            </Group>
+            <EventRowActions
+              event={original}
+              disabled={disabled}
+              indexing={indexingId === original.id}
+              onIndex={onIndex}
+            />
           ),
         },
       ],
-      [disabled, indexingId, onIndex, modals],
+      [disabled, indexingId, onIndex],
     );
 
     const maxSeason = useMemo(

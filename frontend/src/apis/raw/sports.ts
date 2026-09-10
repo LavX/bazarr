@@ -44,6 +44,8 @@ export interface SportsEvent extends SportsEventReference {
   mapped_path: string;
   file_size: number;
   profileId: number | null;
+  /** Audio languages the indexer read off the file, as bare codes. */
+  audio_language: string[];
   subtitles: [language: string, path: string | null, size: number | null][];
   missing_subtitles: string[];
 }
