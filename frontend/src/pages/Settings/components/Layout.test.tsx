@@ -339,7 +339,7 @@ it("keeps Save and Leave values out of the active development logger", async () 
     await userEvent.click(screen.getByRole("link", { name: "Leave settings" }));
     await userEvent.click(
       await screen.findByRole("button", {
-        name: "Save all changes and leave this page",
+        name: "Save and leave",
       }),
     );
     await waitFor(() => expect(submitted).toHaveLength(1));

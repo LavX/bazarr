@@ -671,6 +671,30 @@ def list_throttled_providers():
     return throttled_providers
 
 
+def snapshot_throttled_providers():
+    """Read-only view of the in-memory throttle table.
+
+    ``list_throttled_providers`` calls ``update_throttled_provider`` first,
+    which deletes expired entries, rewrites throttled_providers.dat and emits a
+    badge event. A status read must do none of that, so this filters expired
+    entries in memory and writes nothing.
+
+    An empty result means no throttle is recorded for an enabled provider. It is
+    not evidence that the providers are healthy, and one throttled provider says
+    nothing about the others.
+    """
+    now = datetime.datetime.now()
+    enabled = list(settings.general.enabled_providers or [])
+    providers = []
+    for provider in enabled:
+        reason, until, throttle_desc = tp.get(provider, (None, None, None))
+        if not reason or not until or until <= now:
+            continue
+        providers.append({'provider': provider, 'reason': reason,
+                          'until': until.isoformat(), 'description': throttle_desc})
+    return {'providers': providers, 'enabled_count': len(enabled)}
+
+
 def reset_throttled_providers(only_auth_or_conf_error=False):
     for provider in list(tp):
         if only_auth_or_conf_error and tp[provider][0] not in ['AuthenticationError', 'ConfigurationError',

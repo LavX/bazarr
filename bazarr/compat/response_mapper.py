@@ -372,7 +372,7 @@ def local_to_os_entry(*, file_id: int, lang: str, modifier: str | None,
 
     # Append the per-file id so two locals with the same lang+modifier
     # (e.g. two distinct on-disk `.en.srt` files) don't collide on
-    # subtitle_id and get de-duplicated by the client. Codex P2.
+    # subtitle_id and get de-duplicated by the client.
     subtitle_id = f"{subtitle_id}-{int(file_id)}"
 
     return {

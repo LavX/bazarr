@@ -61,7 +61,7 @@ def test_search_local_returns_empty_on_no_subtitles_in_db(tmp_path):
 
 def test_search_local_moviehash_only_skips_imdb_resolution(tmp_path):
     """moviehash_match=only must not surface locals resolved via imdb,
-    because those aren't hash-validated. Codex P1: strict hash mode
+    because those aren't hash-validated. Strict hash mode
     contract."""
     from compat import local_subs
     # Strict mode + no moviehash supplied -> empty list (can't certify).
@@ -81,7 +81,7 @@ def test_search_local_moviehash_only_skips_imdb_resolution(tmp_path):
 def test_search_local_hash_resolved_sets_moviehash_match_in_include_mode(tmp_path):
     """When the row was resolved via moviehash (regardless of whether
     the request was moviehash_match=include or =only), the resulting
-    entry must carry attributes.moviehash_match=true. Codex P2."""
+    entry must carry attributes.moviehash_match=true."""
     from compat import local_subs
     media_dir = tmp_path / "Inception (2010)"
     media_dir.mkdir()

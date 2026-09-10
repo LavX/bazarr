@@ -39,6 +39,11 @@ import {
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import client from "@/apis/raw/client";
+import {
+  readStoredValue,
+  removeStoredValue,
+  writeStoredValue,
+} from "@/utilities/browserStorage";
 import { Environment } from "@/utilities/env";
 import { saveBlobAs } from "@/utilities/files";
 import { isCombinedOutputLanguageKey } from "@/utilities/subtitles";
@@ -200,7 +205,7 @@ export default function EditorPage() {
           metadata: parseResult?.metadata ?? { format },
           cues: docState.cues,
         });
-        localStorage.setItem(
+        writeStoredValue(
           autoSaveKey,
           JSON.stringify({
             content: serialized,
@@ -233,7 +238,7 @@ export default function EditorPage() {
   useEffect(() => {
     if (!autoSaveKey || !loaded) return;
     try {
-      const raw = localStorage.getItem(autoSaveKey);
+      const raw = readStoredValue(autoSaveKey);
       if (!raw) return;
       const saved = JSON.parse(raw);
       const age = Date.now() - saved.timestamp;
@@ -241,10 +246,10 @@ export default function EditorPage() {
         // Less than 24 hours old
         setRecoveryAvailable(saved);
       } else {
-        localStorage.removeItem(autoSaveKey);
+        removeStoredValue(autoSaveKey);
       }
     } catch {
-      localStorage.removeItem(autoSaveKey!);
+      removeStoredValue(autoSaveKey!);
     }
   }, [autoSaveKey, loaded]);
 
@@ -260,12 +265,12 @@ export default function EditorPage() {
       /* ignore */
     }
     setRecoveryAvailable(null);
-    if (autoSaveKey) localStorage.removeItem(autoSaveKey);
+    if (autoSaveKey) removeStoredValue(autoSaveKey);
   }, [recoveryAvailable, autoSaveKey]);
 
   const handleDismissRecovery = useCallback(() => {
     setRecoveryAvailable(null);
-    if (autoSaveKey) localStorage.removeItem(autoSaveKey);
+    if (autoSaveKey) removeStoredValue(autoSaveKey);
   }, [autoSaveKey]);
 
   // Keep etagRef in sync whenever the query result changes (initial load,
@@ -521,7 +526,7 @@ export default function EditorPage() {
             setCreatedSuccessfully(true); // Switch from create to edit mode
             if (autoSaveKey) {
               try {
-                localStorage.removeItem(autoSaveKey);
+                removeStoredValue(autoSaveKey);
               } catch {
                 /* ignore */
               }
@@ -581,7 +586,7 @@ export default function EditorPage() {
             }
             if (autoSaveKey) {
               try {
-                localStorage.removeItem(autoSaveKey);
+                removeStoredValue(autoSaveKey);
               } catch {
                 /* ignore */
               }
@@ -616,7 +621,7 @@ export default function EditorPage() {
                     }
                     if (autoSaveKey) {
                       try {
-                        localStorage.removeItem(autoSaveKey);
+                        removeStoredValue(autoSaveKey);
                       } catch {
                         /* ignore */
                       }

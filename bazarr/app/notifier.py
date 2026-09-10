@@ -91,7 +91,7 @@ def send_notifications(sonarr_series_id, sonarr_episode_id, message, arr_instanc
     # When no custom notifier is enabled, only the title/year/season/
     # episode/title fields land in the notification body - we MUST NOT
     # SELECT * on TableEpisodes (which includes the heavy ffprobe_cache
-    # blob) just to throw the rest away. Codex flagged this as a
+    # blob) just to throw the rest away. Review flagged this as a
     # noticeable cost on bulk subtitle ops.
     custom_notifier_used = _has_custom_notifier(providers)
 

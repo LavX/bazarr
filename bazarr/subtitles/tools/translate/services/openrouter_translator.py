@@ -14,6 +14,7 @@ from deep_translator.exceptions import TooManyRequests, RequestError
 from dynaconf.validator import ValidationError
 
 from app.config import settings, normalize_openrouter_provider_order
+from app import activity
 from languages.get_languages import language_from_alpha2, language_from_alpha3
 from radarr.history import history_log_movie
 from sonarr.history import history_log
@@ -56,6 +57,8 @@ _sidecar_version_cache = {}
 POLL_HARD_CAP_SECONDS = 12 * 3600
 POLL_UNREACHABLE_LIMIT_SECONDS = 600
 POLL_INTERVAL_SECONDS = 2
+# Opaque service identity for observation. Never a URL and never a credential.
+TRANSLATOR_SERVICE_ID = 'ai-subtitle-translator'
 
 
 class ProviderRoutingError(ValueError):
@@ -441,6 +444,12 @@ class OpenRouterTranslatorService:
 
             logger.debug(f'BAZARR translation job submitted: {job_id}')  # noqa: G004
 
+            # Retain the remote job identity. It only ever lived in this local
+            # variable, so a status reader had no way to tell one host job's
+            # remote work from another's.
+            activity.note_remote_submission(activity.activity_id_for_job(bazarr_job_id),
+                                            service_id=TRANSLATOR_SERVICE_ID, remote_job_id=job_id)
+
             # Poll for completion
             return self._poll_job(base_url, job_id, len(lines_payload), bazarr_job_id=bazarr_job_id)
 
@@ -519,6 +528,11 @@ class OpenRouterTranslatorService:
                     value=progress,
                     count=100
                 )
+
+                # Observation only: the remote phase this poll actually saw. A
+                # remote queued phase means the host is waiting, not translating.
+                activity.note_remote_phase(service_id=TRANSLATOR_SERVICE_ID, remote_job_id=job_id,
+                                           phase=status, progress=progress, total=100)
 
                 # Sync progress to bazarr jobs queue (for NotificationDrawer)
                 if bazarr_job_id:
