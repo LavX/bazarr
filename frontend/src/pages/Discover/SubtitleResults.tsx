@@ -1,10 +1,37 @@
-import { Badge, Button, Group, Text, Title } from "@mantine/core";
+import { Badge, Button, Group, Stack, Text, Title } from "@mantine/core";
 import { faDownload } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useDiscover } from "@/contexts/Discover";
-import type { DiscoverSearchSnapshot } from "@/types/discover";
+import type {
+  DiscoverCompatibility,
+  DiscoverCopyCompatibility,
+  DiscoverSearchSnapshot,
+} from "@/types/discover";
+import { copyFacts, copyOwner, copyRelease } from "./LocalCopyPicker";
 import { previewSourceId } from "./SubtitlePreview";
 import styles from "./Discover.module.scss";
+
+// Transport field name paired with the words a reader uses for it. A list of
+// literals rather than an object, so the order is the reading order and the
+// transport names stay out of the identifier namespace.
+const attributeNames: [keyof DiscoverCopyCompatibility, string][] = [
+  ["source", "source"],
+  ["resolution", "resolution"],
+  ["video_codec", "video codec"],
+  ["audio_codec", "audio codec"],
+  ["release_group", "release group"],
+  ["edition", "edition"],
+];
+
+function attributes(
+  compatibility: DiscoverCopyCompatibility,
+  state: DiscoverCompatibility,
+) {
+  return attributeNames
+    .filter(([key]) => compatibility[key] === state)
+    .map(([, label]) => label)
+    .join(", ");
+}
 
 export default function SubtitleResults({
   snapshot,
@@ -30,8 +57,23 @@ export default function SubtitleResults({
   const identity = feedback
     ? `${target} · ${context?.language} · ${scope} · ${feedback.row.provider} · ${feedback.row.release ?? "Release information unavailable"}`
     : "";
+  const copy =
+    snapshot.context.mode === "release" ? undefined : snapshot.context.copy;
   return (
     <>
+      {copy && (
+        <Stack gap={4} mb="md">
+          <Text size="sm">
+            Search context: {copyOwner(copy)} · Local {copy.media_type}{" "}
+            {copy.local_id} · {copyRelease(copy)}
+            {copyFacts(copy) ? ` · ${copyFacts(copy)}` : ""}
+          </Text>
+          <Text size="sm" c="dimmed">
+            Release details from this copy are search context. They do not
+            verify subtitle synchronization with the file you play.
+          </Text>
+        </Stack>
+      )}
       <ul className={styles.results} aria-label="Subtitle results">
         {snapshot.results.map((row) => (
           <li key={row.id}>
@@ -97,6 +139,31 @@ export default function SubtitleResults({
                         : `${row.compatibility_score} / ${row.compatibility_score_max}`}
                     </dd>
                   </div>
+                  {row.copy_compatibility && (
+                    <>
+                      <div>
+                        <dt>Matches this copy</dt>
+                        <dd>
+                          {attributes(row.copy_compatibility, "match") ||
+                            "Nothing stated by both"}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Conflicts with this copy</dt>
+                        <dd>
+                          {attributes(row.copy_compatibility, "conflict") ||
+                            "None stated"}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Unknown for this copy</dt>
+                        <dd>
+                          {attributes(row.copy_compatibility, "unknown") ||
+                            "None"}
+                        </dd>
+                      </div>
+                    </>
+                  )}
                   <div>
                     <dt>Provider rating</dt>
                     <dd>{row.rating ?? "Unknown"}</dd>
@@ -113,7 +180,9 @@ export default function SubtitleResults({
                 <Text size="sm" c="dimmed">
                   {snapshot.context.mode === "release"
                     ? "Release queries do not verify title, episode identity or subtitle timing for a video file."
-                    : "Title matches do not verify subtitle timing for a video file."}
+                    : copy
+                      ? "A matching source, resolution or provider rating does not certify that these subtitles are synchronized with your copy."
+                      : "Title matches do not verify subtitle timing for a video file."}
                 </Text>
               </details>
               <Group className={styles.downloadAction} justify="space-between">
@@ -131,8 +200,9 @@ export default function SubtitleResults({
                     Preview
                   </Button>
                   <Button
+                    variant="filled"
                     mih={44}
-                    variant="light"
+                    color="brand"
                     leftSection={<FontAwesomeIcon icon={faDownload} />}
                     loading={
                       feedback?.status === "pending" &&
@@ -169,7 +239,8 @@ export default function SubtitleResults({
           </Text>
           {feedback.status === "expired" && (
             <Button
-              variant="light"
+              variant="filled"
+              color="brand"
               mt="sm"
               disabled={state.status === "searching"}
               onClick={() => void searchAgain()}

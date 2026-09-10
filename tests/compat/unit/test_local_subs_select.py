@@ -129,7 +129,7 @@ def test_select_returns_empty_on_garbage_subtitles_blob():
 def test_select_drops_oversized_files(tmp_path):
     """Files larger than the 5MB cap should not appear as candidates -
     serve_local would 404 them, so surfacing produces a guaranteed-fail
-    download (Codex P2)."""
+    download."""
     from compat.local_subs import _select_local_subs, _MAX_SUB_BYTES
     big = tmp_path / "movie.en.srt"
     big.write_bytes(b"x" * (_MAX_SUB_BYTES + 1024))
@@ -141,7 +141,7 @@ def test_select_drops_oversized_files(tmp_path):
 def test_select_accepts_subs_in_absolute_target_folder(tmp_path, monkeypatch):
     """When general.subfolder=='absolute' the subtitle lives outside the
     media's directory but inside the configured target folder. The
-    selector must accept that case (Codex P1)."""
+    selector must accept that case."""
     from compat import local_subs
     media_dir = tmp_path / "Movies" / "Inception (2010)"
     media_dir.mkdir(parents=True)

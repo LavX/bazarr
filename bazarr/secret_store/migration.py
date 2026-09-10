@@ -294,7 +294,7 @@ def encrypt_settings_dict(plaintext_dict: Dict[str, Any]) -> Dict[str, Any]:
     secrets_encryption_key - on next boot, decrypt_settings_in_place
     would generate a DIFFERENT master key, decryption would silently
     fail, and the application would start using the bad ciphertext as
-    the credential. (Codex P1 finding.)
+    the credential.
     """
     out = deepcopy(plaintext_dict)
 

@@ -39,12 +39,26 @@ class Configuration:
 
 
 def configuration():
-    """Snapshot the effective configuration; revision never derives from credential bytes."""
+    """Snapshot the effective configuration; revision never derives from credential bytes.
+
+    Discover authenticates with the application's own built-in TMDB v3 key, so
+    it works with no reader configuration at all. A reader who stores their own
+    key overrides it; a stored value that cannot be used as a v3 key, which is
+    what a token from the v4 era is, is ignored in favour of the built-in one
+    rather than allowed to fail every request.
+
+    The revision stays a random identifier. It is regenerated only when the
+    effective credential or locale actually changes within this process, so a
+    built-in default does not make every process believe the configuration
+    changed, and no part of the key ever reaches the revision.
+    """
     from app.config import settings
+    from app.tmdb import api_key
     global _current
     with CONFIG_LOCK:
-        token = settings.get("discover.tmdb_access_token", "")
-        token = token if isinstance(token, str) and not token.startswith("enc:") else ""
+        stored = settings.get("discover.tmdb_access_token", "")
+        stored = stored if isinstance(stored, str) and not stored.startswith("enc:") else ""
+        token = api_key(stored)
         locale = settings.get("discover.locale", "en-US")
         if not isinstance(locale, str) or not re.fullmatch(r"[a-z]{2,3}(?:-[A-Z]{2})?", locale):
             locale = "en-US"
@@ -52,6 +66,18 @@ def configuration():
             _current = Configuration(token, locale, uuid.uuid4().hex)
             _cache.invalidate(hard=True)
         return _current
+
+
+def reader_token_stored():
+    """Whether the reader has stored a key of their own, without revealing it.
+
+    Discover works on the built-in key, so "a key is usable" is no longer the
+    same fact as "the reader saved one". Only the second one can be offered for
+    removal, and only the second one is exposed to the client.
+    """
+    from app.config import settings
+    stored = settings.get("discover.tmdb_access_token", "")
+    return bool(isinstance(stored, str) and not stored.startswith("enc:") and stored.strip())
 
 
 def invalidate_metadata():
@@ -126,8 +152,10 @@ def _request(config, path, params=None):
         # simultaneous saved-token and draft-token checks. Environment proxies
         # remain available through requests' normal transport configuration.
         with requests.Session() as session:
-            with session.get(API_ROOT + path, params=params,
-                             headers={"Authorization": "Bearer " + config.token, "Accept": "application/json"},
+            # v3 authentication: the key is a query parameter, never a header and
+            # never part of the cache key or the revision.
+            with session.get(API_ROOT + path, params={**(params or {}), "api_key": config.token},
+                             headers={"Accept": "application/json"},
                              timeout=(3.05, 8), allow_redirects=False, stream=True) as response:
                 if response.status_code in (401, 403):
                     raise UpstreamFailure("authentication_failed")
@@ -168,25 +196,34 @@ def _request(config, path, params=None):
 
 
 _MESSAGES = {
-    "unconfigured": "Set up TMDB to browse movies beyond your library. IMDb subtitle search remains available.",
+    "unconfigured": "TMDB metadata is unavailable in this build. IMDb subtitle search remains available.",
     "available": "TMDB is available.",
-    "authentication_failed": "TMDB rejected the access token. Replace it in Discover settings.",
+    "authentication_failed": "TMDB rejected the key in use. Check the key in Discover settings, or clear it to use the built-in one.",
     "unavailable": "TMDB is temporarily unavailable. Try again shortly.",
     "cached": "Showing cached TMDB metadata with its original fetch time.",
 }
 
 
-def _envelope(config, status, *, fetched_at=None, checked_at=None, **payload):
+def _envelope(config, status, *, fetched_at=None, checked_at=None, message=None, **payload):
     return {"data": {"source": SOURCE, "status": status, "configured": bool(config.token),
                      "revision": config.revision, "locale": config.locale,
-                     "message": _MESSAGES[status], "checked_at": checked_at,
+                     "message": message or _MESSAGES[status], "checked_at": checked_at,
                      "fetched_at": fetched_at, **payload}}
 
 
 def connection_status(candidate=None, *, use_saved=True):
+    from app.tmdb import is_v3_key
     config = configuration()
     if not use_saved:
-        config = Configuration(validate_token(candidate), config.locale, uuid.uuid4().hex)
+        draft = validate_token(candidate)
+        if draft and not is_v3_key(draft):
+            # Say so rather than quietly checking the built-in key and reporting
+            # that everything is fine: this entry would never be sent.
+            return _envelope(config, "authentication_failed",
+                             checked_at=_now(),
+                             message="This is not a TMDB v3 API key, so it will not be used. "
+                                     "A v3 key is 32 characters. Clear the field to use the built-in key.")
+        config = Configuration(draft or config.token, config.locale, uuid.uuid4().hex)
     if not config.token:
         return _envelope(config, "unconfigured")
     checked = _now()
@@ -281,8 +318,11 @@ def _movie(raw, images):
     title = raw.get("title")
     if not isinstance(title, str) or not title.strip():
         raise UpstreamFailure()
-    date = raw.get("release_date", "")
-    year = int(date[:4]) if isinstance(date, str) and re.match(r"^\d{4}-\d{2}-\d{2}$", date) else None
+    # A date-shaped value is not a date. 2026-02-31 and 2026-13-01 both satisfy
+    # the shape and would project a confident year from a value the source
+    # cannot mean, so the calendar check decides it and unknown stays unknown.
+    date = _date(raw.get("release_date", ""))
+    year = int(date[:4]) if date else None
     imdb = raw.get("imdb_id")
     imdb = imdb if isinstance(imdb, str) and re.fullmatch(r"tt\d{7,10}", imdb) else None
     overview = raw.get("overview")

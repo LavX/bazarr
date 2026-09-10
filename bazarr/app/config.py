@@ -863,7 +863,8 @@ def _get_settings():
                 full_path = f"{k}.{subk.lower()}"
                 if is_write_only_secret(full_path):
                     continue
-                if k == "discover" and subk.lower() in {"tmdb_configured", "metadata_revision"}:
+                if k == "discover" and subk.lower() in {"tmdb_configured", "tmdb_token_stored",
+                                                        "metadata_revision"}:
                     continue
                 if is_system_secret(full_path):
                     # Keep empty values literally empty so the UI can
@@ -877,10 +878,14 @@ def _get_settings():
                     settings_to_return[k].update({subk: get_array_from(subv)})
                 else:
                     settings_to_return[k].update({subk: subv})
-    from discover.metadata import configuration
+    from discover.metadata import configuration, reader_token_stored
     metadata_config = configuration()
+    # Two separate facts: metadata works at all, which the built-in key makes
+    # true everywhere, and whether the reader saved a key of their own, which
+    # is the only one that can be removed.
     settings_to_return.setdefault("discover", {}).update({
-        "tmdb_configured": bool(metadata_config.token), "metadata_revision": metadata_config.revision})
+        "tmdb_configured": bool(metadata_config.token), "tmdb_token_stored": reader_token_stored(),
+        "metadata_revision": metadata_config.revision})
     return settings_to_return
 
 

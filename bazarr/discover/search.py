@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import datetime as dt
 import hashlib
 import json
@@ -16,11 +16,10 @@ from babelfish.exceptions import LanguageReverseError
 from subzero.language import Language
 
 from app.config import settings
+from app import activity
 from app import get_providers
 from compat import cache, service
-from provider_hub import registry
 from subliminal_patch.extensions import provider_registry
-from subliminal_patch.provider_health import get_tracker
 from subliminal_patch.score import ComputeScore, MAX_SCORES
 
 from .handles import mint_result, resolve_result
@@ -36,6 +35,9 @@ class SearchRequest:
     context: dict
     refresh: bool
     metadata_valid_until: float | None = None
+    # The resolved copy carries the mapped path and content hash, so it stays
+    # out of repr and never travels with the serialized context.
+    copy: dict | None = field(default=None, repr=False)
 
 
 class SearchAdmissionExpired(ValueError):
@@ -74,7 +76,7 @@ def validate_context(payload) -> SearchRequest:
     if mode not in ("title", "release"):
         raise ValueError("Choose an identified title or an advanced release-name search.")
     allowed = ({"mode", "query", "language", "refresh"} if mode == "release" else
-               {"mode", "media_type", "imdb_id", "language", "season", "episode", "title", "year", "refresh", "episode_identity", "manual_confirmed", "show_id"})
+               {"mode", "media_type", "imdb_id", "language", "season", "episode", "title", "year", "refresh", "episode_identity", "manual_confirmed", "show_id", "copy_id"})
     if set(payload) - allowed:
         raise ValueError("Unsupported search context. Choose a title and subtitle language.")
     media_type = payload.get("media_type")
@@ -130,7 +132,30 @@ def validate_context(payload) -> SearchRequest:
         metadata_valid_until = _reconcile_episode(payload, context)
     elif any(key in payload for key in ("episode_identity", "manual_confirmed", "show_id")):
         raise ValueError("Movie searches cannot contain episode identity.")
-    return SearchRequest(context, refresh, metadata_valid_until)
+    return SearchRequest(context, refresh, metadata_valid_until, _reconcile_copy(payload, context))
+
+
+def _reconcile_copy(payload, context):
+    """Resolve an explicitly chosen library copy against the confirmed target.
+
+    The client supplies one opaque identity and nothing else. The path, the
+    release facts and the physical revision are all read here, server side,
+    from the row that identity actually names within the current instance
+    scope. A copy that no longer resolves raises instead of falling back, so a
+    stale choice can never be answered with a different file.
+    """
+    from .library import copy_context, resolve_copy
+
+    chosen = payload.get("copy_id")
+    if chosen is None:
+        return None
+    if not isinstance(chosen, str) or len(chosen) > 64:
+        raise ValueError("Choose a library copy from the offered list.")
+    facts = resolve_copy(chosen, context)
+    context["copy_id"] = facts["copy_id"]
+    context["file_revision"] = facts["file_revision"]
+    context["copy"] = copy_context(facts)
+    return facts
 
 
 
@@ -199,6 +224,17 @@ def _coverage(pool, state):
     # Registration performs catalog validation. Check the actual class too:
     # historical registration IDs can outlive a removed/rejected installation.
     available = set(get_providers.get_providers_sorted() or [])
+    # Resolved here rather than at module import. api/__init__.py eagerly
+    # imports every namespace, so a module-level import of the Hub registry and
+    # the provider health tracker makes the whole API surface depend on deep
+    # provider internals: importing one API module then drags in
+    # subliminal_patch.providers and subliminal_patch.provider_health, which is
+    # exactly what three existing API tests cannot satisfy when they replace
+    # subliminal_patch with a bounded stub. Neither name is needed until a
+    # search actually computes provider coverage.
+    from provider_hub import registry
+    from subliminal_patch.provider_health import get_tracker
+
     trusted = {item.provider_id for item in registry.active_installations() if item.trusted}
     discarded = get_tracker().currently_discarded() | set(pool.discarded_providers)
     now = time.time()
@@ -244,7 +280,41 @@ def _number(value):
     return None
 
 
-def _result(sub, video, context, search_id, checked_at, ttl):
+_COMPATIBILITY_FACTS = (("source", "source"), ("resolution", "screen_size"),
+                        ("video_codec", "video_codec"), ("audio_codec", "audio_codec"),
+                        ("release_group", "release_group"), ("edition", "edition"))
+
+
+def _comparable(value):
+    if isinstance(value, (list, tuple, set)):
+        return frozenset(_comparable(item) for item in value if _comparable(item) is not None) or None
+    if isinstance(value, str):
+        return value.strip().lower() or None
+    return str(value).strip().lower() if value is not None else None
+
+
+def _copy_compatibility(video, sub, parsed):
+    """Three-state evidence from the compared facts, not from score keys.
+
+    A scoring match set counts two absent optional fields as agreement and
+    cannot tell a missing fact from a contradicted one. This compares what the
+    chosen copy actually states against what the offered release actually
+    states, and says "unknown" whenever either side is silent. None of it is
+    evidence of synchronization.
+    """
+    release = getattr(sub, "release_info", None) or ""
+    if release not in parsed:
+        parsed[release] = service._copy_release_hints(release)
+    hints = parsed[release]
+    result = {}
+    for attribute, key in _COMPATIBILITY_FACTS:
+        mine, theirs = _comparable(getattr(video, attribute, None)), _comparable(hints.get(key))
+        result[attribute] = ("unknown" if mine is None or theirs is None
+                             else "match" if mine == theirs else "conflict")
+    return result
+
+
+def _result(sub, video, context, search_id, checked_at, ttl, parsed=None):
     result_id, expires = mint_result(sub, context, search_id, ttl)
     language = sub.language
     matches = None
@@ -276,6 +346,8 @@ def _result(sub, video, context, search_id, checked_at, ttl):
         "matches": matches, "compatibility_score": _number(score),
         "compatibility_score_max": MAX_SCORES.get(context.get("media_type")),
         "rating": _number(getattr(sub, "rating", None)),
+        "copy_compatibility": (_copy_compatibility(video, sub, parsed)
+                               if context.get("copy_id") and parsed is not None else None),
         "checked_at": checked_at, "expires_at": _iso(expires), "stale": False,
     }
 
@@ -325,7 +397,12 @@ def search(request: SearchRequest) -> dict:
             query=context["query"] if raw else context.get("title"), year=context.get("year"),
             title_only=not raw, release_query=raw,
             episode_identity=context.get("episode_identity") if not context.get("manual_confirmed") else None,
+            copy_path=request.copy["path"] if request.copy is not None else None,
         )
+        if request.copy is not None:
+            # Only the explicitly chosen copy contributes a file name, size,
+            # hash and release description. Confirmed identity is untouched.
+            service.refine_video_with_copy(video, request.copy)
 
         def on_outcome(outcome, elapsed):
             if outcome.provider not in providers:
@@ -346,8 +423,16 @@ def search(request: SearchRequest) -> dict:
         # This is admission to one provider operation. Cache-creator and
         # preparation waits precede it; admitted work may finish after expiry.
         _admit_provider_search(request)
-        subtitles = service.search_title(video, [language], pool, providers, on_outcome)
-        rows = [_result(sub, video, context, search_id, checked, ttl) for sub in subtitles]
+        # A Discover search never becomes a queue job, so it is observed here or
+        # it is invisible to a status reader while it is the running work.
+        with activity.observed_operation(
+                "discover_search", scope_kind="request", language=context["language"],
+                media_type=context.get("media_type"),
+                title=context.get("title") or context.get("query") or context.get("imdb_id"),
+                season=context.get("season"), episode=context.get("episode")):
+            subtitles = service.search_title(video, [language], pool, providers, on_outcome)
+        parsed = {}
+        rows = [_result(sub, video, context, search_id, checked, ttl, parsed) for sub in subtitles]
         # Failed refreshes retain usable rows only for providers that failed.
         # Successful empty searches replace their earlier results.
         if previous_exists:

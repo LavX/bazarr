@@ -1,8 +1,12 @@
 """Bounded scalar library projections. Reads never adopt a media file."""
 from copy import deepcopy
+import hashlib
+import json
+import os
 import re
+import stat
 
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 
 CANDIDATE_LIMIT = 12
 SHORTLIST_LIMIT = 48
@@ -257,3 +261,328 @@ def local_details(local_id, media_type):
     with engine.connect() as connection:
         row = connection.execute(select(*_columns(media_type)).where(table.id == int(local_id))).first()
         return _expand(connection, [_project(row, media_type)])[0] if row else None
+
+
+# --- Explicit, ownership-safe copy matching ---------------------------------
+#
+# Two entry points with different rules, so be exact about which is which.
+# copy_options() runs whenever a confirmed target is on screen and adopts
+# nothing: it projects columns and never opens a file. resolve_copy(), and
+# everything that reaches a Video through it, runs only for a copy a reader
+# explicitly chose. A title, an IMDb id or a library that happens to hold
+# exactly one file never selects one.
+#
+# The native pipeline is deliberately not reused here. get_video() resolves a
+# row by globally reverse-mapped path with no owner predicate, runs every
+# registered refiner, probes media and writes the ffprobe cache. None of that
+# is an ownership-safe read-only boundary for a copy the reader picked. What is
+# reused is the validated scalar projection, the established bounded string
+# parsing and the existing per-instance forward path-mapping seam.
+
+COPY_OPTION_LIMIT = 24
+COPY_HASH_MIN_BYTES = 10 * 1024 * 1024
+_COPY_ID = re.compile(r"c1\.(movie|episode)\.([1-9]\d{0,12})\.(0|[1-9]\d{0,12}|x)")
+
+
+class CopyUnavailable(ValueError):
+    """The chosen copy does not resolve to the confirmed target.
+
+    Not "no longer": a malformed identity and one naming no owner never
+    resolved at all, and the same refusal covers both.
+
+    Deliberately a ValueError so an unhandled path still refuses the search
+    rather than falling through to some other file. Callers that can offer
+    recovery read ``reason``.
+    """
+
+    def __init__(self, message, reason="copy_unavailable"):
+        super().__init__(message)
+        self.reason = reason
+
+
+# One message for every refusal, so it has to be true of every one of them,
+# including an identity that was never valid rather than one that expired.
+_RECOVERY = ("This library copy cannot be used for this title. "
+             "Choose another copy or search the title only.")
+
+
+def copy_identity(media_type, local_id, arr_instance_id):
+    """Opaque to the client: it is re-resolved and revalidated on every use."""
+    return f"c1.{media_type}.{local_id}.{'x' if arr_instance_id is None else arr_instance_id}"
+
+
+def _parse_copy_identity(copy_id):
+    match = _COPY_ID.fullmatch(copy_id) if isinstance(copy_id, str) else None
+    if match is None:
+        return None
+    owner = match.group(3)
+    return match.group(1), int(match.group(2)), None if owner == "x" else int(owner)
+
+
+def _copy_target(target):
+    if not isinstance(target, dict):
+        raise ValueError("Choose a movie or an exact episode.")
+    media_type = target.get("media_type")
+    imdb = _imdb(target.get("imdb_id"))
+    if media_type not in ("movie", "episode") or not imdb:
+        raise ValueError("Choose a movie or an exact episode with a valid IMDb ID.")
+    season = episode = None
+    if media_type == "episode":
+        season, episode = target.get("season"), target.get("episode")
+        if (type(season) is not int or type(episode) is not int
+                or not 0 <= season <= 9999 or not 1 <= episode <= 9999):
+            raise ValueError("Choose an exact season and episode.")
+    return media_type, imdb, season, episode
+
+
+def _text(value, limit=300):
+    return value[:limit] if isinstance(value, str) and value.strip() else None
+
+
+def _copy_statement(media_type, imdb, season, episode, local_id=None, owner=None):
+    from app.database import TableEpisodes as Episode
+    from app.database import TableMovies as Movie
+    from app.database import TableShows as Show
+    if media_type == "movie":
+        table = Movie
+        statement = select(
+            Movie.id, Movie.arr_instance_id, Movie.title, Movie.year, Movie.path,
+            Movie.sceneName, Movie.format, Movie.resolution, Movie.video_codec,
+            Movie.audio_codec, Movie.file_size, Movie.movie_file_id.label("file_id"),
+            Movie.updated_at_timestamp,
+        ).where(func.lower(func.trim(Movie.imdbId)) == imdb)
+    else:
+        table = Episode
+        statement = select(
+            Episode.id, Episode.arr_instance_id, Episode.title, Episode.path,
+            Episode.sceneName, Episode.format, Episode.resolution, Episode.video_codec,
+            Episode.audio_codec, Episode.file_size,
+            Episode.episode_file_id.label("file_id"), Episode.updated_at_timestamp,
+            Show.id.label("series_id"), Show.title.label("series_title"),
+            Show.year.label("series_year"),
+        ).join(Show, Show.id == Episode.series_id).where(
+            func.lower(func.trim(Show.imdbId)) == imdb,
+            Episode.season == season, Episode.episode == episode,
+            # A show row owned by one instance never lends file context to an
+            # episode row owned by another.
+            or_(Episode.arr_instance_id == Show.arr_instance_id,
+                and_(Episode.arr_instance_id.is_(None), Show.arr_instance_id.is_(None))),
+        )
+    if local_id is not None:
+        statement = statement.where(table.id == local_id)
+        statement = statement.where(table.arr_instance_id.is_(None) if owner is None
+                                    else table.arr_instance_id == owner)
+    return statement.order_by(table.arr_instance_id.is_(None), table.arr_instance_id, table.id)
+
+
+def _copy_option(row, media_type):
+    scene = _text(row.sceneName, 500)
+    stored = _text(row.path, 4000)
+    filename = os.path.basename(stored) if stored else None
+    reason = ("owner_unknown" if row.arr_instance_id is None
+              else "no_stored_path" if not filename else None)
+    return {
+        "copy_id": copy_identity(media_type, row.id, row.arr_instance_id),
+        "media_type": media_type, "local_id": row.id,
+        "arr_instance_id": row.arr_instance_id, "instance_name": None,
+        "series_local_id": getattr(row, "series_id", None),
+        "title": _text(getattr(row, "series_title", None) if media_type == "episode" else row.title),
+        "episode_title": _text(row.title) if media_type == "episode" else None,
+        "release": scene, "filename": filename,
+        "source": _text(row.format, 100), "resolution": _text(row.resolution, 100),
+        "video_codec": _text(row.video_codec, 100), "audio_codec": _text(row.audio_codec, 100),
+        "file_size": row.file_size if isinstance(row.file_size, int) else None,
+        "updated_at": row.updated_at_timestamp.isoformat() if row.updated_at_timestamp else None,
+        "selectable": reason is None, "unavailable_reason": reason,
+    }
+
+
+def _instance_names(connection, owners):
+    from app.database import TableArrInstances as Instance
+    owners = {owner for owner in owners if owner is not None}
+    if not owners:
+        return {}
+    rows = connection.execute(select(Instance.id, Instance.name)
+                              .where(Instance.id.in_(sorted(owners)))).all()
+    return {row.id: _text(row.name, 200) for row in rows}
+
+
+def _owning_titles(connection, media_type, imdb):
+    from app.database import TableMovies as Movie
+    from app.database import TableShows as Show
+    table = Movie if media_type == "movie" else Show
+    return connection.execute(select(func.count(table.id))
+                              .where(func.lower(func.trim(table.imdbId)) == imdb)).scalar() or 0
+
+
+def copy_options(target):
+    """Offer the exact copies of one confirmed target. Reads only.
+
+    A show that is owned but has no row for this episode contributes nothing
+    here: ``owning_titles`` reports it separately so an absent episode never
+    reads as an absent series.
+
+    The list is capped at COPY_OPTION_LIMIT and ``truncated`` says whether the
+    cap was reached. A caller must not read absence from a truncated list as
+    absence from the library: a copy beyond the cap is still resolvable.
+    """
+    from app.database import engine
+    media_type, imdb, season, episode = _copy_target(target)
+    with engine.connect() as connection:
+        rows = connection.execute(
+            _copy_statement(media_type, imdb, season, episode).limit(COPY_OPTION_LIMIT + 1)).all()
+        items = [_copy_option(row, media_type) for row in rows[:COPY_OPTION_LIMIT]]
+        names = _instance_names(connection, {item["arr_instance_id"] for item in items})
+        for item in items:
+            item["instance_name"] = names.get(item["arr_instance_id"])
+            if item["selectable"] and item["arr_instance_id"] not in names:
+                item["selectable"], item["unavailable_reason"] = False, "instance_missing"
+        owning = _owning_titles(connection, media_type, imdb)
+    return {"items": items, "truncated": len(rows) > COPY_OPTION_LIMIT,
+            "owning_titles": owning, "match_scope": "exact_target_copy"}
+
+
+def _physical_revision(facts, path, status, file_hash):
+    """A digest of what is actually on disk right now, not of stored columns.
+
+    Stored file id, size and update timestamp are all mutable metadata that can
+    lag, repeat or change for unrelated reasons, and a local id can be reused
+    after a delete. The observed size and modification time are the floor. The
+    content hash, when hashing is permitted, is what raises the digest above
+    metadata: it catches a same-size replacement that also preserves
+    timestamps, which is what an archive restore or a preserving copy produces.
+
+    Be precise about the limits rather than implying more.
+
+    While a hash is present it is the OpenSubtitles digest, file size plus the
+    first and last 64 KiB, so a replacement that keeps the size, keeps the
+    timestamps and rewrites only bytes between those two windows is not
+    detected. Detecting that would mean reading the whole file on every
+    request.
+
+    The hash is absent, leaving size and modification time as the whole digest,
+    whenever _copy_hash returns None. That is: the reader has skip_hashing on;
+    or the file is at or under COPY_HASH_MIN_BYTES, the same 10 MiB floor
+    custom_libs/subliminal_patch/core.py uses before it computes provider
+    hashes; or the digest could not be computed at all, which covers a read
+    error, a file that vanished between the stat and the open, and anything
+    else the helper declines. That last case is a catch-all on purpose: it
+    stays true if another reason is added.
+    """
+    material = [facts["media_type"], facts["local_id"], facts["arr_instance_id"],
+                facts["file_id"], facts["stored_path"], path, facts["release"],
+                facts["file_size"], facts["updated_at"],
+                status.st_size, status.st_mtime_ns, file_hash]
+    digest = hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode())
+    return digest.hexdigest()[:32]
+
+
+def _copy_hash(path, size):
+    """The OpenSubtitles digest of the file as it is right now.
+
+    Deliberately not the module-level `hash_opensubtitles`: subliminal
+    decorates it with functools.cache keyed on the path string alone, with no
+    size, mtime or inode in the key, and nothing in this application ever
+    clears it. Through that wrapper a second call for the same path returns the
+    first call's digest for the life of the process, so the read would be paid
+    and the replacement would still go unnoticed, and the hash handed to
+    hash-capable providers would be the previous file's. `__wrapped__` is the
+    same upstream algorithm without the memo, so the digest providers receive
+    is unchanged while the observation becomes real.
+
+    The shared memo is left alone for every other caller.
+
+    Returns None, meaning the revision digest falls back to size and
+    modification time, when hashing is off, when the file is at or under
+    COPY_HASH_MIN_BYTES, or when the digest could not be computed for any
+    reason at all.
+    """
+    from app.config import settings
+    if settings.general.skip_hashing or size <= COPY_HASH_MIN_BYTES:
+        return None
+    try:
+        from subliminal_patch.hashes import hash_opensubtitles
+        return getattr(hash_opensubtitles, "__wrapped__", hash_opensubtitles)(path)
+    except Exception:
+        # A hash is an optimization for hash-capable providers and one more
+        # revision input. Losing it must never lose the chosen copy.
+        return None
+
+
+def resolve_copy(copy_id, target):
+    """Resolve one explicitly chosen copy, or refuse.
+
+    Resolution is by local id plus owning instance, revalidated against the
+    confirmed target, so a colliding upstream id can never redirect it.
+
+    It refuses, with a reason, for exactly these causes and no others:
+    copy_invalid for a malformed identity or one naming the wrong media kind;
+    owner_unknown for an identity that names no owning instance; copy_missing
+    when no row matches that local id and owner within this confirmed target,
+    which is what a deleted row, a reused local id and a row that now belongs to
+    another title all reduce to; instance_missing when the owning arr_instances
+    row is gone; no_stored_path when the row records no file; and
+    copy_unavailable when the mapped path cannot be stat-ed or is not a regular
+    file. Every one of them asks for a new choice instead of quietly searching a
+    different file. An invalid target itself raises a plain ValueError before
+    any of this.
+
+    _copy_option can also mark a row owner_unknown, but not on this path: the
+    identity has already been required to name an owner and the query pins the
+    row to it, so the only projection reason reachable here is no_stored_path.
+    """
+    from app.database import engine
+    from utilities.path_mappings import path_mappings
+    media_type, imdb, season, episode = _copy_target(target)
+    parsed = _parse_copy_identity(copy_id)
+    if parsed is None or parsed[0] != media_type:
+        raise CopyUnavailable(_RECOVERY, "copy_invalid")
+    _, local_id, owner = parsed
+    if owner is None:
+        raise CopyUnavailable("This library copy has no owning instance, so it cannot be "
+                              "verified. Search the title only.", "owner_unknown")
+    with engine.connect() as connection:
+        row = connection.execute(
+            _copy_statement(media_type, imdb, season, episode, local_id, owner).limit(2)).first()
+        if row is None:
+            raise CopyUnavailable(_RECOVERY, "copy_missing")
+        name = _instance_names(connection, {owner}).get(owner)
+    if name is None:
+        raise CopyUnavailable(_RECOVERY, "instance_missing")
+    facts = _copy_option(row, media_type)
+    if not facts["selectable"]:
+        raise CopyUnavailable(_RECOVERY, facts["unavailable_reason"])
+    facts["instance_name"] = name
+    facts["stored_path"] = row.path
+    facts["file_id"] = row.file_id
+    path = path_mappings.path_replace_instance(
+        row.path, owner, "movies" if media_type == "movie" else "series")
+    try:
+        status = os.stat(path)
+    except OSError:
+        raise CopyUnavailable(_RECOVERY, "copy_unavailable") from None
+    if not stat.S_ISREG(status.st_mode):
+        raise CopyUnavailable(_RECOVERY, "copy_unavailable")
+    file_hash = _copy_hash(path, status.st_size)
+    facts["observed_size"] = status.st_size
+    facts["file_revision"] = _physical_revision(facts, path, status, file_hash)
+    # Private to the server. copy_context() is what may be serialized.
+    facts["path"] = path
+    facts["file_hash"] = file_hash
+    return facts
+
+
+COPY_CONTEXT_FIELDS = ("copy_id", "media_type", "local_id", "arr_instance_id", "instance_name",
+                       "series_local_id", "title", "episode_title", "release", "filename",
+                       "source", "resolution", "video_codec", "audio_codec", "file_size",
+                       "observed_size", "updated_at")
+
+
+def copy_context(facts):
+    """The client-safe projection.
+
+    Carries the file's basename, which the reader chose and needs to recognise.
+    Never the directory, the stored path, the mapped path, the content hash or
+    the upstream file id.
+    """
+    return {key: facts[key] for key in COPY_CONTEXT_FIELDS}

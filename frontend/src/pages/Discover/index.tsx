@@ -6,7 +6,7 @@ import {
   Button,
   Checkbox,
   Group,
-  NativeSelect,
+  SegmentedControl,
   Stack,
   Text,
   TextInput,
@@ -14,8 +14,10 @@ import {
 } from "@mantine/core";
 import { faMagnifyingGlass } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { useSystemSettings } from "@/apis/hooks";
 import { useDiscoverMetadata } from "@/apis/hooks/discover";
-import { useLanguages } from "@/apis/hooks/languages";
+import { useLanguageProfiles, useLanguages } from "@/apis/hooks/languages";
+import { useProviderHubProviders } from "@/apis/hooks/providerHub";
 import { useDiscover } from "@/contexts/Discover";
 import {
   discoverPageKey,
@@ -24,14 +26,20 @@ import {
 } from "@/contexts/discoverState";
 import type { DiscoverProviderOutcome } from "@/types/discover";
 import DigitalReleases from "./DigitalReleases";
+import DiscoverSelect from "./DiscoverSelect";
+import { readableTime } from "./feedText";
+import LocalCopyPicker from "./LocalCopyPicker";
 import MetadataAttribution from "./MetadataAttribution";
 import RecentEpisodes from "./RecentEpisodes";
 import SubtitleResults from "./SubtitleResults";
-import TitleDetails from "./TitleDetails";
+import SystemSummary from "./SystemSummary";
+import TitleDetails, { TitleNotes } from "./TitleDetails";
 import TitleSearch from "./TitleSearch";
 import Trending from "./Trending";
 import styles from "./Discover.module.scss";
 
+/* eslint-disable camelcase -- these keys are the API's own outcome and skip
+   codes, so they keep their transport spelling. */
 const outcomeLabels: Record<DiscoverProviderOutcome["status"], string> = {
   success: "Search complete",
   empty: "No matches",
@@ -47,18 +55,32 @@ const outcomeLabels: Record<DiscoverProviderOutcome["status"], string> = {
   saturated: "Search capacity is busy. Try again shortly",
 };
 
+// Each reason names what actually happened to that provider. A built-in
+// provider that Discover cannot use is enabled and was skipped, so it is not
+// told to be enabled; it is told why it was skipped.
 const skipLabels: Record<string, string> = {
   unsupported_media: "This provider does not support this media type",
   excluded_language: "This language is excluded in provider settings",
   unsupported_language: "This provider does not support this language",
   requires_file: "This provider needs a video file",
   not_catalog_provider:
-    "Enable a trusted catalog provider in provider settings",
-  provider_unavailable: "Install or enable this provider in provider settings",
+    "Built-in provider, skipped. Discover searches trusted catalog providers only.",
+  provider_unavailable:
+    "Not installed or not loaded, skipped. Check it in the Subtitle Hub.",
 };
 
+/** Where a reader can install or enable a catalog provider. */
+const HUB_ROUTE = "/subtitle-hub?tab=marketplace";
+
+function listNames(names: string[]): string {
+  if (names.length <= 1) return names.join("");
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+/* eslint-enable camelcase */
+
 export default function Discover() {
-  const { state, updateDraft, updateBrowsing, findSubtitles } = useDiscover();
+  const { state, updateDraft, updateBrowsing, seedLanguage, findSubtitles } =
+    useDiscover();
   const { draft, snapshot } = state;
   const location = useLocation();
   const adoptedRoute = useRef<string | null>(null);
@@ -184,6 +206,67 @@ export default function Discover() {
       return () => window.cancelAnimationFrame(frame);
     }
   }, [browsingPage, pageKey, state.browsing.pagePosition]);
+
+  // The selected-title path above restores through browsing.pagePosition. The
+  // homepage has no equivalent owner: TitleSearch restores ids inside its own
+  // section and each feed restores its own card prefix, so the retrieval form's
+  // own controls are restored by nobody, and returning from a local page landed
+  // at whatever offset the browser happened to pick. That was measurable on a
+  // narrow viewport, where the page is long: 742 against a captured 3038.
+  //
+  // The saved pair is read once, at mount, so this restores the position the
+  // reader left with and cannot be re-triggered by later interaction on the
+  // page. Containment in the retrieval form keeps ownership disjoint from the
+  // existing owners, so no two of them ever restore the same return.
+  const retrievalForm = useRef<HTMLFormElement>(null);
+  const retrievalResults = useRef<HTMLDivElement>(null);
+  const homeReturn = useRef(
+    browsingPage
+      ? { focusId: state.browsing.focusId, scrollY: state.browsing.scrollY }
+      : null,
+  );
+  const restoredReturn = useRef(false);
+  useEffect(() => {
+    const saved = homeReturn.current;
+    if (!browsingPage || restoredReturn.current || !saved?.focusId) return;
+    // This page owns the retrieval form and the results it renders itself.
+    // The title search restores ids inside its own section and each feed
+    // restores its own card prefix, so ownership stays disjoint and no return
+    // is ever restored twice.
+    const control = document.getElementById(saved.focusId);
+    const owned =
+      retrievalForm.current?.contains(control) ||
+      retrievalResults.current?.contains(control);
+    if (!control || !owned) return;
+    // Same post-commit reconciliation as the selected-title path: native
+    // history applies its own offset after the route commit, and this page can
+    // leave again before the frame runs.
+    const frame = window.requestAnimationFrame(() => {
+      restoredReturn.current = true;
+      control.focus({ preventScroll: true });
+      window.scrollTo({ top: saved.scrollY, behavior: "instant" });
+      const bounds = control.getBoundingClientRect();
+      const shellBottom = Math.max(
+        0,
+        document
+          .querySelector(".mantine-AppShell-header")
+          ?.getBoundingClientRect().bottom ?? 0,
+      );
+      const adjustment =
+        bounds.top < shellBottom
+          ? bounds.top - shellBottom - 8
+          : bounds.bottom > window.innerHeight
+            ? bounds.bottom - window.innerHeight + 8
+            : 0;
+      if (adjustment)
+        window.scrollTo({
+          top: Math.max(0, window.scrollY + adjustment),
+          behavior: "instant",
+        });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [browsingPage]);
+
   useEffect(() => {
     const active = document.activeElement;
     let focusId =
@@ -237,6 +320,45 @@ export default function Discover() {
   ) {
     languageOptions.push({ value: draft.language, label: draft.language });
   }
+  // The first visit starts with a language rather than an inert button. The
+  // seed comes only from the reader's own language profiles, never from the
+  // browser locale, the film region or anything else, and only into an empty
+  // field: a remembered or chosen language is never touched. The state marks
+  // it as seeded so the field says where it came from.
+  const profiles = useLanguageProfiles();
+  const settings = useSystemSettings();
+  const seedAttempted = useRef(false);
+  useEffect(() => {
+    if (seedAttempted.current || draft.language) return;
+    if (!languages.data || !profiles.data) return;
+    if (!settings.data && !settings.isError) return;
+    seedAttempted.current = true;
+    const general = settings.data?.general;
+    const preferred =
+      draft.mediaType === "episode"
+        ? general?.serie_default_enabled
+          ? general.serie_default_profile
+          : undefined
+        : general?.movie_default_enabled
+          ? general.movie_default_profile
+          : undefined;
+    const profile =
+      profiles.data.find((row) => row.profileId === preferred) ??
+      profiles.data[0];
+    const code2 = profile?.items?.[0]?.language;
+    const match = code2
+      ? languages.data.find((language) => language.code2 === code2)
+      : undefined;
+    if (match) seedLanguage(match.code3);
+  }, [
+    draft.language,
+    draft.mediaType,
+    languages.data,
+    profiles.data,
+    settings.data,
+    settings.isError,
+    seedLanguage,
+  ]);
   const searching = state.status === "searching";
   const searched = snapshot !== null || state.status === "failed";
   const recentMismatch = recentEpisodeMismatch(state);
@@ -245,7 +367,92 @@ export default function Discover() {
     event.preventDefault();
     if (!searching && canSearch) void findSubtitles(searched);
   };
+  const detailsPage = !browsingPage && !releaseMode;
   const providers = snapshot?.coverage.providers ?? [];
+  // Knowable before a search: Discover searches trusted catalog providers
+  // only, so an install whose enabled providers are all built-ins has nothing
+  // Discover can search. That is said here, next to the action, rather than
+  // discovered by burning a search. The rule mirrors the server's own:
+  // enabled, installed from the Hub, trusted, active, not awaiting restart.
+  const hub = useProviderHubProviders();
+  const enabledProviders = settings.data?.general.enabled_providers ?? [];
+  const hubInstall = (name: string) =>
+    (hub.data ?? []).find((item) => item.provider_id === name);
+  const catalogReady = enabledProviders.filter((name) => {
+    const install = hubInstall(name);
+    return Boolean(
+      install &&
+      install.trusted &&
+      install.state === "active" &&
+      !install.pending_restart,
+    );
+  });
+  // Why each enabled provider is not searchable, from what the Hub actually
+  // says. Absence from the Hub is the only evidence that a provider is not a
+  // catalog install; an install that is present but untrusted, inactive or
+  // awaiting a restart is none of those things, and saying it is built in
+  // would be false at exactly the moment a reader returns from installing one.
+  // Each reason carries both numbers. Grouping puts several providers under one
+  // of them, so a phrase that only reads correctly for a single provider gives
+  // a reader with three built-ins "bsplayer, gestdown and yifysubtitles are not
+  // a catalog provider", which is the common case rather than the edge one.
+  const notSearchable = enabledProviders
+    .filter((name) => !catalogReady.includes(name))
+    .map((name) => {
+      const install = hubInstall(name);
+      const label = install?.name?.trim() || name;
+      if (!install)
+        return {
+          label,
+          one: "is not a catalog provider",
+          many: "are not catalog providers",
+        };
+      if (install.pending_restart)
+        return {
+          label,
+          one: "is waiting for a restart",
+          many: "are waiting for a restart",
+        };
+      if (!install.trusted)
+        return { label, one: "is not trusted", many: "are not trusted" };
+      if (install.state !== "active")
+        return {
+          label,
+          one: `is not active (${install.state})`,
+          many: `are not active (${install.state})`,
+        };
+      return {
+        label,
+        one: "is not available to Discover",
+        many: "are not available to Discover",
+      };
+    });
+  const groupedReasons = [
+    ...new Set(notSearchable.map((item) => item.one)),
+  ].map((one) => {
+    const group = notSearchable.filter((item) => item.one === one);
+    return { one, many: group[0].many, names: group.map((i) => i.label) };
+  });
+  const readiness: "unknown" | "none" | "no-catalog" | "ready" =
+    !settings.data || !hub.data
+      ? "unknown"
+      : enabledProviders.length === 0
+        ? "none"
+        : catalogReady.length === 0
+          ? "no-catalog"
+          : "ready";
+  // After a search: nothing searched at all is a different fact from
+  // providers that searched and failed, and it gets its own sentence.
+  const nothingSearched =
+    snapshot?.status === "failed" &&
+    providers.length > 0 &&
+    providers.every(
+      (provider) =>
+        provider.status === "skipped" || provider.status === "setup_required",
+    );
+  const skippedBuiltIns = providers
+    .filter((provider) => provider.reason === "not_catalog_provider")
+    .map((provider) => provider.provider);
   const empty =
     state.status === "complete" &&
     snapshot?.status === "complete" &&
@@ -253,6 +460,71 @@ export default function Discover() {
   const noProviders =
     snapshot !== null && snapshot.coverage.configured_count === 0;
 
+  const languageField = (
+    <DiscoverSelect
+      id="discover-subtitle-language"
+      label="Subtitle language"
+      placeholder="Choose a language"
+      searchable
+      value={draft.language}
+      options={languageOptions}
+      description={
+        state.languageSeeded && draft.language
+          ? "Preselected from your language profile. Change it here at any time."
+          : undefined
+      }
+      onChange={(value) => updateDraft({ language: value })}
+    />
+  );
+  const hubLink = (
+    <Anchor
+      component={Link}
+      to={HUB_ROUTE}
+      className={styles.hubLink}
+      onClick={() =>
+        updateBrowsing({
+          returnTarget: location.pathname + location.search + location.hash,
+        })
+      }
+    >
+      Open the Subtitle Hub
+    </Anchor>
+  );
+  const readinessNotice =
+    !releaseMode && readiness === "none" ? (
+      <Alert color="yellow" className={styles.readiness} role="status">
+        No subtitle provider is enabled, so Find subtitles has nothing to
+        search. Discover searches trusted catalog providers from the Subtitle
+        Hub. {hubLink}
+      </Alert>
+    ) : !releaseMode && readiness === "no-catalog" ? (
+      <Alert color="yellow" className={styles.readiness} role="status">
+        Discover cannot search any of your enabled providers, because it
+        searches installed, trusted catalog providers only.{" "}
+        {groupedReasons.map(({ one, many, names }, index) => (
+          <span key={one}>
+            {index > 0 ? " " : ""}
+            {listNames(names)} {names.length === 1 ? one : many}.
+          </span>
+        ))}{" "}
+        {hubLink}
+      </Alert>
+    ) : null;
+  const submitButton = (
+    <Button
+      type="submit"
+      variant="filled"
+      disabled={!canSearch || searching}
+      loading={searching}
+      leftSection={<FontAwesomeIcon icon={faMagnifyingGlass} />}
+    >
+      {searching
+        ? "Finding subtitles"
+        : searched
+          ? "Refresh subtitles"
+          : "Find subtitles"}
+    </Button>
+  );
   return (
     <section className={styles.discover} aria-labelledby="discover-title">
       <header className={styles.header}>
@@ -260,10 +532,11 @@ export default function Discover() {
           <Title order={1} id="discover-title">
             Discover
           </Title>
-          <Text className={styles.intro}>Browse films and series.</Text>
+          {browsingPage && (
+            <Text className={styles.intro}>Browse films and series.</Text>
+          )}
         </div>
         <Anchor
-          c="light-dark(var(--mantine-color-brand-7), var(--mantine-color-brand-4))"
           component={Link}
           to="/subtitle-hub"
           className={styles.settingsLink}
@@ -272,7 +545,10 @@ export default function Discover() {
         </Anchor>
       </header>
 
-      <div className={styles.homepageLayout}>
+      <div
+        className={styles.homepageLayout}
+        data-page={browsingPage ? "home" : "title"}
+      >
         <div className={styles.homepageContent}>
           {invalidEpisodeLink && (
             <Alert color="red">
@@ -290,7 +566,7 @@ export default function Discover() {
               )}
               {metadata.data?.status === "authentication_failed" && (
                 <Alert color="yellow">
-                  TMDB rejected the saved token. Replace it in Discover
+                  TMDB rejected the key Discover is using. Check it in Discover
                   settings.
                 </Alert>
               )}
@@ -302,7 +578,7 @@ export default function Discover() {
                 </Alert>
               )}
               <Anchor
-                c="light-dark(var(--mantine-color-brand-7), var(--mantine-color-brand-4))"
+                c="var(--discover-link)"
                 component={Link}
                 to="/settings/discover"
                 className={styles.settingsLink}
@@ -324,7 +600,10 @@ export default function Discover() {
               {state.browsing.releaseContext && (
                 <Text size="sm" mb="md" aria-label="Selected digital release">
                   Digital · {state.browsing.releaseContext.region} ·{" "}
-                  <time dateTime={state.browsing.releaseContext.release_date}>
+                  <time
+                    className={styles.dateValue}
+                    dateTime={state.browsing.releaseContext.release_date}
+                  >
                     {state.browsing.releaseContext.release_date}
                   </time>{" "}
                   · TMDB regional release record
@@ -347,7 +626,10 @@ export default function Discover() {
                     {state.browsing.recentContext.item.episode}:{" "}
                     {state.browsing.recentContext.item.title} · Original air
                     date:{" "}
-                    <time dateTime={state.browsing.recentContext.item.air_date}>
+                    <time
+                      className={styles.dateValue}
+                      dateTime={state.browsing.recentContext.item.air_date}
+                    >
                       {state.browsing.recentContext.item.air_date}
                     </time>{" "}
                     · TMDB season record
@@ -376,26 +658,32 @@ export default function Discover() {
             </>
           )}
 
-          <Group className={styles.modeControls} justify="space-between">
-            <Text fw={600}>
-              {releaseMode
-                ? "Advanced release-name search"
-                : "Identified title search"}
-            </Text>
-            <Button
-              type="button"
-              variant="subtle"
-              onClick={() =>
-                updateDraft({ mode: releaseMode ? "title" : "release" })
-              }
-            >
-              {releaseMode
-                ? "Return to identified title"
-                : "Search providers by release name"}
-            </Button>
-          </Group>
+          {!detailsPage && (
+            <Group className={styles.modeControls} justify="space-between">
+              <Text fw={600}>
+                {releaseMode
+                  ? "Advanced release-name search"
+                  : "Identified title search"}
+              </Text>
+              <Button
+                type="button"
+                variant="subtle"
+                onClick={() =>
+                  updateDraft({ mode: releaseMode ? "title" : "release" })
+                }
+              >
+                {releaseMode
+                  ? "Return to identified title"
+                  : "Search providers by release name"}
+              </Button>
+            </Group>
+          )}
 
-          <form onSubmit={submit} className={styles.searchForm}>
+          <form
+            ref={retrievalForm}
+            onSubmit={submit}
+            className={styles.searchForm}
+          >
             {releaseMode && (
               <Text size="sm" mb="lg" maw="70ch">
                 Title and episode identity and timing compatibility are
@@ -404,10 +692,18 @@ export default function Discover() {
                 Show.S02E03.
               </Text>
             )}
+            {detailsPage && readinessNotice}
+            {detailsPage && (
+              <div className={styles.primaryRow}>
+                {languageField}
+                {submitButton}
+              </div>
+            )}
             <div
               className={
                 releaseMode ? styles.releaseFields : styles.targetFields
               }
+              data-secondary={detailsPage ? "true" : undefined}
             >
               {releaseMode ? (
                 <TextInput
@@ -425,40 +721,51 @@ export default function Discover() {
                 />
               ) : (
                 <>
-                  <NativeSelect
-                    id="discover-media-type"
-                    label="Media type"
-                    value={draft.mediaType}
-                    data={[
-                      { value: "movie", label: "Movie" },
-                      { value: "episode", label: "Episode" },
-                    ]}
-                    onChange={(event) => {
-                      updateDraft({
-                        mediaType:
-                          event.currentTarget.value === "episode"
-                            ? "episode"
-                            : "movie",
-                        title: undefined,
-                        year: undefined,
-                        showId: undefined,
-                        episodeIdentity: undefined,
-                        manualConfirmed: false,
-                        manualEntry: true,
-                        season: "",
-                        episode: "",
-                      });
-                      updateBrowsing({
-                        selectedId: null,
-                        identityLoaded: false,
-                        adoptedMovieId: null,
-                        adoptedSourceId: null,
-                        suggestionsClosed: true,
-                        focusId: "discover-media-type",
-                        scrollY: window.scrollY,
-                      });
-                    }}
-                  />
+                  <div className={styles.field}>
+                    <Text
+                      component="span"
+                      className={styles.fieldLabel}
+                      id="discover-media-type-label"
+                    >
+                      Media type
+                    </Text>
+                    <SegmentedControl
+                      id="discover-media-type"
+                      aria-labelledby="discover-media-type-label"
+                      classNames={{
+                        root: styles.segmented,
+                        label: styles.segmentedLabel,
+                        indicator: styles.segmentedIndicator,
+                      }}
+                      value={draft.mediaType}
+                      data={[
+                        { value: "movie", label: "Movie" },
+                        { value: "episode", label: "Episode" },
+                      ]}
+                      onChange={(value) => {
+                        updateDraft({
+                          mediaType: value === "episode" ? "episode" : "movie",
+                          title: undefined,
+                          year: undefined,
+                          showId: undefined,
+                          episodeIdentity: undefined,
+                          manualConfirmed: false,
+                          manualEntry: true,
+                          season: "",
+                          episode: "",
+                        });
+                        updateBrowsing({
+                          selectedId: null,
+                          identityLoaded: false,
+                          adoptedMovieId: null,
+                          adoptedSourceId: null,
+                          suggestionsClosed: true,
+                          focusId: "discover-media-type",
+                          scrollY: window.scrollY,
+                        });
+                      }}
+                    />
+                  </div>
                   <TextInput
                     id="discover-imdb-id"
                     label="IMDb ID"
@@ -531,18 +838,7 @@ export default function Discover() {
                   )}
                 </>
               )}
-              <NativeSelect
-                id="discover-subtitle-language"
-                label="Subtitle language"
-                value={draft.language}
-                data={[
-                  { value: "", label: "Choose a language" },
-                  ...languageOptions,
-                ]}
-                onChange={(event) =>
-                  updateDraft({ language: event.currentTarget.value })
-                }
-              />
+              {!detailsPage && languageField}
             </div>
             {!releaseMode &&
               draft.mediaType === "episode" &&
@@ -569,7 +865,7 @@ export default function Discover() {
               <Text c="red" size="sm" mt="sm">
                 The language list could not be loaded.{" "}
                 <Anchor
-                  c="light-dark(var(--mantine-color-brand-7), var(--mantine-color-brand-4))"
+                  c="var(--discover-link)"
                   component="button"
                   type="button"
                   onClick={() => void languages.refetch()}
@@ -584,30 +880,48 @@ export default function Discover() {
                 unavailable.
               </Text>
             )}
-            <Group
-              className={styles.submitRow}
-              justify="space-between"
-              align="center"
-            >
-              <Text size="sm">
-                {releaseMode
-                  ? "Search mode: release name. Results have unverified identity and compatibility."
-                  : "Search by title identity. Choose an exact episode for series."}
+            {!detailsPage && readinessNotice}
+            {detailsPage ? (
+              <Text className={styles.primaryHint}>
+                Search by title identity. Choose an exact episode for series.
               </Text>
-              <Button
-                type="submit"
-                disabled={!canSearch || searching}
-                loading={searching}
-                leftSection={<FontAwesomeIcon icon={faMagnifyingGlass} />}
+            ) : (
+              <Group
+                className={styles.submitRow}
+                justify="space-between"
+                align="center"
               >
-                {searching
-                  ? "Finding subtitles"
-                  : searched
-                    ? "Refresh subtitles"
-                    : "Find subtitles"}
-              </Button>
-            </Group>
+                <Text size="sm">
+                  {releaseMode
+                    ? "Search mode: release name. Results have unverified identity and compatibility."
+                    : "Search by title identity. Choose an exact episode for series."}
+                </Text>
+                {submitButton}
+              </Group>
+            )}
+            {/*
+              A target typed straight into this form is as confirmed as one
+              reached by browsing, so it gets the same copy matching. The
+              picker derives its own target and renders nothing until that
+              target is exact. There is one instance of it, here, rendered for
+              the browsing page and the selected-title page alike, so a chosen
+              copy survives moving between them. Release-name search has no
+              identified target, so it has nothing to match against.
+            */}
+            {!releaseMode && <LocalCopyPicker />}
           </form>
+          {detailsPage && <TitleNotes />}
+          {detailsPage && (
+            <div className={styles.modeSwitch}>
+              <Button
+                type="button"
+                variant="subtle"
+                onClick={() => updateDraft({ mode: "release" })}
+              >
+                Search providers by release name
+              </Button>
+            </div>
+          )}
 
           <div role="status" aria-live="polite" className={styles.status}>
             {state.status === "unsearched" && (
@@ -628,11 +942,9 @@ export default function Discover() {
             {state.error && <Alert color="red">{state.error}</Alert>}
             {noProviders && (
               <Alert color="yellow" title="Set up a subtitle provider">
-                Enable a provider in{" "}
-                <Anchor component={Link} to="/subtitle-hub">
-                  Provider settings
-                </Anchor>
-                , then return to this search and try again.
+                No subtitle provider is enabled. Discover searches trusted
+                catalog providers from the Subtitle Hub; install or enable one,
+                then return to this search and try again. {hubLink}
               </Alert>
             )}
             {!searching && !state.error && snapshot?.status === "partial" && (
@@ -644,12 +956,30 @@ export default function Discover() {
             {!searching &&
               !state.error &&
               snapshot?.status === "failed" &&
-              !noProviders && (
+              !noProviders &&
+              (nothingSearched ? (
+                <Alert color="yellow">
+                  No provider searched this title.{" "}
+                  {/* The pre-search notice already names the built-ins when
+                      the condition was knowable; say it once. */}
+                  {skippedBuiltIns.length > 0 && readiness !== "no-catalog" && (
+                    <>
+                      {listNames(skippedBuiltIns)}{" "}
+                      {skippedBuiltIns.length === 1
+                        ? "is a built-in provider"
+                        : "are built-in providers"}
+                      , and Discover searches trusted catalog providers
+                      only.{" "}
+                    </>
+                  )}
+                  Provider details are below. {hubLink}
+                </Alert>
+              ) : (
                 <Alert color="yellow">
                   No provider completed this search. Review provider details
                   below before retrying.
                 </Alert>
-              )}
+              ))}
             {!searching && empty && (
               <Text>
                 {releaseMode
@@ -665,120 +995,93 @@ export default function Discover() {
             )}
           </div>
 
-          {snapshot && (
-            <Stack gap="lg">
-              <Group justify="space-between" align="baseline">
-                <Title order={2}>
-                  Subtitle results
-                  {snapshot.results.length
-                    ? ` (${snapshot.results.length})`
-                    : ""}
-                </Title>
-                <Text size="sm" c="dimmed">
-                  {snapshot.cache_status === "cached"
-                    ? "Cached search"
-                    : "Checked"}{" "}
-                  <time dateTime={snapshot.checked_at}>
-                    {new Date(snapshot.checked_at).toLocaleString()}
-                  </time>
-                </Text>
-              </Group>
-              <Text size="sm" c="dimmed">
-                {snapshot.context.mode === "release"
-                  ? snapshot.context.query
-                  : (snapshot.context.title ?? snapshot.context.imdb_id)}
-                {snapshot.context.media_type === "episode"
-                  ? `, season ${snapshot.context.season}, episode ${snapshot.context.episode}`
-                  : ""}
-                {` · ${snapshot.context.language} · ${snapshot.context.mode === "release" ? "Unverified release query" : "Title matching"}`}
-              </Text>
-              {snapshot.context.episode_identity && (
-                <Text size="sm">
-                  Source episode: S{snapshot.context.episode_identity.season} E
-                  {snapshot.context.episode_identity.episode}:{" "}
-                  {snapshot.context.episode_identity.title}
-                  {snapshot.context.episode_identity.air_date
-                    ? ` · Original air date: ${snapshot.context.episode_identity.air_date}`
-                    : " · Original air date unavailable"}
-                </Text>
-              )}
-              {snapshot.context.media_type === "episode" && (
-                <Text size="sm">
-                  {snapshot.context.manual_confirmed
-                    ? "Manual episode recovery. Source numbering and identity are unverified."
-                    : "Target numbering: TVDB default order. Catalog ordering and timing compatibility may differ."}
-                </Text>
-              )}
-              <SubtitleResults snapshot={snapshot} />
-              {providers.length > 0 && (
-                <section aria-labelledby="discover-coverage">
-                  <Title order={3} id="discover-coverage" size="h4">
-                    Provider coverage
+          <div ref={retrievalResults}>
+            {snapshot && (
+              <Stack gap="lg">
+                <Group justify="space-between" align="baseline">
+                  <Title order={2}>
+                    Subtitle results
+                    {snapshot.results.length
+                      ? ` (${snapshot.results.length})`
+                      : ""}
                   </Title>
-                  <ul className={styles.providerList}>
-                    {providers.map((provider) => (
-                      <li key={provider.provider}>
-                        <div>
-                          <Text fw={600}>{provider.provider}</Text>
-                          <Text size="sm">
-                            {skipLabels[provider.reason ?? ""] ??
-                              outcomeLabels[provider.status]}
-                          </Text>
-                          {provider.retry_at && (
-                            <Text size="sm" c="dimmed">
-                              Retry after{" "}
-                              <time dateTime={provider.retry_at}>
-                                {new Date(provider.retry_at).toLocaleString()}
-                              </time>
+                  <Text size="sm" c="dimmed">
+                    {snapshot.cache_status === "cached"
+                      ? "Cached search"
+                      : "Checked"}{" "}
+                    <time
+                      className={styles.dateValue}
+                      dateTime={snapshot.checked_at}
+                    >
+                      {readableTime(snapshot.checked_at)}
+                    </time>
+                  </Text>
+                </Group>
+                <Text size="sm" c="dimmed">
+                  {snapshot.context.mode === "release"
+                    ? snapshot.context.query
+                    : (snapshot.context.title ?? snapshot.context.imdb_id)}
+                  {snapshot.context.media_type === "episode"
+                    ? `, season ${snapshot.context.season}, episode ${snapshot.context.episode}`
+                    : ""}
+                  {` · ${snapshot.context.language} · ${snapshot.context.mode === "release" ? "Unverified release query" : "Title matching"}`}
+                </Text>
+                {snapshot.context.episode_identity && (
+                  <Text size="sm">
+                    Source episode: S{snapshot.context.episode_identity.season}{" "}
+                    E{snapshot.context.episode_identity.episode}:{" "}
+                    {snapshot.context.episode_identity.title}
+                    {snapshot.context.episode_identity.air_date
+                      ? ` · Original air date: ${snapshot.context.episode_identity.air_date}`
+                      : " · Original air date unavailable"}
+                  </Text>
+                )}
+                {snapshot.context.media_type === "episode" && (
+                  <Text size="sm">
+                    {snapshot.context.manual_confirmed
+                      ? "Manual episode recovery. Source numbering and identity are unverified."
+                      : "Target numbering: TVDB default order. Catalog ordering and timing compatibility may differ."}
+                  </Text>
+                )}
+                <SubtitleResults snapshot={snapshot} />
+                {providers.length > 0 && (
+                  <section aria-labelledby="discover-coverage">
+                    <Title order={3} id="discover-coverage" size="h4">
+                      Provider coverage
+                    </Title>
+                    <ul className={styles.providerList}>
+                      {providers.map((provider) => (
+                        <li key={provider.provider}>
+                          <div>
+                            <Text fw={600}>{provider.provider}</Text>
+                            <Text size="sm">
+                              {skipLabels[provider.reason ?? ""] ??
+                                outcomeLabels[provider.status]}
                             </Text>
-                          )}
-                        </div>
-                        <Text size="sm" c="dimmed">
-                          {provider.result_count}{" "}
-                          {provider.result_count === 1 ? "result" : "results"}
-                        </Text>
-                      </li>
-                    ))}
-                  </ul>
-                </section>
-              )}
-            </Stack>
-          )}
+                            {provider.retry_at && (
+                              <Text size="sm" c="dimmed">
+                                Retry after{" "}
+                                <time dateTime={provider.retry_at}>
+                                  {new Date(provider.retry_at).toLocaleString()}
+                                </time>
+                              </Text>
+                            )}
+                          </div>
+                          <Text size="sm" c="dimmed">
+                            {provider.result_count}{" "}
+                            {provider.result_count === 1 ? "result" : "results"}
+                          </Text>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                )}
+              </Stack>
+            )}
+          </div>
           <MetadataAttribution />
         </div>
-        <aside
-          className={styles.localSummary}
-          aria-labelledby="discover-local-title"
-        >
-          <Title order={2} id="discover-local-title">
-            Your Bazarr+
-          </Title>
-          <Text size="sm">
-            Library automation is optional. Manage your local work separately
-            from global discovery.
-          </Text>
-          <Anchor
-            c="light-dark(var(--mantine-color-brand-8), var(--mantine-color-brand-4))"
-            component={Link}
-            to="/system/tasks"
-          >
-            Activity
-          </Anchor>
-          <Anchor
-            c="light-dark(var(--mantine-color-brand-8), var(--mantine-color-brand-4))"
-            component={Link}
-            to="/settings/connections"
-          >
-            Library connections
-          </Anchor>
-          <Anchor
-            c="light-dark(var(--mantine-color-brand-8), var(--mantine-color-brand-4))"
-            component={Link}
-            to="/setup"
-          >
-            Optional setup guide
-          </Anchor>
-        </aside>
+        <SystemSummary />
       </div>
     </section>
   );

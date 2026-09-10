@@ -6,10 +6,12 @@ import { beforeEach, expect, it, vi } from "vitest";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import { AllProviders } from "@/providers";
-import { act, fireEvent, rawRender, screen, waitFor } from "@/tests";
+import { act, fireEvent, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import type { TrendingFeed, TrendingTitle } from "@/types/discover";
+import { findSelectInput, pickOption, selectInput } from "./selectTestHelpers";
 import Discover from ".";
+import styles from "./Discover.module.scss";
 
 const movie: TrendingTitle = {
   source_id: "tmdb:movie:42",
@@ -171,11 +173,31 @@ it("shows sourced weekly global titles without local media or subtitle language"
     await screen.findByRole("button", { name: "Explore Northern Light" }),
   ).toBeEnabled();
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
-  expect(screen.getByLabelText("Subtitle language")).toHaveValue("");
+  expect(selectInput("Subtitle language")).toHaveValue("");
   expect(screen.getByRole("img", { name: "TMDB" })).toBeInTheDocument();
   expect(searches).toEqual([]);
 });
 
+it("keeps the metadata caveat visible while the homepage carries one source attribution", async () => {
+  browse();
+  await screen.findByRole("button", { name: "Explore Northern Light" });
+  // The homepage renders the shared attribution once and suppresses the search
+  // section's copy of that one sentence by name. The availability caveat is a
+  // separate statement and is not part of that suppression.
+  expect(
+    screen.getByText(
+      /Metadata does not establish subtitle availability or compatibility/,
+    ),
+  ).toBeInTheDocument();
+  const attributions = screen.getAllByText(
+    /This product uses the TMDB API but is not endorsed or certified by TMDB/,
+  );
+  expect(
+    attributions.some((node) =>
+      node.classList.contains(styles.sourceAttribution),
+    ),
+  ).toBe(true);
+});
 it("keeps filtering, metadata refresh and movie selection separate from explicit provider submission", async () => {
   const { user } = browse();
   await screen.findByRole("button", { name: "Explore Northern Light" });
@@ -200,7 +222,7 @@ it("keeps filtering, metadata refresh and movie selection separate from explicit
     expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0080274"),
   );
   expect(searches).toEqual([]);
-  await user.selectOptions(screen.getByLabelText("Subtitle language"), "eng");
+  await pickOption(user, "Subtitle language", "English");
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
   await waitFor(() => expect(searches).toHaveLength(1));
   expect(searches[0]).toMatchObject({
@@ -220,7 +242,7 @@ it("selects TMDB series identity and requires explicit episode selection", async
   expect(
     await screen.findByRole("heading", { name: "The Long Winter" }),
   ).toBeInTheDocument();
-  expect(await screen.findByLabelText("Choose season")).toHaveValue("");
+  expect(await findSelectInput("Choose season")).toHaveValue("");
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
   expect(searches).toEqual([]);
 });
@@ -393,9 +415,13 @@ it("keeps the current card position when its scroll event is still pending and r
   const oldScroll = Object.getOwnPropertyDescriptor(window, "scrollY");
   const scrollTo = vi.spyOn(window, "scrollTo");
   try {
-    const card = screen.getByRole("button", {
-      name: /Artwork unavailable.*Northern Light/,
-    });
+    // The missing-art treatment is decorative and aria-hidden, so the card's
+    // accessible name is its own title. This case is about scroll restoration,
+    // not artwork: the missing-art states are asserted by their own case below,
+    // which distinguishes a resolved poster from an unresolved one. jsdom never
+    // loads images, so a text assertion here would hold either way and prove
+    // nothing.
+    const card = screen.getByRole("button", { name: /Northern Light.*Film/ });
     Object.defineProperty(window, "scrollY", {
       configurable: true,
       value: 1162,
@@ -412,9 +438,7 @@ it("keeps the current card position when its scroll event is still pending and r
     await user.click(screen.getByRole("button", { name: "Back to Discover" }));
     await waitFor(() =>
       expect(
-        screen.getByRole("button", {
-          name: /Artwork unavailable.*Northern Light/,
-        }),
+        screen.getByRole("button", { name: /Northern Light.*Film/ }),
       ).toHaveFocus(),
     );
     expect(scrollTo).toHaveBeenLastCalledWith({
@@ -659,3 +683,38 @@ it.each(["title", "release"])(
     }
   },
 );
+
+it("tells a resolved poster from one that never resolves", async () => {
+  // The fixture's fallback is painted under every slot, so a text assertion
+  // alone cannot tell the two apart. The img element can: it exists only while
+  // a source is present and has not failed, and the fallback carries the class
+  // that removes it once the image paints.
+  server.use(
+    http.get("/api/discover/feeds/trending", () =>
+      HttpResponse.json({
+        ...envelope("all"),
+        items: [
+          { ...movie, poster_url: null },
+          { ...show, poster_url: "https://image.tmdb.org/t/p/w342/show.jpg" },
+        ],
+      }),
+    ),
+  );
+  browse();
+  const withArt = await screen.findByRole("button", {
+    name: /The Long Winter/,
+  });
+  const withoutArt = screen.getByRole("button", {
+    name: /Northern Light.*Film/,
+  });
+  expect(within(withArt).getByRole("presentation")).toHaveAttribute(
+    "src",
+    "https://image.tmdb.org/t/p/w342/show.jpg",
+  );
+  expect(
+    within(withoutArt).queryByRole("presentation"),
+  ).not.toBeInTheDocument();
+  // Both carry the treatment underneath; only the unresolved one has nothing
+  // over it. That is the state the reader actually meets.
+  expect(withoutArt).toHaveTextContent("Artwork unavailable");
+});

@@ -41,7 +41,7 @@ def plaintext_dict():
         # generated and persisted general.secrets_encryption_key. The
         # encrypt-settings-dict path expects the master key to be in
         # the snapshot so on-disk ciphertext stays paired with the key
-        # that decrypts it (Codex P1 fix on a first-write race).
+        # that decrypts it (a first-write race).
         "general": {
             "flask_secret_key": "system",
             "instance_name": "Bazarr+",

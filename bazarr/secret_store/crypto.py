@@ -2,10 +2,10 @@
 """Symmetric AEAD crypto for secrets at rest.
 
 Uses `cryptography.fernet.Fernet` - AES-128-CBC + HMAC-SHA256 in a single
-authenticated primitive. Replaces an earlier signed-only design (Codex
-flagged URLSafeSerializer.dumps as encoding-not-encryption: anyone with
-config.yaml could base64-decode the JSON payload and recover the secret
-without the master key).
+authenticated primitive. Replaces an earlier signed-only design that a
+security review rejected as encoding rather than encryption:
+URLSafeSerializer.dumps let anyone with config.yaml base64-decode the JSON
+payload and recover the secret without the master key.
 
 Format:
 - Stored value: `enc:v1:<urlsafe-base64 Fernet token>`

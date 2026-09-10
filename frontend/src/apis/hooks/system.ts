@@ -6,6 +6,7 @@ import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { notification } from "@/modules/task";
 import { Environment } from "@/utilities";
+import { writeSessionValue } from "@/utilities/browserStorage";
 import { setAuthenticated } from "@/utilities/event";
 
 export function useBadges() {
@@ -347,7 +348,7 @@ export function useSystem() {
         data.upgrade_token
       ) {
         // Store opaque token (not password) for upgrade prompt
-        sessionStorage.setItem("password_upgrade_token", data.upgrade_token);
+        writeSessionValue("password_upgrade_token", data.upgrade_token);
       }
       // TODO: Hard-coded value
       window.location.replace(getPostLoginRedirectTarget());

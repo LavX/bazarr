@@ -1,10 +1,12 @@
 /* eslint-disable camelcase -- API parameters retain their transport names. */
 import type {
   DigitalReleaseFeed,
+  DiscoverCopyOffer,
   DiscoverDownloadIdentity,
   DiscoverPreviewData,
   DiscoverSearchSnapshot,
   DiscoverSelection,
+  DiscoverSummary,
   MetadataResponse,
   RecentEpisodeFeed,
   TrendingFeed,
@@ -26,6 +28,14 @@ class DiscoverApi extends BaseApi {
     return response.data;
   }
 
+  async summary(signal: AbortSignal) {
+    const response = await client.axios.get<DiscoverSummary>(
+      this.prefix + "/summary",
+      { signal },
+    );
+    return response.data;
+  }
+
   async trending(mediaType: TrendingMediaType, signal: AbortSignal) {
     const response = await client.axios.get<TrendingFeed>(
       this.prefix + "/feeds/trending",
@@ -38,6 +48,14 @@ class DiscoverApi extends BaseApi {
     const response = await client.axios.get<DigitalReleaseFeed>(
       this.prefix + "/feeds/digital",
       { params: { region }, signal },
+    );
+    return response.data;
+  }
+
+  async copies(params: LooseObject, signal: AbortSignal) {
+    const response = await client.axios.get<DiscoverCopyOffer>(
+      this.prefix + "/copies",
+      { params, signal },
     );
     return response.data;
   }

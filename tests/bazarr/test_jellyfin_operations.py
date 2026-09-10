@@ -492,7 +492,7 @@ def test_find_item_handles_null_providerids(fake, settings):
     settings.jellyfin.movie_library_ids = ["lib-movies"]
     settings.jellyfin.get.return_value = "immediate"
     poisoned = make_movie(id="bad", imdb_id="tt000")
-    poisoned["ProviderIds"] = None  # the wire shape Codex flagged
+    poisoned["ProviderIds"] = None  # the wire shape review flagged
     target = make_movie(id="good", imdb_id="tt999", path="/media/movies/Found")
     fake.get_items = lambda params: [poisoned, target]
 

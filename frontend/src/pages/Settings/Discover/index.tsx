@@ -30,6 +30,9 @@ function DiscoverIntegration() {
   const form = useFormValues();
   const { setValue } = useFormActions();
   const configured = settings?.discover?.tmdb_configured ?? false;
+  // Metadata being available is the built-in key's doing, so it is not evidence
+  // that the reader has anything saved. Only a saved key can be removed.
+  const tokenStored = settings?.discover?.tmdb_token_stored ?? false;
   const revision = settings?.discover?.metadata_revision;
   const draft = form.values.settings[tokenKey] as string | undefined;
   const locale = (form.values.settings[localeKey] ??
@@ -77,21 +80,22 @@ function DiscoverIntegration() {
       <Title order={2}>Discover</Title>
       <Text>
         Browse movie titles from TMDB, including films outside your library.
-        Library connections and subtitle providers are set up separately.
+        Nothing here needs setting up: Bazarr+ uses its own TMDB key. Library
+        connections and subtitle providers are set up separately.
       </Text>
       <Section header="Movie metadata">
         <Text fw={600}>
           {configured
-            ? "Saved TMDB token configured"
-            : "TMDB is not configured"}
+            ? "TMDB metadata is available"
+            : "TMDB metadata is unavailable in this build"}
         </Text>
         <PasswordInput
           disabled={saving}
-          label="TMDB API Read Access Token"
+          label="Your own TMDB API key, optional"
           autoComplete="new-password"
           value={draft ?? ""}
           maxLength={4096}
-          description="Paste a replacement token here. The saved token stays private on the server."
+          description="Leave this empty to use the built-in key. A TMDB v3 API key is 32 characters; it stays private on the server, and anything else is ignored."
           styles={{
             input: { minHeight: 44 },
             innerInput: { minHeight: 44 },
@@ -114,30 +118,32 @@ function DiscoverIntegration() {
             onClick={() => void test()}
           >
             {draft === undefined
-              ? "Check saved connection"
+              ? tokenStored
+                ? "Check saved connection"
+                : "Check built-in connection"
               : "Check draft connection"}
           </Button>
-          {configured && (
+          {tokenStored && (
             <Button
               disabled={saving}
               type="button"
-              variant="subtle"
+              variant="default"
               color="red"
               mih={44}
               onClick={() => setValue("", tokenKey)}
             >
-              Remove saved token
+              Remove saved key
             </Button>
           )}
           {draft !== undefined && (
             <Button
               disabled={saving}
               type="button"
-              variant="subtle"
+              variant="default"
               mih={44}
               onClick={clearDraft}
             >
-              Cancel token change
+              Cancel key change
             </Button>
           )}
         </Group>
@@ -145,7 +151,7 @@ function DiscoverIntegration() {
           <Text size="sm">
             {draft
               ? "Replacement pending save."
-              : "Removal pending save. Global movie browsing will be unavailable."}
+              : "Removal pending save. Browsing continues on the built-in key."}
           </Text>
         )}
         <div role="status" aria-live="polite">
@@ -179,7 +185,7 @@ function DiscoverIntegration() {
           rel="noreferrer"
           py="sm"
         >
-          Get a TMDB API Read Access Token
+          Get your own TMDB API key
         </Anchor>
         <NativeSelect
           disabled={saving}

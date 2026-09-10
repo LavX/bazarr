@@ -1,18 +1,14 @@
 /* eslint-disable camelcase -- API context retains source field names. */
 import { useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router";
-import {
-  Alert,
-  Anchor,
-  Button,
-  Group,
-  Stack,
-  Text,
-  Title,
-} from "@mantine/core";
+import { Alert, Anchor, Button, Stack, Text, Title } from "@mantine/core";
+import { faArrowsRotate } from "@fortawesome/free-solid-svg-icons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useDiscoverRecentEpisodes } from "@/apis/hooks/discover";
 import { useDiscover } from "@/contexts/Discover";
 import type { RecentEpisode } from "@/types/discover";
+import { plural, readableTime } from "./feedText";
+import MediaPoster from "./MediaPoster";
 import styles from "./Discover.module.scss";
 
 export default function RecentEpisodes() {
@@ -98,25 +94,33 @@ export default function RecentEpisodes() {
   const items = expired || setup ? [] : (data?.items ?? []);
   return (
     <section className={styles.trending} aria-labelledby="recent-title">
-      <Group className={styles.railHeading} justify="space-between">
-        <Title order={2} id="recent-title">
-          Recent episodes from trending shows
-        </Title>
+      <div className={styles.sectionHead}>
+        <div>
+          <Title order={2} id="recent-title">
+            Recent episodes
+          </Title>
+          <Text component="p" className={styles.sectionMeta}>
+            Original air dates · Last 30 days
+          </Text>
+        </div>
         {feed.configured && (
-          <Button
-            id="discover-recent-refresh"
-            variant="subtle"
-            loading={feed.isFetching}
-            onClick={() => void feed.refetch()}
-          >
-            Refresh recent episodes
-          </Button>
+          <div className={styles.sectionTools}>
+            <Button
+              id="discover-recent-refresh"
+              variant="subtle"
+              loading={feed.isFetching}
+              leftSection={<FontAwesomeIcon icon={faArrowsRotate} />}
+              onClick={() => void feed.refetch()}
+            >
+              Refresh recent episodes
+            </Button>
+          </div>
         )}
-      </Group>
-      <Text size="sm" mb="md">
-        Original air dates · Last 30 days · A selection from weekly trending
-        shows, not a complete schedule or a ranking of episode popularity.
-        Subtitle availability and exact episode ownership are unchecked.
+      </div>
+      <Text component="p" className={styles.caveat}>
+        A selection from weekly trending shows, not a complete schedule or a
+        ranking of episode popularity. Subtitle availability and exact episode
+        ownership are unchecked. Verify episode identity in details.
       </Text>
       <Stack
         role="status"
@@ -131,7 +135,7 @@ export default function RecentEpisodes() {
           <Alert color="yellow">
             <Text size="sm">
               {data?.status === "authentication_failed"
-                ? "TMDB rejected the saved access token."
+                ? "TMDB rejected the key Discover is using."
                 : "Connect TMDB to browse recent episodes."}
             </Text>
             <Anchor
@@ -158,14 +162,8 @@ export default function RecentEpisodes() {
         )}
         {data && !data.coverage.complete && !expired && !setup && (
           <Text size="sm">
-            Incomplete episode coverage: {data.coverage.shows_checked} of{" "}
-            {data.coverage.shows} shows and {data.coverage.seasons_checked} of{" "}
-            {data.coverage.seasons} seasons checked, {data.coverage.failed}{" "}
-            failed checks, {data.coverage.missing_dates} missing or invalid
-            dates.
-            {data.coverage.truncated
-              ? " Additional source records are outside this bounded selection."
-              : ""}
+            Incomplete episode coverage. The counts are in Episode source and
+            freshness below.
           </Text>
         )}
         {data?.status === "empty" && !expired && (
@@ -175,41 +173,52 @@ export default function RecentEpisodes() {
           </Text>
         )}
         {data?.fetched_at && !expired && (
-          <Text size="xs">
+          <Text component="p" className={styles.stamp}>
             {data.status === "cached" ||
             (data.expires_at && Date.parse(data.expires_at) <= clock)
               ? "Cached TMDB episode records"
               : "Checked TMDB episode records"}{" "}
             ·{" "}
-            <time dateTime={data.fetched_at}>
-              {new Date(data.fetched_at).toLocaleString()}
+            <time className={styles.dateValue} dateTime={data.fetched_at}>
+              {readableTime(data.fetched_at)}
             </time>
           </Text>
         )}
       </Stack>
       {items.length > 0 && (
-        <ul className={styles.posterGrid} aria-label="Recent episodes">
+        <ul className={styles.episodeList} aria-label="Recent episodes">
           {items.map((item) => (
             <li key={item.source_id}>
               <button
                 type="button"
                 id={`discover-recent-${item.source_id}`}
-                className={styles.poster}
+                className={styles.episodeRow}
                 onClick={() => open(item)}
               >
-                <strong>{item.show_title}</strong>
-                <Text component="span" display="block" size="sm">
-                  {item.season === 0 ? "Special" : `S${item.season}`} E
-                  {item.episode}: {item.title}
-                </Text>
-                <Text component="span" display="block" size="sm">
-                  Original air date:{" "}
-                  <time dateTime={item.air_date}>{item.air_date}</time>
-                </Text>
-                <span>
-                  {item.identity_status === "conflict"
-                    ? "Source numbering conflict. Review episode details."
-                    : "Verify episode identity in details"}
+                <span className={styles.episodeArt}>
+                  <MediaPoster key={item.poster_url} src={item.poster_url} />
+                </span>
+                <span className={styles.episodeFacts}>
+                  <strong>{item.show_title}</strong>
+                  <span>
+                    <span className={styles.episodeCode}>
+                      {item.season === 0 ? "Special" : `S${item.season}`} E
+                      {item.episode}
+                    </span>
+                    {" · "}
+                    {item.title}
+                  </span>
+                  {item.identity_status === "conflict" && (
+                    <span className={styles.episodeConflict}>
+                      Source numbering conflict. Review episode details.
+                    </span>
+                  )}
+                  <span>
+                    Original air date{" "}
+                    <time className={styles.dateValue} dateTime={item.air_date}>
+                      {item.air_date}
+                    </time>
+                  </span>
                 </span>
               </button>
             </li>
@@ -228,6 +237,21 @@ export default function RecentEpisodes() {
             {data.window.start} through {data.window.end}, inclusive, using UTC
             today.
           </Text>
+          {!data.coverage.complete && (
+            <Text size="xs">
+              Checked {data.coverage.shows_checked} of{" "}
+              {plural(data.coverage.shows, "show")} and{" "}
+              {data.coverage.seasons_checked} of{" "}
+              {plural(data.coverage.seasons, "season")}.{" "}
+              {plural(data.coverage.failed, "check")} failed, and{" "}
+              {plural(data.coverage.missing_dates, "date")}{" "}
+              {data.coverage.missing_dates === 1 ? "was" : "were"} missing or
+              invalid.
+              {data.coverage.truncated
+                ? " Additional source records are outside this bounded selection."
+                : ""}
+            </Text>
+          )}
           <dl>
             {[
               ["Oldest source observation", data.last_success],

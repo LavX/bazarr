@@ -10,6 +10,12 @@ import { AllProviders } from "@/providers";
 import { rawRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import * as files from "@/utilities/files";
+import {
+  chooseSegment,
+  findSelectInput,
+  pickOption,
+  selectInput,
+} from "./selectTestHelpers";
 import Discover from ".";
 
 const envelope = {
@@ -145,7 +151,7 @@ it("opens an exact episode link with original name, number and date without sear
     await screen.findByText("Original air date: 2026-09-01"),
   ).toBeInTheDocument();
   expect(requests).toEqual([]);
-  await user.selectOptions(screen.getByLabelText("Subtitle language"), "eng");
+  await pickOption(user, "Subtitle language", "English");
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
   await waitFor(() => expect(requests).toHaveLength(1));
   expect(requests[0]).toMatchObject({
@@ -160,13 +166,13 @@ it("opens an exact episode link with original name, number and date without sear
 });
 it("adopts a show without selecting an episode and offers its real season list", async () => {
   const { user } = browse();
-  await user.selectOptions(screen.getByLabelText("Browse media"), "show");
-  await user.type(screen.getByLabelText("Search show titles"), "Northern");
+  await chooseSegment(user, "Series");
+  await user.type(screen.getByLabelText("Search series titles"), "Northern");
   await user.click(
     await screen.findByRole("button", { name: "Northern Light (2020)" }),
   );
-  expect(await screen.findByLabelText("Choose season")).toHaveValue("");
-  await user.selectOptions(screen.getByLabelText("Subtitle language"), "eng");
+  expect(await findSelectInput("Choose season")).toHaveValue("");
+  await pickOption(user, "Subtitle language", "English");
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
   expect(requests).toEqual([]);
 });
@@ -187,8 +193,8 @@ it("distinguishes an empty season from a metadata outage and offers confirmed ma
     screen.getByRole("button", { name: "Enter a manual episode" }),
   );
   await user.type(screen.getByLabelText("Season"), "0");
-  await user.type(screen.getByLabelText("Episode"), "3");
-  await user.selectOptions(screen.getByLabelText("Subtitle language"), "eng");
+  await user.type(screen.getByRole("textbox", { name: "Episode" }), "3");
+  await pickOption(user, "Subtitle language", "English");
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
   await user.click(
     screen.getByLabelText(
@@ -228,7 +234,7 @@ it("keeps conflicts blocked and preserves original source numbering for manual r
   expect(
     await screen.findByText(/Source episode identities conflict/),
   ).toBeInTheDocument();
-  await user.selectOptions(screen.getByLabelText("Subtitle language"), "eng");
+  await pickOption(user, "Subtitle language", "English");
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
   expect(
     screen.queryByRole("button", { name: "Enter a manual episode" }),
@@ -272,13 +278,13 @@ it("retires results and pending responses when an exact episode changes while re
   );
   const { user } = browse("/discover?show=100&season=2&episode=1");
   await screen.findByText("Original air date: 2026-09-01");
-  await user.selectOptions(screen.getByLabelText("Subtitle language"), "eng");
+  await pickOption(user, "Subtitle language", "English");
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
   await waitFor(() => expect(finish).toBeDefined());
   await user.click(screen.getByRole("link", { name: "S2 E2: Home" }));
   await screen.findByText("Original air date unavailable");
-  expect(screen.getByLabelText("Episode")).toHaveValue("2");
-  expect(screen.getByLabelText("Subtitle language")).toHaveValue("eng");
+  expect(screen.getByRole("textbox", { name: "Episode" })).toHaveValue("2");
+  expect(selectInput("Subtitle language")).toHaveValue("English");
   finish?.();
   await waitFor(() =>
     expect(
@@ -319,7 +325,7 @@ it("ignores a late episode metadata response after an exact link change", async 
   await user.click(await screen.findByRole("link", { name: "S2 E2: Home" }));
   await screen.findByText("Original air date unavailable");
   finish?.();
-  expect(screen.getByLabelText("Episode")).toHaveValue("2");
+  expect(screen.getByRole("textbox", { name: "Episode" })).toHaveValue("2");
   expect(requests).toEqual([]);
 });
 
@@ -329,7 +335,7 @@ it("keeps an active raw query isolated from episode-link adoption", async () => 
     screen.getByRole("button", { name: "Search providers by release name" }),
   );
   await user.type(screen.getByLabelText("Release name"), "Other.Movie.2024");
-  await user.selectOptions(screen.getByLabelText("Subtitle language"), "eng");
+  await pickOption(user, "Subtitle language", "English");
   await router.navigate("/discover?show=100&season=2&episode=1");
   expect(screen.getByLabelText("Release name")).toHaveValue("Other.Movie.2024");
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
@@ -369,7 +375,7 @@ it.each([
 it("preserves the exact episode through source outages and settings return", async () => {
   const { user } = browse("/discover?show=100&season=2&episode=1");
   await screen.findByText("Original air date: 2026-09-01");
-  await user.selectOptions(screen.getByLabelText("Subtitle language"), "eng");
+  await pickOption(user, "Subtitle language", "English");
   server.use(
     http.get("/api/discover/metadata/shows/100", () =>
       HttpResponse.json({
@@ -389,8 +395,8 @@ it("preserves the exact episode through source outages and settings return", asy
   expect(
     await screen.findByText("Original air date: 2026-09-01"),
   ).toBeInTheDocument();
-  expect(screen.getByLabelText("Episode")).toHaveValue("1");
-  expect(screen.getByLabelText("Subtitle language")).toHaveValue("eng");
+  expect(screen.getByRole("textbox", { name: "Episode" })).toHaveValue("1");
+  expect(selectInput("Subtitle language")).toHaveValue("English");
   expect(requests).toEqual([]);
 });
 
@@ -474,17 +480,14 @@ it.each([
           screen.getByRole("button", { name: "Enter a manual episode" }),
         );
         await user.type(screen.getByLabelText("Season"), "0");
-        await user.type(screen.getByLabelText("Episode"), "3");
+        await user.type(screen.getByRole("textbox", { name: "Episode" }), "3");
         await user.click(
           screen.getByLabelText(
             "I confirm this series IMDb ID and the manual season and episode numbers",
           ),
         );
       }
-      await user.selectOptions(
-        screen.getByLabelText("Subtitle language"),
-        "eng",
-      );
+      await pickOption(user, "Subtitle language", "English");
       await user.click(screen.getByRole("button", { name: "Find subtitles" }));
       await user.click(
         await screen.findByRole("button", { name: "Download SRT" }),
@@ -532,7 +535,7 @@ it.each([
       expect(
         screen.getByText("Original air date: 2026-09-01"),
       ).toBeInTheDocument();
-      expect(screen.getByLabelText("Subtitle language")).toHaveValue("eng");
+      expect(selectInput("Subtitle language")).toHaveValue("English");
       finish?.();
       await waitFor(() =>
         expect(
@@ -586,17 +589,14 @@ it.each([
           screen.getByRole("button", { name: "Enter a manual episode" }),
         );
         await user.type(screen.getByLabelText("Season"), "0");
-        await user.type(screen.getByLabelText("Episode"), "3");
+        await user.type(screen.getByRole("textbox", { name: "Episode" }), "3");
         await user.click(
           screen.getByLabelText(
             "I confirm this series IMDb ID and the manual season and episode numbers",
           ),
         );
       }
-      await user.selectOptions(
-        screen.getByLabelText("Subtitle language"),
-        "eng",
-      );
+      await pickOption(user, "Subtitle language", "English");
       await user.click(screen.getByRole("button", { name: "Find subtitles" }));
       await user.click(
         await screen.findByRole("button", { name: "Download SRT" }),
@@ -645,7 +645,9 @@ it.each([
           ),
         ).toBeChecked();
         expect(screen.getByLabelText("Season")).toHaveValue("0");
-        expect(screen.getByLabelText("Episode")).toHaveValue("3");
+        expect(screen.getByRole("textbox", { name: "Episode" })).toHaveValue(
+          "3",
+        );
         expect(requests[1]).toMatchObject({
           manual_confirmed: true,
           episode_identity: episode,

@@ -286,7 +286,8 @@ def _build_video(imdb_id: str | None, season: int | None, episode: int | None,
                  series_anidb_id: int | None = None,
                  series_anidb_episode_id: int | None = None,
                  *, title_only: bool = False, year: int | None = None,
-                 release_query: bool = False, episode_identity: dict | None = None) -> Video:
+                 release_query: bool = False, episode_identity: dict | None = None,
+                 copy_path: str | None = None) -> Video:
     """Construct a Video for compat fanout.
 
     Preferred path: when the imdb_id resolves to a library entry with a
@@ -304,7 +305,8 @@ def _build_video(imdb_id: str | None, season: int | None, episode: int | None,
     if release_query:
         if (title_only or imdb_id or season is not None or episode is not None or year is not None
                 or moviehash or moviebytesize is not None or series_anidb_id is not None
-                or series_anidb_episode_id is not None or episode_identity is not None):
+                or series_anidb_episode_id is not None or episode_identity is not None
+                or copy_path is not None):
             raise ValueError("A release query cannot adopt identified media or file properties.")
         return _build_release_query_video(query)
     # Normalize up front: clients (Jellyfin plugin) strip 'tt' before
@@ -315,14 +317,14 @@ def _build_video(imdb_id: str | None, season: int | None, episode: int | None,
     if title_only:
         if media_type == "episode":
             identity = episode_identity or {}
-            video = Episode(name="", series=query or "", season=season, episodes=[episode],
+            video = Episode(name=copy_path or "", series=query or "", season=season, episodes=[episode],
                             year=year, series_imdb_id=imdb_id, title=identity.get("title"),
                             imdb_id=identity.get("imdb_id"), tvdb_id=identity.get("tvdb_id"),
                             series_tvdb_id=identity.get("show_tvdb_id"), tmdb_id=identity.get("id"),
                             series_tmdb_id=identity.get("show_id"))
             video.episode_title = identity.get("title")
             return video
-        return Movie(name="", title=query or "", year=year, imdb_id=imdb_id)
+        return Movie(name=copy_path or "", title=query or "", year=year, imdb_id=imdb_id)
     meta = _lookup_library_metadata(imdb_id, media_type, season, episode)
 
     path = meta.get("path") or ""
@@ -696,6 +698,71 @@ _SKIP_FOR_VIRTUAL_VIDEO = frozenset({"embeddedsubtitles"})
 # name: with an allow-list active they are served only when it lists `local`;
 # with no allow-list they follow serve_local_subs unless `local` is excluded.
 LOCAL_PROVIDER = "local"
+
+
+# Release facts a chosen local copy may contribute, and the guessit key each
+# one is read from. Identity is deliberately absent: a copy refines how a
+# release is described, never which title, episode or numbering was confirmed.
+COPY_RELEASE_ATTRIBUTES = (
+    ("release_group", "release_group"),
+    ("source", "source"),
+    ("resolution", "screen_size"),
+    ("video_codec", "video_codec"),
+    ("audio_codec", "audio_codec"),
+    ("edition", "edition"),
+    ("streaming_service", "streaming_service"),
+    ("other", "other"),
+)
+_COPY_STORED_COLUMNS = (("source", "source"), ("resolution", None),
+                        ("video_codec", "video_codec"), ("audio_codec", "audio_codec"))
+
+
+def _copy_release_hints(text: str) -> dict:
+    """Bounded string parsing of one release-bearing name, nothing more."""
+    if not isinstance(text, str) or not text.strip() or len(text) > 500:
+        return {}
+    return _guessit_filename(text.strip())
+
+
+def refine_video_with_copy(video, copy_facts: dict):
+    """Supplement one prebuilt title target with facts from a chosen local copy.
+
+    Only release description, file name, observed size and, when it was
+    computed, the content hash are contributed. Title, series, season, episode
+    and every external identifier are left exactly as the confirmed target
+    established them, so a copy can never redirect the search to another work.
+
+    Every fact comes from the copy the reader picked: the mapped path's own
+    file name first, then its scene name, then the stored release columns. No
+    refiner registry, no media probe, no cache write and no network call.
+
+    ``Video.name`` is read-only and takes part in the video's hash, so the
+    chosen copy's path is supplied to ``_build_video`` at construction instead
+    of being assigned here.
+    """
+    from subtitles.refiners.utils import convert_to_guessit
+
+    path = copy_facts.get("path") or ""
+    hints = _copy_release_hints(os.path.basename(path))
+    scene = _copy_release_hints(copy_facts.get("release"))
+    for attribute, key in COPY_RELEASE_ATTRIBUTES:
+        for source in (hints, scene):
+            value = source.get(key)
+            if value and getattr(video, attribute, None) in (None, "", []):
+                setattr(video, attribute, value)
+    for attribute, key in _COPY_STORED_COLUMNS:
+        stored = copy_facts.get(attribute)
+        # convert_to_guessit returns its argument unchanged on a miss, and the
+        # column can hold the literal string "None" from an older writer.
+        if not stored or stored == "None" or getattr(video, attribute, None):
+            continue
+        setattr(video, attribute, convert_to_guessit(key, stored) if key else stored)
+    size = copy_facts.get("observed_size")
+    if isinstance(size, int) and size > 0:
+        video.size = size
+    if copy_facts.get("file_hash"):
+        _apply_client_moviehash(video, copy_facts["file_hash"])
+    return video
 
 
 def search_title(video, languages, pool, providers, on_outcome):

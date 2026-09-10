@@ -1,10 +1,40 @@
+// Discover.
+//
+// The page is a screening room: the lights are down, one image is lit, and
+// the chrome keeps to the dim edges. Amber is the single lit sign, the one
+// thing a reader can do next, so it is spent on filled actions and on
+// nothing else. Everything the copy says stays; it moves from the middle of
+// the stage to the margins, where it can be read without being in the way.
+
 .discover {
+  // One primary fill per theme, for every filled action on this page and in
+  // the preview modal it opens. Mantine picks a darker shade for filled
+  // buttons in night, which on navy reads as inert; the hero used to carry
+  // its own brighter amber as an exception. Now there is no exception.
+  // Day values first; the night block below overrides them. Values switch on
+  // Mantine's scheme attribute rather than through light-dark(), which here
+  // followed the operating system rather than the reader's chosen appearance.
+  --discover-action-bg: #b36b00;
+  --discover-action-bg-hover: #995c00;
+  --discover-action-fg: #ffffff;
+  --discover-link: var(--mantine-color-brand-7);
+  --discover-stage: #0b0c15;
+  --discover-poster-shadow: 0 10px 24px -10px rgba(18, 17, 37, 0.35);
+  --discover-poster-ring: rgba(18, 17, 37, 0.12);
+  --discover-bar-shadow: 0 1px 2px rgba(18, 17, 37, 0.04);
+  --discover-bar-focus: rgba(179, 107, 0, 0.35);
+  --discover-tab-shadow: 0 1px 2px rgba(18, 17, 37, 0.12);
+  --discover-glow-opacity: 0.4;
+  --discover-conflict: #8a5a00;
+  --discover-wait-ring: rgba(179, 107, 0, 0.55);
+  --discover-wait-text: #8a5a00;
+
   max-width: 1200px;
   margin-inline: auto;
   padding: clamp(16px, 3vw, 40px);
   color: var(--bz-text-primary);
-  caret-color: var(--mantine-color-brand-6);
-  accent-color: var(--mantine-color-brand-6);
+  caret-color: var(--mantine-color-brand-5);
+  accent-color: var(--mantine-color-brand-5);
 
   ::selection {
     background: var(--mantine-color-brand-3);
@@ -12,11 +42,53 @@
   }
 
   :focus-visible {
-    outline: 2px solid var(--mantine-color-brand-6);
+    outline: 2px solid var(--mantine-color-brand-5);
     outline-offset: 3px;
   }
 
-  input,
+  // Mantine's subtle variant is transparent with no resting border, so the
+  // refresh controls, the search-mode switch and "Back to shows" rendered as
+  // plain bold text on a page whose other actions are amber. A resting border
+  // and the link colour make them controls again without promoting them past
+  // the one filled action.
+  button[data-variant="subtle"] {
+    border: 1px solid var(--bz-border-interactive);
+    color: var(--bz-text-secondary);
+    &:hover {
+      background: var(--bz-hover-bg);
+      color: var(--bz-text-primary);
+    }
+  }
+
+  button[data-variant="filled"]:not(:disabled):not([data-disabled]) {
+    // Mantine writes these three on the element's style attribute, so only an
+    // important declaration in a stylesheet outranks them.
+    --button-bg: var(--discover-action-bg) !important;
+    --button-hover: var(--discover-action-bg-hover) !important;
+    --button-color: var(--discover-action-fg) !important;
+    color: var(--discover-action-fg);
+    font-weight: 600;
+  }
+
+  // A primary action that is waiting for input keeps its colour at reduced
+  // strength. Mantine's grey disabled fill reads as a control that is broken,
+  // which on the one button this page exists for is the wrong message.
+  button[data-variant="filled"]:disabled:not([data-loading]),
+  button[data-variant="filled"][data-disabled]:not([data-loading]) {
+    // Hollow: the amber outline says which action this will be, the empty
+    // fill says it is not yet available. Distinct from the filled primary,
+    // from the neutral secondaries, and from any muddy half-amber.
+    background-color: transparent;
+    border: 1px dashed var(--discover-wait-ring);
+    color: var(--discover-wait-text);
+    opacity: 1;
+    cursor: not-allowed;
+  }
+
+  // Checkboxes and radios are drawn boxes, not text fields: stretching one to
+  // 44px turns it into a 20 by 44 bar. Their target floor is carried by the
+  // full-width label below, which is what a pointer or finger actually hits.
+  input:not([type="checkbox"]):not([type="radio"]),
   select,
   button {
     min-height: 44px;
@@ -26,29 +98,112 @@
     font-size: clamp(1.625rem, 3vw, 2rem);
     letter-spacing: -0.03em;
     font-weight: 650;
+    line-height: 1.1;
   }
 
   h2 {
-    font-size: 1.4rem;
+    font-size: 1.5rem;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+    line-height: 1.15;
   }
 
   a {
     text-underline-offset: 0.2em;
   }
+
+  // Prose keeps a readable measure. The feeds explain their own scope, source
+  // and freshness in sentences, and a sentence that runs the full width of a
+  // desktop column is scanned rather than read.
+  p {
+    max-width: 75ch;
+  }
 }
+
+// The preview modal is portalled outside the page, so it declares the same
+// action fill itself: Download SRT in the modal and Download SRT in the
+// results list are one control to the reader and must be one colour.
+.previewModal {
+  --discover-action-bg: #b36b00;
+  --discover-action-bg-hover: #995c00;
+  --discover-action-fg: #ffffff;
+  --discover-wait-ring: rgba(179, 107, 0, 0.55);
+  --discover-wait-text: #8a5a00;
+  button[data-variant="filled"]:disabled:not([data-loading]),
+  button[data-variant="filled"][data-disabled]:not([data-loading]) {
+    background-color: transparent;
+    border: 1px dashed var(--discover-wait-ring);
+    color: var(--discover-wait-text);
+    opacity: 1;
+    cursor: not-allowed;
+  }
+  button[data-variant="filled"]:not(:disabled):not([data-disabled]) {
+    --button-bg: var(--discover-action-bg) !important;
+    --button-hover: var(--discover-action-bg-hover) !important;
+    --button-color: var(--discover-action-fg) !important;
+    color: var(--discover-action-fg);
+    font-weight: 600;
+  }
+}
+
+:global([data-mantine-color-scheme="dark"]) .discover {
+  --discover-action-bg: #f2b560;
+  --discover-action-bg-hover: #fac77f;
+  --discover-action-fg: #21190e;
+  --discover-link: var(--mantine-color-brand-4);
+  --discover-poster-shadow: 0 14px 30px -12px rgba(0, 0, 0, 0.7);
+  --discover-poster-ring: rgba(255, 248, 240, 0.16);
+  --discover-bar-shadow: 0 8px 30px -18px rgba(0, 0, 0, 0.8);
+  --discover-bar-focus: rgba(242, 181, 96, 0.4);
+  --discover-tab-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  --discover-glow-opacity: 0.8;
+  --discover-conflict: #ffd166;
+  --discover-wait-ring: rgba(242, 181, 96, 0.5);
+  --discover-wait-text: rgba(242, 181, 96, 0.8);
+}
+:global([data-mantine-color-scheme="dark"]) .previewModal {
+  --discover-action-bg: #f2b560;
+  --discover-action-bg-hover: #fac77f;
+  --discover-action-fg: #21190e;
+  --discover-wait-ring: rgba(242, 181, 96, 0.5);
+  --discover-wait-text: rgba(242, 181, 96, 0.8);
+}
+
+.visuallyHidden {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+// ---------------------------------------------------------------------------
+// Masthead and search
+// ---------------------------------------------------------------------------
 
 .header {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 20px;
+  gap: 12px 24px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+  > div {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
 }
 
 .intro {
-  margin-top: 8px;
-  color: var(--bz-text-secondary);
-  max-width: 65ch;
+  color: var(--bz-text-tertiary);
+  font-size: 0.9375rem;
 }
 
 .settingsLink {
@@ -56,18 +211,874 @@
   align-items: center;
   min-height: 44px;
   flex-shrink: 0;
+  color: var(--discover-link);
+}
+
+.search {
+  margin-bottom: 20px;
+}
+
+// One bar, two segments: what to search, and the title. Both keep their real
+// labels for assistive technology; the bar carries the visual affordance and
+// one shared focus ring so a keyboard reader sees the whole control light up.
+.searchBar {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  padding: 5px;
+  border-radius: 16px;
+  background: var(--bz-surface-raised);
+  border: 1px solid var(--bz-border-interactive);
+  box-shadow: var(--discover-bar-shadow);
+  transition:
+    border-color var(--bz-duration-normal) var(--bz-ease-standard),
+    box-shadow var(--bz-duration-normal) var(--bz-ease-standard);
+  &:focus-within {
+    border-color: var(--mantine-color-brand-5);
+    box-shadow: 0 0 0 2px var(--discover-bar-focus);
+  }
+  :focus-visible {
+    outline: none;
+  }
+  input,
+  select {
+    border: 0;
+    background: transparent;
+    min-height: 48px;
+    font-size: 1.0625rem;
+    &:focus {
+      border: 0;
+      background: transparent;
+    }
+  }
+  input::placeholder {
+    color: var(--bz-text-tertiary);
+    opacity: 1;
+  }
+}
+
+.searchScope {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.searchField {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+}
+
+.searchFoot {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 24px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  padding-inline: 6px;
+  > p {
+    color: var(--bz-text-tertiary);
+    font-size: 0.8125rem;
+  }
+  a {
+    font-size: 0.875rem;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    color: var(--discover-link);
+  }
+}
+
+.searchStatus {
+  margin-block: 12px;
+  &:empty {
+    display: none;
+  }
+}
+
+.candidates {
+  margin-top: 8px;
+}
+
+.candidate {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  padding-block: 14px;
+  border-top: 1px solid var(--bz-border-card);
+  > span:first-child {
+    display: grid;
+    aspect-ratio: 2 / 3;
+    border-radius: 6px;
+    overflow: hidden;
+    background: var(--bz-surface-raised);
+    > * {
+      grid-area: 1 / 1;
+    }
+    img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+  }
+}
+
+.searchCaveat {
+  color: var(--bz-text-tertiary);
+  font-size: 0.8125rem;
+  margin-top: 0;
+  padding-inline: 6px;
+}
+
+// ---------------------------------------------------------------------------
+// The feature
+// ---------------------------------------------------------------------------
+
+.filterRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  flex-wrap: wrap;
+  margin-block: 4px 14px;
+  > p {
+    color: var(--bz-text-tertiary);
+    font-size: 0.8125rem;
+    margin: 0;
+  }
+}
+
+.filterTabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--bz-surface-raised);
+  border: 1px solid var(--bz-border-card);
+  button {
+    min-height: 44px;
+    padding: 0 16px;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--bz-text-secondary);
+    font: inherit;
+    font-size: 0.875rem;
+    font-weight: 550;
+    cursor: pointer;
+    transition:
+      background var(--bz-duration-normal) var(--bz-ease-standard),
+      color var(--bz-duration-normal) var(--bz-ease-standard);
+    &[aria-pressed="true"] {
+      background: var(--bz-surface-card);
+      color: var(--bz-text-primary);
+      box-shadow: var(--discover-tab-shadow);
+    }
+    &:hover {
+      color: var(--bz-text-primary);
+    }
+    &:focus-visible {
+      outline-offset: -2px;
+    }
+  }
+}
+
+// The stage holds the feature and, behind it, a blurred copy of its own
+// backdrop, so the artwork's colour spills past the frame the way light
+// spills past a screen. It is derived from the real image, not painted.
+.stage {
+  position: relative;
+  isolation: isolate;
+  margin-block: 0 36px;
+  &[data-artwork="true"]::before {
+    content: "";
+    position: absolute;
+    inset: -22% -1.5%;
+    z-index: -1;
+    background: var(--feature-backdrop) center / cover no-repeat;
+    filter: blur(44px) saturate(1.8);
+    opacity: var(--discover-glow-opacity);
+    // closest-side: the ellipse touches all four edges of the box, so the
+    // light is fully gone by the edge and never ends in a band.
+    mask-image: radial-gradient(
+      ellipse closest-side at center,
+      #000 18%,
+      transparent 100%
+    );
+    pointer-events: none;
+  }
+}
+
+.feature {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  align-items: flex-end;
+  overflow: hidden;
+  width: 100%;
+  max-width: 100%;
+  aspect-ratio: 16 / 9;
+  min-height: 380px;
+  max-height: 560px;
+  border-radius: 20px;
+  background: var(--discover-stage);
+  color: #fff8f0;
+  box-shadow: 0 30px 70px -30px rgba(0, 0, 0, 0.75);
+  > img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: 50% 22%;
+    z-index: -2;
+    animation: featureIn 1100ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  // Two scrims: one rising from the floor so the title has a base, one from
+  // the left so the copy never sits on the brightest part of the frame.
+  &::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background:
+      linear-gradient(
+        to top,
+        rgba(11, 12, 21, 0.97) 0%,
+        rgba(11, 12, 21, 0.72) 32%,
+        rgba(11, 12, 21, 0.18) 62%,
+        rgba(11, 12, 21, 0) 85%
+      ),
+      linear-gradient(
+        to right,
+        rgba(11, 12, 21, 0.55) 0%,
+        rgba(11, 12, 21, 0) 60%
+      );
+  }
+
+  // No backdrop, no scrim. The panel keeps its shape on the page's own
+  // surface, so an absent image reads as a quiet feature rather than as a
+  // black rectangle that failed to load, in either theme.
+  &[data-artwork="false"] {
+    aspect-ratio: auto;
+    min-height: 0;
+    background: linear-gradient(
+      160deg,
+      var(--bz-surface-raised),
+      var(--bz-surface-card)
+    );
+    border: 1px solid var(--bz-border-card);
+    box-shadow: none;
+    color: var(--bz-text-primary);
+    &::after {
+      display: none;
+    }
+    .featureCopy {
+      padding-top: clamp(24px, 4vw, 40px);
+      > p {
+        color: var(--bz-text-secondary);
+      }
+    }
+  }
+}
+
+.featureCopy {
+  padding: clamp(20px, 4vw, 40px);
+  padding-top: 96px;
+  min-width: 0;
+  max-width: 40rem;
+  animation: riseIn 900ms 140ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  h2 {
+    font-size: clamp(2.25rem, 1.6rem + 3.4vw, 4rem);
+    font-weight: 700;
+    line-height: 1.02;
+    letter-spacing: -0.03em;
+    text-wrap: balance;
+    overflow-wrap: anywhere;
+    max-width: 18ch;
+    text-shadow: 0 2px 28px rgba(0, 0, 0, 0.45);
+  }
+  > p {
+    margin-top: 12px;
+    color: rgba(255, 248, 240, 0.86);
+    font-size: 0.9375rem;
+  }
+  button {
+    margin-top: 22px;
+    min-height: 48px;
+    padding-inline: 22px;
+    font-size: 0.9375rem;
+    &:focus-visible {
+      outline-color: #fff8f0;
+    }
+  }
+}
+
+.featureMeta {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  font-weight: 550;
+}
+
+.featureOverview {
+  max-width: 56ch;
+}
+
+@keyframes featureIn {
+  from {
+    opacity: 0;
+    transform: scale(1.06);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes riseIn {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sections
+// ---------------------------------------------------------------------------
+
+.spotlight {
+  margin-block: 0 36px;
+}
+
+.trending {
+  margin-block: 0 56px;
+}
+
+.sectionHead {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px 24px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  > div:first-child {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+}
+
+.sectionMeta {
+  color: var(--bz-text-tertiary);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+  margin: 0;
+}
+
+.sectionTools {
+  display: flex;
+  align-items: center;
+  gap: 8px 12px;
+  flex-wrap: wrap;
+  button[data-variant="subtle"] {
+    font-size: 0.8125rem;
+    padding-inline: 12px;
+    font-weight: 550;
+  }
+}
+
+.regionSelect {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  label {
+    margin: 0;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--bz-text-secondary);
+    white-space: nowrap;
+  }
+  select {
+    font-size: 0.875rem;
+    max-width: 15rem;
+  }
+}
+
+.caveat {
+  color: var(--bz-text-tertiary);
+  font-size: 0.8125rem;
+  margin-bottom: 12px;
+}
+
+.feedStatus {
+  margin-bottom: 14px;
+  p {
+    color: var(--bz-text-secondary);
+    font-size: 0.875rem;
+  }
+  &:empty {
+    display: none;
+  }
+}
+
+.stamp {
+  color: var(--bz-text-tertiary);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A date is one value. Letting it break mid-value renders 2026- above 09-08,
+   which reads as two facts. Source dates are also tabular, so they line up. */
+.dateValue {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A caption is a row of values, and the separators are drawn by the layout
+   rather than written into the text, so a line can never end on one. */
+.captionValues {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 0.5ch;
+  > * {
+    white-space: nowrap;
+  }
+  > * + *::before {
+    content: "\00b7";
+    margin-inline-end: 0.5ch;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Poster wall
+// ---------------------------------------------------------------------------
+
+.posterGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(126px, 1fr));
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  gap: 26px 16px;
+  li {
+    min-width: 0;
+  }
+}
+
+.poster {
+  scroll-margin-top: calc(var(--app-shell-header-height, 70px) + 16px);
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-radius: 12px;
+  padding: 0;
+  background: transparent;
+  color: var(--bz-text-primary);
+  font: inherit;
+  cursor: pointer;
+  strong {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    margin-top: 10px;
+    font-size: 0.875rem;
+    font-weight: 550;
+    line-height: 1.3;
+    overflow-wrap: anywhere;
+    transition: color var(--bz-duration-normal) var(--bz-ease-standard);
+  }
+  > .captionValues {
+    font-size: 0.75rem;
+    color: var(--bz-text-tertiary);
+    margin-top: 3px;
+    font-variant-numeric: tabular-nums;
+  }
+  &:hover img {
+    transform: scale(1.045);
+  }
+  &:hover .posterArt {
+    box-shadow:
+      var(--discover-poster-shadow),
+      0 0 0 1px var(--discover-poster-ring);
+  }
+  &:hover strong {
+    color: var(--discover-link);
+  }
+}
+
+/* The art slot stacks its two children in one cell: the missing-art treatment
+   is the floor, and the image covers it once it paints. */
+.posterArt {
+  position: relative;
+  display: grid;
+  aspect-ratio: 2 / 3;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bz-surface-raised);
+  box-shadow: var(--discover-poster-shadow);
+  transition: box-shadow var(--bz-duration-card) var(--bz-ease-standard);
+  > * {
+    grid-area: 1 / 1;
+  }
+  img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    transition:
+      transform 600ms cubic-bezier(0.16, 1, 0.3, 1),
+      opacity var(--bz-duration-card) var(--bz-ease-standard);
+  }
+}
+
+// The weekly rank, drawn from the feed rather than counted by the layout.
+.rank {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 1;
+  min-width: 26px;
+  height: 26px;
+  padding-inline: 7px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(11, 12, 21, 0.78);
+  color: #fff8f0;
+  font-size: 0.75rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  backdrop-filter: blur(6px);
+}
+
+.pendingArt {
+  opacity: 0;
+}
+
+.missingArtHidden {
+  display: none;
+}
+
+.missingArt,
+.artPending {
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+  gap: 12px;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  color: var(--bz-text-tertiary);
+  font-size: 0.75rem;
+  text-align: center;
+  svg {
+    width: 22px;
+    height: 22px;
+  }
+}
+
+// An image that has not painted yet is pending, not missing, and the slot
+// must not say otherwise while it waits. Same surface, same icon, no claim.
+.artPending {
+  svg {
+    opacity: 0.4;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Release calendar
+// ---------------------------------------------------------------------------
+
+.calendar {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  border-top: 1px solid var(--bz-border-card);
+  li {
+    border-bottom: 1px solid var(--bz-border-card);
+  }
+  li[data-first-of-date="true"] + li,
+  li + li[data-first-of-date="true"] {
+    border-top: 0;
+  }
+  li[data-first-of-date="true"]:not(:first-child) {
+    margin-top: 10px;
+    border-top: 1px solid var(--bz-border-card);
+  }
+}
+
+.calendarRow {
+  scroll-margin-top: calc(var(--app-shell-header-height, 70px) + 16px);
+  width: 100%;
+  display: grid;
+  grid-template-columns: 6.25rem 40px minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+  text-align: left;
+  border: 0;
+  border-radius: 10px;
+  padding: 8px 8px;
+  min-height: 60px;
+  background: transparent;
+  color: var(--bz-text-primary);
+  font: inherit;
+  cursor: pointer;
+  transition: background var(--bz-duration-normal) var(--bz-ease-standard);
+  &:hover {
+    background: var(--bz-hover-bg);
+  }
+  &:hover strong {
+    color: var(--discover-link);
+  }
+  strong {
+    display: block;
+    font-size: 0.9375rem;
+    font-weight: 550;
+    overflow-wrap: anywhere;
+    transition: color var(--bz-duration-normal) var(--bz-ease-standard);
+  }
+}
+
+// The date leads each row. The first row of a day carries it at full weight;
+// the rows beneath keep it, quieter, so every row still reads on its own.
+.calendarDate {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.875rem;
+  color: var(--bz-text-tertiary);
+  li[data-first-of-date="true"] & {
+    color: var(--bz-text-primary);
+    font-weight: 600;
+  }
+}
+
+.calendarArt {
+  display: grid;
+  aspect-ratio: 2 / 3;
+  width: 40px;
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--bz-surface-raised);
+  > * {
+    grid-area: 1 / 1;
+  }
+  img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  .missingArt,
+  .artPending {
+    gap: 0;
+    padding: 4px;
+    font-size: 0;
+    svg {
+      width: 14px;
+      height: 14px;
+    }
+  }
+}
+
+.calendarFacts {
+  min-width: 0;
+}
+
+.calendarMeta {
+  font-size: 0.8125rem;
+  color: var(--bz-text-tertiary);
+  justify-content: flex-end;
+}
+
+// ---------------------------------------------------------------------------
+// Episode ledger
+// ---------------------------------------------------------------------------
+
+/* An episode is a set of values: show, season and episode, title, air date.
+   Rows carry them across their own width, two abreast where the width allows. */
+.episodeList {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  gap: 0 32px;
+  border-top: 1px solid var(--bz-border-card);
+  li {
+    min-width: 0;
+    border-bottom: 1px solid var(--bz-border-card);
+  }
+}
+
+.episodeRow {
+  scroll-margin-top: calc(var(--app-shell-header-height, 70px) + 16px);
+  width: 100%;
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 14px;
+  align-items: center;
+  text-align: left;
+  border: 0;
+  border-radius: 10px;
+  padding: 10px 8px;
+  min-height: 60px;
+  background: transparent;
+  color: var(--bz-text-primary);
+  font: inherit;
+  cursor: pointer;
+  transition: background var(--bz-duration-normal) var(--bz-ease-standard);
+  &:hover {
+    background: var(--bz-hover-bg);
+  }
+  &:hover strong {
+    color: var(--discover-link);
+  }
+  strong {
+    display: block;
+    font-size: 0.9375rem;
+    font-weight: 550;
+    overflow-wrap: anywhere;
+    transition: color var(--bz-duration-normal) var(--bz-ease-standard);
+  }
+}
+
+.episodeArt {
+  display: grid;
+  aspect-ratio: 2 / 3;
+  width: 44px;
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--bz-surface-raised);
+  > * {
+    grid-area: 1 / 1;
+  }
+  img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  .missingArt,
+  .artPending {
+    gap: 0;
+    padding: 4px;
+    font-size: 0;
+    svg {
+      width: 14px;
+      height: 14px;
+    }
+  }
+}
+
+.episodeFacts {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: 0.8125rem;
+  color: var(--bz-text-secondary);
+  overflow-wrap: anywhere;
+  > span:last-child {
+    color: var(--bz-text-tertiary);
+  }
+}
+
+.episodeCode {
+  font-variant-numeric: tabular-nums;
+  font-weight: 550;
+  color: var(--bz-text-primary);
+}
+
+.episodeConflict {
+  color: var(--discover-conflict);
+}
+
+// ---------------------------------------------------------------------------
+// Freshness, attribution
+// ---------------------------------------------------------------------------
+
+.feedDates {
+  color: var(--bz-text-tertiary);
+  margin-top: 16px;
+  font-size: 0.75rem;
+  summary {
+    min-height: 44px;
+    align-content: center;
+    cursor: pointer;
+    width: fit-content;
+    padding-inline-end: 8px;
+  }
+  dl {
+    font-variant-numeric: tabular-nums;
+  }
+  dl > div {
+    margin-block: 8px;
+  }
+  dd {
+    margin: 0;
+  }
+}
+
+.attribution {
+  margin-block: 32px 8px;
+  color: var(--bz-text-tertiary);
+  max-width: 70ch;
+  a {
+    display: inline-flex;
+    min-height: 44px;
+    align-items: center;
+  }
+  img {
+    width: 110px;
+    height: auto;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Retrieval form and results
+// ---------------------------------------------------------------------------
+
+.modeControls {
+  margin-block: 8px 12px;
+  h2,
+  p {
+    font-size: 1.25rem;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+  }
+  button {
+    height: auto;
+    white-space: normal;
+    span {
+      white-space: normal;
+    }
+  }
 }
 
 .searchForm {
   padding: clamp(16px, 2.5vw, 28px);
-  border: 1px solid var(--bz-border-interactive);
+  border: 1px solid var(--bz-border-card);
   border-radius: 16px;
   background: var(--bz-surface-raised);
 }
 
 .targetFields {
   display: grid;
-  grid-template-columns: minmax(120px, 0.65fr) minmax(180px, 1.25fr) minmax(
+  // The first column holds the segmented Movie / Episode pair, which needs
+  // its full width rather than a fraction that clips the second label.
+  grid-template-columns: minmax(176px, 0.7fr) minmax(180px, 1.25fr) minmax(
       180px,
       1fr
     );
@@ -76,7 +1087,7 @@
 
   &:has(.episodeFields) {
     grid-template-columns:
-      minmax(110px, 0.7fr) minmax(150px, 1.2fr) minmax(145px, 1fr)
+      minmax(176px, 0.75fr) minmax(150px, 1.2fr) minmax(145px, 1fr)
       minmax(160px, 1fr);
   }
 }
@@ -172,57 +1183,6 @@
   overflow-wrap: anywhere;
 }
 
-@media (max-width: 1000px) {
-  .targetFields,
-  .targetFields:has(.episodeFields) {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 600px) {
-  .header {
-    align-items: start;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .targetFields,
-  .targetFields:has(.episodeFields) {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .submitRow button {
-    width: 100%;
-  }
-
-  .evidence dl > div {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 2px;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .discover *,
-  .discover *::before,
-  .discover *::after {
-    animation: none !important;
-    transition: none !important;
-  }
-}
-
-.modeControls {
-  margin-block: 24px 12px;
-
-  button {
-    height: auto;
-    white-space: normal;
-
-    span {
-      white-space: normal;
-    }
-  }
-}
-
 .releaseFields {
   input::placeholder {
     color: var(--bz-text-secondary);
@@ -265,26 +1225,27 @@
   }
 }
 
-.episodeRow {
-  padding-block: 0.5rem;
-  border-bottom: 1px solid var(--bz-border-interactive);
-  a {
-    overflow-wrap: anywhere;
-  }
-}
-
 .manualConfirmation {
   label {
     min-height: 44px;
     display: flex;
     align-items: center;
+    flex: 1;
+  }
+  input[type="checkbox"] {
+    width: 22px;
+    height: 22px;
   }
 }
 
+// ---------------------------------------------------------------------------
+// Page layout and the local rail
+// ---------------------------------------------------------------------------
+
 .homepageLayout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 210px;
-  gap: clamp(20px, 3vw, 36px);
+  grid-template-columns: minmax(0, 1fr) 252px;
+  gap: clamp(20px, 3vw, 40px);
   align-items: start;
 }
 
@@ -292,253 +1253,187 @@
   min-width: 0;
 }
 
+// The reader's own Bazarr+, beside the discovery. A status surface: what is
+// happening now, what arrived, what is waiting, what needs attention, each
+// with its own mark, the numbers carrying the weight in tabular figures.
 .localSummary {
-  border-left: 1px solid var(--bz-border-interactive);
-  padding-left: 24px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 0;
+  padding: 18px 18px 8px;
+  border: 1px solid var(--bz-border-card);
+  border-radius: 16px;
+  background: var(--bz-surface-raised);
   h2 {
     font-size: 1.125rem;
+    letter-spacing: -0.01em;
   }
   p {
     color: var(--bz-text-secondary);
   }
   a {
     min-height: 44px;
-    display: flex;
+    display: inline-flex;
     align-items: center;
   }
-}
-
-.homepageSearch {
-  margin-bottom: 12px;
-  section {
-    margin-bottom: 8px !important;
-  }
-  h2 {
-    font-size: 1.125rem;
-  }
-  section > p:last-child {
-    display: none;
-  }
-  form {
-    display: grid;
-    grid-template-columns: 130px minmax(0, 1fr);
-    align-items: end;
-    gap: 16px;
-  }
-  .mediaFilter {
-    margin-bottom: 0;
-  }
-}
-
-.trending {
-  margin-block: 16px 40px;
-}
-.trendingFilters {
-  gap: 8px;
-  margin-bottom: 16px;
-  > div {
-    display: flex;
-    gap: 16px;
-  }
-  button {
-    color: var(--bz-text-secondary);
-    background: transparent;
-    border: 0;
-    border-bottom: 2px solid transparent;
-    padding: 8px 2px;
-    font: inherit;
-    cursor: pointer;
-    &[aria-pressed="true"] {
-      color: var(--bz-text-primary);
-      border-color: var(--mantine-color-brand-5);
-    }
-    &:hover {
-      color: var(--bz-text-primary);
-    }
-  }
-  > p {
-    color: var(--bz-text-secondary);
-  }
-}
-
-.feature {
-  position: relative;
-  isolation: isolate;
-  display: flex;
-  align-items: flex-end;
-  overflow: hidden;
-  min-height: 340px;
-  border-radius: 12px;
-  background: #171a25;
-  color: #fff8f0;
-  > img {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    z-index: -2;
-  }
-  &::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    z-index: -1;
-    background: linear-gradient(
-      0deg,
-      rgba(12, 13, 19, 0.98),
-      rgba(12, 13, 19, 0.8) 45%,
-      rgba(12, 13, 19, 0.6) 100%
-    );
-  }
-}
-
-.featureCopy {
-  padding: clamp(20px, 3vw, 32px);
-  padding-top: 80px;
-  min-width: 0;
-  h2 {
-    font-size: clamp(1.8rem, 3vw, 2.8rem);
-    line-height: 1.1;
-    letter-spacing: -0.03em;
-    text-wrap: balance;
-    overflow-wrap: anywhere;
-    max-width: 22ch;
-  }
-  > p {
-    margin-top: 12px;
-    color: #f2e7dc;
-    font-size: 0.875rem;
-  }
-  button {
-    margin-top: 20px;
-    background: #f2b560;
-    color: #21190e;
-    &:hover {
-      background: #fac77f;
-    }
-    &:focus-visible {
-      outline-color: #fff8f0;
-    }
-  }
-}
-.featureOverview {
-  max-width: 60ch;
-}
-.railHeading {
-  margin-block: 24px 12px;
-}
-.feedStatus {
-  margin-bottom: 16px;
-  p {
-    color: var(--bz-text-secondary);
-  }
-}
-.posterGrid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  gap: 24px 14px;
-  li {
-    min-width: 0;
-  }
-}
-.poster {
-  scroll-margin-top: calc(var(--app-shell-header-height, 70px) + 16px);
-  width: 100%;
-  text-align: left;
-  border: 0;
-  border-radius: 8px;
-  padding: 0;
-  background: transparent;
-  color: var(--bz-text-primary);
-  font: inherit;
-  cursor: pointer;
   strong {
-    display: block;
-    margin-top: 10px;
-    font-size: 0.875rem;
-    font-weight: 550;
-    overflow-wrap: anywhere;
-  }
-  > span:last-child {
-    display: block;
-    font-size: 0.75rem;
-    color: var(--bz-text-secondary);
-    margin-top: 4px;
-  }
-  &:hover strong {
-    color: light-dark(
-      var(--mantine-color-brand-7),
-      var(--mantine-color-brand-4)
-    );
-  }
-}
-.posterArt {
-  display: block;
-  aspect-ratio: 2 / 3;
-  border-radius: 8px;
-  overflow: hidden;
-  background: var(--bz-surface-raised);
-  img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    display: block;
-  }
-}
-.missingArt {
-  display: flex;
-  height: 100%;
-  flex-direction: column;
-  gap: 14px;
-  align-items: center;
-  justify-content: center;
-  padding: 12px;
-  color: var(--bz-text-secondary);
-  font-size: 0.75rem;
-  text-align: center;
-  svg {
-    width: 24px;
-    height: 24px;
-  }
-}
-.feedDates {
-  color: var(--bz-text-secondary);
-  margin-top: 20px;
-  font-size: 0.75rem;
-  summary {
-    min-height: 44px;
-    align-content: center;
-    cursor: pointer;
-  }
-  dl {
     font-variant-numeric: tabular-nums;
   }
-  dl > div {
-    margin-block: 8px;
-  }
-  dd {
+  ul {
+    list-style: none;
+    padding: 0;
     margin: 0;
   }
 }
-.attribution {
-  margin-block: 24px;
+
+.panelHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 12px;
+  flex-wrap: wrap;
+}
+
+.panelLink {
   color: var(--bz-text-secondary);
-  max-width: 70ch;
-  a {
-    display: inline-flex;
-    min-height: 44px;
-    align-items: center;
+  font-size: 0.875rem;
+  text-decoration-color: var(--bz-border-hover);
+  &:hover {
+    color: var(--bz-text-primary);
   }
-  img {
-    width: 110px;
-    height: auto;
+}
+
+.panelRecovery {
+  color: var(--discover-link);
+  font-weight: 600;
+  font-size: 0.875rem;
+}
+
+.panelIcon {
+  width: 16px;
+  height: 16px;
+  color: var(--bz-text-tertiary);
+  flex: 0 0 auto;
+  margin-top: 3px;
+}
+
+.nowTile {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 12px;
+  padding-block: 10px 14px;
+}
+
+.nowBody {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  > p {
+    margin: 0;
+  }
+}
+
+.statRow {
+  display: flex;
+  gap: 4px 16px;
+  flex-wrap: wrap;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-width: 0;
+}
+
+.statValue {
+  font-size: 1.5rem;
+  font-weight: 650;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--bz-text-primary);
+  &[data-unknown="true"] {
+    font-size: 0.9375rem;
+    font-weight: 600;
+    line-height: 1.2;
+    padding-block: 5px 4px;
+    color: var(--bz-text-secondary);
+  }
+}
+
+.statLabel {
+  font-size: 0.75rem;
+  color: var(--bz-text-tertiary);
+}
+
+.panelNote {
+  color: var(--bz-text-tertiary);
+}
+
+.panelSummary {
+  cursor: pointer;
+  min-height: 44px;
+  align-content: center;
+  color: var(--bz-text-secondary);
+  border-top: 1px solid var(--bz-border-card);
+  font-weight: 550;
+}
+
+.panelGroup {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 6px 12px;
+  padding-block: 12px 14px;
+  border-top: 1px solid var(--bz-border-card);
+  &[data-tone="attention"] .panelIcon {
+    color: var(--discover-conflict);
+  }
+}
+
+.panelGroupHead {
+  display: contents;
+}
+
+.panelGroupLabel {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--bz-text-secondary);
+  align-self: center;
+}
+
+.panelGroupBody {
+  grid-column: 2;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  li {
+    margin-bottom: 8px !important;
+  }
+}
+
+.wantedLine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 6px;
+}
+
+.bigNumber {
+  font-size: 1.625rem;
+  font-weight: 650;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--bz-text-primary);
+}
+
+.homepageSearch {
+  margin-bottom: 8px;
+  .sourceAttribution {
+    display: none;
   }
 }
 
@@ -579,31 +1474,58 @@
   overflow: hidden;
 }
 
+// ---------------------------------------------------------------------------
+// Breakpoints
+// ---------------------------------------------------------------------------
+
 @media (max-width: 1100px) {
+  // One column. The content wrapper dissolves so its sections and the local
+  // summary are siblings in one flex column, and the order is set here:
+  // search, the spotlight, then the local summary, then the feeds. Discovery
+  // leads; the reader's own housekeeping follows it. On the selected-title
+  // page the summary comes last, because the reader came for the title.
   .homepageLayout {
-    grid-template-columns: minmax(0, 1fr);
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+  // With the wrapper dissolved its children are the flex items, and a flex
+  // item's default minimum width is its content: the feature's aspect ratio
+  // would transfer its minimum height into a width wider than the screen.
+  .homepageContent {
+    display: contents;
+  }
+  .homepageLayout > *,
+  .homepageContent > * {
+    min-width: 0;
+    max-width: 100%;
+  }
+  .homepageSearch {
+    order: -3;
+  }
+  .spotlight {
+    order: -2;
+  }
+  .homepageLayout[data-page="home"] .localSummary {
+    order: -1;
+  }
+  .homepageLayout[data-page="title"] .localSummary {
+    order: 1;
+    margin-top: 24px;
   }
   .localSummary {
-    grid-row: 1;
-    border-left: 0;
-    padding-left: 0;
-    padding-bottom: 16px;
-    border-bottom: 1px solid var(--bz-border-interactive);
-    flex-direction: row;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 4px 20px;
-    p {
-      display: none;
-    }
-    h2 {
-      width: 100%;
-    }
-    a {
-      font-size: 0.875rem;
-    }
+    margin-bottom: 36px;
+    padding: 14px 16px 4px;
   }
 }
+
+@media (max-width: 1000px) {
+  .targetFields,
+  .targetFields:has(.episodeFields) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 47.99em) {
   .librarySearch {
     display: none;
@@ -613,41 +1535,470 @@
     margin-right: 0;
   }
 }
-@media (max-width: 600px) {
-  .posterGrid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+
+@media (max-width: 700px) {
+  // Below this width the meta drops under the title. The date and the art
+  // span both rows so the row stays one compact unit rather than a title
+  // centred beside a hole.
+  .calendarRow {
+    grid-template-columns: 5.5rem 36px minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    gap: 2px 12px;
+    align-items: center;
   }
-  .feature {
-    min-height: 300px;
+  .calendarDate,
+  .calendarArt {
+    grid-row: 1 / span 2;
   }
-  .featureCopy {
-    padding: 20px;
-    padding-top: 60px;
+  .calendarFacts {
+    align-self: end;
   }
-  .trendingFilters {
-    > div {
-      gap: 12px;
-    }
+  .calendarMeta {
+    grid-column: 3;
+    justify-content: flex-start;
+    align-self: start;
+  }
+  .episodeList {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
 @media (max-width: 600px) {
   .header {
-    flex-direction: row;
-    align-items: start;
-    gap: 12px;
-  }
-  .header .settingsLink {
-    font-size: 0.875rem;
+    margin-bottom: 14px;
   }
   .intro {
     font-size: 0.875rem;
   }
-  .homepageSearch form {
+  .targetFields,
+  .targetFields:has(.episodeFields) {
     grid-template-columns: minmax(0, 1fr);
-    gap: 10px;
   }
-  .homepageSearch .mediaFilter {
+  .submitRow button {
+    width: 100%;
+  }
+  .evidence dl > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+  .discover h2 {
+    font-size: 1.375rem;
+  }
+  .feature {
+    aspect-ratio: 4 / 5;
+    min-height: 400px;
+    max-height: 600px;
+    border-radius: 16px;
+    > img {
+      object-position: 50% 30%;
+    }
+  }
+  .featureCopy {
+    padding: 20px;
+    padding-top: 120px;
+    h2 {
+      max-width: 12ch;
+    }
+    button {
+      width: 100%;
+    }
+  }
+  .stage {
+    margin-bottom: 28px;
+  }
+  .trending {
+    margin-bottom: 44px;
+  }
+  .posterGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 20px 12px;
+  }
+  .filterTabs button {
+    padding: 0 12px;
+  }
+  .sectionTools {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .regionSelect select {
+    max-width: 12rem;
+  }
+}
+
+@media (max-width: 400px) {
+  .searchBar {
+    padding: 4px;
+  }
+  .searchScope select {
+    padding-inline: 10px 26px;
+    font-size: 0.875rem;
+  }
+  .searchField {
+    // Mantine reserves a fixed slot for the leading icon; at this width the
+    // placeholder needs the pixels more than the icon needs its margin.
+    --input-left-section-width: 30px;
+  }
+  .searchBar input {
+    font-size: 0.9375rem;
+  }
+  .calendarRow {
+    grid-template-columns: 5.25rem 32px minmax(0, 1fr);
+    gap: 10px;
+    padding-inline: 4px;
+  }
+  .calendarDate {
+    font-size: 0.8125rem;
+  }
+  .episodeRow {
+    padding-inline: 4px;
+    gap: 12px;
+  }
+}
+
+// Reduced motion: no entrance, no drift, no scale. The final frame is the
+// page, and it is the same page.
+@media (prefers-reduced-motion: reduce) {
+  .discover *,
+  .discover *::before,
+  .discover *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+  .poster:hover img {
+    transform: none;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Choices: the themed select and the segmented pairs
+// ---------------------------------------------------------------------------
+
+.select {
+  label {
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+}
+
+.selectInput {
+  min-height: 44px;
+  background: var(--bz-surface-raised);
+  border: 1px solid var(--bz-border-interactive);
+  border-radius: 10px;
+  color: var(--bz-text-primary);
+  font-size: 0.9375rem;
+  &::placeholder {
+    color: var(--bz-text-tertiary);
+    opacity: 1;
+  }
+  &:focus,
+  &:focus-within {
+    border-color: var(--mantine-color-brand-5);
+  }
+}
+
+.selectDropdown {
+  background: var(--bz-surface-overlay);
+  border: 1px solid var(--bz-border-card);
+  border-radius: 12px;
+  padding: 4px;
+  box-shadow: var(--bz-shadow-float);
+  color: var(--bz-text-primary);
+}
+
+.selectOption {
+  min-height: 40px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  font-size: 0.9375rem;
+  color: var(--bz-text-primary);
+  &[data-combobox-active] {
+    background: var(--bz-hover-bg-emphasis);
+  }
+  &[data-combobox-selected] {
+    background: var(--bz-hover-bg-emphasis);
+    font-weight: 600;
+  }
+  &[data-combobox-disabled] {
+    color: var(--bz-text-disabled);
+  }
+}
+
+// Two-way choices are a segmented pair, not a list: both answers are visible
+// and one press away, and arrow keys move between them as a radio group.
+.segmented {
+  background: var(--bz-surface-raised);
+  border: 1px solid var(--bz-border-card);
+  border-radius: 12px;
+  padding: 3px;
+  --sc-transition-duration: 150ms;
+}
+
+.segmentedLabel {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding-inline: 16px;
+  font-weight: 550;
+  font-size: 0.9375rem;
+  color: var(--bz-text-secondary);
+  &[data-active] {
+    color: var(--bz-text-primary);
+  }
+}
+
+.segmentedIndicator {
+  background: var(--bz-surface-card);
+  border-radius: 9px;
+  box-shadow: var(--discover-tab-shadow);
+}
+
+.searchScope .segmented {
+  height: 100%;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  display: inline-flex;
+  align-items: stretch;
+  .segmentedLabel {
+    min-height: 48px;
+    height: 100%;
+  }
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.fieldLabel {
+  font-weight: 600;
+  font-size: 0.875rem;
+}
+
+// ---------------------------------------------------------------------------
+// The selected title
+// ---------------------------------------------------------------------------
+
+.titleTools {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px 16px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+  button[data-variant="subtle"] {
+    font-size: 0.875rem;
+  }
+}
+
+.titleFeature {
+  aspect-ratio: auto;
+  min-height: 0;
+  max-height: none;
+  align-items: stretch;
+  &[data-artwork="false"] {
+    .titleFeatureCopy {
+      padding-top: clamp(20px, 3vw, 32px);
+    }
+  }
+}
+
+.titleFeatureCopy {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr);
+  gap: clamp(16px, 3vw, 28px);
+  align-items: end;
+  width: 100%;
+  min-width: 0;
+  padding: clamp(20px, 3.5vw, 32px);
+  padding-top: clamp(44px, 6vw, 72px);
+  animation: riseIn 900ms 140ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  h2 {
+    font-size: clamp(2rem, 1.3rem + 2.8vw, 3.5rem);
+    font-weight: 700;
+    line-height: 1.02;
+    letter-spacing: -0.03em;
+    text-wrap: balance;
+    overflow-wrap: anywhere;
+    text-shadow: 0 2px 28px rgba(0, 0, 0, 0.45);
+    outline-offset: 6px;
+  }
+  > div {
+    min-width: 0;
+  }
+  > div > p {
+    margin-top: 10px;
+    color: rgba(255, 248, 240, 0.86);
+    font-size: 0.9375rem;
+  }
+  .feature[data-artwork="false"] & > div > p {
+    color: var(--bz-text-secondary);
+  }
+}
+
+.titlePoster {
+  display: grid;
+  aspect-ratio: 2 / 3;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bz-surface-raised);
+  box-shadow: 0 16px 36px -12px rgba(0, 0, 0, 0.7);
+  > * {
+    grid-area: 1 / 1;
+  }
+  img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+}
+
+// What the metadata can and cannot tell the reader, in the margin of the
+// title rather than between the reader and the search.
+.titleNotes {
+  margin-block: 18px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  p {
+    color: var(--bz-text-tertiary);
+    font-size: 0.8125rem;
+    margin: 0;
+  }
+}
+
+// On the selected-title page the language and the one action lead the form.
+.primaryRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px 16px;
+  align-items: end;
+  .select {
+    max-width: 28rem;
+  }
+  button {
+    min-height: 44px;
+  }
+}
+
+.primaryHint {
+  margin-top: 10px;
+  color: var(--bz-text-tertiary);
+  font-size: 0.8125rem;
+}
+
+// The identity fields on the selected-title page are context, already
+// resolved, and read that way: present, quieter, below the action.
+.targetFields[data-secondary="true"] {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--bz-border-card);
+  label,
+  .fieldLabel {
+    font-size: 0.8125rem;
+    font-weight: 550;
+    color: var(--bz-text-secondary);
+  }
+  input {
+    font-size: 0.875rem;
+  }
+}
+
+.modeSwitch {
+  margin-top: 12px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+// Copy matching is optional by design, and a disclosure says so before a
+// single control is shown. A chosen copy keeps it open so its state stays in
+// view.
+.copyDisclosure {
+  margin-top: 20px;
+  border-top: 1px solid var(--bz-border-card);
+  > summary {
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.9375rem;
+    color: var(--bz-text-secondary);
+    width: fit-content;
+    padding-inline-end: 8px;
+    &:hover {
+      color: var(--bz-text-primary);
+    }
+  }
+}
+
+.optionalTag {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--bz-text-tertiary);
+  border: 1px solid var(--bz-border-interactive);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.copyBody {
+  padding-top: 4px;
+  max-width: 70ch;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+@media (max-width: 700px) {
+  .titleFeatureCopy {
+    grid-template-columns: 92px minmax(0, 1fr);
+    padding-top: clamp(36px, 9vw, 64px);
+  }
+  .primaryRow {
+    grid-template-columns: minmax(0, 1fr);
+    .select {
+      max-width: none;
+    }
+    button {
+      width: 100%;
+    }
+  }
+}
+
+@media (max-width: 400px) {
+  .titleFeatureCopy {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+  .titlePoster {
+    width: 84px;
+  }
+  .segmentedLabel {
+    padding-inline: 12px;
+  }
+}
+
+// The one route out of a provider dead end, before a search when it is
+// knowable and in the failure state when it is not.
+.readiness {
+  margin-bottom: 16px;
+  p {
     max-width: none;
   }
+}
+
+.hubLink {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  color: var(--discover-link);
+  font-weight: 600;
+  white-space: nowrap;
 }

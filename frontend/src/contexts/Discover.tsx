@@ -8,7 +8,7 @@ import {
   useReducer,
   useRef,
 } from "react";
-import { Link } from "react-router";
+import { Link, useLocation } from "react-router";
 import { Anchor, Group, Text } from "@mantine/core";
 import {
   useDiscoverDownload,
@@ -23,8 +23,10 @@ import type {
   DiscoverSelection,
   DiscoverSubtitleResult,
 } from "@/types/discover";
+import { writeStoredValue } from "@/utilities/browserStorage";
 import { filenameFromContentDisposition, saveBlobAs } from "@/utilities/files";
 import {
+  copyTargetKey,
   DISCOVER_LANGUAGE_KEY,
   DiscoverBrowsing,
   discoverContextKey,
@@ -40,6 +42,12 @@ interface DiscoverContextValue {
   state: DiscoverState;
   updateBrowsing: (changes: Partial<DiscoverBrowsing>) => void;
   updateDraft: (changes: Partial<DiscoverDraft>) => void;
+  /**
+   * Preselect a subtitle language from the reader's language profile. Only an
+   * empty language is ever seeded, nothing is written to browser storage, and
+   * the state says it was seeded so the page can show where it came from.
+   */
+  seedLanguage: (language: string) => void;
   findSubtitles: (refresh?: boolean) => Promise<void>;
   downloadSubtitle: (row: DiscoverSubtitleResult) => Promise<void>;
   previewSubtitle: (row: DiscoverSubtitleResult) => Promise<void>;
@@ -87,7 +95,16 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
 
   const updateDraft = useCallback(
     (changes: Partial<DiscoverDraft>) => {
-      const next = { ...draft.current, ...changes };
+      const merged = { ...draft.current, ...changes };
+      // A copy belongs to one exact target. Retiring it here, rather than in
+      // every caller, is what keeps a stale choice from surviving a change of
+      // film or episode. The comparison is unconditional: a caller that
+      // changes the target and supplies a copy in the same update is supplying
+      // a copy for a target that no longer exists, so the copy loses.
+      const next =
+        copyTargetKey(merged) === copyTargetKey(draft.current)
+          ? merged
+          : { ...merged, copyId: undefined };
       if (discoverContextKey(next) !== discoverContextKey(draft.current)) {
         generation.current += 1;
         downloadSequence.current += 1;
@@ -96,37 +113,77 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
       draft.current = next;
       let storageAvailable = state.storageAvailable;
       if (changes.language !== undefined) {
-        try {
-          localStorage.setItem(DISCOVER_LANGUAGE_KEY, changes.language);
-          storageAvailable = true;
-        } catch {
-          storageAvailable = false;
-        }
+        // Whether the write landed is what decides the session-only notice
+        // under the language select, so the helper's answer is the answer.
+        storageAvailable = writeStoredValue(
+          DISCOVER_LANGUAGE_KEY,
+          changes.language,
+        );
       }
       dispatch({
         type: "draft",
         draft: next,
         generation: generation.current,
         storageAvailable,
+        // A language the reader set by hand is no longer a seeded one.
+        ...(changes.language !== undefined ? { languageSeeded: false } : {}),
       });
     },
     [state.storageAvailable],
   );
 
+  const seedLanguage = useCallback((language: string) => {
+    if (!language || draft.current.language) return;
+    draft.current = { ...draft.current, language };
+    dispatch({
+      type: "draft",
+      draft: draft.current,
+      generation: generation.current,
+      storageAvailable: currentState.current.storageAvailable,
+      languageSeeded: true,
+    });
+  }, []);
+
   const runSearch = useCallback(
-    async (refresh = false, captured?: SearchContext) => {
+    async (
+      refresh = false,
+      captured?: { context: SearchContext; key: string },
+    ) => {
       if (!captured && recentEpisodeMismatch(currentState.current)) return;
-      const context = captured ?? searchSelection(draft.current);
+      // A recovery search reuses the context it captured, so the key it files
+      // results under travels with that context instead of being recomputed
+      // from the draft. If the two have drifted apart the results would belong
+      // to a context the reader has already left, so nothing is filed at all.
+      const key = captured?.key ?? discoverContextKey(draft.current);
+      if (key !== discoverContextKey(draft.current)) return;
+      const context = captured?.context ?? searchSelection(draft.current);
       if (!context) return;
-      const key = discoverContextKey(draft.current);
       const attempt = ++generation.current;
-      dispatch({ type: "start", generation: attempt });
+      // A seeded language becomes the remembered one the first time it is
+      // actually used for a search; a chosen language was written when chosen.
+      // Either way the helper's answer is what the storage notice is made of,
+      // so it is carried into the dispatch rather than dropped: a reader whose
+      // storage refuses the seeded language must be told it is session-only,
+      // exactly as one who chose it by hand is.
+      const stored = currentState.current.languageSeeded
+        ? writeStoredValue(DISCOVER_LANGUAGE_KEY, context.language)
+        : undefined;
+      dispatch({
+        type: "start",
+        generation: attempt,
+        storageAvailable: stored,
+      });
       try {
-        // matching_mode is a server-owned property, never an input override.
-        const selection: DiscoverSelection & { matching_mode?: string } = {
-          ...context,
-        };
+        // matching_mode, the resolved copy and its physical revision are all
+        // server-owned. Only the opaque copy identity is ever an input.
+        const selection: DiscoverSelection & {
+          matching_mode?: string;
+          copy?: unknown;
+          file_revision?: string;
+        } = { ...context };
         delete selection.matching_mode;
+        delete selection.copy;
+        delete selection.file_revision;
         const snapshot = await mutateAsync({ context: selection, refresh });
         dispatch({ type: "success", generation: attempt, key, snapshot });
       } catch (error) {
@@ -138,7 +195,9 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
         dispatch({
           type: "failure",
           message:
-            response?.status === 400 &&
+            // 409 is a chosen copy that no longer resolves. Its message names
+            // the recovery, and the choice is never replaced automatically.
+            (response?.status === 400 || response?.status === 409) &&
             typeof response.data?.message === "string"
               ? response.data.message
               : undefined,
@@ -157,9 +216,13 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
   );
   const searchAgain = useCallback(async () => {
     const captured =
-      currentState.current.preview?.context ??
-      currentState.current.download?.context;
-    if (captured) await runSearch(true, captured);
+      currentState.current.preview ?? currentState.current.download;
+    // Fails closed: feedback without its own captured key is never replayed.
+    if (captured?.contextKey)
+      await runSearch(true, {
+        context: captured.context,
+        key: captured.contextKey,
+      });
   }, [runSearch]);
 
   const downloadSubtitle = useCallback(
@@ -179,6 +242,7 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
       const requestId = ++downloadSequence.current;
       const feedback: DiscoverDownloadFeedback = {
         requestId,
+        contextKey: key,
         context: { ...snapshot.context },
         row: { ...row },
         status: "pending",
@@ -260,6 +324,7 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
       const requestId = ++previewSequence.current;
       const feedback: DiscoverPreviewFeedback = {
         requestId,
+        contextKey: key,
         context: { ...snapshot.context },
         row: { ...row },
         status: "pending",
@@ -340,6 +405,7 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
       state,
       updateBrowsing,
       updateDraft,
+      seedLanguage,
       findSubtitles,
       downloadSubtitle,
       previewSubtitle,
@@ -350,6 +416,7 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
       state,
       updateBrowsing,
       updateDraft,
+      seedLanguage,
       findSubtitles,
       downloadSubtitle,
       previewSubtitle,
@@ -379,30 +446,43 @@ export function useDiscover() {
   return value;
 }
 
+/**
+ * The way back to an interrupted Discover task.
+ *
+ * Every route a reader can be sent to from Discover, whether that is provider
+ * setup, Activity, History, Wanted or a library item, owes them a way back to
+ * the exact task they left, not native Back and not a fresh page. It is mounted
+ * once around the application outlet, so the return is offered wherever the
+ * interruption lands rather than only on the two routes that happened to link
+ * to it, and it stands down on Discover itself, which is the destination.
+ */
 export function DiscoverSetupReturn({ children }: PropsWithChildren) {
   const { state } = useDiscover();
+  const { pathname } = useLocation();
+  const onDiscover = /^\/discover(?:[/?#]|$)/.test(pathname);
   return (
     <>
-      {(state.draft.imdbId ||
-        state.draft.query ||
-        state.browsing.query ||
-        state.browsing.returnTarget !== "/discover") && (
-        <Group mb="md" justify="space-between">
-          <Text size="sm">Your Discover selection is saved.</Text>
-          <Anchor
-            c="light-dark(var(--mantine-color-brand-7), var(--mantine-color-brand-4))"
-            component={Link}
-            to={
-              /^\/discover(?:[/?#]|$)/.test(state.browsing.returnTarget)
-                ? state.browsing.returnTarget
-                : "/discover"
-            }
-            py="sm"
-          >
-            Return to Discover
-          </Anchor>
-        </Group>
-      )}
+      {!onDiscover &&
+        (state.draft.imdbId ||
+          state.draft.query ||
+          state.browsing.query ||
+          state.browsing.returnTarget !== "/discover") && (
+          <Group mx="md" mt="md" mb="md" justify="space-between">
+            <Text size="sm">Your Discover selection is saved.</Text>
+            <Anchor
+              c="light-dark(var(--mantine-color-brand-7), var(--mantine-color-brand-4))"
+              component={Link}
+              to={
+                /^\/discover(?:[/?#]|$)/.test(state.browsing.returnTarget)
+                  ? state.browsing.returnTarget
+                  : "/discover"
+              }
+              py="sm"
+            >
+              Return to Discover
+            </Anchor>
+          </Group>
+        )}
       {children}
     </>
   );

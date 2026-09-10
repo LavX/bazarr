@@ -73,6 +73,7 @@ const savedSettings = {
   general: { theme: "auto" },
   discover: {
     tmdb_configured: true,
+    tmdb_token_stored: true,
     metadata_revision: "metadata-one",
     locale: "en-US",
   },
@@ -131,14 +132,16 @@ async function renderSettings(fromDiscover = false) {
   );
   if (!fromDiscover)
     await waitFor(() =>
-      expect(screen.getByLabelText("TMDB API Read Access Token")).toBeEnabled(),
+      expect(
+        screen.getByLabelText("Your own TMDB API key, optional"),
+      ).toBeEnabled(),
     );
   return { router, user: userEvent.setup() };
 }
 
 it("starts blank, cancels type-then-clear, and requires explicit removal", async () => {
   const { user } = await renderSettings();
-  const token = await screen.findByLabelText("TMDB API Read Access Token");
+  const token = await screen.findByLabelText("Your own TMDB API key, optional");
   expect(token).toHaveValue("");
   expect(
     screen.queryByRole("button", { name: /Save 1 pending/ }),
@@ -150,7 +153,7 @@ it("starts blank, cancels type-then-clear, and requires explicit removal", async
       screen.queryByRole("button", { name: /Save 1 pending/ }),
     ).not.toBeInTheDocument(),
   );
-  await user.click(screen.getByRole("button", { name: "Remove saved token" }));
+  await user.click(screen.getByRole("button", { name: "Remove saved key" }));
   expect(await screen.findByText(/Removal pending save/)).toBeInTheDocument();
   expect(
     screen.getByRole("button", { name: /Save 1 pending/ }),
@@ -168,7 +171,9 @@ it.each(["button", "enter", "shortcut"])(
       }),
     );
     const { user } = await renderSettings();
-    const token = await screen.findByLabelText("TMDB API Read Access Token");
+    const token = await screen.findByLabelText(
+      "Your own TMDB API key, optional",
+    );
     await user.type(token, "replacement-private");
     if (method === "button")
       await user.click(
@@ -208,7 +213,7 @@ it("omits untouched token from an ordinary locale save and submits empty only fo
       screen.queryByRole("button", { name: /Save 1 pending/ }),
     ).not.toBeInTheDocument(),
   );
-  await user.click(screen.getByRole("button", { name: "Remove saved token" }));
+  await user.click(screen.getByRole("button", { name: "Remove saved key" }));
   await user.click(
     await screen.findByRole("button", { name: /Save 1 pending/ }),
   );
@@ -237,7 +242,7 @@ it("tests saved and unsaved credentials without saving and retires late draft ch
   await screen.findByText("TMDB is available.");
   expect(bodies).toEqual([{}]);
   await user.type(
-    screen.getByLabelText("TMDB API Read Access Token"),
+    screen.getByLabelText("Your own TMDB API key, optional"),
     "old-draft",
   );
   await user.click(
@@ -245,13 +250,13 @@ it("tests saved and unsaved credentials without saving and retires late draft ch
   );
   await waitFor(() => expect(release).toBeDefined());
   await user.type(
-    screen.getByLabelText("TMDB API Read Access Token"),
+    screen.getByLabelText("Your own TMDB API key, optional"),
     "-changed",
   );
   release?.();
   expect(screen.queryByText("TMDB is available.")).not.toBeInTheDocument();
   expect(bodies[1]).toEqual({ token: "old-draft" });
-  expect(screen.getByLabelText("TMDB API Read Access Token")).toHaveValue(
+  expect(screen.getByLabelText("Your own TMDB API key, optional")).toHaveValue(
     "old-draft-changed",
   );
 });
@@ -265,7 +270,7 @@ it("keeps failed-save draft through settings events", async () => {
   );
   const { user, router } = await renderSettings();
   await user.type(
-    await screen.findByLabelText("TMDB API Read Access Token"),
+    await screen.findByLabelText("Your own TMDB API key, optional"),
     "retained-private",
   );
   await user.click(
@@ -275,13 +280,13 @@ it("keeps failed-save draft through settings events", async () => {
   await queryClient.refetchQueries({
     queryKey: [QueryKeys.System, QueryKeys.Settings],
   });
-  expect(screen.getByLabelText("TMDB API Read Access Token")).toHaveValue(
+  expect(screen.getByLabelText("Your own TMDB API key, optional")).toHaveValue(
     "retained-private",
   );
   expect(router.state.location.pathname).toBe("/settings/discover");
 });
 
-it("preserves the real return route, query and focus through Keep Editing, failed Save & Leave and successful retry", async () => {
+it("preserves the real return route, query and focus through Keep editing, a failed Save and leave and a successful retry", async () => {
   let count = 0;
   server.use(
     http.post("/api/system/settings", () => {
@@ -293,33 +298,33 @@ it("preserves the real return route, query and focus through Keep Editing, faile
   await user.type(screen.getByLabelText("Search movie titles"), "Shogun");
   await user.click(screen.getByRole("link", { name: "Discover settings" }));
   await user.type(
-    await screen.findByLabelText("TMDB API Read Access Token"),
+    await screen.findByLabelText("Your own TMDB API key, optional"),
     "pending-private",
   );
   await user.click(screen.getByRole("link", { name: "Return to Discover" }));
   await user.click(
     await screen.findByRole("button", {
-      name: "Stay on this page and continue editing",
+      name: "Keep editing",
     }),
   );
   expect(router.state.location.pathname).toBe("/settings/discover");
-  expect(screen.getByLabelText("TMDB API Read Access Token")).toHaveValue(
+  expect(screen.getByLabelText("Your own TMDB API key, optional")).toHaveValue(
     "pending-private",
   );
   await user.click(screen.getByRole("link", { name: "Return to Discover" }));
   await user.click(
     await screen.findByRole("button", {
-      name: "Save all changes and leave this page",
+      name: "Save and leave",
     }),
   );
   await screen.findByText("Save failed");
   expect(router.state.location.pathname).toBe("/settings/discover");
-  expect(screen.getByLabelText("TMDB API Read Access Token")).toHaveValue(
+  expect(screen.getByLabelText("Your own TMDB API key, optional")).toHaveValue(
     "pending-private",
   );
   await user.click(
     screen.getByRole("button", {
-      name: "Save all changes and leave this page",
+      name: "Save and leave",
     }),
   );
   await waitFor(() => expect(router.state.location.pathname).toBe("/discover"));
@@ -348,13 +353,13 @@ it("discards a replacement through the real modal without saving and returns wit
   await user.type(screen.getByLabelText("Search movie titles"), "Shogun");
   await user.click(screen.getByRole("link", { name: "Discover settings" }));
   await user.type(
-    await screen.findByLabelText("TMDB API Read Access Token"),
+    await screen.findByLabelText("Your own TMDB API key, optional"),
     "abandoned-private",
   );
   await user.click(screen.getByRole("link", { name: "Return to Discover" }));
   await user.click(
     await screen.findByRole("button", {
-      name: "Discard unsaved changes and leave this page",
+      name: "Discard changes",
     }),
   );
   await waitFor(() => expect(router.state.location.pathname).toBe("/discover"));
@@ -364,7 +369,7 @@ it("discards a replacement through the real modal without saving and returns wit
   expect(saves).toEqual([]);
   await user.click(screen.getByRole("link", { name: "Discover settings" }));
   expect(
-    await screen.findByLabelText("TMDB API Read Access Token"),
+    await screen.findByLabelText("Your own TMDB API key, optional"),
   ).toHaveValue("");
 });
 
@@ -458,7 +463,7 @@ it.each(["retry", "leave", "ordinary save", "failed retry"])(
     const { user, router } = await renderSettings(true);
     await user.click(screen.getByRole("link", { name: "Discover settings" }));
     await user.type(
-      await screen.findByLabelText("TMDB API Read Access Token"),
+      await screen.findByLabelText("Your own TMDB API key, optional"),
       "saved-private-replacement",
     );
     await user.selectOptions(
@@ -473,13 +478,15 @@ it.each(["retry", "leave", "ordinary save", "failed retry"])(
       );
       await user.click(
         await screen.findByRole("button", {
-          name: "Save all changes and leave this page",
+          name: "Save and leave",
         }),
       );
     }
     await screen.findByText("Settings saved; application refresh failed");
     expect(router.state.location.pathname).toBe("/settings/discover");
-    expect(screen.getByLabelText("TMDB API Read Access Token")).toHaveValue("");
+    expect(
+      screen.getByLabelText("Your own TMDB API key, optional"),
+    ).toHaveValue("");
     expect(
       screen.queryByRole("button", { name: /Save \d+ pending/ }),
     ).not.toBeInTheDocument();
@@ -504,26 +511,26 @@ it.each(["retry", "leave", "ordinary save", "failed retry"])(
     if (action === "retry" || action === "failed retry") {
       await user.click(
         await screen.findByRole("button", {
-          name: "Retry application refresh and leave this page",
+          name: "Retry refresh and leave",
         }),
       );
       if (action === "failed retry") {
         await waitFor(() => expect(submitted).toHaveLength(2));
         expect(router.state.location.pathname).toBe("/settings/discover");
-        expect(screen.getByLabelText("TMDB API Read Access Token")).toHaveValue(
-          "",
-        );
+        expect(
+          screen.getByLabelText("Your own TMDB API key, optional"),
+        ).toHaveValue("");
         expect(screen.queryByText("Save failed")).not.toBeInTheDocument();
         await user.click(
           screen.getByRole("button", {
-            name: "Leave this page keeping saved settings",
+            name: "Leave with saved settings",
           }),
         );
       }
     } else {
       await user.click(
         await screen.findByRole("button", {
-          name: "Leave this page keeping saved settings",
+          name: "Leave with saved settings",
         }),
       );
     }
@@ -545,3 +552,25 @@ it.each(["retry", "leave", "ordinary save", "failed retry"])(
     );
   },
 );
+
+// Metadata is available on the built-in key whether or not the reader saved
+// anything, so availability stopped being evidence that there is a saved key.
+// A reader who never saved one must not be offered its removal.
+it("offers removal only to a reader who actually saved a key", async () => {
+  server.use(
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({
+        ...savedSettings,
+        discover: { ...savedSettings.discover, tmdb_token_stored: false },
+      }),
+    ),
+  );
+  await renderSettings();
+  expect(
+    await screen.findByRole("button", { name: "Check built-in connection" }),
+  ).toBeInTheDocument();
+  expect(screen.getByText("TMDB metadata is available")).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Remove saved key" }),
+  ).not.toBeInTheDocument();
+});

@@ -29,6 +29,11 @@ export interface DiscoverDraft {
   episodeIdentity?: MetadataEpisode;
   manualConfirmed?: boolean;
   manualEntry?: boolean;
+  /**
+   * The explicitly chosen library copy, or undefined for title-only matching.
+   * Opaque: the server resolves it against the confirmed target every time.
+   */
+  copyId?: string;
 }
 
 export interface DiscoverBrowsing {
@@ -62,6 +67,11 @@ export interface DiscoverState {
   snapshot: DiscoverSearchSnapshot | null;
   error: string | null;
   storageAvailable: boolean;
+  // True while the subtitle language was preselected from the reader's
+  // language profile rather than chosen or previously used. It is shown, not
+  // hidden, and it clears the moment the reader changes the language or
+  // searches with it.
+  languageSeeded: boolean;
   download: DiscoverDownloadFeedback | null;
   preview: DiscoverPreviewFeedback | null;
   retiredResultIds: string[];
@@ -123,6 +133,7 @@ export function initialDiscoverState(): DiscoverState {
     snapshot: null,
     error: null,
     storageAvailable,
+    languageSeeded: false,
     download: null,
     preview: null,
     retiredResultIds: [],
@@ -145,11 +156,14 @@ export function searchSelection(
   }
   const imdbId = draft.imdbId.trim().toLowerCase();
   if (!/^tt\d{7,10}$/.test(imdbId) || !draft.language) return null;
+  /* eslint-disable camelcase -- the selection is the request body, so its keys
+     keep the API spelling. */
   const selection: DiscoverSelection = {
     media_type: draft.mediaType,
     imdb_id: imdbId,
     language: draft.language,
   };
+  /* eslint-enable camelcase */
   if (draft.mediaType === "episode") {
     if (!/^\d{1,4}$/.test(draft.season) || !/^\d{1,4}$/.test(draft.episode))
       return null;
@@ -176,12 +190,16 @@ export function searchSelection(
         identity.target_episode !== selection.episode)
     )
       return null;
+    /* eslint-disable camelcase -- transport field names */
     if (identity) selection.episode_identity = identity;
     if (draft.showId !== undefined) selection.show_id = draft.showId;
     if (draft.manualConfirmed) selection.manual_confirmed = true;
+    /* eslint-enable camelcase */
   }
   if (draft.title) selection.title = draft.title;
   if (draft.year) selection.year = draft.year;
+  // eslint-disable-next-line camelcase -- the transport field name
+  if (draft.copyId) selection.copy_id = draft.copyId;
   return selection;
 }
 
@@ -210,6 +228,28 @@ export function episodeMatchesShow(
   );
 }
 
+/**
+ * The target a chosen copy belongs to.
+ *
+ * A copy resolved for one film or one exact episode is meaningless for
+ * another, so the choice is dropped structurally when this changes rather
+ * than left to every caller of updateDraft to remember.
+ *
+ * The search mode is deliberately absent. A release query can never carry a
+ * copy, because searchSelection returns before the copy line is reached, and
+ * discoverContextKey already differs completely between the two modes. Adding
+ * mode here would only discard a still-valid choice when a reader looks at
+ * release search and comes back.
+ */
+export function copyTargetKey(draft: DiscoverDraft): string {
+  return JSON.stringify([
+    draft.mediaType,
+    draft.imdbId.trim().toLowerCase(),
+    draft.mediaType === "episode" ? draft.season : null,
+    draft.mediaType === "episode" ? draft.episode : null,
+  ]);
+}
+
 export function discoverContextKey(draft: DiscoverDraft): string {
   if (draft.mode === "release")
     return JSON.stringify([
@@ -233,6 +273,9 @@ export function discoverContextKey(draft: DiscoverDraft): string {
       : null,
     draft.mediaType === "episode" ? Boolean(draft.manualConfirmed) : null,
     draft.mediaType === "episode" ? Boolean(draft.manualEntry) : null,
+    // A different copy is a different search context: its results, preview,
+    // feedback and pending responses all belong to the copy that was chosen.
+    draft.copyId ?? null,
   ]);
 }
 
@@ -243,8 +286,9 @@ type DiscoverAction =
       draft: DiscoverDraft;
       generation: number;
       storageAvailable: boolean;
+      languageSeeded?: boolean;
     }
-  | { type: "start"; generation: number }
+  | { type: "start"; generation: number; storageAvailable?: boolean }
   | {
       type: "success";
       generation: number;
@@ -295,6 +339,7 @@ export function discoverReducer(
       draft: action.draft,
       generation: action.generation,
       storageAvailable: action.storageAvailable,
+      languageSeeded: action.languageSeeded ?? state.languageSeeded,
       ...(changed
         ? ({
             snapshot: null,
@@ -313,6 +358,11 @@ export function discoverReducer(
       generation: action.generation,
       status: "searching",
       error: null,
+      // Searching with the language is using it: it stops being a seed, and
+      // the write that promotes it is the same evidence about storage as any
+      // other: if it did not land, the notice has to say so here too.
+      storageAvailable: action.storageAvailable ?? state.storageAvailable,
+      languageSeeded: false,
     };
   }
   if (action.type === "close-preview") return { ...state, preview: null };

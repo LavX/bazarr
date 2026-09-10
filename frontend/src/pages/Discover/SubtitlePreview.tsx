@@ -7,6 +7,7 @@ import type {
   DiscoverPreviewFeedback,
   DiscoverSubtitleResult,
 } from "@/types/discover";
+import styles from "./Discover.module.scss";
 
 const MODAL_ID = "discover-subtitle-preview";
 
@@ -167,8 +168,9 @@ export default function SubtitlePreview({
           Close
         </Button>
         <Button
+          variant="filled"
           mih={44}
-          variant="light"
+          color="brand"
           disabled={status === "expired" || downloading}
           loading={downloading && download.row.id === row.id}
           onClick={() => void downloadSubtitle(row)}
@@ -211,6 +213,9 @@ export function DiscoverPreviewModal(
       transitionProps: { duration: reducedMotion ? 0 : 200 },
       closeOnClickOutside: false,
       closeButtonProps: { "aria-label": "Close subtitle preview", size: 44 },
+      // The page's one action fill, carried into the portal so Download SRT
+      // here and Download SRT in the results list are the same colour.
+      classNames: { content: styles.previewModal },
       styles: {
         content: {
           maxWidth: "calc(100vw - 24px)",

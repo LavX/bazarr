@@ -4,16 +4,18 @@ import {
   Alert,
   Anchor,
   Button,
-  Group,
   NativeSelect,
   Text,
   Title,
 } from "@mantine/core";
-import { faFilm } from "@fortawesome/free-solid-svg-icons";
+import { faArrowsRotate } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useDiscoverDigitalReleases } from "@/apis/hooks/discover";
 import { useDiscover } from "@/contexts/Discover";
 import type { DigitalRelease } from "@/types/discover";
+import DiscoverSelect from "./DiscoverSelect";
+import { plural, readableTime } from "./feedText";
+import MediaPoster from "./MediaPoster";
 import styles from "./Discover.module.scss";
 
 const regionNames = new Intl.DisplayNames(["en"], { type: "region" });
@@ -25,24 +27,6 @@ const regions =
       label: `${regionNames.of(value)} (${value})`,
     }))
     .sort((left, right) => left.label.localeCompare(right.label));
-
-function Poster({ src }: { src: string | null }) {
-  const [failed, setFailed] = useState(false);
-  return src && !failed ? (
-    <img
-      src={src}
-      alt=""
-      loading="lazy"
-      decoding="async"
-      onError={() => setFailed(true)}
-    />
-  ) : (
-    <span className={styles.missingArt}>
-      <FontAwesomeIcon icon={faFilm} />
-      <span>Artwork unavailable</span>
-    </span>
-  );
-}
 
 export default function DigitalReleases() {
   const { state, updateBrowsing, updateDraft } = useDiscover();
@@ -98,6 +82,8 @@ export default function DigitalReleases() {
       focusId: `discover-digital-${region}-${item.source_id}`,
       scrollY: window.scrollY,
       returnTarget: location.pathname + location.search + location.hash,
+      /* eslint-disable camelcase -- the release context is stored and sent with
+         the source's own field names. */
       releaseContext: {
         source_id: item.source_id,
         release_date: item.release_date,
@@ -106,6 +92,7 @@ export default function DigitalReleases() {
         fetched_at: data?.fetched_at ?? null,
         window: data!.window,
       },
+      /* eslint-enable camelcase */
     });
     if (!reopen)
       updateDraft({
@@ -137,39 +124,44 @@ export default function DigitalReleases() {
     (feed.isSuccess && !data);
   return (
     <section className={styles.trending} aria-labelledby="digital-title">
-      <Group className={styles.railHeading} justify="space-between">
-        <Title order={2} id="digital-title">
-          Recent digital releases
-        </Title>
-        {feed.configured && (
-          <Button
-            id="discover-digital-refresh"
-            variant="subtle"
-            loading={feed.isFetching}
-            onClick={() => void feed.refetch()}
-          >
-            Refresh digital releases
-          </Button>
-        )}
-      </Group>
-      <Group align="end" mb="md">
-        <NativeSelect
-          id="discover-digital-region"
-          label="Film region"
-          w={280}
-          maw="100%"
-          data={regions}
-          value={region}
-          onChange={(event) =>
-            updateBrowsing({
-              digitalRegion: event.currentTarget.value,
-              focusId: "discover-digital-region",
-            })
-          }
-        />
-        <Text size="sm">Digital · Last 30 days · {region}</Text>
-      </Group>
-      <Text size="sm" mb="md">
+      <div className={styles.sectionHead}>
+        <div>
+          <Title order={2} id="digital-title">
+            Recent digital releases
+          </Title>
+          <Text component="p" className={styles.sectionMeta}>
+            Digital · Last 30 days · {region}
+          </Text>
+        </div>
+        <div className={styles.sectionTools}>
+          <DiscoverSelect
+            id="discover-digital-region"
+            label="Film region"
+            className={styles.regionSelect}
+            searchable
+            options={regions}
+            value={region}
+            onChange={(value) =>
+              updateBrowsing({
+                digitalRegion: value,
+                focusId: "discover-digital-region",
+              })
+            }
+          />
+          {feed.configured && (
+            <Button
+              id="discover-digital-refresh"
+              variant="subtle"
+              loading={feed.isFetching}
+              leftSection={<FontAwesomeIcon icon={faArrowsRotate} />}
+              onClick={() => void feed.refetch()}
+            >
+              Refresh digital releases
+            </Button>
+          )}
+        </div>
+      </div>
+      <Text component="p" className={styles.caveat}>
         Release availability does not confirm subtitle availability or
         synchronization.
       </Text>
@@ -181,7 +173,7 @@ export default function DigitalReleases() {
           <Alert color="yellow">
             <Text size="sm">
               {data?.status === "authentication_failed"
-                ? "TMDB rejected the saved access token."
+                ? "TMDB rejected the key Discover is using."
                 : "Connect TMDB to browse regional digital releases."}
             </Text>
             <Anchor
@@ -208,13 +200,8 @@ export default function DigitalReleases() {
         )}
         {data && !data.coverage.complete && !expired && !setup && (
           <Text size="sm">
-            Incomplete regional coverage: {data.coverage.checked} of{" "}
-            {data.coverage.candidates} candidates checked,{" "}
-            {data.coverage.missing_region} missing {region} records,{" "}
-            {data.coverage.failed} failed checks.
-            {data.coverage.truncated
-              ? " Coverage beyond this candidate page is not verified."
-              : ""}
+            Incomplete regional coverage. The counts are in Digital release
+            source and freshness below.
           </Text>
         )}
         {data?.status === "empty" && !expired && (
@@ -224,35 +211,55 @@ export default function DigitalReleases() {
           </Text>
         )}
         {data?.fetched_at && !expired && (
-          <Text size="xs">
+          <Text component="p" className={styles.stamp}>
             {data.status === "cached" ||
             (data.expires_at && Date.parse(data.expires_at) <= clock)
               ? "Cached TMDB regional records"
               : "Checked TMDB regional records"}{" "}
             ·{" "}
-            <time dateTime={data.fetched_at}>
-              {new Date(data.fetched_at).toLocaleString()}
+            <time className={styles.dateValue} dateTime={data.fetched_at}>
+              {readableTime(data.fetched_at)}
             </time>
           </Text>
         )}
       </div>
       {items.length > 0 && (
-        <ul className={styles.posterGrid} aria-label="Recent digital films">
-          {items.map((item) => (
-            <li key={item.source_id}>
+        <ul className={styles.calendar} aria-label="Recent digital films">
+          {items.map((item, index) => (
+            <li
+              key={item.source_id}
+              // The feed is ordered by source date, so the first row of each
+              // day leads its group. Every row still carries its own date.
+              data-first-of-date={
+                index === 0 ||
+                items[index - 1].release_date !== item.release_date
+                  ? "true"
+                  : "false"
+              }
+            >
               <button
                 id={`discover-digital-${region}-${item.source_id}`}
                 type="button"
-                className={styles.poster}
+                className={styles.calendarRow}
                 onClick={() => open(item)}
               >
-                <span className={styles.posterArt}>
-                  <Poster key={item.poster_url} src={item.poster_url} />
+                <time
+                  className={styles.calendarDate}
+                  dateTime={item.release_date}
+                >
+                  {item.release_date}
+                </time>
+                <span className={styles.calendarArt}>
+                  <MediaPoster key={item.poster_url} src={item.poster_url} />
                 </span>
-                <strong>{item.title}</strong>
-                <span>
-                  <time dateTime={item.release_date}>{item.release_date}</time>{" "}
-                  · Digital · {item.region}
+                <span className={styles.calendarFacts}>
+                  <strong>{item.title}</strong>
+                </span>
+                <span
+                  className={`${styles.captionValues} ${styles.calendarMeta}`}
+                >
+                  <span>Digital</span>
+                  <span>{item.region}</span>
                 </span>
               </button>
             </li>
@@ -269,6 +276,18 @@ export default function DigitalReleases() {
             {data.window.end}, inclusive, using UTC today. Source calendar dates
             are never shifted by timezone.
           </Text>
+          {!data.coverage.complete && (
+            <Text size="xs">
+              {data.coverage.checked} of{" "}
+              {plural(data.coverage.candidates, "candidate")} checked,{" "}
+              {data.coverage.missing_region} missing {region}{" "}
+              {data.coverage.missing_region === 1 ? "record" : "records"}, and{" "}
+              {plural(data.coverage.failed, "failed check")}.
+              {data.coverage.truncated
+                ? " Coverage beyond this candidate page is not verified."
+                : ""}
+            </Text>
+          )}
           <dl>
             {[
               ["Last successful fetch", data.last_success],

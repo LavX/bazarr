@@ -22,7 +22,6 @@ import { useBadges } from "@/apis/hooks";
 import { useEnabledStatus } from "@/apis/hooks/site";
 import App from "@/App";
 import { Lazy } from "@/components/async";
-import { DiscoverSetupReturn } from "@/contexts/Discover";
 import Authentication from "@/pages/Authentication";
 import BlacklistMoviesView from "@/pages/Blacklist/Movies";
 import BlacklistSeriesView from "@/pages/Blacklist/Series";
@@ -197,11 +196,7 @@ function useRoutes(): CustomRouteObject[] {
             icon: faStore,
             name: "Subtitle Hub",
             path: "subtitle-hub",
-            element: (
-              <DiscoverSetupReturn>
-                <SettingsProvidersView />
-              </DiscoverSetupReturn>
-            ),
+            element: <SettingsProvidersView></SettingsProvidersView>,
           },
           {
             icon: faTowerBroadcast,
@@ -217,11 +212,7 @@ function useRoutes(): CustomRouteObject[] {
               {
                 path: "discover",
                 name: "Discover",
-                element: (
-                  <DiscoverSetupReturn>
-                    <SettingsDiscoverView />
-                  </DiscoverSetupReturn>
-                ),
+                element: <SettingsDiscoverView></SettingsDiscoverView>,
               },
               {
                 path: "connections",

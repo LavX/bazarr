@@ -19,6 +19,7 @@ from utilities.helper import get_target_folder, force_unicode
 from utilities.path_mappings import path_mappings
 from app.database import (database, get_profiles_list, select, TableEpisodes, TableShows, get_audio_profile_languages,
                           get_profile_id, TableMovies)
+from app import activity
 from app.jobs_queue import jobs_queue
 from app.notifier import send_notifications, send_notifications_movie
 from sonarr.history import history_log
@@ -39,6 +40,16 @@ from .processing import process_subtitle
 def manual_search(path, profile_id, providers, sceneName, title, media_type):
     logging.debug(f'BAZARR Manually searching subtitles for this file: {path}')  # noqa: G004
 
+    # A manual search runs synchronously on the request thread and never enters
+    # the jobs queue, so without this observation it is invisible to any status
+    # reader while it is the only thing the server is actually doing.
+    with activity.observed_operation('manual_search', scope_kind='media',
+                                     media_type='episode' if media_type == 'series' else 'movie',
+                                     title=title):
+        return _manual_search(path, profile_id, providers, sceneName, title, media_type)
+
+
+def _manual_search(path, profile_id, providers, sceneName, title, media_type):
     final_subtitles = []
 
     pool = _get_pool(media_type, profile_id)
@@ -264,6 +275,12 @@ def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode
         return 'Episode not found', 404
 
     title = episodeInfo.title
+    observed = activity.register(activity.activity_id_for_job(job_id), operation='manual_download',
+                                 scope_kind='media', media_type='episode', title=title,
+                                 episode_title=episodeInfo.episodeTitle, season=episodeInfo.season,
+                                 episode=episodeInfo.episode, arr_instance_id=arr_instance_id,
+                                 upstream_series_id=sonarr_series_id,
+                                 upstream_episode_id=sonarr_episode_id)
     jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Manually downloading Subtitles for {title} - "
                                                            f"S{episodeInfo.season:02d}E{episodeInfo.episode:02d} - "
                                                            f"{episodeInfo.episodeTitle}")
@@ -289,6 +306,12 @@ def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode
         if isinstance(result, str):
             return result, 500
         elif result:
+            # The subtitle exists and its history row is about to be written.
+            # The job name flips to "downloaded" in the finally block whatever
+            # happened, so the name is not evidence and this is.
+            activity.note_publication(observed, outcome='success',
+                                      language=getattr(result, 'language', None),
+                                      provider=selected_provider)
             history_log(2, sonarr_series_id, sonarr_episode_id, result, arr_instance_id=arr_instance_id)
             if not settings.general.dont_notify_manual_actions:
                 send_notifications(sonarr_series_id, sonarr_episode_id, result.message,
@@ -320,6 +343,9 @@ def movie_manually_download_specific_subtitle(radarr_id, hi, forced, use_origina
         return 'Movie not found', 404
 
     title = movieInfo.title
+    observed = activity.register(activity.activity_id_for_job(job_id), operation='manual_download',
+                                 scope_kind='media', media_type='movie', title=title,
+                                 arr_instance_id=arr_instance_id, upstream_movie_id=radarr_id)
     jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Manually downloading Subtitles for {title} "
                                                            f"({movieInfo.year})")
     moviePath = path_mappings.path_replace_movie(movieInfo.path)
@@ -344,6 +370,9 @@ def movie_manually_download_specific_subtitle(radarr_id, hi, forced, use_origina
         if isinstance(result, str):
             return result, 500
         elif result:
+            activity.note_publication(observed, outcome='success',
+                                      language=getattr(result, 'language', None),
+                                      provider=selected_provider)
             history_log_movie(2, radarr_id, result, arr_instance_id=arr_instance_id)
             if not settings.general.dont_notify_manual_actions:
                 send_notifications_movie(radarr_id, result.message, arr_instance_id=arr_instance_id)

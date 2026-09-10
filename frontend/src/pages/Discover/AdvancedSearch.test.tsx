@@ -11,6 +11,7 @@ import { AllProviders } from "@/providers";
 import { rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import * as files from "@/utilities/files";
+import { pickOption, selectInput } from "./selectTestHelpers";
 import Discover from ".";
 
 const query = "Example.Movie.2024.1080p.WEB-DL";
@@ -127,7 +128,7 @@ async function releaseMode(user: ReturnType<typeof userEvent.setup>) {
     screen.getByRole("button", { name: "Search providers by release name" }),
   );
   await user.type(screen.getByLabelText("Release name"), query);
-  await user.selectOptions(screen.getByLabelText("Subtitle language"), "eng");
+  await pickOption(user, "Subtitle language", "English");
 }
 async function rawSearch(user: ReturnType<typeof userEvent.setup>) {
   await releaseMode(user);
@@ -193,15 +194,23 @@ it("keeps metadata setup visible and requires explicit valid release query and l
     screen.getByText(/Title and episode identity.*unverified/),
   ).toBeVisible();
   const find = screen.getByRole("button", { name: "Find subtitles" });
+  // No language chosen yet, and a valid query on its own is not enough. This
+  // is the half of the language guard that survived the move off the native
+  // control: that control could be set back to its empty option, so the test
+  // used to unchoose a language mid-run and re-assert. The themed select sets
+  // allowDeselect false, so unchoosing is not a state a reader can reach and
+  // is not a state worth asserting; reaching the button with no language is,
+  // and it is asserted here instead.
+  await user.type(screen.getByLabelText("Release name"), query);
+  expect(find).toBeDisabled();
+  await user.clear(screen.getByLabelText("Release name"));
   await user.type(screen.getByLabelText("Release name"), "...-_/!?");
-  await user.selectOptions(screen.getByLabelText("Subtitle language"), "eng");
+  await pickOption(user, "Subtitle language", "English");
   expect(find).toBeDisabled();
   await user.clear(screen.getByLabelText("Release name"));
   await user.type(screen.getByLabelText("Release name"), query);
-  await user.selectOptions(screen.getByLabelText("Subtitle language"), "");
-  expect(find).toBeDisabled();
   expect(searches).toEqual([]);
-  await user.selectOptions(screen.getByLabelText("Subtitle language"), "eng");
+  expect(find).toBeEnabled();
   await user.click(find);
   await screen.findByRole("heading", { name: `${query}.forced` });
   expect(searches).toEqual([
@@ -264,7 +273,7 @@ it("preserves both mode inputs and retires incompatible results and feedback", a
     screen.getByRole("button", { name: "Search providers by release name" }),
   );
   expect(screen.getByLabelText("Release name")).toHaveValue(query);
-  expect(screen.getByLabelText("Subtitle language")).toHaveValue("eng");
+  expect(selectInput("Subtitle language")).toHaveValue("English");
   expect(searches).toHaveLength(1);
 });
 
@@ -302,10 +311,7 @@ it.each(["mode", "query"])(
     const { user } = renderDiscover();
     if (change === "mode") {
       await user.type(screen.getByLabelText("IMDb ID"), "tt0133093");
-      await user.selectOptions(
-        screen.getByLabelText("Subtitle language"),
-        "eng",
-      );
+      await pickOption(user, "Subtitle language", "English");
     } else await releaseMode(user);
     await user.click(screen.getByRole("button", { name: "Find subtitles" }));
     await waitFor(() => expect(finish).toBeDefined());

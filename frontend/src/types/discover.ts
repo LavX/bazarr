@@ -11,6 +11,8 @@ export interface DiscoverIdentifiedSelection {
   show_id?: number;
   episode_identity?: MetadataEpisode;
   manual_confirmed?: boolean;
+  /** Opaque. The server re-resolves and revalidates it on every use. */
+  copy_id?: string;
 }
 
 export interface DiscoverReleaseSelection {
@@ -26,15 +28,73 @@ export interface DiscoverReleaseSelection {
   show_id?: never;
   episode_identity?: never;
   manual_confirmed?: never;
+  copy_id?: never;
 }
 
 export type DiscoverSelection =
   | DiscoverIdentifiedSelection
   | DiscoverReleaseSelection;
 
+/** One exact copy of a confirmed target, as the server resolved it. */
+export interface DiscoverCopy {
+  copy_id: string;
+  media_type: "movie" | "episode";
+  local_id: number;
+  arr_instance_id: number | null;
+  instance_name: string | null;
+  series_local_id: number | null;
+  title: string | null;
+  episode_title: string | null;
+  release: string | null;
+  filename: string | null;
+  source: string | null;
+  resolution: string | null;
+  video_codec: string | null;
+  audio_codec: string | null;
+  file_size: number | null;
+  updated_at: string | null;
+}
+
+export interface DiscoverCopyOption extends DiscoverCopy {
+  selectable: boolean;
+  unavailable_reason:
+    | "owner_unknown"
+    | "no_stored_path"
+    | "instance_missing"
+    | null;
+}
+
+export interface DiscoverCopyOffer {
+  items: DiscoverCopyOption[];
+  truncated: boolean;
+  owning_titles: number;
+  match_scope: "exact_target_copy";
+}
+
+export interface DiscoverCopyContext extends DiscoverCopy {
+  observed_size: number;
+}
+
 export type DiscoverContext =
-  | (DiscoverIdentifiedSelection & { matching_mode: "title" })
+  | (DiscoverIdentifiedSelection & {
+      matching_mode: "title";
+      /** Present only when a copy was explicitly chosen. */
+      file_revision?: string;
+      copy?: DiscoverCopyContext;
+    })
   | (DiscoverReleaseSelection & { matching_mode: "release" });
+
+/** Per-attribute evidence against the chosen copy. Never a timing guarantee. */
+export type DiscoverCompatibility = "match" | "conflict" | "unknown";
+
+export interface DiscoverCopyCompatibility {
+  source: DiscoverCompatibility;
+  resolution: DiscoverCompatibility;
+  video_codec: DiscoverCompatibility;
+  audio_codec: DiscoverCompatibility;
+  release_group: DiscoverCompatibility;
+  edition: DiscoverCompatibility;
+}
 
 export type DiscoverProviderStatus =
   | "success"
@@ -72,6 +132,11 @@ export interface DiscoverSubtitleResult {
   compatibility_score: number | null;
   compatibility_score_max: number | null;
   rating: number | null;
+  /**
+   * Present whenever the search carried a chosen copy. Optional so a fixture
+   * or an older snapshot without it still describes a valid result.
+   */
+  copy_compatibility?: DiscoverCopyCompatibility | null;
   checked_at: string;
   expires_at: string;
   stale: boolean;
@@ -100,6 +165,12 @@ export interface DiscoverDownloadIdentity {
 
 export interface DiscoverDownloadFeedback {
   requestId: number;
+  /**
+   * The draft context key this feedback was filed under. searchAgain reuses
+   * the captured context, so the key it files results under has to travel
+   * with that context rather than be recomputed beside it.
+   */
+  contextKey?: string;
   context: DiscoverContext;
   row: DiscoverSubtitleResult;
   status: "pending" | "started" | "expired" | "failed";
@@ -117,6 +188,12 @@ export interface DiscoverPreviewData {
 
 export interface DiscoverPreviewFeedback {
   requestId: number;
+  /**
+   * The draft context key this feedback was filed under. searchAgain reuses
+   * the captured context, so the key it files results under has to travel
+   * with that context rather than be recomputed beside it.
+   */
+  contextKey?: string;
   context: DiscoverContext;
   row: DiscoverSubtitleResult;
   status: "pending" | "ready" | "expired" | "failed";
@@ -375,4 +452,164 @@ export interface RecentEpisodeFeed extends Omit<
     truncated: boolean;
   };
   items: RecentEpisode[];
+}
+
+/** Read-only summary of this Bazarr's own work, shown beside global discovery. */
+export type DiscoverSummaryAvailability = "available" | "stale" | "unknown";
+
+export type DiscoverSummaryState =
+  | "busy"
+  | "quiet"
+  | "degraded"
+  | "new_installation"
+  | "unknown";
+
+export interface DiscoverSummaryProgress {
+  unit: "item" | "percent";
+  value: number;
+  total: number;
+}
+
+export interface DiscoverRemoteObservation {
+  service_id: string;
+  job_id: string;
+  phase: string;
+  observed_at: string | null;
+  progress: number | null;
+  total: number | null;
+}
+
+export interface DiscoverActivityItem {
+  activity_id: string;
+  operation: string;
+  state: "running" | "queued";
+  phase: "running" | "queued" | "waiting_for_service";
+  name: string;
+  scope_kind: string;
+  arr_instance_id: number | null;
+  instance_name: string | null;
+  media_type: "episode" | "movie" | null;
+  title: string | null;
+  season: number | null;
+  episode: number | null;
+  episode_title: string | null;
+  language: string | null;
+  progress: DiscoverSummaryProgress | null;
+  remote: DiscoverRemoteObservation | null;
+  parent_activity_id: string | null;
+  scheduler_run_id: string | null;
+  observed_at: string | null;
+}
+
+export interface DiscoverScheduleItem {
+  job_id: string;
+  name: string;
+  interval: string | null;
+  next_run_in: string | null;
+}
+
+export interface DiscoverActivityComponent {
+  availability: DiscoverSummaryAvailability;
+  observed_at: string | null;
+  complete: boolean;
+  truncated: boolean;
+  running_count: number | null;
+  queued_count: number | null;
+  scheduled_count: number | null;
+  running: DiscoverActivityItem[];
+  queued: DiscoverActivityItem[];
+  scheduled: DiscoverScheduleItem[];
+  unknown_sources: string[];
+}
+
+export interface DiscoverWantedComponent {
+  availability: DiscoverSummaryAvailability;
+  observed_at: string | null;
+  complete: boolean;
+  requirements: number | null;
+  episode_requirements: number | null;
+  movie_requirements: number | null;
+  media_count: number | null;
+  unknown_media_count: number | null;
+  qualifications: string[];
+  by_instance: {
+    arr_instance_id: number | null;
+    instance_name: string | null;
+    requirements: number;
+  }[];
+}
+
+export interface DiscoverArrival {
+  kind: "episode" | "movie" | "translation";
+  event_id: string;
+  status: "success";
+  action: number | null;
+  title: string | null;
+  season: number | null;
+  episode: number | null;
+  episode_title: string | null;
+  language: string | null;
+  provider: string | null;
+  arr_instance_id: number | null;
+  instance_name: string | null;
+  timestamp: string | null;
+}
+
+export interface DiscoverArrivalsStatus {
+  availability: DiscoverSummaryAvailability;
+  observed_at: string | null;
+  complete: boolean;
+  truncated: boolean;
+  candidate_limit: number;
+  display_limit: number;
+  qualifications: string[];
+}
+
+export interface DiscoverAttentionItem {
+  id: string;
+  capability: "library_sync" | "library_paths" | "subtitle_providers" | string;
+  severity: "warning" | "error";
+  scope: {
+    arr_instance_id?: number | null;
+    instance_name?: string | null;
+    kind?: string | null;
+    folders?: number;
+    example?: string | null;
+    providers?: string[];
+    alternatives?: boolean;
+    enabled_count?: number;
+  };
+  summary: string;
+  detail: string | null;
+  freshness: "live" | "last_recorded_observation" | string;
+  recovery: { label: string; target: string };
+}
+
+export interface DiscoverOnboardingItem {
+  id: string;
+  summary: string;
+  target: string;
+}
+
+export interface DiscoverSummary {
+  generated_at: string;
+  state: DiscoverSummaryState;
+  query_budget: number;
+  activity: DiscoverActivityComponent;
+  wanted: DiscoverWantedComponent;
+  arrivals: DiscoverArrival[];
+  arrivals_status: DiscoverArrivalsStatus;
+  attention: {
+    availability: DiscoverSummaryAvailability;
+    observed_at: string | null;
+    complete: boolean;
+    unknown_sources: string[];
+    items: DiscoverAttentionItem[];
+  };
+  onboarding: {
+    availability: DiscoverSummaryAvailability;
+    observed_at: string | null;
+    complete: boolean;
+    items: DiscoverOnboardingItem[];
+  };
 }

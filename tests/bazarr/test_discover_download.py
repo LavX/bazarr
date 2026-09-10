@@ -1,6 +1,7 @@
 """Exact Discover attachments through the real authenticated API and provider pool."""
 import pytest
 
+import test_discover_copy_matching as copy_fixtures
 import test_discover_search as search_fixtures
 
 authenticated_client = search_fixtures.authenticated_client
@@ -13,6 +14,10 @@ FULL_SRT = b"1\n00:00:01,000 --> 00:00:02,000\nFull dialogue\n\n"
 FORCED_SRT = b"1\n00:00:03,000 --> 00:00:04,000\nForced translation\n\n"
 CONTEXT = {"media_type": "episode", "imdb_id": "tt0903747", "title": "Breaking Bad",
            "year": 2008, "season": 2, "episode": 1, "language": "eng", "manual_confirmed": True}
+# Every saved file ends with the identity of the exact result: its own release,
+# its provider and whether it is forced or full.
+RESULT_NAME = {scope: f".Breaking.Bad.S02E01.{scope}.discover_download.en.{scope}.srt"
+               for scope in ("full", "forced")}
 
 
 @pytest.fixture
@@ -74,7 +79,11 @@ def test_exact_forced_attachment_without_library_or_hub_mutation(
     assert b"-->" in download.data
     assert download.data == FORCED_SRT
     assert "attachment" in download.headers["Content-Disposition"]
-    assert "Breaking_Bad.S02E01.en.forced.srt" in download.headers["Content-Disposition"]
+    # The saved file names the exact result: its own release, provider and
+    # forced identity, with the target identity dropped only because the
+    # release already states it.
+    assert ("Breaking.Bad.S02E01.forced.discover_download.en.forced.srt"
+            in download.headers["Content-Disposition"])
     assert download.mimetype == "application/x-subrip"
     assert download.headers["Cache-Control"] == "no-store"
     assert choices[1] == ["forced"]
@@ -203,7 +212,7 @@ def test_filename_sanitizes_title_and_preserves_exact_episode(authenticated_clie
     assert response.status_code == 200
     disposition = response.headers["Content-Disposition"]
     assert "/" not in disposition and "\\" not in disposition and "\r" not in disposition and "\n" not in disposition
-    assert "S02E01.en.forced.srt" in disposition
+    assert disposition.endswith("Bad_Title_name_Header.S02E01" + RESULT_NAME["forced"])
 
 
 @pytest.mark.parametrize("content", [
@@ -243,7 +252,7 @@ def test_movie_filename_has_exact_title_year_and_language(authenticated_client, 
                                          "title": "The Matrix", "year": 1999, "language": "eng"})
     download = get(authenticated_client, response.json["results"][0])
     assert download.status_code == 200
-    assert 'The_Matrix.1999.en.full.srt' in download.headers["Content-Disposition"]
+    assert download.headers["Content-Disposition"].endswith("The_Matrix.1999" + RESULT_NAME["full"])
 
 
 @pytest.mark.parametrize("query", ["Example.Movie.2024.1080p.WEB-DL", '../../Bad: "Title"/name Header', "電影"])
@@ -273,7 +282,7 @@ def test_raw_attachment_and_expiry_recovery_keep_query_without_identity(
     download = get(authenticated_client, row)
     assert download.status_code == 200 and download.data == FORCED_SRT
     name = secure_filename(query)[:120].strip("._") or "release-query"
-    assert f'{name}.en.forced.srt' in download.headers["Content-Disposition"]
+    assert download.headers["Content-Disposition"].endswith(name + RESULT_NAME["forced"])
     assert "tt" not in snapshot["context"] and "imdb_id" not in snapshot["context"]
     file_id_store.reset_store()
     assert get(authenticated_client, row).status_code == 410
@@ -301,5 +310,125 @@ def test_resolved_nonlibrary_episode_download_retains_original_source_and_exact_
     assert resolve_result(row["id"])["context"]["episode_identity"]["id"] == 401
     download = get(authenticated_client, row)
     assert download.status_code == 200 and download.data == FORCED_SRT
-    assert "Northern_Light.S02E01.en.forced.srt" in download.headers["Content-Disposition"]
+    assert download.headers["Content-Disposition"].endswith("Northern_Light.S02E01" + RESULT_NAME["forced"])
     assert {table.name: session.execute(sa.select(table)).all() for table in db.Base.metadata.sorted_tables} == before
+
+copy_database = copy_fixtures.copy_database
+hashing = copy_fixtures.hashing
+
+
+def test_a_retired_copy_stops_delivery_of_bytes_it_was_searched_for(
+    authenticated_client, choices, copy_database, hashing, tmp_path,
+):
+    """A minted handle freezes its context, so copy validity has to be rechecked
+    at the byte owner rather than only at search time.
+
+    The replacement holds size and modification time constant, so this passes
+    only if the content hash is genuinely re-read. Deletion is checked after it,
+    since the two failure modes are different.
+    """
+    import os
+
+    _, session = copy_database
+    copy_fixtures.add_instance(session, 1, "Sonarr HD", kind="sonarr")
+    path = copy_fixtures.media_file(tmp_path / "hd", "Breaking.Bad.S02E01.720p.mkv", b"HD")
+    copy_fixtures.add_episode(session, 3, 1, 30, path, scene="Breaking.Bad.S02E01.720p-GRP")
+    session.commit()
+    offered = authenticated_client.get("/api/discover/copies", query_string={
+        "media_type": "episode", "imdb_id": "tt0903747", "season": "2", "episode": "1"},
+        headers={"X-API-KEY": "discover-test-key"}).json["items"]
+    copy_id = offered[0]["copy_id"]
+    snapshot = post(authenticated_client, {**CONTEXT, "copy_id": copy_id}).json
+    row = snapshot["results"][1]
+    assert get(authenticated_client, row).status_code == 200
+    assert choices[1] == ["forced"]
+    copy_fixtures.replace_content(path, b"REPLACED")
+    expired = get(authenticated_client, row)
+    assert expired.status_code == 410
+    assert expired.json["reason"] == "result_expired"
+    assert expired.json["recoverable"] is True
+    # The cached artifact is not served either, and no second fetch happens.
+    assert choices[1] == ["forced"]
+    fresh = post(authenticated_client, {**CONTEXT, "copy_id": copy_id}).json
+    assert fresh["context"]["file_revision"] != snapshot["context"]["file_revision"]
+    assert get(authenticated_client, fresh["results"][1]).status_code == 200
+    assert choices[1] == ["forced", "forced"]
+    os.remove(path)
+    gone = get(authenticated_client, fresh["results"][1])
+    assert gone.status_code == 410
+    assert gone.json["reason"] == "result_expired"
+    assert choices[1] == ["forced", "forced"]
+
+
+@pytest.mark.parametrize("release,provider,title", [
+    ("R" * 400, "P" * 200, "T" * 300),
+    ("Ünnepi" * 90, "provider", "Árvíztűrő tükörfúrógép" * 20),
+    ("The.Matrix.1999.1080p.BluRay.x264-GROUP", "catalog_example", "The Matrix"),
+])
+def test_attachment_names_stay_within_one_filesystem_name(release, provider, title):
+    """ext4, APFS and SMB all stop at 255 bytes for a single name.
+
+    The release is the longest and least identifying component, so it yields
+    first and the result stays a name the reader's device can actually save.
+    """
+    from types import SimpleNamespace
+    from discover.download import FILENAME_MAX_BYTES, _filename
+
+    subtitle = SimpleNamespace(release_info=release, provider_name=provider,
+                               _reported_forced=True)
+    name = _filename({"subtitle": subtitle, "context": {
+        "media_type": "movie", "imdb_id": "tt0133093", "title": title,
+        "year": 1999, "language": "eng"}})
+    assert len(name.encode()) <= FILENAME_MAX_BYTES
+    assert name.endswith(".eng.forced.srt")
+    assert "/" not in name and "\\" not in name
+    # Trimming never leaves a partial character or a dangling separator.
+    name.encode().decode()
+    assert ".." not in name
+
+
+def test_a_long_release_keeps_the_provider_and_scope_that_identify_it():
+    from types import SimpleNamespace
+    from discover.download import FILENAME_MAX_BYTES, _filename
+
+    subtitle = SimpleNamespace(release_info="Show.S01E01." + "x" * 400,
+                               provider_name="catalog_example", _reported_forced=False)
+    name = _filename({"subtitle": subtitle, "context": {
+        "media_type": "episode", "imdb_id": "tt0903747", "title": "Breaking Bad",
+        "season": 2, "episode": 1, "language": "eng"}})
+    assert len(name.encode()) <= FILENAME_MAX_BYTES
+    assert name.endswith(".catalog_example.eng.full.srt")
+    assert name.startswith("Breaking_Bad.S02E01.Show.S01E01.")
+
+
+@pytest.mark.parametrize("waited", [False, True])
+def test_a_cache_hit_reobserves_the_copy_only_when_the_request_waited(
+    authenticated_client, choices, copy_database, hashing, tmp_path, monkeypatch, waited,
+):
+    """The entry validation happens before the cache lock, which is bounded by
+    FETCH_WAIT_SECONDS rather than by nothing. A request that actually waited
+    has to look again; an uncontended cache hit has nothing new to see."""
+    from discover import download as owner
+    from discover import library
+
+    _, session = copy_database
+    copy_fixtures.add_instance(session, 1, "Sonarr HD", kind="sonarr")
+    path = copy_fixtures.media_file(tmp_path / "hd", "Breaking.Bad.S02E01.720p.mkv", b"HD")
+    copy_fixtures.add_episode(session, 3, 1, 30, path, scene="Breaking.Bad.S02E01.720p-GRP")
+    session.commit()
+    offered = authenticated_client.get("/api/discover/copies", query_string={
+        "media_type": "episode", "imdb_id": "tt0903747", "season": "2", "episode": "1"},
+        headers={"X-API-KEY": "discover-test-key"}).json["items"]
+    row = post(authenticated_client, {**CONTEXT, "copy_id": offered[0]["copy_id"]}).json["results"][1]
+    assert get(authenticated_client, row).status_code == 200
+
+    observations = []
+    real = library._copy_hash
+    monkeypatch.setattr(library, "_copy_hash",
+                        lambda p, s: (observations.append(p), real(p, s))[1])
+    if waited:
+        # Stand in for a contended cache lock: any elapsed time now counts.
+        monkeypatch.setattr(owner, "COPY_RECHECK_AFTER_SECONDS", -1)
+    assert get(authenticated_client, row).status_code == 200
+    assert len(observations) == (2 if waited else 1)
+    assert choices[1] == ["forced"]

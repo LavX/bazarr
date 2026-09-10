@@ -4,20 +4,21 @@ import {
   Alert,
   Anchor,
   Button,
-  Group,
-  Image,
-  NativeSelect,
+  SegmentedControl,
   Stack,
   Text,
   TextInput,
   Title,
 } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
+import { faMagnifyingGlass } from "@fortawesome/free-solid-svg-icons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   normalizeTitleQuery,
   useDiscoverMetadata,
 } from "@/apis/hooks/discover";
 import { useDiscover } from "@/contexts/Discover";
+import MediaPoster from "./MediaPoster";
 import styles from "./Discover.module.scss";
 
 export default function TitleSearch() {
@@ -84,49 +85,55 @@ export default function TitleSearch() {
     <section
       ref={root}
       aria-labelledby="movie-browse-title"
-      style={{ marginBottom: 32 }}
+      className={styles.search}
     >
-      <Group justify="space-between" mb="md">
-        <Title order={2} id="movie-browse-title">
-          {shows ? "Explore shows" : "Explore movies"}
-        </Title>
-        <Anchor
-          c="light-dark(var(--mantine-color-brand-7), var(--mantine-color-brand-4))"
-          id="discover-metadata-setup"
-          component={Link}
-          to="/settings/discover"
-          py="sm"
-          onClick={() => saveReturn("discover-metadata-setup")}
-        >
-          Discover settings
-        </Anchor>
-      </Group>
+      {/* The section keeps its heading for assistive technology. On screen the
+          bar is the heading: one control, first thing on the page. */}
+      <Title
+        order={2}
+        id="movie-browse-title"
+        className={styles.visuallyHidden}
+      >
+        {shows ? "Explore shows" : "Explore movies"}
+      </Title>
       <form
+        className={styles.searchBar}
         onSubmit={(event) => {
           event.preventDefault();
           if (normalized) updateBrowsing({ suggestionsClosed: false });
         }}
       >
-        <NativeSelect
-          className={styles.mediaFilter}
-          label="Browse media"
-          value={browsing.mediaFilter}
-          data={[
-            { value: "movie", label: "Movies" },
-            { value: "show", label: "Shows" },
-          ]}
-          onChange={(event) =>
-            updateBrowsing({
-              mediaFilter:
-                event.currentTarget.value === "show" ? "show" : "movie",
-              suggestionsClosed: false,
-            })
-          }
-        />
+        {/* This scopes the title search, not the feeds below it. One
+            vocabulary with the trending tabs: Movies and Series. A segmented
+            pair shows both answers; arrow keys move between them. */}
+        <div className={styles.searchScope}>
+          <SegmentedControl
+            aria-label="Search for"
+            classNames={{
+              root: styles.segmented,
+              label: styles.segmentedLabel,
+              indicator: styles.segmentedIndicator,
+            }}
+            value={browsing.mediaFilter}
+            data={[
+              { value: "movie", label: "Movies" },
+              { value: "show", label: "Series" },
+            ]}
+            onChange={(value) =>
+              updateBrowsing({
+                mediaFilter: value === "show" ? "show" : "movie",
+                suggestionsClosed: false,
+              })
+            }
+          />
+        </div>
         <TextInput
           id="discover-title-query"
-          label={shows ? "Search show titles" : "Search movie titles"}
-          placeholder="A title, a year to remember"
+          className={styles.searchField}
+          classNames={{ label: styles.visuallyHidden }}
+          label={shows ? "Search series titles" : "Search movie titles"}
+          placeholder={shows ? "Search series titles" : "Search movie titles"}
+          leftSection={<FontAwesomeIcon icon={faMagnifyingGlass} />}
           maxLength={200}
           value={browsing.query}
           autoComplete="off"
@@ -146,10 +153,24 @@ export default function TitleSearch() {
           }}
           aria-controls="discover-title-suggestions"
           aria-expanded={items.length > 0}
-          description="Global title identities and local library candidates. Browsing never searches subtitle providers."
+          aria-describedby="discover-title-hint"
         />
       </form>
-      <div aria-live="polite" role="status" style={{ marginBlock: 16 }}>
+      <div className={styles.searchFoot}>
+        <Text component="p" id="discover-title-hint">
+          Global title identities and local library candidates. Browsing never
+          searches subtitle providers.
+        </Text>
+        <Anchor
+          id="discover-metadata-setup"
+          component={Link}
+          to="/settings/discover"
+          onClick={() => saveReturn("discover-metadata-setup")}
+        >
+          Discover settings
+        </Anchor>
+      </div>
+      <div aria-live="polite" role="status" className={styles.searchStatus}>
         {status.settingsLoading && <Text>Loading Discover setup.</Text>}
         {status.settingsError && (
           <Alert color="yellow">
@@ -221,13 +242,13 @@ export default function TitleSearch() {
       )}
       {source?.status === "authentication_failed" && (
         <Anchor
-          c="light-dark(var(--mantine-color-brand-7), var(--mantine-color-brand-4))"
+          c="var(--discover-link)"
           component={Link}
           to="/settings/discover"
           py="sm"
           onClick={() => saveReturn("discover-metadata-setup")}
         >
-          Replace TMDB token
+          Check the TMDB key
         </Anchor>
       )}
       {source?.primary &&
@@ -269,30 +290,17 @@ export default function TitleSearch() {
       <Stack
         id="discover-title-suggestions"
         gap={0}
+        className={styles.candidates}
         aria-label={shows ? "Show candidates" : "Movie candidates"}
       >
         {items.map((movie) => (
-          <Group
-            key={movie.source_id}
-            py="md"
-            wrap="nowrap"
-            align="start"
-            style={{ borderBottom: "1px solid var(--bz-border-interactive)" }}
-          >
-            {movie.poster_url && (
-              <Image
-                src={movie.poster_url}
-                alt=""
-                w={64}
-                h={96}
-                radius="sm"
-                fit="cover"
-                loading="lazy"
-              />
-            )}
-            <Stack gap={4} style={{ minWidth: 0, flex: 1 }}>
+          <div key={movie.source_id} className={styles.candidate}>
+            <span aria-hidden="true">
+              <MediaPoster key={movie.poster_url} src={movie.poster_url} />
+            </span>
+            <Stack gap={4} style={{ minWidth: 0 }}>
               <Anchor
-                c="light-dark(var(--mantine-color-brand-7), var(--mantine-color-brand-4))"
+                c="var(--discover-link)"
                 component="button"
                 type="button"
                 ta="left"
@@ -364,11 +372,17 @@ export default function TitleSearch() {
                 </Text>
               )}
             </Stack>
-          </Group>
+          </div>
         ))}
       </Stack>
-      <Text size="xs" mt="lg" maw="75ch">
-        This product uses the TMDB API but is not endorsed or certified by TMDB.
+      <Text component="p" className={styles.searchCaveat}>
+        {/* Two separate statements. The homepage renders one shared source
+            attribution for the whole page, so it hides this copy of that
+            sentence by name, and the availability caveat stays visible. */}
+        <span className={styles.sourceAttribution}>
+          This product uses the TMDB API but is not endorsed or certified by
+          TMDB.{" "}
+        </span>
         Metadata does not establish subtitle availability or compatibility.
       </Text>
     </section>

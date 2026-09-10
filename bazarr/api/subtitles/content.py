@@ -392,9 +392,9 @@ def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=N
         return 'Subtitle file not found on disk', 404
 
     # CodeQL-recognized py/path-injection sanitizer: realpath + commonpath.
-    # Copilot's official autofix for this exact query uses precisely this
-    # pattern. startswith(base + os.sep) is NOT modeled as a sanitizer by
-    # the py/path-injection query, but os.path.commonpath([path, base]) is.
+    # The query's own documented autofix uses precisely this pattern.
+    # startswith(base + os.sep) is NOT modeled as a sanitizer by the
+    # py/path-injection query, but os.path.commonpath([path, base]) is.
     # Building the barrier at the final return site gives the caller a value
     # that CodeQL's dataflow treats as cleared, so the downstream sinks
     # (os.stat in generate_etag, tempfile.mkstemp(dir=), os.replace, os.chmod)

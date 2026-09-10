@@ -34,6 +34,7 @@ import AppNavbar from "@/App/Navbar";
 import logoSrc from "@/assets/images/logo_no_orb128.png";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import { useWhatsNewAutoOpen } from "@/components/modals/useWhatsNewAutoOpen";
+import { DiscoverSetupReturn } from "@/contexts/Discover";
 import NavbarProvider from "@/contexts/Navbar";
 import OnlineProvider from "@/contexts/Online";
 import { notification } from "@/modules/task";
@@ -41,6 +42,10 @@ import CriticalError from "@/pages/errors/CriticalError";
 import { useOnboardingState } from "@/pages/Setup/useOnboardingState";
 import { RouterNames } from "@/Router/RouterNames";
 import { Environment } from "@/utilities";
+import {
+  readSessionValue,
+  removeSessionValue,
+} from "@/utilities/browserStorage";
 import { consumeRestartReloadPending } from "@/utilities/restart";
 import { registerAppNavigate } from "@/utilities/whatsNew";
 import AppHeader from "./Header";
@@ -160,14 +165,14 @@ const App: FunctionComponent = () => {
   }, []);
 
   useEffect(() => {
-    const token = sessionStorage.getItem("password_upgrade_token");
+    const token = readSessionValue("password_upgrade_token");
     if (token) {
       setUpgradeModalOpen(true);
     }
   }, []);
 
   const handleUpgradeAccept = useCallback(async () => {
-    const token = sessionStorage.getItem("password_upgrade_token");
+    const token = readSessionValue("password_upgrade_token");
     if (!token) return;
     setUpgrading(true);
     try {
@@ -183,14 +188,14 @@ const App: FunctionComponent = () => {
         notification.warn("Upgrade failed", "Could not upgrade password hash"),
       );
     } finally {
-      sessionStorage.removeItem("password_upgrade_token");
+      removeSessionValue("password_upgrade_token");
       setUpgradeModalOpen(false);
       setUpgrading(false);
     }
   }, []);
 
   const handleUpgradeDecline = useCallback(() => {
-    sessionStorage.removeItem("password_upgrade_token");
+    removeSessionValue("password_upgrade_token");
     setUpgradeModalOpen(false);
   }, []);
 
@@ -308,7 +313,9 @@ const App: FunctionComponent = () => {
                   </Text>
                 </Alert>
               )}
-              <Outlet></Outlet>
+              <DiscoverSetupReturn>
+                <Outlet></Outlet>
+              </DiscoverSetupReturn>
             </AppShell.Main>
           </AppShell>
           <Modal

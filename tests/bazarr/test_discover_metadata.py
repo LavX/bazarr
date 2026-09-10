@@ -59,7 +59,7 @@ def authenticated_client(upstream, monkeypatch):
     monkeypatch.setattr(metadata, "_current", None)
 
     previous = settings.get("discover", {}).copy()
-    settings.set("discover", {"tmdb_access_token": "synthetic-metadata-token", "locale": "en-US"})
+    settings.set("discover", {"tmdb_access_token": "5ecafe00cafe00cafe00cafe00cafe00", "locale": "en-US"})
     monkeypatch.setattr(settings.auth, "apikey", "metadata-test-key")
     monkeypatch.setattr(settings.compat_endpoint, "enabled", False)
     provider_searches = []
@@ -85,7 +85,7 @@ def test_search_is_authenticated_cached_and_never_submits_providers(authenticate
     assert second.json["data"]["status"] == "cached"
     assert first.json["data"]["fetched_at"] == second.json["data"]["fetched_at"]
     assert authenticated_client.provider_searches == []
-    assert "synthetic-metadata-token" not in first.get_data(as_text=True)
+    assert "5ecafe00cafe00cafe00cafe00cafe00" not in first.get_data(as_text=True)
 
 
 def test_metadata_requires_bazarr_authentication(authenticated_client):
@@ -93,11 +93,31 @@ def test_metadata_requires_bazarr_authentication(authenticated_client):
     assert authenticated_client.get("/api/discover/metadata/status", headers={"X-API-KEY": "wrong"}).status_code == 401
 
 
+def test_stored_key_flag_is_false_while_metadata_stays_configured(authenticated_client, monkeypatch):
+    """A reader with no key of their own still browses, and is told nothing is saved.
+
+    These are two different facts. Before the built-in key they moved together,
+    so the client could read one off the other; now only this flag answers
+    "is there something here to remove?".
+    """
+    from app.config import get_settings, settings
+    for stored in ("", "   ", "enc:v1:opaque"):
+        settings.set("discover", {"tmdb_access_token": stored, "locale": "en-US"})
+        result = get_settings()["discover"]
+        assert result["tmdb_configured"] is True
+        assert result["tmdb_token_stored"] is False
+    settings.set("discover", {"tmdb_access_token": "5ecafe00cafe00cafe00cafe00cafe00", "locale": "en-US"})
+    assert get_settings()["discover"]["tmdb_token_stored"] is True
+
+
 def test_real_settings_serializer_omits_write_only_value(authenticated_client):
     from app.config import get_settings, settings
     result = get_settings()
     assert "tmdb_access_token" not in result["discover"]
     assert result["discover"]["tmdb_configured"] is True
+    # The reader's own key is present here, and the flag says so without
+    # carrying any part of it.
+    assert result["discover"]["tmdb_token_stored"] is True
     assert result["discover"]["metadata_revision"]
     assert result["auth"]["apikey"] == settings.auth.apikey
     assert result["general"]["enabled_providers"] == list(settings.general.enabled_providers)
@@ -123,17 +143,19 @@ def test_details_resolve_identity_without_subtitle_lookup(authenticated_client):
                                              (429, "unavailable"), (500, "unavailable")])
 def test_upstream_failures_are_safe_domain_outcomes(authenticated_client, upstream, status, expected):
     upstream.status = status
-    response = authenticated_client.post("/api/discover/metadata/test", json={"token": "candidate-private"},
+    response = authenticated_client.post("/api/discover/metadata/test",
+                                         json={"token": "5ecafe44cafe44cafe44cafe44cafe44"},
                                          headers={"X-API-KEY": "metadata-test-key"})
     assert response.status_code == 200
     assert response.json["data"]["status"] == expected
-    assert "candidate-private" not in response.get_data(as_text=True)
+    assert "5ecafe44cafe44cafe44cafe44cafe44" not in response.get_data(as_text=True)
 
 
 def test_connection_check_does_not_save_candidate(authenticated_client):
     from app.config import settings
     before = settings.discover.tmdb_access_token
-    response = authenticated_client.post("/api/discover/metadata/test", json={"token": "draft-token"},
+    response = authenticated_client.post("/api/discover/metadata/test",
+                                         json={"token": "5ecafe55cafe55cafe55cafe55cafe55"},
                                          headers={"X-API-KEY": "metadata-test-key"})
     assert response.status_code == 200
     assert response.json["data"]["status"] == "available"
@@ -161,6 +183,24 @@ def test_unresolved_mapping_is_never_guessed(authenticated_client, upstream, val
     assert authenticated_client.provider_searches == []
 
 
+@pytest.mark.parametrize("value", ["2026-02-31", "2026-13-01", "2026-00-10", "0000-00-00", "1980-1-1", "1980"])
+def test_date_shaped_but_invalid_release_dates_stay_unknown(authenticated_client, upstream, value):
+    """A shape match is not a date. An impossible calendar value must not
+    project a confident year on either the movie or the show path."""
+    upstream.payload = {"id": 42, "title": "Unknown film", "release_date": value}
+    assert get(authenticated_client, "movies/42").json["data"]["item"]["year"] is None
+    upstream.payload = {"id": 42, "name": "Unknown show", "first_air_date": value, "seasons": []}
+    assert get(authenticated_client, "shows/42").json["data"]["item"]["year"] is None
+
+
+@pytest.mark.parametrize("value,expected", [("2024-02-29", 2024), ("1980-01-01", 1980)])
+def test_real_calendar_dates_still_project_their_year(authenticated_client, upstream, value, expected):
+    upstream.payload = {"id": 42, "title": "Known film", "release_date": value}
+    assert get(authenticated_client, "movies/42").json["data"]["item"]["year"] == expected
+    upstream.payload = {"id": 42, "name": "Known show", "first_air_date": value, "seasons": []}
+    assert get(authenticated_client, "shows/42").json["data"]["item"]["year"] == expected
+
+
 @pytest.mark.parametrize("failure", [requests.Timeout("synthetic-sensitive-exception"), requests.ConnectionError("synthetic-sensitive-exception")])
 def test_timeouts_and_transport_errors_do_not_leak(authenticated_client, upstream, failure):
     upstream.error = failure
@@ -170,8 +210,17 @@ def test_timeouts_and_transport_errors_do_not_leak(authenticated_client, upstrea
     assert "synthetic-sensitive-exception" not in response.get_data(as_text=True)
 
 
-def test_missing_key_never_calls_upstream(authenticated_client, upstream):
+def test_missing_key_never_calls_upstream(authenticated_client, upstream, monkeypatch):
+    """With no key anywhere, not even the built-in one, nothing is requested.
+
+    A build with no credential at all is the only way this state is reachable
+    now that the application ships its own key, so it is asserted against that
+    condition rather than against an empty setting, which means "use the
+    built-in one".
+    """
+    from app import tmdb
     from app.config import settings
+    monkeypatch.setattr(tmdb, "builtin_api_key", lambda: "")
     settings.discover.tmdb_access_token = ""
     for path in ["status", "search?q=Shogun", "movies/42"]:
         result = get(authenticated_client, path)
@@ -180,15 +229,118 @@ def test_missing_key_never_calls_upstream(authenticated_client, upstream):
     assert upstream.calls == []
 
 
+def test_no_stored_token_still_reaches_tmdb_with_the_built_in_key(authenticated_client, upstream):
+    """The point of the change: Discover works with zero reader configuration."""
+    from app import tmdb
+    from app.config import settings
+    settings.discover.tmdb_access_token = ""
+    result = get(authenticated_client, "search?q=Shogun")
+    assert result.status_code == 200
+    assert result.json["data"]["status"] == "available"
+    assert result.json["data"]["configured"] is True
+    assert upstream.calls, "no request was made with the built-in key"
+    # v3 authentication, and the key the application ships.
+    assert upstream.calls[0][1]["params"]["api_key"] == tmdb.builtin_api_key()
+    assert "Authorization" not in upstream.calls[0][1]["headers"]
+
+
+@pytest.mark.parametrize("stored", ["eyJhbGciOiJIUzI1NiJ9.payload.signature", "not-a-key",
+                                    "5ecafe00cafe00cafe00cafe00cafe0", "  "])
+def test_a_stored_value_that_is_not_a_v3_key_falls_back_rather_than_failing(authenticated_client,
+                                                                            upstream, stored):
+    """A token stored during the v4 era must not break startup or a request."""
+    from app import tmdb
+    from app.config import settings
+    settings.discover.tmdb_access_token = stored
+    result = get(authenticated_client, "search?q=Shogun")
+    assert result.status_code == 200
+    assert result.json["data"]["status"] == "available"
+    assert upstream.calls[0][1]["params"]["api_key"] == tmdb.builtin_api_key()
+    if stored.strip():
+        assert stored.strip() not in result.get_data(as_text=True)
+
+
+def test_a_stored_v3_key_overrides_the_built_in_one(authenticated_client, upstream):
+    from app import tmdb
+    from app.config import settings
+    settings.discover.tmdb_access_token = "5ecafe66cafe66cafe66cafe66cafe66"
+    result = get(authenticated_client, "search?q=Shogun")
+    assert result.status_code == 200
+    assert upstream.calls[0][1]["params"]["api_key"] == "5ecafe66cafe66cafe66cafe66cafe66"
+    assert upstream.calls[0][1]["params"]["api_key"] != tmdb.builtin_api_key()
+    assert "5ecafe66cafe66cafe66cafe66cafe66" not in result.get_data(as_text=True)
+
+
+def test_the_built_in_key_never_leaves_the_server(authenticated_client, upstream):
+    """It travels as an outbound query parameter and nowhere else.
+
+    Not in the settings payload, not in a DTO, not in the revision, not in a
+    cache key. The revision must stay a random identifier: deriving it from the
+    credential would put the key in every envelope the reader can read.
+    """
+    from app import tmdb
+    from app.config import get_settings, settings
+    from discover import metadata
+    # The ordinary installation: nothing stored, so the built-in key is the one
+    # in use and therefore the one that could leak.
+    settings.discover.tmdb_access_token = ""
+    key = tmdb.builtin_api_key()
+    settings_payload = get_settings()
+    assert "tmdb_access_token" not in settings_payload["discover"]
+    assert key not in json.dumps(settings_payload)
+
+    config = metadata.configuration()
+    assert key not in config.revision
+    assert key not in repr(config), repr(config)
+    for path in ["status", "search?q=Shogun", "movies/42"]:
+        body = get(authenticated_client, path).get_data(as_text=True)
+        assert key not in body, path
+    # It did reach TMDB, as a v3 query parameter.
+    assert any(call[1]["params"].get("api_key") == key for call in upstream.calls)
+    assert all("Authorization" not in call[1]["headers"] for call in upstream.calls)
+    # And it is not the cache key either.
+    from discover.metadata import _cache
+    assert key not in repr(getattr(_cache, "backend", _cache).__dict__)
+
+
+def test_the_built_in_default_does_not_make_a_process_see_a_configuration_change(authenticated_client):
+    """A default must not look like a change on every call, or every read would
+    hard-invalidate the metadata cache."""
+    from app.config import settings
+    from discover import metadata
+    settings.discover.tmdb_access_token = ""
+    first = metadata.configuration().revision
+    for _ in range(5):
+        assert metadata.configuration().revision == first
+    # An ignored stored value is not a change either: the effective credential
+    # is the same built-in key before and after.
+    settings.discover.tmdb_access_token = "eyJhbGciOiJIUzI1NiJ9.payload.signature"
+    assert metadata.configuration().revision == first
+    # A usable key is a real change, and rotates it.
+    settings.discover.tmdb_access_token = "5ecafe99cafe99cafe99cafe99cafe99"
+    assert metadata.configuration().revision != first
+
+
+def test_a_draft_that_is_not_a_v3_key_is_refused_without_a_request(authenticated_client, upstream):
+    """Checking a v4 era token must not quietly report the built-in key's health."""
+    response = authenticated_client.post("/api/discover/metadata/test",
+                                         json={"token": "eyJhbGciOiJIUzI1NiJ9.payload.signature"},
+                                         headers={"X-API-KEY": "metadata-test-key"})
+    assert response.status_code == 200
+    assert response.json["data"]["status"] == "authentication_failed"
+    assert "not a TMDB v3 API key" in response.json["data"]["message"]
+    assert upstream.calls == []
+
+
 @pytest.mark.parametrize("payload", [{}, {"results": "bad"}, {"results": [{"id": True, "title": "Invalid"}]},
-                                     {"results": [{"id": 42, "title": "synthetic-metadata-token"}]},
+                                     {"results": [{"id": 42, "title": "5ecafe00cafe00cafe00cafe00cafe00"}]},
                                      {"results": [{"id": 42, "title": "x" * (1024 * 1024)}]}])
 def test_invalid_or_oversized_responses_fail_closed(authenticated_client, upstream, payload):
     upstream.payload = payload
     response = get(authenticated_client, "search?q=Shogun")
     assert response.json["data"]["status"] == "unavailable"
     assert response.json["data"]["items"] == []
-    assert "synthetic-metadata-token" not in response.get_data(as_text=True)
+    assert "5ecafe00cafe00cafe00cafe00cafe00" not in response.get_data(as_text=True)
 
 
 def test_cache_has_bounded_stale_fallback_and_no_cross_rotation_reuse(authenticated_client, upstream, monkeypatch):
@@ -204,7 +356,7 @@ def test_cache_has_bounded_stale_fallback_and_no_cross_rotation_reuse(authentica
     assert stale["fetched_at"] == first["fetched_at"]
     now[0] += 3600
     assert get(authenticated_client, "search?q=Shogun").json["data"]["status"] == "unavailable"
-    settings.discover.tmdb_access_token = "rotated-synthetic-token"
+    settings.discover.tmdb_access_token = "5ecafe11cafe11cafe11cafe11cafe11"
     rotated = get(authenticated_client, "search?q=Shogun").json["data"]
     assert rotated["revision"] != first["revision"]
     assert rotated["items"] == []
@@ -217,7 +369,7 @@ def test_obsolete_inflight_response_cannot_repopulate_cache(authenticated_client
     first_revision = metadata.configuration().revision
     def rotate(config, path, params=None):
         result = original(config, path, params)
-        settings.discover.tmdb_access_token = "new-token-after-request"
+        settings.discover.tmdb_access_token = "5ecafe22cafe22cafe22cafe22cafe22"
         metadata.invalidate_metadata()
         return result
     monkeypatch.setattr(metadata, "_request", rotate)
@@ -247,7 +399,8 @@ def test_real_authenticated_settings_get_omits_token_and_ciphertext(authenticate
     assert result.status_code == 200
     assert "tmdb_access_token" not in result.json["discover"]
     assert result.json["discover"]["tmdb_configured"] is True
-    assert "synthetic-metadata-token" not in result.get_data(as_text=True)
+    assert result.json["discover"]["tmdb_token_stored"] is True
+    assert "5ecafe00cafe00cafe00cafe00cafe00" not in result.get_data(as_text=True)
 
 
 def test_repeated_token_form_is_rejected_before_language_mutation(authenticated_client, monkeypatch):
@@ -307,7 +460,7 @@ def test_image_urls_use_validated_source_configuration(authenticated_client, ups
     movie = get(authenticated_client, "movies/42").json["data"]["item"]
     assert movie["poster_url"] == "https://image.tmdb.org/t/p/w342/abc123.jpg"
     assert movie["backdrop_url"] is None
-    assert all("synthetic-metadata-token" not in url for url, _ in upstream.calls)
+    assert all("5ecafe00cafe00cafe00cafe00cafe00" not in url for url, _ in upstream.calls)
     assert len(upstream.calls) == 2
 
 
@@ -377,7 +530,7 @@ def test_real_settings_followup_failure_preserves_saved_metadata_and_retires_old
         raise RuntimeError("synthetic-private-followup-error")
     monkeypatch.setattr(sys.modules["app.database"].database, "execute", fail)
     response = authenticated_client.post("/api/system/settings", data={
-        "settings-discover-tmdb_access_token": "replacement-synthetic-token", "settings-discover-locale": "hu-HU",
+        "settings-discover-tmdb_access_token": "5ecafe77cafe77cafe77cafe77cafe77", "settings-discover-locale": "hu-HU",
     }, headers={"X-API-KEY": "metadata-test-key"})
     assert response.status_code == 503
     assert response.json == {"code": "discover_settings_refresh_failed",
@@ -389,7 +542,10 @@ def test_real_settings_followup_failure_preserves_saved_metadata_and_retires_old
     refreshed = get(authenticated_client, "search?q=Shogun").json["data"]
     assert refreshed["status"] == "available"
     assert refreshed["revision"] == status["revision"] == env.config.get_settings()["discover"]["metadata_revision"]
-    assert upstream.calls[-1][1]["headers"]["Authorization"] == "Bearer replacement-synthetic-token"
+    # v3 authentication: the replacement key travels as a query parameter and
+    # no authorization header is sent at all.
+    assert upstream.calls[-1][1]["params"]["api_key"] == "5ecafe77cafe77cafe77cafe77cafe77"
+    assert "Authorization" not in upstream.calls[-1][1]["headers"]
 
 
 @pytest.mark.parametrize("field", ["title", "overview", "poster_path", "backdrop_path"])
@@ -397,7 +553,7 @@ def test_real_settings_followup_failure_preserves_saved_metadata_and_retires_old
 @pytest.mark.parametrize("primed", [False, True])
 def test_escaped_credential_echo_never_reaches_metadata_or_cache(authenticated_client, upstream, monkeypatch, field, path, primed):
     from discover import metadata
-    token = "synthetic-metadata-token"
+    token = "5ecafe00cafe00cafe00cafe00cafe00"
     now = [100.0]
     monkeypatch.setattr(metadata.time, "monotonic", lambda: now[0])
     original = get(authenticated_client, path).json["data"] if primed else None

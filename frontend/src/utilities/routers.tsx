@@ -64,6 +64,11 @@ export function usePrompt(
         size: "md",
         closeOnEscape: true,
         closeOnClickOutside: false,
+        // The dialog's own controls carry the same 44px touch floor as the page
+        // behind it. Mantine's sm button is 36px and its close control smaller
+        // still, and at 320px these are the only way out of the prompt.
+        closeButtonProps: { size: 44 },
+        styles: { close: { minWidth: 44, minHeight: 44 } },
         onClose: () => {
           // Only reset if still blocked (not if proceed was already called)
           if (blocker.state === "blocked") {
@@ -77,42 +82,40 @@ export function usePrompt(
               {message}
             </Text>
             <Group justify="flex-end" mt="lg" gap="xs">
+              {/* The visible label carries the meaning, and there is no
+                  aria-label overriding it. A reader using voice control says
+                  the words on the button, so an accessible name that does not
+                  contain them does not activate it (WCAG 2.5.3, Level A). */}
               <Button
                 variant="default"
                 size="sm"
+                mih={44}
                 data-autofocus
                 onClick={handleStay}
-                aria-label="Stay on this page and continue editing"
               >
-                Keep Editing
+                Keep editing
               </Button>
               <Button
                 variant="light"
                 color="red"
                 size="sm"
+                mih={44}
                 onClick={handleDiscard}
-                aria-label={
-                  savedRefreshFailed
-                    ? "Leave this page keeping saved settings"
-                    : "Discard unsaved changes and leave this page"
-                }
               >
-                {savedRefreshFailed ? "Leave with saved settings" : "Discard"}
+                {savedRefreshFailed
+                  ? "Leave with saved settings"
+                  : "Discard changes"}
               </Button>
               {onSaveAndLeave && (
                 <Button
                   color="brand"
                   size="sm"
+                  mih={44}
                   onClick={handleSaveAndLeave}
-                  aria-label={
-                    savedRefreshFailed
-                      ? "Retry application refresh and leave this page"
-                      : "Save all changes and leave this page"
-                  }
                 >
                   {savedRefreshFailed
-                    ? "Retry refresh & Leave"
-                    : "Save & Leave"}
+                    ? "Retry refresh and leave"
+                    : "Save and leave"}
                 </Button>
               )}
             </Group>

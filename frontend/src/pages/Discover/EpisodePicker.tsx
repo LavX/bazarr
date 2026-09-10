@@ -5,7 +5,6 @@ import {
   Anchor,
   Button,
   Group,
-  NativeSelect,
   Stack,
   Text,
   Title,
@@ -17,6 +16,7 @@ import {
   episodeMatchesShow,
 } from "@/contexts/discoverState";
 import type { MetadataShow } from "@/types/discover";
+import DiscoverSelect from "./DiscoverSelect";
 import styles from "./Discover.module.scss";
 
 export function episodeLink(showId: number, season: number, episode: number) {
@@ -120,21 +120,16 @@ export default function EpisodePicker({ show }: { show: MetadataShow }) {
       ) : show.seasons.length === 0 ? (
         <Text>No seasons have been listed for this show.</Text>
       ) : (
-        <NativeSelect
+        <DiscoverSelect
           label="Choose season"
+          placeholder="Choose a season"
           value={season?.toString() ?? ""}
-          data={[
-            { value: "", label: "Choose a season" },
-            ...show.seasons.map((row) => ({
-              value: String(row.season),
-              label: row.title,
-            })),
-          ]}
-          onChange={(event) => {
-            const next =
-              event.currentTarget.value === ""
-                ? null
-                : Number(event.currentTarget.value);
+          options={show.seasons.map((row) => ({
+            value: String(row.season),
+            label: row.title,
+          }))}
+          onChange={(value) => {
+            const next = value === "" ? null : Number(value);
             updateBrowsing({ selectedSeason: next, selectedEpisode: null });
             updateDraft({
               episodeIdentity: undefined,
@@ -175,7 +170,7 @@ export default function EpisodePicker({ show }: { show: MetadataShow }) {
               justify="space-between"
             >
               <Anchor
-                c="light-dark(var(--mantine-color-brand-7), var(--mantine-color-brand-4))"
+                c="var(--discover-link)"
                 component={Link}
                 to={episodeLink(show.id, row.season, row.episode)}
                 aria-current={row.episode === number ? "page" : undefined}
@@ -260,7 +255,7 @@ export default function EpisodePicker({ show }: { show: MetadataShow }) {
             </Alert>
           )}
           <Anchor
-            c="light-dark(var(--mantine-color-brand-7), var(--mantine-color-brand-4))"
+            c="var(--discover-link)"
             component={Link}
             to={episodeLink(show.id, episode.season, episode.episode)}
           >

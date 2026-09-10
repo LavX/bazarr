@@ -15,7 +15,7 @@ it("offers global movie browsing without requiring a library or subtitle languag
     </AllProviders>,
   );
   expect(screen.getByLabelText("Search movie titles")).toBeEnabled();
-  expect(screen.getByLabelText("Subtitle language")).toHaveValue("");
+  expect(selectInput("Subtitle language")).toHaveValue("");
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
 });
 
@@ -133,7 +133,7 @@ it("debounces title queries, opens mapped movie details, and submits only after 
   expect(lookups).toEqual(["shogun"]);
   expect(providers).toEqual([]);
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
-  await user.selectOptions(screen.getByLabelText("Subtitle language"), "eng");
+  await pickOption(user, "Subtitle language", "English");
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
   await waitFor(() => expect(providers).toHaveLength(1));
   expect(providers[0]).toEqual({
@@ -222,7 +222,7 @@ it("explains unresolved IMDb mapping without keeping an earlier searchable ident
   );
   const { user } = browse();
   await user.type(screen.getByLabelText("IMDb ID"), "tt0133093");
-  await user.selectOptions(screen.getByLabelText("Subtitle language"), "eng");
+  await pickOption(user, "Subtitle language", "English");
   await user.type(screen.getByLabelText("Search movie titles"), "Shogun");
   await user.click(
     await screen.findByRole("button", { name: "Shōgun (1980)" }),
@@ -250,7 +250,7 @@ it("keeps explicit IMDb retrieval usable without metadata setup", async () => {
   const { user } = browse();
   await screen.findByText(/Set up TMDB in Discover settings/);
   await user.type(screen.getByLabelText("IMDb ID"), "tt0133093");
-  await user.selectOptions(screen.getByLabelText("Subtitle language"), "eng");
+  await pickOption(user, "Subtitle language", "English");
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeEnabled();
 });
 
@@ -294,7 +294,7 @@ it("preserves the selected subtitle identity when metadata credentials are remov
     await screen.findByRole("button", { name: "Shōgun (1980)" }),
   );
   await screen.findByRole("heading", { name: "Shōgun" });
-  await user.selectOptions(screen.getByLabelText("Subtitle language"), "eng");
+  await pickOption(user, "Subtitle language", "English");
   expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0080274");
   server.use(
     http.get("/api/system/settings", () =>
@@ -330,14 +330,14 @@ it.each(["IMDb ID", "Media type"])(
       await screen.findByRole("button", { name: "Shōgun (1980)" }),
     );
     await screen.findByRole("heading", { name: "Shōgun" });
-    await user.selectOptions(screen.getByLabelText("Subtitle language"), "eng");
+    await pickOption(user, "Subtitle language", "English");
     if (field === "IMDb ID") {
       await user.clear(screen.getByLabelText(field));
       await user.type(screen.getByLabelText(field), "tt0133093");
     } else {
-      await user.selectOptions(screen.getByLabelText(field), "episode");
+      await chooseSegment(user, "Episode");
       await user.type(screen.getByLabelText("Season"), "1");
-      await user.type(screen.getByLabelText("Episode"), "2");
+      await user.type(screen.getByRole("textbox", { name: "Episode" }), "2");
       await user.click(
         screen.getByLabelText(
           "I confirm this series IMDb ID and the manual season and episode numbers",
@@ -484,16 +484,14 @@ it.each([
       await screen.findByRole("button", { name: "Shōgun (1980)" }),
     );
     await screen.findByRole("heading", { name: "Shōgun" });
-    await user.selectOptions(screen.getByLabelText("Subtitle language"), "eng");
+    await pickOption(user, "Subtitle language", "English");
     await user.click(screen.getByRole("button", { name: "Find subtitles" }));
     await screen.findByRole("heading", {
       name: "Shogun.1980.Web",
     });
-    await user.click(
-      within(screen.getByRole("article")).getByRole("button", {
-        name: "Download SRT",
-      }),
-    );
+    // The title hero is an article too; the result row is the one that
+    // offers the download.
+    await user.click(screen.getByRole("button", { name: "Download SRT" }));
     await screen.findByText(/This result has expired/);
     await user.click(screen.getByRole("button", { name: "Back to movies" }));
     expect(
@@ -538,9 +536,7 @@ it.each([
       ).toBeInTheDocument();
       expect(screen.getByText(/This result has expired/)).toBeInTheDocument();
       expect(
-        within(screen.getByRole("article")).getByRole("button", {
-          name: "Download SRT",
-        }),
+        screen.getByRole("button", { name: "Download SRT" }),
       ).toBeDisabled();
     } else {
       expect(
@@ -605,15 +601,15 @@ it("keeps movie and show numeric identities separate when switching the global f
     expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0080274"),
   );
   await user.click(screen.getByRole("button", { name: "Back to movies" }));
-  await user.selectOptions(screen.getByLabelText("Browse media"), "show");
+  await chooseSegment(user, "Series");
   await user.click(
     await screen.findByRole("button", { name: "Shōgun (2024)" }),
   );
   await waitFor(() =>
     expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt2788316"),
   );
-  expect(screen.getByLabelText("Media type")).toHaveValue("episode");
-  expect(screen.getByLabelText("Episode")).toHaveValue("");
+  expect(screen.getByRole("radio", { name: "Episode" })).toBeChecked();
+  expect(screen.getByRole("textbox", { name: "Episode" })).toHaveValue("");
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
 });
 
@@ -681,7 +677,7 @@ it("browses OMDB with TMDB absent and retains the source through explicit title-
   );
   expect(sources).toEqual(["omdb"]);
   expect(submissions).toEqual([]);
-  await user.selectOptions(screen.getByLabelText("Subtitle language"), "eng");
+  await pickOption(user, "Subtitle language", "English");
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
   await waitFor(() =>
     expect(submissions).toEqual([
@@ -754,7 +750,7 @@ it("keeps numeric local and TMDB movie identities separate and submits no copy f
     screen.getByText(/No file, filename or hash is selected/),
   ).toBeInTheDocument();
   expect(submitted).toEqual([]);
-  await user.selectOptions(screen.getByLabelText("Subtitle language"), "eng");
+  await pickOption(user, "Subtitle language", "English");
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
   await waitFor(() =>
     expect(submitted).toEqual([
@@ -808,8 +804,8 @@ it("shows scoped local episode counts and requires explicit manual confirmation 
     }),
   );
   const { user } = browse();
-  await user.selectOptions(screen.getByLabelText("Browse media"), "show");
-  await user.type(screen.getByLabelText("Search show titles"), "Local");
+  await chooseSegment(user, "Series");
+  await user.type(screen.getByLabelText("Search series titles"), "Local");
   await user.click(
     await screen.findByRole("button", { name: "Local show (1980)" }),
   );
@@ -817,12 +813,14 @@ it("shows scoped local episode counts and requires explicit manual confirmation 
   expect(
     screen.getByText(/does not establish ownership of the selected episode/),
   ).toBeInTheDocument();
-  expect(screen.queryByLabelText("Choose season")).not.toBeInTheDocument();
+  expect(
+    screen.queryAllByLabelText("Choose season")[0] ?? null,
+  ).not.toBeInTheDocument();
   expect(requests).toHaveLength(1);
   expect(new URL(requests[0]).searchParams.get("source")).toBe("local");
-  await user.selectOptions(screen.getByLabelText("Subtitle language"), "eng");
+  await pickOption(user, "Subtitle language", "English");
   await user.type(screen.getByLabelText("Season"), "2");
-  await user.type(screen.getByLabelText("Episode"), "7");
+  await user.type(screen.getByRole("textbox", { name: "Episode" }), "7");
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
   await user.click(
     screen.getByLabelText(
@@ -848,6 +846,7 @@ it("shows scoped local episode counts and requires explicit manual confirmation 
 });
 
 import { useSettingsMutation } from "@/apis/hooks/system";
+import { chooseSegment, pickOption, selectInput } from "./selectTestHelpers";
 
 function SaveMetadataFixture({
   changes,
@@ -1159,7 +1158,7 @@ it.each([
       ).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "Shōgun (1980)" }));
     expect(
-      await screen.findByText("Movie · 1980 · Local library"),
+      await screen.findByText(/Film · 1980 · Local library/),
     ).toBeInTheDocument();
     expect(submissions).toEqual([]);
   },

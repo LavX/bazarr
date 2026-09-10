@@ -28,6 +28,7 @@ describe("Redirector", () => {
 
   it("opens Discover for a fresh install without library setup", () => {
     mockedSettings.mockReturnValue({
+      // eslint-disable-next-line camelcase -- settings transport field names
       data: { general: { use_sonarr: false, use_radarr: false } },
     } as unknown as ReturnType<typeof useSystemSettings>);
 
@@ -38,6 +39,7 @@ describe("Redirector", () => {
 
   it("opens Discover for a configured install", () => {
     mockedSettings.mockReturnValue({
+      // eslint-disable-next-line camelcase -- settings transport field names
       data: { general: { use_sonarr: true, use_radarr: false } },
     } as unknown as ReturnType<typeof useSystemSettings>);
 

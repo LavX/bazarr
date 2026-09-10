@@ -80,18 +80,27 @@ def test_unknown_or_repeated_parameters_never_reach_upstream(authenticated_clien
     assert upstream.calls == []
 
 
-def test_unconfigured_empty_and_authentication_failure_remain_distinct(authenticated_client, upstream):
+def test_unconfigured_empty_and_authentication_failure_remain_distinct(authenticated_client, upstream,
+                                                                       monkeypatch):
+    from app import tmdb
     from app.config import settings
+    # Unconfigured now means no credential anywhere, because the application
+    # ships its own key and an empty setting simply falls back to it.
+    monkeypatch.setattr(tmdb, "builtin_api_key", lambda: "")
     settings.discover.tmdb_access_token = ""
     assert get(authenticated_client).json["status"] == "unconfigured"
     assert upstream.calls == []
-    settings.discover.tmdb_access_token = "new-synthetic-token"
+    # Restore the built-in key alone, with no stored token: that is the ordinary
+    # installation, and the feed has to work in it.
+    monkeypatch.setattr(tmdb, "builtin_api_key", lambda: "5ecafe99cafe99cafe99cafe99cafe99")
     upstream.payload = {"results": []}
     result = get(authenticated_client).json
     assert result["status"] == "empty" and result["last_success"]
     assert len(upstream.calls) == 1
     upstream.status = 401
-    settings.discover.tmdb_access_token = "rejected-synthetic-token"
+    # A different usable credential, so the cached empty result is not reused
+    # and the rejection is what the feed actually reports.
+    settings.discover.tmdb_access_token = "5ecafeddcafeddcafeddcafeddcafedd"
     assert get(authenticated_client).json["status"] == "authentication_failed"
 
 
@@ -132,13 +141,13 @@ def test_failed_refresh_retains_original_times_then_expires(authenticated_client
     assert expired["last_success"] == first["fetched_at"]
 
 
-@pytest.mark.parametrize("raw", [{}, {"results": "bad"}, {"results": [None]}, {"results": [{"id": True, "media_type": "movie", "title": "bad"}]}, {"results": [{"id": 1, "media_type": "movie", "title": "synthetic-metadata-token"}]}])
+@pytest.mark.parametrize("raw", [{}, {"results": "bad"}, {"results": [None]}, {"results": [{"id": True, "media_type": "movie", "title": "bad"}]}, {"results": [{"id": 1, "media_type": "movie", "title": "5ecafe00cafe00cafe00cafe00cafe00"}]}])
 def test_malformed_or_credential_echo_feed_fails_safely(authenticated_client, upstream, raw):
     upstream.payload = raw
     response = get(authenticated_client)
     assert response.json["status"] == "unavailable"
     assert response.json["items"] == []
-    assert "synthetic-metadata-token" not in response.get_data(as_text=True)
+    assert "5ecafe00cafe00cafe00cafe00cafe00" not in response.get_data(as_text=True)
 
 
 def test_feed_bounds_page_size_and_uses_only_validated_image_urls(authenticated_client, upstream):

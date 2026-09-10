@@ -11,6 +11,7 @@ from .core.translator_utils import validate_translation_params, convert_language
 from .services.translator_factory import TranslatorFactory
 from languages.get_languages import alpha3_from_alpha2
 from app.config import settings
+from app import activity
 from app.jobs_queue import jobs_queue
 from subtitles.indexer.utils import get_subtitle_destination_path
 
@@ -31,6 +32,21 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         return
 
     translator_label = settings.translator.translator_type.replace("_", " ").title()
+    # Observation only. The queue records a generic completed envelope for every
+    # ordinary return, so a typed outcome has to be recorded where publication
+    # actually happens, further down, and a partial result has to dominate it.
+    observed = activity.register(activity.activity_id_for_job(job_id), operation='translation',
+                                 scope_kind='media', arr_instance_id=arr_instance_id,
+                                 media_type=media_type, language=to_lang, source_language=from_lang,
+                                 forced=forced, hi=hi,
+                                 upstream_series_id=sonarr_series_id,
+                                 upstream_episode_id=sonarr_episode_id,
+                                 upstream_movie_id=radarr_id)
+    try:
+        activity.note_scope(observed, title=get_title(media_type, radarr_id, sonarr_series_id,
+                                                      sonarr_episode_id, arr_instance_id))
+    except Exception:
+        logging.debug('Could not record the media title for this translation observation')
     try:
         logging.debug(f'Translation request: video={video_path}, source={source_srt_file}, from={from_lang}, to={to_lang}')  # noqa: G004
 
@@ -108,8 +124,14 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         except Exception:
             logging.exception("BAZARR combine-after-translate failed for %s", video_path)
 
+        # The file is on disk and post-processing has run, so this is the real
+        # publication boundary. A partial translation is not a successful one.
+        partial_detail = getattr(translator, 'partial_error', None)
+        activity.note_publication(observed, outcome='partial' if partial_detail else 'success',
+                                  detail=partial_detail)
+
         # Get current job name (which batch.py already set with title) and mark as done
-        completion_label = 'Partially translated' if getattr(translator, 'partial_error', None) else 'Translated'
+        completion_label = 'Partially translated' if partial_detail else 'Translated'
         current_name = jobs_queue.get_job_name(job_id)
         if current_name and 'Translating' in current_name:
             done_name = current_name.replace('Translating', completion_label)
@@ -119,6 +141,7 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         return result
 
     except Exception as e:
+        activity.note_publication(observed, outcome='failed', detail=str(e))
         logging.error(f'Translation failed: {str(e)}', exc_info=True)  # noqa: G004, G201
         current_name = jobs_queue.get_job_name(job_id)
         if current_name and 'Translating' in current_name:

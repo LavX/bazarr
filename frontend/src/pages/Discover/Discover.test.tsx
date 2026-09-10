@@ -9,6 +9,13 @@ import { AllProviders } from "@/providers";
 import { rawRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import { setAuthenticated } from "@/utilities/event";
+import { readableTime } from "./feedText";
+import {
+  chooseSegment,
+  findSelectInput,
+  pickOption,
+  selectInput,
+} from "./selectTestHelpers";
 import Discover from ".";
 
 function ThemeToggle() {
@@ -109,10 +116,7 @@ beforeEach(() => {
 
 async function selectTarget(user: ReturnType<typeof userEvent.setup>) {
   await user.type(screen.getByLabelText("IMDb ID"), "tt0133093");
-  await user.selectOptions(
-    await screen.findByLabelText("Subtitle language"),
-    "eng",
-  );
+  await pickOption(user, "Subtitle language", "English");
 }
 
 describe("Discover retrieval", () => {
@@ -128,7 +132,7 @@ describe("Discover retrieval", () => {
     expect(
       screen.getByRole("button", { name: "Find subtitles" }),
     ).toBeDisabled();
-    expect(screen.getByLabelText("Subtitle language")).toHaveValue("");
+    expect(selectInput("Subtitle language")).toHaveValue("");
     await selectTarget(user);
     await user.click(screen.getByRole("button", { name: "Change appearance" }));
     await queryClient.refetchQueries({ type: "active" });
@@ -184,7 +188,7 @@ describe("Discover retrieval", () => {
     expect(await screen.findByText(/Refresh failed/)).toBeInTheDocument();
     expect(screen.getByText("The.Matrix.1999.1080p")).toBeInTheDocument();
     expect(
-      screen.getAllByText(new Date("2026-09-08T10:00:00Z").toLocaleString())[0],
+      screen.getAllByText(readableTime("2026-09-08T10:00:00Z"))[0],
     ).toHaveAttribute("datetime", "2026-09-08T10:00:00Z");
   });
 
@@ -234,7 +238,7 @@ describe("Discover retrieval", () => {
     expect(screen.getByText("Usable result")).toBeInTheDocument();
     expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0133093");
     expect(
-      screen.getAllByText(new Date(first.checked_at).toLocaleString())[0],
+      screen.getAllByText(readableTime(first.checked_at))[0],
     ).toHaveAttribute("datetime", first.checked_at);
   });
 
@@ -278,7 +282,7 @@ describe("Discover retrieval", () => {
           expect(screen.getByText("Usable result")).toBeInTheDocument();
         expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0133093");
         expect(
-          screen.getAllByText(new Date(first.checked_at).toLocaleString())[0],
+          screen.getAllByText(readableTime(first.checked_at))[0],
         ).toHaveAttribute("datetime", first.checked_at);
         if (!hasUsable) {
           let complete: (() => void) | undefined;
@@ -338,7 +342,7 @@ describe("Discover retrieval", () => {
     await selectTarget(user);
     await user.click(screen.getByRole("button", { name: "Find subtitles" }));
     await waitFor(() => expect(release).toBeDefined());
-    await user.selectOptions(screen.getByLabelText("Subtitle language"), "hun");
+    await pickOption(user, "Subtitle language", "Hungarian");
     release?.();
     await waitFor(() =>
       expect(
@@ -355,12 +359,12 @@ describe("Discover retrieval", () => {
   it("blocks malformed IMDb identity and incomplete exact episodes", async () => {
     const { user } = renderDiscover();
     await selectTarget(user);
-    await user.selectOptions(screen.getByLabelText("Media type"), "episode");
+    await chooseSegment(user, "Episode");
     expect(
       screen.getByRole("button", { name: "Find subtitles" }),
     ).toBeDisabled();
     await user.type(screen.getByLabelText("Season"), "0");
-    await user.type(screen.getByLabelText("Episode"), "3");
+    await user.type(screen.getByRole("textbox", { name: "Episode" }), "3");
     expect(
       screen.getByRole("button", { name: "Find subtitles" }),
     ).toBeDisabled();
@@ -479,10 +483,65 @@ it("remembers only the explicit language and works when browser storage is block
     const { user } = renderDiscover();
     await selectTarget(user);
     expect(screen.getByText(/remembered for this visit/)).toBeInTheDocument();
-    expect(screen.getByLabelText("Subtitle language")).toHaveValue("eng");
+    expect(selectInput("Subtitle language")).toHaveValue("English");
     await user.click(screen.getByRole("link", { name: "Provider settings" }));
     await user.click(screen.getByRole("link", { name: "Return to Discover" }));
-    expect(screen.getByLabelText("Subtitle language")).toHaveValue("eng");
+    expect(selectInput("Subtitle language")).toHaveValue("English");
+  } finally {
+    blocked.mockRestore();
+  }
+});
+
+// The seeded language is written when the first search uses it, and that write
+// is the same evidence about storage as any other. Its answer was being thrown
+// away, so a reader whose storage refuses writes was told nothing and believed
+// the seeded language would be there next time.
+it("says a seeded language is session-only once the search tries to remember it", async () => {
+  server.use(
+    http.get("/api/system/languages/profiles", () =>
+      HttpResponse.json([
+        {
+          profileId: 1,
+          name: "English",
+          cutoff: null,
+          items: [
+            {
+              id: 1,
+              language: "en",
+              audio_exclude: "False",
+              hi: "False",
+              forced: "False",
+            },
+          ],
+          mustContain: [],
+          mustNotContain: [],
+          originalFormat: false,
+          tag: null,
+        },
+      ]),
+    ),
+    http.post("/api/discover/search", () => HttpResponse.json(snapshot())),
+  );
+  const original = Storage.prototype.setItem;
+  const blocked = vi
+    .spyOn(Storage.prototype, "setItem")
+    .mockImplementation(function (this: Storage, key, value) {
+      if (key === "bazarr.discover.subtitle-language")
+        throw new DOMException("Storage blocked", "SecurityError");
+      original.call(this, key, value);
+    });
+  try {
+    const { user } = renderDiscover();
+    await waitFor(() =>
+      expect(selectInput("Subtitle language")).toHaveValue("English"),
+    );
+    await user.type(screen.getByLabelText("IMDb ID"), "tt0133093");
+    // Seeding alone writes nothing, so there is nothing to report yet.
+    expect(screen.queryByText(/remembered for this visit/)).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+    expect(
+      await screen.findByText(/remembered for this visit/),
+    ).toBeInTheDocument();
   } finally {
     blocked.mockRestore();
   }
@@ -491,7 +550,11 @@ it("remembers only the explicit language and works when browser storage is block
 it("restores an explicit preference without deriving one from enabled library languages", async () => {
   localStorage.setItem("bazarr.discover.subtitle-language", "eng");
   renderDiscover();
-  expect(await screen.findByLabelText("Subtitle language")).toHaveValue("eng");
+  // The stored code is shown by its name once the language list has loaded.
+  await findSelectInput("Subtitle language");
+  await waitFor(() =>
+    expect(selectInput("Subtitle language")).toHaveValue("English"),
+  );
   expect(screen.getByLabelText("IMDb ID")).toHaveValue("");
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
 });

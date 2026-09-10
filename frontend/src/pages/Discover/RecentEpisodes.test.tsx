@@ -5,9 +5,11 @@ import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { AllProviders } from "@/providers";
-import { act, rawRender, screen, waitFor } from "@/tests";
+import { act, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
+import { selectInput } from "./selectTestHelpers";
 import Discover from ".";
+import styles from "./Discover.module.scss";
 
 const day = () => new Date().toISOString().slice(0, 10);
 const sourceEpisode = () => ({
@@ -193,6 +195,51 @@ it("browses true recent episode dates and partial coverage without provider requ
   );
   expect(searches).toEqual([]);
 });
+it("carries the show poster and keeps the missing-art tile in place", async () => {
+  server.use(
+    http.get("/api/discover/feeds/recent-episodes", () =>
+      HttpResponse.json({
+        ...feed(),
+        items: [
+          sourceEpisode(),
+          {
+            ...sourceEpisode(),
+            source_id: "tmdb:show:100:episode:402",
+            id: 402,
+            episode: 2,
+            title: "Away",
+            poster_url: "https://image.tmdb.org/t/p/w342/show100.jpg",
+          },
+        ],
+      }),
+    ),
+  );
+  browse();
+  const withArt = await screen.findByRole("button", {
+    name: /Northern Light.*Away/,
+  });
+  expect(within(withArt).getByRole("presentation")).toHaveAttribute(
+    "src",
+    "https://image.tmdb.org/t/p/w342/show100.jpg",
+  );
+  const withoutArt = screen.getByRole("button", {
+    name: /Northern Light.*Home/,
+  });
+  expect(
+    within(withoutArt).queryByRole("presentation"),
+  ).not.toBeInTheDocument();
+  expect(withoutArt).toHaveTextContent("Artwork unavailable");
+});
+it("keeps a source date whole rather than breaking it across lines", async () => {
+  browse();
+  const item = await screen.findByRole("button", {
+    name: /Northern Light.*Home/,
+  });
+  const stamp = within(item).getByText(day());
+  expect(stamp.tagName).toBe("TIME");
+  expect(stamp).toHaveAttribute("datetime", day());
+  expect(stamp).toHaveClass(styles.dateValue);
+});
 it("opens the exact source episode and retains date, explicit target mapping and return focus", async () => {
   const { user, router } = browse();
   await user.click(
@@ -203,7 +250,7 @@ it("opens the exact source episode and retains date, explicit target mapping and
     day(),
   );
   expect(searches).toEqual([]);
-  await user.click(screen.getByLabelText("Subtitle language"));
+  await user.click(selectInput("Subtitle language"));
   await act(async () => {
     await router.navigate("/system/tasks");
   });
@@ -214,9 +261,7 @@ it("opens the exact source episode and retains date, explicit target mapping and
   await act(async () => {
     await router.navigate(-1);
   });
-  await waitFor(() =>
-    expect(screen.getByLabelText("Subtitle language")).toHaveFocus(),
-  );
+  await waitFor(() => expect(selectInput("Subtitle language")).toHaveFocus());
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
   await waitFor(() => expect(searches).toHaveLength(1));
   expect(searches[0]).toMatchObject({
@@ -266,7 +311,7 @@ it.each(["unverified", "conflict"])(
         screen.getByRole("button", { name: "Enter a manual episode" }),
       );
       await user.type(screen.getByLabelText("Season"), "3");
-      await user.type(screen.getByLabelText("Episode"), "7");
+      await user.type(screen.getByRole("textbox", { name: "Episode" }), "7");
       expect(
         screen.getByRole("button", { name: "Find subtitles" }),
       ).toBeDisabled();
@@ -365,7 +410,7 @@ it.each(["empty", "unavailable", "authentication_failed", "cached", "expired"])(
     if (status === "unavailable" || status === "expired")
       await screen.findByText(/Recent episodes are temporarily unavailable/);
     if (status === "authentication_failed")
-      await screen.findByText(/TMDB rejected the saved access token/);
+      await screen.findByText(/TMDB rejected the key Discover is using/);
     if (status === "cached")
       await screen.findByText(/Cached TMDB episode records/);
     if (status !== "cached")

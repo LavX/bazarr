@@ -189,7 +189,7 @@ def metadata_save_environment(monkeypatch, tmp_path):
 
     path = tmp_path / "config.yaml"
     initial = config.settings.as_dict()
-    initial["DISCOVER"] = {"tmdb_access_token": "saved-synthetic-token", "locale": "en-US"}
+    initial["DISCOVER"] = {"tmdb_access_token": "5ecafe00cafe00cafe00cafe00cafe00", "locale": "en-US"}
     write(str(path), encrypt_settings_dict({key.lower(): value for key, value in initial.items()}), merge=False)
     fake = Dynaconf(settings_file=str(path), core_loaders=["YAML"])
     config.decrypt_settings_in_place(fake)
@@ -208,7 +208,7 @@ def metadata_save_environment(monkeypatch, tmp_path):
     return SimpleNamespace(config=config, settings=fake, path=path, executed=executed, resets=resets, metadata=metadata)
 
 
-@pytest.mark.parametrize("value", ["new-synthetic-token", "", "12345", "true", "null"])
+@pytest.mark.parametrize("value", ["5ecafe11cafe11cafe11cafe11cafe11", "", "12345", "true", "null"])
 def test_tmdb_save_encrypts_exact_value_and_only_invalidates_metadata(metadata_save_environment, value):
     env = metadata_save_environment
     before = env.metadata.configuration().revision
@@ -226,18 +226,18 @@ def test_tmdb_save_encrypts_exact_value_and_only_invalidates_metadata(metadata_s
     assert "tmdb_access_token" not in env.config.get_settings()["discover"]
 
 
-@pytest.mark.parametrize("value", ["***", "saved-synthetic-token", None])
+@pytest.mark.parametrize("value", ["***", "5ecafe00cafe00cafe00cafe00cafe00", None])
 def test_tmdb_unchanged_legacy_mask_and_unrelated_save_preserve_revision(metadata_save_environment, value):
     env = metadata_save_environment
     before = env.metadata.configuration().revision
     items = [("settings-general-page_size", ["51"])] if value is None else [("settings-discover-tmdb_access_token", [value])]
     env.config.save_settings(items)
-    assert env.settings.discover.tmdb_access_token == "saved-synthetic-token"
+    assert env.settings.discover.tmdb_access_token == "5ecafe00cafe00cafe00cafe00cafe00"
     assert env.metadata.configuration().revision == before
     assert env.resets == []
 
 
-@pytest.mark.parametrize("previous,replacement", [("", "first-synthetic-token"), ("saved", "replacement"), ("saved", "")])
+@pytest.mark.parametrize("previous,replacement", [("", "5ecafe22cafe22cafe22cafe22cafe22"), ("saved", "replacement"), ("5ecafe00cafe00cafe00cafe00cafe00", "")])
 @pytest.mark.parametrize("failure", ["write", "move"])
 def test_failed_tmdb_persistence_restores_effective_metadata_and_never_advertises_success(
     metadata_save_environment, monkeypatch, previous, replacement, failure,
@@ -269,7 +269,7 @@ def test_validation_failure_reloads_and_decrypts_write_only_credential(metadata_
     monkeypatch.setattr(env.settings.validators, "validate", fail)
     with pytest.raises(ValidationError):
         env.config.save_settings([("settings-discover-tmdb_access_token", ["failed-replacement"])])
-    assert env.settings.discover.tmdb_access_token == "saved-synthetic-token"
+    assert env.settings.discover.tmdb_access_token == "5ecafe00cafe00cafe00cafe00cafe00"
     assert env.metadata.configuration().revision == before
     assert env.resets == env.executed == []
 
@@ -318,13 +318,13 @@ def test_locale_only_persistence_failure_is_reported_and_preserves_metadata(meta
     assert env.executed == env.resets == []
 
 
-@pytest.mark.parametrize("replacement", ["first-synthetic-token", "replacement-synthetic-token", "", None])
+@pytest.mark.parametrize("replacement", ["5ecafe22cafe22cafe22cafe22cafe22", "5ecafe33cafe33cafe33cafe33cafe33", "", None])
 @pytest.mark.parametrize("stage", ["configured_db", "logging_service"])
 def test_metadata_durable_write_survives_followup_failure(metadata_save_environment, monkeypatch, replacement, stage):
     import yaml
     from secret_store import decrypt_settings_dict
     env = metadata_save_environment
-    if replacement == "first-synthetic-token":
+    if replacement == "5ecafe22cafe22cafe22cafe22cafe22":
         env.settings.discover.tmdb_access_token = ""
         env.config.write_config()
     before = env.config.get_settings()["discover"]
@@ -337,7 +337,7 @@ def test_metadata_durable_write_survives_followup_failure(metadata_save_environm
     items = [("settings-discover-locale", ["hu-HU"]), ("settings-general-debug", ["true"])]
     if replacement is not None:
         items.append(("settings-discover-tmdb_access_token", [replacement]))
-    expected = "saved-synthetic-token" if replacement is None else replacement
+    expected = "5ecafe00cafe00cafe00cafe00cafe00" if replacement is None else replacement
     with pytest.raises(Exception) as error:
         env.config.save_settings(items)
     stored = yaml.safe_load(env.path.read_text())
@@ -346,7 +346,12 @@ def test_metadata_durable_write_survives_followup_failure(metadata_save_environm
     assert env.settings.discover.tmdb_access_token == expected
     after = env.config.get_settings()["discover"]
     assert after["metadata_revision"] != before["metadata_revision"]
-    assert after["tmdb_configured"] is bool(expected)
+    # Clearing the reader's key does not leave Discover unconfigured: the
+    # application's own built-in key is what it falls back to. Whether the
+    # reader has a key of their own is the separate fact, and it is the one
+    # that has to follow the save.
+    assert after["tmdb_configured"] is True
+    assert after["tmdb_token_stored"] is bool(expected)
     assert after["locale"] == "hu-HU"
     assert "tmdb_access_token" not in after
     assert type(error.value).__name__ == "MetadataFollowupError"
@@ -354,7 +359,7 @@ def test_metadata_durable_write_survives_followup_failure(metadata_save_environm
     assert env.resets == []
 
 
-@pytest.mark.parametrize("token", ["***", "saved-synthetic-token", None])
+@pytest.mark.parametrize("token", ["***", "5ecafe00cafe00cafe00cafe00cafe00", None])
 def test_unchanged_metadata_and_legacy_save_preserve_followup_exception(metadata_save_environment, monkeypatch, token):
     env = metadata_save_environment
     before = env.config.get_settings()["discover"]
@@ -369,7 +374,7 @@ def test_unchanged_metadata_and_legacy_save_preserve_followup_exception(metadata
     assert env.config.get_settings()["discover"] == before
 
 
-@pytest.mark.parametrize("previous,replacement", [("", "first-synthetic-token"), ("saved", "rotated"), ("saved", "")])
+@pytest.mark.parametrize("previous,replacement", [("", "5ecafe22cafe22cafe22cafe22cafe22"), ("5ecafe00cafe00cafe00cafe00cafe00", "5ecafe44cafe44cafe44cafe44cafe44"), ("5ecafe00cafe00cafe00cafe00cafe00", "")])
 @pytest.mark.parametrize("other_writer", ["ordinary_save", "direct_write"])
 @pytest.mark.parametrize("fail_move", [False, True])
 def test_all_config_writers_serialize_with_metadata_save(

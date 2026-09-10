@@ -76,15 +76,19 @@ def test_invalid_parameters_are_rejected_before_requests(authenticated_client, u
 
 
 def test_authentication_empty_missing_and_unconfigured_truth(authenticated_client, upstream, monkeypatch):
+    from app import tmdb
     from app.config import settings
     assert authenticated_client.get("/api/discover/feeds/digital").status_code == 401
     configure(upstream, monkeypatch, {1: []})
     missing = get(authenticated_client).json
     assert missing["status"] == "empty" and missing["coverage"]["missing_region"] == 1
     assert missing["coverage"]["complete"] is False
+    # Unconfigured now means no credential anywhere: an empty setting falls back
+    # to the key the application ships.
+    monkeypatch.setattr(tmdb, "builtin_api_key", lambda: "")
     settings.discover.tmdb_access_token = ""
     assert get(authenticated_client).json["status"] == "unconfigured"
-    settings.discover.tmdb_access_token = "replacement-synthetic"
+    monkeypatch.setattr(tmdb, "builtin_api_key", lambda: "5ecafe88cafe88cafe88cafe88cafe88")
     upstream.payload = {"results": [], "total_pages": 0}
     empty = get(authenticated_client, "").json
     assert empty["status"] == "empty" and empty["coverage"]["complete"] is True
@@ -271,12 +275,12 @@ def test_shared_job_cap_coalesces_regional_work_and_rate_limit_is_global(authent
     assert len(upstream.calls) == calls
 
 
-@pytest.mark.parametrize("raw", [{}, {"results": [None]}, {"results": [{"id": True, "title": "Bad"}]}, {"results": [{"id": 1, "title": "synthetic-metadata-token"}]}])
+@pytest.mark.parametrize("raw", [{}, {"results": [None]}, {"results": [{"id": True, "title": "Bad"}]}, {"results": [{"id": 1, "title": "5ecafe00cafe00cafe00cafe00cafe00"}]}])
 def test_malformed_admission_and_credential_echo_never_become_feed_data(authenticated_client, upstream, raw):
     upstream.payload = raw
     response = get(authenticated_client)
     assert response.json["status"] == "unavailable" and response.json["items"] == []
-    assert "synthetic-metadata-token" not in response.get_data(as_text=True)
+    assert "5ecafe00cafe00cafe00cafe00cafe00" not in response.get_data(as_text=True)
 
 
 def configure_admission_rows(upstream, monkeypatch, rows):
@@ -352,14 +356,14 @@ def test_wholly_malformed_candidate_page_is_unavailable_with_failed_coverage(aut
 
 
 @pytest.mark.parametrize("payload", [{}, {"results": None}, {"results": "malformed"},
-                                     {"results": [{"id": 1, "title": "Verified film"}, {"id": 2, "title": "synthetic-metadata-token"}], "total_pages": 1}])
+                                     {"results": [{"id": 1, "title": "Verified film"}, {"id": 2, "title": "5ecafe00cafe00cafe00cafe00cafe00"}], "total_pages": 1}])
 def test_invalid_whole_envelope_or_credential_echo_rejects_all_candidates(authenticated_client, upstream, payload):
     upstream.payload = payload
     feed = get(authenticated_client).json
     assert feed["status"] == "unavailable" and feed["items"] == []
     assert feed["coverage"]["candidates"] == feed["coverage"]["failed"] == 0
     assert len(upstream.calls) == 1
-    assert "synthetic-metadata-token" not in str(feed)
+    assert "5ecafe00cafe00cafe00cafe00cafe00" not in str(feed)
 
 
 

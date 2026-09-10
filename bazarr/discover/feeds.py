@@ -420,17 +420,23 @@ def _recent_deadline(job):
         raise metadata.UpstreamFailure()
 
 
-def _recent_record(config, path, job, coverage):
+def _recent_record(config, path, job, coverage, admit):
     """Share the bounded metadata LRU, without changing retrieval validation.
 
     Feed-only raw records tolerate malformed siblings. They must never populate
     the stricter show/season/episode identity caches used for provider admission.
+
+    `admit` runs before the body reaches the shared region. A body that cannot
+    carry the records this feed asks for is not a cheaper answer to keep: caching
+    it would make Refresh reproduce the same partial coverage for the whole
+    freshness window without even reaching the source again.
     """
     _recent_deadline(job)
     def load():
         _recent_deadline(job)
         raw = metadata._request(config, path, {"language": config.locale, **({"page": 1} if "trending" in path else {})})
         _recent_deadline(job)
+        admit(raw)
         return raw
     raw, status, fetched, availability, _valid_until = metadata._cached(config, ("recent-source", path), load)
     _recent_deadline(job)
@@ -454,6 +460,24 @@ def _recent_progress(job, items, coverage):
                        "stale_until": (fetched + timedelta(seconds=STALE_SECONDS)).isoformat()}
 
 
+def _recent_trending_shape(raw):
+    if not isinstance(raw, dict) or not isinstance(raw.get("results"), list):
+        raise metadata.UpstreamFailure()
+
+
+def _recent_show_shape(raw, identity):
+    if (not isinstance(raw, dict) or type(raw.get("id")) is not int or raw["id"] != identity
+            or not isinstance(raw.get("seasons"), list)):
+        raise metadata.UpstreamFailure()
+
+
+def _recent_season_shape(raw, season, season_id):
+    if (not isinstance(raw, dict) or type(raw.get("id")) is not int or raw["id"] != season_id
+            or type(raw.get("season_number")) is not int or raw["season_number"] != season
+            or not isinstance(raw.get("episodes"), list)):
+        raise metadata.UpstreamFailure()
+
+
 def _recent_shows(config, job, coverage):
     # Reuse the actual weekly series observation when the homepage has it.
     key = ("tmdb", config.revision, config.locale, "trending", "week", "series", 1)
@@ -463,14 +487,18 @@ def _recent_shows(config, job, coverage):
             and time.monotonic() < entry["time"] + FRESH_SECONDS):
         job.source_time = datetime.fromisoformat(entry["fetched_at"])
         coverage["truncated"] = True  # That DTO does not establish pagination.
-        return entry["items"]
-    raw = _recent_record(config, "/trending/tv/week", job, coverage)
-    rows = raw.get("results")
-    if not isinstance(rows, list):
-        raise metadata.UpstreamFailure()
+        # The homepage feed already resolved these posters, so there is no
+        # artwork left to hydrate on this path.
+        return entry["items"], {}
+    raw = _recent_record(config, "/trending/tv/week", job, coverage, _recent_trending_shape)
+    # After the cache as well as before it, matching the show and season paths.
+    # The key has one producer today, which is not an invariant worth resting on.
+    _recent_trending_shape(raw)
+    rows = raw["results"]
     coverage["truncated"] = (len(rows) > MAX_ITEMS or type(raw.get("total_pages")) is not int
                              or raw["total_pages"] not in (0, 1))
     shows = {}
+    artwork = {}
     rejected = set()
     unidentified = 0
     for row in rows[:MAX_ITEMS]:
@@ -482,19 +510,45 @@ def _recent_shows(config, job, coverage):
             if row.get("media_type", "tv") != "tv":
                 raise metadata.UpstreamFailure()
             item = metadata._show(row, {})
-            shows.setdefault(identity, item)
+            if shows.setdefault(identity, item) is item:
+                artwork[identity] = row.get("poster_path")
         except metadata.UpstreamFailure:
             rejected.add(identity)
     coverage["failed"] += unidentified + len(rejected - shows.keys())
     if rows and not shows:
         raise metadata.UpstreamFailure()
-    return list(shows.values())
+    return list(shows.values()), artwork
+
+
+def _recent_artwork(config, job, shows, artwork):
+    """Fill in show posters last, from the shared image configuration.
+
+    Artwork is optional, so it comes after the records are verified and only
+    with budget left: it can neither consume the record checks nor discard shows
+    that already qualified.
+
+    This function only ever fills a poster in. It never clears one, because it
+    is not the only producer: the warm path returns shows the homepage feed
+    already resolved and hands over an empty path map, and an unconditional
+    assignment there replaced every resolved URL with None. A hydrator that can
+    destroy what another producer resolved is a hydrator that has to be called
+    in exactly the right order forever, which is not a property worth relying on.
+    """
+    paths = {identity: path for identity, path in artwork.items() if path}
+    if not shows or not paths or time.monotonic() >= job.deadline:
+        return
+    # The shared convention: one configuration request at most, and none at all
+    # when no row actually carries a poster to build.
+    images = metadata._artwork(config, {"poster_path": True})
+    for identity, path in paths.items():
+        item = shows.get(identity)
+        resolved = metadata._image(images, path, "poster")
+        if item is not None and resolved:
+            item["poster_url"] = resolved
 
 
 def _recent_seasons(raw, identity, coverage):
-    if (type(raw.get("id")) is not int or raw["id"] != identity
-            or not isinstance(raw.get("seasons"), list)):
-        raise metadata.UpstreamFailure()
+    _recent_show_shape(raw, identity)
     rows = raw["seasons"]
     coverage["truncated"] |= len(rows) > RECENT_RECORDS
     seasons = {}
@@ -514,10 +568,7 @@ def _recent_seasons(raw, identity, coverage):
 
 
 def _recent_episodes(raw, show, season, season_id, start, end, coverage):
-    if (type(raw.get("id")) is not int or raw["id"] != season_id
-            or type(raw.get("season_number")) is not int or raw["season_number"] != season
-            or not isinstance(raw.get("episodes"), list)):
-        raise metadata.UpstreamFailure()
+    _recent_season_shape(raw, season, season_id)
     rows = raw["episodes"]
     coverage["truncated"] |= len(rows) > RECENT_RECORDS
     episodes = {}
@@ -557,7 +608,7 @@ def _recent_episodes(raw, show, season, season_id, start, end, coverage):
 
 def _load_recent(config, start, end, job):
     coverage = _recent_coverage()
-    shows = _recent_shows(config, job, coverage)
+    shows, artwork = _recent_shows(config, job, coverage)
     coverage["shows"] = min(len(shows), RECENT_SHOWS)
     coverage["truncated"] |= len(shows) > RECENT_SHOWS
     items = {}
@@ -565,7 +616,8 @@ def _load_recent(config, start, end, job):
     for show in shows[:RECENT_SHOWS]:
         _recent_deadline(job)
         try:
-            raw = _recent_record(config, f"/tv/{show['id']}", job, coverage)
+            raw = _recent_record(config, f"/tv/{show['id']}", job, coverage,
+                                 lambda body: _recent_show_shape(body, show["id"]))
             seasons = _recent_seasons(raw, show["id"], coverage)
             coverage["shows_checked"] += 1
         except metadata.UpstreamFailure as error:
@@ -578,7 +630,8 @@ def _load_recent(config, start, end, job):
         for number, identity in seasons:
             _recent_deadline(job)
             try:
-                raw = _recent_record(config, f"/tv/{show['id']}/season/{number}", job, coverage)
+                raw = _recent_record(config, f"/tv/{show['id']}/season/{number}", job, coverage,
+                                     lambda body: _recent_season_shape(body, number, identity))
                 records = _recent_episodes(raw, show, number, identity, start, end, coverage)
                 coverage["seasons_checked"] += 1
                 for item in records:
@@ -596,6 +649,18 @@ def _load_recent(config, start, end, job):
                 coverage["failed"] += 1
             _recent_progress(job, list(items.values()), coverage)
     coverage["complete"] = not (coverage["truncated"] or coverage["failed"] or coverage["missing_dates"])
+    # Artwork is optional, so it spends what is left of the budget and never any
+    # of what the records need. Running it before the loop meant a slow
+    # configuration request could exhaust the deadline with zero seasons
+    # checked, which seals the whole feed as failed rather than partial.
+    _recent_artwork(config, job, {show["id"]: show for show in shows[:RECENT_SHOWS]}, artwork)
+    # Carry whatever the show ended up with onto its episodes, whichever producer
+    # resolved it, and never overwrite an item's own poster with nothing.
+    by_show = {show["id"]: show for show in shows}
+    for item in items.values():
+        poster = (by_show.get(item["show_id"]) or {}).get("poster_url")
+        if poster:
+            item["poster_url"] = poster
     _recent_progress(job, list(items.values()), coverage)
 
 

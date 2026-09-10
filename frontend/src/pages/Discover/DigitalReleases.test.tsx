@@ -8,6 +8,7 @@ import { QueryKeys } from "@/apis/queries/keys";
 import { AllProviders } from "@/providers";
 import { act, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
+import { pickOption, selectInput } from "./selectTestHelpers";
 import Discover from ".";
 
 let regions: string[] = [];
@@ -161,23 +162,23 @@ it("browses recent digital films in US without changing the explicit subtitle la
   expect(
     await screen.findByRole("button", { name: /Digital North US/ }),
   ).toBeEnabled();
-  expect(screen.getByLabelText("Film region")).toHaveValue("US");
-  expect(screen.getByLabelText("Subtitle language")).toHaveValue("hun");
+  expect(selectInput("Film region")).toHaveValue("United States (US)");
+  expect(selectInput("Subtitle language")).toHaveValue("Hungarian");
   expect(searches).toEqual([]);
 });
 
 it("changes only film region and caches independent region queries without provider submission", async () => {
   const { user } = browse();
   await screen.findByRole("button", { name: /Digital North US/ });
-  await user.selectOptions(screen.getByLabelText("Film region"), "GB");
+  await pickOption(user, "Film region", /\(GB\)/);
   await screen.findByRole("button", { name: /Digital North GB/ });
   expect(
     screen.queryByRole("button", { name: /Digital North US/ }),
   ).not.toBeInTheDocument();
-  expect(screen.getByLabelText("Subtitle language")).toHaveValue("hun");
+  expect(selectInput("Subtitle language")).toHaveValue("Hungarian");
   expect(localStorage.getItem("bazarr.discover.subtitle-language")).toBe("hun");
-  expect(screen.getByLabelText("Browse media")).toHaveValue("movie");
-  await user.selectOptions(screen.getByLabelText("Film region"), "US");
+  expect(screen.getByRole("radio", { name: "Movies" })).toBeChecked();
+  await pickOption(user, "Film region", /\(US\)/);
   await screen.findByRole("button", { name: /Digital North US/ });
   expect(regions).toEqual(["US", "GB"]);
   expect(searches).toEqual([]);
@@ -186,7 +187,7 @@ it("changes only film region and caches independent region queries without provi
 it("preserves exact date/type/region through details, explicit retrieval, route return and back focus", async () => {
   const { user, router } = browse();
   await screen.findByRole("button", { name: /Digital North US/ });
-  await user.selectOptions(screen.getByLabelText("Film region"), "HU");
+  await pickOption(user, "Film region", /\(HU\)/);
   await user.click(
     await screen.findByRole("button", { name: /Digital North HU/ }),
   );
@@ -222,8 +223,8 @@ it("preserves exact date/type/region through details, explicit retrieval, route 
       screen.getByRole("button", { name: /Digital North HU/ }),
     ).toHaveFocus(),
   );
-  expect(screen.getByLabelText("Film region")).toHaveValue("HU");
-  expect(screen.getByLabelText("Subtitle language")).toHaveValue("hun");
+  expect(selectInput("Film region")).toHaveValue("Hungary (HU)");
+  expect(selectInput("Subtitle language")).toHaveValue("Hungarian");
 });
 
 it("ignores a late prior-region completion", async () => {
@@ -243,7 +244,7 @@ it("ignores a late prior-region completion", async () => {
   );
   const { user } = browse();
   await waitFor(() => expect(started).toBe(true));
-  await user.selectOptions(screen.getByLabelText("Film region"), "GB");
+  await pickOption(user, "Film region", /\(GB\)/);
   await screen.findByRole("button", { name: /Digital North GB/ });
   await act(async () => {
     finish!();
@@ -305,7 +306,14 @@ it.each([
   if (status === "authentication_failed")
     await section.findByText(/TMDB rejected/);
   if (status === "partial") {
-    await section.findByText(/Incomplete regional coverage: 1 of 2/);
+    // The visible line names the gap; the counts live in the freshness
+    // disclosure directly below it, where the telemetry belongs.
+    await section.findByText(
+      /Incomplete regional coverage\. The counts are in Digital release source and freshness below\./,
+    );
+    expect(
+      section.getByText(/1 of 2 candidates checked, 0 missing US records/),
+    ).toBeInTheDocument();
     await section.findByRole("button", { name: /Digital North US/ });
   }
   if (status === "cached")
@@ -346,7 +354,7 @@ it.each([
 it("retains region while metadata configuration rotates and rejects the old revision", async () => {
   const { user } = browse();
   await screen.findByRole("button", { name: /Digital North US/ });
-  await user.selectOptions(screen.getByLabelText("Film region"), "HU");
+  await pickOption(user, "Film region", /\(HU\)/);
   await screen.findByRole("button", { name: /Digital North HU/ });
   server.use(
     http.get("/api/system/settings", () =>
@@ -369,8 +377,8 @@ it("retains region while metadata configuration rotates and rejects the old revi
   expect(
     screen.queryByRole("button", { name: /Digital North HU/ }),
   ).not.toBeInTheDocument();
-  expect(screen.getByLabelText("Film region")).toHaveValue("HU");
-  expect(screen.getByLabelText("Subtitle language")).toHaveValue("hun");
+  expect(selectInput("Film region")).toHaveValue("Hungary (HU)");
+  expect(selectInput("Subtitle language")).toHaveValue("Hungarian");
   expect(searches).toEqual([]);
 });
 

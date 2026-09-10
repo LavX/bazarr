@@ -49,6 +49,66 @@ export function useDiscoverPreview() {
   });
 }
 
+export const COPIES_QUERY_KEY = [QueryKeys.Discover, "copies"] as const;
+
+/**
+ * The exact library copies of one confirmed target.
+ *
+ * Reading this list adopts nothing: the default stays title-only until the
+ * reader picks a copy. The cached result is kept long enough that returning
+ * from a library page re-renders the picker on the first paint, so the
+ * selected-title restorer finds the control it saved rather than an empty gap.
+ */
+export function useDiscoverCopies(
+  target: {
+    mediaType: "movie" | "episode";
+    imdbId: string;
+    season?: number;
+    episode?: number;
+  } | null,
+) {
+  const params = target
+    ? {
+        media_type: target.mediaType,
+        imdb_id: target.imdbId,
+        ...(target.mediaType === "episode"
+          ? { season: target.season, episode: target.episode }
+          : {}),
+      }
+    : {};
+  return useQuery({
+    queryKey: [...COPIES_QUERY_KEY, params],
+    queryFn: ({ signal }) => api.discover.copies(params, signal),
+    enabled: target !== null,
+    staleTime: 30_000,
+    gcTime: 300_000,
+    retry: false,
+    networkMode: "always",
+  });
+}
+
+export const SUMMARY_QUERY_KEY = [QueryKeys.Discover, "summary"] as const;
+
+/**
+ * The read-only local work summary.
+ *
+ * It is deliberately independent of TMDB configuration and of the metadata
+ * feeds: what this Bazarr is doing is knowable whether or not global metadata
+ * is set up. There is no retry chain here, so a failed read stays visibly
+ * unavailable until the reader asks again, rather than silently reappearing as
+ * zero work.
+ */
+export function useDiscoverSummary() {
+  return useQuery({
+    queryKey: SUMMARY_QUERY_KEY,
+    queryFn: ({ signal }) => api.discover.summary(signal),
+    staleTime: 15_000,
+    gcTime: 60_000,
+    retry: false,
+    networkMode: "always",
+  });
+}
+
 export const METADATA_QUERY_KEY = [QueryKeys.Discover, "metadata"] as const;
 
 export function normalizeTitleQuery(query: string) {

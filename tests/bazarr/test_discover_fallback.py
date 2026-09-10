@@ -25,9 +25,11 @@ def fallback_config(monkeypatch):
 
 
 def test_omdb_fallback_preserves_primary_setup_and_returns_sparse_identity(authenticated_client, library_database, monkeypatch):
+    from app import tmdb
     from app.config import settings
     from discover import metadata
     from subliminal_patch.refiners import omdb
+    monkeypatch.setattr(tmdb, "builtin_api_key", lambda: "")
     settings.discover.tmdb_access_token = ""
     monkeypatch.setattr(omdb, "_resolve_omdb_apikey", lambda: "synthetic-omdb-key")
     calls = []
@@ -66,11 +68,11 @@ def omdb_transport(monkeypatch):
 def test_fallback_order_keeps_primary_outage(library_database, monkeypatch, omdb_transport):
     from discover import metadata
     from app.config import settings
-    settings.discover.tmdb_access_token = "synthetic-tmdb"
+    settings.discover.tmdb_access_token = "5ecafeaacafeaacafeaacafeaacafeaa"
     monkeypatch.setattr(metadata, "_request", lambda *a, **kw: {"results": [{"id": 42, "title": "Primary"}]})
     assert metadata.candidates("Example")["data"]["items"][0]["source"] == "tmdb"
     assert omdb_transport.calls == []
-    settings.discover.tmdb_access_token = "synthetic-tmdb-outage"
+    settings.discover.tmdb_access_token = "5ecafebbcafebbcafebbcafebbcafebb"
     def fail(*args, **kwargs):
         raise metadata.UpstreamFailure()
     monkeypatch.setattr(metadata, "_request", fail)
@@ -320,7 +322,7 @@ def test_tmdb_work_on_same_stripe_cannot_hold_omdb_caller(monkeypatch, omdb_tran
     import threading
     from app.config import settings
     from discover import metadata
-    monkeypatch.setattr(settings.discover, "tmdb_access_token", "synthetic-stripe-primary")
+    monkeypatch.setattr(settings.discover, "tmdb_access_token", "5ecafe13cafe13cafe13cafe13cafe13")
     primary, fallback = metadata.configuration(), metadata.omdb_configuration()
     stripe = hash(("omdb", fallback.revision, ("search", "movie", "example"))) % len(metadata._fetch_locks)
     operation = next(("shared-stripe", i) for i in range(10000)
@@ -396,7 +398,7 @@ def test_combined_failure_reason_preserves_primary_and_local_candidates(
     session.add(TableMovies(id=1, radarrId=1, arr_instance_id=1, title="Example local", path="/private/local",
                             imdbId="tt0000099", tmdbId="99"))
     session.commit()
-    monkeypatch.setattr(settings.discover, "tmdb_access_token", "synthetic-primary-outage")
+    monkeypatch.setattr(settings.discover, "tmdb_access_token", "5ecafe14cafe14cafe14cafe14cafe14")
     def primary_failure(*args, **kwargs):
         raise metadata.UpstreamFailure()
     monkeypatch.setattr(metadata, "_request", primary_failure)

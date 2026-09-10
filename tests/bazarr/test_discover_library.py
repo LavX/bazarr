@@ -9,9 +9,12 @@ from sqlalchemy.orm import Session
 
 @pytest.fixture(params=["sqlite", "postgresql"])
 def library_database(request, monkeypatch):
-    from app import database as db
+    from app import database as db, tmdb
     from app.config import settings
     from subliminal_patch.refiners import omdb
+    # These cases are about local candidates with no primary metadata source, so
+    # the credential has to be absent everywhere, built-in key included.
+    monkeypatch.setattr(tmdb, "builtin_api_key", lambda: "")
     monkeypatch.setattr(settings.discover, "tmdb_access_token", "")
     monkeypatch.setattr(omdb, "_resolve_omdb_apikey", lambda: None)
     if request.param == "postgresql":
@@ -89,7 +92,8 @@ def test_local_ownership_is_canonical_and_owner_scoped(library_database, monkeyp
     assert item["ownership"]["selected_episode_owned"] is None
     assert item["ownership"]["complete_series"] is None
     from app.config import settings
-    monkeypatch.setattr(settings.discover, "tmdb_access_token", "synthetic-primary-ownership")
+    # A usable v3 key, so the primary source is genuinely configured here.
+    monkeypatch.setattr(settings.discover, "tmdb_access_token", "5ecafe12cafe12cafe12cafe12cafe12")
     def primary(config, path, params=None):
         if path.endswith("/external_ids"):
             return {"id": 100, "imdb_id": "tt0000042", "tvdb_id": 42}

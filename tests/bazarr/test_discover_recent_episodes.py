@@ -66,6 +66,102 @@ def test_real_dates_duplicates_and_partial_show_coverage(authenticated_client, u
     assert authenticated_client.provider_searches == []
 
 
+def test_show_artwork_is_resolved_on_the_cold_path(authenticated_client, upstream, monkeypatch):
+    """The feed carries a show poster whether or not the homepage warmed it.
+
+    The cold path used to pass an empty image configuration, so poster_url was a
+    field that could never be filled from this producer. One configuration
+    request at most, and none when no row carries a poster to build.
+    """
+    from discover import feeds
+    configure(upstream, monkeypatch)
+    base = upstream.payload
+    def payload(url):
+        raw = base(url)
+        if url.endswith("/configuration"):
+            raw["images"]["backdrop_sizes"] = ["w780"]
+        if url.endswith("/trending/tv/week"):
+            for row in raw["results"]:
+                row["poster_path"] = f"/show{row['id']}.jpg"
+        return raw
+    upstream.payload = payload
+    items = get(authenticated_client).json["items"]
+    assert items and all(row["poster_url"] == "https://image.tmdb.org/t/p/w342/show100.jpg" for row in items)
+    assert sum(1 for url, _ in upstream.calls if url.endswith("/configuration")) == 1
+    feeds._cache.clear()
+    get(authenticated_client)
+    assert sum(1 for url, _ in upstream.calls if url.endswith("/configuration")) == 1
+
+
+def test_show_artwork_survives_the_warm_path(authenticated_client, upstream, monkeypatch):
+    """The homepage loads weekly trending on the same page, so this feed takes
+    the warm path in ordinary use: the shows arrive with their posters already
+    resolved and no path map to resolve them from. Hydration must fill in what is
+    missing and never clear what another producer already resolved.
+
+    The cold-path test clears the cache first, which is exactly why it could not
+    see the wipe this case now pins.
+    """
+    from discover import feeds
+    configure(upstream, monkeypatch)
+    base = upstream.payload
+    def payload(url):
+        raw = base(url)
+        if url.endswith("/configuration"):
+            raw["images"]["backdrop_sizes"] = ["w780"]
+        if "trending/tv/week" in url:
+            for row in raw["results"]:
+                row["poster_path"] = f"/show{row['id']}.jpg"
+        return raw
+    upstream.payload = payload
+
+    # Warm the shared weekly series observation, exactly as the homepage does.
+    assert feeds.trending("series")["items"]
+    warmed = sum(1 for url, _ in upstream.calls if url.endswith("/trending/tv/week"))
+    items = get(authenticated_client).json["items"]
+    # The feed really did take the warm path: no second trending request.
+    assert sum(1 for url, _ in upstream.calls if url.endswith("/trending/tv/week")) == warmed
+    assert items, "the warm path produced no episodes"
+    assert all(row["poster_url"] == "https://image.tmdb.org/t/p/w342/show100.jpg" for row in items), \
+        [row["poster_url"] for row in items]
+
+
+def test_artwork_hydration_never_clears_a_poster_another_producer_resolved():
+    """The contract at its source, so a future edit cannot reintroduce half of
+    the wipe invisibly behind the back-fill guard.
+
+    _recent_artwork is not the only producer of poster_url: the warm path hands
+    it shows the homepage feed already resolved, with no path map to resolve
+    them from. It fills in; it never clears.
+    """
+    import time
+    from discover import feeds
+    warm = {"id": 100, "poster_url": "https://image.tmdb.org/t/p/w342/warm.jpg"}
+    job = feeds._RecentJob(deadline=time.monotonic() + 30)
+    feeds._recent_artwork(None, job, {100: warm}, {})
+    assert warm["poster_url"] == "https://image.tmdb.org/t/p/w342/warm.jpg"
+    # A path map that carries only empty values is the same situation.
+    feeds._recent_artwork(None, job, {100: warm}, {100: None})
+    assert warm["poster_url"] == "https://image.tmdb.org/t/p/w342/warm.jpg"
+
+
+def test_malformed_source_body_is_not_cached_for_the_next_refresh(authenticated_client, upstream, monkeypatch):
+    """A 200 body that cannot carry the records this feed asks for must not
+    occupy the shared metadata region. Refresh has to reach the source again
+    instead of reproducing the same partial coverage from a cached malformation.
+    The sibling that answered correctly stays cached, so only the broken record
+    costs a second request."""
+    from discover import feeds
+    configure(upstream, monkeypatch)
+    broken = lambda: sum(1 for url, _ in upstream.calls if url.endswith("/tv/101"))  # noqa: E731
+    trending = lambda: sum(1 for url, _ in upstream.calls if url.endswith("/trending/tv/week"))  # noqa: E731
+    assert get(authenticated_client).json["coverage"]["failed"] >= 1
+    assert (broken(), trending()) == (1, 1)
+    feeds._cache.clear()
+    assert get(authenticated_client).json["coverage"]["failed"] >= 1
+    assert (broken(), trending()) == (2, 1)
+
+
 @pytest.mark.parametrize("bad", [None, {}, {"id": 999, "episode_number": True}, "bad"])
 def test_bad_episode_does_not_erase_good_siblings(authenticated_client, upstream, monkeypatch, bad):
     configure(upstream, monkeypatch, rows=[bad, episode(401, 1), episode(401, 1)])
@@ -92,9 +188,12 @@ def test_feed_has_no_user_fanout_or_date_override(authenticated_client, upstream
     assert upstream.calls == []
 
 
-def test_auth_and_unconfigured_never_start_source_work(authenticated_client, upstream):
+def test_auth_and_unconfigured_never_start_source_work(authenticated_client, upstream, monkeypatch):
+    from app import tmdb
     from app.config import settings
     assert authenticated_client.get("/api/discover/feeds/recent-episodes").status_code == 401
+    # Unconfigured now means no credential anywhere, built-in key included.
+    monkeypatch.setattr(tmdb, "builtin_api_key", lambda: "")
     settings.discover.tmdb_access_token = ""
     response = get(authenticated_client)
     assert response.status_code == 200 and response.json["status"] == "unconfigured"
@@ -183,11 +282,13 @@ def test_cache_keys_include_window_configuration_and_locale(authenticated_client
     tomorrow = feeds.recent_episodes(date(2026, 9, 9))
     assert tomorrow["window"]["end"] == "2026-09-09"
     assert 404 in [row["id"] for row in tomorrow["items"]]
-    assert len(upstream.calls) == count
+    # A different window reuses every admitted source record. The one repeat is
+    # the malformed 200 body, which is deliberately never admitted to the cache.
+    assert [url for url, _ in upstream.calls[count:]] == ["https://api.themoviedb.org/3/tv/101"]
     settings.discover.locale = "hu-HU"
     localized = feeds.recent_episodes(date(2026, 9, 8))
     assert localized["revision"] != first["revision"] and localized["locale"] == "hu-HU"
-    settings.discover.tmdb_access_token = "synthetic-rotation"
+    settings.discover.tmdb_access_token = "5ecafe33cafe33cafe33cafe33cafe33"
     assert feeds.recent_episodes(date(2026, 9, 8))["revision"] != localized["revision"]
 
 
