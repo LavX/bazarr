@@ -53,7 +53,7 @@ py7zr==1.1.3  # GHSA-q6rc-2cgv-63h7 arbitrary-file-write fix (latest)
 pycountry==26.2.16
 PyJWT>=2.13.0  # CVE-2026-32597 fix for unknown crit headers
 pysrt==1.1.2
-pysubs2==1.8.1
+pysubs2==1.9.0
 python-dateutil==2.9.0.post0
 PyYAML>=6.0.3
 rarfile==4.5
