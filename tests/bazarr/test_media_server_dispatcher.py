@@ -40,6 +40,9 @@ def dispatch():
     from media_servers.dispatcher import NativeConfiguration, RefreshDispatcher
     configuration = NativeConfiguration(native_settings(), snapshots=native_snapshots(native_settings()))
     calls = {"emby": [], "silo": []}
+    # Emby resolves the item itself, so the media type it was asked for is the
+    # only evidence that an episode publication actually reached the client.
+    emby_items = []
     started, release = Event(), Event()
     failures = set()
     failed_paths = set()
@@ -59,7 +62,8 @@ def dispatch():
         def get_libraries(self):
             return libraries
 
-        def refresh_movie(self, path, *, ensure_current):
+        def refresh_item(self, media_type, path, *, ensure_current):
+            emby_items.append((media_type, path))
             return self.refresh_file(None, path, ensure_current=ensure_current)
 
         def refresh_file(self, library_id, path, *, ensure_current):
@@ -75,7 +79,8 @@ def dispatch():
 
     dispatcher = RefreshDispatcher(configuration, client_factory=Client)
     yield SimpleNamespace(dispatcher=dispatcher, config=configuration, calls=calls, started=started,
-                          release=release, failures=failures, libraries=libraries, failed_paths=failed_paths)
+                          release=release, failures=failures, libraries=libraries, failed_paths=failed_paths,
+                          emby_items=emby_items)
     release.set()
     assert dispatcher.wait_idle(3)
 
@@ -89,9 +94,10 @@ def movie_event(**overrides):
 def test_second_write_requires_followup_and_servers_are_independent(dispatch, media_type):
     dispatch.libraries[0]['type'] = 'movies' if media_type == 'movie' else 'series'
     dispatch.dispatcher.notify(movie_event(media_type=media_type))
-    assert dispatch.started.wait(3)
+    # The first worker in the process pays the one-time subsync engine import.
+    assert dispatch.started.wait(10)
     assert dispatch.dispatcher.wait_idle(3, server=IDS["emby"])
-    assert len(dispatch.calls["emby"]) == (1 if media_type == 'movie' else 0)
+    assert dispatch.emby_items == [(media_type, "/media/A.mkv")]
     dispatch.dispatcher.notify(movie_event(media_type=media_type))
     dispatch.release.set()
     assert dispatch.dispatcher.wait_idle(3)
@@ -159,12 +165,26 @@ def test_disabled_connection_retains_pending_without_new_requests(dispatch):
     assert len(dispatch.calls["silo"]) == 1
 
 
-@pytest.mark.parametrize("event", [movie_event(operation="delete"), movie_event(media_type="episode")])
-def test_emby_only_consumes_movie_download_and_upload(dispatch, event):
+@pytest.mark.parametrize('media_type', ['movie', 'episode'])
+@pytest.mark.parametrize('operation', ['delete', 'sync', 'translate', 'combine', 'edit'])
+def test_emby_only_consumes_download_and_upload(dispatch, operation, media_type):
+    dispatch.libraries[0]['type'] = 'movies' if media_type == 'movie' else 'series'
     dispatch.release.set()
-    dispatch.dispatcher.notify(event)
+    dispatch.dispatcher.notify(movie_event(media_type=media_type, operation=operation))
     assert dispatch.dispatcher.wait_idle(3)
     assert dispatch.calls["emby"] == []
+    assert dispatch.emby_items == []
+
+
+@pytest.mark.parametrize('media_type', ['movie', 'episode'])
+@pytest.mark.parametrize('operation', ['download', 'upload'])
+def test_emby_accepts_each_supported_publication_for_movies_and_episodes(dispatch, operation, media_type):
+    dispatch.libraries[0]['type'] = 'movies' if media_type == 'movie' else 'series'
+    dispatch.release.set()
+    dispatch.dispatcher.notify(movie_event(media_type=media_type, operation=operation))
+    assert dispatch.dispatcher.wait_idle(3)
+    assert dispatch.emby_items == [(media_type, '/media/A.mkv')]
+    assert dispatch.dispatcher.status(IDS['emby']) == {'pending': 0, 'state': 'requested', 'error_code': None}
 
 
 @pytest.mark.parametrize(("event", "code"), [

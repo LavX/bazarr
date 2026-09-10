@@ -1,11 +1,15 @@
 # coding=utf-8
-"""Native Emby movie refresh with exact file-path resolution."""
+"""Native Emby movie and episode refresh with exact file-path resolution."""
 
 from urllib.parse import quote
 from typing import Callable
 
 from media_servers.http import MediaServerError, MediaServerHTTP
 from media_servers.paths import media_paths_equal
+
+# Emby stores both libraries as items refreshed the same way. Only the type it
+# is asked to resolve differs, and an unlisted media type never becomes one.
+_ITEM_TYPES = {"movie": "Movie", "episode": "Episode"}
 
 
 class EmbyClient:
@@ -30,13 +34,17 @@ class EmbyClient:
             raise MediaServerError("invalid_response")
         return {"success": True, "server_name": info["ServerName"], "version": info["Version"]}
 
-    def refresh_movie(self, video_path: str, *, ensure_current: Callable[[], None] | None = None) -> dict:
+    def refresh_item(self, media_type: str, video_path: str, *,
+                     ensure_current: Callable[[], None] | None = None) -> dict:
+        item_type = _ITEM_TYPES.get(media_type) if isinstance(media_type, str) else None
+        if item_type is None:
+            raise MediaServerError("internal_error")
         if not media_paths_equal(video_path, video_path):
             raise MediaServerError("path_invalid")
         if ensure_current:
             ensure_current()
         result = self.http.request_json("GET", "/Items", params={
-            "Path": video_path, "IncludeItemTypes": "Movie", "Recursive": "true",
+            "Path": video_path, "IncludeItemTypes": item_type, "Recursive": "true",
             "Fields": "Path,ProviderIds,MediaStreams,MediaSources",
         })
         if not isinstance(result, dict) or not isinstance(result.get("Items"), list):
@@ -44,13 +52,13 @@ class EmbyClient:
         items = result["Items"]
         total = result.get("TotalRecordCount", len(items))
         if type(total) is not int or total != len(items):
-            # A partial response cannot establish unique movie ownership.
+            # A partial response cannot establish unique item ownership.
             raise MediaServerError("invalid_response")
         matches = []
         for item in items:
             if not isinstance(item, dict):
                 raise MediaServerError("invalid_response")
-            if item.get("Type") != "Movie":
+            if item.get("Type") != item_type:
                 continue
             sources = item.get("MediaSources")
             if sources is None:

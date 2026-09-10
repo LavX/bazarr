@@ -60,7 +60,7 @@ def test_same_path_fanout_and_failure_retry_are_destination_scoped(schema_sessio
         def get_libraries(self):
             return [{'id': '7' if self.snapshot.id == first.id else '8', 'type': 'movies',
                      'paths': [f'/media/{"A" if self.snapshot.id == first.id else "B"}']}]
-        def refresh_movie(self, path, *, ensure_current):
+        def refresh_item(self, _media_type, path, *, ensure_current):
             return self.refresh_file(None, path, ensure_current=ensure_current)
         def refresh_file(self, library_id, path, *, ensure_current):
             ensure_current()
@@ -107,7 +107,7 @@ def blocked_pair(schema_session, monkeypatch, request):
         def get_libraries(self):
             return [{'id': '7', 'type': 'movies', 'paths': ['/media/A']},
                     {'id': '8', 'type': 'movies', 'paths': ['/media/B']}]
-        def refresh_movie(self, path, *, ensure_current):
+        def refresh_item(self, _media_type, path, *, ensure_current):
             return self.refresh_file(None, path, ensure_current=ensure_current)
         def refresh_file(self, library_id, path, *, ensure_current):
             if self.snapshot.id == first_id and not started.is_set():

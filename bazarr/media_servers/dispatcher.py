@@ -147,7 +147,7 @@ class RefreshDispatcher:
             for snapshot in self.configuration.list():
                 server = snapshot.id
                 state = self._server(server)
-                if snapshot.kind == "emby" and (media_type != "movie" or event.operation not in {"download", "upload"}):
+                if snapshot.kind == "emby" and event.operation not in {"download", "upload"}:
                     continue
                 _revision, snapshot, changing = self._connection(server, state)
                 if not snapshot.enabled:
@@ -210,7 +210,7 @@ class RefreshDispatcher:
         with self.client_factory(server, snapshot) as client:
             guard()
             if server == "emby":
-                result = client.refresh_movie(mapped["path"], ensure_current=guard)
+                result = client.refresh_item(event.media_type, mapped["path"], ensure_current=guard)
             else:
                 libraries = client.get_libraries()
                 library = next((row for row in libraries if row["id"].lstrip("0") ==
