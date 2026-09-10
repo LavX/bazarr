@@ -530,10 +530,24 @@ def _handle_mgb(name, exception, ids, language):
 
     if ids:
         if exception.media_type == "series":
-            if 'sonarrSeriesId' in ids and 'sonarrEpisodeId' in ids:
+            if ids.get('sonarrSeriesId') and ids.get('sonarrEpisodeId'):
                 blacklist_log(ids['sonarrSeriesId'], ids['sonarrEpisodeId'], name, exception.id, language_str)
-        else:
+                return
+        elif ids.get('radarrId'):
             blacklist_log_movie(ids['radarrId'], name, exception.id, language_str)
+            return
+        # No usable media id. A sports search reaches here every time: its video
+        # is a Movie for provider compatibility, so providers report media_type
+        # "movie", while the id dict subliminal builds carries only the Sonarr
+        # and Radarr keys and every one of them is None. The movie branch used
+        # to run anyway and write a blacklist row with a null radarrId, which
+        # blacklists nothing and leaves a junk entry on the movie Excluded page.
+        #
+        # Sports exclusions are written by their own owned flow, which has the
+        # event and its instance; this callback has neither.
+        logging.warning(
+            'BAZARR provider %s demanded a blacklist for %s, but the search carried no '
+            'media id to attribute it to; not recording it.', name, exception.id)
 
 
 def provider_throttle(name, exception, ids=None, language=None):
