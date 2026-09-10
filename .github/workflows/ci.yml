@@ -291,6 +291,7 @@ jobs:
             tests/bazarr/test_media_server_dispatcher.py \
             tests/bazarr/test_media_server_resolution.py \
             tests/bazarr/test_media_server_mutation_hooks.py \
+            tests/bazarr/test_language_profile_guards.py \
             tests/bazarr/test_logging_filters.py \
             tests/bazarr/test_openrouter_provider_routing.py \
             tests/bazarr/test_openrouter_model_migration.py \

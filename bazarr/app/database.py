@@ -1175,6 +1175,31 @@ def convert_list_to_clause(arr: list):
         return ""
 
 
+# The per-language keys a profile item may legitimately arrive without: each was
+# added to the item shape after profiles already existed, so an older item, or a
+# payload from a client that predates them, carries none of them. Absent means
+# "no restriction / not set", which is what the readers assume.
+PROFILE_ITEM_DEFAULTS = {
+    'audio_exclude': "False",
+    'audio_only_include': "False",
+    'translate_from': None,
+}
+
+
+def normalize_profile_items(items):
+    """Fill in the optional per-language keys, in place, and return the items.
+
+    Called from both ends: the startup migration below, and the settings
+    endpoint that writes profiles. The migration alone was not enough, because
+    it runs at startup only. A POST that omitted a key stored the item as sent,
+    and every indexing pass until the next restart raised KeyError on it.
+    """
+    for language in items or []:
+        for key, default in PROFILE_ITEM_DEFAULTS.items():
+            language.setdefault(key, default)
+    return items
+
+
 def upgrade_languages_profile_values():
     for languages_profile in (database.execute(
             select(
@@ -1195,14 +1220,7 @@ def upgrade_languages_profile_values():
             elif language['hi'] in ["also", "never"]:
                 language['hi'] = "False"
 
-            if 'audio_exclude' not in language:
-                language['audio_exclude'] = "False"
-
-            if 'audio_only_include' not in language:
-                language['audio_only_include'] = "False"
-
-            if "translate_from" not in language:
-                language["translate_from"] = None
+        normalize_profile_items(items)
         database.execute(
             update(TableLanguagesProfiles)
             .values({"items": json.dumps(items)})
