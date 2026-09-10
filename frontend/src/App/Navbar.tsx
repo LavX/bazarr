@@ -12,11 +12,12 @@ import {
   AppShell,
   Badge,
   Collapse,
+  Drawer,
   Stack,
   Text,
   Tooltip,
 } from "@mantine/core";
-import { useHover } from "@mantine/hooks";
+import { useHover, useMediaQuery } from "@mantine/hooks";
 import { faGift, IconDefinition } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import clsx from "clsx";
@@ -31,6 +32,7 @@ import { CustomRouteObject, Route } from "@/Router/type";
 import { BuildKey, pathJoin } from "@/utilities";
 import { LOG } from "@/utilities/console";
 import styles from "./Navbar.module.scss";
+import discoverStyles from "@/pages/Discover/Discover.module.scss";
 
 const Selection = createContext<{
   selection: string | null;
@@ -95,7 +97,7 @@ function useIsActive(parent: string, route: RouteObject) {
 // Section grouping configuration.
 // Routes are matched by their path property.
 const sectionGroups = [
-  { label: "Media", paths: ["series", "movies"] },
+  { label: "Media", paths: ["discover", "series", "movies"] },
   { label: "Management", paths: ["history", "wanted", "blacklist"] },
   {
     label: "System",
@@ -132,6 +134,8 @@ function groupRoutes(routes: CustomRouteObject[]) {
 }
 
 const AppNavbar: FunctionComponent = () => {
+  const mobile = useMediaQuery("(max-width: 47.99em)");
+  const { showed, show } = useNavbar();
   const [selection, select] = useState<string | null>(null);
 
   const routes = useRouteItems();
@@ -154,8 +158,8 @@ const AppNavbar: FunctionComponent = () => {
 
   const groups = useMemo(() => groupRoutes(navRoutes), [navRoutes]);
 
-  return (
-    <AppShell.Navbar className={styles.nav}>
+  const content = (
+    <>
       <div className={styles.navInner}>
         <Selection.Provider value={{ selection, select }}>
           <Stack gap={0}>
@@ -191,6 +195,7 @@ const AppNavbar: FunctionComponent = () => {
         {showWhatsNew && (
           <Tooltip label="What's new" position="top" withArrow>
             <ActionIcon
+              size={44}
               variant="subtle"
               aria-label="What's new"
               onClick={openWhatsNew}
@@ -200,6 +205,38 @@ const AppNavbar: FunctionComponent = () => {
           </Tooltip>
         )}
       </div>
+    </>
+  );
+  return mobile ? (
+    <Drawer
+      opened={showed}
+      onClose={() => show(false)}
+      title="Navigation"
+      position="left"
+      size="min(320px, calc(100vw - 32px))"
+      trapFocus
+      returnFocus
+      closeOnEscape
+      closeOnClickOutside
+      closeButtonProps={{ "aria-label": "Close navigation", size: 44 }}
+      classNames={{
+        content: discoverStyles.mobileNavigation,
+        body: discoverStyles.navigationBody,
+      }}
+      styles={{
+        content: { height: "100dvh" },
+        body: {
+          display: "flex",
+          flexDirection: "column",
+          height: "calc(100% - 76px)",
+        },
+      }}
+    >
+      <nav aria-label="Main navigation">{content}</nav>
+    </Drawer>
+  ) : (
+    <AppShell.Navbar className={styles.nav} aria-label="Main navigation">
+      {content}
     </AppShell.Navbar>
   );
 };
@@ -346,6 +383,7 @@ const NavbarItem: FunctionComponent<NavbarItemProps> = ({
   return (
     <NavLink
       to={link}
+      style={{ minHeight: 44, display: "flex", alignItems: "center" }}
       onClick={(event: React.MouseEvent<HTMLAnchorElement>) => {
         onClick?.(event);
         if (!event.isDefaultPrevented()) {

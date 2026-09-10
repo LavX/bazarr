@@ -60,7 +60,7 @@ import { branchOptions, proxyOptions, securityOptions } from "./options";
 // After typing "newpw", a fresh `stored` read returns "newpw", so a
 // fall-back to `stored` on clear would re-stage the new password
 // instead of the original hash - silently saving the typed-then-
-// cancelled password. Codex flagged this. The ref captures the value
+// cancelled password. The ref captures the value
 // once on first render (before any user interaction can stage anything)
 // and stays pinned to the loaded hash for the lifetime of the
 // component.
@@ -72,7 +72,7 @@ const AuthPasswordInput: FunctionComponent = () => {
     settingKey: "settings-auth-password",
   });
   // Capture the FIRST observed `stored` value, including the empty
-  // string. Codex P3: the prior `stored.length > 0` guard meant
+  // string. The prior `stored.length > 0` guard meant
   // originalRef.current stayed null whenever there was no auth password
   // configured, and the type-then-clear path below sent that null back
   // through FormData, where it was serialized as the string "null" and

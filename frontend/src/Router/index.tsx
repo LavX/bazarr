@@ -9,6 +9,7 @@ import { createBrowserRouter, Navigate, RouterProvider } from "react-router";
 import {
   faClock,
   faCogs,
+  faCompass,
   faExclamationTriangle,
   faFileExcel,
   faFilm,
@@ -24,6 +25,7 @@ import { Lazy } from "@/components/async";
 import Authentication from "@/pages/Authentication";
 import BlacklistMoviesView from "@/pages/Blacklist/Movies";
 import BlacklistSeriesView from "@/pages/Blacklist/Series";
+import DiscoverView from "@/pages/Discover";
 import DistributionHubView from "@/pages/DistributionHub";
 import Episodes from "@/pages/Episodes";
 import NotFound from "@/pages/errors/NotFound";
@@ -33,6 +35,7 @@ import MovieView from "@/pages/Movies";
 import MovieDetailView from "@/pages/Movies/Details";
 import SeriesView from "@/pages/Series";
 import SettingsConnectionsView from "@/pages/Settings/Connections";
+import SettingsDiscoverView from "@/pages/Settings/Discover";
 import SettingsGeneralView from "@/pages/Settings/General";
 import SettingsLanguagesView from "@/pages/Settings/Languages";
 import SettingsNotificationsView from "@/pages/Settings/Notifications";
@@ -79,8 +82,14 @@ function useRoutes(): CustomRouteObject[] {
             element: <Redirector></Redirector>,
           },
           {
+            icon: faCompass,
+            name: "Discover",
+            path: "discover",
+            element: <DiscoverView />,
+          },
+          {
             icon: faPlay,
-            name: "Series",
+            name: "My series",
             path: "series",
             badge: data?.sonarr_signalr,
             hidden: !sonarr,
@@ -97,7 +106,7 @@ function useRoutes(): CustomRouteObject[] {
           },
           {
             icon: faFilm,
-            name: "Movies",
+            name: "My movies",
             path: "movies",
             badge: data?.radarr_signalr,
             hidden: !radarr,
@@ -200,6 +209,11 @@ function useRoutes(): CustomRouteObject[] {
             name: "Settings",
             path: "settings",
             children: [
+              {
+                path: "discover",
+                name: "Discover",
+                element: <SettingsDiscoverView></SettingsDiscoverView>,
+              },
               {
                 path: "connections",
                 name: "Connections",

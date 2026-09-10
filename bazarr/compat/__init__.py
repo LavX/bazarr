@@ -20,7 +20,7 @@ def register(app, base_url: str) -> None:
     # Use the same `app.config` import path as the rest of bazarr. Importing
     # via `bazarr.app.config` would resolve to a SECOND module instance with
     # its own Dynaconf state, so settings written by /api/system/settings
-    # would not be visible here and vice versa. Codex flagged this as
+    # would not be visible here and vice versa. Review flagged this as
     # producing UI/runtime divergence on /system/compat/regenerate writes.
     from app.config import settings
     enabled = bool(settings.compat_endpoint.enabled)

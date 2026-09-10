@@ -7,11 +7,12 @@ import os
 import time
 
 from time import sleep
-from datetime import datetime
+from datetime import datetime, timezone
 from collections import deque
 from typing import Union
 from threading import Thread, Lock, RLock
 
+from app import activity
 from app.event_handler import event_stream
 from app.config import settings
 
@@ -92,6 +93,16 @@ class Job:
         self.progress_message = ""
         self.job_returned_value = job_returned_value
         self.cancelled = False
+        # Observation only. ``last_run_time`` is overwritten at creation, start
+        # and terminal state, so it cannot tell those three apart; these can.
+        # They never take part in equality, scheduling or execution.
+        self.activity_id = activity.activity_id_for_job(job_id)
+        self.scheduler_run_id = activity.current_scheduler_run()
+        self.observed_created_at = datetime.now(timezone.utc)
+        self.observed_started_at = None
+        self.observed_updated_at = None
+        self.observed_finished_at = None
+        self.observed_monotonic = time.monotonic()
 
     def __eq__(self, other):
         """
@@ -227,6 +238,77 @@ class JobsQueue:
             return [vars(job) for job in queues if job.job_id == job_id]
         else:
             return [vars(job) for job in queues]
+
+    SNAPSHOT_FIELDS = (
+        'job_id', 'job_name', 'module', 'func', 'status', 'is_progress', 'is_signalr',
+        'progress_value', 'progress_max', 'progress_message', 'cancelled',
+        'activity_id', 'scheduler_run_id',
+        'created_at', 'started_at', 'updated_at', 'finished_at', 'age_seconds',
+    )
+
+    def snapshot_activity(self, limit_per_state: int = 5):
+        """A detached, whitelisted view of the queues for read-only reporting.
+
+        ``list_jobs_from_queue`` concatenates the deques without the lock and
+        hands back ``vars(job)``, which aliases the live job and exposes its
+        args, kwargs and returned value. Those carry subtitle objects, absolute
+        paths, provider clients and API keys, so this copies a fixed field list
+        under the lock instead.
+
+        Counts are reported for the whole queue and samples are bounded, so a
+        truncated sample can never be mistaken for the total. ``running`` counts
+        jobs whose status has actually flipped: reservation puts a job on the
+        running deque one step before it starts, and that gap is reported
+        separately as ``reserved`` rather than as work in progress.
+        """
+        limit = max(0, int(limit_per_state))
+        now = time.monotonic()
+
+        def project(job):
+            return {
+                'job_id': job.job_id,
+                'job_name': job.job_name,
+                'module': job.module,
+                'func': job.func,
+                'status': job.status,
+                'is_progress': bool(job.is_progress),
+                'is_signalr': bool(job.is_signalr),
+                'progress_value': job.progress_value,
+                'progress_max': job.progress_max,
+                'progress_message': job.progress_message,
+                'cancelled': bool(job.cancelled),
+                'activity_id': getattr(job, 'activity_id', None),
+                'scheduler_run_id': getattr(job, 'scheduler_run_id', None),
+                'created_at': getattr(job, 'observed_created_at', None),
+                'started_at': getattr(job, 'observed_started_at', None),
+                'updated_at': getattr(job, 'observed_updated_at', None),
+                'finished_at': getattr(job, 'observed_finished_at', None),
+                'age_seconds': max(0.0, round(now - getattr(job, 'observed_monotonic', now), 3)),
+            }
+
+        with self._queue_lock:
+            pending = list(self.jobs_pending_queue)
+            running_members = list(self.jobs_running_queue)
+            failed = list(self.jobs_failed_queue)
+            completed = list(self.jobs_completed_queue)
+            running = [job for job in running_members if job.status == 'running']
+            reserved = [job for job in running_members if job.status != 'running']
+            samples = {
+                'pending': [project(job) for job in pending[:limit]],
+                'running': [project(job) for job in running[:limit]],
+                'reserved': [project(job) for job in reserved[:limit]],
+                'failed': [project(job) for job in failed[:limit]],
+                'completed': [project(job) for job in completed[:limit]],
+            }
+            counts = {'pending': len(pending), 'running': len(running), 'reserved': len(reserved),
+                      'failed': len(failed), 'completed': len(completed)}
+
+        return {
+            'observed_at': datetime.now(timezone.utc),
+            'counts': counts,
+            'samples': samples,
+            'truncated': {state: counts[state] > len(samples[state]) for state in counts},
+        }
 
     def get_job_status(self, job_id: int):
         """
@@ -369,6 +451,7 @@ class JobsQueue:
             job.progress_message = progress_message
         payload["progress_message"] = job.progress_message
 
+        job.observed_updated_at = datetime.now(timezone.utc)
         return payload
 
     def update_job_progress_status(self, job_id: int, is_progress: bool = False) -> bool:
@@ -670,6 +753,7 @@ class JobsQueue:
         try:
             job.status = 'running'
             job.last_run_time = datetime.now()
+            job.observed_started_at = datetime.now(timezone.utc)
             if 'job_id' not in job.kwargs or not job.kwargs['job_id']:
                 job.kwargs['job_id'] = job.job_id
 
@@ -694,6 +778,8 @@ class JobsQueue:
             job.status = 'completed'
             job.progress_message = "Cancelled by user"
             job.last_run_time = datetime.now()
+            job.observed_finished_at = datetime.now(timezone.utc)
+            activity.finish(job.activity_id, outcome='cancelled')
             with self._queue_lock:
                 self.jobs_running_queue.remove(job)
             self.jobs_completed_queue.append(job)
@@ -702,6 +788,8 @@ class JobsQueue:
             logging.exception(f"Exception raised while running function: {e}")  # noqa: G004
             job.status = 'failed'
             job.last_run_time = datetime.now()
+            job.observed_finished_at = datetime.now(timezone.utc)
+            activity.finish(job.activity_id, outcome='failed')
             with self._queue_lock:
                 self.jobs_running_queue.remove(job)
             self.jobs_failed_queue.append(job)
@@ -709,6 +797,10 @@ class JobsQueue:
         else:
             job.status = 'completed'
             job.last_run_time = datetime.now()
+            job.observed_finished_at = datetime.now(timezone.utc)
+            # A generic completed envelope is not a publication. Only a typed
+            # outcome recorded at a real publication boundary can claim one.
+            activity.finish(job.activity_id)
             with self._queue_lock:
                 self.jobs_running_queue.remove(job)
             self.jobs_completed_queue.append(job)

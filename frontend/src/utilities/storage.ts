@@ -1,13 +1,13 @@
 import { useCallback } from "react";
 import { useSystemSettings } from "@/apis/hooks";
+import { writeStoredValue } from "./browserStorage";
 
 export const uiPageSizeKey = "settings-general-page_size";
 
 export function useUpdateLocalStorage() {
   return useCallback((newVals: LooseObject) => {
     for (const key in newVals) {
-      const value = newVals[key];
-      localStorage.setItem(key, value);
+      writeStoredValue(key, newVals[key]);
     }
   }, []);
 }

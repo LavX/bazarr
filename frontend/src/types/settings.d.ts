@@ -1,5 +1,12 @@
 interface Settings {
   general: Settings.General;
+  discover?: {
+    tmdb_configured: boolean;
+    /** Whether the reader saved a key of their own, never the key itself. */
+    tmdb_token_stored?: boolean;
+    metadata_revision: string;
+    locale: string;
+  };
   log: Settings.Log;
   proxy: Settings.Proxy;
   auth: Settings.Auth;

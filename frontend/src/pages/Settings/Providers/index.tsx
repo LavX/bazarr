@@ -1,4 +1,5 @@
-import { FunctionComponent, useMemo, useState } from "react";
+import { FunctionComponent, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router";
 import {
   Anchor,
   Button,
@@ -43,6 +44,12 @@ import {
 } from "./list";
 
 type TabKey = "my-providers" | "marketplace" | "updates" | "activity";
+
+function requestedTabKey(value: string | null): TabKey | null {
+  return value === "marketplace" || value === "updates" || value === "activity"
+    ? value
+    : null;
+}
 
 function schemaToInputs(
   manifest: LooseObject | undefined,
@@ -264,7 +271,32 @@ const IntegrationsSection: FunctionComponent = () => (
 );
 
 const SettingsProvidersView: FunctionComponent = () => {
-  const [tab, setTab] = useState<TabKey>("my-providers");
+  // A link can open a specific tab: Discover sends readers whose enabled
+  // providers cannot be searched straight to the marketplace.
+  const [params, setParams] = useSearchParams();
+  const requestedTab = params.get("tab");
+  const [tab, setTab] = useState<TabKey>(
+    requestedTabKey(requestedTab) ?? "my-providers",
+  );
+  // Reading the parameter once, at mount, was enough only for a reader who
+  // arrives here from somewhere else. Following the link a second time, from
+  // the notice on Discover while this page is already open, changes the URL
+  // without remounting, and the tab did not move. The parameter is consumed
+  // rather than left in place, so the same link works again after the reader
+  // has switched tabs by hand.
+  useEffect(() => {
+    if (requestedTab === null) return;
+    const requested = requestedTabKey(requestedTab);
+    if (requested) setTab(requested);
+    setParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        next.delete("tab");
+        return next;
+      },
+      { replace: true },
+    );
+  }, [requestedTab, setParams]);
   const catalog = useProviderHubCatalog();
   const providers = useProviderHubProviders();
   const providerOptions = useProviderOptions(providers.data);
