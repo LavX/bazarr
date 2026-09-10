@@ -1062,7 +1062,7 @@ def test_review_create_cannot_overwrite_a_later_upload(upload_flow, monkeypatch)
     flow = upload_flow
     monkeypatch.setattr(settings.subsync, "use_subsync", False)
     monkeypatch.setattr(content, "database", Mock(execute=Mock(return_value=Mock(
-        first=Mock(return_value=SimpleNamespace(path=str(flow.video), id=30))))))
+        first=Mock(return_value=SimpleNamespace(path=str(flow.video), id=30, arr_instance_id=7))))))
     monkeypatch.setattr(content, "get_target_folder", lambda *args: None)
     monkeypatch.setattr(content, "store_subtitles_movie", lambda *args, **kwargs: None)
     monkeypatch.setattr(content, "event_stream", lambda **kwargs: None)
@@ -1111,7 +1111,7 @@ def test_review_combine_waits_for_an_existing_publication(upload_flow, monkeypat
     first.write_text("1\n00:00:01,000 --> 00:00:02,000\nFirst\n")
     second.write_text("1\n00:00:01,000 --> 00:00:02,000\nSecond\n")
     monkeypatch.setattr(main, "resolve_source_paths", lambda **kwargs: SourcePaths(str(first), [str(second)]))
-    monkeypatch.setattr(main, "_post_write", lambda *args: None)
+    monkeypatch.setattr(main, "_post_write", lambda *args, **kwargs: None)
     output = flow.video.with_suffix(".en.combined-hu.srt")
     results = []
     finished = Event()
@@ -1234,7 +1234,8 @@ def review_translator(upload_flow, monkeypatch, request):
     service = getattr(module, class_name)(
         source_srt_file=str(source), dest_srt_file=str(destination), lang_obj=None,
         to_lang="eng", from_lang="en", media_type="movie", video_path=str(flow.video),
-        orig_to_lang="en", forced=False, hi=False, sonarr_series_id=None, sonarr_episode_id=None, radarr_id=30)
+        orig_to_lang="en", forced=False, hi=False, sonarr_series_id=None, sonarr_episode_id=None, radarr_id=30,
+        arr_instance_id=7)
     monkeypatch.setattr(module, "jobs_queue", flow.queue)
     monkeypatch.setattr(module, "history_log_movie", Mock())
     monkeypatch.setattr(module, "create_process_result", Mock())
@@ -1401,7 +1402,7 @@ def review_combine(upload_flow, monkeypatch):
     primary.write_text("1\n00:00:01,000 --> 00:00:02,000\nFirst\n")
     secondary.write_text("1\n00:00:01,000 --> 00:00:02,000\nSecond\n")
     monkeypatch.setattr(main, "resolve_source_paths", lambda **kwargs: SourcePaths(str(primary), [str(secondary)]))
-    monkeypatch.setattr(main, "_post_write", lambda *args: None)
+    monkeypatch.setattr(main, "_post_write", lambda *args, **kwargs: None)
     return SimpleNamespace(flow=flow, module=main, output=flow.video.with_suffix(".en.combined-hu.srt"),
                            run=lambda format="srt": main.try_combine_for_video(
                                str(flow.video), "movie", languages=["en", "hu"], format=format))
@@ -1423,11 +1424,11 @@ def test_review_combine_format_rebuilds_cannot_delete_each_other(review_combine,
     original = run.module._remove_stale_combined_siblings
     results = []
 
-    def cleanup(path, video):
+    def cleanup(path, video, on_publish=None):
         mine, other = (first_cleanup, second_cleanup) if path.endswith(".srt") else (second_cleanup, first_cleanup)
         mine.set()
         other.wait(0.3)
-        original(path, video)
+        original(path, video, on_publish)
 
     monkeypatch.setattr(run.module, "_remove_stale_combined_siblings", cleanup)
     workers = [Thread(target=lambda fmt=fmt: results.append(run.run(fmt))) for fmt in ("srt", "ass")]

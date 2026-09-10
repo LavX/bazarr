@@ -127,7 +127,7 @@ def _make_result(status, path="", alignment="", reason="", error=""):
 
 
 def _make_db_row(path="/movies/Movie.mkv"):
-    return type("Row", (), {"path": path})()
+    return type("Row", (), {"path": path, "arr_instance_id": 7})()
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +155,7 @@ class TestMoviesSubtitlesCombinePost:
              patch.object(movies_subtitles_module, 'request', self._make_request({})):
 
             mock_db.execute.return_value = mock_db_result
-            mock_pm.path_replace_movie.return_value = '/mapped/movies/Movie.mkv'
+            mock_pm.path_replace_instance.return_value = '/mapped/movies/Movie.mkv'
             mock_combine.return_value = _make_result(
                 status='built',
                 path='/movies/Movie.en.combined-hu.srt',
@@ -187,7 +187,7 @@ class TestMoviesSubtitlesCombinePost:
              patch.object(movies_subtitles_module, 'request', self._make_request(payload)):
 
             mock_db.execute.return_value = mock_db_result
-            mock_pm.path_replace_movie.return_value = '/mapped/movies/Movie.mkv'
+            mock_pm.path_replace_instance.return_value = '/mapped/movies/Movie.mkv'
             mock_combine.return_value = _make_result(
                 status='built',
                 path='/x.srt',
@@ -214,7 +214,7 @@ class TestMoviesSubtitlesCombinePost:
              patch.object(movies_subtitles_module, 'request', self._make_request({})):
 
             mock_db.execute.return_value = mock_db_result
-            mock_pm.path_replace_movie.return_value = '/mapped/movies/Movie.mkv'
+            mock_pm.path_replace_instance.return_value = '/mapped/movies/Movie.mkv'
             mock_combine.return_value = _make_result(
                 status='skipped',
                 reason='missing source(s)',
@@ -239,7 +239,7 @@ class TestMoviesSubtitlesCombinePost:
              patch.object(movies_subtitles_module, 'request', self._make_request({})):
 
             mock_db.execute.return_value = mock_db_result
-            mock_pm.path_replace_movie.return_value = '/mapped/movies/Movie.mkv'
+            mock_pm.path_replace_instance.return_value = '/mapped/movies/Movie.mkv'
             mock_combine.return_value = _make_result(
                 status='failed',
                 error='bad SRT',

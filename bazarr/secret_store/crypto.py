@@ -41,6 +41,7 @@ import base64
 import hashlib
 import logging
 import secrets as _secrets
+from threading import RLock
 
 from cryptography.fernet import Fernet, InvalidToken
 from itsdangerous import BadPayload, BadSignature, URLSafeSerializer
@@ -54,6 +55,8 @@ SECRET_MARKER_PREFIX = "enc:v1:"
 
 # Generated key length in bytes (token_urlsafe doubles to ~43 chars).
 _MASTER_KEY_BYTES = 32
+_master_key_lock = RLock()
+_unpersisted_master_keys = set()
 
 
 def _generate_master_key() -> str:
@@ -90,13 +93,15 @@ def get_master_key(settings_obj=None) -> str:
     if settings_obj is None:
         from app.config import settings as settings_obj  # noqa: PLC0415, RUF100
 
-    general = settings_obj.general
-    key = getattr(general, "secrets_encryption_key", None)
-    if not key or (isinstance(key, str) and not key.strip()):
-        key = _generate_master_key()
-        general.secrets_encryption_key = key
-        logger.info("Generated new master secrets_encryption_key on first boot")
-    return key
+    with _master_key_lock:
+        general = settings_obj.general
+        key = getattr(general, "secrets_encryption_key", None)
+        if not key or (isinstance(key, str) and not key.strip()):
+            key = _generate_master_key()
+            general.secrets_encryption_key = key
+            _unpersisted_master_keys.add(key)
+            logger.info("Generated new master secrets_encryption_key on first boot")
+        return key
 
 
 def persist_master_key(settings_obj=None) -> None:
@@ -112,19 +117,33 @@ def persist_master_key(settings_obj=None) -> None:
     committing an arr_instances API key (the repository write commits
     immediately under the AUTOCOMMIT engine).
 
-    Only writes config when the key was just generated, so the common path
-    (key already on disk) is a cheap no-op.
+    Keys generated in this process remain pending until a successful settings
+    write confirms them. Keys loaded from disk need no extra write.
     """
     if settings_obj is None:
         from app.config import settings as settings_obj
 
-    general = settings_obj.general
-    before = getattr(general, "secrets_encryption_key", "") or ""
-    get_master_key(settings_obj)
-    after = getattr(general, "secrets_encryption_key", "") or ""
-    if not before and after:
-        from app.config import write_config
-        write_config()
+    with _master_key_lock:
+        general = settings_obj.general
+        before = getattr(general, "secrets_encryption_key", "") or ""
+        key = get_master_key(settings_obj)
+        if key in _unpersisted_master_keys:
+            from app.config import write_config
+            try:
+                if write_config() is not True:
+                    raise ValueError
+            except Exception:
+                general.secrets_encryption_key = before
+                if before != key:
+                    _unpersisted_master_keys.discard(key)
+                raise ValueError("Unable to persist secrets encryption key") from None
+            mark_master_key_persisted(key)
+
+
+def mark_master_key_persisted(key):
+    """A successful settings write confirms only the key in its saved payload."""
+    with _master_key_lock:
+        _unpersisted_master_keys.discard(key)
 
 
 def is_encrypted(value) -> bool:

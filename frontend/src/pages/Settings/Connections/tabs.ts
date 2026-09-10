@@ -7,6 +7,8 @@ export const CONNECTION_TABS = [
   "radarr",
   "plex",
   "jellyfin",
+  "emby",
+  "silo",
 ] as const;
 
 export type ConnectionTab = (typeof CONNECTION_TABS)[number];

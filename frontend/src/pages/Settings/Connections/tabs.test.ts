@@ -7,8 +7,15 @@ import {
 } from "./tabs";
 
 describe("connection tabs", () => {
-  it("lists the four services in order", () => {
-    expect(CONNECTION_TABS).toEqual(["sonarr", "radarr", "plex", "jellyfin"]);
+  it("lists all services in order", () => {
+    expect(CONNECTION_TABS).toEqual([
+      "sonarr",
+      "radarr",
+      "plex",
+      "jellyfin",
+      "emby",
+      "silo",
+    ]);
   });
 
   it("recognises valid tab keys", () => {
@@ -19,6 +26,8 @@ describe("connection tabs", () => {
   it("parses a leading-hash fragment to its tab", () => {
     expect(parseTabFromHash("#plex")).toBe("plex");
     expect(parseTabFromHash("#jellyfin")).toBe("jellyfin");
+    expect(parseTabFromHash("#emby")).toBe("emby");
+    expect(parseTabFromHash("#silo")).toBe("silo");
   });
 
   it("parses a bare fragment without a hash", () => {

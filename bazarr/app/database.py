@@ -220,6 +220,32 @@ class TableAnnouncements(Base):
     text = mapped_column(Text)
 
 
+class TableMediaServerInstances(Base):
+    __tablename__ = 'media_server_instances'
+    __table_args__ = (
+        CheckConstraint("kind IN ('emby', 'silo')", name='ck_media_server_kind'),
+        CheckConstraint('enabled IN (0, 1)', name='ck_media_server_enabled'),
+        CheckConstraint('verify_ssl IN (0, 1)', name='ck_media_server_verify_ssl'),
+    )
+
+    id = mapped_column(Text, primary_key=True)
+    kind = mapped_column(Text, nullable=False)
+    name = mapped_column(Text, nullable=False)
+    enabled = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    url = mapped_column(Text, nullable=False)
+    api_key = mapped_column(Text, nullable=False, default='', server_default='')
+    verify_ssl = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    path_mappings = mapped_column(Text, nullable=False, default='[]', server_default='[]')
+    revision = mapped_column(Integer, nullable=False, default=1, server_default='1')
+
+
+class TableMediaServerImports(Base):
+    __tablename__ = 'media_server_imports'
+    __table_args__ = (CheckConstraint("kind IN ('emby', 'silo')", name='ck_media_server_import_kind'),)
+
+    kind = mapped_column(Text, primary_key=True)
+
+
 class TableArrInstances(Base):
     # Multiple Sonarr/Radarr instances (#156). One Bazarr+ install can connect
     # to several named Sonarr/Radarr instances - e.g. split libraries: TV,
@@ -917,6 +943,11 @@ def migrate_db(app):
             insert(System)
             .values(configured='0', updated='0'))
 
+    # Native destinations retain one-time scalar import markers independently
+    # of destination lifetime. A failed kind remains unavailable to workers.
+    from media_servers.backfill import backfill_instances
+    backfill_instances(database, settings)
+
     # Multiple Sonarr/Radarr instances (#156): represent the existing scalar
     # Sonarr/Radarr config as the default arr_instances rows and stamp existing
     # owned rows with their arr_instance_id. Idempotent and non-destructive;
@@ -1144,6 +1175,31 @@ def convert_list_to_clause(arr: list):
         return ""
 
 
+# The per-language keys a profile item may legitimately arrive without: each was
+# added to the item shape after profiles already existed, so an older item, or a
+# payload from a client that predates them, carries none of them. Absent means
+# "no restriction / not set", which is what the readers assume.
+PROFILE_ITEM_DEFAULTS = {
+    'audio_exclude': "False",
+    'audio_only_include': "False",
+    'translate_from': None,
+}
+
+
+def normalize_profile_items(items):
+    """Fill in the optional per-language keys, in place, and return the items.
+
+    Called from both ends: the startup migration below, and the settings
+    endpoint that writes profiles. The migration alone was not enough, because
+    it runs at startup only. A POST that omitted a key stored the item as sent,
+    and every indexing pass until the next restart raised KeyError on it.
+    """
+    for language in items or []:
+        for key, default in PROFILE_ITEM_DEFAULTS.items():
+            language.setdefault(key, default)
+    return items
+
+
 def upgrade_languages_profile_values():
     for languages_profile in (database.execute(
             select(
@@ -1164,14 +1220,7 @@ def upgrade_languages_profile_values():
             elif language['hi'] in ["also", "never"]:
                 language['hi'] = "False"
 
-            if 'audio_exclude' not in language:
-                language['audio_exclude'] = "False"
-
-            if 'audio_only_include' not in language:
-                language['audio_only_include'] = "False"
-
-            if "translate_from" not in language:
-                language["translate_from"] = None
+        normalize_profile_items(items)
         database.execute(
             update(TableLanguagesProfiles)
             .values({"items": json.dumps(items)})

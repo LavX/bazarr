@@ -68,7 +68,7 @@ const Layout: FunctionComponent<Props> = (props) => {
       if (Object.keys(settings).length > 0) {
         const settingsToSubmit = { ...settings };
         runHooks(hooks, settingsToSubmit);
-        LOG("info", "submitting settings", settingsToSubmit);
+        LOG("info", "submitting settings", Object.keys(settingsToSubmit));
         mutate(settingsToSubmit);
       }
     },
@@ -80,7 +80,7 @@ const Layout: FunctionComponent<Props> = (props) => {
     if (Object.keys(settings).length > 0) {
       const settingsToSubmit = { ...settings };
       runHooks(hooks, settingsToSubmit);
-      LOG("info", "save & leave", settingsToSubmit);
+      LOG("info", "save & leave", Object.keys(settingsToSubmit));
       await mutateAsync(settingsToSubmit);
     }
   }, [form.values, mutateAsync]);

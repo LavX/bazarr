@@ -739,6 +739,7 @@ def _process_subtitle_item(item, action, options, job_id):
             item['video_path'],
             # Resolve keep-lyrics against the per-item owning instance (#227).
             arr_instance_id=item.get('arr_instance_id'),
+            media_type='episode' if item['sonarr_series_id'] else 'movies',
         )
         return True
     return False

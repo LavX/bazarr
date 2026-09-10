@@ -1,11 +1,15 @@
+import { createMemoryRouter, Link, RouterProvider } from "react-router";
 import { Text } from "@mantine/core";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { useFormActions } from "@/pages/Settings/utilities/FormValues";
-import { customRender, screen, waitFor } from "@/tests";
+import { AllProviders } from "@/providers";
+import { customRender, rawRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
+import { Password } from "./forms";
 import Layout from "./Layout";
+import LayoutModal from "./LayoutModal";
 
 // An input that only stages its value when it is left, the way the AI Model
 // field commits an OpenRouter routing shortcut.
@@ -219,4 +223,137 @@ describe("Settings layout keyboard save", () => {
     expect(await screen.findByText("Nothing staged")).toBeInTheDocument();
     expect(submitted).toHaveLength(0);
   });
+});
+
+it("submits a secret while the active development logger records only field names", async () => {
+  vi.stubEnv("MODE", "development");
+  const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const submitted: LooseObject[] = [];
+  server.use(
+    http.post("/api/system/settings", async ({ request }) => {
+      submitted.push(Object.fromEntries((await request.formData()).entries()));
+      return HttpResponse.json({});
+    }),
+  );
+  try {
+    customRender(
+      <Layout name="Logging test">
+        <CommitOnBlurInput />
+      </Layout>,
+    );
+    await userEvent.type(
+      screen.getByLabelText("Commits on blur"),
+      "sentinel-layout-secret{Enter}",
+    );
+    await waitFor(() => expect(submitted).toHaveLength(1));
+    expect(submitted[0]["settings-general-instance_name"]).toBe(
+      "sentinel-layout-secret",
+    );
+    expect(log).toHaveBeenCalledWith("[info] submitting settings", [
+      "settings-general-instance_name",
+    ]);
+    expect(
+      JSON.stringify([log.mock.calls, warn.mock.calls, error.mock.calls]),
+    ).not.toContain("sentinel-layout-secret");
+  } finally {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  }
+});
+
+it("keeps modal submission values out of the active development logger", async () => {
+  vi.stubEnv("MODE", "development");
+  const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const submitted: LooseObject[] = [];
+  const close = vi.fn();
+  server.use(
+    http.post("/api/system/settings", async ({ request }) => {
+      submitted.push(Object.fromEntries((await request.formData()).entries()));
+      return HttpResponse.json({});
+    }),
+  );
+  try {
+    customRender(
+      <LayoutModal callbackModal={close}>
+        <Password label="API Key" settingKey="settings-silo-apikey" />
+      </LayoutModal>,
+    );
+    await userEvent.type(
+      screen.getByLabelText("API Key"),
+      "sentinel-modal-secret",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(submitted).toHaveLength(1));
+    expect(submitted[0]["settings-silo-apikey"]).toBe("sentinel-modal-secret");
+    expect(log).toHaveBeenCalledWith("[info] submitting settings", [
+      "settings-silo-apikey",
+    ]);
+    expect(
+      JSON.stringify([log.mock.calls, warn.mock.calls, error.mock.calls]),
+    ).not.toContain("sentinel-modal-secret");
+    await waitFor(() => expect(close).toHaveBeenCalledWith(true));
+  } finally {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  }
+});
+
+it("keeps Save and Leave values out of the active development logger", async () => {
+  vi.stubEnv("MODE", "development");
+  const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const submitted: LooseObject[] = [];
+  server.use(
+    http.post("/api/system/settings", async ({ request }) => {
+      submitted.push(Object.fromEntries((await request.formData()).entries()));
+      return HttpResponse.json({});
+    }),
+  );
+  const router = createMemoryRouter([
+    {
+      path: "/",
+      element: (
+        <Layout name="Logging test">
+          <Password label="API Key" settingKey="settings-emby-apikey" />
+          <Link to="/away">Leave settings</Link>
+        </Layout>
+      ),
+    },
+    { path: "/away", element: <p>Destination</p> },
+  ]);
+  try {
+    rawRender(
+      <AllProviders>
+        <RouterProvider router={router} />
+      </AllProviders>,
+    );
+    await userEvent.type(
+      screen.getByLabelText("API Key"),
+      "sentinel-leave-secret",
+    );
+    await userEvent.click(screen.getByRole("link", { name: "Leave settings" }));
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: "Save all changes and leave this page",
+      }),
+    );
+    await waitFor(() => expect(submitted).toHaveLength(1));
+    expect(await screen.findByText("Destination")).toBeInTheDocument();
+    expect(submitted[0]["settings-emby-apikey"]).toBe("sentinel-leave-secret");
+    expect(log).toHaveBeenCalledWith("[info] save & leave", [
+      "settings-emby-apikey",
+    ]);
+    expect(
+      JSON.stringify([log.mock.calls, warn.mock.calls, error.mock.calls]),
+    ).not.toContain("sentinel-leave-secret");
+  } finally {
+    router.dispose();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  }
 });
