@@ -446,6 +446,76 @@ def test_unsupported_warning_capacity_counts_distinct_video_and_arr_owner_target
     assert dispatcher.status(IDS['silo'])['error_code'] == 'queue_overflow'
 
 
+@pytest.mark.parametrize('drain', ['retry', 'covering_scan'])
+def test_a_moved_subtitle_lets_the_retained_unsupported_warning_drain(dispatch, tmp_path, drain):
+    """The warning tells the user to move the subtitle beside the video and retry.
+
+    That move publishes nothing of its own, so the retained event is the only
+    record of the target. Replaying the path it was recorded with re-raises
+    sidecar_unsupported however many times the user retries, and the covering
+    scan of a later eligible publication does not release it either: the
+    destination can never return to idle short of deleting the instance or
+    restarting Bazarr.
+    """
+    dispatcher = dispatch.dispatcher
+    settings = native_settings()
+    settings.general.use_emby = False
+    settings.silo.path_mappings[0]['local_path'] = str(tmp_path)
+    apply_settings(dispatch.config, settings)
+    dispatch.release.set()
+    video = tmp_path / 'Video.mkv'
+    video.touch()
+    custom = tmp_path / 'subtitles'
+    custom.mkdir()
+    stray = custom / 'Video.hu.srt'
+    stray.write_text('Stored in the configured custom subtitle folder')
+    warning = {'pending': 1, 'state': 'unconfirmed', 'error_code': 'sidecar_unsupported'}
+
+    dispatcher.notify(movie_event(video_path=str(video), subtitle_path=str(stray)))
+    assert dispatcher.wait_idle(10)
+    assert dispatch.calls['silo'] == []
+    assert dispatcher.status(IDS['silo']) == warning
+
+    stray.rename(video.parent / stray.name)
+
+    if drain == 'retry':
+        assert dispatcher.retry(IDS['silo']) == 1
+    else:
+        dispatcher.notify(movie_event(video_path=str(video),
+                                      subtitle_path=str(video.with_suffix('.en.srt'))))
+    assert dispatcher.wait_idle(10)
+    assert [path for path, _snapshot in dispatch.calls['silo']] == ['/media/Video.mkv'] * (
+        1 if drain == 'retry' else 2)
+    assert dispatcher.status(IDS['silo']) == {'pending': 0, 'state': 'confirmed', 'error_code': None}
+
+
+def test_a_retained_unsupported_warning_survives_a_subtitle_that_never_moved(dispatch, tmp_path):
+    """Only an actual move releases it. A file still sitting where Silo cannot
+    read it keeps the warning, however many times the user retries."""
+    dispatcher = dispatch.dispatcher
+    settings = native_settings()
+    settings.general.use_emby = False
+    settings.silo.path_mappings[0]['local_path'] = str(tmp_path)
+    apply_settings(dispatch.config, settings)
+    dispatch.release.set()
+    video = tmp_path / 'Video.mkv'
+    video.touch()
+    custom = tmp_path / 'subtitles'
+    custom.mkdir()
+    stray = custom / 'Video.hu.srt'
+    stray.write_text('Stored in the configured custom subtitle folder')
+    warning = {'pending': 1, 'state': 'unconfirmed', 'error_code': 'sidecar_unsupported'}
+
+    dispatcher.notify(movie_event(video_path=str(video), subtitle_path=str(stray)))
+    assert dispatcher.wait_idle(10)
+    assert dispatcher.status(IDS['silo']) == warning
+    for _attempt in range(2):
+        assert dispatcher.retry(IDS['silo']) == 1
+        assert dispatcher.wait_idle(10)
+        assert dispatch.calls['silo'] == []
+        assert dispatcher.status(IDS['silo']) == warning
+
+
 def test_read_only_status_and_invalid_selection_never_start_worker(dispatch):
     from media_servers.http import MediaServerError
     assert dispatch.dispatcher.status(IDS["silo"]) == {"pending": 0, "state": "idle", "error_code": None}

@@ -83,9 +83,23 @@ class MediaServerInstanceRepository:
         except ValueError:
             raise MediaServerError('missing_credentials') from None
 
+    def retained_api_key(self, instance_id):
+        """The saved key as plaintext, or nothing when it can no longer be read.
+
+        A database restored without its master key leaves ciphertext that
+        decrypts to nothing usable. That is a destination holding no
+        credentials, not a request the user is forbidden to make: the enabled
+        checks below still refuse to run it, and turning it off has to stay
+        possible.
+        """
+        try:
+            return self.get_decrypted_api_key(instance_id)
+        except MediaServerError:
+            return ''
+
     def values(self, row, *, decrypt_key=True):
         return dict(kind=row.kind, name=row.name, enabled=bool(row.enabled), url=row.url,
-                    verify_ssl=bool(row.verify_ssl), api_key=self.get_decrypted_api_key(row.id) if decrypt_key else '',
+                    verify_ssl=bool(row.verify_ssl), api_key=self.retained_api_key(row.id) if decrypt_key else '',
                     path_mappings=json.loads(row.path_mappings))
 
     def create(self, kind, name, **fields):
@@ -118,7 +132,16 @@ class MediaServerInstanceRepository:
             values['api_key'] = ''
         values.update({key: value for key, value in fields.items()
                        if key != 'clear_api_key' and (key != 'api_key' or value)})
-        validate_connection(values)
+        try:
+            validate_connection(values)
+        except MediaServerError:
+            # Retained values only have to hold up while the destination is on.
+            # A key that no longer decrypts, or a legacy import that never had a
+            # URL, would otherwise make the destination impossible to switch
+            # off: every field this request actually submits was validated by
+            # validate_fields above, so nothing new gets in this way.
+            if values['enabled']:
+                raise
         encrypted = _encrypted(values['api_key']) if fields.get('api_key') else row.api_key
         if fields.get('clear_api_key'):
             encrypted = ''

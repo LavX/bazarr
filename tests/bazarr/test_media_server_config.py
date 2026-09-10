@@ -13,10 +13,12 @@ def saved_config(tmp_path, monkeypatch):
     from sqlalchemy import update
     from app.database import System
     snapshot = config.settings.as_dict()
-    settings = Dynaconf(core_loaders=["YAML"], validators=config.validators)
+    path = tmp_path / "config.yaml"
+    # Bound to its own file, exactly as the live object is: a settings object
+    # with nowhere to reload from cannot show what a failed save falls back to.
+    settings = Dynaconf(settings_file=str(path), core_loaders=["YAML"], validators=config.validators)
     settings.update(snapshot)
     settings.validators.validate()
-    path = tmp_path / "config.yaml"
     monkeypatch.setattr(config, "settings", settings)
     from media_servers import dispatcher
     monkeypatch.setattr(dispatcher, "_configuration", dispatcher.NativeConfiguration(settings))
@@ -156,3 +158,55 @@ def test_successful_ordinary_save_marks_generated_master_key_durable(saved_confi
     assert config.write_config() is True and path.exists()
     monkeypatch.setattr(config, 'write_config', lambda: pytest.fail('ordinary save already persisted this key'))
     persist_master_key()
+
+
+@pytest.mark.parametrize('failure', ['write', 'move'])
+def test_a_save_that_never_reached_disk_leaves_nothing_applied(saved_config, monkeypatch, failure):
+    """A master switch travels with whatever else the settings page submitted.
+
+    Refusing the request while the co-saved values stay on the live settings
+    object leaves the process running a configuration that is not on disk, and
+    reverting silently at the next restart.
+    """
+    from media_servers.dispatcher import get_native_configuration
+    from test_media_server_dispatcher import IDS, native_settings, native_snapshots
+    config, path = saved_config
+    native = get_native_configuration()
+    for snapshot in native_snapshots(native_settings()):
+        native.publish(snapshot)
+    config.save_settings([('settings-general-use_silo', ['true']),
+                          ('settings-general-page_size', ['25'])])
+    before_disk = path.read_bytes()
+    before = native.read(IDS['silo'])
+
+    def fail(*args, **kwargs):
+        raise OSError('synthetic-sensitive-remote-text')
+
+    monkeypatch.setattr(config, failure, fail)
+    with pytest.raises(ValidationError):
+        config.save_settings([('settings-general-use_silo', ['false']),
+                              ('settings-general-page_size', ['250'])])
+
+    assert path.read_bytes() == before_disk
+    assert config.settings.general.page_size == 25
+    assert config.settings.general.use_silo is True
+    assert native.read(IDS['silo']) == before
+    native.ensure_current(IDS['silo'], before[0])
+
+
+def test_a_failed_save_keeps_credentials_readable(saved_config, monkeypatch):
+    """settings.reload() pulls the on-disk ciphertext back in, so the rollback
+    has to decrypt again or every secret stays an ``enc:v1:`` string until the
+    process restarts."""
+    config, _path = saved_config
+    config.settings.auth.apikey = 'synthetic-rollback-key'
+    config.save_settings([('settings-general-use_emby', ['false'])])
+
+    def fail(*args, **kwargs):
+        raise OSError('synthetic-sensitive-remote-text')
+
+    monkeypatch.setattr(config, 'write', fail)
+    with pytest.raises(ValidationError):
+        config.save_settings([('settings-general-use_emby', ['true']),
+                              ('settings-general-page_size', ['250'])])
+    assert config.settings.auth.apikey == 'synthetic-rollback-key'

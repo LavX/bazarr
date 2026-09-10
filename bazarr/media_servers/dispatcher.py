@@ -2,6 +2,7 @@
 """Bounded, independent native refresh workers and saved connection revisions."""
 
 import logging
+import os
 from dataclasses import dataclass, field, replace
 from threading import Condition, RLock, Thread
 
@@ -109,6 +110,30 @@ def _misses_on(call, codes):
                 return None
             raise
     return attempt
+
+
+def _relocated(event):
+    """Where a retained unsupported publication's subtitle sits now, if it moved.
+
+    The warning names a path the user is told to fix, and moving that file
+    publishes nothing. Replaying the recorded path would answer the same
+    refusal forever, so the retained event has to be re-derived against the
+    filesystem instead: the same name beside the video, gone from where it was
+    recorded, is the move the warning asked for. Anything else is not, and
+    keeps the warning.
+    """
+    if event is None:
+        return None
+    try:
+        video, subtitle = _media_path(event.video_path), _media_path(event.subtitle_path)
+    except MediaServerError:
+        return None
+    if subtitle.parent == video.parent:
+        return None
+    moved = video.parent / subtitle.name
+    if os.path.isfile(event.subtitle_path) or not os.path.isfile(str(moved)):
+        return None
+    return replace(event, subtitle_path=str(moved))
 
 
 def _metadata(event):
@@ -336,7 +361,16 @@ class RefreshDispatcher:
                 except MediaServerError:
                     result, error_code = "unconfirmed", "configuration_changed"
                 if not error_code and state.targets[key].generation == generation:
-                    if target.unsupported_event is None:
+                    moved = _relocated(target.unsupported_event)
+                    if moved is not None:
+                        # The subtitle now sits where Silo reads it, so the
+                        # warning has real work again rather than a path the
+                        # user already fixed. Queue that work instead of
+                        # counting it as covered by the scan just finished.
+                        target.event, target.unsupported_event = moved, None
+                        target.generation += 1
+                        target.ready = True
+                    elif target.unsupported_event is None:
                         del state.targets[key]
                     else:
                         # The scan completed eligible work only. Retry the
@@ -373,6 +407,14 @@ class RefreshDispatcher:
             if changing or not snapshot.enabled:
                 return 0
             for target in state.targets.values():
+                # Retry is the button the warning tells the user to press after
+                # moving the subtitle, so this is where the recorded path has to
+                # be re-derived rather than replayed.
+                moved = _relocated(target.unsupported_event)
+                if moved is not None:
+                    target.event, target.unsupported_event = moved, None
+                    target.generation += 1
+                    target.error_code = None
                 target.ready = True
             self._start(server, state)
             return len(state.targets)

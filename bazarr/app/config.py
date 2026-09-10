@@ -936,6 +936,19 @@ def _active_provider_hub_provider_ids():
         return set()
 
 
+def restore_persisted_settings():
+    """Return the live settings object to what is actually saved on disk.
+
+    Re-decrypt after reload: settings.reload() pulls the on-disk ciphertext back
+    into the live Dynaconf object, so without this second pass downstream code
+    would see `enc:v1:` strings for API keys, auth credentials, provider
+    passwords, and compat tokens until the next process restart.
+    """
+    settings.reload()
+    migrate_legacy_plex_encryption(settings)
+    decrypt_settings_in_place(settings)
+
+
 _native_settings_save_lock = threading.RLock()
 
 
@@ -1302,19 +1315,18 @@ def _save_settings(settings_items, native_configuration=None):
         settings.validators.validate()
         validate_log_regex()
     except ValidationError:
-        # Re-decrypt after reload: settings.reload() pulls the on-disk
-        # ciphertext back into the live Dynaconf object, so without this
-        # second pass downstream code would see `enc:v1:` strings for
-        # API keys, auth credentials, provider passwords, and compat
-        # tokens until the next process restart.
-        settings.reload()
-        migrate_legacy_plex_encryption(settings)
-        decrypt_settings_in_place(settings)
+        restore_persisted_settings()
         raise
     else:
         persisted = write_config()
         if native_configuration is not None:
             if persisted is not True:
+                # The request is refused, so none of it may stay applied. Every
+                # submitted value is already on the live settings object by now,
+                # and the caller's `finally` restores only the two master
+                # switches: without this the process would keep running values
+                # that reached no file and revert at the next restart.
+                restore_persisted_settings()
                 raise ValidationError('Unable to persist native media-server settings')
             native_configuration.publish_masters(settings)
 

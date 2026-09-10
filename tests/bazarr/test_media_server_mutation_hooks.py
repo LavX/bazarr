@@ -672,3 +672,91 @@ def test_combine_cleanup_notifies_each_successful_removal(tmp_path, mutations):
     _remove_stale_combined_siblings(str(destination), str(video), callback)
     assert not stale.exists()
     assert len(mutations) == 1 and mutations[0].subtitle_path == str(stale)
+
+
+SRT = '1\n00:00:01,000 --> 00:00:02,000\nOriginal\n'
+
+
+@pytest.mark.parametrize('media_type', ['movie', 'episode'])
+@pytest.mark.parametrize('relocates', [False, True])
+def test_mod_edits_publish_the_file_they_leave_behind(upload_flow, mutations, monkeypatch, media_type, relocates):
+    """Remove HI and the other mods rewrite, and sometimes rename, the subtitle.
+
+    The mod implementation deletes the old file and writes the modified one, so
+    a destination that is not told about it serves the pre-mod subtitle until
+    some later scan happens to notice.
+    """
+    from subtitles.tools import mods
+    flow = upload_flow
+    source = flow.video.with_suffix('.en.hi.srt' if relocates else '.en.srt')
+    source.write_text(SRT)
+    monkeypatch.setattr(mods.Subtitle, 'get_modified_content', lambda self, **kwargs: b'Modified')
+    mods.subtitles_apply_mods('en', str(source), ['remove_HI'] if relocates else ['OCR_fixes'],
+                              str(flow.video), media_type=media_type, arr_instance_id=7)
+    survivor = next(path for path in flow.video.parent.glob('*.srt') if path.read_text() == 'Modified')
+    # Remove HI drops the .hi tag, so the published path is not the one the
+    # request named; every other mod rewrites the file in place.
+    assert (survivor != source) is relocates and not (relocates and source.exists())
+    assert len(mutations) == 1
+    assert (mutations[0].media_type, mutations[0].operation, mutations[0].video_path,
+            mutations[0].subtitle_path, mutations[0].arr_instance_id) == (
+        media_type, 'edit', str(flow.video), str(survivor), 7)
+
+
+def test_an_invalid_subtitle_the_mod_never_rewrites_publishes_nothing(upload_flow, mutations, monkeypatch):
+    from subtitles.tools import mods
+    source = upload_flow.video.with_suffix('.en.srt')
+    source.write_text('not a subtitle at all')
+    mods.subtitles_apply_mods('en', str(source), ['OCR_fixes'], str(upload_flow.video),
+                              media_type='movie', arr_instance_id=7)
+    assert source.read_text() == 'not a subtitle at all'
+    assert mutations == []
+
+
+@pytest.mark.parametrize('media_type', ['movie', 'episode'])
+def test_the_subtitle_tools_endpoint_publishes_its_mod_action(upload_flow, mutations, monkeypatch, media_type):
+    """The finding's path: PATCH /api/subtitles with a mod action.
+
+    It applies the mod and post-processes it, and used to publish nothing at
+    all, so Remove HI or OCR fixes from the toolbar reached no destination.
+    """
+    from api.subtitles import subtitles as api_mod
+    from subtitles.tools import mods
+    flow = upload_flow
+    source = flow.video.with_suffix('.en.srt')
+    source.write_text(SRT)
+    monkeypatch.setattr(mods.Subtitle, 'get_modified_content', lambda self, **kwargs: b'Modified')
+    monkeypatch.setattr(api_mod, 'postprocess_subtitles', lambda *args, **kwargs: None)
+    metadata = SimpleNamespace(path='/upstream/Video.mkv', sonarrSeriesId=10, subtitles=None,
+                               season=1, episode=1, imdbId='tt1', tvdbId=1, tmdbId=1)
+    monkeypatch.setattr(api_mod, 'database',
+                        Mock(execute=Mock(return_value=Mock(first=Mock(return_value=metadata)))))
+    monkeypatch.setattr(api_mod.path_mappings, 'path_replace_instance',
+                        lambda path, owner, kind: str(flow.video))
+    args = {'action': 'OCR_fixes', 'language': 'en', 'path': str(source), 'type': media_type,
+            'id': 42, 'arr_instance_id': 7, 'forced': 'False', 'hi': 'False'}
+    stub = SimpleNamespace(patch_request_parser=SimpleNamespace(parse_args=lambda: args))
+
+    assert api_mod.Subtitles.patch.__wrapped__(stub) == ('', 204)
+
+    assert source.read_text() == 'Modified'
+    assert len(mutations) == 1
+    assert (mutations[0].media_type, mutations[0].operation, mutations[0].video_path,
+            mutations[0].subtitle_path, mutations[0].arr_instance_id) == (
+        media_type, 'edit', str(flow.video), str(source), 7)
+
+
+def test_bulk_mod_action_reaches_the_publication_hook(upload_flow, mutations, monkeypatch):
+    from subtitles.mass_operations import _process_subtitle_item
+    from subtitles.tools import mods
+    flow = upload_flow
+    source = flow.video.with_suffix('.en.srt')
+    source.write_text(SRT)
+    monkeypatch.setattr(mods.Subtitle, 'get_modified_content', lambda self, **kwargs: b'Modified')
+    item = dict(video_path=str(flow.video), srt_path=str(source), srt_lang='en', forced=False, hi=False,
+                sonarr_series_id=None, sonarr_episode_id=None, radarrId=None, radarr_id=30,
+                arr_instance_id=7, metadata=None)
+    assert _process_subtitle_item(item, 'OCR_fixes', {}, 'bulk')
+    assert len(mutations) == 1
+    assert (mutations[0].media_type, mutations[0].operation, mutations[0].arr_instance_id) == (
+        'movie', 'edit', 7)

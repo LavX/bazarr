@@ -167,3 +167,40 @@ def test_silo_mapping_ids_are_positive_decimal_strings(instance_api, library_id)
     data = payload('silo', path_mappings=[{'local_path': '/movies', 'remote_path': '/media', 'library_id': library_id}])
     assert instance_api.post(ROOT, json=data, headers=HEADERS).status_code == 400
     assert instance_api.get(ROOT, headers=HEADERS).json == {'data': []}
+
+
+@pytest.mark.parametrize('broken', ['unreadable_key', 'legacy_missing_url'])
+def test_a_broken_destination_can_still_be_turned_off(instance_api, schema_session, broken):
+    """The card's disable action submits ``{'enabled': False}`` and nothing else.
+
+    A saved key that no longer decrypts (a database restored without its master
+    key) and a legacy import that never had a URL are both destinations whose
+    retained values cannot pass validation. Refusing the edit leaves them
+    enabled and accumulating failed refresh targets with no way out short of
+    deleting the instance, so turning one off must not depend on reading or
+    re-validating whatever it retains.
+    """
+    from media_servers.repository import MediaServerInstanceRepository
+    from secret_store import encrypt_secret
+    created = instance_api.post(ROOT, json=payload('emby'), headers=HEADERS).json
+    path = ROOT + '/' + created['id']
+    repo = MediaServerInstanceRepository(schema_session)
+    row = repo.get(created['id'])
+    if broken == 'unreadable_key':
+        row.api_key = encrypt_secret('old-key', master_key='different-test-master')
+    else:
+        row.url = ''
+    retained_key, retained_url = row.api_key, row.url
+    schema_session.flush()
+
+    response = instance_api.patch(path, json={'enabled': False}, headers=HEADERS)
+    assert response.status_code == 200, response.json
+    assert response.json['enabled'] is False
+
+    # Nothing the destination retains was rewritten, so restoring the master key
+    # (or filling the URL back in) still recovers it.
+    saved = repo.get(created['id'])
+    assert (saved.api_key, saved.url) == (retained_key, retained_url)
+    assert bool(saved.enabled) is False
+    # Turning it back on has no usable connection and must still be refused.
+    assert instance_api.patch(path, json={'enabled': True}, headers=HEADERS).status_code == 400
