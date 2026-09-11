@@ -1244,8 +1244,12 @@
 
 .homepageLayout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 252px;
-  gap: clamp(20px, 3vw, 40px);
+  // The concept composition: discovery takes the wider column and the reader's
+  // own Bazarr+ a fixed 246px rail, separated by a single column gap. The rail
+  // is not a card but a seam in the same surface, so the page reads as one
+  // sheet rather than a column of panels.
+  grid-template-columns: minmax(0, 1fr) 246px;
+  column-gap: 25px;
   align-items: start;
 }
 
@@ -1256,14 +1260,16 @@
 // The reader's own Bazarr+, beside the discovery. A status surface: what is
 // happening now, what arrived, what is waiting, what needs attention, each
 // with its own mark, the numbers carrying the weight in tabular figures.
+// Rendered as the concept's right rail: a seam (hairline border) on the same
+// page surface rather than a card, so it reads as part of the composition.
 .localSummary {
   display: flex;
   flex-direction: column;
   gap: 0;
-  padding: 18px 18px 8px;
-  border: 1px solid var(--bz-border-card);
-  border-radius: 16px;
-  background: var(--bz-surface-raised);
+  border: 0;
+  border-left: 1px solid var(--bz-border-card);
+  padding-left: 22px;
+  padding-top: 8px;
   h2 {
     font-size: 1.125rem;
     letter-spacing: -0.01em;
@@ -1513,9 +1519,14 @@
     order: 1;
     margin-top: 24px;
   }
+  // One column, so the rail's left seam would dangle at the screen's margin.
+  // The concept's narrow treatment moves the seam to the bottom, separating
+  // the reader's Bazarr+ from the discovery above it.
   .localSummary {
     margin-bottom: 36px;
     padding: 14px 16px 4px;
+    border: 0;
+    border-bottom: 1px solid var(--bz-border-card);
   }
 }
 
