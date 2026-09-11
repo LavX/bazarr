@@ -128,6 +128,10 @@ def library(compat_db, tmp_path, monkeypatch):
         delete(TableArrInstances).where(TableArrInstances.id.in_([101, 202]))
     )
     database.execute(delete(TableMovies).where(TableMovies.id == 909))
+    # The many-unrelated-movies contract test inserts its own 1000..1139 range.
+    # The suite shares one database across runs, so leaving those rows behind
+    # makes the next run collide on table_movies.id.
+    database.execute(delete(TableMovies).where(TableMovies.id >= 1000))
     cache.invalidate_all()
     file_id_store.reset_store()
     service.reset_compat_pool()
@@ -964,7 +968,11 @@ def test_indexed_discovery_roots_search_link_and_stream(
 
 
 def test_hub_with_many_unrelated_windows_subtitle_records(library):
-    from app.database import TableMovies, insert
+    from app.database import TableMovies, delete, insert
+
+    # This test owns the 1000..1139 movie-id range. Clear it first so a database
+    # left behind by an earlier run cannot collide on the insert.
+    library.db.execute(delete(TableMovies).where(TableMovies.id >= 1000))
 
     for index in range(140):
         library.db.execute(
