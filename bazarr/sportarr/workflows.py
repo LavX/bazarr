@@ -465,6 +465,27 @@ SPORTS_JOB_FUNCTIONS = frozenset(
     }
 )
 
+# The library sync jobs are queued by the sports API from their own modules
+# (sportarr.sync.leagues / sportarr.sync.events), not from this one, because
+# they are the scheduled sync entry points rather than per-subtitle workflows.
+# They still carry a job_id the client polls through the same
+# /sports/jobs/<id> endpoint, so a predicate that only knew about this module
+# answered 404 for a job that had just been queued, and the client retried it
+# every second forever. The function is pinned to its module so a job cannot
+# pair a known function name with an unrelated module.
+SPORTS_SYNC_JOB_MODULES = {
+    "sportarr.sync.leagues": frozenset({"update_sports_for_instance"}),
+    "sportarr.sync.events": frozenset({"sync_one_league"}),
+}
+
+
+def is_sports_job(job):
+    module, func = job.get("module"), job.get("func")
+    if module == "sportarr.workflows":
+        return func in SPORTS_JOB_FUNCTIONS
+    allowed = SPORTS_SYNC_JOB_MODULES.get(module)
+    return allowed is not None and func in allowed
+
 
 def sports_job_status(session, job_id, arr_instance_id):
     require_sportarr(session, arr_instance_id)
@@ -473,8 +494,7 @@ def sports_job_status(session, job_id, arr_instance_id):
         return None
     job = rows[0]
     if (
-        job["module"] != "sportarr.workflows"
-        or job["func"] not in SPORTS_JOB_FUNCTIONS
+        not is_sports_job(job)
         or job["kwargs"].get("arr_instance_id") != arr_instance_id
     ):
         return None
@@ -541,8 +561,7 @@ def sports_job_status(session, job_id, arr_instance_id):
 def cancel_disabled_jobs(enabled_owners):
     for job in jobs_queue.list_jobs_from_queue():
         if (
-            job["module"] == "sportarr.workflows"
-            and job["func"] in SPORTS_JOB_FUNCTIONS
+            is_sports_job(job)
             and job["kwargs"].get("arr_instance_id") is not None
             and job["kwargs"]["arr_instance_id"] not in enabled_owners
         ):

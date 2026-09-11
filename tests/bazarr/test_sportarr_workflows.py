@@ -957,3 +957,100 @@ def test_real_job_signal_cancellation_keeps_committed_publication(
         session.execute(sa.select(TableHistorySports)).all()
     ) == history_before + (phase == "index")
     assert (folder / "1/event.en.srt").read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("module", "func"),
+    [
+        ("sportarr.sync.leagues", "update_sports_for_instance"),
+        ("sportarr.sync.events", "sync_one_league"),
+    ],
+)
+def test_sync_jobs_are_reported_by_the_status_endpoint(
+    workflow_library, monkeypatch, module, func
+):
+    """The sports API queues the library syncs from their own modules and
+    returns a job_id the client polls through the same endpoint as the workflow
+    jobs. A 404 there is retried once a second forever, so the endpoint has to
+    recognise the sync modules rather than only sportarr.workflows."""
+    _, _, workflows, _, session, _ = workflow_library
+    monkeypatch.setattr(
+        workflows.jobs_queue,
+        "list_jobs_from_queue",
+        lambda **kwargs: [
+            {
+                "module": module,
+                "func": func,
+                "kwargs": {"arr_instance_id": 1},
+                "status": "running",
+                "progress_message": "Working",
+                "job_returned_value": None,
+            }
+        ],
+    )
+    state = workflows.sports_job_status(session, 7, 1)
+    assert state is not None
+    assert state["status"] == "running" and state["message"] == "Working"
+    assert state["result"] is None
+
+
+def test_status_endpoint_rejects_a_function_paired_with_the_wrong_module(
+    workflow_library, monkeypatch
+):
+    """A known function name is not enough on its own: the module is part of the
+    identity, so a row pairing a sync function with an unrelated module is not a
+    sports job and must not be reported as one."""
+    _, _, workflows, _, session, _ = workflow_library
+    monkeypatch.setattr(
+        workflows.jobs_queue,
+        "list_jobs_from_queue",
+        lambda **kwargs: [
+            {
+                "module": "sportarr.sync.events",
+                "func": "update_sports_for_instance",
+                "kwargs": {"arr_instance_id": 1},
+                "status": "running",
+                "progress_message": "Working",
+                "job_returned_value": None,
+            }
+        ],
+    )
+    assert workflows.sports_job_status(session, 7, 1) is None
+
+
+def test_cancel_disabled_jobs_cancels_a_queued_sync_job(workflow_library, monkeypatch):
+    """Turning the master toggle off, or disabling an instance, has to stop a
+    queued sync too. The canceller used the same incomplete job set as the
+    status endpoint, so a disabled owner's sync kept running."""
+    _, _, workflows, _, _, _ = workflow_library
+    removed, cancelled = [], []
+    monkeypatch.setattr(
+        workflows.jobs_queue,
+        "list_jobs_from_queue",
+        lambda **kwargs: [
+            {
+                "module": "sportarr.sync.events",
+                "func": "sync_one_league",
+                "kwargs": {"league_id": 1, "arr_instance_id": 9},
+                "status": "pending",
+                "job_id": 41,
+            },
+            {
+                "module": "sportarr.sync.leagues",
+                "func": "update_sports_for_instance",
+                "kwargs": {"arr_instance_id": 9},
+                "status": "running",
+                "job_id": 42,
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        workflows.jobs_queue,
+        "remove_job_from_pending_queue",
+        lambda job_id: removed.append(job_id),
+    )
+    monkeypatch.setattr(
+        workflows.jobs_queue, "cancel_running_job", lambda job_id: cancelled.append(job_id)
+    )
+    workflows.cancel_disabled_jobs(set())
+    assert removed == [41] and cancelled == [42]
