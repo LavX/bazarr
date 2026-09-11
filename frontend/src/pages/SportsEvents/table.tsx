@@ -4,7 +4,8 @@ import React, {
   useEffect,
   useMemo,
 } from "react";
-import { Badge, Group, Text, Tooltip } from "@mantine/core";
+import { useNavigate } from "react-router";
+import { Badge, Group, Text, Tooltip, UnstyledButton } from "@mantine/core";
 import { faBookmark as farBookmark } from "@fortawesome/free-regular-svg-icons";
 import {
   faBookmark,
@@ -15,14 +16,24 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef, Table as TableInstance } from "@tanstack/react-table";
+import { useSubtitleFileDownload } from "@/apis/hooks";
 import { useCombineSubtitles } from "@/apis/hooks/combine";
+import { useSportsSubtitleModification } from "@/apis/hooks/sports";
 import { SportsEvent } from "@/apis/raw/sports";
 import { Action, GroupTable } from "@/components";
-import { AudioList } from "@/components/bazarr";
+import { AudioList, CombinedSubtitleBadge } from "@/components/bazarr";
 import { SportsSearchModal } from "@/components/modals/SportsSearchModal";
+import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
 import TextPopover from "@/components/TextPopover";
 import { useModals } from "@/modules/modals";
-import { BuildKey } from "@/utilities";
+import { BuildKey, toPython } from "@/utilities";
+import {
+  buildSubtitleLanguageKey,
+  canSynchronizeSubtitle,
+  combineRequestForSubtitle,
+  isCombinedOutputSubtitle,
+  isSyncOutputSubtitle,
+} from "@/utilities/subtitles";
 import { navigateApp } from "@/utilities/whatsNew";
 import tableStyles from "@/components/tables/BaseTable.module.scss";
 
@@ -34,50 +45,221 @@ interface Props {
   onAllRowsExpandedChanged: (isAllRowsExpanded: boolean) => void;
 }
 
+type SportsSubtitleTuple = SportsEvent["subtitles"][number];
+
+// Sports keeps a subtitle as a [language, path, size] tuple where episodes and
+// movies hold a Subtitle object, so the tuple is widened here rather than
+// teaching the shared menu a second shape. The language key carries the variant
+// flags, "en", "en:hi", "en:sync-ffsubsync", "en:combined-es", which is the same
+// convention the other two media types use, so the shared helpers read it as is.
+export function toSportsSubtitle([
+  language,
+  path,
+]: SportsSubtitleTuple): Subtitle {
+  const [code2, ...modifiers] = language.split(":");
+  const lower = modifiers.map((modifier) => modifier.toLowerCase());
+  return {
+    code2,
+    name: code2,
+    language,
+    modifier:
+      modifiers.find((modifier) => {
+        const value = modifier.toLowerCase();
+        return value.startsWith("sync-") || value.startsWith("combined-");
+      }) ?? null,
+    forced: lower.includes("forced"),
+    hi: lower.includes("hi"),
+    path,
+  };
+}
+
+// The sports counterpart of buildEpisodeSubtitleToolSelections. The id is the
+// local event id, which is what the modify endpoint resolves a sports row from,
+// and every selection carries its owner because a sports path mapping is always
+// per instance with no global mapping to fall back on.
+export function buildSportsSubtitleToolSelections(
+  event: SportsEvent,
+  subtitle: Subtitle,
+): FormType.ModifySubtitle[] {
+  const isEmbedded = !subtitle.path;
+  return [
+    {
+      id: event.id,
+      type: "sports",
+      path: isEmbedded ? "" : subtitle.path!,
+      language: subtitle.code2,
+      forced: toPython(subtitle.forced),
+      hi: toPython(subtitle.hi),
+      from_language: isEmbedded ? subtitle.code2 : undefined,
+      // eslint-disable-next-line camelcase
+      arr_instance_id: event.arr_instance_id,
+    },
+  ];
+}
+
+// One sports subtitle behind the same tools menu episodes and movies use.
+// This column used to render bare badges: a missing language opened a search and
+// a present one did nothing at all, so a subtitle that existed could not be
+// viewed, edited, downloaded, translated, synced or deleted from the only page
+// that lists it. The menu is the shared component rather than a sports copy, so
+// the tool groups and their wording stay identical across the three media types.
+const EventSubtitleBadge: FunctionComponent<{
+  event: SportsEvent;
+  subtitle: Subtitle;
+  missing?: boolean;
+  availableSubtitles: Subtitle[];
+}> = ({ event, subtitle, missing = false, availableSubtitles }) => {
+  const navigate = useNavigate();
+  const modals = useModals();
+  const combine = useCombineSubtitles();
+  const fileDownload = useSubtitleFileDownload();
+  const { remove } = useSportsSubtitleModification();
+
+  const isEmbedded = !subtitle.path;
+  const isCombinedOutput = !missing && isCombinedOutputSubtitle(subtitle);
+
+  // A missing language has no file to act on, so it carries no selections: the
+  // menu then offers only what applies, which is a search and a translate from
+  // one of the subtitles the event already has.
+  const selections = useMemo(
+    () => (missing ? [] : buildSportsSubtitleToolSelections(event, subtitle)),
+    [event, subtitle, missing],
+  );
+
+  const translationSources = useMemo(
+    () =>
+      availableSubtitles.filter(
+        (item) =>
+          !isSyncOutputSubtitle(item) && !isCombinedOutputSubtitle(item),
+      ),
+    [availableSubtitles],
+  );
+
+  const editorUrl = (action: "preview" | "edit") =>
+    `/subtitles/${action}/sports/${event.id}/${encodeURIComponent(
+      buildSubtitleLanguageKey(subtitle),
+    )}?arr_instance_id=${event.arr_instance_id}`;
+
+  const badgeEl = missing ? (
+    <Badge
+      color="yellow"
+      variant="light"
+      style={{ cursor: event.hasFile ? "pointer" : undefined }}
+      leftSection={<FontAwesomeIcon icon={faMagnifyingGlass} />}
+    >
+      {subtitle.language ?? subtitle.code2}
+    </Badge>
+  ) : isCombinedOutput ? (
+    <CombinedSubtitleBadge subtitle={subtitle} />
+  ) : (
+    // The raw language key, as this column has always shown it: it already
+    // carries the variant, so "en:hi" and "en:sync-ffsubsync" say what they are
+    // without a second badge.
+    <Badge
+      variant="light"
+      style={{ cursor: "pointer", whiteSpace: "nowrap" }}
+      title={subtitle.path || "Embedded"}
+    >
+      {subtitle.language ?? subtitle.code2}
+    </Badge>
+  );
+
+  return (
+    <SubtitleToolsMenu
+      selections={selections}
+      menu={{ trigger: "click" }}
+      canSync={!missing && canSynchronizeSubtitle(subtitle)}
+      isCombinedOutput={isCombinedOutput}
+      missingLanguage={missing ? subtitle : undefined}
+      translationSources={missing ? translationSources : undefined}
+      mediaId={event.id}
+      mediaType="sports"
+      arrInstanceId={event.arr_instance_id}
+      embeddedTrack={isEmbedded}
+      onAction={async (action) => {
+        if (action === "view") {
+          navigate(editorUrl("preview"));
+        } else if (action === "edit") {
+          navigate(editorUrl("edit"));
+        } else if (action === "search") {
+          if (!event.hasFile) return;
+          modals.openContextModal(SportsSearchModal, {
+            item: event,
+            language: subtitle.code2,
+            hi: subtitle.hi,
+            forced: subtitle.forced,
+          });
+        } else if (action === "download") {
+          fileDownload.mutate({
+            type: "sports",
+            mediaId: event.id,
+            language: buildSubtitleLanguageKey(subtitle),
+            arrInstanceId: event.arr_instance_id,
+          });
+        } else if (action === "rebuild") {
+          combine.mutate({
+            scope: {
+              kind: "sports",
+              eventId: event.id,
+              arrInstanceId: event.arr_instance_id,
+            },
+            body: combineRequestForSubtitle(subtitle) ?? {},
+          });
+        } else if (action === "delete" && subtitle.path) {
+          await remove.mutateAsync({
+            eventId: event.id,
+            owner: event.arr_instance_id,
+            form: {
+              language: subtitle.code2,
+              hi: subtitle.hi,
+              forced: subtitle.forced,
+              path: subtitle.path,
+            },
+          });
+        }
+      }}
+    >
+      {isCombinedOutput ? (
+        <UnstyledButton aria-label={`Combined subtitle ${subtitle.code2}`}>
+          {badgeEl}
+        </UnstyledButton>
+      ) : (
+        badgeEl
+      )}
+    </SubtitleToolsMenu>
+  );
+};
+
 // Extracted for the same reason as EventRowActions below: it needs the modals
 // hook, and hook objects change identity every render.
 const EventSubtitles: FunctionComponent<{ event: SportsEvent }> = ({
   event,
 }) => {
-  const modals = useModals();
+  // The subtitles the event already has are the translate sources for the ones
+  // it does not, so the tuples are widened once and read by both lists.
+  const presentSubtitles = useMemo(
+    () => (event.subtitles ?? []).map(toSportsSubtitle),
+    [event.subtitles],
+  );
+
   return (
     <Group gap="xs" wrap="nowrap">
-      {event.missing_subtitles?.map((language, index) => {
-        // Clicking a missing language searches for that one, the way the
-        // episodes table and the wanted pages do. The badges used to be inert,
-        // so the only way to act on one missing language was the row's search,
-        // which searches every missing language.
-        const [code2, ...modifiers] = language.split(":");
-        const lower = modifiers.map((modifier) => modifier.toLowerCase());
-        return (
-          <Badge
-            key={BuildKey(index, language, "missing")}
-            color="yellow"
-            variant="light"
-            style={{ cursor: event.hasFile ? "pointer" : undefined }}
-            leftSection={<FontAwesomeIcon icon={faMagnifyingGlass} />}
-            onClick={() => {
-              if (!event.hasFile) return;
-              modals.openContextModal(SportsSearchModal, {
-                item: event,
-                language: code2,
-                hi: lower.includes("hi"),
-                forced: lower.includes("forced"),
-              });
-            }}
-          >
-            {language}
-          </Badge>
-        );
-      })}
-      {event.subtitles?.map(([language, path], index) => (
-        <Badge
-          key={BuildKey(index, language, "present")}
-          variant="light"
-          title={path || "Embedded"}
-        >
-          {language}
-        </Badge>
+      {event.missing_subtitles?.map((language, index) => (
+        <EventSubtitleBadge
+          key={BuildKey(index, language, "missing")}
+          event={event}
+          subtitle={toSportsSubtitle([language, null, null])}
+          availableSubtitles={presentSubtitles}
+          missing
+        />
+      ))}
+      {presentSubtitles.map((subtitle, index) => (
+        <EventSubtitleBadge
+          key={BuildKey(index, subtitle.language ?? subtitle.code2, "present")}
+          event={event}
+          subtitle={subtitle}
+          availableSubtitles={presentSubtitles}
+        />
       ))}
       {!event.missing_subtitles?.length && !event.subtitles?.length ? (
         <Text size="sm" c="dimmed">

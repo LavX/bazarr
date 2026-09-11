@@ -318,6 +318,71 @@ describe("sports event detail", () => {
     );
   });
 
+  it("gives a present subtitle the shared tools menu", async () => {
+    let removed: unknown;
+    server.use(
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([sportarr]),
+      ),
+      http.get("/api/sports/leagues/51", () =>
+        HttpResponse.json({
+          id: 51,
+          arr_instance_id: 42,
+          title: "Fixture League",
+          eventCount: 1,
+          eventFileCount: 1,
+        }),
+      ),
+      http.get("/api/sports/leagues/51/events", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: 61,
+              arr_instance_id: 42,
+              league_id: 51,
+              title: "Event",
+              path: "/sports/event.mkv",
+              hasFile: true,
+              profileId: 5,
+              subtitles: [["en:hi", "/sports/event.en.hi.srt", 50]],
+              missing_subtitles: [],
+            },
+          ],
+          total: 1,
+        }),
+      ),
+      http.delete("/api/sports/events/61/subtitles", async ({ request }) => {
+        removed = await request.json();
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    renderDetail();
+    const user = userEvent.setup();
+
+    // A subtitle that exists used to render as a badge with no handler at all,
+    // so nothing could be done with it from the only page that lists it.
+    await user.click(await screen.findByText("en:hi"));
+    // The dropdown mounts through a portal behind a transition, so it is waited
+    // for by its contents rather than read synchronously or by role.
+    await user.click(await screen.findByText("Delete..."));
+    const confirm = within(
+      await screen.findByRole("dialog", { name: /deleted/ }),
+    );
+    // The menu carries this subtitle's own file, not the league's.
+    expect(confirm.getByText("/sports/event.en.hi.srt")).toBeInTheDocument();
+    await user.click(confirm.getByRole("button", { name: "Delete" }));
+
+    await waitFor(() =>
+      expect(removed).toEqual({
+        arr_instance_id: 42,
+        language: "en",
+        path: "/sports/event.en.hi.srt",
+        hi: true,
+        forced: false,
+      }),
+    );
+  });
+
   it("searches one missing language from its badge", async () => {
     let searched: unknown;
     server.use(
@@ -357,9 +422,10 @@ describe("sports event detail", () => {
     );
     renderDetail();
     const user = userEvent.setup();
-    // The badges used to be inert, so acting on one missing language meant
-    // the row's search, which searches every missing language.
+    // A badge now opens the same tools menu episodes and movies show, so the
+    // search is the menu's own action rather than the badge's click handler.
     await user.click(await screen.findByText("en:hi"));
+    await user.click(await screen.findByRole("menuitem", { name: "Search" }));
     const dialog = within(await screen.findByRole("dialog"));
     await user.click(dialog.getByRole("button", { name: "Search" }));
 
