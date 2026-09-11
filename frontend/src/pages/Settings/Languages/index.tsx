@@ -161,7 +161,7 @@ const SettingsLanguagesView: FunctionComponent = () => {
           empty if you don't want Bazarr to remove language profiles.
         </Message>
       </Section>
-      <Section header="Default Language Profiles For Newly Added Shows">
+      <Section header="Default Language Profiles For Newly Added Media">
         <Check
           label="Series"
           settingKey="settings-general-serie_default_enabled"
@@ -191,6 +191,27 @@ const SettingsLanguagesView: FunctionComponent = () => {
             label="Profile"
             placeholder="Select a profile"
             settingKey="settings-general-movie_default_profile"
+          ></ProfileSelector>
+        </CollapseBox>
+
+        <Check
+          label="Sports"
+          settingKey="settings-general-sports_default_enabled"
+        ></Check>
+        <Message>
+          Will apply only to Sports leagues added to Bazarr after enabling this
+          option. A profile set on a Sportarr instance under Connections still
+          wins over this one.
+        </Message>
+
+        <CollapseBox
+          indent
+          settingKey="settings-general-sports_default_enabled"
+        >
+          <ProfileSelector
+            label="Profile"
+            placeholder="Select a profile"
+            settingKey="settings-general-sports_default_profile"
           ></ProfileSelector>
         </CollapseBox>
       </Section>

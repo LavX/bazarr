@@ -8,7 +8,7 @@ from sqlalchemy import func
 
 from app.config import settings
 from app.database import (TableArrInstances, TableShowsRootfolder, TableMoviesRootfolder,
-                          TableSportsLeaguesRootfolder,
+                          TableSportsLeaguesRootfolder, TableSportsLeagues,
                           TableLanguagesProfiles, database, select,
                           TableShows, TableMovies)
 from app.event_handler import event_stream
@@ -121,6 +121,20 @@ def movie_default_profile_is_missing():
     return not _every_instance_settles_its_own_default('radarr')
 
 
+def sports_default_profile_is_missing():
+    """The global sports default is enabled but nothing supplies a profile.
+
+    Sports mirrors the series and movie checks, including the instance escape:
+    an enabled Sportarr that carries its own override (or an explicit "assign no
+    profile") settles it without the global.
+    """
+    if not settings.general.sports_default_enabled:
+        return False
+    if settings.general.sports_default_profile != '':
+        return False
+    return not _every_instance_settles_its_own_default('sportarr')
+
+
 def get_health_issues():
     # this function must return a list of dictionaries consisting of to keys: object and issue
     health_issues = []
@@ -200,13 +214,17 @@ def get_health_issues():
                                            .where(TableShows.profileId.is_not(None))).scalar()
     movies_with_profile = database.execute(select(func.count(TableMovies.radarrId))
                                            .where(TableMovies.profileId.is_not(None))).scalar()
+    sports_with_profile = database.execute(select(func.count(TableSportsLeagues.id))
+                                           .where(TableSportsLeagues.profileId.is_not(None))).scalar()
     default_series_profile_empty = series_default_profile_is_missing()
     default_movies_profile_empty = movie_default_profile_is_missing()
+    default_sports_profile_empty = sports_default_profile_is_missing()
     if languages_profiles_count == 0:
         health_issues.append({'object': 'Missing languages profile',
                               'issue': 'You must create at least one languages profile and assign it to your content.'})
     elif languages_profiles_count > 0 and ((settings.general.use_sonarr and series_with_profile == 0 and default_series_profile_empty) or
-                                           (settings.general.use_radarr and movies_with_profile == 0 and default_movies_profile_empty)):
+                                           (settings.general.use_radarr and movies_with_profile == 0 and default_movies_profile_empty) or
+                                           (settings.general.use_sportarr and sports_with_profile == 0 and default_sports_profile_empty)):
         health_issues.append({'object': 'No assigned languages profile',
                               'issue': 'Although you have created at least one languages profile, you must assign it '
                                        'to your content.'})

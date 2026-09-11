@@ -144,6 +144,8 @@ validators = [
     Validator('general.serie_default_profile', must_exist=True, default='', is_type_of=(int, str)),
     Validator('general.movie_default_enabled', must_exist=True, default=False, is_type_of=bool),
     Validator('general.movie_default_profile', must_exist=True, default='', is_type_of=(int, str)),
+    Validator('general.sports_default_enabled', must_exist=True, default=False, is_type_of=bool),
+    Validator('general.sports_default_profile', must_exist=True, default='', is_type_of=(int, str)),
     Validator('general.page_size', must_exist=True, default=25, is_type_of=int,
               is_in=[25, 50, 100, 250, 500, 1000]),
     Validator('general.theme', must_exist=True, default='auto', is_type_of=str,

@@ -4,9 +4,10 @@ import logging
 
 from sqlalchemy import delete, select
 
-from app.database import database, TableArrInstances, TableLanguagesProfiles, TableSportsLeagues
+from app.config import settings
+from app.database import database, TableArrInstances, TableSportsLeagues
 from arr_instances.client import ArrClientFactory
-from arr_instances.media_defaults import instance_default_profile, read_media_defaults
+from arr_instances.resolution import resolve_default_profile
 from sportarr.db import sports_transaction
 from sportarr.connection import check_cancelled, connection_identity, owner_sync_lock
 from sportarr.settings import get_sports_settings
@@ -99,9 +100,16 @@ def _sync_leagues(arr_instance_id, cancel, expected_connection, http_get):
         if connection_identity(instance) != expected:
             raise ValueError('Sportarr connection changed during synchronization')
         options = get_sports_settings(instance)
-        _, profile = instance_default_profile(read_media_defaults(instance.options))
-        if profile is not None and session.get(TableLanguagesProfiles, profile) is None:
-            profile = None
+        # The precedence Series and Movies already use: a Series/Movie tag, then
+        # the owning instance's override when it has one, then the global
+        # default. Sports resolved the override alone, so an install that never
+        # set a per-instance override stamped no profile on any league and the
+        # Languages page had nothing to point at.
+        profile = resolve_default_profile(
+            arr_instance_id,
+            settings.general.sports_default_enabled,
+            settings.general.sports_default_profile,
+            session=session)
         existing = {row.sportarrLeagueId: row for row in session.execute(
             select(TableSportsLeagues).where(TableSportsLeagues.arr_instance_id == arr_instance_id)).scalars()}
         kept = []

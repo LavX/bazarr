@@ -433,3 +433,87 @@ def test_owner_changes_serialize_after_checked_sports_writes(library, monkeypatc
         profiles = connection.execute(sa.select(TableSportsLeagues.profileId).where(
             TableSportsLeagues.id == 51)).scalars().all()
         assert profiles == ([] if operation == 'sync' else [1])
+
+
+# --------------------------------------------------------------------------
+# The global sports default profile, mirroring serie_default_* / movie_default_*.
+# Sports used to resolve the per-instance override alone, so an install that
+# never set one stamped no profile on any league.
+# --------------------------------------------------------------------------
+
+def _set_global_sports_default(monkeypatch, enabled, profile):
+    from app.config import settings
+
+    monkeypatch.setattr(settings.general, 'sports_default_enabled', enabled)
+    monkeypatch.setattr(settings.general, 'sports_default_profile', profile)
+
+
+def _reset_media_defaults_cache():
+    # The resolver memoises each instance's parsed blob for the process, and the
+    # blob lives in the database, so a previous test's row would otherwise be
+    # read back here.
+    from arr_instances.resolution import clear_media_defaults_cache
+
+    clear_media_defaults_cache()
+
+
+def _set_media_defaults_override(session, instance_id, blob):
+    from app.database import TableArrInstances
+
+    session.execute(sa.update(TableArrInstances).where(TableArrInstances.id == instance_id)
+                    .values(options=json.dumps({'media_defaults': blob})))
+    session.flush()
+    _reset_media_defaults_cache()
+
+
+def _synced_league_profile(session):
+    from app.database import TableSportsLeagues
+
+    session.expire_all()
+    return session.execute(sa.select(TableSportsLeagues.profileId)).scalar_one_or_none()
+
+
+def test_sync_assigns_the_global_sports_default_profile(library, monkeypatch):
+    """The ordinary install: no per-instance override, global default on."""
+    session, leagues = library
+    _reset_media_defaults_cache()
+    _set_global_sports_default(monkeypatch, True, 1)
+    remote(monkeypatch, leagues, [payload()])
+
+    leagues.sync_leagues(1)
+
+    assert _synced_league_profile(session) == 1
+
+
+def test_sync_instance_override_wins_over_the_global_sports_default(library, monkeypatch):
+    session, leagues = library
+    _set_global_sports_default(monkeypatch, True, 1)
+    _set_media_defaults_override(session, 1, {'default_enabled': True, 'default_profile': 2})
+    remote(monkeypatch, leagues, [payload()])
+
+    leagues.sync_leagues(1)
+
+    assert _synced_league_profile(session) == 2
+
+
+def test_sync_disabled_override_assigns_no_profile_despite_the_global(library, monkeypatch):
+    """An explicit "assign no profile" is a decision, and it outranks the global."""
+    session, leagues = library
+    _set_global_sports_default(monkeypatch, True, 1)
+    _set_media_defaults_override(session, 1, {'default_enabled': False})
+    remote(monkeypatch, leagues, [payload()])
+
+    leagues.sync_leagues(1)
+
+    assert _synced_league_profile(session) is None
+
+
+def test_sync_leaves_the_global_off(library, monkeypatch):
+    session, leagues = library
+    _reset_media_defaults_cache()
+    _set_global_sports_default(monkeypatch, False, 1)
+    remote(monkeypatch, leagues, [payload()])
+
+    leagues.sync_leagues(1)
+
+    assert _synced_league_profile(session) is None
