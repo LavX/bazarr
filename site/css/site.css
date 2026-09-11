@@ -630,6 +630,18 @@ footer ul { display: flex; flex-wrap: wrap; gap: 8px 24px; list-style: none; mar
   .cmp .up { font-size: 0.86rem; color: var(--ink-faint); margin-bottom: 6px; width: auto; }
   .cmp .up::before { content: 'Upstream: '; }
   .cmp .plus { color: var(--ink-2); }
+
+  /* The routing table stops being a table below 720px, for the same reason the
+     comparison table does: three columns of prose squeezed into a phone width is
+     unreadable even when nothing overflows. Each row becomes the option name, then
+     what it does, then the version it needs, labelled so the numbers keep meaning. */
+  .opts, .opts tbody, .opts tr, .opts td { display: block; width: 100%; }
+  .opts thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .opts tr { padding: 16px 0; border-bottom: 1px solid var(--hair); }
+  .opts td { border: 0; padding: 0; }
+  .opts td:first-child { font-size: 1.02rem; margin-bottom: 6px; }
+  .opts td:last-child { font-size: 0.86rem; color: var(--ink-faint); margin-top: 6px; }
+  .opts td:last-child::before { content: 'Needs AI Subtitle Translator '; }
 }
 
 /* Below 600px only the three destinations survive. The in-page anchors are

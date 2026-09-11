@@ -57,6 +57,49 @@ def validate_tags(tags):
     return all(re.match( r'^[a-z0-9_-]+$', item) for item in tags)
 
 
+def normalize_openrouter_provider_order(value):
+    if not isinstance(value, list) or len(value) > 20:
+        raise ValidationError('OpenRouter providers must be a list of at most 20 provider slugs.')
+    normalized = []
+    for provider in value:
+        if not isinstance(provider, str):
+            raise ValidationError('OpenRouter provider slugs must be text.')
+        provider = provider.strip().lower()
+        if len(provider) > 160:
+            raise ValidationError('OpenRouter provider slugs must be at most 160 characters.')
+        if not re.fullmatch(r'[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*', provider):
+            raise ValidationError('OpenRouter providers must contain nonempty provider or endpoint slugs, '
+                                  'such as deepinfra or parasail/fp8.')
+        if provider not in normalized:
+            normalized.append(provider)
+    return normalized
+
+
+# What a new install gets, and what an install that predates the setting gets instead.
+# smartfast needs AI Subtitle Translator 2.0.0; throughput is served by every version, so
+# an upgrade is never moved onto a routing its translator might refuse.
+DEFAULT_PROVIDER_ROUTING = 'smartfast'
+UPGRADED_PROVIDER_ROUTING = 'throughput'
+# Every routing the selector can store. Shared by the validator's is_in and the boot-time
+# normalization below so the two can never drift apart (the translation service module keeps
+# its own mirror, but a value has to satisfy this set before it is ever persisted).
+PROVIDER_ROUTING_VALUES = ('throughput', 'nitro', 'price', 'floor', 'latency', 'default', 'smartfast', 'custom')
+
+
+def normalize_stored_provider_routing(stored_routing):
+    """The routing an existing config should run with, given its stored value.
+
+    A value we understand is kept verbatim. A missing value (``None``) and any value
+    outside ``PROVIDER_ROUTING_VALUES`` are configs we do not understand, and both land
+    on the plain sort every translator serves rather than on the shipped default, which
+    refuses outright ahead of AI Subtitle Translator 2.0.0. A value we failed to parse is
+    not evidence about which translator version is running, so it must not select a mode
+    that can refuse.
+    """
+    if stored_routing in PROVIDER_ROUTING_VALUES:
+        return stored_routing
+    return UPGRADED_PROVIDER_ROUTING
+
 ONE_HUNDRED_YEARS_IN_MINUTES = 52560000
 ONE_HUNDRED_YEARS_IN_HOURS = 876000
 
@@ -246,11 +289,19 @@ validators = [
     Validator('translator.openrouter_reasoning', must_exist=True, default='disabled', is_type_of=str,
               is_in=['disabled', 'low', 'medium', 'high']),
     Validator('translator.openrouter_parallel_batches', must_exist=True, default=4, is_type_of=int, gte=1, lte=8),
-    # Which OpenRouter provider serves the model: throughput (the sidecar's historical default),
-    # nitro/floor (OpenRouter's slug shortcuts, which also unlock the priority/flex tiers),
-    # price, latency, or OpenRouter's own load balancing.
-    Validator('translator.openrouter_provider_routing', must_exist=True, default='throughput', is_type_of=str,
-              is_in=['throughput', 'nitro', 'price', 'floor', 'latency', 'default']),
+    # Which OpenRouter provider serves the model: smartfast (the default, where the sidecar
+    # weighs speed against price itself, per model and per session), throughput (the sidecar's
+    # historical default, fastest and often needlessly expensive), nitro/floor (OpenRouter's
+    # slug shortcuts, which also unlock the priority/flex tiers), price, latency, OpenRouter's
+    # own load balancing, or explicit provider selection.
+    #
+    # smartfast needs AI Subtitle Translator 2.0.0. A new install pointed at an older one is
+    # told to update rather than being routed some other way behind the user's back.
+    Validator('translator.openrouter_provider_routing', must_exist=True,
+              default=DEFAULT_PROVIDER_ROUTING, is_type_of=str,
+              is_in=list(PROVIDER_ROUTING_VALUES)),
+    Validator('translator.openrouter_provider_order', must_exist=True, default=[], is_type_of=list,
+              cast=normalize_openrouter_provider_order),
     Validator('translator.openrouter_encryption_key', must_exist=True, default='', is_type_of=str, cast=str),
     Validator('translator.lingarr_token', must_exist=True, default='', is_type_of=str, cast=str),
 
@@ -653,6 +704,29 @@ settings = Dynaconf(
 
 settings.validators.register(*validators)
 
+# An install that predates the setting, or whose stored value we cannot make sense of,
+# keeps a sort every translator serves rather than being moved onto the new default.
+#
+# The validator default is written for a NEW install. Applying it to an upgrade would
+# move an install that has been translating happily onto a routing its translator may not
+# implement, and smartfast refuses rather than degrades, so the first symptom would be
+# every translation failing on a service the user never had reason to touch. The setting
+# first shipped in v2.6.2, so every config written before that lacks the key entirely and
+# would otherwise be indistinguishable from a fresh one. A stored value outside the set is
+# the same kind of config we do not understand, and the validation loop below would reset
+# it to the default (smartfast) just the same; normalizing it first prevents that, because
+# a value we failed to parse is not evidence about which translator version is running.
+#
+# A brand new install is the empty file created just above; anything with content in it
+# is an existing config, and existing configs keep the sort they can already be served.
+if os.path.getsize(config_yaml_file) > 0:
+    stored_routing = settings.get('translator.openrouter_provider_routing')
+    if stored_routing not in PROVIDER_ROUTING_VALUES:
+        settings['translator.openrouter_provider_routing'] = normalize_stored_provider_routing(stored_routing)
+        logging.info("Existing configuration has no usable OpenRouter provider routing (%r); keeping %s, "
+                     "which every AI Subtitle Translator version serves.", stored_routing,
+                     UPGRADED_PROVIDER_ROUTING)
+
 failed_validator = True
 while failed_validator:
     try:
@@ -805,6 +879,7 @@ array_keys = ['excluded_tags',
               'enabled_integrations',
               'enabled_engines',
               'gemini_keys',
+              'openrouter_provider_order',
               'path_mappings',
               'path_mappings_movie',
               'remove_profile_tags',
@@ -977,6 +1052,58 @@ def _active_provider_hub_provider_ids():
         return set()
 
 
+def _translator_field(settings_items, name):
+    """The value a request carries for ``settings-translator-<name>``, or None.
+
+    Matched on the whole key rather than its last segment. The settings store underneath
+    is case-insensitive, so the name is compared case-insensitively, but the section is
+    not: a key naming some other section must never be read as, or written to, this one.
+    """
+    for key, value in settings_items:
+        parts = key.split('-')
+        if len(parts) == 3 and parts[0] == 'settings' and parts[1] == 'translator' and parts[2].lower() == name:
+            return value
+    return None
+
+
+def _is_provider_order_key(key):
+    """True for settings-translator-openrouter_provider_order in any casing of the name."""
+    parts = key.split('-')
+    return (len(parts) == 3 and parts[0] == 'settings' and parts[1] == 'translator'
+            and parts[2].lower() == 'openrouter_provider_order')
+
+
+def _require_provider_order_for_custom_routing(settings_items):
+    """Refuse custom OpenRouter routing that names no provider.
+
+    The routing and the provider list arrive in the same request and only mean anything
+    together. Stored apart, custom with an empty list saves cleanly and then fails every
+    translation, and by that point the only signal is a failed job.
+
+    Only a request that actually carries one of the two keys is checked. Reading the pair
+    off stored settings for every save made one bad translator config reject saves on
+    every other settings page, which is a worse failure than the one being prevented and
+    lands on a page that cannot fix it.
+    """
+    submitted_routing = _translator_field(settings_items, 'openrouter_provider_routing')
+    submitted_order = _translator_field(settings_items, 'openrouter_provider_order')
+    if submitted_routing is None and submitted_order is None:
+        return
+    routing = submitted_routing
+    if routing is None:
+        routing = getattr(settings.translator, 'openrouter_provider_routing', '')
+    if isinstance(routing, list):
+        routing = routing[0] if routing else ''
+    if str(routing).lower() != 'custom':
+        return
+    order = submitted_order
+    if order is None:
+        order = getattr(settings.translator, 'openrouter_provider_order', [])
+    if not order:
+        raise ValidationError('OpenRouter custom routing requires at least one provider slug. '
+                              'Choose a provider, or pick another routing option.')
+
+
 def validate_metadata_settings(settings_items):
     from discover.metadata import validate_token
     allowed = {"settings-discover-tmdb_access_token", "settings-discover-locale"}
@@ -997,8 +1124,6 @@ def validate_metadata_settings(settings_items):
                 raise ValidationError("Invalid TMDB access token.") from None
         elif not isinstance(values[0], str) or not re.fullmatch(r"[a-z]{2,3}(?:-[A-Z]{2})?", values[0]):
             raise ValidationError("Invalid metadata language.")
-
-
 def restore_persisted_settings():
     """Return the live settings object to what is actually saved on disk.
 
@@ -1086,6 +1211,24 @@ def save_settings(settings_items):
 
 def _save_settings(settings_items, native_configuration=None, *, strict_metadata=False,
                    on_metadata_persisted=None):
+    # Validate repeated form values before applying any changes, including the
+    # single-value and empty-list representations used by the settings editor.
+    #
+    # The settings store underneath is case-insensitive, so a case variant of the name
+    # would reach the same key while skipping this normalizer and leaving a second,
+    # unvalidated copy in the config file. The name is therefore compared case
+    # insensitively and rewritten to its canonical form, because every later step here
+    # compares the last segment against array_keys and str_keys exactly.
+    #
+    # The section is compared exactly. Matching the name alone let a key naming any other
+    # section be redirected into the translator's, which is a silent cross-section write.
+    settings_items = [
+        ('settings-translator-openrouter_provider_order',
+         normalize_openrouter_provider_order([] if value == [''] else value))
+        if _is_provider_order_key(key) else (key, value)
+        for key, value in settings_items
+    ]
+    _require_provider_order_for_custom_routing(settings_items)
     configure_debug = False
     configure_captcha = False
     update_schedule = False
@@ -1141,7 +1284,8 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
                     pass
 
         # Make sure empty language list are stored correctly
-        if settings_keys[-1] in array_keys and value[0] in empty_values:
+        if (settings_keys[-1] in array_keys and settings_keys[-1] != 'openrouter_provider_order'
+                and value and value[0] in empty_values):
             value = []
 
         # Handle path mappings settings since they are array in array

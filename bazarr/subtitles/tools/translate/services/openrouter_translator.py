@@ -11,8 +11,9 @@ from typing import Optional, List, Dict, Any
 
 from retry.api import retry
 from deep_translator.exceptions import TooManyRequests, RequestError
+from dynaconf.validator import ValidationError
 
-from app.config import settings
+from app.config import settings, normalize_openrouter_provider_order
 from app import activity
 from languages.get_languages import language_from_alpha2, language_from_alpha3
 from radarr.history import history_log_movie
@@ -25,13 +26,32 @@ from .auth import get_translator_auth_headers
 
 logger = logging.getLogger(__name__)
 
-PROVIDER_ROUTING_VALUES = ('throughput', 'nitro', 'price', 'floor', 'latency', 'default')
-DEFAULT_PROVIDER_ROUTING = 'throughput'
+PROVIDER_ROUTING_VALUES = ('throughput', 'nitro', 'price', 'floor', 'latency', 'default', 'smartfast', 'custom')
+DEFAULT_PROVIDER_ROUTING = 'smartfast'
+# What a routing we cannot make sense of falls back to, which is deliberately not the
+# shipped default. A stored value outside PROVIDER_ROUTING_VALUES, or no stored value at
+# all, is a config we do not understand, and smartfast refuses outright on an older
+# sidecar. The plain sort translates on every version.
+UNKNOWN_ROUTING_FALLBACK = 'throughput'
 # Sidecars before this version forward provider.sort to OpenRouter verbatim, which
-# rejects nitro, floor and default; they get the plain sort each value stands for.
+# rejects nitro, floor and default; a selector set to one of those three gets the plain
+# sort each value stands for. Custom routing is gated on the same version because that is
+# where order, only and allowFallbacks began to be forwarded, but it cannot degrade to a
+# plain sort without sending the job to a provider the user excluded, so it refuses instead.
 ROUTING_SHORTCUTS_MIN_SIDECAR = (1, 3, 4)
+# The release that added smartfast to the sidecar's own provider.sort values. Older ones
+# reject the sort outright, and no plain sort stands for "balance speed against price",
+# so a selector set to smartfast refuses rather than silently routing some other way.
+SMARTFAST_MIN_SIDECAR = (2, 0, 0)
 ROUTING_PLAIN_SORT = {'nitro': 'throughput', 'floor': 'price', 'default': 'throughput'}
+MODEL_ROUTING_SUFFIXES = ('floor', 'nitro', 'smartfast')
 SIDECAR_VERSION_CACHE_SECONDS = 300
+# How stale a reading may be when the caller is about to refuse work over it. A user told
+# to update the translator will do so and retry within seconds, and answering that retry
+# from a five-minute-old reading of the version they just replaced tells them their fix
+# did not work. Only the refusing paths ask for a reading this fresh; the paths that
+# merely degrade keep the full interval, because re-probing changes nothing they do.
+SIDECAR_VERSION_ACTIONABLE_CACHE_SECONDS = 10
 _sidecar_version_cache = {}
 
 POLL_HARD_CAP_SECONDS = 12 * 3600
@@ -41,12 +61,35 @@ POLL_INTERVAL_SECONDS = 2
 TRANSLATOR_SERVICE_ID = 'ai-subtitle-translator'
 
 
+class ProviderRoutingError(ValueError):
+    """The selected provider routing cannot be honored safely."""
+
+
+def _model_variants(model_id):
+    """A model id split into its base slug and its colon-separated variants."""
+    parts = str(model_id or '').strip().split(':')
+    return parts[0], parts[1:]
+
+
 def _typed_routing_suffix(model_id):
-    """'floor' or 'nitro' when the model id ends with that OpenRouter shortcut, else None."""
-    for suffix in ('floor', 'nitro'):
-        if str(model_id or '').endswith(f':{suffix}'):
-            return suffix
-    return None
+    """The routing shortcut typed into a model id, wherever it sits, else None.
+
+    A stacked id carries more than one, and the last one is the one the user typed
+    most recently, which is the one the settings page adopts. Reading only the final
+    colon segment would miss a shortcut sitting in front of a genuine variant, and
+    would then forward that shortcut to OpenRouter, which does not know it.
+    """
+    shortcuts = [part for part in _model_variants(model_id)[1] if part.lower() in MODEL_ROUTING_SUFFIXES]
+    return shortcuts[-1].lower() if shortcuts else None
+
+
+def _strip_routing_suffixes(model_id):
+    """``model_id`` without any routing shortcut, keeping genuine variants such as :free."""
+    base, variants = _model_variants(model_id)
+    # Empty segments go too. A trailing-colon typo used to survive as "author/model:",
+    # which the legacy branch then rebuilt into "author/model::nitro".
+    return ':'.join([base] + [part for part in variants
+                              if part and part.lower() not in MODEL_ROUTING_SUFFIXES])
 
 
 def reset_sidecar_version_cache():
@@ -61,16 +104,21 @@ def _parse_version(text):
     return tuple(int(part or 0) for part in numbers.groups())
 
 
-def sidecar_version(base_url):
+def sidecar_version(base_url, max_age=None):
     """The AI Subtitle Translator version behind ``base_url``, cached per URL.
 
     Returns a version tuple, or None when the health endpoint is unreachable or
     does not report a version. The probe is cheap and unauthenticated, and it is
     cached so a job of many batches asks once.
+
+    ``max_age`` is how stale a cached reading the caller will accept, in seconds. A
+    caller about to refuse work over the answer passes a short one so the user's retry
+    is answered by a fresh probe rather than by the reading that failed them.
     """
     base_url = (base_url or '').rstrip('/')
+    max_age = SIDECAR_VERSION_CACHE_SECONDS if max_age is None else max_age
     cached = _sidecar_version_cache.get(base_url)
-    if cached and cached[0] > time.monotonic():
+    if cached and time.monotonic() - cached[0] < max_age:
         return cached[1]
     version = None
     try:
@@ -79,30 +127,89 @@ def sidecar_version(base_url):
             version = _parse_version(response.json().get('version'))
     except (requests.exceptions.RequestException, ValueError, AttributeError) as e:
         logger.debug("Could not read the AI Subtitle Translator version from %s: %s", base_url, e)
-    _sidecar_version_cache[base_url] = (time.monotonic() + SIDECAR_VERSION_CACHE_SECONDS, version)
+    _sidecar_version_cache[base_url] = (time.monotonic(), version)
     return version
 
 
-def build_provider_config():
-    """The OpenRouter provider routing the sidecar applies to every request of a job.
+def _require_routing_support(routing, minimum, degrade_on_unknown=False):
+    """True when the service behind the configured URL can honor ``routing``.
 
-    Left unset the sidecar sorts providers by throughput, which is the fastest and
-    often not the cheapest endpoint; the setting lets the user pick price, latency,
-    the ``:nitro``/``:floor`` shortcuts, or OpenRouter's own load balancing. A
-    sidecar older than 1.3.4 (or one whose version cannot be read) does not know
-    the shortcuts and would hand them to OpenRouter as an invalid sort, so it gets
-    the plain sort each of them stands for.
+    A version we read that is below the floor is actionable, so it raises and the message
+    names the version to install. A version we could not read is not evidence of an old
+    one: /health may be hidden behind a reverse proxy, or answer without a version field,
+    while the job API works perfectly. Refusing there would fail every translation on a
+    service that supports the routing, which is the failure this returns False to avoid.
+
+    ``degrade_on_unknown`` says the caller has a plain sort it can safely fall back to.
+    Custom has none: falling back would send the job to a provider the user excluded,
+    which is the one outcome that mode exists to prevent, so it asks for a refusal.
     """
-    routing = getattr(settings.translator, 'openrouter_provider_routing', DEFAULT_PROVIDER_ROUTING)
-    if routing not in PROVIDER_ROUTING_VALUES:
-        logger.warning("Unknown OpenRouter provider routing '%s', using %s", routing, DEFAULT_PROVIDER_ROUTING)
-        routing = DEFAULT_PROVIDER_ROUTING
-    typed = _typed_routing_suffix(getattr(settings.translator, 'openrouter_model', ''))
-    if typed:
+    version = sidecar_version(settings.translator.openrouter_url,
+                              max_age=SIDECAR_VERSION_ACTIONABLE_CACHE_SECONDS)
+    required = '.'.join(map(str, minimum))
+    if version is None:
+        if degrade_on_unknown:
+            return False
+        raise ProviderRoutingError(
+            f"OpenRouter {routing} routing requires AI Subtitle Translator {required} or newer, and its "
+            f"version could not be read from the service URL. Check the service URL and the translator.")
+    if version < minimum:
+        raise ProviderRoutingError(
+            f"OpenRouter {routing} routing requires AI Subtitle Translator {required} or newer "
+            f"(detected version: {'.'.join(map(str, version))}). Update the translator.")
+    return True
+
+
+def build_routing_config():
+    """Resolve the outgoing model and provider settings together for both job APIs.
+
+    Explicit smartfast/custom selections supersede old routing suffixes while
+    preserving genuine model variants. Older shortcut selections retain their
+    historical compatibility behavior.
+    """
+    routing = getattr(settings.translator, 'openrouter_provider_routing', None)
+    # A missing setting is a weaker signal than an unreadable one, so both land on the
+    # fallback rather than on the shipped default, which can refuse.
+    understood = routing in PROVIDER_ROUTING_VALUES
+    if not understood:
+        logger.warning("Unusable OpenRouter provider routing %r, using %s", routing, UNKNOWN_ROUTING_FALLBACK)
+        routing = UNKNOWN_ROUTING_FALLBACK
+    model = getattr(settings.translator, 'openrouter_model', '')
+    typed = _typed_routing_suffix(model)
+    # Only a routing we understood may be upgraded by a suffix. Promoting a config we
+    # could not read into smartfast would undo the fallback on the next line.
+    if understood and routing not in ('smartfast', 'custom') and typed == 'smartfast':
+        routing = 'smartfast'
+    if routing in ('smartfast', 'custom'):
+        if routing == 'custom':
+            try:
+                order = normalize_openrouter_provider_order(
+                    getattr(settings.translator, 'openrouter_provider_order', []))
+            except ValidationError as error:
+                raise ProviderRoutingError(str(error)) from error
+            if not order:
+                raise ProviderRoutingError('OpenRouter custom routing requires at least one provider slug.')
+            _require_routing_support(routing, ROUTING_SHORTCUTS_MIN_SIDECAR)
+            provider = {'sort': 'default', 'order': order, 'only': list(order), 'allowFallbacks': False}
+        else:
+            if not _require_routing_support(routing, SMARTFAST_MIN_SIDECAR, degrade_on_unknown=True):
+                logger.warning(
+                    "Could not read the AI Subtitle Translator version, so smartfast routing cannot be "
+                    "confirmed; sending %s instead of failing the translation", UNKNOWN_ROUTING_FALLBACK)
+                return _strip_routing_suffixes(model), {'sort': UNKNOWN_ROUTING_FALLBACK}
+            provider = {'sort': 'smartfast'}
+        return _strip_routing_suffixes(model), provider
+    # Only a shortcut that stands for a plain sort is honored here. :smartfast reaches
+    # this point when the stored routing could not be read, and it has no plain sort, so
+    # it comes off the id and the fallback below decides.
+    if typed in ROUTING_PLAIN_SORT:
         # The slug already says how to route. A sidecar from 1.3.4 on drops the sort
         # for a typed shortcut anyway; an older one forwards both, so the sort has to
-        # agree with the slug rather than with the setting.
-        return {'sort': ROUTING_PLAIN_SORT[typed]}
+        # agree with the slug rather than with the setting. Only the adopted shortcut
+        # goes back on: the sidecar reads a single trailing one, so leaving an earlier
+        # shortcut in place would send it to OpenRouter as part of the model id.
+        model = f'{_strip_routing_suffixes(model)}:{typed}'
+        return model, {'sort': ROUTING_PLAIN_SORT[typed]}
     if routing in ROUTING_PLAIN_SORT:
         version = sidecar_version(settings.translator.openrouter_url)
         if version is None or version < ROUTING_SHORTCUTS_MIN_SIDECAR:
@@ -111,7 +218,11 @@ def build_provider_config():
                 "AI Subtitle Translator %s does not support the '%s' provider routing (needs 1.3.4), sending %s",
                 '.'.join(map(str, version)) if version else 'of unknown version', routing, plain)
             routing = plain
-    return {'sort': routing}
+    return _strip_routing_suffixes(model), {'sort': routing}
+
+
+def build_provider_config():
+    return build_routing_config()[1]
 
 
 class OpenRouterTranslatorService:
@@ -140,6 +251,7 @@ class OpenRouterTranslatorService:
         # unique together with it, so every media lookup below carries it.
         self.arr_instance_id = arr_instance_id
         self.partial_error = None
+        self.routing_error = None
         self.language_code_convert_dict = {
             'he': 'iw',
             'zh': 'zh-CN',
@@ -175,6 +287,7 @@ class OpenRouterTranslatorService:
 
     def translate(self, job_id=None):
         self.partial_error = None
+        self.routing_error = None
         try:
             with staged_subtitle_write(self.video_path, self.dest_srt_file,
                                        on_publish=publication_callback(self.media_type, self.video_path,
@@ -196,8 +309,12 @@ class OpenRouterTranslatorService:
                 translated_lines = self._submit_and_poll(lines_list, bazarr_job_id=job_id)
 
                 if translated_lines is None:
-                    logger.error(f'Translation failed for {self.source_srt_file}')  # noqa: G004
-                    show_message(f'Translation failed for {self.source_srt_file}')
+                    # A routing refusal names what the user has to change, so it replaces
+                    # the generic message rather than arriving alongside it.
+                    failure = (f'AI translation failed: {self.routing_error}' if self.routing_error
+                               else f'Translation failed for {self.source_srt_file}')
+                    logger.error(failure)
+                    show_message(failure)
                     return False
 
                 # Process results
@@ -270,6 +387,7 @@ class OpenRouterTranslatorService:
                 logger.error(f'Target language is empty! from_lang={self.from_lang}, to_lang={self.to_lang}, orig_to_lang={self.orig_to_lang}')  # noqa: G004
                 return None
 
+            model, provider = build_routing_config()
             lines_payload: List[Dict[str, Any]] = [{"position": i, "line": line} for i, line in enumerate(lines_list)]
 
             title = get_title(
@@ -293,12 +411,12 @@ class OpenRouterTranslatorService:
                 # Add configuration from Bazarr settings
                 "config": {
                     "apiKey": self._get_api_key_value(),
-                    "model": settings.translator.openrouter_model,
+                    "model": model,
                     "temperature": settings.translator.openrouter_temperature,
                     "maxConcurrentJobs": settings.translator.openrouter_max_concurrent,
                     "parallelBatches": settings.translator.openrouter_parallel_batches,
                     "reasoning": self._build_reasoning_config(),
-                    "provider": build_provider_config(),
+                    "provider": provider,
                 }
             }
 
@@ -335,6 +453,13 @@ class OpenRouterTranslatorService:
             # Poll for completion
             return self._poll_job(base_url, job_id, len(lines_payload), bazarr_job_id=bazarr_job_id)
 
+        except ProviderRoutingError as error:
+            # Recorded rather than announced here: translate() reports every failed
+            # submission, and showing the detail now would put two notifications on
+            # screen for one failure, the second of which says less than the first.
+            logger.error('AI Subtitle Translator routing error: %s', error)
+            self.routing_error = str(error)
+            return None
         except requests.exceptions.Timeout:
             logger.error('AI Subtitle Translator request timed out')
             return None
