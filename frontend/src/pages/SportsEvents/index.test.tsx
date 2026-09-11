@@ -471,6 +471,113 @@ describe("sports event detail", () => {
     );
   });
 
+  it("compares sync outputs on an event and promotes one to the base subtitle", async () => {
+    let promoted: unknown;
+    let promotedUrl = "";
+    server.use(
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([sportarr]),
+      ),
+      http.get("/api/sports/leagues/51", () =>
+        HttpResponse.json({ id: 51, arr_instance_id: 42, title: "League" }),
+      ),
+      http.get("/api/sports/leagues/51/events", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: 61,
+              arr_instance_id: 42,
+              league_id: 51,
+              title: "Event",
+              path: "/sports/event.mkv",
+              hasFile: true,
+              profileId: 5,
+              subtitles: [
+                ["en", "/sports/event.en.srt", 40],
+                [
+                  "en:sync-ffsubsync",
+                  "/sports/event.en.sync-ffsubsync.srt",
+                  41,
+                ],
+                ["en:sync-alass", "/sports/event.en.sync-alass.srt", 42],
+              ],
+              missing_subtitles: [],
+            },
+          ],
+          total: 1,
+        }),
+      ),
+      http.get(
+        /\/api\/sports\/events\/61\/subtitles\/.+\/content/,
+        ({ request }) => {
+          const path = new URL(request.url).pathname;
+          const prefix = "/subtitles/";
+          const language = decodeURIComponent(
+            path.slice(
+              path.indexOf(prefix) + prefix.length,
+              path.lastIndexOf("/content"),
+            ),
+          );
+          const cueByLanguage: Record<string, string> = {
+            en: "Base cue",
+            "en:sync-ffsubsync": "FFsubsync cue",
+            "en:sync-alass": "ALASS cue",
+          };
+          return HttpResponse.json({
+            content: `1\n00:00:01,000 --> 00:00:02,000\n${cueByLanguage[language] ?? "Sync cue"}\n`,
+            format: "srt",
+            encoding: "utf-8",
+            language,
+            size: 40,
+            lastModified: 123,
+          });
+        },
+      ),
+      http.post(
+        "/api/sports/events/61/subtitles/en/promote",
+        async ({ request }) => {
+          promotedUrl = request.url;
+          promoted = await request.json();
+          return HttpResponse.json({
+            sourceLanguage: "en:sync-ffsubsync",
+            targetLanguage: "en",
+            targetPath: "/sports/event.en.srt",
+          });
+        },
+      ),
+    );
+    renderDetail();
+    const user = userEvent.setup();
+
+    // The sync output renders as its own badge, but the base subtitle is the
+    // one that gains the compare action, as it is the file a sync could replace.
+    await user.click(await screen.findByText("en"));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Compare Sync Outputs" }),
+    );
+
+    // The modal loads the original and both engine outputs so all three can be
+    // previewed side by side, and offers each engine as a choice.
+    const dialog = within(await screen.findByRole("dialog"));
+    expect(dialog.getByText("Base cue")).toBeInTheDocument();
+    expect(dialog.getByText("FFsubsync cue")).toBeInTheDocument();
+    expect(dialog.getByText("ALASS cue")).toBeInTheDocument();
+    expect(dialog.getByText("FFsubsync")).toBeInTheDocument();
+    expect(dialog.getByText("ALASS")).toBeInTheDocument();
+
+    // Choosing the other engine promotes that output over the original and
+    // scopes the request to the owning instance, as every other sports action
+    // does.
+    await user.click(dialog.getByText("ALASS"));
+    await user.click(
+      dialog.getByRole("button", { name: "Overwrite Original" }),
+    );
+    await waitFor(() =>
+      expect(promoted).toEqual({ sourceLanguage: "en:sync-alass" }),
+    );
+    expect(new URL(promotedUrl).searchParams.get("arr_instance_id")).toBe("42");
+  });
+
   it("searches one missing language from its badge", async () => {
     let searched: unknown;
     server.use(

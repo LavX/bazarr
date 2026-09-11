@@ -3,6 +3,7 @@ import React, {
   FunctionComponent,
   useEffect,
   useMemo,
+  useState,
 } from "react";
 import { useNavigate } from "react-router";
 import { Badge, Group, Text, Tooltip, UnstyledButton } from "@mantine/core";
@@ -23,6 +24,7 @@ import { SportsEvent } from "@/apis/raw/sports";
 import { Action, GroupTable } from "@/components";
 import { AudioList, CombinedSubtitleBadge } from "@/components/bazarr";
 import { SportsSearchModal } from "@/components/modals/SportsSearchModal";
+import SyncOutputCompareModal from "@/components/modals/SyncOutputCompareModal";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
 import TextPopover from "@/components/TextPopover";
 import { useModals } from "@/modules/modals";
@@ -32,7 +34,9 @@ import {
   canSynchronizeSubtitle,
   combineRequestForSubtitle,
   isCombinedOutputSubtitle,
+  isCompatibleSyncOutputSubtitle,
   isSyncOutputSubtitle,
+  sortSyncOutputSubtitles,
 } from "@/utilities/subtitles";
 import { navigateApp } from "@/utilities/whatsNew";
 import tableStyles from "@/components/tables/BaseTable.module.scss";
@@ -118,6 +122,8 @@ const EventSubtitleBadge: FunctionComponent<{
   const isEmbedded = !subtitle.path;
   const isCombinedOutput = !missing && isCombinedOutputSubtitle(subtitle);
 
+  const [compareOpened, setCompareOpened] = useState(false);
+
   // A missing language has no file to act on, so it carries no selections: the
   // menu then offers only what applies, which is a search and a translate from
   // one of the subtitles the event already has.
@@ -134,6 +140,25 @@ const EventSubtitleBadge: FunctionComponent<{
       ),
     [availableSubtitles],
   );
+
+  // The sync outputs of THIS subtitle: same base language and variant flags,
+  // only the sync-engine modifier differs. Mirrors the episodes component so
+  // the compare action means the same thing on all three media types.
+  const syncOutputs = useMemo(
+    () =>
+      sortSyncOutputSubtitles(
+        availableSubtitles.filter((item) =>
+          isCompatibleSyncOutputSubtitle(subtitle, item),
+        ),
+      ),
+    [availableSubtitles, subtitle],
+  );
+
+  const canCompareSyncOutputs =
+    !missing &&
+    !isEmbedded &&
+    !isSyncOutputSubtitle(subtitle) &&
+    syncOutputs.length > 0;
 
   const editorUrl = (action: "preview" | "edit") =>
     `/subtitles/${action}/sports/${event.id}/${encodeURIComponent(
@@ -165,68 +190,84 @@ const EventSubtitleBadge: FunctionComponent<{
   );
 
   return (
-    <SubtitleToolsMenu
-      selections={selections}
-      menu={{ trigger: "click" }}
-      canSync={!missing && canSynchronizeSubtitle(subtitle)}
-      isCombinedOutput={isCombinedOutput}
-      missingLanguage={missing ? subtitle : undefined}
-      translationSources={missing ? translationSources : undefined}
-      mediaId={event.id}
-      mediaType="sports"
-      arrInstanceId={event.arr_instance_id}
-      embeddedTrack={isEmbedded}
-      onAction={async (action) => {
-        if (action === "view") {
-          navigate(editorUrl("preview"));
-        } else if (action === "edit") {
-          navigate(editorUrl("edit"));
-        } else if (action === "search") {
-          if (!event.hasFile) return;
-          modals.openContextModal(SportsSearchModal, {
-            item: event,
-            language: subtitle.code2,
-            hi: subtitle.hi,
-            forced: subtitle.forced,
-          });
-        } else if (action === "download") {
-          fileDownload.mutate({
-            type: "sports",
-            mediaId: event.id,
-            language: buildSubtitleLanguageKey(subtitle),
-            arrInstanceId: event.arr_instance_id,
-          });
-        } else if (action === "rebuild") {
-          combine.mutate({
-            scope: {
-              kind: "sports",
-              eventId: event.id,
-              arrInstanceId: event.arr_instance_id,
-            },
-            body: combineRequestForSubtitle(subtitle) ?? {},
-          });
-        } else if (action === "delete" && subtitle.path) {
-          await remove.mutateAsync({
-            eventId: event.id,
-            owner: event.arr_instance_id,
-            form: {
+    <>
+      <SubtitleToolsMenu
+        selections={selections}
+        menu={{ trigger: "click" }}
+        canSync={!missing && canSynchronizeSubtitle(subtitle)}
+        canCompareSyncOutputs={canCompareSyncOutputs}
+        isCombinedOutput={isCombinedOutput}
+        missingLanguage={missing ? subtitle : undefined}
+        translationSources={missing ? translationSources : undefined}
+        mediaId={event.id}
+        mediaType="sports"
+        arrInstanceId={event.arr_instance_id}
+        embeddedTrack={isEmbedded}
+        onAction={async (action) => {
+          if (action === "view") {
+            navigate(editorUrl("preview"));
+          } else if (action === "edit") {
+            navigate(editorUrl("edit"));
+          } else if (action === "compare-sync") {
+            setCompareOpened(true);
+          } else if (action === "search") {
+            if (!event.hasFile) return;
+            modals.openContextModal(SportsSearchModal, {
+              item: event,
               language: subtitle.code2,
               hi: subtitle.hi,
               forced: subtitle.forced,
-              path: subtitle.path,
-            },
-          });
-        }
-      }}
-    >
-      {isCombinedOutput ? (
-        <UnstyledButton aria-label={`Combined subtitle ${subtitle.code2}`}>
-          {badgeEl}
-        </UnstyledButton>
-      ) : (
-        badgeEl
+            });
+          } else if (action === "download") {
+            fileDownload.mutate({
+              type: "sports",
+              mediaId: event.id,
+              language: buildSubtitleLanguageKey(subtitle),
+              arrInstanceId: event.arr_instance_id,
+            });
+          } else if (action === "rebuild") {
+            combine.mutate({
+              scope: {
+                kind: "sports",
+                eventId: event.id,
+                arrInstanceId: event.arr_instance_id,
+              },
+              body: combineRequestForSubtitle(subtitle) ?? {},
+            });
+          } else if (action === "delete" && subtitle.path) {
+            await remove.mutateAsync({
+              eventId: event.id,
+              owner: event.arr_instance_id,
+              form: {
+                language: subtitle.code2,
+                hi: subtitle.hi,
+                forced: subtitle.forced,
+                path: subtitle.path,
+              },
+            });
+          }
+        }}
+      >
+        {isCombinedOutput ? (
+          <UnstyledButton aria-label={`Combined subtitle ${subtitle.code2}`}>
+            {badgeEl}
+          </UnstyledButton>
+        ) : (
+          badgeEl
+        )}
+      </SubtitleToolsMenu>
+      {canCompareSyncOutputs && (
+        <SyncOutputCompareModal
+          opened={compareOpened}
+          onClose={() => setCompareOpened(false)}
+          mediaType="sports"
+          mediaId={event.id}
+          arrInstanceId={event.arr_instance_id}
+          original={subtitle}
+          outputs={syncOutputs}
+        />
       )}
-    </SubtitleToolsMenu>
+    </>
   );
 };
 

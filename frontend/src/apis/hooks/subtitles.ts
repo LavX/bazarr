@@ -230,7 +230,7 @@ export function useSubtitleContents(subtitlePath: string) {
 }
 
 export function useSubtitleSyncStatus(
-  mediaType: "episode" | "movie",
+  mediaType: "episode" | "movie" | "sports",
   mediaId: number | undefined,
   language: string,
   enabled: boolean,
