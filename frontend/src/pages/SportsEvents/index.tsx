@@ -61,7 +61,7 @@ import { useModals } from "@/modules/modals";
 import { notification } from "@/modules/task";
 import ItemOverview from "@/pages/views/ItemOverview";
 import { navigateApp } from "@/utilities/whatsNew";
-import Table from "./table";
+import Table, { toSportsSubtitle } from "./table";
 
 // The league detail page, built to match the Series episodes page: breadcrumb,
 // ItemOverview header, a Toolbox of actions, then the season-grouped table.
@@ -157,6 +157,11 @@ const SportsEventsView: FunctionComponent = () => {
     [events],
   );
 
+  // The shared Subtitle Tools modal reads Subtitle objects and rebuilds the
+  // language key from one, so the tuples go through the same widening the table
+  // uses. Splitting the key here instead kept only the base language and the
+  // hi/forced flags, which dropped a sync or combined modifier and made the
+  // Download action fetch the plain base-language file.
   const toolsPayload = useMemo<SportsToolsItem[]>(
     () =>
       (events ?? []).map((event) => ({
@@ -167,17 +172,7 @@ const SportsEventsView: FunctionComponent = () => {
         isSports: true as const,
         subtitles: (event.subtitles ?? [])
           .filter(([, path]) => Boolean(path))
-          .map(([key, path]) => {
-            const [code2, ...modifiers] = key.split(":");
-            const lower = modifiers.map((modifier) => modifier.toLowerCase());
-            return {
-              code2,
-              name: code2,
-              hi: lower.includes("hi"),
-              forced: lower.includes("forced"),
-              path,
-            };
-          }),
+          .map(toSportsSubtitle),
       })),
     [events],
   );

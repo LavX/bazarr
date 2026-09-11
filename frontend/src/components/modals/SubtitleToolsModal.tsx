@@ -20,7 +20,13 @@ import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
 import SimpleTable from "@/components/tables/SimpleTable";
 import { useModals, withModal } from "@/modules/modals";
 import { fromPython, isMovie, toPython } from "@/utilities";
-import { buildSubtitleLanguageKey } from "@/utilities/subtitles";
+import {
+  buildSubtitleLanguageKey,
+  getCombinedLabel,
+  getSyncEngineLabel,
+  isCombinedOutputSubtitle,
+  isSyncOutputSubtitle,
+} from "@/utilities/subtitles";
 
 // A sports event in the shape this modal reads. Its subtitles arrive as
 // [language, path, size] tuples rather than Subtitle objects, so the caller
@@ -36,7 +42,7 @@ export type SportsToolsItem = {
 type SupportType = Item.Episode | Item.Movie | SportsToolsItem;
 
 type TableColumnType = FormType.ModifySubtitle & {
-  raw_language: Language.Info;
+  raw_language: Subtitle;
   seriesId: number;
   name: string;
   isMovie: boolean;
@@ -141,9 +147,35 @@ const SubtitleToolView: FunctionComponent<SubtitleToolViewProps> = ({
             original: { raw_language: rawLanguage },
           },
         }) => (
-          <Badge color="secondary">
-            <Language.Text value={rawLanguage} long></Language.Text>
-          </Badge>
+          // The language name alone cannot tell two rows of the same language
+          // apart: a sync or combined output carries the base language and
+          // flags of the subtitle it was made from, so the variant rides along
+          // in a second badge, the way the episode and movie tables show it.
+          <Group gap={4} wrap="nowrap">
+            <Badge color="secondary">
+              <Language.Text value={rawLanguage} long></Language.Text>
+            </Badge>
+            {isSyncOutputSubtitle(rawLanguage) && (
+              <Badge
+                color="gray"
+                size="xs"
+                variant="light"
+                style={{ whiteSpace: "nowrap" }}
+              >
+                {getSyncEngineLabel(rawLanguage.modifier)}
+              </Badge>
+            )}
+            {isCombinedOutputSubtitle(rawLanguage) && (
+              <Badge
+                color="gray"
+                size="xs"
+                variant="light"
+                style={{ whiteSpace: "nowrap" }}
+              >
+                {getCombinedLabel(rawLanguage)}
+              </Badge>
+            )}
+          </Group>
         ),
       },
       {
@@ -230,9 +262,7 @@ const SubtitleToolView: FunctionComponent<SubtitleToolViewProps> = ({
                   await fileDownload.mutateAsync({
                     type: selection.type,
                     mediaId: selection.id,
-                    language: buildSubtitleLanguageKey(
-                      selection.raw_language as Subtitle,
-                    ),
+                    language: buildSubtitleLanguageKey(selection.raw_language),
                     arrInstanceId: selection.arr_instance_id,
                   });
                 } catch {

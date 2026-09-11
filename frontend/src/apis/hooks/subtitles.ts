@@ -33,6 +33,14 @@ export function useSubtitleAction() {
         client.invalidateQueries({
           queryKey: [QueryKeys.Series],
         });
+      } else if (type === "sports") {
+        // Sports library, wanted, history and exclusion queries all live under
+        // this one root, as the batch hook already invalidates them. Falling
+        // through to the Movies prefix refreshed nothing here: it matched no
+        // sports query and left the lists stale until the socket event arrived.
+        client.invalidateQueries({
+          queryKey: [QueryKeys.Sports],
+        });
       } else {
         // The prefix, not [Movies, id]. Movie queries are cached under the
         // canonical LOCAL id while this id is the upstream radarrId, so a key
@@ -455,11 +463,17 @@ export function usePromoteSyncSubtitle() {
     onSuccess: (_, params) => {
       if (params.mediaType === "episode") {
         client.invalidateQueries({ queryKey: [QueryKeys.Series] });
+      } else if (params.mediaType === "sports") {
+        // Same reason as useSubtitleAction: every sports query hangs off this
+        // one root, while the Movies prefix that used to take this branch
+        // matched none of them.
+        client.invalidateQueries({ queryKey: [QueryKeys.Sports] });
       } else {
         client.invalidateQueries({ queryKey: [QueryKeys.Movies] });
       }
-      // Episode/movie history live under the Series/Movies roots above; only
-      // the System history stats need a separate invalidation.
+      // Episode, movie and sports history live under the Series, Movies and
+      // Sports roots above; only the System history stats need a separate
+      // invalidation.
       client.invalidateQueries({
         queryKey: [QueryKeys.System, QueryKeys.History],
       });
@@ -504,6 +518,11 @@ export function useSubtitleCreate() {
     onSuccess: (_, params) => {
       if (params.mediaType === "episode") {
         client.invalidateQueries({ queryKey: [QueryKeys.Series] });
+      } else if (params.mediaType === "sports") {
+        // Same reason as useSubtitleAction: every sports query hangs off this
+        // one root, while the Movies prefix that used to take this branch
+        // matched none of them.
+        client.invalidateQueries({ queryKey: [QueryKeys.Sports] });
       } else {
         client.invalidateQueries({ queryKey: [QueryKeys.Movies] });
       }

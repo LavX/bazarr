@@ -5,10 +5,15 @@
  * Focused coverage:
  *   - useSubtitleAction: episode path -> [Episodes, id] + [Series]
  *   - useSubtitleAction: movie path -> [Movies, id] + [Movies, History]
+ *   - useSubtitleAction: sports path -> [Sports] (NOT [Movies])
  *   - useBatchAction: -> [Series] + [Movies] + [System, History] + [Translator]
  *     (NOT a bare [History] key)
  *   - usePromoteSyncSubtitle: episode -> [Series] + [System, History] + content key
  *   - usePromoteSyncSubtitle: movie  -> [Movies] + [System, History] + content key
+ *   - usePromoteSyncSubtitle: sports -> [Sports] + [System, History] + content key
+ *     (NOT [Movies])
+ *   - useSubtitleCreate: sports -> [Sports] (NOT [Movies]); movie -> [Movies]
+ *     (NOT [Sports])
  */
 
 import { PropsWithChildren } from "react";
@@ -19,6 +24,7 @@ import {
   useBatchAction,
   usePromoteSyncSubtitle,
   useSubtitleAction,
+  useSubtitleCreate,
 } from "@/apis/hooks/subtitles";
 import { QueryKeys } from "@/apis/queries/keys";
 
@@ -37,6 +43,9 @@ vi.mock("@/apis/raw", () => ({
         sourceLanguage: "en",
         targetLanguage: "fr",
         targetPath: "/movies/1/subtitles/fr.srt",
+      }),
+      createSubtitle: vi.fn().mockResolvedValue({
+        path: "/sports/event31/fr.srt",
       }),
     },
   },
@@ -197,6 +206,59 @@ describe("useSubtitleAction – movie", () => {
 });
 
 // ---------------------------------------------------------------------------
+// useSubtitleAction - sports
+// ---------------------------------------------------------------------------
+
+describe("useSubtitleAction – sports", () => {
+  let spy: ReturnType<typeof vi.spyOn>;
+  let wrapper: ReturnType<typeof makeClientAndWrapper>["wrapper"];
+
+  beforeEach(() => {
+    ({ spy, wrapper } = makeClientAndWrapper());
+  });
+
+  it("invalidates [Sports] and NOT [Movies], [Episodes] or [Series]", async () => {
+    const { result } = renderHook(() => useSubtitleAction(), { wrapper });
+
+    result.current.mutate({
+      action: "translate",
+      form: {
+        id: 31,
+        type: "sports",
+        language: "fr",
+        path: "/sports/event31/episode.en.srt",
+      },
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    const keys = capturedKeys(spy);
+
+    // Sports lists and history all live under this root.
+    expect(keys).toContainEqual([QueryKeys.Sports]);
+    expect(
+      keys.filter((k: unknown[]) => k[0] === QueryKeys.Sports),
+    ).toHaveLength(1);
+
+    // The Movies prefix used to take this branch and refreshed nothing that
+    // this action touched.
+    const touchedMovies = keys.some(
+      (k: unknown[]) => Array.isArray(k) && k[0] === QueryKeys.Movies,
+    );
+    expect(touchedMovies).toBe(false);
+
+    const touchedEpisodes = keys.some(
+      (k: unknown[]) => Array.isArray(k) && k[0] === QueryKeys.Episodes,
+    );
+    const touchedSeries = keys.some(
+      (k: unknown[]) => Array.isArray(k) && k[0] === QueryKeys.Series,
+    );
+    expect(touchedEpisodes).toBe(false);
+    expect(touchedSeries).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // useBatchAction
 // ---------------------------------------------------------------------------
 
@@ -352,5 +414,124 @@ describe("usePromoteSyncSubtitle – movie", () => {
       (k: unknown[]) => Array.isArray(k) && k[0] === QueryKeys.Series,
     );
     expect(touchedSeries).toBe(false);
+  });
+});
+
+describe("usePromoteSyncSubtitle – sports", () => {
+  let spy: ReturnType<typeof vi.spyOn>;
+  let wrapper: ReturnType<typeof makeClientAndWrapper>["wrapper"];
+
+  beforeEach(() => {
+    ({ spy, wrapper } = makeClientAndWrapper());
+  });
+
+  it("invalidates [Sports], [System, History], and the exact subtitle content key, NOT [Movies]", async () => {
+    const { result } = renderHook(() => usePromoteSyncSubtitle(), { wrapper });
+
+    const params = {
+      mediaType: "sports",
+      mediaId: 12,
+      targetLanguage: "fr",
+      sourceLanguage: "en",
+      arrInstanceId: 3,
+    };
+
+    result.current.mutate(params);
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    const keys = capturedKeys(spy);
+
+    // Must invalidate the Sports root (sports history lives here too)
+    expect(keys).toContainEqual([QueryKeys.Sports]);
+
+    // Must invalidate System history stats
+    expect(keys).toContainEqual([QueryKeys.System, QueryKeys.History]);
+
+    // Must invalidate the exact subtitle content cache entry
+    expect(keys).toContainEqual([
+      QueryKeys.Subtitles,
+      "content",
+      "sports",
+      12,
+      "fr",
+      3,
+    ]);
+
+    // Must NOT touch Movies or Series
+    const touchedMovies = keys.some(
+      (k: unknown[]) => Array.isArray(k) && k[0] === QueryKeys.Movies,
+    );
+    const touchedSeries = keys.some(
+      (k: unknown[]) => Array.isArray(k) && k[0] === QueryKeys.Series,
+    );
+    expect(touchedMovies).toBe(false);
+    expect(touchedSeries).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// useSubtitleCreate
+// ---------------------------------------------------------------------------
+
+describe("useSubtitleCreate", () => {
+  let spy: ReturnType<typeof vi.spyOn>;
+  let wrapper: ReturnType<typeof makeClientAndWrapper>["wrapper"];
+
+  beforeEach(() => {
+    ({ spy, wrapper } = makeClientAndWrapper());
+  });
+
+  it("invalidates [Sports] and NOT [Movies] for a sports event", async () => {
+    const { result } = renderHook(() => useSubtitleCreate(), { wrapper });
+
+    result.current.mutate({
+      mediaType: "sports",
+      mediaId: 31,
+      content: "1\n00:00:01,000 --> 00:00:02,000\nHello\n",
+      language: "fr",
+      format: "srt",
+      forced: false,
+      hi: false,
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    const keys = capturedKeys(spy);
+
+    expect(keys).toContainEqual([QueryKeys.Sports]);
+    expect(
+      keys.filter((k: unknown[]) => k[0] === QueryKeys.Sports),
+    ).toHaveLength(1);
+
+    const touchedMovies = keys.some(
+      (k: unknown[]) => Array.isArray(k) && k[0] === QueryKeys.Movies,
+    );
+    expect(touchedMovies).toBe(false);
+  });
+
+  it("still invalidates [Movies] and not [Sports] for a movie", async () => {
+    const { result } = renderHook(() => useSubtitleCreate(), { wrapper });
+
+    result.current.mutate({
+      mediaType: "movie",
+      mediaId: 44,
+      content: "1\n00:00:01,000 --> 00:00:02,000\nHello\n",
+      language: "en",
+      format: "srt",
+      forced: false,
+      hi: false,
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    const keys = capturedKeys(spy);
+
+    expect(keys).toContainEqual([QueryKeys.Movies]);
+
+    const touchedSports = keys.some(
+      (k: unknown[]) => Array.isArray(k) && k[0] === QueryKeys.Sports,
+    );
+    expect(touchedSports).toBe(false);
   });
 });

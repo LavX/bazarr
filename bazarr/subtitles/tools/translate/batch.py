@@ -6,7 +6,8 @@ import ast
 import re
 import subprocess
 import uuid
-from app.database import TableEpisodes, TableMovies, TableShows, database, select
+from app.database import (TableEpisodes, TableMovies, TableShows, TableSportsEvents,
+                          database, select)
 from app.config import settings
 from app.jobs_queue import jobs_queue
 from app.event_handler import event_stream
@@ -396,7 +397,30 @@ def extract_embedded_subtitle(
         return None
 
     # Look up file metadata needed by parse_video_metadata
-    if media_type == "episode":
+    if media_type == "sports":
+        db_path = path_mappings.path_replace_reverse_instance(
+            video_path, arr_instance_id, "sports")
+        # Sports rows are keyed by the local event id and the probe cache hangs
+        # off the same row, so the row is resolved by mapped path and owner and
+        # its id drives the sports branch of parse_video_metadata. Without this
+        # arm a sports extraction ran the movie lookup, found no movie row and
+        # returned None, so a collected event could never be extracted.
+        media = database.execute(
+            scoped(
+                select(TableSportsEvents.id, TableSportsEvents.file_size).where(
+                    TableSportsEvents.path == db_path
+                ),
+                TableSportsEvents.arr_instance_id,
+                arr_instance_id,
+            )
+        ).first()
+        if not media:
+            return None
+        data = parse_video_metadata(
+            video_path, media.file_size, arr_instance_id=arr_instance_id,
+            sports_event_id=media.id
+        )
+    elif media_type == "episode":
         db_path = path_mappings.path_replace_reverse_instance(
             video_path, arr_instance_id, "series")
         # Scoped to the owning instance (#156): two instances can index the

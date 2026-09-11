@@ -9,6 +9,8 @@ now lives in one place, which is the point, since it is the copies that let the
 gates drift apart.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 
@@ -145,3 +147,121 @@ def test_the_language_half_is_still_sanitised():
     name = _subtitle_filename('Race', '../../etc/passwd', '.srt')
     assert '/' not in name
     assert '..' not in name.split('.')
+
+
+@pytest.fixture
+def embedded_translate(sports_event, schema_session, monkeypatch, tmp_path):
+    """Drive PATCH /api/subtitles with no path, which is the embedded-track shape."""
+    from api.subtitles import subtitles as api_mod
+    from sportarr import profile_hooks
+
+    monkeypatch.setattr(api_mod, 'database', schema_session)
+    monkeypatch.setattr(api_mod, 'alpha3_from_alpha2',
+                        lambda code: 'hun' if code == 'hu' else None)
+
+    extracted = tmp_path / 'race.hu.srt'
+    extracted.write_text('1\n')
+
+    recorded = {'operation': object()}
+
+    def _extract(video_path, language_code2, media_type, hi=False, forced=False,
+                 arr_instance_id=None):
+        recorded['extracted'] = {
+            'video_path': video_path, 'language_code2': language_code2,
+            'media_type': media_type, 'arr_instance_id': arr_instance_id,
+        }
+        return str(extracted)
+
+    monkeypatch.setattr(api_mod, 'extract_embedded_subtitle', _extract)
+    monkeypatch.setattr(api_mod, 'translate_subtitles_file',
+                        lambda **kwargs: recorded.update(translated=kwargs))
+    # The translation itself is not what this exercises; binding an operation
+    # would need a profile the fixture has not got.
+    monkeypatch.setattr(profile_hooks, 'manual_translation_operation',
+                        lambda *a, **k: recorded['operation'])
+
+    def _call(**overrides):
+        args = {
+            'action': 'translate', 'language': 'en', 'path': '', 'type': 'sports',
+            'id': 61, 'arr_instance_id': 42, 'from_language': 'hu',
+            'forced': 'False', 'hi': 'False',
+        }
+        args.update(overrides)
+        stub_self = SimpleNamespace(
+            patch_request_parser=SimpleNamespace(parse_args=lambda: args))
+        return api_mod.Subtitles.patch.__wrapped__(stub_self)
+
+    return _call, recorded
+
+
+def test_an_embedded_sports_translate_resolves_the_event_video(embedded_translate, sports_event):
+    """The embedded branch special-cased episode and sent everything else to the
+    Radarr lookup, so a sports event whose only source track is embedded was
+    answered with "Movie not found"."""
+    call, recorded = embedded_translate
+
+    assert call() == ("", 204)
+    assert recorded['extracted']['video_path'] == str(sports_event / "race.mkv")
+    assert recorded['extracted']['media_type'] == 'sports'
+    assert recorded['extracted']['arr_instance_id'] == 42
+    assert recorded['translated']['video_path'] == str(sports_event / "race.mkv")
+    assert recorded['translated']['media_type'] == 'sports'
+    assert recorded['translated']['metadata'] is None
+    assert recorded['translated']['radarr_id'] is None
+    assert recorded['translated']['sonarr_episode_id'] is None
+
+
+def test_the_embedded_branch_reads_the_owner_off_the_row(embedded_translate):
+    """arr_instance_id is optional on this parser and the sports mapping needs
+    an enabled owner, so an unset one must not reach the mapping."""
+    call, recorded = embedded_translate
+
+    assert call(arr_instance_id=None) == ("", 204)
+    assert recorded['extracted']['arr_instance_id'] == 42
+
+
+def test_an_unknown_sports_event_is_not_reported_as_a_missing_movie(embedded_translate):
+    call, _ = embedded_translate
+
+    assert call(id=999) == ("Sports event not found", 404)
+
+
+def test_extraction_resolves_the_sports_event_row(sports_event, schema_session, monkeypatch):
+    """extract_embedded_subtitle repeated the episode-or-movie split, so even a
+    collected sports item ran the movie lookup, found no row and returned None."""
+    from subtitles.tools.translate import batch
+
+    monkeypatch.setattr(batch, 'database', schema_session)
+    # alpha3_from_alpha2 reads a table the app fills at startup.
+    monkeypatch.setattr(batch, 'alpha3_from_alpha2', lambda code: 'hun')
+    calls = []
+
+    def _metadata(*args, **kwargs):
+        calls.append((args, kwargs))
+        return None
+
+    monkeypatch.setattr(batch, 'parse_video_metadata', _metadata)
+
+    assert batch.extract_embedded_subtitle(
+        str(sports_event / "race.mkv"), 'hu', 'sports', arr_instance_id=42) is None
+
+    assert calls, 'the sports arm must resolve the event row before probing it'
+    (video_path, file_size), kwargs = calls[0]
+    assert video_path == str(sports_event / "race.mkv")
+    assert file_size == 5
+    assert kwargs['sports_event_id'] == 61
+    assert kwargs['arr_instance_id'] == 42
+
+
+def test_another_owner_cannot_extract_the_event(sports_event, schema_session, monkeypatch):
+    from subtitles.tools.translate import batch
+
+    monkeypatch.setattr(batch, 'database', schema_session)
+    monkeypatch.setattr(batch, 'alpha3_from_alpha2', lambda code: 'hun')
+    calls = []
+    monkeypatch.setattr(batch, 'parse_video_metadata',
+                        lambda *a, **k: calls.append(a) or None)
+
+    assert batch.extract_embedded_subtitle(
+        str(sports_event / "race.mkv"), 'hu', 'sports', arr_instance_id=43) is None
+    assert calls == []

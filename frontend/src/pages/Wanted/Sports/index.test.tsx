@@ -85,7 +85,46 @@ it("downloads only the language whose badge was clicked", async () => {
   await userEvent.setup().click(within(row).getByText("hu:HI"));
 
   await waitFor(() =>
-    expect(posted).toEqual({ arr_instance_id: 42, language: "hu" }),
+    expect(posted).toEqual({ arr_instance_id: 42, language: "hu:hi" }),
+  );
+});
+
+it("keeps the variant suffix on the badge click for every modifier", async () => {
+  // The automatic path matches the posted key against the profile's missing
+  // list, and that list stores the variant ("hu:forced"). A bare code is
+  // refused as "No eligible missing language" with downloads: 0, so the click
+  // silently does nothing. The unmodified key must still go out unchanged.
+  owners();
+  const forced = {
+    ...event,
+    id: 12,
+    missing_subtitles: ["en", "hu:forced"],
+  };
+  let posted: unknown;
+  server.use(
+    http.get("/api/sports/wanted", () =>
+      HttpResponse.json({ data: [forced], total: 1 }),
+    ),
+    http.post("/api/sports/events/12/automatic", async ({ request }) => {
+      posted = await request.json();
+      return HttpResponse.json({ queued: true, job_id: 1, message: "queued" });
+    }),
+  );
+  customRender(<WantedSportsView />);
+  const row = await screen.findByRole(
+    "row",
+    { name: /Final/ },
+    { timeout: 8000 },
+  );
+
+  await userEvent.setup().click(within(row).getByText("hu:Forced"));
+  await waitFor(() =>
+    expect(posted).toEqual({ arr_instance_id: 42, language: "hu:forced" }),
+  );
+
+  await userEvent.setup().click(within(row).getByText("en"));
+  await waitFor(() =>
+    expect(posted).toEqual({ arr_instance_id: 42, language: "en" }),
   );
 });
 

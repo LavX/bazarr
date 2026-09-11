@@ -109,6 +109,49 @@ it("offers no exclusion for a record that names no release", async () => {
   expect(screen.queryByRole("button", { name: "Exclude" })).toBeNull();
 });
 
+it("disables the exclusion on a row the instance already excluded", async () => {
+  owners();
+  const user = userEvent.setup();
+  let posts = 0;
+  server.use(
+    http.get("/api/sports/history", () =>
+      HttpResponse.json({
+        data: [{ ...record, blacklisted: true }],
+        total: 1,
+      }),
+    ),
+    http.post("/api/sports/history/9/blacklist", () => {
+      posts++;
+      return HttpResponse.json({
+        queued: true,
+        job_id: 100,
+        message: "Search queued",
+      });
+    }),
+  );
+  customRender(<SportsHistoryView />);
+  await screen.findByText("Final", undefined, { timeout: 8000 });
+  const exclude = screen.getByRole("button", { name: "Exclude" });
+  expect(exclude).toBeDisabled();
+  // The repeat would queue another job and another replacement search for a
+  // release the instance has already been told to skip.
+  await user.click(exclude);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(posts).toBe(0);
+});
+
+it("keeps the exclusion enabled on a row that is not excluded yet", async () => {
+  owners();
+  server.use(
+    http.get("/api/sports/history", () =>
+      HttpResponse.json({ data: [record], total: 1 }),
+    ),
+  );
+  customRender(<SportsHistoryView />);
+  await screen.findByText("Final", undefined, { timeout: 8000 });
+  expect(screen.getByRole("button", { name: "Exclude" })).toBeEnabled();
+});
+
 it("shows the relative date the other history pages show", async () => {
   owners();
   server.use(

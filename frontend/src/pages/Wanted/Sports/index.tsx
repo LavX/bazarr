@@ -21,6 +21,7 @@ import { SportsSearchModal } from "@/components/modals/SportsSearchModal";
 import { useModals } from "@/modules/modals";
 import WantedView from "@/pages/views/WantedView";
 import { BuildKey } from "@/utilities";
+import { buildSubtitleLanguageKey } from "@/utilities/subtitles";
 import tableStyles from "@/components/tables/BaseTable.module.scss";
 
 // Built on the same WantedView as Series and Movies. Sports used to share one
@@ -55,7 +56,11 @@ const MissingLanguages: FunctionComponent<{ row: SportsWantedRow }> = ({
             action.mutate({
               path: `/events/${row.id}/automatic`,
               owner: row.arr_instance_id,
-              language: item.code2,
+              // The full key, not the bare code. The automatic path matches
+              // this against the profile's missing list, which stores the
+              // variant ("hu:hi"), so a bare "hu" is refused as no eligible
+              // language and the click downloads nothing.
+              language: buildSubtitleLanguageKey(item),
             })
           }
           onContextMenu={(event) => {

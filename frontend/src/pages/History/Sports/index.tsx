@@ -166,11 +166,15 @@ const SportsHistoryView: FunctionComponent = () => {
           ) {
             return null;
           }
+          // A row that already names an exclusion cannot be excluded again:
+          // the repeat queues a second job and a replacement search for a
+          // release the instance has been told to skip.
           return (
             <ActionIcon
               aria-label="Exclude"
               variant="subtle"
               color="red"
+              disabled={original.blacklisted}
               onClick={() => setPending(original)}
             >
               <FontAwesomeIcon size="sm" icon={faFileExcel} />

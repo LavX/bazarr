@@ -2,11 +2,12 @@
 import { createMemoryRouter, RouterProvider } from "react-router";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { sportarr } from "@/pages/Settings/Connections/__tests__/fixtures";
 import { AllProviders } from "@/providers";
 import { rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
+import * as files from "@/utilities/files";
 import SportsEvents from ".";
 
 function renderDetail() {
@@ -316,6 +317,93 @@ describe("sports event detail", () => {
         forced: false,
       }),
     );
+  });
+
+  it("downloads the variant a Mass Edit row names, not its base language", async () => {
+    const downloads: string[] = [];
+    const save = vi
+      .spyOn(files, "saveBlobAs")
+      .mockImplementation(() => undefined);
+    server.use(
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([sportarr]),
+      ),
+      http.get("/api/sports/leagues/51", () =>
+        HttpResponse.json({
+          id: 51,
+          arr_instance_id: 42,
+          title: "Fixture League",
+          eventCount: 1,
+          eventFileCount: 1,
+        }),
+      ),
+      http.get("/api/sports/leagues/51/events", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: 61,
+              arr_instance_id: 42,
+              league_id: 51,
+              title: "Event",
+              path: "/sports/event.mkv",
+              hasFile: true,
+              profileId: 5,
+              subtitles: [
+                ["en", "/sports/event.en.srt", 40],
+                [
+                  "en:sync-ffsubsync",
+                  "/sports/event.en.sync-ffsubsync.srt",
+                  41,
+                ],
+              ],
+              missing_subtitles: [],
+            },
+          ],
+          total: 1,
+        }),
+      ),
+      http.get(
+        /\/api\/sports\/events\/61\/subtitles\/.+\/download/,
+        ({ request }) => {
+          const path = new URL(request.url).pathname;
+          const prefix = "/subtitles/";
+          downloads.push(
+            decodeURIComponent(
+              path.slice(
+                path.indexOf(prefix) + prefix.length,
+                path.lastIndexOf("/download"),
+              ),
+            ),
+          );
+          return new HttpResponse("1\n00:00:01,000 --> 00:00:02,000\nSync\n", {
+            headers: {
+              "Content-Type": "application/x-subrip",
+              "Content-Disposition":
+                'attachment; filename="event.en.sync-ffsubsync.srt"',
+            },
+          });
+        },
+      ),
+    );
+    renderDetail();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Mass Edit" }));
+    const dialog = within(await screen.findByRole("dialog"));
+    await dialog.findByText("event.en.sync-ffsubsync.srt");
+    // Both rows are English, so the variant has to be named on the row: without
+    // it the two files are indistinguishable before anything is selected.
+    expect(dialog.getByText("FFsubsync")).toBeInTheDocument();
+
+    // The tools table checkboxes carry ids rather than labels, so the row is
+    // selected by position: header, the base file, then its sync output.
+    await user.click(dialog.getAllByRole("checkbox")[2]);
+    await user.click(dialog.getByRole("button", { name: "Select Action" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Download" }));
+    // The row's own key, sync modifier included: the base language here would
+    // serve the plain "en" file the user did not pick.
+    await waitFor(() => expect(downloads).toEqual(["en:sync-ffsubsync"]));
+    expect(save.mock.calls[0][1]).toBe("event.en.sync-ffsubsync.srt");
+    save.mockRestore();
   });
 
   it("gives a present subtitle the shared tools menu", async () => {

@@ -274,7 +274,29 @@ class Subtitles(Resource):
             )
 
             # Resolve the video path from the DB using the media ID
-            if media_type == "episode":
+            if media_type == "sports":
+                sports_stmt = scoped(
+                    select(
+                        TableSportsEvents.path, TableSportsEvents.arr_instance_id
+                    ).where(TableSportsEvents.id == id),
+                    TableSportsEvents.arr_instance_id,
+                    arr_instance_id,
+                )
+                sports_meta = database.execute(sports_stmt).first()
+                if not sports_meta:
+                    return "Sports event not found", 404
+                # Take the owner off the row when the caller did not send one,
+                # for the same reason the metadata lookup below does: the
+                # sports mapping has no global fallback and needs an enabled
+                # owner, so an unset arr_instance_id raised out of the handler.
+                arr_instance_id = arr_instance_id or sports_meta.arr_instance_id
+                # The owning instance's mapping, like the non-embedded sports
+                # branch below: extraction reverses this path with
+                # path_replace_reverse_instance, and the two only round-trip
+                # when the same mapping made both.
+                embedded_video_path = path_mappings.path_replace_instance(
+                    sports_meta.path, arr_instance_id, 'sports')
+            elif media_type == "episode":
                 ep_stmt = scoped(
                     select(TableEpisodes.path).where(
                         TableEpisodes.sonarrEpisodeId == id
