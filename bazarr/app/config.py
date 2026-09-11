@@ -80,6 +80,25 @@ def normalize_openrouter_provider_order(value):
 # an upgrade is never moved onto a routing its translator might refuse.
 DEFAULT_PROVIDER_ROUTING = 'smartfast'
 UPGRADED_PROVIDER_ROUTING = 'throughput'
+# Every routing the selector can store. Shared by the validator's is_in and the boot-time
+# normalization below so the two can never drift apart (the translation service module keeps
+# its own mirror, but a value has to satisfy this set before it is ever persisted).
+PROVIDER_ROUTING_VALUES = ('throughput', 'nitro', 'price', 'floor', 'latency', 'default', 'smartfast', 'custom')
+
+
+def normalize_stored_provider_routing(stored_routing):
+    """The routing an existing config should run with, given its stored value.
+
+    A value we understand is kept verbatim. A missing value (``None``) and any value
+    outside ``PROVIDER_ROUTING_VALUES`` are configs we do not understand, and both land
+    on the plain sort every translator serves rather than on the shipped default, which
+    refuses outright ahead of AI Subtitle Translator 2.0.0. A value we failed to parse is
+    not evidence about which translator version is running, so it must not select a mode
+    that can refuse.
+    """
+    if stored_routing in PROVIDER_ROUTING_VALUES:
+        return stored_routing
+    return UPGRADED_PROVIDER_ROUTING
 
 ONE_HUNDRED_YEARS_IN_MINUTES = 52560000
 ONE_HUNDRED_YEARS_IN_HOURS = 876000
@@ -280,7 +299,7 @@ validators = [
     # told to update rather than being routed some other way behind the user's back.
     Validator('translator.openrouter_provider_routing', must_exist=True,
               default=DEFAULT_PROVIDER_ROUTING, is_type_of=str,
-              is_in=['throughput', 'nitro', 'price', 'floor', 'latency', 'default', 'smartfast', 'custom']),
+              is_in=list(PROVIDER_ROUTING_VALUES)),
     Validator('translator.openrouter_provider_order', must_exist=True, default=[], is_type_of=list,
               cast=normalize_openrouter_provider_order),
     Validator('translator.openrouter_encryption_key', must_exist=True, default='', is_type_of=str, cast=str),
@@ -685,22 +704,28 @@ settings = Dynaconf(
 
 settings.validators.register(*validators)
 
-# An install that predates the provider-routing setting keeps the behaviour it had.
+# An install that predates the setting, or whose stored value we cannot make sense of,
+# keeps a sort every translator serves rather than being moved onto the new default.
 #
 # The validator default is written for a NEW install. Applying it to an upgrade would
 # move an install that has been translating happily onto a routing its translator may not
 # implement, and smartfast refuses rather than degrades, so the first symptom would be
 # every translation failing on a service the user never had reason to touch. The setting
 # first shipped in v2.6.2, so every config written before that lacks the key entirely and
-# would otherwise be indistinguishable from a fresh one.
+# would otherwise be indistinguishable from a fresh one. A stored value outside the set is
+# the same kind of config we do not understand, and the validation loop below would reset
+# it to the default (smartfast) just the same; normalizing it first prevents that, because
+# a value we failed to parse is not evidence about which translator version is running.
 #
 # A brand new install is the empty file created just above; anything with content in it
-# is an existing config, and existing configs get the sort they were already using.
-if (os.path.getsize(config_yaml_file) > 0
-        and settings.get('translator.openrouter_provider_routing') is None):
-    settings['translator.openrouter_provider_routing'] = UPGRADED_PROVIDER_ROUTING
-    logging.info("Existing configuration has no OpenRouter provider routing; keeping %s, "
-                 "which every AI Subtitle Translator version serves.", UPGRADED_PROVIDER_ROUTING)
+# is an existing config, and existing configs keep the sort they can already be served.
+if os.path.getsize(config_yaml_file) > 0:
+    stored_routing = settings.get('translator.openrouter_provider_routing')
+    if stored_routing not in PROVIDER_ROUTING_VALUES:
+        settings['translator.openrouter_provider_routing'] = normalize_stored_provider_routing(stored_routing)
+        logging.info("Existing configuration has no usable OpenRouter provider routing (%r); keeping %s, "
+                     "which every AI Subtitle Translator version serves.", stored_routing,
+                     UPGRADED_PROVIDER_ROUTING)
 
 failed_validator = True
 while failed_validator:

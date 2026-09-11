@@ -32,6 +32,20 @@ def test_setting_defaults_to_smartfast_and_pins_the_allowed_values():
     assert list(validator.operations.get('is_in')) == ROUTING_VALUES + ['smartfast', 'custom']
 
 
+@pytest.mark.parametrize('stored', ['throughput', 'nitro', 'price', 'floor', 'latency', 'default', 'smartfast', 'custom'])
+def test_a_known_stored_routing_is_kept_verbatim(stored):
+    assert config.normalize_stored_provider_routing(stored) == stored
+
+
+@pytest.mark.parametrize('stored', [None, '', 'cheapest', 'price-aware', 'future-value'])
+def test_an_unreadable_stored_routing_normalizes_to_the_plain_sort(stored):
+    # The boot gate applies this ahead of validation, because the validation loop would
+    # otherwise write the new default (smartfast), which refuses on a sidecar below 2.0.0.
+    # A value we cannot parse is not evidence about the translator version.
+    assert config.normalize_stored_provider_routing(stored) == config.UPGRADED_PROVIDER_ROUTING
+    assert config.normalize_stored_provider_routing(stored) == 'throughput'
+
+
 def test_an_unreadable_stored_routing_falls_back_to_a_sort_any_sidecar_serves():
     # Not the shipped default: smartfast refuses outright below 2.0.0, and a value we
     # cannot read is a config we do not understand, so it must not also refuse.
