@@ -63,7 +63,11 @@ def test_reconcile_enables_the_flag_once_for_an_existing_install(schema_session,
     from app.config import settings
     from arr_instances.repository import ArrInstanceRepository
     from arr_instances.service import reconcile_sportarr_enable_flag
+    from sportarr import scheduler as sportarr_scheduler
 
+    refresh_calls = []
+    monkeypatch.setattr(sportarr_scheduler, "refresh_sports_runtime",
+                        lambda: refresh_calls.append(True))
     monkeypatch.setattr(config, "write_config", lambda: None)
     monkeypatch.setattr(settings.general, "use_sportarr", False)
     monkeypatch.setattr(settings.sportarr, "enable_reconciled", False)
@@ -72,18 +76,26 @@ def test_reconcile_enables_the_flag_once_for_an_existing_install(schema_session,
     assert reconcile_sportarr_enable_flag(schema_session) is True
     assert settings.general.use_sportarr is True
     assert settings.sportarr.enable_reconciled is True
+    assert refresh_calls == [True]
 
-    # Second boot: the operator turns it off. The marker keeps it off.
+    # Second boot: the operator turns it off. The marker keeps it off, and
+    # nothing is refreshed because the flag was not flipped by the reconcile.
+    refresh_calls.clear()
     settings.general.use_sportarr = False
     assert reconcile_sportarr_enable_flag(schema_session) is False
     assert settings.general.use_sportarr is False
+    assert refresh_calls == []
 
 
 def test_reconcile_leaves_the_flag_off_when_no_instance_exists(schema_session, monkeypatch):
     from app import config
     from app.config import settings
     from arr_instances.service import reconcile_sportarr_enable_flag
+    from sportarr import scheduler as sportarr_scheduler
 
+    refresh_calls = []
+    monkeypatch.setattr(sportarr_scheduler, "refresh_sports_runtime",
+                        lambda: refresh_calls.append(True))
     monkeypatch.setattr(config, "write_config", lambda: None)
     monkeypatch.setattr(settings.general, "use_sportarr", False)
     monkeypatch.setattr(settings.sportarr, "enable_reconciled", False)
@@ -91,8 +103,9 @@ def test_reconcile_leaves_the_flag_off_when_no_instance_exists(schema_session, m
     assert reconcile_sportarr_enable_flag(schema_session) is False
     assert settings.general.use_sportarr is False
     # The marker still burns, so a later-added instance does not retroactively
-    # flip a flag the operator never asked for.
+    # flip a flag the operator never asked for, and nothing is refreshed.
     assert settings.sportarr.enable_reconciled is True
+    assert refresh_calls == []
 
 
 def test_reconcile_ignores_a_disabled_instance(schema_session, monkeypatch):
@@ -100,7 +113,11 @@ def test_reconcile_ignores_a_disabled_instance(schema_session, monkeypatch):
     from app.config import settings
     from arr_instances.repository import ArrInstanceRepository
     from arr_instances.service import reconcile_sportarr_enable_flag
+    from sportarr import scheduler as sportarr_scheduler
 
+    refresh_calls = []
+    monkeypatch.setattr(sportarr_scheduler, "refresh_sports_runtime",
+                        lambda: refresh_calls.append(True))
     monkeypatch.setattr(config, "write_config", lambda: None)
     monkeypatch.setattr(settings.general, "use_sportarr", False)
     monkeypatch.setattr(settings.sportarr, "enable_reconciled", False)

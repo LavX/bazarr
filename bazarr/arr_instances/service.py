@@ -623,4 +623,16 @@ def reconcile_sportarr_enable_flag(session):
         config.settings.general.use_sportarr = True
     config.settings.sportarr.enable_reconciled = True
     config.write_config()
+    if enabled_any:
+        # The one-time flip must also register the sports jobs, not just the
+        # pages. The scheduler builds its jobs before migration runs, so it saw
+        # the pre-reconcile flag and registered nothing; without this the first
+        # upgraded boot shows Sports but schedules no sync, scan or search until
+        # a later restart or settings save. Best-effort: the flag and marker are
+        # already committed, so a refresh hiccup only defers the jobs.
+        try:
+            from sportarr.scheduler import refresh_sports_runtime
+            refresh_sports_runtime()
+        except Exception:
+            logging.exception("Refresh after Sportarr enable reconcile failed; continuing startup")
     return enabled_any
