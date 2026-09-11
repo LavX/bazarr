@@ -1093,7 +1093,7 @@ def test_saving_the_master_toggle_refreshes_the_sports_runtime():
 
     from app import config
 
-    source = inspect.getsource(config.save_settings)
+    source = inspect.getsource(config._save_settings)
     assert "sportarr_changed = True" in source
     assert "settings-general-use_sportarr" in source
     hook = source[source.index("if sportarr_changed:"):]

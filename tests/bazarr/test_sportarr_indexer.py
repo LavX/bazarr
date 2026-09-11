@@ -898,7 +898,8 @@ def test_global_embedded_setting_refreshes_sports_missing(indexed_library, monke
     db.update_profile_id_list.invalidate()
     module.store_subtitles_sports(61, 1)
     assert row(session, 61).missing_subtitles == "[]"
-    monkeypatch.setattr(config, "write_config", lambda: None)
+    # A write that reached disk: the refactored save refuses a falsy return.
+    monkeypatch.setattr(config, "write_config", lambda: True)
     monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
     monkeypatch.setattr(config.settings.general, "use_sonarr", False)
     monkeypatch.setattr(config.settings.general, "use_radarr", False)

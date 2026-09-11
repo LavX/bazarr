@@ -56,7 +56,7 @@ def test_saving_a_sportarr_key_triggers_a_scheduler_refresh():
     import inspect
     from app import config
 
-    source = inspect.getsource(config.save_settings)
+    source = inspect.getsource(config._save_settings)
     for key in (
         "settings-sportarr-sports_sync",
         "settings-sportarr-full_update",
@@ -72,7 +72,7 @@ def test_saving_a_sports_exclusion_key_invalidates_exclusions():
     import inspect
     from app import config
 
-    source = inspect.getsource(config.save_settings)
+    source = inspect.getsource(config._save_settings)
     for key in (
         "settings-sportarr-excluded_tags",
         "settings-sportarr-excluded_sports",
@@ -85,7 +85,7 @@ def test_saving_sports_path_mappings_updates_the_path_map():
     import inspect
     from app import config
 
-    assert "settings-general-path_mappings_sports" in inspect.getsource(config.save_settings)
+    assert "settings-general-path_mappings_sports" in inspect.getsource(config._save_settings)
 
 
 def test_resolution_falls_through_global_then_override(schema_session, monkeypatch):
@@ -215,7 +215,7 @@ def test_sports_path_mappings_are_parsed_as_pairs():
     import inspect
     from app import config
 
-    source = inspect.getsource(config.save_settings)
+    source = inspect.getsource(config._save_settings)
     marker = "'path_mappings', 'path_mappings_movie', 'path_mappings_sports'"
     assert marker in source, "path_mappings_sports missing from the pair-splitting list"
 
