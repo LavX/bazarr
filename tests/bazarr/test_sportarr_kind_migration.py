@@ -11,7 +11,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.pool import NullPool
 
-_PREVIOUS = "b8d2c5f1a604"
+_PREVIOUS = "c2e7a4d9f810"
 _REVISION = "c9e4a6b2d701"
 
 

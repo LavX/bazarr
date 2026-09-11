@@ -1,13 +1,13 @@
 """Allow Sportarr instance registration.
 
 Revision ID: c9e4a6b2d701
-Revises: b8d2c5f1a604
+Revises: c2e7a4d9f810
 """
 from alembic import op
 import sqlalchemy as sa
 
 revision = "c9e4a6b2d701"
-down_revision = "b8d2c5f1a604"
+down_revision = "c2e7a4d9f810"
 branch_labels = None
 depends_on = None
 
