@@ -95,7 +95,7 @@ function CustomProviders() {
       <Text size="sm">
         AI Subtitle Translator will try these providers in order. Providers
         outside this list are excluded. If none can serve the model, translation
-        fails.
+        fails. Requires AI Subtitle Translator 1.3.4 or later.
       </Text>
       <Select
         label="Add a provider for this model"
