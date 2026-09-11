@@ -128,7 +128,10 @@ def subtitle_write_locks(video_path, *paths, cancel=None):
         for directory in directories:
             state = subtitle_write_lock(video_path, directory)
             if cancel is None:
-                stack.enter_context(state)
+                # Store the entered value. A substituted lock, like a test
+                # double, can be a generator context manager whose __enter__
+                # yields a different object than the raw call returned.
+                states[directory] = stack.enter_context(state)
             else:
                 while not cancel.is_set():
                     if state.lock.acquire(timeout=0.05):
@@ -136,7 +139,7 @@ def subtitle_write_locks(video_path, *paths, cancel=None):
                         break
                 if cancel.is_set():
                     raise ValueError('Subtitle indexing stopped')
-            states[directory] = state
+                states[directory] = state
         yield states
 
 
@@ -166,7 +169,8 @@ def staged_subtitle_write(video_path, destination, before_publish=None, allow_em
                           publication_guard=None, cancel=None, expected_versions=(),
                           after_write=None):
     """Compute privately, then publish only while source and destination are current."""
-    with subtitle_write_locks(video_path, destination, *source_paths, cancel=cancel) as states:
+    with subtitle_write_locks(video_path, destination, *source_paths,
+                              **({} if cancel is None else {'cancel': cancel})) as states:
         validate_subtitle_versions(expected_versions)
         def version(path):
             directory = os.path.normcase(os.path.realpath(os.path.dirname(path)))
@@ -183,7 +187,8 @@ def staged_subtitle_write(video_path, destination, before_publish=None, allow_em
             return
         if not os.path.isfile(temporary) or os.path.getsize(temporary) == 0:
             raise OSError('Subtitle writer did not produce a nonempty file')
-        with subtitle_write_locks(video_path, destination, *source_paths, cancel=cancel):
+        with subtitle_write_locks(video_path, destination, *source_paths,
+                                  **({} if cancel is None else {'cancel': cancel})):
             with subtitle_mutation(video_path, destination):
                 with publication_guard() if publication_guard is not None else nullcontext():
                     validate_subtitle_versions(expected_versions)
