@@ -658,3 +658,106 @@ def test_sports_history_includes_embedded_records_on_request(schema_session, mon
     assert code == 200
     assert sorted(item["action"] for item in result["data"]) == [1, 7]
     assert result["total"] == 2
+
+
+# --------------------------------------------------------------------------
+# Blacklist parity: the listing carries the event's season, episode and part,
+# so two parts of one event are distinguishable on the excluded page.
+# --------------------------------------------------------------------------
+
+def _sports_blacklist_rows(schema_session):
+    from app.database import (TableArrInstances, TableBlacklistSports,
+                              TableSportsEvents, TableSportsLeagues)
+
+    schema_session.add(TableArrInstances(
+        id=1, kind="sportarr", name="Sports", stable_key="s",
+        port=1867, enabled=1,
+    ))
+    schema_session.flush()
+    schema_session.add(TableSportsLeagues(
+        id=1, arr_instance_id=1, sportarrLeagueId=7, title="League",
+    ))
+    schema_session.flush()
+    schema_session.add(TableSportsEvents(
+        id=1, arr_instance_id=1, league_id=1, sportarrEventId=7, file_id=8,
+        path="/sports/prelims.mkv", title="Card", season=2026,
+        episode=1, partNumber=1, partName="Prelims",
+        audio_language="[]", subtitles="[]", missing_subtitles="[]",
+        failedAttempts="[]",
+    ))
+    schema_session.add(TableSportsEvents(
+        id=2, arr_instance_id=1, league_id=1, sportarrEventId=8, file_id=9,
+        path="/sports/main.mkv", title="Card", season=2026,
+        episode=1, partNumber=2,
+        audio_language="[]", subtitles="[]", missing_subtitles="[]",
+        failedAttempts="[]",
+    ))
+    schema_session.flush()
+    schema_session.add(TableBlacklistSports(
+        id=1, arr_instance_id=1, league_id=1, event_id=1,
+        language="en", provider="provider-a", subs_id="prelims-release",
+    ))
+    schema_session.add(TableBlacklistSports(
+        id=2, arr_instance_id=1, league_id=1, event_id=2,
+        language="en", provider="provider-a", subs_id="main-release",
+    ))
+    schema_session.flush()
+
+
+def test_sports_blacklist_carries_the_event_season_episode_and_part(schema_session):
+    """The excluded page renders one row per release, and two parts of one
+    event used to share a title with no way to tell them apart. The listing
+    now sends the event fields the events table already sends."""
+    _sports_blacklist_rows(schema_session)
+
+    from sportarr import history
+
+    result = history.list_records(schema_session, "blacklist")
+    by_id = {item["id"]: item for item in result["data"]}
+
+    assert by_id[1]["season"] == 2026
+    assert by_id[1]["episode"] == 1
+    assert by_id[1]["partNumber"] == 1
+    assert by_id[1]["partName"] == "Prelims"
+
+    # A part without a part name still distinguishes itself by its number, and
+    # the events listing's "or None" normalization is applied so the page can
+    # treat an unset part like the events table does.
+    assert by_id[2]["partNumber"] == 2
+    assert by_id[2]["partName"] is None
+
+
+def test_sports_blacklist_part_stays_none_for_an_unparted_event(schema_session):
+    """The column is NOT NULL and the parser writes 0 for a part-less event,
+    so a listing must turn that into None and not invent a "Part 0"."""
+    _sports_blacklist_rows(schema_session)
+    from app.database import TableSportsEvents
+
+    schema_session.get(TableSportsEvents, 2).partNumber = 0
+    schema_session.commit()
+
+    from sportarr import history
+
+    result = history.list_records(schema_session, "blacklist")
+    by_id = {item["id"]: item for item in result["data"]}
+    assert by_id[2]["partNumber"] is None
+
+
+def test_sports_history_with_parts_still_lists_every_column(schema_session):
+    """The event columns ride the same join for history, and the Match and
+    Upgrade flags added recently must survive the extra selected columns."""
+    _sports_history(schema_session)
+    from app.database import TableSportsEvents
+
+    schema_session.get(TableSportsEvents, 1).season = 2026
+    schema_session.get(TableSportsEvents, 1).partNumber = 4
+    schema_session.commit()
+
+    from sportarr import history
+
+    result = history.list_records(schema_session, "history", include_embedded=True)
+    downloaded = next(item for item in result["data"] if item["action"] == 1)
+    assert downloaded["season"] == 2026
+    assert downloaded["partNumber"] == 4
+    assert downloaded["matches"] == ["title", "year"]
+    assert "blacklisted" in downloaded and "upgradable" in downloaded

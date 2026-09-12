@@ -72,15 +72,28 @@ const BlacklistSportsView: FunctionComponent = () => {
       {
         header: "Name",
         accessorKey: "title",
-        cell: ({ row: { original } }) => (
-          <Anchor
-            className="table-primary"
-            component={Link}
-            to={`/sports/${original.league_id}?instance=${original.arr_instance_id}`}
-          >
-            {original.title}
-          </Anchor>
-        ),
+        cell: ({ row: { original } }) => {
+          const part =
+            original.partName ||
+            (original.partNumber && original.partNumber > 0
+              ? `Part ${original.partNumber}`
+              : null);
+          // Built as one string, not two adjacent JSX children: React would
+          // otherwise emit separate text nodes and the title would no longer
+          // be matchable (or selectable) as a single label. Same rule the
+          // events table applies, so two parts of one event read apart here
+          // the way they do in the library.
+          const label = part ? `${original.title} (${part})` : original.title;
+          return (
+            <Anchor
+              className="table-primary"
+              component={Link}
+              to={`/sports/${original.league_id}?instance=${original.arr_instance_id}`}
+            >
+              {label}
+            </Anchor>
+          );
+        },
       },
       ...(multiInstance
         ? [

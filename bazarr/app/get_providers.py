@@ -520,13 +520,30 @@ def get_providers_auth():
     return provider_configs
 
 
-def _handle_mgb(name, exception, ids, language):
+def _handle_mgb(name, exception, ids, language, sports_context=None):
     if language.forced:
         language_str = f'{language.basename}:forced'
     elif language.hi:
         language_str = f'{language.basename}:hi'
     else:
         language_str = language.basename
+
+    if sports_context is not None:
+        # A sports search carries the event and its instance on the video, and
+        # the pool threads them through to this callback. The release ids are
+        # all None by construction, so this must come before the media
+        # branches; the event's own table records the exclusion the same shape
+        # the owned blacklist flow writes. Guarded: an attribution fault must
+        # not take the whole provider search down with it.
+        from sportarr.history import blacklist_log_sports
+        try:
+            blacklist_log_sports(
+                sports_context, name, exception.id, language_str)
+        except Exception:
+            logging.exception(
+                'BAZARR could not record the sports blacklist for %s '
+                'release %s', name, exception.id)
+        return
 
     if ids:
         if exception.media_type == "series":
@@ -543,16 +560,17 @@ def _handle_mgb(name, exception, ids, language):
         # to run anyway and write a blacklist row with a null radarrId, which
         # blacklists nothing and leaves a junk entry on the movie Excluded page.
         #
-        # Sports exclusions are written by their own owned flow, which has the
-        # event and its instance; this callback has neither.
+        # A sports search that carried no context still drops here, because
+        # there is nothing to attribute the exclusion to. The callback cannot
+        # invent an event.
         logging.warning(
             'BAZARR provider %s demanded a blacklist for %s, but the search carried no '
             'media id to attribute it to; not recording it.', name, exception.id)
 
 
-def provider_throttle(name, exception, ids=None, language=None):
+def provider_throttle(name, exception, ids=None, language=None, sports_context=None):
     if isinstance(exception, MustGetBlacklisted) and isinstance(ids, dict) and isinstance(language, Language):
-        return _handle_mgb(name, exception, ids, language)
+        return _handle_mgb(name, exception, ids, language, sports_context)
 
     cls = getattr(exception, "__class__")
     cls_name = getattr(cls, "__name__")

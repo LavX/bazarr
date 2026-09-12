@@ -73,7 +73,14 @@ def list_records(
     limit = validate_page(start, length)
     table = TableHistorySports if kind == "history" else TableBlacklistSports
     query = (
-        select(table, TableSportsEvents.title)
+        select(
+            table,
+            TableSportsEvents.title,
+            TableSportsEvents.season,
+            TableSportsEvents.episode,
+            TableSportsEvents.partNumber,
+            TableSportsEvents.partName,
+        )
         .join(
             TableSportsEvents,
             (table.event_id == TableSportsEvents.id)
@@ -105,7 +112,7 @@ def list_records(
         select(func.count()).select_from(query.subquery())
     ).scalar_one()
     data = []
-    for row, title in session.execute(
+    for row, title, season, episode, part_number, part_name in session.execute(
         query.order_by(table.timestamp.desc(), table.id.desc())
         .offset(start)
         .limit(limit)
@@ -128,7 +135,16 @@ def list_records(
         else:
             item["timestamp"] = None
             item["parsed_timestamp"] = None
-        data.append(item | {"title": title})
+        # The event's season, episode and part, under the same names the event
+        # listing sends. The blacklist page shows them beside the title, so two
+        # parts of one event are distinguishable; the history page ignores them.
+        data.append(item | {
+            "title": title,
+            "season": season,
+            "episode": episode,
+            "partNumber": part_number or None,
+            "partName": part_name,
+        })
     if kind == "history":
         _mark_history_flags(session, data)
     return {"data": data, "total": total}
@@ -197,6 +213,36 @@ def sports_history_log(action, event_id, arr_instance_id, result):
         )
     )
     database.commit()
+
+
+def blacklist_log_sports(context, provider, subs_id, language):
+    """Record a release a provider demanded be excluded from a sports search.
+
+    The provider throttle callback runs inside a pool worker thread with no
+    publication boundary, so unlike blacklist_history this is a plain insert:
+    the event the search just named exists, so the foreign key holds, and the
+    excluded page reads the row straight out of the table. notify([]) refreshes
+    that page the way the owned exclusion flow does, so a release the operator
+    excluded during a search disappears from later searches by the same owner
+    without any search-side change.
+    """
+    event_id = getattr(context, "event_id", None)
+    league_id = getattr(context, "league_id", None)
+    arr_instance_id = getattr(context, "arr_instance_id", None)
+    if not event_id or not league_id or not arr_instance_id:
+        raise ValueError("A resolved sports event context is required")
+    database.execute(
+        insert(TableBlacklistSports).values(
+            event_id=event_id,
+            league_id=league_id,
+            arr_instance_id=arr_instance_id,
+            language=language,
+            provider=provider,
+            subs_id=subs_id,
+        )
+    )
+    database.commit()
+    notify([])
 
 
 def remove_blacklist(session, entry_id, arr_instance_id):

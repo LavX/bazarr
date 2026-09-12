@@ -53,6 +53,42 @@ const record = {
   subs_id: "release",
 };
 
+it("names the part so two parts of one event read apart", async () => {
+  owners();
+  const parts = [
+    { ...record, partName: "Prelims", partNumber: 1 },
+    { ...record, id: 10, title: "Final", partNumber: 2 },
+  ];
+  server.use(
+    http.get("/api/sports/blacklist", () =>
+      HttpResponse.json({ data: parts, total: 2 }),
+    ),
+  );
+  customRender(<BlacklistSportsView />);
+
+  expect(
+    await screen.findByText("Final (Prelims)", undefined, { timeout: 8000 }),
+  ).toBeInTheDocument();
+  // A part without a part name still distinguishes itself by its number, and
+  // an unparted row keeps its bare title with no invented "Part 0".
+  expect(screen.getByText("Final (Part 2)")).toBeInTheDocument();
+});
+
+it("omits any part marker for an event with no parts", async () => {
+  owners();
+  server.use(
+    http.get("/api/sports/blacklist", () =>
+      HttpResponse.json({ data: [record], total: 1 }),
+    ),
+  );
+  customRender(<BlacklistSportsView />);
+
+  expect(
+    await screen.findByText("Final", undefined, { timeout: 8000 }),
+  ).toBeInTheDocument();
+  expect(screen.queryByText(/Part/)).toBeNull();
+});
+
 it("removes a release exclusion for its owner", async () => {
   owners();
   let removed = false;

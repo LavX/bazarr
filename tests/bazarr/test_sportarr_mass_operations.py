@@ -382,3 +382,165 @@ def test_the_scheduled_mass_sync_runs_the_shared_entry_point():
     source = inspect.getsource(scheduler.Scheduler._Scheduler__mass_sync_task)
     assert "mass_batch_operation" in source
     assert "id='mass_sync_subtitles'" in source
+
+
+# --------------------------------------------------------------------------
+# Mass translate from an embedded track inside a sports container.
+# --------------------------------------------------------------------------
+
+def _embedded_event(schema_session, event_id=62, file_id=72, title='Embedded',
+                    subtitles="[['en', None, None]]"):
+    from app.database import TableSportsEvents
+
+    schema_session.add(TableSportsEvents(
+        id=event_id, arr_instance_id=42, league_id=51,
+        sportarrEventId=event_id, file_id=file_id,
+        path='/remote/sports/embedded.mkv', title=title,
+        audio_language='[]', subtitles=subtitles,
+        missing_subtitles='[]', failedAttempts='[]'))
+    schema_session.commit()
+
+
+def _translate_settings(monkeypatch):
+    from subtitles import mass_operations
+    from unittest.mock import MagicMock
+
+    mock_settings = MagicMock()
+    mock_settings.subsync.max_offset_seconds = 60
+    mock_settings.subsync.gss = True
+    mock_settings.subsync.no_fix_framerate = True
+    mock_settings.general.use_embedded_subs = True
+    monkeypatch.setattr(mass_operations, 'settings', mock_settings)
+    return mock_settings
+
+
+def test_an_embedded_track_becomes_a_sports_translate_source(
+        sports_library, schema_session, monkeypatch):
+    """The indexer records an in-container track as [language, None, None],
+    and the collector used to drop every pathless entry, so a release whose
+    only subtitles are inside the container could never be mass-translated."""
+    _embedded_event(schema_session)
+    _translate_settings(monkeypatch)
+
+    from subtitles.mass_operations import _collect_sports
+
+    items, skipped = _collect_sports(
+        event_ids=[62], sports_instance={62: {42}}, action='translate',
+        target_lang='nl', source_lang='en')
+
+    assert skipped == 0
+    assert len(items) == 1
+    item = items[0]
+    assert item['embedded'] is True
+    assert item['srt_path'] is None
+    assert item['srt_lang'] == 'en'
+    assert item['video_path'] == str(sports_library / "embedded.mkv")
+    assert item['sports_event_id'] == 62
+    assert item['arr_instance_id'] == 42
+    assert item['metadata'] is None
+
+
+def test_sync_and_mods_never_see_an_embedded_sports_track(
+        sports_library, schema_session, monkeypatch):
+    """There is no file to sync and no useful one to produce, so an embedded
+    track is not a candidate. It must not reach the skipped tally either."""
+    _embedded_event(schema_session)
+    _translate_settings(monkeypatch)
+
+    from subtitles.mass_operations import _collect_sports
+
+    items, skipped = _collect_sports(
+        event_ids=[62], sports_instance={62: {42}}, action='sync')
+    assert items == []
+    assert skipped == 0
+
+    items, skipped = _collect_sports(
+        event_ids=[62], sports_instance={62: {42}}, action='remove_HI')
+    assert items == []
+    assert skipped == 0
+
+
+def test_embedded_sports_tracks_are_ignored_when_turned_off(
+        sports_library, schema_session, monkeypatch):
+    """The rows outlive the setting until the next index, so consuming them
+    has to check it too."""
+    _embedded_event(schema_session)
+    mock_settings = _translate_settings(monkeypatch)
+    mock_settings.general.use_embedded_subs = False
+
+    from subtitles.mass_operations import _collect_sports
+
+    items, skipped = _collect_sports(
+        event_ids=[62], sports_instance={62: {42}}, action='translate',
+        target_lang='nl', source_lang='en')
+    assert items == []
+    assert skipped == 0
+
+
+def test_a_real_sports_file_wins_over_the_embedded_track_of_the_same_language(
+        sports_library, schema_session, monkeypatch):
+    """Queueing both would run the same translation twice into one output."""
+    (sports_library / "embedded.en.srt").write_text("1\n")
+    _embedded_event(schema_session,
+                    subtitles="[['en', None, None], "
+                              "['en', '/remote/sports/embedded.en.srt', 100]]")
+    _translate_settings(monkeypatch)
+
+    from subtitles.mass_operations import _collect_sports
+
+    items, _skipped = _collect_sports(
+        event_ids=[62], sports_instance={62: {42}}, action='translate',
+        target_lang='nl', source_lang='en')
+
+    assert len(items) == 1
+    assert items[0]['srt_path'] == str(sports_library / "embedded.en.srt")
+    assert not items[0]['embedded']
+
+
+def test_an_embedded_sports_item_extracts_the_track_when_it_runs():
+    """Extraction happens when the item runs, not when the batch was
+    collected, and the sports arm of the shared extraction helper is what the
+    event's owner resolves through."""
+    from subtitles.mass_operations import _process_subtitle_item
+
+    item = {
+        'video_path': '/mapped/embedded.mkv', 'srt_path': None,
+        'srt_lang': 'en', 'embedded': True, 'forced': False, 'hi': False,
+        'sonarr_series_id': None, 'sonarr_episode_id': None, 'radarr_id': None,
+        'sports_event_id': 62, 'arr_instance_id': 42, 'metadata': None,
+    }
+    operation = MagicMock()
+    with patch('subtitles.tools.translate.batch.extract_embedded_subtitle',
+               return_value='/config/extracted_subs/embedded.en.srt') as extract, \
+         patch('sportarr.profile_hooks.manual_translation_operation',
+               return_value=operation), \
+         patch('subtitles.tools.translate.main.translate_subtitles_file') as translate:
+        assert _process_subtitle_item(
+            item, 'translate', {'to_lang': 'en'}, job_id=1) is True
+
+    assert extract.call_args.args[:3] == ('/mapped/embedded.mkv', 'en', 'sports')
+    assert extract.call_args.kwargs['arr_instance_id'] == 42
+    kwargs = translate.call_args.kwargs
+    assert kwargs['media_type'] == 'sports'
+    assert kwargs['metadata'] is None
+    assert kwargs['sports_operation'] is operation
+
+
+def test_an_unextractable_sports_track_skips_the_item_not_the_batch():
+    """Usually a bitmap track (PGS, VobSub). That is this item's problem; the
+    batch carries on."""
+    from subtitles.mass_operations import _process_subtitle_item
+
+    item = {
+        'video_path': '/mapped/embedded.mkv', 'srt_path': None,
+        'srt_lang': 'en', 'embedded': True, 'forced': False, 'hi': False,
+        'sonarr_series_id': None, 'sonarr_episode_id': None, 'radarr_id': None,
+        'sports_event_id': 62, 'arr_instance_id': 42, 'metadata': None,
+    }
+    with patch('subtitles.tools.translate.batch.extract_embedded_subtitle',
+               return_value=None), \
+         patch('sportarr.profile_hooks.manual_translation_operation'), \
+         patch('subtitles.tools.translate.main.translate_subtitles_file') as translate:
+        assert _process_subtitle_item(
+            item, 'translate', {'to_lang': 'en'}, job_id=1) is False
+    translate.assert_not_called()

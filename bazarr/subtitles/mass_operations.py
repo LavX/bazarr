@@ -743,10 +743,10 @@ def _collect_sports(event_ids=None, action='sync', force_resync=False,
     and the item carries that owner so the processor can build the publication
     guard a sports write needs.
 
-    No embedded-track branch. Translating one means extracting it to a file
-    first, and the extraction helper resolves its media row by upstream id
-    through the series and movies tables, which a sports event has no place in.
-    An in-container track is skipped rather than half-handled.
+    Embedded-track branch: only translation can use an in-container track, and
+    only when the user still has embedded subtitles turned on. The extraction
+    helper has its own sports arm, so the item runs exactly like an episodes one
+    would: it is extracted when the item runs, not when the batch was collected.
     """
     sports_instance = sports_instance or {}
     # Joined to the owner and filtered to enabled Sportarr instances. A sports
@@ -780,9 +780,22 @@ def _collect_sports(event_ids=None, action='sync', force_resync=False,
         if not _instance_filter_matches(event.arr_instance_id, req_instances):
             continue
 
-        subtitles = _parse_subtitles_column(event.subtitles)
+        # Only translation can use an in-container track, and only when the
+        # user still has embedded subtitles turned on: the rows outlive the
+        # setting until the next index, so the check has to happen here too.
+        want_embedded = action == 'translate' and settings.general.use_embedded_subs
+        subtitles = _parse_subtitles_column(event.subtitles, include_embedded=want_embedded)
         video_path = path_mappings.path_replace_instance(
             event.path, event.arr_instance_id, 'sports')
+
+        if want_embedded:
+            def _usable(lang_string, sub_path, _owner=event):
+                if not _usable_as_translate_source(lang_string, sub_path):
+                    return False
+                return os.path.isfile(path_mappings.path_replace_instance(
+                    sub_path, _owner.arr_instance_id, 'sports'))
+
+            subtitles = _drop_embedded_duplicates(subtitles, _usable)
 
         def _target_usable(lang_string, sub_path, _owner=event):
             mapped = path_mappings.path_replace_instance(
@@ -815,19 +828,25 @@ def _collect_sports(event_ids=None, action='sync', force_resync=False,
                 skipped += 1
                 continue
 
-            if not sub_path:
-                skipped += 1
-                continue
-
-            mapped_sub_path = path_mappings.path_replace_instance(
-                sub_path, event.arr_instance_id, 'sports')
-            if not os.path.isfile(mapped_sub_path):
-                skipped += 1
-                continue
+            # An entry with no path is an in-container track. Only translate can
+            # use one, by extracting it first; there is nothing for sync or the
+            # mod actions to open.
+            is_embedded = not sub_path
+            if is_embedded:
+                if action != 'translate':
+                    skipped += 1
+                    continue
+                mapped_sub_path = None
+            else:
+                mapped_sub_path = path_mappings.path_replace_instance(
+                    sub_path, event.arr_instance_id, 'sports')
+                if not os.path.isfile(mapped_sub_path):
+                    skipped += 1
+                    continue
 
             modifiers = [p.lower() for p in lang_string.split(':')[1:]]
             is_combined = any(m.startswith('combined-') for m in modifiers)
-            if action in ('sync', 'translate') and (
+            if action in ('sync', 'translate') and not is_embedded and (
                     is_sync_engine_output(mapped_sub_path) or is_combined):
                 skipped += 1
                 continue
@@ -843,7 +862,7 @@ def _collect_sports(event_ids=None, action='sync', force_resync=False,
                 'video_path': video_path,
                 'srt_path': mapped_sub_path,
                 'srt_lang': sub_lang,
-                'embedded': False,
+                'embedded': is_embedded,
                 'forced': sub_forced,
                 'hi': sub_hi,
                 'sonarr_series_id': None,

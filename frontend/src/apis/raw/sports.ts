@@ -85,6 +85,13 @@ export interface SportsRecord {
   league_id: number;
   event_id: number;
   title: string;
+  /** The event's season and episode, as the events listing sends them. */
+  season?: number | null;
+  episode?: number | null;
+  /** The part of the event this row names ("Part N" when unnamed), so two
+   * parts of one event are distinguishable in a listing. */
+  partNumber?: number | null;
+  partName?: string | null;
   /** Relative form for the column, as the episodes and movies endpoints send. */
   timestamp: string | null;
   /** Exact date, shown in the column's popover. */
