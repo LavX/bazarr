@@ -741,7 +741,7 @@ def search_local(
                 # Hash-match flag reflects how the row was resolved, not
                 # the request mode: a moviehash-resolved row is
                 # hash-validated regardless of moviehash_match=include vs
-                # only. Codex P2.
+                # only.
                 hash_matched=resolve_source == "moviehash",
             ))
         return out

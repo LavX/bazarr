@@ -88,6 +88,7 @@ type SettingsKey =
 
 interface ProviderViewProps {
   addLabel?: string;
+  excludedKeys?: readonly string[];
   availableOptions: Readonly<ProviderInfo[]>;
   settingsKey: SettingsKey;
 }
@@ -448,6 +449,7 @@ const SortableProviderTile: FunctionComponent<SortableProviderTileProps> = ({
 
 export const ProviderView: FunctionComponent<ProviderViewProps> = ({
   addLabel,
+  excludedKeys,
   availableOptions,
   settingsKey,
 }) => {
@@ -484,6 +486,7 @@ export const ProviderView: FunctionComponent<ProviderViewProps> = ({
     // load after a restart). Render a minimal placeholder so the tile stays
     // visible and the saved enabled-providers list never silently shrinks.
     const decorated = providers
+      .filter((key) => !excludedKeys?.includes(key))
       .map((key) => {
         const item = availableOptions.find((opt) => opt.key === key);
         return item ?? ({ key } satisfies ProviderInfo);
@@ -498,7 +501,7 @@ export const ProviderView: FunctionComponent<ProviderViewProps> = ({
     });
 
     return decorated;
-  }, [providers, availableOptions, priorities]);
+  }, [providers, availableOptions, priorities, excludedKeys]);
 
   const itemIds = useMemo(
     () => sortedItems.map((item) => item.v.key),

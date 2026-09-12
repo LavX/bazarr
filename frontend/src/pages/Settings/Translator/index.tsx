@@ -42,6 +42,7 @@ import {
   aiTranslatorParallelBatchesOptions,
   aiTranslatorReasoningOptions,
 } from "./options";
+import ProviderRoutingDetails from "./ProviderRoutingDetails";
 import { aiTranslatorProviderRoutingOptions } from "./routing";
 
 const engineOptions = [
@@ -509,7 +510,7 @@ const SettingsTranslatorView: FunctionComponent = () => {
                 </div>
                 <ReasoningSelector />
                 <Tooltip
-                  label="Which OpenRouter provider serves the model. Fastest picks the highest-throughput provider, Cheapest the lowest price. The :nitro and :floor variants also unlock OpenRouter's priority and flex tiers. The provider decides what a request costs."
+                  label="Tell AI Subtitle Translator how to choose providers. SmartFast balances speed and price. Custom restricts translation to your chosen providers. The :nitro and :floor options also allow priority and flex tiers."
                   multiline
                   w={280}
                   withArrow
@@ -545,6 +546,7 @@ const SettingsTranslatorView: FunctionComponent = () => {
                   />
                 </Tooltip>
               </SimpleGrid>
+              <ProviderRoutingDetails />
             </Stack>
           </Paper>
 

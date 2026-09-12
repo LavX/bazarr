@@ -19,6 +19,7 @@ from app.database import (get_exclusion_clause, get_audio_profile_languages, get
                           TableHistoryMovie, database, update, select)
 from app.event_handler import event_stream
 from app.jobs_queue import jobs_queue
+from app import activity
 from subliminal_patch.score import MAX_SCORES
 
 from ..adaptive_searching import is_search_active, updateFailedAttempts
@@ -301,8 +302,19 @@ def wanted_search_missing_subtitles_movies(job_id=None, wait_for_completion=Fals
         jobs_queue.update_job_progress(job_id=job_id, progress_value='max')
 
     throttled = False
+    observed = activity.register(activity.activity_id_for_job(job_id), operation='wanted_search',
+                                 scope_kind='server')
     for i, movie in enumerate(movies, start=1):
         jobs_queue.update_job_progress(job_id=job_id, progress_value=i, progress_message=movie.title)
+        # Observation only: the bulk loop knows which item it is on, and
+        # nothing else records that. "item i of N" is not N downloads.
+        # The owner is deliberately not recorded: this scan spans every
+        # instance, and a scope field that is never cleared would leave the
+        # whole server-wide search reading as scoped to whichever instance it
+        # touched last.
+        activity.note_scope(observed, media_type='movie',
+                            title=movie.title, upstream_movie_id=movie.radarrId)
+        activity.note_progress(observed, unit='item', value=i, total=count_movies)
 
         providers = get_providers()
         if providers:

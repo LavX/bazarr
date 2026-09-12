@@ -1,5 +1,12 @@
 interface Settings {
   general: Settings.General;
+  discover?: {
+    tmdb_configured: boolean;
+    /** Whether the reader saved a key of their own, never the key itself. */
+    tmdb_token_stored?: boolean;
+    metadata_revision: string;
+    locale: string;
+  };
   log: Settings.Log;
   proxy: Settings.Proxy;
   auth: Settings.Auth;
@@ -27,6 +34,7 @@ interface Settings {
 
 declare namespace Settings {
   interface General {
+    metadata_language?: string;
     adaptive_searching: boolean;
     adaptive_searching_delay: string;
     adaptive_searching_delta: string;
@@ -206,6 +214,7 @@ declare namespace Settings {
     openrouter_reasoning?: string;
     openrouter_parallel_batches?: number;
     openrouter_provider_routing?: string;
+    openrouter_provider_order?: string[];
   }
 
   interface Plex {

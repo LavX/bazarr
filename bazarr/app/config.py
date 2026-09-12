@@ -57,6 +57,49 @@ def validate_tags(tags):
     return all(re.match( r'^[a-z0-9_-]+$', item) for item in tags)
 
 
+def normalize_openrouter_provider_order(value):
+    if not isinstance(value, list) or len(value) > 20:
+        raise ValidationError('OpenRouter providers must be a list of at most 20 provider slugs.')
+    normalized = []
+    for provider in value:
+        if not isinstance(provider, str):
+            raise ValidationError('OpenRouter provider slugs must be text.')
+        provider = provider.strip().lower()
+        if len(provider) > 160:
+            raise ValidationError('OpenRouter provider slugs must be at most 160 characters.')
+        if not re.fullmatch(r'[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*', provider):
+            raise ValidationError('OpenRouter providers must contain nonempty provider or endpoint slugs, '
+                                  'such as deepinfra or parasail/fp8.')
+        if provider not in normalized:
+            normalized.append(provider)
+    return normalized
+
+
+# What a new install gets, and what an install that predates the setting gets instead.
+# smartfast needs AI Subtitle Translator 2.0.0; throughput is served by every version, so
+# an upgrade is never moved onto a routing its translator might refuse.
+DEFAULT_PROVIDER_ROUTING = 'smartfast'
+UPGRADED_PROVIDER_ROUTING = 'throughput'
+# Every routing the selector can store. Shared by the validator's is_in and the boot-time
+# normalization below so the two can never drift apart (the translation service module keeps
+# its own mirror, but a value has to satisfy this set before it is ever persisted).
+PROVIDER_ROUTING_VALUES = ('throughput', 'nitro', 'price', 'floor', 'latency', 'default', 'smartfast', 'custom')
+
+
+def normalize_stored_provider_routing(stored_routing):
+    """The routing an existing config should run with, given its stored value.
+
+    A value we understand is kept verbatim. A missing value (``None``) and any value
+    outside ``PROVIDER_ROUTING_VALUES`` are configs we do not understand, and both land
+    on the plain sort every translator serves rather than on the shipped default, which
+    refuses outright ahead of AI Subtitle Translator 2.0.0. A value we failed to parse is
+    not evidence about which translator version is running, so it must not select a mode
+    that can refuse.
+    """
+    if stored_routing in PROVIDER_ROUTING_VALUES:
+        return stored_routing
+    return UPGRADED_PROVIDER_ROUTING
+
 ONE_HUNDRED_YEARS_IN_MINUTES = 52560000
 ONE_HUNDRED_YEARS_IN_HOURS = 876000
 
@@ -246,11 +289,19 @@ validators = [
     Validator('translator.openrouter_reasoning', must_exist=True, default='disabled', is_type_of=str,
               is_in=['disabled', 'low', 'medium', 'high']),
     Validator('translator.openrouter_parallel_batches', must_exist=True, default=4, is_type_of=int, gte=1, lte=8),
-    # Which OpenRouter provider serves the model: throughput (the sidecar's historical default),
-    # nitro/floor (OpenRouter's slug shortcuts, which also unlock the priority/flex tiers),
-    # price, latency, or OpenRouter's own load balancing.
-    Validator('translator.openrouter_provider_routing', must_exist=True, default='throughput', is_type_of=str,
-              is_in=['throughput', 'nitro', 'price', 'floor', 'latency', 'default']),
+    # Which OpenRouter provider serves the model: smartfast (the default, where the sidecar
+    # weighs speed against price itself, per model and per session), throughput (the sidecar's
+    # historical default, fastest and often needlessly expensive), nitro/floor (OpenRouter's
+    # slug shortcuts, which also unlock the priority/flex tiers), price, latency, OpenRouter's
+    # own load balancing, or explicit provider selection.
+    #
+    # smartfast needs AI Subtitle Translator 2.0.0. A new install pointed at an older one is
+    # told to update rather than being routed some other way behind the user's back.
+    Validator('translator.openrouter_provider_routing', must_exist=True,
+              default=DEFAULT_PROVIDER_ROUTING, is_type_of=str,
+              is_in=list(PROVIDER_ROUTING_VALUES)),
+    Validator('translator.openrouter_provider_order', must_exist=True, default=[], is_type_of=list,
+              cast=normalize_openrouter_provider_order),
     Validator('translator.openrouter_encryption_key', must_exist=True, default='', is_type_of=str, cast=str),
     Validator('translator.lingarr_token', must_exist=True, default='', is_type_of=str, cast=str),
 
@@ -608,6 +659,10 @@ validators = [
     # OMDB: optional title/year resolution for movies that aren't in the
     # local library. Free tier at omdbapi.com (1000 req/day). Empty = skip.
     Validator('omdb.apikey', default='', cast=str),
+    # Validate new credential input before assignment, never interpolate a stored secret.
+    Validator('discover.tmdb_access_token', default=''),
+    Validator('discover.locale', default='en-US'),
+    Validator('general.metadata_language', default=''),
 ]
 
 
@@ -649,6 +704,29 @@ settings = Dynaconf(
 )
 
 settings.validators.register(*validators)
+
+# An install that predates the setting, or whose stored value we cannot make sense of,
+# keeps a sort every translator serves rather than being moved onto the new default.
+#
+# The validator default is written for a NEW install. Applying it to an upgrade would
+# move an install that has been translating happily onto a routing its translator may not
+# implement, and smartfast refuses rather than degrades, so the first symptom would be
+# every translation failing on a service the user never had reason to touch. The setting
+# first shipped in v2.6.2, so every config written before that lacks the key entirely and
+# would otherwise be indistinguishable from a fresh one. A stored value outside the set is
+# the same kind of config we do not understand, and the validation loop below would reset
+# it to the default (smartfast) just the same; normalizing it first prevents that, because
+# a value we failed to parse is not evidence about which translator version is running.
+#
+# A brand new install is the empty file created just above; anything with content in it
+# is an existing config, and existing configs keep the sort they can already be served.
+if os.path.getsize(config_yaml_file) > 0:
+    stored_routing = settings.get('translator.openrouter_provider_routing')
+    if stored_routing not in PROVIDER_ROUTING_VALUES:
+        settings['translator.openrouter_provider_routing'] = normalize_stored_provider_routing(stored_routing)
+        logging.info("Existing configuration has no usable OpenRouter provider routing (%r); keeping %s, "
+                     "which every AI Subtitle Translator version serves.", stored_routing,
+                     UPGRADED_PROVIDER_ROUTING)
 
 failed_validator = True
 while failed_validator:
@@ -700,7 +778,21 @@ _force_first_save_migration = has_plaintext_secrets_on_disk(settings)
 decrypt_settings_in_place(settings)
 
 
-def write_config():
+class MetadataPersistenceError(Exception):
+    """The requested metadata configuration could not be persisted."""
+
+
+class MetadataFollowupError(Exception):
+    """Metadata settings were persisted, but subsequent application work failed."""
+
+
+def write_config(*, strict_metadata=False):
+    from discover.metadata import CONFIG_LOCK
+    with CONFIG_LOCK:
+        return _write_config(strict_metadata=strict_metadata)
+
+
+def _write_config(*, strict_metadata=False):
     from secret_store.crypto import mark_master_key_persisted
     # On-disk shape compared in plaintext form: encrypt_secret is non-
     # deterministic (per-payload salt + timestamp), so naive ciphertext
@@ -729,14 +821,19 @@ def write_config():
         write(settings_path=config_yaml_file + '.tmp',
               settings_data=encrypted_payload,
               merge=False)
-    except Exception:
-        logging.error("Unable to save temporary settings file")
+    except Exception as error:
+        if strict_metadata:
+            raise MetadataPersistenceError("Discover settings could not be saved. Try again.") from None
+        logging.exception(f"Exception raised while trying to save temporary settings file: {error}")  # noqa: G004
         return False
     else:
         try:
             move(config_yaml_file + '.tmp', config_yaml_file)
-        except Exception:
-            logging.error("Unable to replace settings file")
+        except Exception as error:
+            if strict_metadata:
+                raise MetadataPersistenceError("Discover settings could not be saved. Try again.") from None
+            logging.exception(f"Exception raised while trying to overwrite settings file with temporary settings "  # noqa: G004
+                              f"file: {error}")
             return False
         else:
             # Only clear the forced-migration flag once the new
@@ -783,6 +880,7 @@ array_keys = ['excluded_tags',
               'enabled_integrations',
               'enabled_engines',
               'gemini_keys',
+              'openrouter_provider_order',
               'path_mappings',
               'path_mappings_movie',
               'remove_profile_tags',
@@ -842,11 +940,17 @@ write_config()
 
 
 def get_settings():
+    from discover.metadata import CONFIG_LOCK
+    with CONFIG_LOCK:
+        return _get_settings()
+
+
+def _get_settings():
     # API serializer for /api/system/settings. SYSTEM_SECRETS are masked
     # with '***' (key still present so the wire shape is stable, value
     # hidden); USER_VISIBLE_SECRETS pass through unchanged because the
     # in-memory settings already hold their decrypted plaintext.
-    from secret_store import is_system_secret  # noqa: PLC0415, RUF100
+    from secret_store import is_system_secret, is_write_only_secret  # noqa: PLC0415, RUF100
     from secret_store.registry import IMPORT_ONLY_SECTIONS
     settings_to_return = {}
     for k, v in settings.as_dict().items():
@@ -857,6 +961,11 @@ def get_settings():
             settings_to_return[k] = dict()
             for subk, subv in v.items():
                 full_path = f"{k}.{subk.lower()}"
+                if is_write_only_secret(full_path):
+                    continue
+                if k == "discover" and subk.lower() in {"tmdb_configured", "tmdb_token_stored",
+                                                        "metadata_revision"}:
+                    continue
                 if is_system_secret(full_path):
                     # Keep empty values literally empty so the UI can
                     # distinguish "not configured" from "configured but
@@ -869,6 +978,15 @@ def get_settings():
                     settings_to_return[k].update({subk: get_array_from(subv)})
                 else:
                     settings_to_return[k].update({subk: subv})
+    from discover.metadata import configuration, reader_token_stored
+    metadata_config = configuration()
+    # Two separate facts: metadata works at all, which the built-in key makes
+    # true everywhere, and whether the reader saved a key of their own, which
+    # is the only one that can be removed.
+    settings_to_return.setdefault("discover", {}).update({
+        "tmdb_configured": bool(metadata_config.token), "tmdb_token_stored": reader_token_stored(),
+        "metadata_revision": metadata_config.revision})
+    settings_to_return.setdefault("general", {})["metadata_language"] = metadata_config.locale
     return settings_to_return
 
 
@@ -936,6 +1054,79 @@ def _active_provider_hub_provider_ids():
         return set()
 
 
+def _translator_field(settings_items, name):
+    """The value a request carries for ``settings-translator-<name>``, or None.
+
+    Matched on the whole key rather than its last segment. The settings store underneath
+    is case-insensitive, so the name is compared case-insensitively, but the section is
+    not: a key naming some other section must never be read as, or written to, this one.
+    """
+    for key, value in settings_items:
+        parts = key.split('-')
+        if len(parts) == 3 and parts[0] == 'settings' and parts[1] == 'translator' and parts[2].lower() == name:
+            return value
+    return None
+
+
+def _is_provider_order_key(key):
+    """True for settings-translator-openrouter_provider_order in any casing of the name."""
+    parts = key.split('-')
+    return (len(parts) == 3 and parts[0] == 'settings' and parts[1] == 'translator'
+            and parts[2].lower() == 'openrouter_provider_order')
+
+
+def _require_provider_order_for_custom_routing(settings_items):
+    """Refuse custom OpenRouter routing that names no provider.
+
+    The routing and the provider list arrive in the same request and only mean anything
+    together. Stored apart, custom with an empty list saves cleanly and then fails every
+    translation, and by that point the only signal is a failed job.
+
+    Only a request that actually carries one of the two keys is checked. Reading the pair
+    off stored settings for every save made one bad translator config reject saves on
+    every other settings page, which is a worse failure than the one being prevented and
+    lands on a page that cannot fix it.
+    """
+    submitted_routing = _translator_field(settings_items, 'openrouter_provider_routing')
+    submitted_order = _translator_field(settings_items, 'openrouter_provider_order')
+    if submitted_routing is None and submitted_order is None:
+        return
+    routing = submitted_routing
+    if routing is None:
+        routing = getattr(settings.translator, 'openrouter_provider_routing', '')
+    if isinstance(routing, list):
+        routing = routing[0] if routing else ''
+    if str(routing).lower() != 'custom':
+        return
+    order = submitted_order
+    if order is None:
+        order = getattr(settings.translator, 'openrouter_provider_order', [])
+    if not order:
+        raise ValidationError('OpenRouter custom routing requires at least one provider slug. '
+                              'Choose a provider, or pick another routing option.')
+
+
+def validate_metadata_settings(settings_items):
+    from discover.metadata import validate_token
+    allowed = {"settings-discover-tmdb_access_token", "settings-discover-locale",
+               "settings-general-metadata_language"}
+    seen = set()
+    for key, values in settings_items:
+        if not key.lower().startswith("settings-discover-") and key.lower() != "settings-general-metadata_language":
+            continue
+        if key not in allowed or key in seen:
+            raise ValidationError("Invalid Discover setting.")
+        seen.add(key)
+        if not isinstance(values, list) or len(values) != 1:
+            raise ValidationError("Invalid TMDB access token." if key.endswith("tmdb_access_token")
+                                  else "Invalid metadata language.")
+        if key.endswith("tmdb_access_token"):
+            try:
+                validate_token(values[0])
+            except ValueError:
+                raise ValidationError("Invalid TMDB access token.") from None
+        elif not isinstance(values[0], str) or not re.fullmatch(r"[a-z]{2,3}(?:-[A-Z]{2})?", values[0]):
+            raise ValidationError("Invalid metadata language.")
 def restore_persisted_settings():
     """Return the live settings object to what is actually saved on disk.
 
@@ -951,38 +1142,102 @@ def restore_persisted_settings():
 
 _native_settings_save_lock = threading.RLock()
 
+NATIVE_MASTER_KEYS = {'settings-general-use_emby', 'settings-general-use_silo'}
 
-def save_settings(settings_items):
-    from media_servers.http import MediaServerError, parse_verify_ssl
-    from secret_store.registry import IMPORT_ONLY_SECTIONS
 
-    settings_items = list(settings_items)
-    masters = {'settings-general-use_emby', 'settings-general-use_silo'}
-    for index, (key, value) in enumerate(settings_items):
-        parts = key.lower().split('-')
-        if len(parts) > 1 and parts[1] in IMPORT_ONLY_SECTIONS:
-            raise ValidationError('Use media server instances to edit connection settings')
-        if key in masters:
-            if isinstance(value, list) and len(value) == 1:
-                value = value[0]
-            try:
-                settings_items[index] = key, parse_verify_ssl(value)
-            except MediaServerError:
-                raise ValidationError('Invalid native media server master switch') from None
+def _save_settings_with_native(settings_items, *, strict_metadata=False, on_metadata_persisted=None):
+    """Apply the media-server master-switch handling around a settings save."""
     with _native_settings_save_lock:
-        if not any(key in masters for key, _value in settings_items):
-            return _save_settings(settings_items)
+        if not any(key in NATIVE_MASTER_KEYS for key, _value in settings_items):
+            return _save_settings(settings_items, strict_metadata=strict_metadata,
+                                  on_metadata_persisted=on_metadata_persisted)
         from media_servers.dispatcher import get_native_configuration
         native = get_native_configuration()
         with native.lock:
             try:
-                return _save_settings(settings_items, native)
+                return _save_settings(settings_items, native, strict_metadata=strict_metadata,
+                                      on_metadata_persisted=on_metadata_persisted)
             finally:
                 for kind, enabled in native.masters.items():
                     _settings_mapping(settings, 'general')['use_' + kind] = enabled
 
 
-def _save_settings(settings_items, native_configuration=None):
+def save_settings(settings_items):
+    from media_servers.http import MediaServerError, parse_verify_ssl
+    from secret_store.registry import IMPORT_ONLY_SECTIONS
+
+    items = list(settings_items)
+    validate_metadata_settings(items)
+
+    for index, (key, value) in enumerate(items):
+        parts = key.lower().split('-')
+        if len(parts) > 1 and parts[1] in IMPORT_ONLY_SECTIONS:
+            raise ValidationError('Use media server instances to edit connection settings')
+        if key in NATIVE_MASTER_KEYS:
+            if isinstance(value, list) and len(value) == 1:
+                value = value[0]
+            try:
+                items[index] = key, parse_verify_ssl(value)
+            except MediaServerError:
+                raise ValidationError('Invalid native media server master switch') from None
+
+    from discover.metadata import CONFIG_LOCK, invalidate_metadata
+    with CONFIG_LOCK:
+        if not any(key.startswith("settings-discover-") or key == "settings-general-metadata_language"
+                   for key, _ in items):
+            return _save_settings_with_native(items)
+        previous = dict(settings.discover)
+        previous_language = settings.get("general.metadata_language", "")
+        effective_language = previous_language
+        effective = dict(previous)
+        for key, values in items:
+            if key == "settings-general-metadata_language":
+                effective_language = values[0]
+            if key.startswith("settings-discover-"):
+                field = key.removeprefix("settings-discover-")
+                if field != "tmdb_access_token" or values[0] != "***":
+                    effective[field] = values[0]
+        changed = effective != previous or effective_language != previous_language
+        persisted = False
+
+        def metadata_persisted():
+            nonlocal persisted
+            persisted = True
+            invalidate_metadata()
+
+        try:
+            _save_settings_with_native(items, strict_metadata=changed,
+                                       on_metadata_persisted=metadata_persisted if changed else None)
+        except Exception:
+            if persisted:
+                raise MetadataFollowupError(
+                    "Discover settings were saved, but application refresh failed. Reload settings before retrying."
+                ) from None
+            settings.set("discover", previous)
+            settings.set("general.metadata_language", previous_language)
+            raise
+
+
+def _save_settings(settings_items, native_configuration=None, *, strict_metadata=False,
+                   on_metadata_persisted=None):
+    # Validate repeated form values before applying any changes, including the
+    # single-value and empty-list representations used by the settings editor.
+    #
+    # The settings store underneath is case-insensitive, so a case variant of the name
+    # would reach the same key while skipping this normalizer and leaving a second,
+    # unvalidated copy in the config file. The name is therefore compared case
+    # insensitively and rewritten to its canonical form, because every later step here
+    # compares the last segment against array_keys and str_keys exactly.
+    #
+    # The section is compared exactly. Matching the name alone let a key naming any other
+    # section be redirected into the translator's, which is a silent cross-section write.
+    settings_items = [
+        ('settings-translator-openrouter_provider_order',
+         normalize_openrouter_provider_order([] if value == [''] else value))
+        if _is_provider_order_key(key) else (key, value)
+        for key, value in settings_items
+    ]
+    _require_provider_order_for_custom_routing(settings_items)
     configure_debug = False
     configure_captcha = False
     update_schedule = False
@@ -1015,6 +1270,12 @@ def _save_settings(settings_items, native_configuration=None):
 
         settings_keys = key.split('-')
 
+        if key in {'settings-discover-tmdb_access_token', 'settings-discover-locale'}:
+            if key.endswith('tmdb_access_token') and value[0] == '***':
+                continue
+            settings.discover[settings_keys[-1]] = value[0]
+            continue
+
         # Make sure that text based form values aren't passed as list
         if isinstance(value, list) and len(value) == 1 and settings_keys[-1] not in array_keys:
             value = value[0]
@@ -1032,7 +1293,8 @@ def _save_settings(settings_items, native_configuration=None):
                     pass
 
         # Make sure empty language list are stored correctly
-        if settings_keys[-1] in array_keys and value[0] in empty_values:
+        if (settings_keys[-1] in array_keys and settings_keys[-1] != 'openrouter_provider_order'
+                and value and value[0] in empty_values):
             value = []
 
         # Handle path mappings settings since they are array in array
@@ -1318,7 +1580,16 @@ def _save_settings(settings_items, native_configuration=None):
         restore_persisted_settings()
         raise
     else:
-        if write_config() is not True:
+        if strict_metadata:
+            try:
+                saved = write_config(strict_metadata=True)
+            except Exception:
+                restore_persisted_settings()
+                raise MetadataPersistenceError("Discover settings could not be saved. Try again.") from None
+        else:
+            saved = write_config()
+
+        if saved is not True:
             # The request is refused, so none of it may stay applied. Every
             # submitted value is already on the live settings object by now,
             # and when a media-server master switch travelled with it the
@@ -1331,6 +1602,9 @@ def _save_settings(settings_items, native_configuration=None):
             raise ValidationError('Unable to save settings to disk')
         if native_configuration is not None:
             native_configuration.publish_masters(settings)
+
+        if on_metadata_persisted is not None:
+            on_metadata_persisted()
 
         # Set the configured state based on config.yaml file existence
         from .database import database, update, System

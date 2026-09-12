@@ -101,7 +101,7 @@ RUNTIME_REQUIREMENTS = {
     "apscheduler": ("apscheduler", "==3.11.3"),
     "babelfish": ("babelfish", "==0.6.1"),
     "bs4": ("beautifulsoup4", "==4.15.0"),
-    "cachetools": ("cachetools", ">=7.1.4"),
+    "cachetools": ("cachetools", ">=7.1.8"),
     "certifi": ("certifi", "==2026.7.22"),
     "chardet": ("chardet", "==7.6.0"),
     "charset_normalizer": ("charset-normalizer", "==3.5.1"),

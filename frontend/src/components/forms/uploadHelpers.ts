@@ -1,5 +1,5 @@
 // Pure helpers for the subtitle upload modals. Kept out of the components so
-// the behaviours below are unit-tested directly. See Codex pass-3 on PR #248.
+// the behaviours below are unit-tested directly.
 
 // Find the episode an embedded-info filename points at, or null.
 export function matchEpisode(

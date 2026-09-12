@@ -362,7 +362,7 @@ def test_proxy_service_returns_connection_error_when_no_ip_reachable(monkeypatch
 def test_format_host_header_brackets_ipv6():
     """RFC 7230 §5.4 requires IPv6 literals in the Host header to be
     bracketed. urlparse(...).hostname strips brackets, so the helper
-    has to put them back. Codex P2 round 3."""
+    has to put them back."""
     from app.ui import _format_host_header
     # IPv6 with non-default port
     assert _format_host_header("::1", 8989, "http") == "[::1]:8989"
@@ -384,7 +384,7 @@ def test_proxy_service_brackets_ipv6_in_host_header(monkeypatch):
     """Verify the IPv6 Host header makes it through proxy_service intact.
     Without the bracketing fix, Sonarr/Radarr behind certain HTTP parsers
     return 400 because Host: ::1:8989 is ambiguous (which colon is the
-    port separator?). Codex P2 round 3."""
+    port separator?)."""
     monkeypatch.setattr("app.config.settings.auth.type", None)
     monkeypatch.setattr(socket, "getaddrinfo",
                         lambda *a, **kw: [_addr("::1")])
@@ -428,7 +428,7 @@ def test_proxy_service_pins_to_resolved_ip_for_http(monkeypatch):
 
 
 def test_proxy_service_does_not_pin_for_https_with_verify(monkeypatch):
-    """Codex P2: when HTTPS is in use with verify_ssl=True, pinning the
+    """When HTTPS is in use with verify_ssl=True, pinning the
     URL to the resolved IP would set SNI to the IP and fail TLS
     hostname validation against a cert legitimately issued for the
     hostname. The hostname must be preserved in the URL so urllib3

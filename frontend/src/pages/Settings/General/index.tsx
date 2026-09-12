@@ -28,6 +28,7 @@ import {
   Text,
 } from "@/pages/Settings/components";
 import { useBaseInput } from "@/pages/Settings/utilities/hooks";
+import { useSettings } from "@/pages/Settings/utilities/SettingsProvider";
 import { Environment, toggleState } from "@/utilities";
 import ExternalWebhookSelector from "./ExternalWebhookSelector";
 import { branchOptions, proxyOptions, securityOptions } from "./options";
@@ -60,7 +61,7 @@ import { branchOptions, proxyOptions, securityOptions } from "./options";
 // After typing "newpw", a fresh `stored` read returns "newpw", so a
 // fall-back to `stored` on clear would re-stage the new password
 // instead of the original hash - silently saving the typed-then-
-// cancelled password. Codex flagged this. The ref captures the value
+// cancelled password. The ref captures the value
 // once on first render (before any user interaction can stage anything)
 // and stays pinned to the loaded hash for the lifetime of the
 // component.
@@ -72,7 +73,7 @@ const AuthPasswordInput: FunctionComponent = () => {
     settingKey: "settings-auth-password",
   });
   // Capture the FIRST observed `stored` value, including the empty
-  // string. Codex P3: the prior `stored.length > 0` guard meant
+  // string. The prior `stored.length > 0` guard meant
   // originalRef.current stayed null whenever there was no auth password
   // configured, and the type-then-clear path below sent that null back
   // through FormData, where it was serialized as the string "null" and
@@ -116,6 +117,55 @@ const generateApiKey = () => {
     .join("");
 };
 
+export function MetadataLanguage() {
+  const settings = useSettings();
+  const locale =
+    settings?.general.metadata_language || settings?.discover?.locale;
+  return (
+    <Selector
+      label="Metadata language"
+      searchable
+      settingKey="settings-general-metadata_language"
+      settingOptions={{
+        onLoaded: (settings) =>
+          settings.general.metadata_language ||
+          settings.discover?.locale ||
+          "en-US",
+      }}
+      options={[
+        { value: "en-US", label: "English (United States)" },
+        { value: "en-GB", label: "English (United Kingdom)" },
+        { value: "hu-HU", label: "Hungarian" },
+        { value: "de-DE", label: "German" },
+        { value: "fr-FR", label: "French" },
+        { value: "es-ES", label: "Spanish" },
+        { value: "it-IT", label: "Italian" },
+        { value: "pt-BR", label: "Portuguese (Brazil)" },
+        { value: "ja-JP", label: "Japanese" },
+        { value: "ko-KR", label: "Korean" },
+        { value: "zh-CN", label: "Chinese (Simplified)" },
+      ].concat(
+        locale &&
+          ![
+            "en-US",
+            "en-GB",
+            "hu-HU",
+            "de-DE",
+            "fr-FR",
+            "es-ES",
+            "it-IT",
+            "pt-BR",
+            "ja-JP",
+            "ko-KR",
+            "zh-CN",
+          ].includes(locale)
+          ? [{ value: locale, label: locale }]
+          : [],
+      )}
+    />
+  );
+}
+
 const SettingsGeneralView: FunctionComponent = () => {
   const { data: status } = useSystemStatus();
   const [copied, setCopy] = useState(false);
@@ -155,6 +205,13 @@ const SettingsGeneralView: FunctionComponent = () => {
         <Message>
           Hostname or IP address to access Bazarr (ie: bazarr.mydomain.local or
           192.168.0.100). Required for webhook security.
+        </Message>
+      </Section>
+      <Section header="Metadata">
+        <MetadataLanguage />
+        <Message>
+          Preferred language for titles and descriptions across Bazarr+.
+          Subtitle languages are managed separately.
         </Message>
       </Section>
       <Section header="Media">
