@@ -192,6 +192,42 @@ def test_jobs_only_enabled_sportarr_and_stale_removal(schema_session, monkeypatc
                                              f'upgrade_sports_subtitles_{disabled.id}', 'sportarr_clients'}
 
 
+def test_league_rows_aggregate_events_with_missing_languages(library):
+    """The league list reports how many of a league's events still want a language.
+
+    The count is aggregated in the leagues query (one grouped pass over the
+    events table), never computed per row on the client, and it counts
+    distinct events, not file-rows: the first two rows below are two parts of
+    one upstream event, and with both parts missing they still count as one.
+    A league whose events all carry an empty missing list reports 0, which
+    the library page renders as nothing at all.
+    """
+    from app.database import TableSportsEvents, TableSportsLeagues
+    from sportarr.library import list_leagues
+    session, _ = library
+    session.execute(sa.insert(TableSportsLeagues), [
+        dict(id=51, arr_instance_id=1, sportarrLeagueId=7, title='Partial'),
+        dict(id=52, arr_instance_id=1, sportarrLeagueId=8, title='Complete'),
+    ])
+    session.execute(sa.insert(TableSportsEvents), [
+        dict(id=61, arr_instance_id=1, league_id=51, sportarrEventId=9, partNumber=1,
+             file_id=91, path='/a.mkv', title='A', missing_subtitles="['en']"),
+        # Second part of the same upstream event: same sportarrEventId.
+        dict(id=62, arr_instance_id=1, league_id=51, sportarrEventId=9, partNumber=2,
+             file_id=92, path='/b.mkv', title='A', missing_subtitles="['fr']"),
+        dict(id=63, arr_instance_id=1, league_id=51, sportarrEventId=10, partNumber=1,
+             file_id=93, path='/c.mkv', title='B', missing_subtitles='[]'),
+        dict(id=64, arr_instance_id=1, league_id=51, sportarrEventId=11, partNumber=1,
+             file_id=94, path='/d.mkv', title='C', missing_subtitles="['de']"),
+        dict(id=65, arr_instance_id=1, league_id=52, sportarrEventId=12, partNumber=1,
+             file_id=95, path='/e.mkv', title='D', missing_subtitles='[]'),
+    ])
+    rows = {row['id']: row for row in list_leagues(session, 1)['data']}
+    # Three file-rows want a language but only two distinct events do.
+    assert rows[51]['missingLanguageCount'] == 2
+    assert rows[52]['missingLanguageCount'] == 0
+
+
 def test_league_api_scope_and_profile_validation(schema_session):
     from app.database import TableSportsLeagues, TableLanguagesProfiles
     from arr_instances.repository import ArrInstanceRepository

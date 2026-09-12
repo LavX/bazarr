@@ -1,7 +1,7 @@
 """Local-ID sports library operations shared by the HTTP boundary."""
 import ast
 
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 
 from app.database import TableArrInstances, TableSportsLeagues, TableSportsEvents, TableLanguagesProfiles
 from arr_instances.media_defaults import instance_default_profile, read_media_defaults
@@ -18,8 +18,19 @@ def _query():
         TableSportsEvents.arr_instance_id,
         func.count(func.distinct(TableSportsEvents.sportarrEventId)).label('eventCount'),
         func.count(TableSportsEvents.id).label('eventFileCount'),
+        # The D4 league-list indicator: how many of a league's EVENTS still
+        # have at least one missing language, from a clean aggregate. The
+        # stored missing_subtitles is a Python list literal, so an event with
+        # nothing missing holds '' or '[]' and everything else has entries.
+        # Counted on the distinct event id like eventCount, not on file-rows:
+        # one two-part event with both parts missing is one event, not two.
+        func.count(func.distinct(case(
+            (TableSportsEvents.missing_subtitles.notin_(('', '[]')),
+             TableSportsEvents.sportarrEventId),
+            else_=None))).label('missingLanguageCount'),
     ).group_by(TableSportsEvents.league_id, TableSportsEvents.arr_instance_id).subquery()
-    return select(TableSportsLeagues, counts.c.eventCount, counts.c.eventFileCount).join(
+    return select(TableSportsLeagues, counts.c.eventCount, counts.c.eventFileCount,
+                  counts.c.missingLanguageCount).join(
         TableArrInstances, TableArrInstances.id == TableSportsLeagues.arr_instance_id).outerjoin(
         counts, (counts.c.league_id == TableSportsLeagues.id) &
         (counts.c.arr_instance_id == TableSportsLeagues.arr_instance_id)).where(
@@ -27,7 +38,7 @@ def _query():
 
 
 def _serialize(row):
-    league, event_count, file_count = row
+    league, event_count, file_count, missing_count = row
     result = league.to_dict()
     for field in ('created_at_timestamp', 'updated_at_timestamp'):
         if result[field] is not None:
@@ -39,7 +50,8 @@ def _serialize(row):
             value = []
         result[field] = value if isinstance(value, list) else []
     result['monitored'] = result['monitored'] == 'True'
-    return result | {'eventCount': event_count or 0, 'eventFileCount': file_count or 0}
+    return result | {'eventCount': event_count or 0, 'eventFileCount': file_count or 0,
+                     'missingLanguageCount': missing_count or 0}
 
 
 def list_leagues(session, arr_instance_id=None, start=0, length=100):

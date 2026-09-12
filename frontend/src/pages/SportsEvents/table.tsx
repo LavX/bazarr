@@ -13,26 +13,35 @@ import {
   faHistory,
   faLayerGroup,
   faMagnifyingGlass,
+  faQuestionCircle,
+  faSpinner,
   faSync,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef, Table as TableInstance } from "@tanstack/react-table";
-import { useSubtitleFileDownload } from "@/apis/hooks";
+import { useSubtitleFileDownload, useSubtitleSyncStatus } from "@/apis/hooks";
 import { useCombineSubtitles } from "@/apis/hooks/combine";
+import { useShowOnlyDesired } from "@/apis/hooks/site";
 import { useSportsSubtitleModification } from "@/apis/hooks/sports";
 import { SportsEvent } from "@/apis/raw/sports";
 import { Action, GroupTable } from "@/components";
-import { AudioList, CombinedSubtitleBadge } from "@/components/bazarr";
+import {
+  AudioList,
+  CombinedSubtitleBadge,
+  HistoryIcon,
+} from "@/components/bazarr";
 import { SportsSearchModal } from "@/components/modals/SportsSearchModal";
 import SyncOutputCompareModal from "@/components/modals/SyncOutputCompareModal";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
 import TextPopover from "@/components/TextPopover";
 import { useModals } from "@/modules/modals";
-import { BuildKey, toPython } from "@/utilities";
+import { BuildKey, filterSubtitleBy, toPython } from "@/utilities";
+import { useProfileItemsToLanguages } from "@/utilities/languages";
 import {
   buildSubtitleLanguageKey,
   canSynchronizeSubtitle,
   combineRequestForSubtitle,
+  getSubtitleSyncStatusPresentation,
   isCombinedOutputSubtitle,
   isCompatibleSyncOutputSubtitle,
   isSyncOutputSubtitle,
@@ -45,6 +54,8 @@ interface Props {
   events: SportsEvent[] | null;
   disabled?: boolean;
   indexingId?: number;
+  /** The league's language profile, used to honour the only-desired rule. */
+  profile?: Language.Profile;
   onIndex: (event: SportsEvent) => void;
   onAllRowsExpandedChanged: (isAllRowsExpanded: boolean) => void;
 }
@@ -273,14 +284,33 @@ const EventSubtitleBadge: FunctionComponent<{
 
 // Extracted for the same reason as EventRowActions below: it needs the modals
 // hook, and hook objects change identity every render.
-const EventSubtitles: FunctionComponent<{ event: SportsEvent }> = ({
-  event,
-}) => {
+const EventSubtitles: FunctionComponent<{
+  event: SportsEvent;
+  profile?: Language.Profile;
+}> = ({ event, profile }) => {
+  // The shared only-desired rule Series and Movies apply to their subtitle
+  // lists. The events table used to render every stored tuple, so an embedded
+  // track the operator explicitly hid on the other two pages stayed visible
+  // here. The filter lives at the frontend boundary, not in the serializer:
+  // event.subtitles also feeds the Mass Edit payload and the badge menus, and
+  // those must keep acting on every file, exactly as before.
+  const onlyDesired = useShowOnlyDesired();
+  const profileItems = useProfileItemsToLanguages(profile);
+
   // The subtitles the event already has are the translate sources for the ones
-  // it does not, so the tuples are widened once and read by both lists.
-  const presentSubtitles = useMemo(
+  // it does not, so the tuples are widened once and read by both lists. The
+  // badges an operator sees are filtered by the only-desired rule; the sources
+  // are not, matching how the Series table passes every subtitle to its menu.
+  const allPresentSubtitles = useMemo(
     () => (event.subtitles ?? []).map(toSportsSubtitle),
     [event.subtitles],
+  );
+  const presentSubtitles = useMemo(
+    () =>
+      onlyDesired
+        ? filterSubtitleBy(allPresentSubtitles, profileItems)
+        : allPresentSubtitles,
+    [allPresentSubtitles, onlyDesired, profileItems],
   );
 
   return (
@@ -290,7 +320,7 @@ const EventSubtitles: FunctionComponent<{ event: SportsEvent }> = ({
           key={BuildKey(index, language, "missing")}
           event={event}
           subtitle={toSportsSubtitle([language, null, null])}
-          availableSubtitles={presentSubtitles}
+          availableSubtitles={allPresentSubtitles}
           missing
         />
       ))}
@@ -299,7 +329,7 @@ const EventSubtitles: FunctionComponent<{ event: SportsEvent }> = ({
           key={BuildKey(index, subtitle.language ?? subtitle.code2, "present")}
           event={event}
           subtitle={subtitle}
-          availableSubtitles={presentSubtitles}
+          availableSubtitles={allPresentSubtitles}
         />
       ))}
       {!event.missing_subtitles?.length && !event.subtitles?.length ? (
@@ -307,6 +337,110 @@ const EventSubtitles: FunctionComponent<{ event: SportsEvent }> = ({
           {event.profileId == null ? "No profile" : "None"}
         </Text>
       ) : null}
+    </Group>
+  );
+};
+
+// The two indicators the movie Status cell renders while a sync runs or
+// cannot be confirmed, reproduced here so the sports row shows the same
+// language the shared sync-status endpoint reports. The history icon itself
+// is the shared HistoryIcon component, so nothing diverges on the completed
+// state.
+const UnconfirmedSyncIcon: FunctionComponent<{ label: string }> = ({
+  label,
+}) => (
+  <Tooltip
+    label={label}
+    openDelay={500}
+    position="right"
+    events={{ hover: true, focus: false, touch: true }}
+  >
+    <Text span c="yellow.5">
+      <FontAwesomeIcon
+        aria-label="Sync unconfirmed"
+        icon={faQuestionCircle}
+      ></FontAwesomeIcon>
+    </Text>
+  </Tooltip>
+);
+
+const ActiveSyncIcon: FunctionComponent<{ label: string }> = ({ label }) => (
+  <Tooltip
+    label={label}
+    openDelay={500}
+    position="right"
+    events={{ hover: true, focus: false, touch: true }}
+  >
+    <Text span c="blue.4">
+      <FontAwesomeIcon
+        aria-label={label}
+        icon={faSpinner}
+        spin
+      ></FontAwesomeIcon>
+    </Text>
+  </Tooltip>
+);
+
+// One subtitle's sync status, the sports counterpart of the movie Status cell:
+// the same shared hook and presentation, so the spinner, the unconfirmed
+// state and the sync history icon mean the same thing on both media types.
+const EventSubtitleStatus: FunctionComponent<{
+  event: SportsEvent;
+  subtitle: Subtitle;
+}> = ({ event, subtitle }) => {
+  const languageKey = buildSubtitleLanguageKey(subtitle);
+  const canCheckSyncStatus =
+    !!subtitle.path && !isCombinedOutputSubtitle(subtitle);
+  const syncStatus = useSubtitleSyncStatus(
+    "sports",
+    event.id,
+    languageKey,
+    canCheckSyncStatus,
+    event.arr_instance_id,
+  );
+  const presentation = syncStatus.data
+    ? getSubtitleSyncStatusPresentation(syncStatus.data)
+    : null;
+
+  if (!canCheckSyncStatus) {
+    return null;
+  }
+  if (syncStatus.isError) {
+    return <UnconfirmedSyncIcon label="Sync status could not be verified" />;
+  }
+  if (presentation?.icon === "running") {
+    return <ActiveSyncIcon label={presentation.label} />;
+  }
+  if (presentation?.icon === "question") {
+    return <UnconfirmedSyncIcon label={presentation.label} />;
+  }
+  if (presentation?.icon === "sync") {
+    return <HistoryIcon action={5} />;
+  }
+  return null;
+};
+
+// One indicator per present subtitle, in the same order as its badge, so the
+// Status column lines up with the language it describes. Movies render one
+// row per subtitle; an event holds its subtitles in one cell, so the column
+// here is a group of the per-subtitle states instead.
+const EventSubtitleStatuses: FunctionComponent<{ event: SportsEvent }> = ({
+  event,
+}) => {
+  const presentSubtitles = useMemo(
+    () => (event.subtitles ?? []).map(toSportsSubtitle),
+    [event.subtitles],
+  );
+
+  return (
+    <Group gap="xs" wrap="nowrap">
+      {presentSubtitles.map((subtitle, index) => (
+        <EventSubtitleStatus
+          key={BuildKey(index, subtitle.language ?? subtitle.code2, "status")}
+          event={event}
+          subtitle={subtitle}
+        />
+      ))}
     </Group>
   );
 };
@@ -384,7 +518,14 @@ const EventRowActions: FunctionComponent<{
 // directly instead of reusing the episode Subtitle component.
 const Table = forwardRef<TableInstance<SportsEvent> | null, Props>(
   (
-    { events, disabled, indexingId, onIndex, onAllRowsExpandedChanged },
+    {
+      events,
+      disabled,
+      indexingId,
+      profile,
+      onIndex,
+      onAllRowsExpandedChanged,
+    },
     ref,
   ) => {
     const tableRef =
@@ -393,15 +534,19 @@ const Table = forwardRef<TableInstance<SportsEvent> | null, Props>(
     const columns = useMemo<ColumnDef<SportsEvent>[]>(
       () => [
         {
+          // The real monitored state, which is what gates automatic search.
+          // This used to read hasFile, a literal True the serializer always
+          // sends, so every event looked monitored and the unmonitored
+          // branch was dead code. The file signal survives in the tooltip,
+          // though the events serializer keeps sending True for now.
           id: "monitored",
           cell: ({ row: { original } }) => (
             <Tooltip
-              label={
-                original.hasFile ? "File available" : "No file in Sportarr"
-              }
+              label={`${original.monitored ? "Monitored" : "Unmonitored"} in Sportarr${original.hasFile ? "" : ", no file"}`}
             >
               <FontAwesomeIcon
-                icon={original.hasFile ? faBookmark : farBookmark}
+                aria-label={original.monitored ? "Monitored" : "Unmonitored"}
+                icon={original.monitored ? faBookmark : farBookmark}
               />
             </Tooltip>
           ),
@@ -483,7 +628,15 @@ const Table = forwardRef<TableInstance<SportsEvent> | null, Props>(
         {
           header: "Subtitles",
           accessorKey: "missing_subtitles",
-          cell: ({ row: { original } }) => <EventSubtitles event={original} />,
+          cell: ({ row: { original } }) => (
+            <EventSubtitles event={original} profile={profile} />
+          ),
+        },
+        {
+          header: "Status",
+          cell: ({ row: { original } }) => (
+            <EventSubtitleStatuses event={original} />
+          ),
         },
         {
           header: "Actions",
@@ -497,7 +650,7 @@ const Table = forwardRef<TableInstance<SportsEvent> | null, Props>(
           ),
         },
       ],
-      [disabled, indexingId, onIndex],
+      [disabled, indexingId, onIndex, profile],
     );
 
     const maxSeason = useMemo(

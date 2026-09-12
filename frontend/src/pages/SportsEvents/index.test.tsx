@@ -29,6 +29,19 @@ describe("sports event detail", () => {
       http.get("/api/system/settings", () =>
         HttpResponse.json({ general: { use_sportarr: true } }),
       ),
+      // The Status column asks the shared sync-status endpoint once per
+      // on-disk subtitle. Most tests here are not about sync, so default the
+      // answer to "never synced"; the focused tests override it.
+      http.get("/api/sports/events/*/subtitles/*/sync-status", () =>
+        HttpResponse.json({
+          synced: false,
+          confirmed: false,
+          editedAfterSync: false,
+          lastModified: 0,
+          lastSyncTimestamp: null,
+          jobStatus: null,
+        }),
+      ),
     );
   });
   it("refreshes cleared subtitle state when a file becomes unavailable", async () => {
@@ -165,6 +178,194 @@ describe("sports event detail", () => {
     );
     expect(
       await within(rowFor(/Prelims/)).findByText("en:hi"),
+    ).toBeInTheDocument();
+  });
+
+  it.each([true, false])(
+    "honours the only-desired rule for embedded present subtitles, setting=%s",
+    async (onlyDesired) => {
+      server.use(
+        http.get("/api/system/settings", () =>
+          HttpResponse.json({
+            general: {
+              use_sportarr: true,
+              embedded_subs_show_desired: onlyDesired,
+            },
+          }),
+        ),
+        http.get("/api/system/arr-instances", () =>
+          HttpResponse.json([sportarr]),
+        ),
+        http.get("/api/system/languages/profiles", () =>
+          HttpResponse.json([
+            {
+              profileId: 5,
+              name: "English only",
+              cutoff: null,
+              items: [
+                {
+                  id: 0,
+                  language: "en",
+                  forced: "False",
+                  hi: "False",
+                  audio_exclude: "False",
+                  audio_only_include: "False",
+                  translate_from: null,
+                },
+              ],
+              mustContain: [],
+              mustNotContain: [],
+              originalFormat: false,
+              tag: "",
+              combine: null,
+            },
+          ]),
+        ),
+        http.get("/api/system/languages", () =>
+          HttpResponse.json([
+            { code2: "en", code3: "eng", name: "English", enabled: true },
+            { code2: "de", code3: "deu", name: "German", enabled: true },
+          ]),
+        ),
+        http.get("/api/sports/leagues/51", () =>
+          HttpResponse.json({
+            id: 51,
+            arr_instance_id: 42,
+            title: "League",
+            profileId: 5,
+          }),
+        ),
+        http.get("/api/sports/leagues/51/events", () =>
+          HttpResponse.json({
+            data: [
+              {
+                id: 61,
+                arr_instance_id: 42,
+                league_id: 51,
+                title: "Event",
+                path: "/sports/event.mkv",
+                hasFile: true,
+                profileId: 5,
+                // The German entry is an embedded track (no file). The shared
+                // filter keeps on-disk files visible and hides embedded tracks
+                // outside the profile, exactly as the Series and Movies tables
+                // behave with the same setting.
+                subtitles: [
+                  ["en", "/sports/event.en.srt", 40],
+                  ["de", null, null],
+                ],
+                missing_subtitles: [],
+              },
+            ],
+            total: 1,
+          }),
+        ),
+      );
+      renderDetail();
+      const table = await screen.findByRole("table");
+      await within(table).findByText("en");
+      if (onlyDesired) {
+        expect(within(table).queryByText("de")).toBeNull();
+      } else {
+        expect(within(table).getByText("de")).toBeInTheDocument();
+      }
+    },
+  );
+
+  it("renders an unmonitored event as unmonitored", async () => {
+    server.use(
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([sportarr]),
+      ),
+      http.get("/api/sports/leagues/51", () =>
+        HttpResponse.json({ id: 51, arr_instance_id: 42, title: "League" }),
+      ),
+      http.get("/api/sports/leagues/51/events", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: 61,
+              arr_instance_id: 42,
+              league_id: 51,
+              title: "Event",
+              path: "/sports/event.mkv",
+              hasFile: true,
+              monitored: false,
+              subtitles: [],
+              missing_subtitles: [],
+            },
+          ],
+          total: 1,
+        }),
+      ),
+    );
+    renderDetail();
+    const table = await screen.findByRole("table");
+    await within(table).findByText("Event");
+    // The column used to key off hasFile, which the events serializer always
+    // sends true, so every event looked monitored. The real state now drives it.
+    expect(within(table).getByLabelText("Unmonitored")).toBeInTheDocument();
+    expect(within(table).queryByLabelText("Monitored")).toBeNull();
+  });
+
+  it("shows the shared sync status for each present sports subtitle", async () => {
+    server.use(
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([sportarr]),
+      ),
+      http.get("/api/sports/leagues/51", () =>
+        HttpResponse.json({ id: 51, arr_instance_id: 42, title: "League" }),
+      ),
+      http.get("/api/sports/leagues/51/events", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: 61,
+              arr_instance_id: 42,
+              league_id: 51,
+              title: "Event",
+              path: "/sports/event.mkv",
+              hasFile: true,
+              subtitles: [
+                ["en", "/sports/event.en.srt", 40],
+                ["fr", "/sports/event.fr.srt", 41],
+              ],
+              missing_subtitles: [],
+            },
+          ],
+          total: 1,
+        }),
+      ),
+      // en was synced and the result confirmed: the shared history icon.
+      http.get("/api/sports/events/61/subtitles/en/sync-status", () =>
+        HttpResponse.json({
+          synced: true,
+          confirmed: true,
+          editedAfterSync: false,
+          lastModified: 100,
+          lastSyncTimestamp: "2026-09-01T00:00:00",
+          jobStatus: null,
+        }),
+      ),
+      // fr is still running: the same spinner the movie Status cell shows.
+      http.get("/api/sports/events/61/subtitles/fr/sync-status", () =>
+        HttpResponse.json({
+          synced: false,
+          confirmed: false,
+          editedAfterSync: false,
+          lastModified: 100,
+          lastSyncTimestamp: null,
+          jobStatus: "running",
+        }),
+      ),
+    );
+    renderDetail();
+    const table = await screen.findByRole("table");
+    await within(table).findByText("Event");
+    // The sync-status responses arrive async, so the icons are waited on.
+    expect(await within(table).findByLabelText("Sync")).toBeInTheDocument();
+    expect(
+      await within(table).findByLabelText("Sync running"),
     ).toBeInTheDocument();
   });
 
@@ -739,6 +940,17 @@ it.each([false, true])(
       // toggle itself rather than inheriting the suite's beforeEach.
       http.get("/api/system/settings", () =>
         HttpResponse.json({ general: { use_sportarr: true } }),
+      ),
+      // The Status column queries sync status for any on-disk subtitle.
+      http.get("/api/sports/events/*/subtitles/*/sync-status", () =>
+        HttpResponse.json({
+          synced: false,
+          confirmed: false,
+          editedAfterSync: false,
+          lastModified: 0,
+          lastSyncTimestamp: null,
+          jobStatus: null,
+        }),
       ),
       http.get("/api/sports/leagues/51", () =>
         HttpResponse.json({ id: 51, arr_instance_id: 42, title: "League" }),

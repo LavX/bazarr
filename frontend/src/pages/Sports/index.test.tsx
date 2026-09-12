@@ -201,6 +201,7 @@ describe("sports library", () => {
               // colours a complete league yellow.
               eventCount: 1,
               eventFileCount: 2,
+              missingLanguageCount: 0,
               profileId: 5,
             },
           ],
@@ -214,6 +215,71 @@ describe("sports library", () => {
       await screen.findByText("1 (2 files)", undefined, { timeout: 8000 }),
     ).toBeInTheDocument();
     expect(screen.queryByText("2/1")).toBeNull();
+  });
+
+  it("shows the missing-language count per league and nothing for a covered league", async () => {
+    server.use(
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([sportarr]),
+      ),
+      http.get("/api/sports/leagues", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: 51,
+              arr_instance_id: 42,
+              sportarrLeagueId: 7,
+              title: "Partial League",
+              sport: "Football",
+              monitored: true,
+              tags: [],
+              audio_language: [],
+              eventCount: 1,
+              eventFileCount: 1,
+              missingLanguageCount: 2,
+              profileId: null,
+            },
+            {
+              id: 52,
+              arr_instance_id: 42,
+              sportarrLeagueId: 8,
+              title: "Complete League",
+              sport: "Football",
+              monitored: true,
+              tags: [],
+              audio_language: [],
+              eventCount: 1,
+              eventFileCount: 1,
+              missingLanguageCount: 0,
+              profileId: null,
+            },
+          ],
+          total: 2,
+        }),
+      ),
+    );
+    customRender(<Sports />);
+    const rowFor = (label: string): HTMLElement => {
+      const link = screen.getByRole("link", { name: label });
+      // eslint-disable-next-line testing-library/no-node-access
+      const row = link.closest("tr");
+      if (!row) throw new Error(`No row for ${label}`);
+      return row;
+    };
+    await screen.findByRole(
+      "link",
+      { name: "Partial League" },
+      { timeout: 8000 },
+    );
+    await screen.findByRole(
+      "link",
+      { name: "Complete League" },
+      { timeout: 8000 },
+    );
+    // The aggregate count is rendered next to the events count and hidden
+    // while the league has no event still wanting a language.
+    expect(within(rowFor("Partial League")).getByText("2")).toBeInTheDocument();
+    expect(within(rowFor("Complete League")).queryByText("2")).toBeNull();
   });
 
   it("does not request the library with no enabled Sportarr", async () => {

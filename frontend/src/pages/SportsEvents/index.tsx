@@ -60,6 +60,7 @@ import SubtitleToolsModal, {
 import { useModals } from "@/modules/modals";
 import { notification } from "@/modules/task";
 import ItemOverview from "@/pages/views/ItemOverview";
+import { useLanguageProfileBy } from "@/utilities/languages";
 import { navigateApp } from "@/utilities/whatsNew";
 import Table, { toSportsSubtitle } from "./table";
 
@@ -81,6 +82,9 @@ const SportsEventsView: FunctionComponent = () => {
   const { data: league } = leagueQuery;
   const eventsQuery = useSportsEvents(leagueId, league?.arr_instance_id, 1);
   const { data: eventPage } = eventsQuery;
+  // The league's profile drives the only-desired subtitle filter in the table,
+  // the same way the Series and Movies pages pass theirs.
+  const profile = useLanguageProfileBy(league?.profileId);
 
   const { multiInstance, nameById: instanceNameById } =
     useArrInstanceLabels("sportarr");
@@ -438,6 +442,7 @@ const SportsEventsView: FunctionComponent = () => {
           events={events}
           ref={tableRef}
           disabled={automatic.isPending}
+          profile={profile}
           indexingId={
             indexSubtitles.isPending ? indexSubtitles.variables?.id : undefined
           }

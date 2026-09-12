@@ -521,6 +521,26 @@ const Sports: FunctionComponent = () => {
         },
       },
       {
+        header: "Missing",
+        cell: ({ row: { original } }) => {
+          // The D4 league-list indicator: an aggregate of how many of the
+          // league's events still want a language, computed in the leagues
+          // query, never per row here. It mirrors the events-count text in
+          // style and shows nothing while the league is fully covered.
+          const { missingLanguageCount } = original;
+          if (!missingLanguageCount) return null;
+          const label =
+            missingLanguageCount === 1
+              ? "1 event with missing subtitles"
+              : `${missingLanguageCount} events with missing subtitles`;
+          return (
+            <Tooltip withArrow label={label}>
+              <Text size="sm">{missingLanguageCount}</Text>
+            </Tooltip>
+          );
+        },
+      },
+      {
         id: "actions",
         cell: ({ row: { original } }) => <LeagueRowActions league={original} />,
       },

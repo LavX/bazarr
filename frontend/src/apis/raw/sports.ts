@@ -20,6 +20,9 @@ export interface SportsLeague {
   profileId: number | null;
   eventCount: number;
   eventFileCount: number;
+  /** Events whose missing_subtitles list is non-empty, aggregated in the
+   * leagues query. The league list renders it only when non-zero. */
+  missingLanguageCount: number;
 }
 
 export interface SportsEventReference {
@@ -41,6 +44,9 @@ export interface SportsEvent extends SportsEventReference {
   eventDate: string | null;
   broadcastDate: string | null;
   hasFile: boolean;
+  /** The real monitored state synced from Sportarr; gates automatic search.
+   * Not the same as hasFile, which the events serializer always sets true. */
+  monitored: boolean;
   mapped_path: string;
   file_size: number;
   profileId: number | null;
