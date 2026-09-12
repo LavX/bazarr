@@ -1,5 +1,6 @@
 """Owner-scoped history, release exclusions and proven artifact deletion."""
 
+import ast
 import json
 import os
 import hashlib
@@ -39,6 +40,24 @@ from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
 from utilities.pretty_date import pretty_date
 
 
+def _parse_criteria(value):
+    """The parsed criteria lists the other history endpoints send.
+
+    The sports tables store the Python repr of the criteria lists, the same
+    storage the episodes table uses, so this parses them the way the episodes
+    endpoint does. A row written by a writer that carries no criteria holds
+    "None", and literal_eval of that is None rather than a list, so anything
+    that is not a list comes out as an empty list rather than a page that 500s.
+    """
+    if not value:
+        return []
+    try:
+        parsed = ast.literal_eval(value)
+    except (ValueError, SyntaxError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
 def list_records(
     session,
     kind,
@@ -49,6 +68,7 @@ def list_records(
     language=None,
     provider=None,
     action=None,
+    include_embedded=False,
 ):
     limit = validate_page(start, length)
     table = TableHistorySports if kind == "history" else TableBlacklistSports
@@ -74,6 +94,13 @@ def list_records(
         query = query.where(table.provider == provider)
     if action is not None and kind == "history":
         query = query.where(table.action == action)
+    if kind == "history" and not include_embedded:
+        # The indexer records "treat embedded subtitles as downloaded" as one
+        # action=7 row per event/language. They are media state, not events,
+        # and a large library carries thousands of them, so they bury real rows
+        # and stay out of the listing and its total unless the caller asks,
+        # exactly as the episodes and movies history endpoints behave.
+        query = query.where(table.action != 7)
     total = session.execute(
         select(func.count()).select_from(query.subquery())
     ).scalar_one()
@@ -85,6 +112,12 @@ def list_records(
     ):
         item = row.to_dict()
         item.pop("artifact", None)
+        # The parsed criteria lists, in the shape the episodes and movies
+        # history endpoints send. The raw stored repr strings used to go out
+        # under their column names, so the shared Match cell could never read
+        # them.
+        item["matches"] = _parse_criteria(item.pop("matched", None))
+        item["dont_matches"] = _parse_criteria(item.pop("not_matched", None))
         # The same pair the episodes and movies history endpoints send: a
         # relative form for the column and the exact date for its popover. The
         # raw ISO string went out under both names, so the sports table printed

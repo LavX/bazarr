@@ -3,14 +3,16 @@ import ast
 import logging
 import os
 import pickle
+from types import SimpleNamespace
 
 from sqlalchemy import select
 from subliminal_patch import core, search_external_subtitles
+from subliminal_patch.score import MAX_SCORES
 
 from app.config import settings
 from app.jobs_queue import jobs_queue
 from app.database import (database, get_audio_profile_languages, get_profile_cutoff, get_profiles_list,
-                          TableArrInstances, TableSportsEvents)
+                          TableArrInstances, TableHistorySports, TableSportsEvents)
 from languages.custom_lang import CustomLanguage
 from languages.get_languages import alpha2_from_alpha3, get_language_set
 from sportarr.analysis import parse_video_metadata
@@ -225,6 +227,7 @@ def store_subtitles_sports(event_id, arr_instance_id=None, *, use_cache=None, ow
         # would be wasteful.
         if settings.general.use_embedded_subs or settings.general.parse_embedded_audio_track:
             data = _metadata(context, signature, cached, use_cache, cancel)
+        embedded_codes = []
         if settings.general.use_embedded_subs:
             for language, forced, hi, codec in embedded_subtitles_from_metadata(data):
                 if codec and ((settings.general.ignore_pgs_subs and codec.lower() == 'pgs') or
@@ -233,7 +236,9 @@ def store_subtitles_sports(event_id, arr_instance_id=None, *, use_cache=None, ow
                     continue
                 code = alpha2_from_alpha3(language)
                 if code:
-                    actual.append([normalize_subtitle_language_variant(code, forced=forced, hi=hi), None, None])
+                    code = normalize_subtitle_language_variant(code, forced=forced, hi=hi)
+                    actual.append([code, None, None])
+                    embedded_codes.append(code)
         actual.extend(_external(context, mappings, ownership_index, cancel))
         with sports_transaction(database) as session:
             row = _validated_row(session, context, signature, cancel)
@@ -248,9 +253,59 @@ def store_subtitles_sports(event_id, arr_instance_id=None, *, use_cache=None, ow
             row.ffprobe_cache = pickle.dumps(data | {'sports_indexed': True}, pickle.HIGHEST_PROTOCOL)
             session.flush()
             check_cancelled(cancel)
+            # Committed with the index: an account of the tracks read from the
+            # file, not a separate event that could land without its media state.
+            _log_embedded_history(session, context, embedded_codes, cancel)
+            # The transaction session flushes only what this block flushes, so
+            # the history rows above stay pending until they are flushed too.
+            session.flush()
     check_cancelled(cancel)
     notify([event_id])
     return actual
+
+
+def _log_embedded_history(session, context, embedded_codes, cancel=None):
+    """Record one source-quality history row per newly detected embedded track.
+
+    Mirrors the series and movies indexers: each embedded language writes an
+    action=7 (EmbeddedSource) row with a full score, and a history lookup
+    deduplicates so re-indexing the same event does not grow the table. The
+    tracks live inside the video file, so the rows carry no sidecar path; the
+    video path pins which file the tracks were read from, which is the "path"
+    half of the event+language+path dedup.
+    """
+    from sportarr.subtitles import sports_history
+
+    for code in embedded_codes:
+        check_cancelled(cancel)
+        base, *variants = code.split(':')
+        variants = set(variants)
+        # The same canonical reduction the series and movies indexers use: a
+        # forced+hi track dedups against and records as the hi-priority code
+        # that ProcessSubtitlesResult.language_code actually stores.
+        canonical = base + (':hi' if 'hi' in variants else ':forced' if 'forced' in variants else '')
+        existing = session.execute(
+            select(TableHistorySports.id)
+            .where(TableHistorySports.event_id == context.event_id)
+            .where(TableHistorySports.arr_instance_id == context.arr_instance_id)
+            .where(TableHistorySports.language == canonical)
+            .where(TableHistorySports.action == 7)
+            .where(TableHistorySports.video_path == context.original_path)
+        ).first()
+        if existing:
+            continue
+        result = SimpleNamespace(
+            message=f"{canonical} embedded subtitles detected.",
+            path=context.original_path,
+            language_code=canonical,
+            provider="embedded",
+            score=MAX_SCORES["movie"],
+            subs_id=None,
+            subs_path=None,
+            matched=[],
+            not_matched=[],
+        )
+        sports_history(session, context, result, action=7)
 
 
 def refresh_sports_files(event_ids, arr_instance_id, cancel=None):

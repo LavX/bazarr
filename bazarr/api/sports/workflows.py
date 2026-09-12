@@ -16,7 +16,11 @@ api_ns_sports_workflows = Namespace(
 )
 
 
+_TRUTHY = {"true", "t", "yes", "y", "on", "1"}
+
+
 def _filters():
+    include_embedded = request.args.get("include_embedded")
     return dict(
         arr_instance_id=_owner(request.args["arr_instance_id"])
         if "arr_instance_id" in request.args
@@ -29,6 +33,13 @@ def _filters():
         language=request.args.get("language"),
         provider=request.args.get("provider"),
         action=int(request.args["action"]) if "action" in request.args else None,
+        # Same default as the episodes and movies endpoints: Embedded Source
+        # records (media state, not events) stay out unless the caller asks.
+        include_embedded=(
+            include_embedded.lower() in _TRUTHY
+            if include_embedded is not None
+            else False
+        ),
     )
 
 

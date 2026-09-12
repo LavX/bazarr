@@ -198,3 +198,102 @@ it("does not request history when every owner is disabled", async () => {
   ).toBeInTheDocument();
   expect(calls).toBe(0);
 });
+
+it("renders the Match popover for a record with recorded criteria", async () => {
+  owners();
+  const user = userEvent.setup();
+  server.use(
+    http.get("/api/sports/history", () =>
+      HttpResponse.json({
+        data: [
+          {
+            ...record,
+            matches: ["title", "year"],
+            dont_matches: ["release_group"],
+          },
+        ],
+        total: 1,
+      }),
+    ),
+  );
+  customRender(<SportsHistoryView />);
+  await screen.findByText("Final", undefined, { timeout: 8000 });
+  // The shared StateIcon cell: a list-check icon whose popover lists the
+  // criteria that matched and did not match.
+  // eslint-disable-next-line testing-library/no-node-access
+  const icon = document.querySelector(".fa-list-check");
+  expect(icon).not.toBeNull();
+  await user.hover(icon as Element);
+  expect(
+    await screen.findByText("Scoring Criteria", undefined, { timeout: 8000 }),
+  ).toBeInTheDocument();
+  expect(screen.getByText("title")).toBeInTheDocument();
+  expect(screen.getByText("year")).toBeInTheDocument();
+  expect(screen.getByText("release_group")).toBeInTheDocument();
+});
+
+it("marks an upgradable row with the recycle indicator", async () => {
+  owners();
+  const user = userEvent.setup();
+  server.use(
+    http.get("/api/sports/history", () =>
+      HttpResponse.json({
+        data: [{ ...record, upgradable: true }],
+        total: 1,
+      }),
+    ),
+  );
+  customRender(<SportsHistoryView />);
+  await screen.findByText("Final", undefined, { timeout: 8000 });
+  // eslint-disable-next-line testing-library/no-node-access
+  const icon = document.querySelector(".fa-recycle");
+  expect(icon).not.toBeNull();
+  await user.hover(icon as Element);
+  expect(
+    await screen.findByText(
+      "This Subtitle File Is Eligible For An Upgrade.",
+      undefined,
+      { timeout: 8000 },
+    ),
+  ).toBeInTheDocument();
+});
+
+it("hides Embedded Source records by default and shows them with the switch on", async () => {
+  owners();
+  const user = userEvent.setup();
+  server.use(
+    http.get("/api/sports/history", ({ request }) => {
+      const include = new URL(request.url).searchParams.get("include_embedded");
+      return HttpResponse.json(
+        include === "true"
+          ? {
+              data: [
+                record,
+                {
+                  ...record,
+                  id: 10,
+                  action: 7,
+                  language: "fr",
+                  provider: "embedded",
+                  description: "fr embedded subtitles detected.",
+                  subs_id: null,
+                },
+              ],
+              total: 2,
+            }
+          : { data: [record], total: 1 },
+      );
+    }),
+  );
+  customRender(<SportsHistoryView />);
+  await screen.findByText("Final", undefined, { timeout: 8000 });
+  // The embedded row's description lives in the Info tooltip, so the visible
+  // proof is the provider cell, which only the action=7 row carries.
+  expect(screen.queryByText("embedded")).toBeNull();
+  await user.click(
+    screen.getByRole("switch", { name: "Show Embedded Source records" }),
+  );
+  expect(
+    await screen.findByText("embedded", undefined, { timeout: 8000 }),
+  ).toBeInTheDocument();
+});

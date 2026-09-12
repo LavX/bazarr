@@ -101,6 +101,11 @@ export interface SportsRecord {
   blacklisted?: boolean;
   /** The upgrade run's display-level check; it refines this before acting. */
   upgradable?: boolean;
+  /** Parsed criteria the release matched, as the other history endpoints send.
+   * The stored columns are Python-repr strings; the endpoint parses them. */
+  matches?: string[];
+  /** Parsed criteria the release did not match. */
+  dont_matches?: string[];
 }
 export interface SportsJob {
   queued: boolean;
@@ -133,6 +138,8 @@ export interface SportsFilters {
   provider?: string;
   action?: string;
   page?: number;
+  /** Include Embedded Source (action 7) history rows; hidden by default. */
+  includeEmbedded?: boolean;
 }
 
 class SportsApi extends BaseApi {
@@ -159,6 +166,7 @@ class SportsApi extends BaseApi {
         language: filters.language || undefined,
         provider: filters.provider || undefined,
         action: filters.action || undefined,
+        include_embedded: filters.includeEmbedded || undefined,
         start,
         length,
       },

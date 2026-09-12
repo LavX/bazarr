@@ -1,14 +1,15 @@
 """One definition of what a page of sports rows means.
 
 The shared frontend views fetch a whole list by asking for length -1, which
-every episodes and movies endpoint already honours. The sports readers each
-carried their own 1..1000 guard and rejected it, so a sports page could not use
-those views at all: filtering or sorting across the library needs the whole
-list, and the sports endpoints would only ever answer with one page.
+every episodes and movies endpoint already honours, and they ask for "All" by
+sending the row total as an explicit length. The episodes and movies endpoints
+serve any positive length with no ceiling. The sports readers once carried a
+1..1000 guard: it rejected -1, so a sports page could not use the shared views
+at all (filtering or sorting across the library needs the whole list), and once
+-1 was accepted it still rejected a total above 1000, so "All" failed on a
+history larger than that. Sports now speaks the same contract: -1 is unbounded
+and any positive length is served as asked.
 """
-
-# Ceiling for an explicit page. -1 is unbounded, which is the fetch-all mode.
-MAX_PAGE_LENGTH = 1000
 
 
 def validate_page(start, length):
@@ -21,6 +22,6 @@ def validate_page(start, length):
         raise ValueError('Invalid pagination')
     if length == -1:
         return None
-    if not 1 <= length <= MAX_PAGE_LENGTH:
+    if length < 1:
         raise ValueError('Invalid pagination')
     return length

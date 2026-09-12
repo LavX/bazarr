@@ -289,12 +289,14 @@ export function toSportsActivityRow(record: SportsRecord): SportsActivityRow {
     // action and re-posting it queued a duplicate exclusion.
     blacklisted: record.blacklisted ?? false,
     upgradable: record.upgradable ?? false,
+    // The API parses the stored criteria reprs into these lists, matching the
+    // episodes and movies endpoints; the shared Match cell reads them.
+    matches: record.matches ?? [],
+    dont_matches: record.dont_matches ?? [],
     // The rest the sports tables genuinely do not record. Stated rather than
     // left undefined so a shared column reaching for a `.length` cannot crash.
     monitored: true,
     tags: [],
-    matches: [],
-    dont_matches: [],
     parsed_timestamp: record.parsed_timestamp ?? "",
     timestamp: record.timestamp ?? "",
     subtitles_path: record.subtitles_path ?? "",

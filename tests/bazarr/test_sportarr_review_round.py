@@ -552,3 +552,109 @@ def test_the_shared_test_database_is_not_cleared_between_sessions():
     source = pathlib.Path('tests/conftest.py').read_text()
     assert 'os.remove(_stale)' not in source
     assert 'deliberately NOT cleared' in source
+
+
+# --------------------------------------------------------------------------
+# History parity: the endpoint sends parsed criteria, the page can show
+# embedded records when asked, and embedded indexing writes them at all.
+# --------------------------------------------------------------------------
+
+def _sports_history(schema_session):
+    from app.database import (TableArrInstances, TableHistorySports,
+                              TableSportsEvents, TableSportsLeagues)
+
+    schema_session.add(TableArrInstances(
+        id=1, kind="sportarr", name="Sports", stable_key="s",
+        port=1867, enabled=1,
+    ))
+    schema_session.flush()
+    schema_session.add(TableSportsLeagues(
+        id=1, arr_instance_id=1, sportarrLeagueId=7, title="League",
+    ))
+    schema_session.flush()
+    schema_session.add(TableSportsEvents(
+        id=1, arr_instance_id=1, league_id=1, sportarrEventId=7, file_id=8,
+        path="/sports/event.mkv", title="Card", file_size=123,
+        audio_language="[]", subtitles="[]", missing_subtitles="[]",
+        failedAttempts="[]",
+    ))
+    schema_session.flush()
+    schema_session.add(TableHistorySports(
+        id=1, arr_instance_id=1, league_id=1, event_id=1, action=1,
+        description="downloaded", language="en", provider="provider-a",
+        subs_id="release", score=90, score_out_of=180,
+        matched="['title', 'year']", not_matched="['release_group']",
+        subtitles_path="/sports/event.en.srt", video_path="/sports/event.mkv",
+    ))
+    # An Embedded Source row: the sports indexer records one action=7 row per
+    # detected track language. It has no sidecar, exactly like the episodes and
+    # movies indexers' rows.
+    schema_session.add(TableHistorySports(
+        id=2, arr_instance_id=1, league_id=1, event_id=1, action=7,
+        description="fr embedded subtitles detected.", language="fr",
+        provider="embedded", subtitles_path=None, video_path="/sports/event.mkv",
+        matched="None", not_matched="None",
+    ))
+    schema_session.flush()
+
+
+def test_sports_history_sends_parsed_criteria_not_stored_reprs(schema_session):
+    """The shared Match cell reads matches/dont_matches as string lists. The
+    sports route used to pass the raw Python-repr columns through, and the
+    mapper hardcoded empty arrays, so the data was discarded at the boundary."""
+    _sports_history(schema_session)
+
+    from sportarr import history
+
+    result = history.list_records(schema_session, "history", include_embedded=True)
+    downloaded = next(item for item in result["data"] if item["action"] == 1)
+    assert downloaded["matches"] == ["title", "year"]
+    assert downloaded["dont_matches"] == ["release_group"]
+    assert "matched" not in downloaded and "not_matched" not in downloaded
+
+
+def test_sports_history_criteria_parse_defends_against_non_list_rows(schema_session):
+    """The deletion writer stores no criteria at all, which lands in the column
+    as the string "None". literal_eval of that is None, not a list, so the
+    parse must fall back to an empty list instead of crashing the page."""
+    _sports_history(schema_session)
+
+    from sportarr import history
+
+    result = history.list_records(schema_session, "history", include_embedded=True)
+    embedded = next(item for item in result["data"] if item["action"] == 7)
+    assert embedded["matches"] == []
+    assert embedded["dont_matches"] == []
+
+
+def test_sports_history_hides_embedded_records_by_default(schema_session, monkeypatch):
+    """The episodes and movies endpoints filter action=7 out of both the rows
+    and the total unless include_embedded is asked for; sports history must do
+    the same or a large library drowns in track-state rows."""
+    _sports_history(schema_session)
+
+    from api.sports import workflows
+    from flask import Flask
+
+    monkeypatch.setattr(workflows, "database", schema_session)
+    app = Flask(__name__)
+    with app.test_request_context("/api/sports/history?start=0&length=100"):
+        result, code = workflows.SportsHistory.get.__wrapped__(workflows.SportsHistory())
+    assert code == 200
+    assert [item["action"] for item in result["data"]] == [1]
+    assert result["total"] == 1
+
+
+def test_sports_history_includes_embedded_records_on_request(schema_session, monkeypatch):
+    _sports_history(schema_session)
+
+    from api.sports import workflows
+    from flask import Flask
+
+    monkeypatch.setattr(workflows, "database", schema_session)
+    app = Flask(__name__)
+    with app.test_request_context("/api/sports/history?start=0&length=100&include_embedded=true"):
+        result, code = workflows.SportsHistory.get.__wrapped__(workflows.SportsHistory())
+    assert code == 200
+    assert sorted(item["action"] for item in result["data"]) == [1, 7]
+    assert result["total"] == 2

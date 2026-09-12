@@ -3,14 +3,18 @@
 
 The shared Wanted, History and Blacklist views fetch a whole list by asking for
 length -1, which every episodes and movies endpoint already honours. Each sports
-reader carried its own 1..1000 guard and rejected it, so a sports page could not
-be built on those views at all: filtering or sorting across the library needs
-the whole list, and the sports endpoints would only ever answer one page.
+reader carried its own 1..1000 guard and rejected it, so a sports page could
+not be built on those views at all: filtering or sorting across the library
+needs the whole list, and the sports endpoints would only ever answer one page.
+The shared page control also sends the row total as the length when "All" is
+chosen, so the ceiling made "All" fail on a library above 1000 rows. The other
+two media types cap nothing, so sports now matches them: -1 stays the fetch-all
+mode and any positive length is served as asked.
 """
 
 import pytest
 
-from sportarr.pagination import MAX_PAGE_LENGTH, validate_page
+from sportarr.pagination import validate_page
 
 
 def test_a_normal_page_limits_to_its_length():
@@ -24,10 +28,19 @@ def test_fetch_all_asks_for_no_limit():
     assert validate_page(0, -1) is None
 
 
-@pytest.mark.parametrize('length', [0, -2, MAX_PAGE_LENGTH + 1])
+def test_an_all_page_size_above_a_thousand_is_served():
+    # The shared page control asks for "All" by sending the row total as the
+    # length. A history with more than a thousand rows used to be refused, so
+    # the table came back empty; the other two media types cap nothing.
+    assert validate_page(0, 1001) == 1001
+    assert validate_page(0, 5000) == 5000
+    assert validate_page(0, 12000) == 12000
+
+
+@pytest.mark.parametrize('length', [0, -2])
 def test_a_length_that_is_neither_a_page_nor_fetch_all_is_refused(length):
     """-1 is the only negative that means anything. 0 would silently return an
-    empty page forever, and an unbounded ceiling invites a memory blowout."""
+    empty page forever."""
     with pytest.raises(ValueError, match='Invalid pagination'):
         validate_page(0, length)
 

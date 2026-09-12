@@ -10,9 +10,14 @@ import {
   Modal,
   Select,
   Stack,
+  Switch,
   Text,
 } from "@mantine/core";
-import { faFileExcel, faInfoCircle } from "@fortawesome/free-solid-svg-icons";
+import {
+  faFileExcel,
+  faInfoCircle,
+  faRecycle,
+} from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
@@ -28,6 +33,7 @@ import {
   SportsJobFeedback,
 } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
+import StateIcon from "@/components/StateIcon";
 import TextPopover from "@/components/TextPopover";
 import HistoryView from "@/pages/views/HistoryView";
 import SportsActivityFilters from "@/pages/views/SportsActivityFilters";
@@ -66,6 +72,9 @@ const SportsHistoryView: FunctionComponent = () => {
   const [provider, setProvider] = useState("");
   const [action, setAction] = useState<string | null>(null);
   const [pending, setPending] = useState<SportsActivityRow | null>(null);
+  // Embedded Source rows (track state, not events) are hidden by default; the
+  // switch asks the API to include them, exactly like the other two pages.
+  const [includeEmbedded, setIncludeEmbedded] = useState(false);
 
   const query = useSportsHistoryPagination({
     owner,
@@ -73,6 +82,7 @@ const SportsHistoryView: FunctionComponent = () => {
     language,
     provider,
     action: action ?? undefined,
+    includeEmbedded,
   });
   const run = useSportsAction();
   const {
@@ -134,6 +144,17 @@ const SportsHistoryView: FunctionComponent = () => {
         accessorKey: "score",
       },
       {
+        header: "Match",
+        accessorKey: "matches",
+        cell: ({ row: { original } }) => {
+          const { matches, dont_matches: dont } = original;
+          if (matches.length || dont.length) {
+            return <StateIcon matches={matches} dont={dont} isHistory={true} />;
+          }
+          return null;
+        },
+      },
+      {
         header: "Date",
         accessorKey: "timestamp",
         cell: ({ row: { original } }) =>
@@ -150,6 +171,16 @@ const SportsHistoryView: FunctionComponent = () => {
           original.description ? (
             <TextPopover text={original.description}>
               <FontAwesomeIcon size="sm" icon={faInfoCircle} />
+            </TextPopover>
+          ) : null,
+      },
+      {
+        header: "Upgradable",
+        accessorKey: "upgradable",
+        cell: ({ row: { original } }) =>
+          original.upgradable ? (
+            <TextPopover text="This Subtitle File Is Eligible For An Upgrade.">
+              <FontAwesomeIcon size="sm" icon={faRecycle} />
             </TextPopover>
           ) : null,
       },
@@ -229,6 +260,15 @@ const SportsHistoryView: FunctionComponent = () => {
               }
             />
             <SportsJobFeedback queued={run.data} owner={run.variables?.owner} />
+            <Group justify="flex-end">
+              <Switch
+                label="Show Embedded Source records"
+                checked={includeEmbedded}
+                onChange={(event) =>
+                  setIncludeEmbedded(event.currentTarget.checked)
+                }
+              ></Switch>
+            </Group>
           </Stack>
         }
       ></HistoryView>

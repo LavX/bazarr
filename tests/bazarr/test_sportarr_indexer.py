@@ -166,6 +166,36 @@ def test_real_embedded_external_and_colliding_owner_cache(indexed_library, monke
             module.store_subtitles_sports(local, owner)
 
 
+def test_embedded_tracks_write_one_history_row_per_language(indexed_library, monkeypatch):
+    """The series and movies indexers record one action=7 (EmbeddedSource) row
+    per detected track language. The sports indexer detected the tracks but
+    wrote no history at all, so a fully subtitled event looked unrecorded and
+    the page had nothing to filter."""
+    from app.database import TableHistorySports
+
+    session, _ = indexed_library
+    module = sports(monkeypatch, session)
+    module.store_subtitles_sports(61, 1)
+    rows = session.execute(
+        sa.select(TableHistorySports).where(TableHistorySports.action == 7)
+    ).scalars().all()
+    assert [row.language for row in rows] == ["fr"]
+    embedded = rows[0]
+    assert embedded.provider == "embedded"
+    assert embedded.event_id == 61
+    assert embedded.subtitles_path is None
+    assert embedded.video_path == "/sports/event.mkv"
+    assert embedded.score == embedded.score_out_of
+    assert "embedded subtitles detected" in embedded.description
+    # Re-indexing the same event already has the row: the dedup must not grow
+    # the table, exactly like the series and movies indexers' dedup.
+    module.store_subtitles_sports(61, 1)
+    rows = session.execute(
+        sa.select(TableHistorySports).where(TableHistorySports.action == 7)
+    ).scalars().all()
+    assert len(rows) == 1
+
+
 def test_profiles_recompute_missing_and_explicit_none(indexed_library, monkeypatch):
     from app import database as db
     from sportarr import library
