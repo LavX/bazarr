@@ -232,6 +232,7 @@ declare namespace Settings {
     openrouter_reasoning?: string;
     openrouter_parallel_batches?: number;
     openrouter_provider_routing?: string;
+    openrouter_provider_order?: string[];
   }
 
   interface Plex {
