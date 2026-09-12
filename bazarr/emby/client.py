@@ -242,7 +242,7 @@ class EmbyClient:
         the answer is the same either way.
         """
         collection_type = _COLLECTION_TYPES.get(media_type) if isinstance(media_type, str) else None
-        if collection_type is None:
+        if not isinstance(media_type, str) or media_type not in _COLLECTION_TYPES:
             raise MediaServerError("internal_error")
         if not is_media_path(video_path):
             raise MediaServerError("path_invalid")

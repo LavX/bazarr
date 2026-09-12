@@ -321,3 +321,56 @@ it("hides Embedded Source records by default and shows them with the switch on",
     await screen.findByText("embedded", undefined, { timeout: 8000 }),
   ).toBeInTheDocument();
 });
+
+it.each(["change", "clear"])(
+  "drops event and league scope when instances %s",
+  async (action) => {
+    owners();
+    const user = userEvent.setup();
+    server.use(
+      http.get("/api/sports/history", () =>
+        HttpResponse.json({ data: [record], total: 1 }),
+      ),
+    );
+    const router = createMemoryRouter(
+      [{ path: "/history/sports", element: <SportsHistoryView /> }],
+      {
+        initialEntries: [
+          "/history/sports?instance=42&league=7&event_id=11&keep=value",
+        ],
+      },
+    );
+    rawRender(
+      <AllProviders>
+        <RouterProvider router={router} />
+      </AllProviders>,
+    );
+    await screen.findByText("Final", undefined, { timeout: 8000 });
+    const instance = screen.getByRole("combobox", { name: "Instance" });
+    await waitFor(() => expect(instance).toHaveValue(sportarr.name));
+    if (action === "change") {
+      await user.click(instance);
+      await user.click(
+        await screen.findByText(sportarrSibling.name, {
+          selector: '[role="option"] span',
+        }),
+      );
+    } else {
+      await user.click(instance);
+      await user.click(
+        await screen.findByText(sportarr.name, {
+          selector: '[role="option"] span',
+        }),
+      );
+    }
+    await waitFor(() => {
+      const params = new URLSearchParams(router.state.location.search);
+      expect(params.get("instance")).toBe(
+        action === "change" ? String(sportarrSibling.id) : null,
+      );
+      expect(params.get("event_id")).toBeNull();
+      expect(params.get("league")).toBeNull();
+      expect(params.get("keep")).toBe("value");
+    });
+  },
+);

@@ -12,15 +12,27 @@ from subtitles.tools.subsync_engines import subtitle_write_locks, subtitle_mutat
 
 
 def postprocessing(command, path, subtitle_path=None, *, lock_paths=None,
-                   publication_guard=None, command_builder=None):
+                   publication_guard=None, command_builder=None, source_version=None,
+                   after_write=None, on_publish=None):
     if publication_guard is not None:
-        from subtitles.tools.subsync_engines import staged_subtitle_write
+        from subtitles.tools.subsync_engines import (
+            staged_subtitle_write, source_is_unchanged, SubtitleSourceChanged,
+            _report_subtitle_publication,
+        )
         if not subtitle_path or command_builder is None:
             raise ValueError('Guarded postprocessing requires a subtitle and command builder')
+        def validate_source():
+            if source_version is not None and not source_is_unchanged(subtitle_path, source_version):
+                raise SubtitleSourceChanged('Uploaded subtitle changed before post-processing')
+
         with staged_subtitle_write(path, subtitle_path, source_paths=(subtitle_path,),
-                                    publication_guard=publication_guard) as temporary:
-            shutil.copyfile(subtitle_path, temporary)
+                                    publication_guard=publication_guard,
+                                    before_publish=validate_source, after_write=after_write) as temporary:
+            with subtitle_write_locks(path, subtitle_path):
+                validate_source()
+                shutil.copyfile(subtitle_path, temporary)
             _postprocessing_locked(command_builder(temporary), path)
+        _report_subtitle_publication(on_publish, subtitle_path)
         return
     # Configured commands can mutate subtitles in place. This is the one boundary
     # that must hold this media's mutation locks while the external command runs.

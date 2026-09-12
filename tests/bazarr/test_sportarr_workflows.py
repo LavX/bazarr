@@ -1231,3 +1231,64 @@ def test_sports_history_route_accepts_the_league_filter(indexed_library, monkeyp
     assert response.status_code == 200
     assert response.json["total"] == 1
     assert [item["event_id"] for item in response.json["data"]] == [61]
+
+
+@pytest.mark.parametrize('restriction', ['none', 'event', 'league', 'tag', 'sport', 'profile', 'disabled'])
+def test_wanted_badge_preserves_eligibility_without_per_event_work(workflow_library, monkeypatch, restriction):
+    from app.database import TableSportsEvents, TableSportsLeagues, TableArrInstances
+
+    _, _, workflows, _, session, _ = workflow_library
+    options = {'only_monitored': True, 'excluded_tags': ['blocked'], 'excluded_sports': ['excluded']}
+    session.execute(sa.update(TableArrInstances).values(options=json.dumps({'sports_settings': options})))
+    session.execute(sa.update(TableSportsEvents).values(missing_subtitles="['en', 'en:hi', 'en:forced']"))
+    for index in range(100, 150):
+        session.add(TableSportsEvents(id=index, arr_instance_id=1, league_id=51,
+                                     sportarrEventId=index, file_id=index,
+                                     title='Race', path=f'/sports/{index}.mkv',
+                                     monitored='True', missing_subtitles="['en', 'en:hi']"))
+    if restriction == 'event':
+        session.execute(sa.update(TableSportsEvents).where(TableSportsEvents.arr_instance_id == 1).values(monitored='False'))
+    elif restriction == 'league':
+        session.execute(sa.update(TableSportsLeagues).where(TableSportsLeagues.id == 51).values(monitored='False'))
+    elif restriction == 'tag':
+        session.execute(sa.update(TableSportsLeagues).where(TableSportsLeagues.id == 51).values(tags="['blocked']"))
+    elif restriction == 'sport':
+        session.execute(sa.update(TableSportsLeagues).where(TableSportsLeagues.id == 51).values(sport='excluded'))
+    elif restriction == 'profile':
+        session.execute(sa.update(TableSportsLeagues).where(TableSportsLeagues.id == 51).values(profileId=None))
+    elif restriction == 'disabled':
+        session.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 1).values(enabled=0))
+    session.commit()
+    expected = sum(len(row['missing_subtitles']) for row in workflows.wanted_rows(session))
+    assert expected == (106 if restriction == 'none' else 3)
+    queries = []
+    def count_query(conn, cursor, statement, parameters, context, executemany):
+        queries.append(statement)
+    sa.event.listen(session.get_bind(), 'before_cursor_execute', count_query)
+    try:
+        assert workflows.wanted_badge(session) == expected
+    finally:
+        sa.event.remove(session.get_bind(), 'before_cursor_execute', count_query)
+    assert len(queries) <= 3, f'Badge needed {len(queries)} queries for 52 events'
+    monkeypatch.setattr(workflows, '_serialize_event', lambda row: pytest.fail('Badge serialized an event'))
+    assert workflows.wanted_badge(session) == expected
+
+
+@pytest.mark.parametrize('missing', ['broken', "'en'", "{'en': 1}", 'None', '', "('en',)"])
+def test_wanted_badge_ignores_malformed_or_nonlist_missing_languages(workflow_library, missing):
+    from app.database import TableSportsEvents
+    _, _, workflows, _, session, _ = workflow_library
+    session.execute(sa.update(TableSportsEvents).values(missing_subtitles=missing))
+    session.commit()
+    assert workflows.wanted_badge(session) == 0
+
+
+def test_ineligible_event_does_not_load_its_language_profile(workflow_library, monkeypatch):
+    from app.database import TableSportsEvents, TableArrInstances
+    from sportarr.identity import resolve_event_in_session
+    automatic, _, _, _, session, _ = workflow_library
+    session.execute(sa.update(TableArrInstances).values(options=json.dumps({'sports_settings': {'only_monitored': True}})))
+    session.execute(sa.update(TableSportsEvents).where(TableSportsEvents.id == 61).values(monitored='False'))
+    session.commit()
+    monkeypatch.setattr(automatic, 'get_profiles_list', lambda profile: pytest.fail('Excluded event loaded a profile'))
+    assert automatic.eligibility(session, resolve_event_in_session(session, 61, 1)) == 'Event or league is not monitored'

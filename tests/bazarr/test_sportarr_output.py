@@ -459,3 +459,22 @@ def test_real_save_with_many_unrelated_windows_subtitle_records(manual_library):
     service.manual_download_sports(61, candidate, arr_instance_id=1)
     assert (folder / "1/event.en.srt").read_bytes()
     assert session.execute(sa.select(TableHistorySports)).scalar_one().event_id == 61
+
+
+def test_namespace_rejects_an_inherited_global_sports_mapping_change(output_library, monkeypatch):
+    from app.config import settings
+    from app.database import TableSportsEvents
+    from sportarr.output import SportsOutputNamespace
+
+    session, folder = output_library
+    monkeypatch.setattr(settings.general, 'path_mappings_sports', [['/foreign', '/elsewhere']])
+    session.add(TableSportsEvents(id=62, league_id=2, arr_instance_id=2,
+                                 sportarrEventId=9, file_id=71,
+                                 path='/foreign/event.mkv', title='Foreign', subtitles='[]'))
+    session.commit()
+    context = SimpleNamespace(event_id=61, arr_instance_id=1,
+                              mapped_path=str(folder / 'event.mkv'))
+    namespace = SportsOutputNamespace(context, session)
+    monkeypatch.setattr(settings.general, 'path_mappings_sports', [['/foreign', str(folder)]])
+    with pytest.raises(ValueError, match='ownership changed'):
+        namespace.validate(session)

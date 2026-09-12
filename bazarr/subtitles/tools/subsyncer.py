@@ -485,7 +485,7 @@ class SubSyncer:
 
     def _log_sync_history(self, success_result, output_mode, srt_lang, hi, forced,
                           sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None,
-                          arr_instance_id=None):
+                          arr_instance_id=None, sports_context=None, history_session=None):
         raw_result = success_result.raw_result if isinstance(success_result.raw_result, dict) else {}
         offset_seconds = raw_result.get('offset_seconds') or 0
         framerate_scale_factor = raw_result.get('framerate_scale_factor') or 0
@@ -502,13 +502,18 @@ class SubSyncer:
         if quality_of_fit is not None:
             message += f' Quality of fit: {quality_of_fit:.2f}.'
 
-        if sonarr_series_id:
+        if sports_context is not None:
+            def prr(path):
+                return path_mappings.path_replace_reverse_instance(
+                    path, sports_context.arr_instance_id, 'sports')
+        elif sonarr_series_id:
             prr = path_mappings.path_replace_reverse
         else:
             prr = path_mappings.path_replace_reverse_movie
 
         result = ProcessSubtitlesResult(message=message,
-                                        reversed_path=prr(self.reference),
+                                        reversed_path=(sports_context.original_path if sports_context is not None
+                                                       else prr(self.reference)),
                                         downloaded_language_code2=srt_lang,
                                         downloaded_provider=None,
                                         score=None,
@@ -517,7 +522,10 @@ class SubSyncer:
                                         reversed_subtitles_path=prr(success_result.output_path),
                                         hearing_impaired=hi)
 
-        if sonarr_episode_id:
+        if sports_context is not None:
+            from sportarr.subtitles import sports_history
+            sports_history(history_session, sports_context, result, action=5)
+        elif sonarr_episode_id:
             history_log(action=5, sonarr_series_id=sonarr_series_id, sonarr_episode_id=sonarr_episode_id,
                         result=result, arr_instance_id=arr_instance_id)
         else:

@@ -41,18 +41,24 @@ def eligibility(session, context):
     instance = validate_context(context, session)
     event = session.get(TableSportsEvents, context.event_id, populate_existing=True)
     league = session.get(TableSportsLeagues, context.league_id, populate_existing=True)
-    options = get_sports_settings(instance)
+    reason = eligibility_reason(event.monitored, league.monitored, league.tags, league.sport,
+                                bool(context.profile_id), get_sports_settings(instance))
+    if reason or get_profiles_list(context.profile_id):
+        return reason
+    return "No language profile is assigned"
+
+
+def eligibility_reason(event_monitored, league_monitored, tags, sport, has_profile, options):
+    """Shared eligibility rules for owned searches and the set-based badge read."""
     if options["only_monitored"] and (
-        event.monitored != "True" or league.monitored != "True"
+        event_monitored != "True" or league_monitored != "True"
     ):
         return "Event or league is not monitored"
-    if set(str(tag) for tag in ast.literal_eval(league.tags or "[]")) & set(
-        options["excluded_tags"]
-    ):
+    if set(str(tag) for tag in ast.literal_eval(tags or "[]")) & set(options["excluded_tags"]):
         return "League has an excluded tag"
-    if league.sport in options["excluded_sports"]:
+    if sport in options["excluded_sports"]:
         return "Sport is excluded"
-    if not context.profile_id or not get_profiles_list(context.profile_id):
+    if not has_profile:
         return "No language profile is assigned"
     return None
 

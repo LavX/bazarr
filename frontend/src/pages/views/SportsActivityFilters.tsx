@@ -62,6 +62,7 @@ const SportsActivityFilters: FunctionComponent<Props> = ({
             // The event filter belongs to one instance's row, so it cannot
             // survive a change of instance.
             next.delete("event_id");
+            next.delete("league");
             if (value) next.set("instance", value);
             else next.delete("instance");
             setParams(next);

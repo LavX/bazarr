@@ -24,15 +24,13 @@ from sonarr.history import history_log
 from arr_instances.resolution import scoped, client_for_instance
 from sonarr.notify import notify_sonarr
 from languages.custom_lang import CustomLanguage
-from app.database import (TableEpisodes, TableMovies, TableShows, TableSportsEvents,
-                         TableSportsLeagues,
+from app.database import (TableEpisodes, TableMovies, TableShows,
                          get_profiles_list, get_audio_profile_languages,
                           database, select)
 from app.jobs_queue import jobs_queue
 from app.event_handler import event_stream
 from app.notifier import send_notifications
 from app.notifier import send_notifications_movie
-from app.notifier import send_notifications_sports
 from subtitles.processing import ProcessSubtitlesResult
 from subtitles.tools.subsync_engines import (SubtitlePublication, write_subtitle_file,
                                             subtitle_source_version, subtitle_write_locks)
@@ -141,6 +139,11 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
     if not job_id:
         return jobs_queue.add_job_from_function(f"Uploading {filename}", is_progress=False)
 
+    if media_type == 'sports':
+        from sportarr.upload import upload_sports_subtitle
+        return upload_sports_subtitle(sportsEventId, arr_instance_id, language, forced, hi,
+                                      subtitle, filename, job_id)
+
     logging.debug(f'BAZARR Manually uploading subtitles: {filename}')  # noqa: G004
 
     single = settings.general.single_language
@@ -169,27 +172,7 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
     if forced:
         lang_obj = Language.rebuild(lang_obj, forced=True)
 
-    sports_metadata = None
-    if media_type == 'sports':
-        # The language profile lives on the LEAGUE, not the event, so it has
-        # to be joined; an event carries no profileId column of its own.
-        sports_metadata = database.execute(scoped(
-            select(TableSportsEvents.id, TableSportsLeagues.profileId)
-            .select_from(TableSportsEvents)
-            .join(TableSportsLeagues,
-                  TableSportsLeagues.id == TableSportsEvents.league_id)
-            .where(TableSportsEvents.id == sportsEventId),
-            TableSportsEvents.arr_instance_id, arr_instance_id)) \
-            .first()
-
-        if sports_metadata:
-            sportsEventId = sports_metadata.id
-            use_original_format = bool(
-                get_profiles_list(sports_metadata.profileId)["originalFormat"]
-            ) if sports_metadata.profileId else False
-        else:
-            return
-    elif media_type == 'series':
+    if media_type == 'series':
         episode_metadata = database.execute(scoped(
             select(TableEpisodes.sonarrSeriesId,
                    TableEpisodes.sonarrEpisodeId,
@@ -330,12 +313,7 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
                                 arr_instance_id=arr_instance_id)
     refresh_subtitles()
 
-    if media_type == 'sports':
-        reversed_path = path_mappings.path_replace_reverse_instance(path, arr_instance_id, "sports")
-        reversed_subtitles_path = path_mappings.path_replace_reverse_instance(
-            subtitle_path, arr_instance_id, "sports")
-        event_stream(type='sports', action='update', payload=sportsEventId)
-    elif media_type == 'series':
+    if media_type == 'series':
         # Reverse-map through the owning instance's path_mappings (#156); None
         # owner => global mapping (the default/single-instance path), unchanged.
         reversed_path = path_mappings.path_replace_reverse_instance(path, arr_instance_id, "series")
@@ -372,14 +350,7 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
         if isinstance(result, tuple) and len(result):
             result = result[0]
         provider = "manual"
-        if media_type == 'sports':
-            from sportarr.history import sports_history_log
-
-            sports_history_log(4, sportsEventId, arr_instance_id, result)
-            if not settings.general.dont_notify_manual_actions:
-                _notify_upload("user", send_notifications_sports, sportsEventId, result.message,
-                               arr_instance_id=arr_instance_id)
-        elif media_type == 'series':
+        if media_type == 'series':
             history_log(4, sonarrSeriesId, sonarrEpisodeId, result, fake_provider=provider,
                         fake_score=MAX_SCORES['episode'], arr_instance_id=arr_instance_id)
             if not settings.general.dont_notify_manual_actions:
@@ -399,8 +370,7 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
 
     refresh_consumers = partial(
         _refresh_upload_consumers, media_type,
-        sports_metadata if media_type == 'sports'
-        else episode_metadata if media_type == 'series' else movie_metadata,
+        episode_metadata if media_type == 'series' else movie_metadata,
         arr_instance_id)
     refresh_consumers()
     if source_publication is not None:

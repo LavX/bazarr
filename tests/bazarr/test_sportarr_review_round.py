@@ -12,6 +12,8 @@ import threading
 import pytest
 import sqlalchemy as sa
 from test_sportarr_kind_migration import migration_engine, _run  # noqa: F401
+from test_sportarr_indexer import indexed_library  # noqa: F401
+from test_sportarr_manual import manual_library  # noqa: F401
 
 
 # --------------------------------------------------------------------------
@@ -761,3 +763,222 @@ def test_sports_history_with_parts_still_lists_every_column(schema_session):
     assert downloaded["partNumber"] == 4
     assert downloaded["matches"] == ["title", "year"]
     assert "blacklisted" in downloaded and "upgradable" in downloaded
+
+
+
+@pytest.fixture
+def sync_library(manual_library, monkeypatch):  # noqa: F811
+    from pathlib import Path
+    from app import event_handler
+    from app.config import settings
+    from sportarr import history
+    from subtitles import sync
+    from subtitles.tools import subsyncer, subsync_engines
+
+    service, session, folder = manual_library
+    monkeypatch.setattr(history, 'database', session)
+    monkeypatch.setattr(settings.subsync, 'debug', False)
+    monkeypatch.setattr(settings.subsync, 'use_subsync_movie_threshold', False)
+    published, refreshed = [], []
+    monkeypatch.setattr(sync, 'publication_callback',
+                        lambda kind, path, operation, owner: lambda output:
+                        published.append((kind, path, operation, owner, str(output))))
+    monkeypatch.setattr(event_handler, 'event_stream', lambda **event: refreshed.append(event))
+    monkeypatch.setattr(subsyncer, 'SubsyncEngineRunner',
+                        lambda: subsync_engines.SubsyncEngineRunner(subsync_engines.InMemorySubsyncFailureStore()))
+    def engine(self, output_path, **kwargs):
+        Path(output_path).write_text('1\n00:00:00,200 --> 00:00:01,200\nSynchronized sporting event.\n')
+        return {'offset_seconds': 0.2, 'framerate_scale_factor': 1.0}
+    monkeypatch.setattr(subsyncer.SubSyncer, '_run_ffsubsync_engine', engine)
+    return service, session, folder, published, refreshed
+
+
+def _run_sports_sync(library, mode='overwrite', mass=False, force=True):
+    from sportarr.subtitles import sports_manual_operation
+    from subtitles import sync, mass_operations
+    _, _, folder, _, _ = library
+    source = str(folder / '1/event.en.hi.srt')
+    if mass:
+        item = dict(video_path=str(folder / '1/event.mkv'), srt_path=source, srt_lang='en',
+                    forced=False, hi=True, percent_score=0, sonarr_series_id=None,
+                    sonarr_episode_id=None, radarr_id=None, sports_event_id=61,
+                    max_offset_seconds='60', no_fix_framerate=False, gss=False,
+                    arr_instance_id=1, output_mode=mode, enabled_engines=['ffsubsync'])
+        return mass_operations._process_subtitle_item(item, 'sync', {}, 99)
+    with sports_manual_operation(61, 1) as (context, validate, guard, path):
+        return sync.sync_subtitles(video_path=path, srt_path=source, srt_lang='en', forced=False,
+                                   hi=True, percent_score=0, force_sync=force, track_job_progress=False,
+                                   arr_instance_id=1, context=context, validate=validate,
+                                   publication_guard=guard, output_mode=mode, enabled_engines=['ffsubsync'])
+
+
+@pytest.mark.parametrize('mode', ['overwrite', 'keep_all'])
+@pytest.mark.parametrize('mass', [False, True])
+@pytest.mark.parametrize('check', ['publication', 'history', 'index'])
+def test_sports_sync_publishes_indexes_and_records_exact_owner(sync_library, mode, mass, check):
+    import ast
+    from app.database import TableHistorySports, TableSportsEvents
+    _, session, folder, published, refreshed = sync_library
+    assert _run_sports_sync(sync_library, mode, mass)
+    output = folder / ('1/event.en.hi.ffsubsync.srt' if mode == 'keep_all' else '1/event.en.hi.srt')
+    assert output.is_file()
+    if check == 'publication':
+        assert published == [('sports', str(folder / '1/event.mkv'), 'sync', 1, str(output))]
+        return
+    if check == 'index':
+        assert any(item[1] == '/sports/' + output.name for item in ast.literal_eval(session.get(TableSportsEvents, 61).subtitles))
+        assert session.get(TableSportsEvents, 62).subtitles == '[]'
+        assert any(event.get('type') == 'sports' and event.get('payload') == 61 for event in refreshed)
+        return
+    rows = session.execute(sa.select(TableHistorySports).where(TableHistorySports.action == 5)).scalars().all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row.event_id, row.arr_instance_id, row.video_path, row.subtitles_path, row.language) == (
+        61, 1, '/sports/event.mkv', '/sports/' + output.name, 'en:hi')
+    assert 'ffsubsync' in row.description and mode in row.description
+    assert any(item[1] == '/sports/' + output.name for item in ast.literal_eval(session.get(TableSportsEvents, 61).subtitles))
+    assert session.get(TableSportsEvents, 62).subtitles == '[]'
+    assert any(event.get('type') == 'sports' and event.get('payload') == 61 for event in refreshed)
+
+
+@pytest.mark.parametrize('failure', ['engine', 'cancel', 'event', 'mapping', 'video'])
+def test_unsuccessful_sports_sync_preserves_source_without_success_history(sync_library, monkeypatch, failure):
+    from pathlib import Path
+    from app.database import TableHistorySports, TableSportsEvents, TableArrInstances
+    from app.jobs_queue import JobCancelled
+    from subtitles.tools.subsyncer import SubSyncer
+
+    _, session, folder, published, _ = sync_library
+    source = folder / '1/event.en.hi.srt'
+    before = source.read_bytes()
+    def engine(self, output_path, **kwargs):
+        Path(output_path).write_text('engine output')
+        if failure == 'engine':
+            raise RuntimeError('engine failed')
+        if failure == 'cancel':
+            raise JobCancelled('cancelled before publication')
+        if failure == 'event':
+            session.execute(sa.update(TableSportsEvents).where(TableSportsEvents.id == 61).values(file_id=999))
+        elif failure == 'mapping':
+            session.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 1).values(path_mappings='[]'))
+        elif failure == 'video':
+            (folder / '1/event.mkv').write_bytes(b'changed')
+        session.commit()
+        return {'offset_seconds': 0, 'framerate_scale_factor': 1}
+    monkeypatch.setattr(SubSyncer, '_run_ffsubsync_engine', engine)
+    if failure == 'cancel':
+        with pytest.raises(JobCancelled):
+            _run_sports_sync(sync_library)
+    else:
+        assert not _run_sports_sync(sync_library)
+    assert source.read_bytes() == before
+    assert not published
+    assert session.execute(sa.select(TableHistorySports)).scalars().all() == []
+
+
+def test_repeated_keep_all_sync_does_not_duplicate_history(sync_library, monkeypatch):
+    from app.config import settings
+    from app.database import TableHistorySports
+    monkeypatch.setattr(settings.subsync, "use_subsync", True)
+    _, session, _, _, _ = sync_library
+    assert _run_sports_sync(sync_library, 'keep_all')
+    assert not _run_sports_sync(sync_library, 'keep_all', force=False)
+    assert session.execute(sa.select(sa.func.count()).select_from(TableHistorySports)).scalar_one() == 1
+
+
+def test_sports_sync_success_survives_an_unavailable_ui_receiver(sync_library, monkeypatch):
+    from app import event_handler
+    from app.database import TableHistorySports, TableSportsEvents
+    _, session, _, _, _ = sync_library
+    def unavailable(**kwargs):
+        raise RuntimeError('UI receiver unavailable')
+    monkeypatch.setattr(event_handler, 'event_stream', unavailable)
+    assert _run_sports_sync(sync_library)
+    assert session.execute(sa.select(TableHistorySports)).scalar_one().action == 5
+    assert session.get(TableSportsEvents, 61).subtitles != '[]'
+
+
+@pytest.mark.parametrize('mode', ['overwrite', 'keep_all'])
+@pytest.mark.parametrize('mass', [False, True])
+def test_sports_sync_index_failure_is_not_reported_as_success(sync_library, monkeypatch, mode, mass):
+    from app.database import TableSportsEvents
+    from subtitles.indexer import sports
+
+    _, session, folder, published, refreshed = sync_library
+    def unavailable(*args, **kwargs):
+        raise RuntimeError('Subtitle index unavailable')
+    monkeypatch.setattr(sports, 'store_subtitles_sports', unavailable)
+
+    assert _run_sports_sync(sync_library, mode, mass) is False
+    output = folder / ('1/event.en.hi.ffsubsync.srt' if mode == 'keep_all' else '1/event.en.hi.srt')
+    assert output.is_file()
+    assert published == [('sports', str(folder / '1/event.mkv'), 'sync', 1, str(output))]
+    assert session.get(TableSportsEvents, 61).subtitles == '[]'
+    assert session.get(TableSportsEvents, 62).subtitles == '[]'
+    assert not refreshed
+
+
+def test_failed_sports_sync_preserves_failure_when_index_cleanup_also_fails(sync_library, monkeypatch, caplog):
+    from app.database import TableHistorySports, TableSportsEvents
+    from subtitles.indexer import sports
+    from subtitles.tools.subsyncer import SubSyncer
+
+    _, session, folder, _, refreshed = sync_library
+    def history_unavailable(*args, **kwargs):
+        raise RuntimeError('Sync history unavailable')
+    def index_unavailable(*args, **kwargs):
+        raise RuntimeError('Subtitle index unavailable')
+    monkeypatch.setattr(SubSyncer, '_log_sync_history', history_unavailable)
+    monkeypatch.setattr(sports, 'store_subtitles_sports', index_unavailable)
+
+    assert _run_sports_sync(sync_library, 'keep_all') is False
+    assert (folder / '1/event.en.hi.ffsubsync.srt').is_file()
+    assert session.get(TableSportsEvents, 61).subtitles == '[]'
+    assert session.execute(sa.select(TableHistorySports)).scalars().all() == []
+    assert not refreshed
+    assert 'Sync history unavailable' in caplog.text
+    assert 'Subtitle index unavailable' in caplog.text
+
+
+@pytest.mark.parametrize('change', [None, 'event', 'video', 'output', 'index_failure'])
+def test_partial_keep_all_indexes_only_current_publications_after_cancellation(sync_library, monkeypatch, change):
+    import ast
+    from app.database import TableSportsEvents, TableHistorySports
+    from app.jobs_queue import JobCancelled
+    from sportarr.subtitles import sports_manual_operation
+    from subtitles import sync
+    from subtitles.indexer import sports
+    from subtitles.tools.subsyncer import SubSyncer
+    from subtitles.tools.subsync_engines import write_subtitle_file
+    _, session, folder, published, refreshed = sync_library
+    output = folder / '1/event.en.hi.ffsubsync.srt'
+    if change == 'index_failure':
+        def unavailable(*args, **kwargs):
+            raise RuntimeError('Subtitle index unavailable')
+        monkeypatch.setattr(sports, 'store_subtitles_sports', unavailable)
+    def cancel(self, **kwargs):
+        if change == 'event':
+            session.execute(sa.update(TableSportsEvents).where(TableSportsEvents.id == 61).values(file_id=999))
+            session.commit()
+        elif change == 'video':
+            (folder / '1/event.mkv').write_bytes(b'New video')
+        elif change == 'output':
+            write_subtitle_file(str(folder / '1/event.mkv'), str(output), b'New subtitle')
+        raise JobCancelled('Second engine cancelled')
+    monkeypatch.setattr(SubSyncer, '_run_external_engine', cancel)
+    with sports_manual_operation(61, 1) as (context, validate, guard, video):
+        with pytest.raises(JobCancelled, match='Second engine cancelled'):
+            sync.sync_subtitles(video_path=video, srt_path=str(folder / '1/event.en.hi.srt'),
+                                srt_lang='en', forced=False, hi=True, percent_score=0,
+                                force_sync=True, track_job_progress=False, arr_instance_id=1,
+                                context=context, validate=validate, publication_guard=guard,
+                                output_mode='keep_all', enabled_engines=['ffsubsync', 'alass'])
+    indexed = ast.literal_eval(session.get(TableSportsEvents, 61).subtitles)
+    assert output.exists()
+    if change is None:
+        assert any(item[1] == '/sports/' + output.name for item in indexed)
+        assert len([event for event in refreshed if event.get('type') == 'sports']) == 1
+    else:
+        assert indexed == []
+        assert not refreshed
+    assert session.execute(sa.select(TableHistorySports)).scalars().all() == []

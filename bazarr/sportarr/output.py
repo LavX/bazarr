@@ -19,6 +19,7 @@ from utilities.path_mappings import (
     _apply_mapping,
     apply_sports_mapping,
     read_sports_mappings,
+    global_sports_mappings,
     path_mappings,
 )
 
@@ -139,6 +140,7 @@ def _configuration():
         settings.general.subfolder_custom,
         repr(path_mappings.path_mapping_series),
         repr(path_mappings.path_mapping_movies),
+        repr(global_sports_mappings()),
     )
 
 

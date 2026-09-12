@@ -248,10 +248,10 @@ def validate_subtitle_versions(snapshots):
 
 
 def write_subtitle_file(video_path, destination, content, written_paths=None,
-                        on_publish=None, publication_guard=None):
+                        on_publish=None, publication_guard=None, after_write=None):
     """Write one saver output atomically and record that exact successful path."""
     with staged_subtitle_write(video_path, destination, on_publish=on_publish,
-                              publication_guard=publication_guard,
+                              publication_guard=publication_guard, after_write=after_write,
                               after_publish=(lambda: written_paths.append(destination))
                               if written_paths is not None else None) as temporary:
         with open(temporary, 'wb') as handle:

@@ -12,13 +12,15 @@ from app.database import (
     TableArrInstances,
     TableHistorySports,
     TableSportsEvents,
+    TableSportsLeagues,
+    TableLanguagesProfiles,
 )
 from app.jobs_queue import jobs_queue, JobCancelled
 from sportarr.automatic import eligibility, search_event
 from sportarr.connection import check_cancelled
 from sportarr.history import blacklist_history
 from sportarr.identity import resolve_event_in_session
-from sportarr.library import _event_query, _serialize_event, get_league
+from sportarr.library import _event_query, _serialize_event, get_league, parse_stored_list
 from sportarr.pagination import validate_page
 from sportarr.sync.leagues import require_sportarr
 from sportarr.errors import SportsNotFound
@@ -106,7 +108,35 @@ def list_wanted(session, arr_instance_id=None, start=0, length=100):
 
 
 def wanted_badge(session):
-    return sum(len(row["missing_subtitles"]) for row in wanted_rows(session))
+    from sportarr.automatic import eligibility_reason
+    from sportarr.settings import get_sports_settings
+
+    owners = {
+        instance.id: get_sports_settings(instance)
+        for instance in session.execute(select(TableArrInstances).where(
+            TableArrInstances.kind == "sportarr", TableArrInstances.enabled == 1
+        ).execution_options(populate_existing=True)).scalars()
+    }
+    if not owners:
+        return 0
+    profiles = set(session.execute(select(TableLanguagesProfiles.profileId)).scalars())
+    rows = session.execute(select(
+        TableSportsEvents.arr_instance_id, TableSportsEvents.monitored,
+        TableSportsLeagues.monitored, TableSportsLeagues.tags,
+        TableSportsLeagues.sport, TableSportsLeagues.profileId,
+        TableSportsEvents.missing_subtitles,
+    ).join(TableSportsLeagues,
+           (TableSportsEvents.league_id == TableSportsLeagues.id)
+           & (TableSportsEvents.arr_instance_id == TableSportsLeagues.arr_instance_id))
+      .where(TableSportsEvents.arr_instance_id.in_(owners),
+             TableSportsEvents.missing_subtitles.is_not(None),
+             TableSportsEvents.missing_subtitles != "[]"))
+    return sum(
+        len(parse_stored_list(missing))
+        for owner, monitored, league_monitored, tags, sport, profile, missing in rows
+        if not eligibility_reason(monitored, league_monitored, tags, sport,
+                                  bool(profile and profile in profiles), owners[owner])
+    )
 
 
 def _run_events(rows, job_id, adaptive=False, language=None):

@@ -166,6 +166,14 @@ def _event_query(arr_instance_id=None, enabled_only=True):
     return query
 
 
+def parse_stored_list(raw):
+    try:
+        value = ast.literal_eval(raw or '[]')
+    except (SyntaxError, ValueError):
+        return []
+    return value if isinstance(value, list) else []
+
+
 def _serialize_event(row):
     event, profile, mappings = row
     result = event.to_dict()
@@ -174,11 +182,7 @@ def _serialize_event(row):
         if result[name] is not None:
             result[name] = result[name].isoformat()
     for name in ('audio_language', 'subtitles', 'missing_subtitles', 'failedAttempts'):
-        try:
-            value = ast.literal_eval(result[name] or '[]')
-        except (SyntaxError, ValueError):
-            value = []
-        result[name] = value if isinstance(value, list) else []
+        result[name] = parse_stored_list(result[name])
     result['monitored'] = result['monitored'] == 'True'
     result['partNumber'] = result['partNumber'] or None
     return result | {'profileId': profile, 'hasFile': True,

@@ -544,3 +544,21 @@ def test_an_unextractable_sports_track_skips_the_item_not_the_batch():
         assert _process_subtitle_item(
             item, 'translate', {'to_lang': 'en'}, job_id=1) is False
     translate.assert_not_called()
+
+
+def test_mass_sports_mod_publishes_the_sports_owner(sports_library, monkeypatch):
+    from subtitles import mass_operations
+    from subtitles.tools import mods
+
+    subtitle = sports_library / 'race.hu.srt'
+    subtitle.write_text('1\n00:00:00,000 --> 00:00:01,000\n<i>Race subtitle</i>\n')
+    published = []
+    monkeypatch.setattr(mods, 'with_keep_lyrics', lambda chosen, owner: chosen)
+    monkeypatch.setattr(mods, 'alpha3_from_alpha2', lambda language: 'hun')
+    monkeypatch.setattr(mods, 'publication_callback',
+                        lambda kind, path, operation, owner: lambda output:
+                        published.append((kind, path, operation, owner, str(output))))
+    items, _ = mass_operations._collect_sports(event_ids=[61], sports_instance={61: {42}})
+    assert mass_operations._process_subtitle_item(items[0], 'remove_tags', {}, 99)
+    assert published == [('sports', str(sports_library / 'race.mkv'), 'edit', 42, str(subtitle))]
+    assert '<i>' not in subtitle.read_text()

@@ -25,6 +25,8 @@ from subtitles.tools.subsync_engines import (
     REASON_DESTINATION_CHANGED,
     REASON_DESTINATION_AMBIGUOUS,
     is_sync_engine_output,
+    subtitle_source_version,
+    subtitle_write_locks,
     normalize_enabled_engines,
     release_subtitle_publication,
     release_unqueued_subtitle_publication,
@@ -216,6 +218,51 @@ def _index_keep_all_outputs(video_path, sonarr_series_id=None, sonarr_episode_id
         event_stream(type='movie', payload=radarr_id)
 
 
+def _record_sports_sync(subsync, sync_result, context, publication_guard, versions, srt_lang, hi, forced):
+    """Record each still-current successful output once, under its owned guard."""
+    if settings.subsync.debug:
+        return
+    outputs = {result.output_path: result for result in sync_result.successful_results}
+    with subtitle_write_locks(context.mapped_path, *outputs):
+        with publication_guard() as (session, validate):
+            validate()
+            for path, result in outputs.items():
+                if versions.get(path) is None or subtitle_source_version(path) != versions[path]:
+                    raise ValueError('Synchronized sports subtitle changed before history was recorded')
+                subsync._log_sync_history(
+                    result, sync_result.output_mode, srt_lang.split(':')[0], hi, forced,
+                    arr_instance_id=context.arr_instance_id, sports_context=context, history_session=session)
+
+
+def _refresh_current_sports_outputs(context, signature, result, versions):
+    """Reconcile real partial publications even when a later engine was cancelled."""
+    from app.database import database
+    from sportarr.output import SportsOutputNamespace
+    from sportarr.subtitles import candidate_signature
+
+    namespace = SportsOutputNamespace(context, database)
+    outputs = [item.output_path for item in result.successful_results]
+    with subtitle_write_locks(context.mapped_path, *outputs):
+        if candidate_signature(context) != signature:
+            return
+        namespace.validate(database)
+        if not any(versions.get(path) is not None and subtitle_source_version(path) == versions[path]
+                   for path in outputs):
+            return
+    _index_sports_outputs(context)
+
+
+def _index_sports_outputs(context):
+    from app.event_handler import event_stream
+    from subtitles.indexer.sports import store_subtitles_sports
+
+    store_subtitles_sports(context.event_id, context.arr_instance_id)
+    try:
+        event_stream(type='sports', payload=context.event_id)
+    except Exception:
+        logging.exception('BAZARR sports subtitles were indexed but the UI refresh failed')
+
+
 def _report_progress(job_id, track_job_progress, owns_job_progress, message,
                      value=None, total=None, name=None):
     """Report sync progress to the jobs queue.
@@ -270,16 +317,16 @@ def sync_subtitles(video_path,
                    validate=None,
                    cancel=None,
                    publication_guard=None):
-    if context is not None:
-        if validate is None or publication_guard is None:
-            raise ValueError('Sports sync requires its owned publication guard')
-        check_cancelled(cancel)
-        validate()
-        validate_output_path(context, srt_path)
-        if (video_path != context.mapped_path or arr_instance_id != context.arr_instance_id
-                or sonarr_series_id is not None or sonarr_episode_id is not None or radarr_id is not None):
-            raise ValueError('Sports sync requires its exact event and owner')
     try:
+        if context is not None:
+            if validate is None or publication_guard is None:
+                raise ValueError('Sports sync requires its owned publication guard')
+            check_cancelled(cancel)
+            validate()
+            validate_output_path(context, srt_path)
+            if (video_path != context.mapped_path or arr_instance_id != context.arr_instance_id
+                    or sonarr_series_id is not None or sonarr_episode_id is not None or radarr_id is not None):
+                raise ValueError('Sports sync requires its exact event and owner')
         # The audio-sync settings resolve against the owning instance (#227); a None
         # owner / unset override yields the global value, so legacy paths are
         # unchanged. The use_subsync gate is evaluated inline via the module-level
@@ -341,6 +388,16 @@ def sync_subtitles(video_path,
                       f'subtitles: {srt_path}.')
         if not use_subsync_threshold or (use_subsync_threshold and percent_score <= float(subsync_threshold)):
             subsync = SubSyncer()
+            published_versions = {}
+            notify_publication = publication_callback(
+                'sports' if context is not None else 'episode' if sonarr_episode_id is not None else 'movie',
+                video_path, publication_operation, arr_instance_id)
+
+            def on_publish(path):
+                if context is not None:
+                    published_versions[path] = subtitle_source_version(path)
+                notify_publication(path)
+
             sync_kwargs = {
                 'video_path': video_path,
                 'srt_path': srt_path,
@@ -360,10 +417,12 @@ def sync_subtitles(video_path,
                 'enabled_engines': enabled_engines,
                 'progress_callback': update_progress if track_job_progress else None,
                 'arr_instance_id': arr_instance_id,
-                'on_publish': publication_callback('episode' if sonarr_episode_id is not None else 'movie',
-                                                   video_path, publication_operation, arr_instance_id),
+                'on_publish': on_publish,
             }
             if context is not None:
+                from sportarr.subtitles import candidate_signature
+                sports_signature = candidate_signature(context)
+
                 def validate_sports_sync():
                     check_cancelled(cancel)
                     validate()
@@ -371,11 +430,15 @@ def sync_subtitles(video_path,
                 sync_kwargs.update(write_history=False, validate=validate_sports_sync, reference=reference or 'a:0',
                                    publication_guard=publication_guard)
             sync_result = None
+            sports_refresh_attempted = False
             if source_version is not None:
                 sync_kwargs['source_version'] = source_version
             try:
                 sync_result = subsync.sync(**sync_kwargs)
                 if sync_result and sync_result.success:
+                    if context is not None:
+                        _record_sports_sync(subsync, sync_result, context, publication_guard,
+                                           published_versions, srt_lang, hi, forced)
                     if callback and source_version is None:
                         callback()
                     elif not callback and context is None and getattr(sync_result, 'output_mode', None) == OUTPUT_MODE_KEEP_ALL:
@@ -386,6 +449,10 @@ def sync_subtitles(video_path,
                             radarr_id=radarr_id,
                             arr_instance_id=arr_instance_id,
                         )
+                    if context is not None and not callback:
+                        sports_refresh_attempted = True
+                        _refresh_current_sports_outputs(context, sports_signature, sync_result,
+                                                       published_versions)
             except JobCancelled:
                 raise
             except Exception:
@@ -397,6 +464,14 @@ def sync_subtitles(video_path,
             finally:
                 try:
                     try:
+                        completed = sync_result or getattr(subsync, 'sync_result', None)
+                        if (context is not None and not callback and not sports_refresh_attempted
+                                and completed and completed.success):
+                            try:
+                                _refresh_current_sports_outputs(context, sports_signature, completed,
+                                                               published_versions)
+                            except Exception:
+                                logging.exception('BAZARR could not refresh published sports sync outputs')
                         if callback and source_version is not None:
                             callback()
                     finally:
