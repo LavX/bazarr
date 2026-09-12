@@ -1084,6 +1084,32 @@ def _process_media_action(items, action, job_id):
             errors.append(str(e))
         return {'queued': queued, 'skipped': 0, 'errors': errors}
 
+    # Sports disc scans come in two shapes. The wanted page's Scan All sends
+    # one representative row per owner with no media id, meaning the whole
+    # library: the sports rescan job builds its own candidate list from the
+    # owner's events and takes an instance, not a media filter. The league
+    # toolbar and the events table send the selected league (or event) and
+    # expect exactly that selection to be re-indexed. Gating the owner-wide arm
+    # on the absence of a media id keeps a league-scoped action from silently
+    # widening into a whole-library scan.
+    sports_scan_owners = sorted({
+        i.get('arr_instance_id')
+        for i in items
+        if action == 'scan-disk' and i.get('type') in ('sports', 'sportsLeague')
+        and not i.get('sportsEventId') and not i.get('sportsLeagueId')
+        and i.get('arr_instance_id')
+    })
+    if action == 'scan-disk' and sports_scan_owners:
+        from subtitles.indexer.sports import sports_full_scan_subtitles
+
+        try:
+            for owner in sports_scan_owners:
+                sports_full_scan_subtitles(job_id=job_id, arr_instance_id=owner)
+            queued += len(sports_scan_owners)
+        except Exception as e:
+            logger.error(f'Error during sports scan-disk: {e}')  # noqa: G004
+            errors.append(str(e))
+
     jobs_queue.update_job_progress(job_id=job_id, progress_max=len(items))
 
     for i, item in enumerate(items, start=1):
@@ -1096,6 +1122,14 @@ def _process_media_action(items, action, job_id):
 
         try:
             if action == 'scan-disk':
+                if item_type in ('sports', 'sportsLeague'):
+                    if not item.get('sportsEventId') and not item.get('sportsLeagueId'):
+                        # Representative Scan All row, handled once per owner
+                        # above. One without an owner can never resolve a
+                        # mapping, so it is skipped rather than dropped.
+                        if not item.get('arr_instance_id'):
+                            skipped += 1
+                        continue
                 if item_type in ('series', 'episode'):
                     series_id = item.get('sonarrSeriesId')
                     if not series_id:

@@ -7,6 +7,7 @@ import { faSearch } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
+import { useAudioLanguages } from "@/apis/hooks/languages";
 import {
   SportsWantedRow,
   useSportsAction,
@@ -14,7 +15,11 @@ import {
   useSportsWantedPagination,
 } from "@/apis/hooks/sports";
 import { useBatchAction } from "@/apis/hooks/subtitles";
-import { InstanceBadge, ReleaseMismatchBadge } from "@/components/bazarr";
+import {
+  AudioList,
+  InstanceBadge,
+  ReleaseMismatchBadge,
+} from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
 import { WantedItem } from "@/components/forms/MassTranslateForm";
 import { SportsSearchModal } from "@/components/modals/SportsSearchModal";
@@ -88,13 +93,45 @@ const WantedSportsView: FunctionComponent = () => {
     : undefined;
 
   const [search, setSearch] = useState("");
+  const [audioLanguages, setAudioLanguages] = useState<string[]>([]);
+  const [excludeLanguages, setExcludeLanguages] = useState<string[]>([]);
   const [missingLanguage, setMissingLanguage] = useState<string | null>(null);
   const [debouncedSearch] = useDebouncedValue(search, 300);
 
   const hasActiveFilter =
-    debouncedSearch.length > 0 || missingLanguage !== null;
+    debouncedSearch.length > 0 ||
+    audioLanguages.length > 0 ||
+    excludeLanguages.length > 0 ||
+    missingLanguage !== null;
 
-  const query = useSportsWantedPagination({ owner }, hasActiveFilter);
+  // The same library-wide audio-language catalogue the Series and Movies
+  // wanted pages use, sourced from every media type's indexed files rather
+  // than from the currently loaded page. The sports API stores the
+  // ffprobe-derived audio track NAMES ("Hungarian"), while the filters and
+  // the Audio column speak code2, so both directions are mapped through this
+  // catalogue: names become the codes the rows carry, and the column turns
+  // those back into readable names.
+  const { data: audioLangs = [] } = useAudioLanguages();
+  const langOptions = useMemo(
+    () => audioLangs.map((l) => ({ value: l.code2, label: l.name })),
+    [audioLangs],
+  );
+  const nameToCode = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const lang of audioLangs) map.set(lang.name, lang.code2);
+    return map;
+  }, [audioLangs]);
+  const codeToName = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const lang of audioLangs) map.set(lang.code2, lang.name);
+    return map;
+  }, [audioLangs]);
+
+  const query = useSportsWantedPagination(
+    { owner },
+    hasActiveFilter,
+    nameToCode,
+  );
   const run = useSportsAction();
   const batch = useBatchAction();
   const { instances } = useSportsAvailability();
@@ -116,6 +153,24 @@ const WantedSportsView: FunctionComponent = () => {
       ) {
         return false;
       }
+      if (audioLanguages.length > 0) {
+        const itemLangs = item.audio_language ?? [];
+        const hasMatchingLang = itemLangs.some((code) =>
+          audioLanguages.includes(code),
+        );
+        if (!hasMatchingLang) {
+          return false;
+        }
+      }
+      if (excludeLanguages.length > 0) {
+        const itemLangs = item.audio_language ?? [];
+        const hasExcludedLang = itemLangs.some((code) =>
+          excludeLanguages.includes(code),
+        );
+        if (hasExcludedLang) {
+          return false;
+        }
+      }
       if (
         missingLanguage &&
         !item.missing_subtitles.some((sub) => sub.code2 === missingLanguage)
@@ -124,21 +179,8 @@ const WantedSportsView: FunctionComponent = () => {
       }
       return true;
     },
-    [debouncedSearch, missingLanguage],
+    [debouncedSearch, audioLanguages, excludeLanguages, missingLanguage],
   );
-
-  // Derived from what is actually missing rather than from the enabled
-  // languages list: a sports library commonly wants a handful of the languages
-  // the install has turned on, and offering the rest filters to nothing.
-  const missingLangOptions = useMemo(() => {
-    const seen = new Map<string, string>();
-    for (const row of query.data?.data ?? []) {
-      for (const sub of row.missing_subtitles) {
-        seen.set(sub.code2, sub.name);
-      }
-    }
-    return Array.from(seen, ([value, label]) => ({ value, label }));
-  }, [query.data]);
 
   const columns = useMemo<ColumnDef<SportsWantedRow>[]>(
     () => [
@@ -201,12 +243,27 @@ const WantedSportsView: FunctionComponent = () => {
           ]
         : []),
       {
+        header: "Audio",
+        accessorKey: "audio_language",
+        cell: ({ row: { original } }) => (
+          // Rows carry code2s; the catalogue turns them back into the real
+          // language names, the way the Series and Movies rows already arrive.
+          // An unknown code is shown as itself rather than dropped.
+          <AudioList
+            audios={(original.audio_language ?? []).map((code) => ({
+              code2: code,
+              name: codeToName.get(code) ?? code,
+            }))}
+          ></AudioList>
+        ),
+      },
+      {
         header: "Missing",
         accessorKey: "missing_subtitles",
         cell: ({ row: { original } }) => <MissingLanguages row={original} />,
       },
     ],
-    [multiInstance, instanceNameById, instanceDefaultId],
+    [multiInstance, instanceNameById, instanceDefaultId, codeToName],
   );
 
   const getWantedItem = useCallback(
@@ -231,16 +288,16 @@ const WantedSportsView: FunctionComponent = () => {
 
   const scanAll = useCallback(async () => {
     // Re-index from disk, which is what Scan All means on the other two pages.
-    // There is no whole-library sports rescan endpoint, so this scans exactly
-    // the events currently listed as wanted.
-    const items = (query.data?.data ?? []).map((row) => ({
+    // The batch scan-disk arm runs the whole-library rescan once per affected
+    // owner, so one representative wanted row per owner is enough: an event on
+    // the second or later wanted page is scanned too.
+    const items = (owner ? [owner] : instanceIds).map((id) => ({
       type: "sports" as const,
-      sportsEventId: row.id,
-      arr_instance_id: row.arr_instance_id,
+      arr_instance_id: id,
     }));
     if (items.length === 0) return;
     await batch.mutateAsync({ items, action: "scan-disk" });
-  }, [query.data, batch]);
+  }, [owner, instanceIds, batch]);
 
   if (isLoading) return null;
   if (!enabled) {
@@ -260,9 +317,14 @@ const WantedSportsView: FunctionComponent = () => {
       query={query}
       searchValue={search}
       onSearchChange={setSearch}
+      audioLanguages={audioLanguages}
+      onAudioLanguagesChange={setAudioLanguages}
+      excludeLanguages={excludeLanguages}
+      onExcludeLanguagesChange={setExcludeLanguages}
       missingLanguage={missingLanguage ?? undefined}
       onMissingLanguageChange={setMissingLanguage}
-      missingLangOptions={missingLangOptions}
+      langOptions={langOptions}
+      missingLangOptions={langOptions}
       dataFilter={hasActiveFilter ? dataFilter : undefined}
       searchAll={searchAll}
       scanAll={scanAll}

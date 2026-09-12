@@ -6,7 +6,7 @@ import logging
 from flask_restx import Resource, Namespace
 from operator import itemgetter
 
-from app.database import TableMovies, TableEpisodes, database, select
+from app.database import TableMovies, TableEpisodes, TableSportsEvents, database, select
 from languages.get_languages import alpha2_from_language, language_from_alpha2
 
 from ..utils import authenticate
@@ -21,7 +21,7 @@ class AudioLanguages(Resource):
     @api_ns_system_audio_languages.response(200, 'Success')
     @api_ns_system_audio_languages.response(401, 'Not Authenticated')
     def get(self):
-        """List unique audio languages found in movies and episodes"""
+        """List unique audio languages found in movies, episodes and sports events"""
         lang_set = set()
 
         # Collect from movies
@@ -48,6 +48,23 @@ class AudioLanguages(Resource):
         ).all()
 
         for row in episode_rows:
+            try:
+                langs = ast.literal_eval(row.audio_language or '[]')
+                for lang in langs:
+                    if lang:
+                        lang_set.add(lang)
+            except (ValueError, SyntaxError):
+                continue
+
+        # Collect from sports events, which store the same ffprobe-derived
+        # names in the same python-list format the movies and episodes use.
+        sports_rows = database.execute(
+            select(TableSportsEvents.audio_language)
+            .where(TableSportsEvents.audio_language.is_not(None))
+            .where(TableSportsEvents.audio_language != '[]')
+        ).all()
+
+        for row in sports_rows:
             try:
                 langs = ast.literal_eval(row.audio_language or '[]')
                 for lang in langs:

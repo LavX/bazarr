@@ -203,6 +203,101 @@ def test_scan_disk_reindexes_an_event_and_a_whole_league(sports_library):
         assert store.call_args.args == (61, 42)
 
 
+def test_scan_all_runs_the_whole_library_once_per_owner(sports_library, schema_session):
+    """Scan All must be library-wide per owner, not limited to the loaded rows.
+
+    The wanted page holds one server page at a time, and the batch scan-disk
+    arm mirrors the upgrade arm: one representative sports row per owner
+    triggers the owner's whole-library rescan, so an event sitting on the
+    second wanted page is indexed even though the client never sent it. The
+    representative row carries no media id, which is what marks it as the
+    owner-wide shape rather than a league-scoped selection.
+    """
+    from app.database import TableSportsEvents
+    from subtitles.mass_operations import _process_media_action
+
+    # Event 62 belongs to the same owner but sits on a later wanted page, so
+    # it is never part of the Scan All payload.
+    schema_session.add(TableSportsEvents(
+        id=62, arr_instance_id=42, league_id=51, sportarrEventId=19, file_id=72,
+        path='/remote/sports/highlights.mkv', title='Highlights'))
+    schema_session.commit()
+
+    result = None
+    with patch('subtitles.indexer.sports.sports_full_scan_subtitles') as full_scan, \
+            patch('subtitles.mass_operations._scan_sports',
+                  side_effect=AssertionError('per-row scan is no longer used')):
+        result = _process_media_action(
+            [{'type': 'sports', 'arr_instance_id': 42}],
+            'scan-disk', job_id=1)
+
+    assert [call.kwargs['arr_instance_id'] for call in full_scan.call_args_list] == [42]
+    assert result == {'queued': 1, 'skipped': 0, 'errors': []}
+    # A Scan All that only held the first page must reach the owner's other
+    # events, which is what delegating to the whole-library rescan buys.
+    assert full_scan.call_args.kwargs['job_id'] == 1
+
+
+def test_scan_all_deduplicates_representative_rows_from_one_owner(sports_library):
+    """Duplicated owner-wide rows from one Sportarr scan that library once."""
+    from subtitles.mass_operations import _process_media_action
+
+    items = [
+        {'type': 'sports', 'arr_instance_id': 42},
+        {'type': 'sports', 'arr_instance_id': 42},
+        {'type': 'sportsLeague', 'arr_instance_id': 42},
+        {'type': 'sports', 'arr_instance_id': 43},
+    ]
+    with patch('subtitles.indexer.sports.sports_full_scan_subtitles') as full_scan:
+        result = _process_media_action(items, 'scan-disk', job_id=1)
+
+    assert [call.kwargs['arr_instance_id'] for call in full_scan.call_args_list] == [42, 43]
+    assert result == {'queued': 2, 'skipped': 0, 'errors': []}
+
+
+def test_scan_disk_mixed_batches_still_scan_selected_series_and_movies(sports_library):
+    """The owner-wide sports arm must not swallow the other media types."""
+    from subtitles.mass_operations import _process_media_action
+
+    with patch('subtitles.indexer.sports.sports_full_scan_subtitles') as full_scan, \
+            patch('subtitles.mass_operations.series_scan_subtitles') as series_scan, \
+            patch('subtitles.mass_operations.movies_scan_subtitles') as movie_scan:
+        result = _process_media_action(
+            [
+                {'type': 'sports', 'arr_instance_id': 42},
+                {'type': 'series', 'sonarrSeriesId': 5, 'arr_instance_id': 9},
+                {'type': 'movie', 'radarrId': 4, 'arr_instance_id': 9},
+            ],
+            'scan-disk', job_id=1)
+
+    assert [call.kwargs['arr_instance_id'] for call in full_scan.call_args_list] == [42]
+    assert [call.args for call in series_scan.call_args_list] == [(5,)]
+    assert [call.args for call in movie_scan.call_args_list] == [(4,)]
+    assert result == {'queued': 3, 'skipped': 0, 'errors': []}
+
+
+@pytest.mark.parametrize("item", [
+    {'type': 'sportsLeague', 'sportsLeagueId': 51, 'arr_instance_id': 42},
+    {'type': 'sports', 'sportsEventId': 61, 'arr_instance_id': 42},
+])
+def test_scan_disk_rows_with_a_media_id_stay_selection_scoped(sports_library, item):
+    """Scan Disk from the league toolbar and the events table sends the
+    selected league (or event) with its media id. Those rows must re-index
+    exactly that selection through _scan_sports, not silently widen into the
+    owner's whole-library rescan the way the wanted page's representative
+    Scan All rows do.
+    """
+    from subtitles.mass_operations import _process_media_action
+
+    with patch('subtitles.mass_operations._scan_sports') as scan, \
+            patch('subtitles.indexer.sports.sports_full_scan_subtitles',
+                  side_effect=AssertionError('a media-scoped row must not widen')):
+        result = _process_media_action([item], 'scan-disk', job_id=1)
+
+    assert scan.call_args.args[0] == item
+    assert result == {'queued': 1, 'skipped': 0, 'errors': []}
+
+
 def test_an_unowned_sports_selection_is_skipped(sports_library):
     """A sports path mapping is always per instance with no global fallback, so
     acting without an owner cannot resolve a file at all."""

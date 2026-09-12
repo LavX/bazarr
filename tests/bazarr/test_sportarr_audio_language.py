@@ -117,3 +117,96 @@ def test_metadata_is_parsed_when_either_embedded_feature_is_on(flag):
         "if settings.general.use_embedded_subs or settings.general.parse_embedded_audio_track:"
         in source
     )
+
+
+@pytest.fixture
+def audio_catalogue(schema_session, monkeypatch, languages_loaded):
+    """The library-wide audio-language endpoint bound to a catalogued session.
+
+    The endpoint lives behind an absolute import of api.utils, so it is loaded
+    in isolation exactly like the other sports API tests, with the database
+    swapped for the fixture session. The sports-only language is served from
+    the sports events table; no movie or episode row carries it.
+    """
+    import importlib.util
+    import sys
+    from pathlib import Path
+    from types import ModuleType
+
+    from app.config import settings
+    from app.database import (TableArrInstances, TableMovies,
+                              TableSportsEvents, TableSportsLeagues)
+
+    languages_loaded.append(
+        {"code3": "eus", "code2": "eu", "name": "Basque", "code3b": "eus"}
+    )
+
+    schema_session.add(TableArrInstances(id=42, kind="sportarr", stable_key="sportarr-1",
+                                         name="Sportarr", enabled=1, port=1867, api_key="k"))
+    schema_session.flush()
+    schema_session.add(TableSportsLeagues(id=51, arr_instance_id=42, sportarrLeagueId=7,
+                                          title="Formula 1", path="/remote/sports"))
+    schema_session.flush()
+    schema_session.add(TableSportsEvents(
+        id=61, arr_instance_id=42, league_id=51, sportarrEventId=9, file_id=71,
+        path="/remote/sports/race.mkv", title="Race", audio_language="['Basque']"))
+    schema_session.add(TableArrInstances(id=2, kind="radarr", stable_key="radarr-1",
+                                         name="Radarr", enabled=1, port=7878, api_key="r"))
+    schema_session.flush()
+    schema_session.add(TableMovies(id=1, arr_instance_id=2, radarrId=1, tmdbId="1",
+                                   title="Film", path="/m.mkv", audio_language="['English']"))
+    schema_session.commit()
+
+    root = Path(__file__).resolve().parents[2] / "bazarr/api"
+    for name in ("_audio_catalogue_api", "_audio_catalogue_api.system"):
+        package = ModuleType(name)
+        package.__path__ = []
+        monkeypatch.setitem(sys.modules, name, package)
+    for name, filename in [
+        ("utils", "utils.py"),
+        ("system.audio_languages", "system/audio_languages.py"),
+    ]:
+        spec = importlib.util.spec_from_file_location(
+            "_audio_catalogue_api." + name, root / filename
+        )
+        endpoint = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, spec.name, endpoint)
+        spec.loader.exec_module(endpoint)
+    monkeypatch.setattr(endpoint, "database", schema_session)
+
+    from flask import Flask
+    from flask_restx import Api
+
+    app = Flask(__name__)
+    Api(app).add_namespace(endpoint.api_ns_system_audio_languages, path="/")
+    return app.test_client(), {"X-API-KEY": settings.auth.apikey}
+
+
+def test_sports_audio_languages_feed_the_library_catalogue(audio_catalogue):
+    """The catalogue is what the sports wanted page's audio filters read.
+
+    Sportarr itself reports no audio metadata, so the sports events table is
+    the only place a sports-only audio language exists; it must contribute to
+    the same endpoint movies and episodes feed.
+    """
+    client, headers = audio_catalogue
+    response = client.get("/system/languages/audio", headers=headers)
+    assert response.status_code == 200
+    body = response.get_json()
+    codes = {item["code2"] for item in body}
+    assert "eu" in codes, "Basque lives only on the sports event and must come back"
+    assert "en" in codes, "the movie's English track must still be present"
+
+
+def test_sports_rows_that_parse_to_nothing_are_skipped(audio_catalogue, schema_session):
+    """Broken or empty sports audio columns must not abort the catalogue."""
+    from app.database import TableSportsEvents
+
+    schema_session.get(TableSportsEvents, 61).audio_language = "[]"
+    schema_session.commit()
+    client, headers = audio_catalogue
+    response = client.get("/system/languages/audio", headers=headers)
+    assert response.status_code == 200
+    codes = {item["code2"] for item in response.get_json()}
+    assert "eu" not in codes
+    assert "en" in codes

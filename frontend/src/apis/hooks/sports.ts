@@ -200,7 +200,18 @@ export type SportsWantedRow = Wanted.Base &
     // Carried so a row can open the manual search, which offers languages from
     // the event's profile.
     profileId: number | null;
+    // Bare code2s, not the raw names the sports API stores: the indexer reads
+    // audio tracks off the file as names ("Hungarian") so the audio profile
+    // rules can resolve them, while the wanted filters and the Audio column
+    // speak code2. toSportsWantedRow translates through the library-wide
+    // language catalogue; an unmapped name is kept as-is so no entry silently
+    // vanishes.
+    audio_language: string[];
   };
+
+// The empty default keeps the mapper usable without a catalogue, and the
+// ReadonlyMap shape matches what useAudioLanguages-derived maps provide.
+const EMPTY_AUDIO_LANGUAGE_MAP: ReadonlyMap<string, string> = new Map();
 
 function toSubtitle(key: string): Subtitle {
   const [code2, ...modifiers] = key.split(":");
@@ -215,7 +226,10 @@ function toSubtitle(key: string): Subtitle {
   };
 }
 
-export function toSportsWantedRow(event: SportsEvent): SportsWantedRow {
+export function toSportsWantedRow(
+  event: SportsEvent,
+  nameToCode: ReadonlyMap<string, string> = EMPTY_AUDIO_LANGUAGE_MAP,
+): SportsWantedRow {
   return {
     ...event,
     title: event.title,
@@ -224,6 +238,9 @@ export function toSportsWantedRow(event: SportsEvent): SportsWantedRow {
     sceneName: event.sceneName ?? undefined,
     hearing_impaired: false,
     missing_subtitles: (event.missing_subtitles ?? []).map(toSubtitle),
+    audio_language: (event.audio_language ?? []).map(
+      (name) => nameToCode.get(name) ?? name,
+    ),
     release_mismatch: (event as SportsEvent & { release_mismatch?: boolean })
       .release_mismatch,
   };
@@ -289,13 +306,20 @@ function useSportsActivityPagination<T extends object>(
   filters: SportsFilters,
   map: (row: never) => T,
   fetchAll = false,
+  keySignatures: unknown[] = [],
 ) {
   const { enabled, instances } = useSportsAvailability();
   const ownerKnown =
     filters.owner === undefined ||
     instances.some((instance) => instance.id === filters.owner);
   return usePaginationQuery<T>(
-    [QueryKeys.Sports, kind, filters, instances.map((instance) => instance.id)],
+    [
+      QueryKeys.Sports,
+      kind,
+      filters,
+      ...keySignatures,
+      instances.map((instance) => instance.id),
+    ],
     async (param) => {
       // Guarded inside the fetcher rather than by an enabled flag, the way the
       // leagues query is: the page calls this hook unconditionally, and an
@@ -323,12 +347,24 @@ function useSportsActivityPagination<T extends object>(
 export function useSportsWantedPagination(
   filters: SportsFilters,
   fetchAll = false,
+  nameToCode: ReadonlyMap<string, string> = EMPTY_AUDIO_LANGUAGE_MAP,
 ) {
+  // toSportsWantedRow derives code2s at fetch time, so the derivation is part
+  // of the cached rows. On a cold cache the wanted rows can resolve before
+  // /system/languages/audio lands; the signature changes when the catalogue
+  // does, re-fetching the rows through the real map instead of caching
+  // unmapped names until the next refetch.
+  const nameToCodeSignature = Array.from(nameToCode.entries()).sort();
   return useSportsActivityPagination<SportsWantedRow>(
     "wanted",
     filters,
-    toSportsWantedRow as (row: never) => SportsWantedRow,
+    ((event) => toSportsWantedRow(event, nameToCode)) as (
+      row: never,
+    ) => SportsWantedRow,
     fetchAll,
+    // A plain-data signature rather than the Map object: same content, same
+    // cache key across renders, and a change to the catalogue is a new key.
+    [nameToCodeSignature],
   );
 }
 
