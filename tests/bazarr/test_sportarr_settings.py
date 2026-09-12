@@ -287,3 +287,34 @@ def test_api_serves_only_the_instance_path_mapping_override(schema_session, monk
     instance = repo.create("sportarr", "Main", api_key="fixture-secret")
 
     assert to_safe_dict(instance)["path_mappings"] == []
+
+
+def test_clearing_sports_mapping_override_restores_global_inheritance(schema_session, monkeypatch):
+    import json
+    from app import database as db
+    from app.config import settings
+    from arr_instances.repository import ArrInstanceRepository, to_safe_dict
+    from arr_instances.service import update_instance
+    from utilities.path_mappings import path_mappings
+
+    monkeypatch.setattr(db, 'database', schema_session)
+    monkeypatch.setattr(settings.general, 'path_mappings_sports', [['/sports', '/global']])
+    repo = ArrInstanceRepository(schema_session)
+    owner = repo.create('sportarr', 'First', path_mappings=json.dumps([['/sports', '/first']]))
+    sibling = repo.create('sportarr', 'Second', path_mappings=json.dumps([['/sports', '/second']]))
+    assert path_mappings.path_replace_instance('/sports/event.mkv', owner.id, 'sports') == '/first/event.mkv'
+    response, status = update_instance(schema_session, owner.id, {'path_mappings': []})
+    assert status == 200
+    assert response['path_mappings'] == []
+    assert path_mappings.path_replace_instance('/sports/event.mkv', owner.id, 'sports') == '/global/event.mkv'
+    assert path_mappings.path_replace_instance('/sports/event.mkv', sibling.id, 'sports') == '/second/event.mkv'
+    assert to_safe_dict(repo.get(owner.id))['path_mappings'] == []
+
+
+def test_legacy_empty_sports_mapping_json_inherits_without_exposing_global_override(monkeypatch):
+    from app.config import settings
+    from utilities.path_mappings import read_sports_mappings
+
+    monkeypatch.setattr(settings.general, 'path_mappings_sports', [['/sports', '/global']])
+    assert read_sports_mappings('[]') == [['/sports', '/global']]
+    assert read_sports_mappings('[]', inherit=False) == []

@@ -20,6 +20,7 @@ from app.database import (
 )
 from sportarr.connection import check_cancelled
 from sportarr.identity import resolve_event_in_session
+from sportarr.notify import rescan_batch
 from sportarr.settings import get_sports_settings
 from sportarr.subtitles import (
     bind_candidate,
@@ -123,6 +124,7 @@ def _provider_result(video, languages, pool, minimum, profile, cancel, candidate
         return value.get(video, [])
 
 
+@rescan_batch()
 def search_event(
     event_id,
     arr_instance_id,

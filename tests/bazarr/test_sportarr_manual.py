@@ -28,7 +28,7 @@ def manual_library(indexed_library, monkeypatch, tmp_path):
     )
     from app.config import settings
     from arr_instances.resolution import clear_subtitle_settings_cache
-    from sportarr import profile_hooks, subtitles as service
+    from sportarr import notify, profile_hooks, subtitles as service
     from subtitles import pool
     from subliminal import Movie, Episode
     from subzero.language import Language
@@ -39,6 +39,9 @@ def manual_library(indexed_library, monkeypatch, tmp_path):
     sports(monkeypatch, session)
     monkeypatch.setattr(service, "database", session)
     monkeypatch.setattr(profile_hooks, "database", session)
+    # This provider fixture publishes real local files, but has no Sportarr
+    # HTTP service. Notification tests install their own transport recorder.
+    monkeypatch.setattr(notify, "_rescan_request", lambda owner, **kwargs: None)
     monkeypatch.setattr(settings.general, "use_embedded_subs", False)
     monkeypatch.setattr(settings.general, "use_postprocessing", False)
     monkeypatch.setattr(settings.subsync, "use_subsync", False)
@@ -981,8 +984,8 @@ def test_destination_owner_change_between_preparation_and_transaction_is_rejecte
     prepare = service.SportsOutputNamespace
     prepared = []
 
-    def prepare_then_change(*args):
-        namespace = prepare(*args)
+    def prepare_then_change(*args, **kwargs):
+        namespace = prepare(*args, **kwargs)
         if not prepared:
             with Session(bind=session.get_bind()) as other:
                 if change == "import":

@@ -322,7 +322,8 @@ def create_instance(session, args):
         if 'path_mappings' in args:
             if args.get('kind') != 'sportarr':
                 raise ValueError('path_mappings require a Sportarr instance')
-            mappings = json.dumps(validate_sports_mappings(args['path_mappings']))
+            validated_mappings = validate_sports_mappings(args['path_mappings'])
+            mappings = json.dumps(validated_mappings) if validated_mappings else None
         sports = validate_sports_settings(args.get('sports_settings'))
         if sports and args.get('kind') != 'sportarr':
             raise ValueError('sports_settings require a Sportarr instance')
@@ -381,7 +382,8 @@ def update_instance(session, instance_id, args):
         try:
             if existing.kind != 'sportarr':
                 raise ValueError('path_mappings require a Sportarr instance')
-            kwargs['path_mappings'] = json.dumps(validate_sports_mappings(args['path_mappings']))
+            mappings = validate_sports_mappings(args['path_mappings'])
+            kwargs['path_mappings'] = json.dumps(mappings) if mappings else None
         except ValueError as exc:
             return {'error': 'invalid', 'message': str(exc)}, 400
     for field in ("name", "ip", "port", "base_url", "ssl", "verify_ssl",

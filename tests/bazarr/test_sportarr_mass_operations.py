@@ -12,6 +12,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from test_sportarr_manual_toolbox import sports_toolbox, indexed_library, migration_engine  # noqa: F401
+from test_sportarr_notifications import sports_refresh_targets  # noqa: F401
 
 
 def test_the_endpoint_accepts_sports_items():
@@ -546,19 +548,150 @@ def test_an_unextractable_sports_track_skips_the_item_not_the_batch():
     translate.assert_not_called()
 
 
-def test_mass_sports_mod_publishes_the_sports_owner(sports_library, monkeypatch):
+def test_mass_sports_mod_publishes_the_sports_owner(sports_toolbox, monkeypatch):  # noqa: F811
     from subtitles import mass_operations
     from subtitles.tools import mods
 
-    subtitle = sports_library / 'race.hu.srt'
+    _, session, folder = sports_toolbox
+    monkeypatch.setattr(mass_operations, 'database', session)
+    subtitle = folder / '1' / 'event.en.hi.srt'
     subtitle.write_text('1\n00:00:00,000 --> 00:00:01,000\n<i>Race subtitle</i>\n')
     published = []
-    monkeypatch.setattr(mods, 'with_keep_lyrics', lambda chosen, owner: chosen)
-    monkeypatch.setattr(mods, 'alpha3_from_alpha2', lambda language: 'hun')
     monkeypatch.setattr(mods, 'publication_callback',
                         lambda kind, path, operation, owner: lambda output:
                         published.append((kind, path, operation, owner, str(output))))
-    items, _ = mass_operations._collect_sports(event_ids=[61], sports_instance={61: {42}})
+    items, _ = mass_operations._collect_sports(event_ids=[61], sports_instance={61: {1}})
     assert mass_operations._process_subtitle_item(items[0], 'remove_tags', {}, 99)
-    assert published == [('sports', str(sports_library / 'race.mkv'), 'edit', 42, str(subtitle))]
+    assert published == [('sports', str(folder / '1' / 'event.mkv'), 'edit', 1, str(subtitle))]
     assert '<i>' not in subtitle.read_text()
+
+
+def test_mass_remove_hi_reindexes_the_renamed_owned_subtitle(sports_toolbox, monkeypatch):  # noqa: F811
+    import ast
+    from app.database import TableSportsEvents
+    from subtitles import mass_operations
+
+    endpoint, session, folder = sports_toolbox
+    monkeypatch.setattr(mass_operations, 'database', session)
+    items, _ = mass_operations._collect_sports(event_ids=[61], sports_instance={61: {1}})
+    result = mass_operations._process_subtitle_item(items[0], 'remove_HI', {}, 99)
+    assert result is True
+    assert (folder / '1' / 'event.en.srt').exists()
+    assert not (folder / '1' / 'event.en.hi.srt').exists()
+    session.expire_all()
+    entries = ast.literal_eval(session.get(TableSportsEvents, 61).subtitles)
+    assert ['en', '/sports/event.en.srt'] in [entry[:2] for entry in entries]
+    assert not any(entry[0] == 'en:hi' for entry in entries)
+    assert session.get(TableSportsEvents, 62).subtitles == '[]'
+
+
+def test_mass_invalid_sports_mod_is_not_counted_as_success(sports_toolbox, monkeypatch):  # noqa: F811
+    from subtitles import mass_operations
+
+    endpoint, session, folder = sports_toolbox
+    monkeypatch.setattr(mass_operations, 'database', session)
+    items, _ = mass_operations._collect_sports(event_ids=[61], sports_instance={61: {1}})
+    (folder / '1' / 'event.en.hi.srt').write_bytes(b'not a subtitle')
+    assert mass_operations._process_subtitle_item(items[0], 'remove_tags', {}, 99) is False
+
+
+@pytest.mark.parametrize('end', ['success', 'invalid', 'cancelled'])
+def test_mass_sports_mod_refreshes_once_for_successful_files(sports_toolbox, sports_refresh_targets, monkeypatch, end):  # noqa: F811
+    from app.jobs_queue import JobCancelled
+    from subtitles import mass_operations
+    from subtitles.indexer import sports as indexer
+
+    endpoint, session, folder = sports_toolbox
+    refreshed, _ = sports_refresh_targets
+    monkeypatch.setattr(mass_operations, 'database', session)
+    monkeypatch.setattr(mass_operations, 'event_stream', lambda **kwargs: None)
+    indexer.store_subtitles_sports(62, 2)
+    sibling = folder / '2' / 'event.de.forced.srt'
+    if end == 'invalid':
+        sibling.write_bytes(b'not a subtitle')
+    original = sibling.read_bytes()
+
+    def progress(*args, **kwargs):
+        if end == 'cancelled' and kwargs.get('progress_value') == 1:
+            raise JobCancelled('stopped after first publication')
+
+    monkeypatch.setattr(mass_operations.jobs_queue, 'update_job_progress', progress)
+    args = dict(items=[{'type': 'sports', 'sportsEventId': 61, 'arr_instance_id': 1},
+                       {'type': 'sports', 'sportsEventId': 62, 'arr_instance_id': 2}],
+                action='remove_HI', job_id=99)
+    if end == 'cancelled':
+        with pytest.raises(JobCancelled):
+            mass_operations.mass_batch_operation(**args)
+    else:
+        result = mass_operations.mass_batch_operation(**args)
+        assert result == {'queued': 2 if end == 'success' else 1,
+                          'skipped': 0 if end == 'success' else 1, 'errors': []}
+    assert (folder / '1' / 'event.en.srt').exists()
+    assert not (folder / '1' / 'event.en.hi.srt').exists()
+    if end != 'success':
+        assert sibling.read_bytes() == original
+    assert refreshed.count(('plex', 'Sports')) == 1
+    assert refreshed.count(('plex', 'Other Sports')) == 1
+    assert refreshed.count(('jellyfin', 'sports-id')) == 1
+    assert refreshed.count(('jellyfin', 'other-sports-id')) == 1
+    assert refreshed.count(('sportarr', 1)) == 1
+    assert refreshed.count(('sportarr', 2)) == (1 if end == 'success' else 0)
+
+
+@pytest.mark.parametrize('when', ['before_write', 'after_write'])
+def test_mass_mod_cancellation_preserves_only_completed_publications(
+        sports_toolbox, sports_refresh_targets, monkeypatch, when):  # noqa: F811
+    import ast
+    from app.database import TableSportsEvents
+    from app.jobs_queue import JobCancelled
+    from subtitles import mass_operations
+    from subtitles.tools import mods
+
+    _, session, folder = sports_toolbox
+    refreshed, _ = sports_refresh_targets
+    monkeypatch.setattr(mass_operations, 'database', session)
+    monkeypatch.setattr(mass_operations, 'event_stream', lambda **kwargs: None)
+    stopped = False
+
+    def progress(*args, **kwargs):
+        if stopped:
+            raise JobCancelled('mod cancelled')
+
+    def publication(*args):
+        def published(output):
+            nonlocal stopped
+            if when == 'after_write':
+                stopped = True
+        return published
+
+    transform = mods.Subtitle.get_modified_content
+
+    def transformed(subtitle, **kwargs):
+        nonlocal stopped
+        content = transform(subtitle, **kwargs)
+        if when == 'before_write':
+            stopped = True
+        return content
+
+    monkeypatch.setattr(mass_operations.jobs_queue, 'update_job_progress', progress)
+    monkeypatch.setattr(mods, 'publication_callback', publication)
+    monkeypatch.setattr(mods.Subtitle, 'get_modified_content', transformed)
+    source = folder / '1' / 'event.en.hi.srt'
+    original = source.read_bytes()
+    with pytest.raises(JobCancelled):
+        mass_operations.mass_batch_operation(
+            items=[{'type': 'sports', 'sportsEventId': 61, 'arr_instance_id': 1}],
+            action='remove_HI', job_id=99)
+    session.expire_all()
+    indexed = ast.literal_eval(session.get(TableSportsEvents, 61).subtitles)
+    if when == 'before_write':
+        assert source.read_bytes() == original
+        assert not (folder / '1' / 'event.en.srt').exists()
+        assert refreshed == []
+    else:
+        assert not source.exists()
+        assert (folder / '1' / 'event.en.srt').exists()
+        assert ['en', '/sports/event.en.srt'] in [entry[:2] for entry in indexed]
+        assert refreshed.count(('plex', 'Sports')) == 1
+        assert refreshed.count(('jellyfin', 'sports-id')) == 1
+        assert refreshed.count(('sportarr', 1)) == 1

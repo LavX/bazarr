@@ -5,9 +5,11 @@ import logging
 import os
 
 from app.config import settings
+from app.event_handler import event_stream
 from app.database import (TableArrInstances, TableEpisodes, TableMovies, TableHistory, TableHistoryMovie,
                           TableHistorySports, TableShows, TableSportsEvents, database, select)
-from app.jobs_queue import jobs_queue
+from app.jobs_queue import JobCancelled, jobs_queue
+from sportarr.notify import rescan_batch
 from subtitles.sync import sync_subtitles
 from subtitles.tools.subsync_engines import is_sync_engine_output
 from subtitles.tools.mods import subtitles_apply_mods
@@ -997,7 +999,13 @@ def _process_subtitle_item(item, action, options, job_id):
         )
         return True
     elif action in MOD_ACTIONS:
-        subtitles_apply_mods(
+        sports_kwargs = {}
+        if item.get('sports_event_id'):
+            from sportarr.workflows import SportsJobSignal
+
+            sports_kwargs = {'sports_event_id': item['sports_event_id'],
+                             'cancel': SportsJobSignal(item['arr_instance_id'], job_id)}
+        output_path = subtitles_apply_mods(
             item['srt_lang'],
             item['srt_path'],
             [action],
@@ -1006,7 +1014,26 @@ def _process_subtitle_item(item, action, options, job_id):
             arr_instance_id=item.get('arr_instance_id'),
             media_type=('sports' if item.get('sports_event_id')
                         else 'episode' if item['sonarr_series_id'] else 'movies'),
+            **sports_kwargs,
         )
+        if item.get('sports_event_id'):
+            if not output_path:
+                return False
+            from sportarr.notify import notify_rescan
+            from subtitles.indexer.sports import store_subtitles_sports
+            from subtitles.processing import refresh_sports_media_servers
+
+            owner = item['arr_instance_id']
+            try:
+                store_subtitles_sports(item['sports_event_id'], owner)
+            finally:
+                refresh_sports_media_servers(
+                    item['video_path'], output_path, owner, publish_notification=False)
+                notify_rescan(owner)
+            try:
+                event_stream(type='sports', payload=item['sports_event_id'])
+            except Exception:
+                logger.exception('Sports subtitles were indexed but the UI refresh failed')
         return True
     return False
 
@@ -1207,6 +1234,7 @@ def _process_media_action(items, action, job_id):
     return {'queued': queued, 'skipped': skipped, 'errors': errors}
 
 
+@rescan_batch()
 def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
     """Main entry point for all batch operations on subtitles.
 
@@ -1276,6 +1304,8 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
                 processed += 1
             else:
                 failed += 1
+        except JobCancelled:
+            raise
         except Exception as e:
             logger.error(f'Error during {action} on {_item_display_name(item)}: {e}')  # noqa: G004
             all_errors.append(str(e))

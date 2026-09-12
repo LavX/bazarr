@@ -340,7 +340,7 @@ class Subtitles(Resource):
                 )
             subtitles_path = extracted
 
-        if not subtitles_path or not os.path.exists(subtitles_path):
+        if media_type != "sports" and (not subtitles_path or not os.path.exists(subtitles_path)):
             return "Subtitles file not found. Path mapping issue?", 500
 
         if action == "sync" and is_sync_engine_output(subtitles_path):
@@ -379,6 +379,9 @@ class Subtitles(Resource):
 
             video_path = path_mappings.path_replace_instance(
                 metadata.path, arr_instance_id, 'sports')
+            if user_supplied_path:
+                subtitles_path = path_mappings.path_replace_instance(
+                    subtitles_path, arr_instance_id, 'sports')
         elif media_type == "episode":
             metadata_stmt = scoped(
                 select(
@@ -439,6 +442,19 @@ class Subtitles(Resource):
         ):
             return "Subtitle path is outside the media library.", 403
 
+        if media_type == "sports":
+            if user_supplied_path:
+                indexed_paths = {
+                    os.path.realpath(path_mappings.path_replace_instance(
+                        entry[1], arr_instance_id, 'sports'))
+                    for entry in get_array_from(metadata.subtitles)
+                    if len(entry) >= 2 and entry[1]
+                }
+                if os.path.realpath(subtitles_path) not in indexed_paths:
+                    return "Subtitle path does not belong to the sports event.", 403
+            if not subtitles_path or not os.path.exists(subtitles_path):
+                return "Subtitles file not found. Path mapping issue?", 500
+
         if action == "sync":
             try:
 
@@ -489,7 +505,9 @@ class Subtitles(Resource):
                         sonarr_episode_id=id if media_type == "episode" else None,
                         radarr_id=id if media_type == "movie" else None,
                         force_sync=True,
-                        callback=postprocess_callback,
+                        # Sports finalizes the verified output paths inside sync,
+                        # including partial results from a cancelled engine run.
+                        callback=postprocess_callback if media_type != "sports" else None,
                         # Thread the owning instance (#156) so the subsync
                         # original-language lookup reads the exact owner, not the
                         # default-preferred instance on an upstream-id collision.
@@ -566,7 +584,7 @@ class Subtitles(Resource):
                 return "Unable to edit subtitles file. Check logs.", 409
         else:
             try:
-                subtitles_apply_mods(
+                output_path = subtitles_apply_mods(
                     language=language,
                     subtitle_path=subtitles_path,
                     mods=[action],
@@ -574,11 +592,19 @@ class Subtitles(Resource):
                     # Resolve keep-lyrics against the owning instance (#227).
                     arr_instance_id=arr_instance_id,
                     media_type=media_type,
+                    **({'sports_event_id': id} if media_type == 'sports' else {}),
                 )
+                if media_type == "sports" and not output_path:
+                    return "Unable to modify subtitles file. Check logs.", 409
                 postprocess_subtitles(
-                    subtitles_path, video_path, media_type, metadata, id,
+                    output_path if media_type == "sports" else subtitles_path,
+                    video_path, media_type, metadata, id,
                     arr_instance_id=arr_instance_id
                 )
+            except ValueError as exc:
+                if media_type != "sports":
+                    raise
+                return str(exc), 409
             except OSError:
                 return "Unable to edit subtitles file. Check logs.", 409
 
@@ -619,12 +645,18 @@ def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id, 
                 subtitles_path)
 
     if media_type == "sports":
-        # Re-index the event so the toolbox result shows up, and push the
-        # refresh the sports pages listen on. No Plex or Jellyfin call here:
-        # both refresh by imdbId, which a sports event does not have.
+        from sportarr.notify import notify_rescan
         from subtitles.indexer.sports import store_subtitles_sports
+        from subtitles.processing import refresh_sports_media_servers
 
-        store_subtitles_sports(id, arr_instance_id)
+        try:
+            store_subtitles_sports(id, arr_instance_id)
+        finally:
+            # Sync and mods already dispatch the individual file publication.
+            # Only the whole-library destinations need a refresh here.
+            refresh_sports_media_servers(
+                video_path, subtitles_path, arr_instance_id, publish_notification=False)
+            notify_rescan(arr_instance_id)
         event_stream(type="sports", payload=id)
         return
 

@@ -15,7 +15,7 @@ import { useSystemSettings } from "./system";
 
 export function useSportsAvailability() {
   const query = useArrInstances();
-  const { data: settings } = useSystemSettings();
+  const { data: settings, isLoading: settingsLoading } = useSystemSettings();
   const useSportarr = settings?.general?.use_sportarr ?? false;
   const instances =
     query.data?.filter(
@@ -26,7 +26,7 @@ export function useSportsAvailability() {
     // Both conditions matter: the master toggle is the operator's intent, and
     // an enabled instance is what there is to actually query.
     enabled: useSportarr && instances.length > 0,
-    isLoading: query.isLoading,
+    isLoading: query.isLoading || settingsLoading,
   };
 }
 // A league in the shape the shared ItemView table expects, so Sports renders
@@ -68,13 +68,6 @@ export function useSportsLeaguesPagination(fetchAll = false) {
   return usePaginationQuery(
     [QueryKeys.Sports, "leagues", instances.map((instance) => instance.id)],
     async (param) => {
-      // Guarded inside the fetcher rather than by an enabled flag: the page
-      // still has to call this hook unconditionally, and returning an empty
-      // page here means no request is made for an install with no enabled
-      // Sportarr instead of a pointless 200 on every render.
-      if (!enabled) {
-        return { data: [], total: 0 };
-      }
       const response = await sports.list(undefined, param.start, param.length);
       return {
         data: response.data.map(toSportsLeagueRow),
@@ -87,6 +80,7 @@ export function useSportsLeaguesPagination(fetchAll = false) {
     // searched one page, exactly as the Series and Movies pages would if they
     // did not request every row while a filter is active.
     fetchAll,
+    enabled,
   );
 }
 
@@ -323,13 +317,6 @@ function useSportsActivityPagination<T extends object>(
       instances.map((instance) => instance.id),
     ],
     async (param) => {
-      // Guarded inside the fetcher rather than by an enabled flag, the way the
-      // leagues query is: the page calls this hook unconditionally, and an
-      // empty page here means no request goes out for an install with no
-      // enabled Sportarr, or for an owner that has just been disabled.
-      if (!enabled || !ownerKnown) {
-        return { data: [], total: 0 };
-      }
       const response = await sports.activity(
         kind,
         filters,
@@ -343,6 +330,7 @@ function useSportsActivityPagination<T extends object>(
     },
     false,
     fetchAll,
+    enabled && ownerKnown,
   );
 }
 
@@ -472,6 +460,7 @@ export function useSportsJob(id?: number | null, owner?: number) {
     enabled:
       !!id && !!owner && instances.some((instance) => instance.id === owner),
     refetchInterval: (query) =>
+      query.state.status === "error" ||
       query.state.data?.status === "completed" ||
       query.state.data?.status === "failed"
         ? false

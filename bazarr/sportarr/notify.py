@@ -1,16 +1,17 @@
 """Ask an owner's Sportarr to rescan its library after a subtitle write."""
 
 import logging
+from contextlib import ContextDecorator
 from contextvars import ContextVar
 from threading import Thread
-
-from app.database import database
-from arr_instances.client import ArrClientFactory
-from sportarr.sync.leagues import require_sportarr
 
 
 def _rescan_request(owner, *, client_factory=None):
     """Perform one whole-library rescan request for the owner."""
+    from app.database import database
+    from arr_instances.client import ArrClientFactory
+    from sportarr.sync.leagues import require_sportarr
+
     instance = require_sportarr(database, owner)
     factory = client_factory if client_factory is not None else ArrClientFactory()
     client = factory.from_row(instance)
@@ -27,13 +28,14 @@ class _RescanBatch:
 
     def __init__(self):
         self.owners = set()
+        self.media_servers = {}
 
 
 _batch = ContextVar('sportarr_rescan_batch', default=None)
 
 
-class rescan_batch:
-    """Coalesce one whole-library rescan per affected owner per operation.
+class rescan_batch(ContextDecorator):
+    """Coalesce whole-library rescans across one operation and its nested work.
 
     A wanted or league download can publish several events of one owner in a
     single operation, and every publication asks for a rescan. POST
@@ -43,12 +45,21 @@ class rescan_batch:
     """
 
     def __enter__(self):
-        self._token = _batch.set(_RescanBatch())
+        self._token = _batch.set(_RescanBatch()) if _batch.get() is None else None
         return self
 
+    def _recreate_cm(self):
+        return type(self)()
+
     def __exit__(self, *_exc):
+        if self._token is None:
+            return False
         batch = _batch.get()
         _batch.reset(self._token)
+        # Published files still need refreshes when subsequent work fails or
+        # is cancelled. Per-file dispatcher notifications are never deferred.
+        for refresh in batch.media_servers:
+            _refresh_media_server(refresh)
         if batch.owners:
             Thread(
                 target=_rescan_batch_dispatch,
@@ -56,6 +67,22 @@ class rescan_batch:
                 name="sportarr-library-rescan", daemon=True,
             ).start()
         return False
+
+
+def _refresh_media_server(refresh):
+    try:
+        refresh()
+    except Exception:
+        logging.exception('Could not refresh a sports media-server library')
+
+
+def request_media_server_refresh(refresh):
+    """Run a configured server's library refresh once at the operation boundary."""
+    batch = _batch.get()
+    if batch is None:
+        _refresh_media_server(refresh)
+    else:
+        batch.media_servers[refresh] = None
 
 
 def _rescan_batch_dispatch(owners):

@@ -50,9 +50,10 @@ def read_sports_mappings(value, inherit=True):
     if not value:
         return global_sports_mappings() if inherit else []
     try:
-        return validate_sports_mappings(json.loads(value))
+        mappings = validate_sports_mappings(json.loads(value))
     except (TypeError, ValueError):
         raise ValueError('Invalid stored Sportarr path mappings') from None
+    return mappings or (global_sports_mappings() if inherit else [])
 
 
 def apply_sports_mapping(path, mapping, reverse=False):

@@ -25,7 +25,7 @@ from app.get_providers import get_providers
 from sportarr.connection import check_cancelled
 from sportarr.db import SportsTransactionOutcome, sports_transaction
 from sportarr.identity import SportsEventContext, resolve_event_in_session
-from sportarr.notify import notify_rescan
+from sportarr.notify import notify_rescan, rescan_batch
 from sportarr.output import (
     SportsOutputNamespace,
     lock_output_owners,
@@ -119,10 +119,10 @@ def get_blacklist_sports(context, session=None):
 
 @contextmanager
 def sports_file_publication(
-    context, signature, cancel=None, extra_validate=None, *, outcome=None
+    context, signature, cancel=None, extra_validate=None, *, outcome=None, output_path=None
 ):
     """Short owned publication boundary for provider and nonprovider file work."""
-    namespace = SportsOutputNamespace(context, database)
+    namespace = SportsOutputNamespace(context, database, read_path=output_path)
     try:
         with sports_transaction(database, nowait=True, outcome=outcome) as session:
             lock_output_owners(session, context.arr_instance_id)
@@ -204,6 +204,42 @@ def sports_manual_operation(event_id, arr_instance_id, cancel=None):
     yield context, validate, publication_guard, context.mapped_path
 
 
+def sports_modification_guard(event_id, arr_instance_id, video_path, source_path, cancel=None):
+    """Pin a mod's source and validate its actual destination before any mutation.
+
+    Called under the shared subtitle directory locks. In-place edits can use a
+    video-side source even when new subtitles belong in a configured folder.
+    """
+    from subtitles.tools.subsync_engines import subtitle_source_version
+
+    context = resolve_event_in_session(database, event_id, arr_instance_id)
+    if context.mapped_path != video_path:
+        raise ValueError("Sports mod video no longer belongs to its event")
+    check_cancelled(cancel)
+    signature = candidate_signature(context)
+    source_namespace = SportsOutputNamespace(context, database, read_path=source_path)
+    source_version = subtitle_source_version(source_path)
+    if source_version is None or os.path.islink(source_path) or not os.path.isfile(source_path):
+        raise ValueError("Sports mod requires a current regular subtitle source")
+
+    @contextmanager
+    def publication(destination):
+        check_cancelled(cancel)
+        if os.path.islink(source_path) or os.path.islink(destination):
+            raise ValueError("Sports mod paths cannot be symlinks")
+        with sports_file_publication(
+            context, signature, extra_validate=source_namespace.validate, output_path=destination
+        ):
+            # Cancellation stops work before mutation. Once bytes are written,
+            # finish indexing and refreshes before the batch observes a stop.
+            check_cancelled(cancel)
+            if subtitle_source_version(source_path) != source_version:
+                raise ValueError("Sports subtitle changed while applying mods")
+            yield
+
+    return publication
+
+
 def sports_history(
     session, context, result, action=2, upgraded_from_id=None, artifact=None
 ):
@@ -264,6 +300,7 @@ def _remove_superseded_sports_subtitle(path, previous_artifact, written_paths, i
         )
 
 
+@rescan_batch()
 def save_sports_subtitle(
     video,
     subtitle,
@@ -281,7 +318,7 @@ def save_sports_subtitle(
     """Reusable save entrypoint for manual and automatic sports provider downloads."""
     from app.notifier import send_notifications_sports
     from subtitles.manual import _save_downloaded_subtitles
-    from subtitles.processing import process_subtitle
+    from subtitles.processing import process_subtitle, refresh_sports_media_servers
     from subtitles.tools.mods import get_subzero_mods
     from subtitles.tools.subsync_engines import subtitle_write_locks
     from utilities.helper import get_target_folder
@@ -300,6 +337,13 @@ def save_sports_subtitle(
 
     pending_replacement = replacement_state is not None
     publication_destination = None
+
+    def published(output_path):
+        # Record the physical write before later processing can fail or stop.
+        # The batch flushes these scans after the final outputs are settled.
+        refresh_sports_media_servers(
+            path, output_path, context.arr_instance_id, publish_notification=False)
+        notify_rescan(context.arr_instance_id)
 
     def validate(destination=None):
         nonlocal publication_destination
@@ -355,6 +399,7 @@ def save_sports_subtitle(
                 validate=validate,
                 publication_guard=publication_guard,
                 written_paths=written_paths,
+                on_publish=published,
             )
             if not saved:
                 raise OSError("Could not save sports subtitles")

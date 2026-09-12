@@ -14,6 +14,7 @@ import sqlalchemy as sa
 from test_sportarr_kind_migration import migration_engine, _run  # noqa: F401
 from test_sportarr_indexer import indexed_library  # noqa: F401
 from test_sportarr_manual import manual_library  # noqa: F401
+from test_sportarr_notifications import sports_refresh_targets  # noqa: F401
 
 
 # --------------------------------------------------------------------------
@@ -982,3 +983,54 @@ def test_partial_keep_all_indexes_only_current_publications_after_cancellation(s
         assert indexed == []
         assert not refreshed
     assert session.execute(sa.select(TableHistorySports)).scalars().all() == []
+
+
+@pytest.mark.parametrize('toolbox', [False, True])
+@pytest.mark.parametrize('cancelled', [False, True])
+def test_sports_sync_refreshes_final_outputs_once_even_after_partial_cancellation(
+        sync_library, sports_refresh_targets, monkeypatch, toolbox, cancelled):  # noqa: F811
+    from app.jobs_queue import JobCancelled
+    from api.subtitles import subtitles as endpoint
+    from subtitles import sync
+    from subtitles.indexer import sports as indexer
+    from subtitles.tools.subsyncer import SubSyncer
+    from sportarr.subtitles import sports_manual_operation
+
+    _, session, folder, published, _ = sync_library
+    refreshed, _ = sports_refresh_targets
+    indexer.store_subtitles_sports(61, 1)
+    monkeypatch.setattr(endpoint, 'database', session)
+    monkeypatch.setattr(endpoint, 'event_stream', lambda **kwargs: None)
+    monkeypatch.setattr(endpoint, 'sync_subtitles', lambda **kwargs: sync.sync_subtitles(**kwargs, job_id=99))
+    if cancelled:
+        def cancel_second_engine(self, **kwargs):
+            raise JobCancelled('second engine cancelled after first output')
+        monkeypatch.setattr(SubSyncer, '_run_external_engine', cancel_second_engine)
+    engines = ['ffsubsync', 'alass'] if cancelled else ['ffsubsync']
+
+    def run():
+        if toolbox:
+            args = dict(action='sync', language='en', path='/sports/event.en.hi.srt',
+                        type='sports', id=61, arr_instance_id=1, hi='True',
+                        output_mode='keep_all', enabled_engines=','.join(engines))
+            monkeypatch.setattr(endpoint.Subtitles.patch_request_parser, 'parse_args', lambda: args)
+            return inspect.unwrap(endpoint.Subtitles.patch)(endpoint.Subtitles())
+        with sports_manual_operation(61, 1) as (context, validate, guard, video):
+            return sync.sync_subtitles(
+                video_path=video, srt_path=str(folder / '1/event.en.hi.srt'), srt_lang='en',
+                forced=False, hi=True, percent_score=0, force_sync=True, track_job_progress=False,
+                arr_instance_id=1, context=context, validate=validate, publication_guard=guard,
+                output_mode='keep_all', enabled_engines=engines)
+
+    if cancelled:
+        with pytest.raises(JobCancelled):
+            run()
+    else:
+        assert run() == (('', 204) if toolbox else True)
+    output = folder / '1/event.en.hi.ffsubsync.srt'
+    assert output.exists()
+    assert len(published) == 1
+    assert sorted(refreshed, key=str) == sorted([
+        ('plex', 'Sports'), ('plex', 'Other Sports'),
+        ('jellyfin', 'sports-id'), ('jellyfin', 'other-sports-id'), ('sportarr', 1),
+    ], key=str)

@@ -239,6 +239,9 @@ def _refresh_current_sports_outputs(context, signature, result, versions):
     from app.database import database
     from sportarr.output import SportsOutputNamespace
     from sportarr.subtitles import candidate_signature
+    from sportarr.notify import notify_rescan
+    from subtitles.processing import refresh_sports_media_servers
+    from utilities.post_processing import set_chmod
 
     namespace = SportsOutputNamespace(context, database)
     outputs = [item.output_path for item in result.successful_results]
@@ -246,10 +249,21 @@ def _refresh_current_sports_outputs(context, signature, result, versions):
         if candidate_signature(context) != signature:
             return
         namespace.validate(database)
-        if not any(versions.get(path) is not None and subtitle_source_version(path) == versions[path]
-                   for path in outputs):
+        current_outputs = [path for path in outputs if versions.get(path) is not None
+                           and subtitle_source_version(path) == versions[path]]
+        if not current_outputs:
             return
-    _index_sports_outputs(context)
+        for path in current_outputs:
+            set_chmod(path)
+    try:
+        _index_sports_outputs(context)
+    finally:
+        # The writer already dispatched each file publication. Whole-library
+        # destinations still need the successful outputs if indexing fails.
+        refresh_sports_media_servers(
+            context.mapped_path, current_outputs[0], context.arr_instance_id,
+            publish_notification=False)
+        notify_rescan(context.arr_instance_id)
 
 
 def _index_sports_outputs(context):

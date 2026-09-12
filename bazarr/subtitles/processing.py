@@ -266,7 +266,7 @@ def _postprocessing_config(media_type, arr_instance_id):
     return use_pp, cmd, use_threshold, threshold
 
 
-def refresh_sports_media_servers(video_path, subtitle_path, arr_instance_id):
+def refresh_sports_media_servers(video_path, subtitle_path, arr_instance_id, *, publish_notification=True):
     """Tell every configured media server a sports subtitle changed.
 
     Series and movies refresh through item-level helpers keyed on identifiers a
@@ -276,19 +276,21 @@ def refresh_sports_media_servers(video_path, subtitle_path, arr_instance_id):
     and episodes use, scoped to their saved path mappings, so an instance whose
     mappings do not cover this video is never asked to scan anything.
     """
+    from sportarr.notify import request_media_server_refresh
+
     if settings.general.use_plex is True:
         sports_library = settings.plex.sports_library
         if isinstance(sports_library, str):
             sports_library = [sports_library] if sports_library else []
         if sports_library:
-            plex_update_sports_library()
+            request_media_server_refresh(plex_update_sports_library)
     if settings.general.use_jellyfin is True:
         sports_library_ids = settings.jellyfin.sports_library_ids
         if isinstance(sports_library_ids, str):
             sports_library_ids = [sports_library_ids] if sports_library_ids else []
         if sports_library_ids:
-            jellyfin_update_sports_library()
-    if settings.general.use_emby is True or settings.general.use_silo is True:
+            request_media_server_refresh(jellyfin_update_sports_library)
+    if publish_notification and (settings.general.use_emby is True or settings.general.use_silo is True):
         notify_subtitle_mutation(
             SubtitleMutation('sports', video_path, subtitle_path, 'download', arr_instance_id))
 
