@@ -9,6 +9,7 @@ import { createBrowserRouter, Navigate, RouterProvider } from "react-router";
 import {
   faClock,
   faCogs,
+  faCompass,
   faExclamationTriangle,
   faFileExcel,
   faFilm,
@@ -24,6 +25,7 @@ import { Lazy } from "@/components/async";
 import Authentication from "@/pages/Authentication";
 import BlacklistMoviesView from "@/pages/Blacklist/Movies";
 import BlacklistSeriesView from "@/pages/Blacklist/Series";
+import DiscoverView from "@/pages/Discover";
 import DistributionHubView from "@/pages/DistributionHub";
 import Episodes from "@/pages/Episodes";
 import NotFound from "@/pages/errors/NotFound";
@@ -79,8 +81,14 @@ function useRoutes(): CustomRouteObject[] {
             element: <Redirector></Redirector>,
           },
           {
+            icon: faCompass,
+            name: "Discover",
+            path: "discover",
+            element: <DiscoverView />,
+          },
+          {
             icon: faPlay,
-            name: "Series",
+            name: "My series",
             path: "series",
             badge: data?.sonarr_signalr,
             hidden: !sonarr,
@@ -97,7 +105,7 @@ function useRoutes(): CustomRouteObject[] {
           },
           {
             icon: faFilm,
-            name: "Movies",
+            name: "My movies",
             path: "movies",
             badge: data?.radarr_signalr,
             hidden: !radarr,
@@ -200,6 +208,16 @@ function useRoutes(): CustomRouteObject[] {
             name: "Settings",
             path: "settings",
             children: [
+              {
+                path: "discover",
+                hidden: true,
+                element: (
+                  <Navigate
+                    to="/subtitle-hub?tab=my-providers#metadata"
+                    replace
+                  />
+                ),
+              },
               {
                 path: "connections",
                 name: "Connections",

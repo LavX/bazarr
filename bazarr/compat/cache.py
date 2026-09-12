@@ -33,7 +33,8 @@ def build_key(media_type: str, imdb_id: str, season: int | None,
               requested_languages: list[str] | None = None,
               exclude_providers: list[str] | None = None,
               timeout_seconds: int | None = None,
-              only_providers: list[str] | None = None) -> str:
+              only_providers: list[str] | None = None,
+              *, matching_mode: str = "library", year: int | None = None) -> str:
     """Deterministic across restarts. Language variants preserved.
 
     query/moviehash/moviebytesize/AniDB ids/moviehash_match are part of the key
@@ -78,6 +79,9 @@ def build_key(media_type: str, imdb_id: str, season: int | None,
         f"|anidb={series_anidb_id or ''}|anidb_ep={series_anidb_episode_id or ''}"
         f"|{req_langs}|local={local_flag}|excl={excl}|incl={incl}|to={to}".encode()
     ).hexdigest()[:16]
+    if matching_mode != "library":
+        context = json.dumps([matching_mode, query, year], separators=(",", ":"))
+        extras = hashlib.sha256(f"{extras}:{context}".encode()).hexdigest()[:16]
     return (
         f"compat:v2:{media_type}:{imdb_id}:{season or 0}:{episode or 0}"
         f":{provider_hash}:{extras}"

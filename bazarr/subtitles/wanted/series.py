@@ -19,6 +19,7 @@ from app.database import (get_exclusion_clause, get_audio_profile_languages, get
                           TableEpisodes, TableHistory, database, update, select)
 from app.event_handler import event_stream
 from app.jobs_queue import jobs_queue
+from app import activity
 from app.config import settings
 from subliminal_patch.score import MAX_SCORES
 
@@ -329,10 +330,23 @@ def wanted_search_missing_subtitles_series(job_id=None, wait_for_completion=Fals
         jobs_queue.update_job_progress(job_id=job_id, progress_value='max')
 
     throttled = False
+    observed = activity.register(activity.activity_id_for_job(job_id), operation='wanted_search',
+                                 scope_kind='server')
     for i, episode in enumerate(episodes, start=1):
         jobs_queue.update_job_progress(job_id=job_id, progress_value=i,
                                        progress_message=f'{episode.title} - S{episode.season:02d}E{episode.episode:02d}'
                                                         f' - {episode.episodeTitle}')
+        # Observation only: the bulk loop knows which item it is on, and
+        # nothing else records that. "item i of N" is not N downloads.
+        # The owner is deliberately not recorded: this scan spans every
+        # instance, and a scope field that is never cleared would leave the
+        # whole server-wide search reading as scoped to whichever instance it
+        # touched last.
+        activity.note_scope(observed, media_type='episode',
+                            title=episode.title, episode_title=episode.episodeTitle,
+                            season=episode.season, episode=episode.episode,
+                            upstream_episode_id=episode.sonarrEpisodeId)
+        activity.note_progress(observed, unit='item', value=i, total=count_episodes)
 
         providers = get_providers()
         if providers:

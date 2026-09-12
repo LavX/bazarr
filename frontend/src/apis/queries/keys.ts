@@ -1,4 +1,5 @@
 export enum QueryKeys {
+  Discover = "discover",
   Movies = "movies",
   Episodes = "episodes",
   Series = "series",

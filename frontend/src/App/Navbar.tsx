@@ -7,29 +7,21 @@ import React, {
   useState,
 } from "react";
 import { matchPath, NavLink, RouteObject, useLocation } from "react-router";
-import {
-  ActionIcon,
-  AppShell,
-  Badge,
-  Collapse,
-  Stack,
-  Text,
-  Tooltip,
-} from "@mantine/core";
-import { useHover } from "@mantine/hooks";
-import { faGift, IconDefinition } from "@fortawesome/free-solid-svg-icons";
+import { AppShell, Badge, Collapse, Drawer, Stack, Text } from "@mantine/core";
+import { useHover, useMediaQuery } from "@mantine/hooks";
+import { IconDefinition } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import clsx from "clsx";
-import { useSystemStatus } from "@/apis/hooks";
-import {
-  hasWhatsNew,
-  useOpenWhatsNew,
-} from "@/components/modals/useWhatsNewAutoOpen";
 import { useNavbar } from "@/contexts/Navbar";
 import { useRouteItems } from "@/Router";
 import { CustomRouteObject, Route } from "@/Router/type";
 import { BuildKey, pathJoin } from "@/utilities";
 import { LOG } from "@/utilities/console";
+import AppControls from "./AppControls";
+import JobsButton from "./JobsButton";
+import NavigationRail from "./NavigationRail";
+import NotificationDrawer from "./NotificationDrawer";
+import shellStyles from "./AppShell.module.scss";
 import styles from "./Navbar.module.scss";
 
 const Selection = createContext<{
@@ -95,7 +87,7 @@ function useIsActive(parent: string, route: RouteObject) {
 // Section grouping configuration.
 // Routes are matched by their path property.
 const sectionGroups = [
-  { label: "Media", paths: ["series", "movies"] },
+  { label: "Media", paths: ["discover", "series", "movies", "sports"] },
   { label: "Management", paths: ["history", "wanted", "blacklist"] },
   {
     label: "System",
@@ -132,12 +124,16 @@ function groupRoutes(routes: CustomRouteObject[]) {
 }
 
 const AppNavbar: FunctionComponent = () => {
+  const mobile = useMediaQuery("(max-width: 47.99em)");
+  const { showed, show } = useNavbar();
   const [selection, select] = useState<string | null>(null);
+  const [jobsOpened, setJobsOpened] = useState(false);
+  const openJobs = () => {
+    show(false);
+    setJobsOpened(true);
+  };
 
   const routes = useRouteItems();
-  const { data: status } = useSystemStatus();
-  const openWhatsNew = useOpenWhatsNew();
-  const showWhatsNew = hasWhatsNew();
 
   const { pathname } = useLocation();
   useEffect(() => {
@@ -147,30 +143,21 @@ const AppNavbar: FunctionComponent = () => {
   // The top-level route (path "/") contains the nav items as children.
   // useRouteItems returns the full routes array, and the nameless "/" route
   // renders its children directly. We need to find the app route's children.
-  const navRoutes = useMemo(() => {
+  const navRoutes = useMemo<CustomRouteObject[]>(() => {
     const appRoute = routes.find((r) => r.path === "/");
     return appRoute?.children ?? routes;
   }, [routes]);
 
   const groups = useMemo(() => groupRoutes(navRoutes), [navRoutes]);
 
-  return (
-    <AppShell.Navbar className={styles.nav}>
+  const content = (
+    <>
       <div className={styles.navInner}>
         <Selection.Provider value={{ selection, select }}>
           <Stack gap={0}>
             {groups.map((group) => {
-              const groupId = `nav-group-${group.label.toLowerCase().replace(/\s+/g, "-")}`;
               return (
-                <div key={group.label} role="group" aria-labelledby={groupId}>
-                  <div
-                    id={groupId}
-                    role="heading"
-                    aria-level={2}
-                    className={styles.groupLabel}
-                  >
-                    {group.label}
-                  </div>
+                <div key={group.label} role="group" aria-label={group.label}>
                   {group.items.map((route, idx) => (
                     <RouteItem
                       key={BuildKey("nav", group.label, idx)}
@@ -178,6 +165,27 @@ const AppNavbar: FunctionComponent = () => {
                       route={route}
                     />
                   ))}
+                  {group.label === "Media" &&
+                    navRoutes
+                      .find((route) => route.path === "settings")
+                      ?.children?.some(
+                        (route: CustomRouteObject) =>
+                          route.path === "connections" && !route.hidden,
+                      ) &&
+                    navRoutes
+                      .filter(
+                        (route) =>
+                          ["series", "movies"].includes(route.path ?? "") &&
+                          route.hidden,
+                      )
+                      .map((route) => (
+                        <NavbarItem
+                          key={route.path}
+                          name={`Set up ${route.name?.toLowerCase()}`}
+                          link="/settings/connections"
+                          icon={route.icon}
+                        />
+                      ))}
                 </div>
               );
             })}
@@ -185,22 +193,58 @@ const AppNavbar: FunctionComponent = () => {
         </Selection.Provider>
       </div>
       <div className={styles.navFooter}>
-        <Text size="xs" c="var(--bz-text-tertiary)" truncate>
-          {status?.bazarr_version ?? ""}
-        </Text>
-        {showWhatsNew && (
-          <Tooltip label="What's new" position="top" withArrow>
-            <ActionIcon
-              variant="subtle"
-              aria-label="What's new"
-              onClick={openWhatsNew}
-            >
-              <FontAwesomeIcon icon={faGift} />
-            </ActionIcon>
-          </Tooltip>
-        )}
+        <JobsButton onClick={openJobs} expanded />
+        <AppControls expanded />
       </div>
-    </AppShell.Navbar>
+    </>
+  );
+  return (
+    <>
+      {mobile ? (
+        <Drawer
+          opened={showed}
+          onClose={() => show(false)}
+          title="Navigation"
+          position="left"
+          size="min(320px, calc(100vw - 32px))"
+          trapFocus
+          returnFocus
+          closeOnEscape
+          closeOnClickOutside
+          closeButtonProps={{ "aria-label": "Close navigation", size: 44 }}
+          classNames={{
+            content: shellStyles.mobileNavigation,
+            body: shellStyles.navigationBody,
+          }}
+          styles={{
+            content: { height: "100dvh" },
+            body: {
+              display: "flex",
+              flexDirection: "column",
+              height: "calc(100% - 76px)",
+            },
+          }}
+        >
+          <nav aria-label="Main navigation">{content}</nav>
+        </Drawer>
+      ) : (
+        <AppShell.Navbar
+          component="nav"
+          className={shellStyles.rail}
+          aria-label="Main navigation"
+        >
+          <NavigationRail
+            groups={groups}
+            routes={navRoutes}
+            onOpenJobs={openJobs}
+          />
+        </AppShell.Navbar>
+      )}
+      <NotificationDrawer
+        opened={jobsOpened}
+        onClose={() => setJobsOpened(false)}
+      />
+    </>
   );
 };
 
@@ -346,6 +390,7 @@ const NavbarItem: FunctionComponent<NavbarItemProps> = ({
   return (
     <NavLink
       to={link}
+      style={{ minHeight: 44, display: "flex", alignItems: "center" }}
       onClick={(event: React.MouseEvent<HTMLAnchorElement>) => {
         onClick?.(event);
         if (!event.isDefaultPrevented()) {

@@ -157,7 +157,7 @@ RUNTIME_REQUIREMENTS = {
     "subliminal": ("subliminal", "==2.6.0"),
     "textdistance": ("textdistance", "==4.6.3"),
     "tld": ("tld", "==0.13.2"),
-    "tomlkit": ("tomlkit", ">=0.15.0"),
+    "tomlkit": ("tomlkit", ">=0.15.1"),
     "tzlocal": ("tzlocal", "==5.4.4"),
     "unidecode": ("unidecode", "==1.4.0"),
     "urllib3": ("urllib3", "==2.7.0"),

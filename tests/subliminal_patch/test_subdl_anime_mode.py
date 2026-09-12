@@ -142,7 +142,7 @@ def test_query_does_not_keyerror_on_malformed_rows():
             {"name": "valid.srt", "url": "/u/1", "language": "EN",
              "subtitlePage": "/s/1", "releases": ["Dummy.Show.S01E03"]},
             # Malformed row: no 'name'
-            {"url": "/u/2", "language": "EN"},  # noqa: missing 'name'
+            {"url": "/u/2", "language": "EN"},  # missing 'name'
         ],
     }
 
@@ -246,7 +246,7 @@ def test_query_anime_mode_skips_pack_not_covering_target():
 
 def test_query_anime_mode_merges_fallbacks_when_primary_reports_cant_find():
     """Primary 'cant find' must not short-circuit: anime_mode fallbacks must still run
-    and their results must flow through (covers Codex review P1)."""
+    and their results must flow through (covers the reported P1)."""
     provider = SubdlProvider(api_key="fake", anime_mode=True)
     video = _episode(season=1, episode=3)
 
@@ -295,7 +295,7 @@ def test_query_non_anime_mode_short_circuits_on_cant_find():
 
 def test_query_raises_on_fallback_throttle():
     """Extra anime-mode searches hitting 429 must raise APIThrottled instead of
-    silently dropping the response (covers Codex review P2)."""
+    silently dropping the response (covers the reported P2)."""
     provider = SubdlProvider(api_key="fake", anime_mode=True)
     video = _episode()
 

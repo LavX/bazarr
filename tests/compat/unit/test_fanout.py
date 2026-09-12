@@ -1,6 +1,65 @@
 import time
 from unittest.mock import MagicMock
 
+import pytest
+
+
+@pytest.mark.parametrize("code,remote_class,expected", [
+    ("provider", "ConnectionError", "unreachable"),
+    ("provider", "ReadTimeout", "timeout"),
+    ("provider", "UnknownError", "error"),
+    ("internal", "ReadTimeout", "error"),
+])
+def test_worker_outcome_classification_does_not_change_legacy_exception(code, remote_class, expected):
+    from provider_hub.worker import WorkerError, _raise_worker_error
+    from subliminal_patch.core import provider_search_failure
+
+    with pytest.raises(WorkerError) as raised:
+        _raise_worker_error({"code": code, "class_name": remote_class, "message": "ReadTimeout ConnectionError"})
+    assert raised.value.code == code
+    assert raised.value.remote_class_name == remote_class
+    assert provider_search_failure("example", raised.value).status == expected
+
+
+@pytest.mark.parametrize("kind,expected", [
+    ("empty", "empty"), ("auth", "authentication_required"),
+    ("throttle", "cooldown"), ("connection", "unreachable"),
+    ("timeout", "timeout"), ("error", "error"), ("language", "skipped"),
+])
+def test_detailed_real_pool_preserves_provider_outcome(monkeypatch, kind, expected):
+    from provider_hub.registry import HubProxyProvider
+    from subliminal.exceptions import AuthenticationError
+    from subliminal_patch.core import SZAsyncProviderPool
+    from subliminal_patch.core_persistent import list_all_subtitles_parallel
+    from subliminal_patch.extensions import provider_registry
+    from subliminal_patch.exceptions import APIThrottled
+    from subliminal.video import Movie
+    from subzero.language import Language
+    from requests.exceptions import ConnectionError, Timeout
+
+    failures = {"auth": AuthenticationError(), "throttle": APIThrottled(retry_after=120),
+                "connection": ConnectionError(), "timeout": Timeout(), "error": RuntimeError()}
+
+    class FixtureProvider(HubProxyProvider):
+        languages = {Language("fra") if kind == "language" else Language("eng")}
+
+        def list_subtitles(self, video, languages):
+            if kind in failures:
+                raise failures[kind]
+            return []
+
+    monkeypatch.setitem(provider_registry.providers, "discover_outcome", FixtureProvider)
+    pool = SZAsyncProviderPool(providers=["discover_outcome"], provider_configs={})
+    outcomes = []
+    list_all_subtitles_parallel(
+        [Movie("", "The Matrix", imdb_id="tt0133093")], {Language("eng")}, pool,
+        on_outcome=lambda outcome, elapsed: outcomes.append(outcome),
+    )
+    assert len(outcomes) == 1
+    assert outcomes[0].status == expected
+    if kind == "throttle":
+        assert outcomes[0].retry_after == 120
+
 
 def test_list_all_subtitles_parallel_as_completed_short_circuits_slow():
     """A slow provider must not starve the wall-timeout."""
@@ -232,3 +291,60 @@ def test_empty_videos_returns_empty_result():
     )
     assert dict(results) == {}
     pool.list_subtitles_provider.assert_not_called()
+
+
+def test_detailed_saturation_reports_each_provider_without_search(monkeypatch):
+    from types import SimpleNamespace
+    from subliminal.video import Movie
+    from subliminal_patch import core_persistent as fanout
+
+    class Saturated:
+        def acquire(self, timeout):
+            return False
+
+    monkeypatch.setattr(fanout, "_get_pool", lambda: (None, Saturated()))
+    pool = SimpleNamespace(providers=["first", "second"], discarded_providers=set())
+    outcomes = []
+    result = fanout.list_all_subtitles_parallel(
+        [Movie("", "A title")], set(), pool, wall_timeout=0.01,
+        on_outcome=lambda outcome, elapsed: outcomes.append(outcome),
+    )
+    assert dict(result) == {}
+    assert [(outcome.provider, outcome.status) for outcome in outcomes] == [
+        ("first", "saturated"), ("second", "saturated")]
+
+
+def test_detailed_wall_timeout_does_not_accept_late_provider_rows(monkeypatch):
+    from threading import Event
+    from provider_hub.registry import HubProxyProvider
+    from subliminal.video import Movie
+    from subliminal_patch.core import SZAsyncProviderPool
+    from subliminal_patch.core_persistent import list_all_subtitles_parallel
+    from subliminal_patch.extensions import provider_registry
+    from subzero.language import Language
+
+    release, finished = Event(), Event()
+
+    class SlowProvider(HubProxyProvider):
+        languages = {Language("eng")}
+
+        def list_subtitles(self, video, languages):
+            release.wait(2)
+            finished.set()
+            return []
+
+    monkeypatch.setitem(provider_registry.providers, "discover_slow", SlowProvider)
+    pool = SZAsyncProviderPool(providers=["discover_slow"], provider_configs={})
+    outcomes = []
+    try:
+        result = list_all_subtitles_parallel(
+            [Movie("", "The Matrix")], {Language("eng")}, pool, wall_timeout=0.05,
+            on_outcome=lambda outcome, elapsed: outcomes.append(outcome),
+        )
+        assert [(outcome.provider, outcome.status) for outcome in outcomes] == [("discover_slow", "timeout")]
+        release.set()
+        assert finished.wait(2)
+        assert dict(result) == {}
+        assert len(outcomes) == 1
+    finally:
+        release.set()
