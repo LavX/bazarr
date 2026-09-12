@@ -7,6 +7,11 @@ import { setupServer } from "msw/node";
 // tests don't trip MSW's "error" onUnhandledRequest strategy. Individual tests
 // can still override via server.use(...).
 const server = setupServer(
+  http.get(
+    "/api/provider-hub/providers",
+    () => new HttpResponse(null, { status: 503 }),
+  ),
+  http.get("/api/system/searches", () => HttpResponse.json([])),
   http.get("/api/system/arr-instances", () => HttpResponse.json([])),
 );
 

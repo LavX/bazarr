@@ -2,6 +2,7 @@
 
 import os
 
+from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
@@ -33,6 +34,7 @@ from utilities.backup import backup_to_zip
 from utilities.pretty_date import pretty_date
 from provider_hub.tasks import provider_hub_check_updates
 
+from . import activity
 from .config import settings
 from .database import database
 from .get_args import args
@@ -126,6 +128,7 @@ class Scheduler:
             logging.info(f"Scheduler will use this timezone: {self.timezone}")  # noqa: G004
 
         self.aps_scheduler = BackgroundScheduler({'apscheduler.timezone': self.timezone})
+        self.__tag_scheduled_runs()
 
         # task listener
         def task_listener_add(event):
@@ -151,6 +154,25 @@ class Scheduler:
         self.update_configurable_tasks()
 
         self.aps_scheduler.start()
+
+    def __tag_scheduled_runs(self):
+        """Tag each scheduled execution thread with its task id, for observation.
+
+        Several recurring tasks enqueue a JobsQueue child and block on it, so a
+        status reader that counts the task and the child sees two searches where
+        there is one. The child inherits this tag and the summary prefers it.
+
+        The tag is applied by wrapping the executor's worker pool, not the
+        registered callables: a job's ``func`` has to stay the exact object that
+        was registered, and APScheduler's own submission arguments are forwarded
+        untouched, so scheduling, results and exceptions are unchanged.
+        """
+        executor = ThreadPoolExecutor()
+        executor._pool = activity.tagged_scheduler_pool(executor._pool)
+        try:
+            self.aps_scheduler.add_executor(executor, 'default')
+        except Exception:
+            logging.exception("Scheduler run tagging is unavailable; task correlation is degraded")
 
     def update_configurable_tasks(self):
         self.__sonarr_update_task()

@@ -144,7 +144,7 @@ RUNTIME_REQUIREMENTS = {
     "py7zr": ("py7zr", "==1.1.3"),
     "pycountry": ("pycountry", "==26.2.16"),
     "pysrt": ("pysrt", "==1.1.2"),
-    "pysubs2": ("pysubs2", "==1.8.1"),
+    "pysubs2": ("pysubs2", "==1.9.0"),
     "python_anticaptcha": ("python-anticaptcha", "==2.0.0"),
     "rarfile": ("rarfile", "==4.5"),
     "requests": ("requests", "==2.34.2"),

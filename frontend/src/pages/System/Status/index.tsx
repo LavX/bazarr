@@ -234,6 +234,11 @@ const SystemStatusView: FunctionComponent = () => {
           </Row>
         </InfoContainer>
         <InfoContainer title="Credits">
+          <Row title="TMDB">
+            <Label icon={faPaperPlane} link="https://www.themoviedb.org/">
+              Movie and TV metadata
+            </Label>
+          </Row>
           <Row title="TheTVDB">
             <Label icon={faPaperPlane} link="https://thetvdb.com">
               TV series metadata

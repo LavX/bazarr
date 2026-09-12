@@ -14,6 +14,7 @@ import itertools
 import rarfile
 import requests
 
+from dataclasses import dataclass, field
 from os import scandir
 from collections import defaultdict
 from bs4 import UnicodeDammit
@@ -57,6 +58,57 @@ HI_REGEX_WITHOUT_PARENTHESIS = re.compile(r'[*¶♫♪].{3,}[*¶♫♪]|[\[\{].{
 HI_REGEX_WITH_PARENTHESIS = re.compile(r'[*¶♫♪].{3,}[*¶♫♪]|[\[\(\{].{3,}[\]\)\}](?<!{\\an\d})')
 
 HI_REGEX_PARENTHESIS_EXCLUDED_LANGUAGES = ['ara']
+
+
+@dataclass(frozen=True)
+class ProviderSearchResult:
+    """Opt-in search outcome. No exception messages or provider credentials."""
+    provider: str
+    subtitles: list = field(default_factory=list)
+    status: str = "empty"
+    reason: str | None = None
+    retry_after: float | None = None
+
+
+def provider_search_failure(provider, error):
+    from subliminal.exceptions import AuthenticationError, ConfigurationError, ServiceUnavailable, DownloadLimitExceeded
+    from .exceptions import TooManyRequests
+
+    # Worker envelopes retain provider exception names even when the legacy
+    # transport deliberately leaves the exception as a generic WorkerError.
+    remote_type = (getattr(error, "remote_class_name", None)
+                   if getattr(error, "code", None) == "provider" else None)
+    if isinstance(error, AuthenticationError):
+        status = "authentication_required"
+    elif isinstance(error, ConfigurationError):
+        status = "setup_required"
+    elif isinstance(error, (APIThrottled, TooManyRequests, DownloadLimitExceeded)):
+        status = "cooldown"
+    elif (isinstance(error, (requests.exceptions.Timeout, TimeoutError))
+          or getattr(error, "code", None) == "timeout"
+          or remote_type in ("Timeout", "ConnectTimeout", "ReadTimeout")):
+        status = "timeout"
+    elif (isinstance(error, (requests.exceptions.ConnectionError, ServiceUnavailable, ConnectionError))
+          or remote_type == "ConnectionError"):
+        status = "unreachable"
+    else:
+        status = "error"
+    # Keep diagnostics useful without logging provider messages or URLs,
+    # which may contain credentials. Worker classes are untrusted strings.
+    error_type = remote_type or type(error).__name__
+    if not isinstance(error_type, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", error_type):
+        error_type = "UnknownError"
+    reason = status
+    if error_type == "CloudflareBlockedError":
+        status, reason = "unreachable", "automated_requests_blocked"
+    logging.getLogger("provider_search").info("Provider search outcome: provider=%s status=%s exception=%s",
+                   provider, status, error_type)
+    retry_after = getattr(error, "retry_after", None)
+    try:
+        retry_after = max(1, min(86400, float(retry_after))) if retry_after is not None else None
+    except (TypeError, ValueError):
+        retry_after = None
+    return ProviderSearchResult(provider, status=status, reason=reason, retry_after=retry_after)
 
 
 def parse_for_hi_regex(subtitle_text, alpha3_language):
@@ -338,7 +390,8 @@ class SZProviderPool(ProviderPool):
     def __exit__(self, exc_type, exc_value, traceback):
         self.terminate()
 
-    def __getitem__(self, name):
+    def adopt_provider(self, name, provider_config=None):
+        """Adopt an eligible member without initializing it or clearing discards."""
         if name not in self.providers:
             # A download can name a provider the pool was not built with, for
             # instance when the subtitle came from an earlier search and the
@@ -360,7 +413,14 @@ class SZProviderPool(ProviderPool):
                 raise ProviderExcludedError(name)
             if self.adoption_gate is not None and not self.adoption_gate(name):
                 raise ProviderExcludedError(name)
+            if provider_config is not None:
+                # Restore the current complete configuration, including removed
+                # options, without initializing outside the bounded search.
+                self.provider_configs[name] = dict(provider_config)
             self.providers.append(name)
+
+    def __getitem__(self, name):
+        self.adopt_provider(name)
         if name not in self.initialized_providers:
             logger.info('Initializing provider %s', name)
             provider = provider_registry[name](**self.provider_configs.get(name, {}))
@@ -403,7 +463,7 @@ class SZProviderPool(ProviderPool):
 
         del self.initialized_providers[name]
 
-    def list_subtitles_provider(self, provider, video, languages):
+    def list_subtitles_provider(self, provider, video, languages, detailed=False):
         """List subtitles with a single provider.
 
         The video and languages are checked against the provider.
@@ -419,6 +479,11 @@ class SZProviderPool(ProviderPool):
         :rtype: list of :class:`~subliminal.subtitle.Subtitle` or None
 
         """
+        def finish(subtitles=None, status="empty", reason=None):
+            if detailed:
+                return ProviderSearchResult(provider, subtitles or [], status, reason)
+            return subtitles
+
         logger.debug("Languages requested: %r", languages)
 
         excluded_languages = self.language_hook(provider) if self.language_hook else None
@@ -428,7 +493,7 @@ class SZProviderPool(ProviderPool):
         # check video validity
         if not provider_registry[provider].check(video):
             logger.info('Skipping provider %r: not a valid video', provider)
-            return []
+            return finish([], "skipped", "unsupported_media")
 
         # check whether we want to search this provider for the languages
         # Compare by alpha3 (and country/script when specified on the
@@ -446,13 +511,13 @@ class SZProviderPool(ProviderPool):
         if not use_languages:
             logger.info('Skipping provider %r: no language to search for (excluded: %r, requested: %r)', provider,
                         excluded_languages, languages)
-            return []
+            return finish([], "skipped", "excluded_language")
 
         # check supported languages
         provider_languages = self.lang_equals.check_set(set(provider_registry[provider].languages)) & use_languages
         if not provider_languages:
             logger.info('Skipping provider %r: no language to search for', provider)
-            return []
+            return finish([], "skipped", "unsupported_language")
 
         # list subtitles
         results = []
@@ -470,7 +535,7 @@ class SZProviderPool(ProviderPool):
             except ProviderExcludedError:
                 logger.info('Provider %r is currently excluded (disabled, '
                             'throttled or discarded); not searching it', provider)
-                return
+                return finish(None, "skipped", "provider_excluded")
             results = initialized_provider.list_subtitles(video, to_request)
             seen = []
             out = []
@@ -512,7 +577,7 @@ class SZProviderPool(ProviderPool):
                     logger.warning('Provider %r returned subtitle with missing attributes: %s', provider, e)
                     continue
 
-            return out
+            return finish(out, "success" if out else "empty")
 
         except APIThrottled as e:
             ids = {
@@ -522,6 +587,8 @@ class SZProviderPool(ProviderPool):
             }
             logger.warning('Provider %r throttled: %s', provider, e)
             self.throttle_callback(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None)
+            if detailed:
+                return provider_search_failure(provider, e)
 
         except Exception as e:
             ids = {
@@ -531,6 +598,8 @@ class SZProviderPool(ProviderPool):
             }
             logger.exception('Unexpected error in provider %r: %s', provider, traceback.format_exc())
             self.throttle_callback(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None)
+            if detailed:
+                return provider_search_failure(provider, e)
 
     def list_subtitles(self, video, languages):
         """List subtitles.
@@ -1007,14 +1076,16 @@ class SZAsyncProviderPool(SZProviderPool):
 
         return updated
 
-    def list_subtitles_provider(self, provider, video, languages):
-        # list subtitles
+    def list_subtitles_provider(self, provider, video, languages, detailed=False):
         provider_subtitles = None
         try:
-            provider_subtitles = super(SZAsyncProviderPool, self).list_subtitles_provider(provider, video, languages)
+            if detailed:
+                return super().list_subtitles_provider(provider, video, languages, detailed=True)
+            provider_subtitles = super().list_subtitles_provider(provider, video, languages)
         except LanguageReverseError:
-            logger.exception("Unexpected language reverse error in %s, skipping. Error: %s", provider,
-                             traceback.format_exc())
+            logger.exception("Unexpected language reverse error in %s, skipping", provider)
+            if detailed:
+                return ProviderSearchResult(provider, status="error", reason="language_conversion")
 
         return provider, provider_subtitles
 

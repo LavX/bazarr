@@ -221,7 +221,17 @@ body::after {
   }
 
   .mantine-AppShell-header {
-    background: transparent !important;
+    // The header is a floating pill on a band. A transparent band let content
+    // scroll past on either side of the pill and be sliced by it: a page
+    // title read "ver". Frosted ground instead: whatever passes beneath dims
+    // and blurs uniformly across the full width, at every scroll position.
+    background: color-mix(
+      in srgb,
+      var(--bz-surface-ground) 97%,
+      transparent
+    ) !important;
+    backdrop-filter: blur(16px) saturate(1.15);
+    -webkit-backdrop-filter: blur(16px) saturate(1.15);
     border: none !important;
     padding: 8px !important;
   }

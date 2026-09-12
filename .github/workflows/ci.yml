@@ -202,6 +202,7 @@ jobs:
             tests/bazarr/test_arr_aux_leaves.py \
             tests/bazarr/test_arr_rootfolder.py \
             tests/bazarr/test_arr_local_id_cutover_migration.py \
+            tests/bazarr/test_activity_registry.py \
             tests/bazarr/test_jobs_queue_progress.py \
             tests/bazarr/test_jobs_concurrency_limit.py \
             tests/bazarr/test_processing_sync_substep.py \
@@ -347,6 +348,17 @@ jobs:
           set -e
           pip install "psycopg[binary]"
           for f in \
+            tests/bazarr/test_discover_metadata.py tests/bazarr/test_discover_feeds.py \
+            tests/bazarr/test_discover_digital_releases.py tests/bazarr/test_discover_recent_episodes.py \
+            tests/bazarr/test_discover_fallback.py \
+            tests/bazarr/test_discover_library.py \
+            tests/bazarr/test_discover_copy_matching.py \
+            tests/bazarr/test_discover_episodes.py \
+            tests/bazarr/test_discover_search.py \
+            tests/bazarr/test_discover_raw_query.py \
+            tests/bazarr/test_discover_download.py \
+            tests/bazarr/test_discover_preview.py \
+            tests/bazarr/test_discover_summary.py \
             tests/bazarr/test_editor_api.py \
             tests/bazarr/test_arr_atomicity_secrets.py \
             tests/bazarr/test_arr_pg_cutover_migration.py \

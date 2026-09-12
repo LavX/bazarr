@@ -1,13 +1,19 @@
+import {
+  readSessionValue,
+  removeSessionValue,
+  writeSessionValue,
+} from "./browserStorage";
+
 const RESTART_RELOAD_STORAGE_KEY = "bazarr.restart.reload_after_reconnect";
 
 export function markRestartReloadPending() {
-  sessionStorage.setItem(RESTART_RELOAD_STORAGE_KEY, "1");
+  writeSessionValue(RESTART_RELOAD_STORAGE_KEY, "1");
 }
 
 export function consumeRestartReloadPending() {
-  const pending = sessionStorage.getItem(RESTART_RELOAD_STORAGE_KEY) === "1";
+  const pending = readSessionValue(RESTART_RELOAD_STORAGE_KEY) === "1";
   if (pending) {
-    sessionStorage.removeItem(RESTART_RELOAD_STORAGE_KEY);
+    removeSessionValue(RESTART_RELOAD_STORAGE_KEY);
   }
   return pending;
 }
