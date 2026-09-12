@@ -217,7 +217,7 @@ def test_the_manual_toolbox_takes_the_sports_owner_off_the_row():
     source = inspect.getsource(subtitles)
     sports_branch = source.split('if media_type == "sports":')[1].split('elif media_type ==')[0]
     assert 'TableSportsEvents.arr_instance_id,' in sports_branch
-    assert 'arr_instance_id = arr_instance_id or metadata.arr_instance_id' in sports_branch
+    assert 'arr_instance_id = arr_instance_id or sports_meta.arr_instance_id' in sports_branch
 
 
 # The reads that go on to MAP the path. _get_media_metadata is deliberately
