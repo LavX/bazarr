@@ -172,7 +172,9 @@ it("adopts a show without selecting an episode and offers its real season list",
   await user.click(
     await screen.findByRole("button", { name: "Northern Light (2020)" }),
   );
-  expect(await findSelectInput("Season")).toHaveValue("");
+  const season = await findSelectInput("Season");
+  await waitFor(() => expect(season).toHaveValue("Season 2"));
+  expect(await findSelectInput("Episode")).toHaveValue("");
   await pickOption(user, "Subtitle language", "English");
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
   expect(requests).toEqual([]);

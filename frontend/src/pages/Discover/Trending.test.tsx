@@ -304,7 +304,9 @@ it("selects TMDB series identity and requires explicit episode selection", async
   expect(
     await screen.findByRole("heading", { name: "The Long Winter" }),
   ).toBeInTheDocument();
-  expect(await findSelectInput("Season")).toHaveValue("");
+  const season = await findSelectInput("Season");
+  await waitFor(() => expect(season).toHaveValue("Season 1"));
+  expect(await findSelectInput("Episode")).toHaveValue("");
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
   expect(searches).toEqual([]);
 });
