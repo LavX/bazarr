@@ -18,6 +18,7 @@ export function usePrompt(
   const previousFocus = useRef<HTMLElement | null>(null);
   const modalId = useId();
   const promptOpen = useRef(false);
+  const leaving = useRef(false);
 
   const handleStay = useCallback(() => {
     modals.closeAll();
@@ -29,6 +30,7 @@ export function usePrompt(
 
   const handleDiscard = useCallback(() => {
     if (blocker.state === "blocked") {
+      leaving.current = true;
       blocker.proceed?.();
     }
     modals.closeAll();
@@ -44,6 +46,7 @@ export function usePrompt(
       }
     }
     if (blocker.state === "blocked") {
+      leaving.current = true;
       blocker.proceed?.();
     }
     modals.closeAll();
@@ -52,8 +55,10 @@ export function usePrompt(
   useEffect(() => {
     if (blocker.state !== "blocked") promptOpen.current = false;
     if (blocker.state === "blocked" && prevWhen.current === when) {
-      if (!promptOpen.current)
+      if (!promptOpen.current) {
+        leaving.current = false;
         previousFocus.current = document.activeElement as HTMLElement;
+      }
 
       const options = {
         modalId,
@@ -71,7 +76,7 @@ export function usePrompt(
         styles: { close: { minWidth: 44, minHeight: 44 } },
         onClose: () => {
           // Only reset if still blocked (not if proceed was already called)
-          if (blocker.state === "blocked") {
+          if (!leaving.current && blocker.state === "blocked") {
             blocker.reset?.();
             requestAnimationFrame(() => previousFocus.current?.focus());
           }

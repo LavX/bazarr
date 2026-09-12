@@ -4,7 +4,8 @@ import styles from "./Discover.module.scss";
 
 export default function MetadataAttribution() {
   return (
-    <div className={styles.attribution}>
+    <details className={styles.attribution}>
+      <summary>Artwork and title metadata: TMDB</summary>
       <Anchor
         href="https://www.themoviedb.org/"
         target="_blank"
@@ -16,6 +17,6 @@ export default function MetadataAttribution() {
       <Text size="xs">
         This product uses the TMDB API but is not endorsed or certified by TMDB.
       </Text>
-    </div>
+    </details>
   );
 }

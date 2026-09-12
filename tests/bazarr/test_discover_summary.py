@@ -416,12 +416,15 @@ def test_arrivals_retain_exact_title_episode_language_and_time(summary_database,
     session = summary_database.session
     add_instance(session, 1, name="Main")
     add_show(session, 100, 1, title="Northern Light")
+    from app.database import TableShows
+    session.get(TableShows, 100).poster = "https://example.com/library-poster.jpg"
     add_episode(session, 101, 100, 1, missing="[]", season=2, episode=5, title="Home")
     add_episode_history(session, 1, 2, 101, 100, 1, language="hu:forced", provider="opensubtitles")
     session.commit()
 
     arrival = get_summary()["arrivals"][0]
     assert arrival["title"] == "Northern Light"
+    assert arrival["poster_url"] == "https://example.com/library-poster.jpg"
     assert arrival["season"] == 2
     assert arrival["episode"] == 5
     assert arrival["episode_title"] == "Home"

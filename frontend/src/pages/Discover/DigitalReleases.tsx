@@ -1,21 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useLocation } from "react-router";
+import { Link, useLocation, useNavigate } from "react-router";
+import { ActionIcon, Alert, Anchor, Button, Text, Title } from "@mantine/core";
+import { useMediaQuery } from "@mantine/hooks";
 import {
-  Alert,
-  Anchor,
-  Button,
-  NativeSelect,
-  Text,
-  Title,
-} from "@mantine/core";
-import { faArrowsRotate } from "@fortawesome/free-solid-svg-icons";
+  faArrowsRotate,
+  faChevronDown,
+  faChevronRight,
+  faChevronUp,
+} from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useDiscoverDigitalReleases } from "@/apis/hooks/discover";
 import { useDiscover } from "@/contexts/Discover";
 import type { DigitalRelease } from "@/types/discover";
 import DiscoverSelect from "./DiscoverSelect";
-import { plural, readableTime } from "./feedText";
+import { readableFeedDate } from "./feedText";
 import MediaPoster from "./MediaPoster";
+import { discoverTitlePath } from "./navigation";
 import styles from "./Discover.module.scss";
 
 const regionNames = new Intl.DisplayNames(["en"], { type: "region" });
@@ -30,11 +30,13 @@ const regions =
 
 export default function DigitalReleases() {
   const { state, updateBrowsing, updateDraft } = useDiscover();
+  const navigate = useNavigate();
   const { browsing } = state;
   const region = browsing.digitalRegion;
   const feed = useDiscoverDigitalReleases(region);
   const data = feed.data;
   const location = useLocation();
+  const [expanded, setExpanded] = useState(false);
   const [clock, setClock] = useState(Date.now);
   useEffect(() => {
     const timers = [data?.expires_at, data?.stale_until]
@@ -54,6 +56,15 @@ export default function DigitalReleases() {
     () => (expired ? [] : (data?.items ?? [])),
     [expired, data?.items],
   );
+  const wide = useMediaQuery("(min-width: 1600px)");
+  const medium = useMediaQuery("(min-width: 1100px)");
+  const previewCount = wide ? 8 : medium ? 6 : 4;
+  const returnedIndex = items.findIndex(
+    (item) =>
+      browsing.focusId === `discover-digital-${region}-${item.source_id}`,
+  );
+  const showAll = expanded || returnedIndex >= previewCount;
+  const visibleItems = showAll ? items : items.slice(0, previewCount);
   const restored = useRef(false);
   useEffect(() => {
     if (restored.current || !browsing.focusId.startsWith("discover-digital-"))
@@ -94,6 +105,7 @@ export default function DigitalReleases() {
       },
       /* eslint-enable camelcase */
     });
+    void navigate(discoverTitlePath("tmdb", "movie", item.id));
     if (!reopen)
       updateDraft({
         mode: "title",
@@ -123,7 +135,11 @@ export default function DigitalReleases() {
     data?.status === "unavailable" ||
     (feed.isSuccess && !data);
   return (
-    <section className={styles.trending} aria-labelledby="digital-title">
+    <section
+      id="bh-digital-section"
+      className={`${styles.trending} ${styles.compactFeed}`}
+      aria-labelledby="digital-title"
+    >
       <div className={styles.sectionHead}>
         <div>
           <Title order={2} id="digital-title">
@@ -141,30 +157,30 @@ export default function DigitalReleases() {
             searchable
             options={regions}
             value={region}
-            onChange={(value) =>
+            onChange={(value) => {
+              setExpanded(false);
               updateBrowsing({
                 digitalRegion: value,
                 focusId: "discover-digital-region",
-              })
-            }
+              });
+            }}
           />
           {feed.configured && (
-            <Button
+            <ActionIcon
               id="discover-digital-refresh"
               variant="subtle"
+              className={styles.refreshButton}
+              aria-label="Refresh digital releases"
+              title="Refresh digital releases"
               loading={feed.isFetching}
-              leftSection={<FontAwesomeIcon icon={faArrowsRotate} />}
               onClick={() => void feed.refetch()}
             >
-              Refresh digital releases
-            </Button>
+              <FontAwesomeIcon icon={faArrowsRotate} />
+            </ActionIcon>
           )}
         </div>
       </div>
-      <Text component="p" className={styles.caveat}>
-        Release availability does not confirm subtitle availability or
-        synchronization.
-      </Text>
+
       <div role="status" aria-live="polite" className={styles.feedStatus}>
         {(feed.settingsLoading || feed.isFetching) && (
           <Text size="sm">Checking digital releases in {region}.</Text>
@@ -178,7 +194,7 @@ export default function DigitalReleases() {
             </Text>
             <Anchor
               component={Link}
-              to="/settings/discover"
+              to="/subtitle-hub?tab=my-providers#metadata"
               className={styles.settingsLink}
             >
               Set up digital releases
@@ -194,121 +210,76 @@ export default function DigitalReleases() {
         )}
         {data?.service_status === "unavailable" && !expired && (
           <Text size="sm">
-            Some release checks are unavailable. Verified records keep their
-            original check time.
+            Some release checks are unavailable. Showing the releases found so
+            far.
           </Text>
         )}
-        {data && !data.coverage.complete && !expired && !setup && (
-          <Text size="sm">
-            Incomplete regional coverage. The counts are in Digital release
-            source and freshness below.
-          </Text>
-        )}
+
         {data?.status === "empty" && !expired && (
-          <Text>
-            No verified digital releases in {region} for this window. Another
-            region's dates are never substituted.
-          </Text>
-        )}
-        {data?.fetched_at && !expired && (
-          <Text component="p" className={styles.stamp}>
-            {data.status === "cached" ||
-            (data.expires_at && Date.parse(data.expires_at) <= clock)
-              ? "Cached TMDB regional records"
-              : "Checked TMDB regional records"}{" "}
-            ·{" "}
-            <time className={styles.dateValue} dateTime={data.fetched_at}>
-              {readableTime(data.fetched_at)}
-            </time>
-          </Text>
+          <Text>No recent digital releases found in {region}.</Text>
         )}
       </div>
       {items.length > 0 && (
-        <ul className={styles.calendar} aria-label="Recent digital films">
-          {items.map((item, index) => (
-            <li
-              key={item.source_id}
-              // The feed is ordered by source date, so the first row of each
-              // day leads its group. Every row still carries its own date.
-              data-first-of-date={
-                index === 0 ||
-                items[index - 1].release_date !== item.release_date
-                  ? "true"
-                  : "false"
-              }
-            >
+        <ul
+          id="bh-digital-releases"
+          className={styles.episodeList}
+          aria-label="Recent digital films"
+        >
+          {visibleItems.map((item) => (
+            <li key={item.source_id}>
               <button
                 id={`discover-digital-${region}-${item.source_id}`}
                 type="button"
-                className={styles.calendarRow}
+                className={styles.episodeRow}
                 onClick={() => open(item)}
               >
-                <time
-                  className={styles.calendarDate}
-                  dateTime={item.release_date}
-                >
-                  {item.release_date}
-                </time>
-                <span className={styles.calendarArt}>
-                  <MediaPoster key={item.poster_url} src={item.poster_url} />
+                <span className={styles.episodeArt}>
+                  <MediaPoster
+                    key={item.backdrop_url ?? item.poster_url}
+                    src={item.backdrop_url ?? item.poster_url}
+                  />
                 </span>
-                <span className={styles.calendarFacts}>
+                <span className={styles.episodeFacts}>
                   <strong>{item.title}</strong>
+                  <span className={styles.episodeName}>
+                    {item.year ? `${item.year} · Film` : "Film"}
+                  </span>
+                  <time
+                    className={styles.dateValue}
+                    dateTime={item.release_date}
+                  >
+                    {readableFeedDate(item.release_date)}
+                  </time>
                 </span>
-                <span
-                  className={`${styles.captionValues} ${styles.calendarMeta}`}
-                >
-                  <span>Digital</span>
-                  <span>{item.region}</span>
-                </span>
+                <FontAwesomeIcon
+                  icon={faChevronRight}
+                  className={styles.episodeChevron}
+                  aria-hidden="true"
+                />
               </button>
             </li>
           ))}
         </ul>
       )}
-      {data?.last_success && (
-        <details className={styles.feedDates}>
-          <summary>Digital release source and freshness</summary>
-          <Text size="xs">
-            TMDB regional release records, digital type 4. The first{" "}
-            {data.coverage.candidate_limit} candidates from one discovery page
-            are checked. Dates run from {data.window.start} through{" "}
-            {data.window.end}, inclusive, using UTC today. Source calendar dates
-            are never shifted by timezone.
-          </Text>
-          {!data.coverage.complete && (
-            <Text size="xs">
-              {data.coverage.checked} of{" "}
-              {plural(data.coverage.candidates, "candidate")} checked,{" "}
-              {data.coverage.missing_region} missing {region}{" "}
-              {data.coverage.missing_region === 1 ? "record" : "records"}, and{" "}
-              {plural(data.coverage.failed, "failed check")}.
-              {data.coverage.truncated
-                ? " Coverage beyond this candidate page is not verified."
-                : ""}
-            </Text>
-          )}
-          <dl>
-            {[
-              ["Last successful fetch", data.last_success],
-              ["Fresh until", data.expires_at],
-              ["Cached fallback until", data.stale_until],
-              ["Last request", data.attempted_at],
-            ].map(
-              ([label, value]) =>
-                value && (
-                  <div key={label}>
-                    <dt>{label}</dt>
-                    <dd>
-                      <time dateTime={value}>
-                        {new Date(value).toLocaleString()}
-                      </time>
-                    </dd>
-                  </div>
-                ),
-            )}
-          </dl>
-        </details>
+      {items.length > previewCount && (
+        <Button
+          variant="default"
+          className={styles.showMore}
+          aria-expanded={showAll}
+          aria-controls="bh-digital-releases"
+          rightSection={
+            <FontAwesomeIcon icon={showAll ? faChevronUp : faChevronDown} />
+          }
+          id="discover-digital-more"
+          onClick={() => {
+            setExpanded(!showAll);
+            updateBrowsing({ focusId: "discover-digital-more" });
+          }}
+        >
+          {showAll
+            ? "Show fewer releases"
+            : `Show all ${items.length} releases`}
+        </Button>
       )}
     </section>
   );

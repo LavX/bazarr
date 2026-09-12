@@ -1,5 +1,10 @@
 /* eslint-disable camelcase -- API fixtures retain transport field names. */
-import { createMemoryRouter, Link, RouterProvider } from "react-router";
+import {
+  createMemoryRouter,
+  Link,
+  RouterProvider,
+  useNavigate,
+} from "react-router";
 import { Button, useMantineColorScheme } from "@mantine/core";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
@@ -8,13 +13,13 @@ import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import { useDiscover } from "@/contexts/Discover";
 import { AllProviders } from "@/providers";
-import { rawRender, screen, waitFor, within } from "@/tests";
+import { act, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import type { DiscoverSearchSnapshot } from "@/types/discover";
 import { setAuthenticated } from "@/utilities/event";
 import * as files from "@/utilities/files";
 import { pickOption } from "./selectTestHelpers";
-import Discover from ".";
+import Discover from "./testHarness";
 
 const fullSrt = "1\n00:00:01,000 --> 00:00:02,000\nFull dialogue\n\n";
 const forcedSrt = "1\n00:00:03,000 --> 00:00:04,000\nForced translation\n\n";
@@ -87,20 +92,44 @@ const episodeDraft = {
 };
 
 function Controls() {
-  const { updateDraft } = useDiscover();
+  const { updateBrowsing, updateDraft } = useDiscover();
   const { toggleColorScheme } = useMantineColorScheme();
+  const navigate = useNavigate();
+  const selectTitle = () => {
+    void navigate("/discover?show=100");
+    updateBrowsing({
+      selectedId: 100,
+      selectedType: "show",
+      selectedSource: "tmdb",
+      selectedSeason: null,
+      selectedEpisode: null,
+    });
+  };
   return (
     <>
-      <Button onClick={() => updateDraft(episodeDraft)}>Choose episode</Button>
+      <Button
+        onClick={() => {
+          selectTitle();
+          updateDraft(episodeDraft);
+        }}
+      >
+        Choose episode
+      </Button>
       {/* Two updates, because a single one that changes the target and
           supplies a copy retires the copy by design. */}
-      <Button onClick={() => updateDraft({ copyId: chosenCopy.copy_id })}>
+      <Button
+        onClick={() => {
+          selectTitle();
+          updateDraft({ copyId: chosenCopy.copy_id });
+        }}
+      >
         Choose copy
       </Button>
       <Button
-        onClick={() =>
-          updateDraft({ ...episodeDraft, copyId: chosenCopy.copy_id })
-        }
+        onClick={() => {
+          selectTitle();
+          updateDraft({ ...episodeDraft, copyId: chosenCopy.copy_id });
+        }}
       >
         Choose episode and copy at once
       </Button>
@@ -132,7 +161,7 @@ function renderDiscover() {
       <RouterProvider router={router} />
     </AllProviders>,
   );
-  return { user: userEvent.setup() };
+  return { user: userEvent.setup(), router };
 }
 function row(scope = "forced") {
   return within(
@@ -199,7 +228,7 @@ beforeEach(() => {
 
 describe("Discover attachments", () => {
   it("downloads only the clicked forced row with its exact identifiers and device filename", async () => {
-    const { user } = renderDiscover();
+    const { user, router } = renderDiscover();
     await search(user);
     expect(requests).toEqual([]);
     await user.click(row().getByRole("button", { name: "Download SRT" }));
@@ -218,20 +247,22 @@ describe("Discover attachments", () => {
   });
 
   it("retains download feedback through appearance and navigation without submitting providers", async () => {
-    const { user } = renderDiscover();
+    const { user, router } = renderDiscover();
     await search(user);
     await user.click(row().getByRole("button", { name: "Download SRT" }));
     await screen.findByText(/Download started for/);
     await user.click(screen.getByRole("button", { name: "Change appearance" }));
-    await user.click(screen.getByRole("link", { name: "Provider settings" }));
-    await user.click(screen.getByRole("link", { name: "Return to Discover" }));
+    await user.click(screen.getByRole("link", { name: "Subtitle Hub" }));
+    await act(async () => {
+      await router.navigate(-1);
+    });
     expect(screen.getByText(/Download started for/)).toBeInTheDocument();
     expect(searches).toHaveLength(1);
     expect(requests).toHaveLength(1);
   });
 
   it("retires a 410 handle and recovers by searching the exact captured episode context", async () => {
-    const { user } = renderDiscover();
+    const { user, router } = renderDiscover();
     await search(user);
     server.use(
       http.get("/api/discover/download", () =>
@@ -256,7 +287,9 @@ describe("Discover attachments", () => {
         return HttpResponse.json(snapshot("search-2"));
       }),
     );
-    await user.click(screen.getByRole("button", { name: "Search again" }));
+    await user.click(
+      screen.getByRole("button", { name: "Search again for expired result" }),
+    );
     await waitFor(() =>
       expect(row().getByRole("button", { name: "Download SRT" })).toBeEnabled(),
     );
@@ -277,7 +310,7 @@ describe("Discover attachments", () => {
   });
 
   it("downloads a usable retained row using its original search ID after partial refresh", async () => {
-    const { user } = renderDiscover();
+    const { user, router } = renderDiscover();
     await search(user);
     server.use(
       http.post("/api/discover/search", () =>
@@ -301,8 +334,8 @@ describe("Discover attachments", () => {
         }),
       ),
     );
-    await user.click(screen.getByRole("button", { name: "Refresh subtitles" }));
-    await screen.findByText("Previous result");
+    await user.click(screen.getByRole("button", { name: "Search again" }));
+    await screen.findByText(/Previous result/);
     expect(
       screen.queryByRole("heading", { name: "Breaking.Bad.S02E01.full" }),
     ).not.toBeInTheDocument();
@@ -315,7 +348,7 @@ describe("Discover attachments", () => {
   });
 
   it("keeps a usable handle after transport failure but never revives a known expired one", async () => {
-    const { user } = renderDiscover();
+    const { user, router } = renderDiscover();
     await search(user);
     server.use(
       http.get("/api/discover/download", () =>
@@ -325,7 +358,9 @@ describe("Discover attachments", () => {
     );
     await user.click(row().getByRole("button", { name: "Download SRT" }));
     await screen.findByText(/This result has expired/);
-    await user.click(screen.getByRole("button", { name: "Search again" }));
+    await user.click(
+      screen.getByRole("button", { name: "Search again for expired result" }),
+    );
     await screen.findByText(/Refresh failed/);
     expect(row().getByRole("button", { name: "Download SRT" })).toBeDisabled();
     expect(
@@ -336,20 +371,26 @@ describe("Discover attachments", () => {
   it.each(["Episode", "Subtitle language", "IMDb ID"])(
     "retires feedback and handles on a change to %s",
     async (field) => {
-      const { user } = renderDiscover();
+      const { user, router } = renderDiscover();
       await search(user);
       await user.click(row().getByRole("button", { name: "Download SRT" }));
       await screen.findByText(/Download started for/);
+      if (field !== "Subtitle language")
+        await user.click(
+          screen.getByRole("button", { name: "Search options" }),
+        );
       if (field === "Subtitle language")
         await pickOption(user, field, "Hungarian");
-      else {
+      else if (field === "IMDb ID") {
+        // Clearing the IMDb ID in the detail form clears the title selection
+        // by design and returns to the homepage. Feedback and handles retire
+        // with the results panel, so there is no field left to type into.
+        await user.clear(screen.getByRole("textbox", { name: field }));
+      } else {
         // "Episode" is also the media-type radio; the number field is the
         // textbox of that name.
         await user.clear(screen.getByRole("textbox", { name: field }));
-        await user.type(
-          screen.getByRole("textbox", { name: field }),
-          field === "Episode" ? "2" : "tt0133093",
-        );
+        await user.type(screen.getByRole("textbox", { name: field }), "2");
       }
       expect(
         screen.queryByText(/Download started for/),
@@ -374,7 +415,7 @@ describe("Discover attachments", () => {
           });
         }),
       );
-      const { user } = renderDiscover();
+      const { user, router } = renderDiscover();
       await search(user);
       await user.click(row().getByRole("button", { name: "Download SRT" }));
       await waitFor(() => expect(finish).toBeDefined());
@@ -388,7 +429,7 @@ describe("Discover attachments", () => {
           ),
         );
         await user.click(
-          screen.getByRole("button", { name: "Refresh subtitles" }),
+          screen.getByRole("button", { name: /^Search again$/ }),
         );
         await screen.findByText(/No subtitles matched/);
       }
@@ -424,7 +465,7 @@ describe("Discover attachments", () => {
             : HttpResponse.json({ message: "Could not download" }, { status }),
         ),
       );
-      const { user } = renderDiscover();
+      const { user, router } = renderDiscover();
       await search(user);
       await user.click(row().getByRole("button", { name: "Download SRT" }));
       await waitFor(() =>
@@ -457,14 +498,14 @@ it("releases pending download state when transport refresh retires its expired r
       });
     }),
   );
-  const { user } = renderDiscover();
+  const { user, router } = renderDiscover();
   await search(user);
   await user.click(row().getByRole("button", { name: "Download SRT" }));
   await waitFor(() => expect(finish).toBeDefined());
   const now = vi.spyOn(Date, "now").mockReturnValue(expiry + 1);
   try {
     server.use(http.post("/api/discover/search", () => HttpResponse.error()));
-    await user.click(screen.getByRole("button", { name: "Refresh subtitles" }));
+    await user.click(screen.getByRole("button", { name: /^Search again$/ }));
     await screen.findByText(/Refresh failed/);
     finish?.();
     await waitFor(() =>
@@ -541,13 +582,13 @@ describe("Discover results against a chosen library copy", () => {
         return HttpResponse.json(copySnapshot());
       }),
     );
-    const { user } = renderDiscover();
+    const { user, router } = renderDiscover();
     await search(user);
-    expect(screen.getByText(/Search context: Sonarr HD/)).toHaveTextContent(
-      /Breaking\.Bad\.S02E01\.1080p\.WEB\.H264-GRP/,
-    );
     expect(
-      screen.getByText(
+      row("full").getByText(/Search context: Sonarr HD/),
+    ).toHaveTextContent(/Breaking\.Bad\.S02E01\.1080p\.WEB\.H264-GRP/);
+    expect(
+      row("full").getByText(
         /Release details from this copy are search context\. They do not verify subtitle synchronization/i,
       ),
     ).toBeInTheDocument();
@@ -560,7 +601,7 @@ describe("Discover results against a chosen library copy", () => {
         return HttpResponse.json(copySnapshot());
       }),
     );
-    const { user } = renderDiscover();
+    const { user, router } = renderDiscover();
     await search(user);
     expect(row("full").getByText("Matches this copy")).toBeInTheDocument();
     expect(
@@ -582,7 +623,7 @@ describe("Discover results against a chosen library copy", () => {
         return HttpResponse.json(copySnapshot());
       }),
     );
-    const { user } = renderDiscover();
+    const { user, router } = renderDiscover();
     // One update that both moves to a new target and names a copy is naming a
     // copy for a target that did not exist when the copy was resolved.
     await user.click(
@@ -611,7 +652,7 @@ describe("Discover results against a chosen library copy", () => {
         ),
       ),
     );
-    const { user } = renderDiscover();
+    const { user, router } = renderDiscover();
     await searchWithCopy(user);
     expect(searches[0]).toMatchObject({ copy_id: chosenCopy.copy_id });
     await user.click(row().getByRole("button", { name: "Download SRT" }));
@@ -622,7 +663,9 @@ describe("Discover results against a chosen library copy", () => {
         return HttpResponse.json(copySnapshot("search-2"));
       }),
     );
-    await user.click(screen.getByRole("button", { name: "Search again" }));
+    await user.click(
+      screen.getByRole("button", { name: "Search again for expired result" }),
+    );
     await waitFor(() => expect(searches).toHaveLength(2));
     expect(searches[1]).toMatchObject({ copy_id: chosenCopy.copy_id });
     // Only the opaque copy identity is an input. The resolved copy and its

@@ -1,24 +1,26 @@
 /* eslint-disable camelcase -- API fixture fields keep their transport names. */
-import { createMemoryRouter, RouterProvider } from "react-router";
+import { createMemoryRouter, RouterProvider, useNavigate } from "react-router";
 import { Button, useMantineColorScheme } from "@mantine/core";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, expect, it, vi } from "vitest";
 import { COPIES_QUERY_KEY } from "@/apis/hooks/discover";
 import queryClient from "@/apis/queries";
+import { QueryKeys } from "@/apis/queries/keys";
 import { useDiscover } from "@/contexts/Discover";
 import { AllProviders } from "@/providers";
-import { rawRender, screen, waitFor, within } from "@/tests";
+import { act, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import { describeCopy } from "./LocalCopyPicker";
 import {
   chooseSegment,
   findSelectInput,
+  openReleaseSearch,
   openSelect,
   pickOption,
   selectInput,
 } from "./selectTestHelpers";
-import Discover from ".";
+import Discover from "./testHarness";
 
 const envelope = {
   source: "tmdb",
@@ -100,6 +102,23 @@ const copyB = {
   filename: "northern.light.s02e01.uhd.mkv",
   source: "Bluray",
   resolution: "2160p",
+};
+const movieDetail = {
+  source: "tmdb",
+  source_id: "tmdb:movie:200",
+  id: 200,
+  media_type: "movie",
+  title: "The Matrix",
+  year: 1999,
+  imdb_id: "tt0133093",
+  tvdb_id: null,
+  mapping_status: "resolved",
+  overview: "A film with library copies.",
+  poster_url: null,
+  backdrop_url: null,
+  copies: [],
+  copies_truncated: false,
+  ownership: null,
 };
 
 const summary = {
@@ -204,6 +223,9 @@ beforeEach(() => {
     http.get("/api/discover/metadata/shows/100/seasons/2/episodes/1", () =>
       HttpResponse.json({ data: { ...envelope, episode } }),
     ),
+    http.get("/api/discover/metadata/movies/200", () =>
+      HttpResponse.json({ data: { ...envelope, item: movieDetail } }),
+    ),
     http.get("/api/discover/summary", () => {
       summaryReads += 1;
       return HttpResponse.json(summary);
@@ -237,6 +259,30 @@ function Slots() {
   );
 }
 
+/** Enters the movie detail on demand. The homepage carries no retrieval
+ * controls, so manual movie copy tests reach the detail this way instead of
+ * by typing an IMDb identifier into a homepage form. */
+function DetailEntry() {
+  const navigate = useNavigate();
+  const { updateBrowsing } = useDiscover();
+  return (
+    <Button
+      onClick={() => {
+        void navigate("/discover?movie=200");
+        updateBrowsing({
+          selectedId: 200,
+          selectedSource: "tmdb",
+          selectedType: "movie",
+          selectedSeason: null,
+          selectedEpisode: null,
+        });
+      }}
+    >
+      Enter movie detail
+    </Button>
+  );
+}
+
 function browse(initial = "/discover?show=100&season=2&episode=1") {
   const router = createMemoryRouter(
     [
@@ -246,6 +292,7 @@ function browse(initial = "/discover?show=100&season=2&episode=1") {
           <>
             <Appearance />
             <Slots />
+            <DetailEntry />
             <Discover />
           </>
         ),
@@ -337,17 +384,24 @@ it("states that a library copy is search context and never a timing guarantee", 
   ).toBeInTheDocument();
 });
 
-it("explains an absent episode separately from an unowned title", async () => {
-  copyPayload = { items: [], truncated: false, owning_titles: 2 };
-  browse();
-  expect(
-    await screen.findByText(
-      /2 series in your library match this title, but none holds this episode/i,
-    ),
-  ).toBeInTheDocument();
-});
+it.each([0, 2])(
+  "keeps title-only retrieval usable with %s owning series and no episode copy",
+  async (owners) => {
+    copyPayload = { items: [], truncated: false, owning_titles: owners };
+    const { user } = browse();
+    await pickOption(user, "Subtitle language", "English");
+    await waitFor(() => expect(copyRequests).toHaveLength(1));
+    await waitFor(() =>
+      expect(queryClient.isFetching({ queryKey: COPIES_QUERY_KEY })).toBe(0),
+    );
+    expect(screen.queryByText("Match a copy in your library")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+    await waitFor(() => expect(searches).toHaveLength(1));
+    expect(searches[0]).not.toHaveProperty("copy_id");
+  },
+);
 
-it("keeps a chosen copy through appearance and local status changes", async () => {
+it("keeps a chosen copy through appearance and unrelated cached status changes", async () => {
   const { user } = browse();
   await pickOption(user, "Library copy", describeCopy(copyA));
   await pickOption(user, "Subtitle language", "English");
@@ -358,23 +412,8 @@ it("keeps a chosen copy through appearance and local status changes", async () =
   await user.click(screen.getByRole("button", { name: "Change appearance" }));
   expect(selectInput("Library copy")).toHaveValue(describeCopy(copyA));
 
-  // Neither is inspecting this Bazarr's own work, or retrying that read.
-  await user.click(
-    await screen.findByRole("button", { name: "Refresh local status" }),
-  );
-  await waitFor(() => expect(summaryReads).toBeGreaterThan(1));
-  expect(selectInput("Library copy")).toHaveValue(describeCopy(copyA));
-
-  server.use(
-    http.get("/api/discover/summary", () => {
-      summaryReads += 1;
-      return new HttpResponse(null, { status: 503 });
-    }),
-  );
-  await user.click(
-    screen.getByRole("button", { name: "Refresh local status" }),
-  );
-  await screen.findByRole("button", { name: "Retry local status" });
+  // A background dashboard refresh must not change the chosen file.
+  act(() => queryClient.setQueryData([QueryKeys.Discover, "summary"], summary));
   expect(selectInput("Library copy")).toHaveValue(describeCopy(copyA));
 
   // None of it searched a provider or re-read the offer under a new key.
@@ -437,11 +476,9 @@ it("changing the target retires the chosen copy instead of carrying it over", as
   const { user } = browse();
   await pickOption(user, "Library copy", describeCopy(copyA));
   await pickOption(user, "Subtitle language", "English");
-  // The same series IMDb id, now as a film. That is a different target, so the
-  // episode copy chosen for it cannot travel with the search.
+  // Switching from episode to movie keeps retrieval open, but the old
+  // episode copy cannot be carried over to the new target.
   await chooseSegment(user, "Movie");
-  // The picker follows the reader to the manual form and re-offers copies for
-  // the new target, but the episode copy chosen for the old one is gone.
   await waitFor(() =>
     expect(selectInput("Library copy")).toHaveValue(
       "Title only, no library copy",
@@ -489,10 +526,12 @@ const movieCopy = {
 it("matches a copy for an IMDb identifier typed straight into the form", async () => {
   copyPayload = { items: [movieCopy], truncated: false, owning_titles: 1 };
   const { user } = browse("/discover");
-  // No title was browsed to. This is the manual retrieval path, and it has to
-  // offer exactly the same explicit copy matching as the browsing path.
+  // The homepage carries no retrieval controls, so the movie detail is entered
+  // first. The detail adopts the verified IMDb identity, and it has to offer
+  // exactly the same explicit copy matching as the browsing path.
   expect(screen.queryAllByLabelText("Library copy")[0] ?? null).toBeNull();
-  await user.type(screen.getByLabelText("IMDb ID"), "tt0133093");
+  expect(screen.queryByLabelText("IMDb ID")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Enter movie detail" }));
   const select = await findSelectInput("Library copy");
   expect(select).toHaveValue("Title only, no library copy");
   expect(copyRequests[0]).toContain("media_type=movie");
@@ -515,22 +554,23 @@ it("keeps exactly one picker when a browsed title is open", async () => {
   const { user } = browse();
   await ready();
   expect(screen.getAllByLabelText("Library copy")).toHaveLength(1);
-  // Leaving the selected title returns the reader to the manual form, which
-  // owns the only picker on that branch.
+  // Leaving the selected title returns the reader to the homepage, which
+  // carries no retrieval controls and therefore no picker.
   await user.click(screen.getByRole("button", { name: /^Back to/ }));
   await waitFor(() =>
-    expect(screen.getAllByLabelText("Library copy")).toHaveLength(1),
+    expect(screen.queryAllByLabelText("Library copy")[0] ?? null).toBeNull(),
   );
+  expect(
+    screen.queryByRole("button", { name: "Find subtitles" }),
+  ).not.toBeInTheDocument();
 });
 
 it("offers no copy matching for an unverified release-name query", async () => {
   copyPayload = { items: [movieCopy], truncated: false, owning_titles: 1 };
   const { user } = browse("/discover");
-  await user.type(screen.getByLabelText("IMDb ID"), "tt0133093");
+  await user.click(screen.getByRole("button", { name: "Enter movie detail" }));
   await pickOption(user, "Library copy", describeCopy(movieCopy));
-  await user.click(
-    screen.getByRole("button", { name: "Search providers by release name" }),
-  );
+  await openReleaseSearch(user);
   await waitFor(() =>
     expect(screen.queryAllByLabelText("Library copy")[0] ?? null).toBeNull(),
   );
@@ -550,7 +590,7 @@ it("offers no copy matching for an unverified release-name query", async () => {
 it("stops claiming a copy is gone when the offer simply could not be read", async () => {
   copyPayload = { items: [movieCopy], truncated: false, owning_titles: 1 };
   const { user } = browse("/discover");
-  await user.type(screen.getByLabelText("IMDb ID"), "tt0133093");
+  await user.click(screen.getByRole("button", { name: "Enter movie detail" }));
   await pickOption(user, "Library copy", describeCopy(movieCopy));
   // One failed background refetch, with the target unchanged. The query does
   // not retry, so this is all it takes to reach the state.
@@ -598,20 +638,24 @@ it("records its position in the slot the branch it renders on actually uses", as
 it("records the homepage slot when it renders inside the retrieval form", async () => {
   copyPayload = { items: [movieCopy], truncated: false, owning_titles: 1 };
   const { user } = browse("/discover");
-  await user.type(screen.getByLabelText("IMDb ID"), "tt0133093");
+  // The homepage carries no retrieval form, so there is no homepage picker to
+  // record a homepage slot. Entering the movie detail records the detail
+  // target-keyed position instead.
+  expect(screen.queryAllByLabelText("Library copy")[0] ?? null).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Enter movie detail" }));
   await pickOption(user, "Library copy", describeCopy(movieCopy));
   const slots = JSON.parse(screen.getByTestId("slots").textContent ?? "{}") as {
     focusId: string;
-    pagePosition: unknown;
+    pagePosition: { target: string; focusId: string } | null;
   };
-  expect(slots.focusId).toBe("discover-local-copy");
-  expect(slots.pagePosition).toBeNull();
+  expect(slots.pagePosition?.focusId).toBe("discover-local-copy");
+  expect(slots.focusId).not.toBe("discover-local-copy");
 });
 
 it("keeps the control and the choice in step after a retirement and a failed refetch", async () => {
   copyPayload = { items: [movieCopy], truncated: false, owning_titles: 1 };
   const { user } = browse("/discover");
-  await user.type(screen.getByLabelText("IMDb ID"), "tt0133093");
+  await user.click(screen.getByRole("button", { name: "Enter movie detail" }));
   await pickOption(user, "Library copy", describeCopy(movieCopy));
 
   // A genuine retirement: a successful read that no longer lists the copy.
@@ -650,29 +694,33 @@ it("keeps the control and the choice in step after a retirement and a failed ref
 });
 
 it("never labels an unchecked copy as retired", async () => {
-  // The offer fails on its very first read, so nothing successful was ever
-  // observed for this target and no retirement can be claimed.
+  let reads = 0;
   server.use(
-    http.get(
-      "/api/discover/copies",
-      () => new HttpResponse(null, { status: 503 }),
-    ),
+    http.get("/api/discover/copies", () => {
+      reads += 1;
+      return new HttpResponse(null, { status: 503 });
+    }),
   );
   const { user } = browse("/discover");
-  await user.type(screen.getByLabelText("IMDb ID"), "tt0133093");
-  expect(
-    await screen.findByText(/Your library copies could not be read/),
-  ).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Enter movie detail" }));
+  await waitFor(() => expect(reads).toBeGreaterThan(0));
+  await waitFor(() =>
+    expect(queryClient.isFetching({ queryKey: COPIES_QUERY_KEY })).toBe(0),
+  );
   expect(
     screen.queryByText(/The copy you chose is no longer offered/),
   ).toBeNull();
-  expect(screen.queryAllByLabelText("Library copy")[0] ?? null).toBeNull();
+  expect(screen.queryByText("Match a copy in your library")).toBeNull();
+  await pickOption(user, "Subtitle language", "English");
+  await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+  await waitFor(() => expect(searches).toHaveLength(1));
+  expect(searches[0]).not.toHaveProperty("copy_id");
 });
 
 it("does not call a copy retired when the list it is missing from is truncated", async () => {
   copyPayload = { items: [movieCopy], truncated: false, owning_titles: 1 };
   const { user } = browse("/discover");
-  await user.type(screen.getByLabelText("IMDb ID"), "tt0133093");
+  await user.click(screen.getByRole("button", { name: "Enter movie detail" }));
   await pickOption(user, "Library copy", describeCopy(movieCopy));
 
   // The same target, now answered with a capped list that no longer shows the
@@ -719,7 +767,7 @@ it("labels an unrecognised unavailable reason without borrowing another one", as
     owning_titles: 1,
   };
   const { user } = browse("/discover");
-  await user.type(screen.getByLabelText("IMDb ID"), "tt0133093");
+  await user.click(screen.getByRole("button", { name: "Enter movie detail" }));
   await ready();
   const listbox = await openSelect(user, "Library copy");
   expect(
@@ -738,7 +786,7 @@ it("reports a recorded size honestly at both ends of the range", async () => {
     owning_titles: 1,
   };
   const { user } = browse("/discover");
-  await user.type(screen.getByLabelText("IMDb ID"), "tt0133093");
+  await user.click(screen.getByRole("button", { name: "Enter movie detail" }));
   await pickOption(user, "Library copy", describeCopy(movieCopy));
   // A zero-byte library record is odd, and inventing a megabyte for it would
   // be the control asserting something the row does not say.

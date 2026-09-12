@@ -1,18 +1,41 @@
 /* eslint-disable camelcase -- API fixtures retain transport field names. */
 import { createMemoryRouter, RouterProvider } from "react-router";
+import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, expect, it } from "vitest";
 import queryClient from "@/apis/queries";
 import { AllProviders } from "@/providers";
 import { rawRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
-import Discover from ".";
+import Discover from "./testHarness";
 
 // No Discover test registered a handler for the provider-hub endpoint, so the
 // Hub query always failed, readiness was always "unknown", and neither branch
 // of this notice was ever rendered in the suite. The copy went out unguarded,
 // which is how it came to tell a reader that an installed provider is built in
 // on evidence that does not establish it.
+
+const movie = {
+  source: "tmdb",
+  source_id: "tmdb:movie:42",
+  id: 42,
+  media_type: "movie",
+  title: "Northern Light",
+  year: 2008,
+  imdb_id: "tt0080274",
+  mapping_status: "resolved",
+  overview: "A journey north.",
+  poster_url: null,
+  backdrop_url: null,
+};
+
+const envelope = {
+  source: "tmdb",
+  status: "available",
+  configured: true,
+  revision: "feed-one",
+  locale: "en-US",
+};
 
 function install(overrides: Record<string, unknown> = {}) {
   return {
@@ -34,6 +57,11 @@ function serve(
     http.get("/api/system/settings", () =>
       HttpResponse.json({
         general: { theme: "auto", enabled_providers: enabled },
+        discover: {
+          tmdb_configured: true,
+          metadata_revision: "feed-one",
+          locale: "en-US",
+        },
       }),
     ),
     http.get("/api/system/languages", () =>
@@ -46,6 +74,15 @@ function serve(
       installs === "pending"
         ? new Promise<never>(() => undefined)
         : HttpResponse.json({ data: installs }),
+    ),
+    http.get("/api/discover/metadata/status", () =>
+      HttpResponse.json({ data: envelope }),
+    ),
+    http.get("/api/discover/metadata/search", () =>
+      HttpResponse.json({ data: { ...envelope, items: [movie] } }),
+    ),
+    http.get("/api/discover/metadata/movies/42", () =>
+      HttpResponse.json({ data: { ...envelope, item: movie } }),
     ),
   );
 }
@@ -62,6 +99,18 @@ function open() {
     <AllProviders>
       <RouterProvider router={router} />
     </AllProviders>,
+  );
+  return { user: userEvent.setup(), router };
+}
+
+async function enterDetail(user: ReturnType<typeof userEvent.setup>) {
+  await user.type(screen.getByLabelText("Search"), "Northern");
+  await user.click(
+    await screen.findByRole("button", { name: "Northern Light (2008)" }),
+  );
+  await screen.findByRole("heading", { name: "Northern Light" });
+  await waitFor(() =>
+    expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0080274"),
   );
 }
 
@@ -82,7 +131,8 @@ async function findReadinessNotice() {
   return readinessNotice() as HTMLElement;
 }
 
-async function settle() {
+async function settle(user: ReturnType<typeof userEvent.setup>) {
+  await enterDetail(user);
   await screen.findByRole("button", { name: /Find subtitles/ });
   await screen.findByRole("combobox", { name: /Subtitle language/ });
 }
@@ -94,22 +144,27 @@ beforeEach(() => {
 
 it("says nothing is enabled when nothing is enabled", async () => {
   serve([], []);
-  open();
-  expect(await findReadinessNotice()).toHaveTextContent(
-    /No subtitle provider is enabled/,
-  );
+  const { user } = open();
+  await enterDetail(user);
+  expect(
+    await screen.findByRole("link", { name: "Set up providers" }),
+  ).toHaveAttribute("href", "/subtitle-hub?tab=marketplace");
+  expect(
+    screen.queryByRole("button", { name: "Find subtitles" }),
+  ).not.toBeInTheDocument();
 });
 
 it("stays silent while a searchable catalog provider is enabled", async () => {
   serve(["catalog-example"], [install()]);
-  open();
-  await settle();
+  const { user } = open();
+  await settle(user);
   expect(readinessNotice()).toBeNull();
 });
 
 it("calls a provider built in only when the Hub has never heard of it", async () => {
   serve(["bsplayer"], []);
-  open();
+  const { user } = open();
+  await enterDetail(user);
   const notice = await findReadinessNotice();
   expect(notice).toHaveTextContent(/bsplayer is not a catalog provider/);
   expect(notice).toHaveTextContent(/installed, trusted catalog providers only/);
@@ -128,7 +183,8 @@ it.each([
   "does not call a provider built in when it is installed but %s",
   async (_name, overrides, expected) => {
     serve(["catalog-example"], [install(overrides)]);
-    open();
+    const { user } = open();
+    await enterDetail(user);
     const notice = await findReadinessNotice();
     expect(notice).toHaveTextContent(expected);
     // The claim a reader must never be given about a provider they installed
@@ -140,7 +196,8 @@ it.each([
 
 it("gives each provider the reason that actually applies to it", async () => {
   serve(["bsplayer", "catalog-example"], [install({ pending_restart: true })]);
-  open();
+  const { user } = open();
+  await enterDetail(user);
   const notice = await findReadinessNotice();
   expect(notice).toHaveTextContent(/bsplayer is not a catalog provider/);
   expect(notice).toHaveTextContent(/Catalog Example is waiting for a restart/);
@@ -151,7 +208,8 @@ it("gives each provider the reason that actually applies to it", async () => {
 // read "bsplayer, gestdown and yifysubtitles are not a catalog provider".
 it("counts correctly when several providers share one reason", async () => {
   serve(["bsplayer", "gestdown", "yifysubtitles"], []);
-  open();
+  const { user } = open();
+  await enterDetail(user);
   const notice = await findReadinessNotice();
   expect(notice).toHaveTextContent(
     /bsplayer, gestdown and yifysubtitles are not catalog providers\./,
@@ -171,7 +229,8 @@ it("keeps each group on its own number", async () => {
       }),
     ],
   );
-  open();
+  const { user } = open();
+  await enterDetail(user);
   const notice = await findReadinessNotice();
   expect(notice).toHaveTextContent(/bsplayer is not a catalog provider\./);
   expect(notice).toHaveTextContent(
@@ -181,7 +240,8 @@ it("keeps each group on its own number", async () => {
 
 it("names a provider the way the Hub names it, not by its raw id", async () => {
   serve(["catalog-example"], [install({ trusted: false })]);
-  open();
+  const { user } = open();
+  await enterDetail(user);
   const notice = await findReadinessNotice();
   expect(notice).toHaveTextContent(/Catalog Example/);
   expect(notice).not.toHaveTextContent(/catalog-example/);
@@ -189,8 +249,8 @@ it("names a provider the way the Hub names it, not by its raw id", async () => {
 
 it("withholds the notice entirely while the Hub has not answered", async () => {
   serve(["bsplayer"], "pending");
-  open();
-  await settle();
+  const { user } = open();
+  await settle(user);
   // Naming a reason before the Hub has answered would be a guess, so nothing
   // is said at all.
   expect(readinessNotice()).toBeNull();

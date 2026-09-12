@@ -4,6 +4,7 @@ import type {
   DiscoverCopyOffer,
   DiscoverDownloadIdentity,
   DiscoverPreviewData,
+  DiscoverSearchProgress,
   DiscoverSearchSnapshot,
   DiscoverSelection,
   DiscoverSummary,
@@ -20,11 +21,31 @@ class DiscoverApi extends BaseApi {
     super("/discover");
   }
 
-  async search(context: DiscoverSelection, refresh = false) {
-    const response = await this.postRaw<DiscoverSearchSnapshot>("/search", {
-      ...context,
-      refresh,
-    });
+  async search(
+    context: DiscoverSelection,
+    refresh = false,
+    progressId?: string,
+  ) {
+    const response = await this.postRaw<DiscoverSearchSnapshot>(
+      "/search",
+      {
+        ...context,
+        refresh,
+      },
+      undefined,
+      progressId ? { "X-Discover-Progress": progressId } : undefined,
+    );
+    return response.data;
+  }
+
+  async searchProgress(progressId: string, signal: AbortSignal) {
+    const response = await client.axios.get<DiscoverSearchProgress>(
+      this.prefix + "/search",
+      {
+        params: { progress_id: progressId },
+        signal,
+      },
+    );
     return response.data;
   }
 

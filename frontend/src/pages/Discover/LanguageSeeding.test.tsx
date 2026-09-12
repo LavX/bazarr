@@ -8,7 +8,7 @@ import { AllProviders } from "@/providers";
 import { rawRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import { pickOption, selectInput } from "./selectTestHelpers";
-import Discover from ".";
+import Discover from "./testHarness";
 
 // The global fixture serves an empty profile list, so every other Discover test
 // exercises a reader who has no language profile at all. That is not the normal
@@ -21,6 +21,28 @@ const languages = [
   { code2: "en", code3: "eng", name: "English", enabled: true },
   { code2: "de", code3: "deu", name: "German", enabled: true },
 ];
+
+const movie = {
+  source: "tmdb",
+  source_id: "tmdb:movie:42",
+  id: 42,
+  media_type: "movie",
+  title: "Northern Light",
+  year: 2008,
+  imdb_id: "tt0080274",
+  mapping_status: "resolved",
+  overview: "A journey north.",
+  poster_url: null,
+  backdrop_url: null,
+};
+
+const envelope = {
+  source: "tmdb",
+  status: "available",
+  configured: true,
+  revision: "feed-one",
+  locale: "en-US",
+};
 
 function profile(id: number, code2: string, name: string) {
   return {
@@ -56,6 +78,11 @@ function serve({
     http.get("/api/system/settings", () =>
       HttpResponse.json({
         general: { theme: "auto", enabled_providers: [], ...general },
+        discover: {
+          tmdb_configured: true,
+          metadata_revision: "feed-one",
+          locale: "en-US",
+        },
       }),
     ),
     http.get("/api/system/languages", () => HttpResponse.json(languages)),
@@ -64,8 +91,18 @@ function serve({
         ? new HttpResponse(null, { status: 500 })
         : HttpResponse.json(profiles),
     ),
-    http.get("/api/provider-hub/providers", () =>
-      HttpResponse.json({ data: [] }),
+    http.get(
+      "/api/provider-hub/providers",
+      () => new HttpResponse(null, { status: 503 }),
+    ),
+    http.get("/api/discover/metadata/status", () =>
+      HttpResponse.json({ data: envelope }),
+    ),
+    http.get("/api/discover/metadata/search", () =>
+      HttpResponse.json({ data: { ...envelope, items: [movie] } }),
+    ),
+    http.get("/api/discover/metadata/movies/42", () =>
+      HttpResponse.json({ data: { ...envelope, item: movie } }),
     ),
   );
 }
@@ -86,6 +123,17 @@ function open() {
   return { user: userEvent.setup(), router };
 }
 
+async function enterDetail(user: ReturnType<typeof userEvent.setup>) {
+  await user.type(screen.getByLabelText("Search"), "Northern");
+  await user.click(
+    await screen.findByRole("button", { name: "Northern Light (2008)" }),
+  );
+  await screen.findByRole("heading", { name: "Northern Light" });
+  await waitFor(() =>
+    expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0080274"),
+  );
+}
+
 beforeEach(() => {
   localStorage.clear();
   queryClient.clear();
@@ -93,16 +141,20 @@ beforeEach(() => {
 
 it("seeds the language from the reader's own profile and says where it came from", async () => {
   serve();
-  open();
+  const { user } = open();
+  expect(
+    screen.queryByRole("combobox", { name: /Subtitle language/ }),
+  ).not.toBeInTheDocument();
+  await enterDetail(user);
   await waitFor(() =>
     expect(selectInput("Subtitle language")).toHaveValue("Hungarian"),
   );
   expect(
     screen.getByText(/Preselected from your language profile/),
   ).toBeInTheDocument();
-  // Seeding a language is not the same as making the search ready: it fills the
-  // field the reader would otherwise fill, and nothing else.
-  expect(screen.getByRole("button", { name: /Find subtitles/ })).toBeDisabled();
+  // In detail the selected title plus the seeded language complete the form,
+  // so Find becomes available. Seeding still only fills the language field.
+  expect(screen.getByRole("button", { name: /Find subtitles/ })).toBeEnabled();
 });
 
 it("prefers the profile the media type actually defaults to", async () => {
@@ -110,7 +162,11 @@ it("prefers the profile the media type actually defaults to", async () => {
     profiles: [profile(1, "hu", "Hungarian"), profile(2, "de", "German")],
     general: { movie_default_enabled: true, movie_default_profile: 2 },
   });
-  open();
+  const { user } = open();
+  expect(
+    screen.queryByRole("combobox", { name: /Subtitle language/ }),
+  ).not.toBeInTheDocument();
+  await enterDetail(user);
   await waitFor(() =>
     expect(selectInput("Subtitle language")).toHaveValue("German"),
   );
@@ -119,7 +175,11 @@ it("prefers the profile the media type actually defaults to", async () => {
 it("never overrides a language the reader already chose", async () => {
   localStorage.setItem("bazarr.discover.subtitle-language", "eng");
   serve();
-  open();
+  const { user } = open();
+  expect(
+    screen.queryByRole("combobox", { name: /Subtitle language/ }),
+  ).not.toBeInTheDocument();
+  await enterDetail(user);
   await waitFor(() =>
     expect(selectInput("Subtitle language")).toHaveValue("English"),
   );
@@ -132,7 +192,11 @@ it("never overrides a language the reader already chose", async () => {
 
 it("does not seed at all when there is no profile to seed from", async () => {
   serve({ profiles: [] });
-  open();
+  const { user } = open();
+  expect(
+    screen.queryByRole("combobox", { name: /Subtitle language/ }),
+  ).not.toBeInTheDocument();
+  await enterDetail(user);
   await screen.findByRole("button", { name: /Find subtitles/ });
   expect(selectInput("Subtitle language")).toHaveValue("");
   expect(
@@ -142,7 +206,11 @@ it("does not seed at all when there is no profile to seed from", async () => {
 
 it("does not seed when the profile list cannot be read", async () => {
   serve({ profilesFail: true });
-  open();
+  const { user } = open();
+  expect(
+    screen.queryByRole("combobox", { name: /Subtitle language/ }),
+  ).not.toBeInTheDocument();
+  await enterDetail(user);
   await screen.findByRole("button", { name: /Find subtitles/ });
   expect(selectInput("Subtitle language")).toHaveValue("");
 });
@@ -150,6 +218,10 @@ it("does not seed when the profile list cannot be read", async () => {
 it("drops the disclosure once the reader changes the language, and does not seed again", async () => {
   serve();
   const { user } = open();
+  expect(
+    screen.queryByRole("combobox", { name: /Subtitle language/ }),
+  ).not.toBeInTheDocument();
+  await enterDetail(user);
   await waitFor(() =>
     expect(selectInput("Subtitle language")).toHaveValue("Hungarian"),
   );
@@ -174,16 +246,24 @@ it("seeds from the profile language, never from the metadata locale or the film 
   server.use(
     http.get("/api/system/settings", () =>
       HttpResponse.json({
-        general: { theme: "auto", enabled_providers: [] },
+        general: {
+          theme: "auto",
+          enabled_providers: [],
+          movie_default_enabled: false,
+        },
         discover: {
           tmdb_configured: true,
-          metadata_revision: "seed",
+          metadata_revision: "feed-one",
           locale: "de-DE",
         },
       }),
     ),
   );
-  open();
+  const { user } = open();
+  expect(
+    screen.queryByRole("combobox", { name: /Subtitle language/ }),
+  ).not.toBeInTheDocument();
+  await enterDetail(user);
   await waitFor(() =>
     expect(selectInput("Subtitle language")).toHaveValue("Hungarian"),
   );

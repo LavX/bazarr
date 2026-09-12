@@ -6,17 +6,17 @@ import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import queryClient from "@/apis/queries";
 import { AllProviders } from "@/providers";
-import { rawRender, screen, waitFor } from "@/tests";
+import { act, rawRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import { setAuthenticated } from "@/utilities/event";
 import { readableTime } from "./feedText";
 import {
-  chooseSegment,
   findSelectInput,
+  openSearchOptions,
   pickOption,
   selectInput,
 } from "./selectTestHelpers";
-import Discover from ".";
+import Discover from "./testHarness";
 
 function ThemeToggle() {
   const { toggleColorScheme } = useMantineColorScheme();
@@ -56,6 +56,48 @@ const target = {
   language: "eng",
   matching_mode: "title",
 };
+
+const movie = {
+  source: "tmdb",
+  source_id: "tmdb:movie:11",
+  id: 11,
+  media_type: "movie",
+  title: "The Matrix",
+  year: 1999,
+  imdb_id: "tt0133093",
+  mapping_status: "resolved",
+  overview: "A computer hacker learns about the true nature of reality.",
+  poster_url: null,
+  backdrop_url: null,
+};
+
+const show = {
+  source: "tmdb",
+  source_id: "tmdb:show:100",
+  id: 100,
+  media_type: "show",
+  title: "Northern Light",
+  year: 2020,
+  imdb_id: "tt1234567",
+  tvdb_id: 300,
+  mapping_status: "resolved",
+  overview: "A non-library show.",
+  poster_url: null,
+  backdrop_url: null,
+  seasons: [],
+};
+
+const envelope = {
+  source: "tmdb",
+  status: "available",
+  configured: true,
+  revision: "metadata-one",
+  locale: "en-US",
+  message: "TMDB is available.",
+  checked_at: "2026-09-08T10:00:00Z",
+  fetched_at: "2026-09-08T10:00:00Z",
+};
+
 function snapshot(release = "The.Matrix.1999.1080p") {
   return {
     search_id: "search-1",
@@ -105,21 +147,239 @@ function snapshot(release = "The.Matrix.1999.1080p") {
 beforeEach(() => {
   localStorage.clear();
   server.use(
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({
+        general: { theme: "auto" },
+        discover: {
+          tmdb_configured: true,
+          metadata_revision: "metadata-one",
+          locale: "en-US",
+        },
+      }),
+    ),
     http.get("/api/system/languages", () =>
       HttpResponse.json([
         { name: "English", code2: "en", code3: "eng", enabled: false },
         { name: "Hungarian", code2: "hu", code3: "hun", enabled: true },
       ]),
     ),
+    http.get("/api/discover/metadata/status", () =>
+      HttpResponse.json({ data: envelope }),
+    ),
+    http.get("/api/discover/metadata/search", ({ request }) => {
+      const type = new URL(request.url).searchParams.get("type");
+      if (type === "show")
+        return HttpResponse.json({ data: { ...envelope, items: [show] } });
+      return HttpResponse.json({ data: { ...envelope, items: [movie] } });
+    }),
+    http.get("/api/discover/metadata/movies/11", () =>
+      HttpResponse.json({ data: { ...envelope, item: movie } }),
+    ),
+    http.get("/api/discover/metadata/shows/100", () =>
+      HttpResponse.json({ data: { ...envelope, item: show } }),
+    ),
   );
 });
 
+async function selectTitle(user: ReturnType<typeof userEvent.setup>) {
+  await user.type(screen.getByLabelText("Search"), "Matrix");
+  await user.click(
+    await screen.findByRole("button", { name: "The Matrix (1999)" }),
+  );
+  await screen.findByRole("heading", { name: "The Matrix" });
+  await waitFor(() =>
+    expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0133093"),
+  );
+}
+
+async function selectShow(user: ReturnType<typeof userEvent.setup>) {
+  // The single catalog tab row owns the search scope. Series follows the
+  // title search to series titles.
+  await user.click(await screen.findByRole("button", { name: "Series" }));
+  const query = screen.getByLabelText("Search");
+  await user.clear(query);
+  await user.type(query, "Northern");
+  await user.click(
+    await screen.findByRole("button", { name: "Northern Light (2020)" }),
+  );
+  await screen.findByRole("heading", { name: "Northern Light" });
+  await waitFor(() =>
+    expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt1234567"),
+  );
+}
+
 async function selectTarget(user: ReturnType<typeof userEvent.setup>) {
-  await user.type(screen.getByLabelText("IMDb ID"), "tt0133093");
+  await selectTitle(user);
   await pickOption(user, "Subtitle language", "English");
 }
 
 describe("Discover retrieval", () => {
+  it.each(["Movies", "Series"])(
+    "searches movies and shows while the %s feed is selected",
+    async (scope) => {
+      const { user, router } = renderDiscover();
+      await user.click(screen.getByRole("button", { name: scope }));
+      await user.type(screen.getByLabelText("Search"), "light");
+      expect(
+        await screen.findByRole("button", { name: "The Matrix (1999)" }),
+      ).toBeEnabled();
+      expect(
+        await screen.findByRole("button", { name: "Northern Light (2020)" }),
+      ).toBeEnabled();
+      expect(
+        screen.queryByRole("button", { name: "Find subtitles" }),
+      ).toBeNull();
+    },
+  );
+
+  it("retains movie candidates while reporting failed show coverage in All media", async () => {
+    server.use(
+      http.get("/api/discover/metadata/search", ({ request }) => {
+        if (new URL(request.url).searchParams.get("type") === "show")
+          return new HttpResponse(null, { status: 503 });
+        return HttpResponse.json({ data: { ...envelope, items: [movie] } });
+      }),
+    );
+    const { user, router } = renderDiscover();
+    await user.type(screen.getByLabelText("Search"), "light");
+    expect(
+      await screen.findByRole("button", { name: "The Matrix (1999)" }),
+    ).toBeEnabled();
+    expect(
+      await screen.findByText(/Show metadata could not be loaded/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/No shows matched/)).toBeNull();
+  });
+
+  it("keeps IMDb edits in retrieval until returning to Discover", async () => {
+    const { user, router } = renderDiscover();
+    await selectTarget(user);
+    await openSearchOptions(user);
+    await user.clear(screen.getByLabelText("IMDb ID"));
+    await user.type(screen.getByLabelText("IMDb ID"), "tt0080274");
+    expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0080274");
+    expect(
+      screen.getByRole("button", { name: "Find subtitles" }),
+    ).toBeEnabled();
+    expect(screen.getByLabelText("Search")).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Back to Discover" }));
+    expect(screen.getByLabelText("Search")).toBeEnabled();
+    expect(screen.queryByLabelText("IMDb ID")).toBeNull();
+  });
+
+  it("keeps manual episode controls available after changing a movie's media type", async () => {
+    const { user, router } = renderDiscover();
+    await selectTarget(user);
+    await openSearchOptions(user);
+    await user.click(screen.getByRole("radio", { name: "Episode" }));
+    expect(screen.getByLabelText("IMDb ID")).toBeEnabled();
+    expect(screen.getByRole("textbox", { name: "Season" })).toBeEnabled();
+    expect(screen.getByRole("textbox", { name: "Episode" })).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "Find subtitles" }),
+    ).toBeDisabled();
+    expect(screen.getByLabelText("Search")).toBeEnabled();
+  });
+
+  it.each(["Search subtitles by IMDb ID", "Search providers by release name"])(
+    "opens %s from an empty catalog without showing homepage retrieval controls",
+    async (action) => {
+      server.use(
+        http.get("/api/discover/metadata/search", () =>
+          HttpResponse.json({
+            data: { ...envelope, status: "unavailable", items: [] },
+          }),
+        ),
+      );
+      const { user, router } = renderDiscover();
+      await user.type(screen.getByLabelText("Search"), "missing");
+      expect(screen.queryByLabelText("IMDb ID")).toBeNull();
+      expect(screen.queryByLabelText("Release name")).toBeNull();
+      expect(screen.queryByLabelText("Subtitle language")).toBeNull();
+      await user.click(await screen.findByRole("button", { name: action }));
+      expect(
+        screen.getByLabelText(
+          action.includes("IMDb") ? "IMDb ID" : "Release name",
+        ),
+      ).toBeEnabled();
+      expect(
+        screen.getByLabelText(
+          action.includes("IMDb") ? "IMDb ID" : "Release name",
+        ),
+      ).toHaveFocus();
+      expect(
+        screen.getByRole("button", { name: "Find subtitles" }),
+      ).toBeDisabled();
+      await user.click(
+        screen.getByRole("button", { name: "Back to Discover" }),
+      );
+      expect(screen.getByLabelText("Search")).toHaveValue("missing");
+      await user.click(screen.getByLabelText("Search"));
+      await waitFor(() =>
+        expect(screen.getByLabelText("Search")).toHaveFocus(),
+      );
+      expect(screen.queryByLabelText("Subtitle language")).toBeNull();
+    },
+  );
+
+  it("shows only feeds belonging to the selected media scope", async () => {
+    const { user, router } = renderDiscover();
+    expect(
+      screen.getByRole("heading", { name: "Recent digital releases" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "New episodes" }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Movies" }));
+    expect(screen.queryByRole("heading", { name: "New episodes" })).toBeNull();
+    expect(
+      screen.getByRole("heading", { name: "Recent digital releases" }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Series" }));
+    expect(
+      screen.queryByRole("heading", { name: "Recent digital releases" }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("heading", { name: "New episodes" }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "All media" }));
+    expect(
+      screen.getByRole("heading", { name: "Recent digital releases" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "New episodes" }),
+    ).toBeInTheDocument();
+  });
+
+  it.each([
+    { preference: "light", theme: "day" },
+    { preference: "dark", theme: "night" },
+  ])(
+    "follows the resolved $preference appearance in automatic mode",
+    async ({ preference, theme }) => {
+      const original = window.matchMedia;
+      window.matchMedia = vi.fn((query) => ({
+        ...original(query),
+        matches:
+          query === "(prefers-color-scheme: dark)" && preference === "dark",
+      }));
+      try {
+        renderDiscover();
+        await waitFor(() =>
+          expect(
+            screen.getByRole("region", { name: "Discover" }),
+          ).toHaveAttribute("data-theme", theme),
+        );
+        expect(document.documentElement).toHaveAttribute(
+          "data-mantine-color-scheme",
+          preference,
+        );
+      } finally {
+        window.matchMedia = original;
+      }
+    },
+  );
+
   it("requires explicit language and Find subtitles; appearance and query refetch never search", async () => {
     const requests: unknown[] = [];
     server.use(
@@ -128,12 +388,16 @@ describe("Discover retrieval", () => {
         return HttpResponse.json(snapshot());
       }),
     );
-    const { user } = renderDiscover();
+    const { user, router } = renderDiscover();
+    expect(screen.queryByLabelText("IMDb ID")).toBeNull();
+    expect(screen.queryByLabelText("Subtitle language")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Find subtitles" })).toBeNull();
+    await selectTitle(user);
     expect(
       screen.getByRole("button", { name: "Find subtitles" }),
     ).toBeDisabled();
     expect(selectInput("Subtitle language")).toHaveValue("");
-    await selectTarget(user);
+    await pickOption(user, "Subtitle language", "English");
     await user.click(screen.getByRole("button", { name: "Change appearance" }));
     await queryClient.refetchQueries({ type: "active" });
     expect(requests).toEqual([]);
@@ -145,25 +409,41 @@ describe("Discover retrieval", () => {
       {
         media_type: "movie",
         imdb_id: "tt0133093",
+        title: "The Matrix",
+        year: 1999,
         language: "eng",
         refresh: false,
       },
     ]);
     await queryClient.refetchQueries({ type: "active" });
     expect(requests).toHaveLength(1);
-    expect(screen.getByText("HI unknown")).toBeInTheDocument();
+    await user.click(
+      screen.getByLabelText("Match evidence for The.Matrix.1999.1080p"),
+    );
+    expect(screen.getByText("Hearing-impaired cues")).toBeVisible();
+    expect(
+      screen
+        .getAllByText("Unknown")
+        .some(
+          (element) =>
+            element.previousElementSibling?.textContent ===
+            "Hearing-impaired cues",
+        ),
+    ).toBe(true);
   });
 
   it("keeps the saved task through settings navigation and appearance changes", async () => {
     server.use(
       http.post("/api/discover/search", () => HttpResponse.json(snapshot())),
     );
-    const { user } = renderDiscover();
+    const { user, router } = renderDiscover();
     await selectTarget(user);
     await user.click(screen.getByRole("button", { name: "Find subtitles" }));
     await screen.findByText("The.Matrix.1999.1080p");
-    await user.click(screen.getByRole("link", { name: "Provider settings" }));
-    await user.click(screen.getByRole("link", { name: "Return to Discover" }));
+    await user.click(screen.getByRole("link", { name: "Subtitle Hub" }));
+    await act(async () => {
+      await router.navigate(-1);
+    });
     expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0133093");
     expect(screen.getByText("The.Matrix.1999.1080p")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Change appearance" }));
@@ -180,11 +460,11 @@ describe("Discover retrieval", () => {
           : HttpResponse.json({ message: "Unavailable" }, { status: 503 });
       }),
     );
-    const { user } = renderDiscover();
+    const { user, router } = renderDiscover();
     await selectTarget(user);
     await user.click(screen.getByRole("button", { name: "Find subtitles" }));
     await screen.findByText("The.Matrix.1999.1080p");
-    await user.click(screen.getByRole("button", { name: "Refresh subtitles" }));
+    await user.click(screen.getByRole("button", { name: "Search again" }));
     expect(await screen.findByText(/Refresh failed/)).toBeInTheDocument();
     expect(screen.getByText("The.Matrix.1999.1080p")).toBeInTheDocument();
     expect(
@@ -228,11 +508,11 @@ describe("Discover retrieval", () => {
         );
       }),
     );
-    const { user } = renderDiscover();
+    const { user, router } = renderDiscover();
     await selectTarget(user);
     await user.click(screen.getByRole("button", { name: "Find subtitles" }));
     await screen.findByText("Evicted result");
-    await user.click(screen.getByRole("button", { name: "Refresh subtitles" }));
+    await user.click(screen.getByRole("button", { name: "Search again" }));
     await screen.findByText("Sign in to this provider in provider settings");
     expect(screen.queryByText("Evicted result")).not.toBeInTheDocument();
     expect(screen.getByText("Usable result")).toBeInTheDocument();
@@ -264,15 +544,13 @@ describe("Discover retrieval", () => {
             : HttpResponse.json({}, { status: 503 });
         }),
       );
-      const { user } = renderDiscover();
+      const { user, router } = renderDiscover();
       await selectTarget(user);
       await user.click(screen.getByRole("button", { name: "Find subtitles" }));
       await screen.findByText("Expired result");
       const now = vi.spyOn(Date, "now").mockReturnValue(expiry + 1);
       try {
-        await user.click(
-          screen.getByRole("button", { name: "Refresh subtitles" }),
-        );
+        await user.click(screen.getByRole("button", { name: "Search again" }));
         await screen.findByText(hasUsable ? /Refresh failed/ : /Search failed/);
         expect(screen.queryByText("Expired result")).not.toBeInTheDocument();
         expect(
@@ -308,10 +586,12 @@ describe("Discover retrieval", () => {
             }),
           );
           await user.click(
-            screen.getByRole("button", { name: "Refresh subtitles" }),
+            screen.getByRole("button", { name: "Search again" }),
           );
           await waitFor(() => expect(complete).toBeDefined());
-          expect(screen.getByText(/Searching providers/)).toBeInTheDocument();
+          expect(
+            screen.getByRole("progressbar", { name: "Providers checked" }),
+          ).toBeInTheDocument();
           expect(
             screen.queryByText(/No subtitles matched this title and language/),
           ).not.toBeInTheDocument();
@@ -338,7 +618,7 @@ describe("Discover retrieval", () => {
         return HttpResponse.json(snapshot());
       }),
     );
-    const { user } = renderDiscover();
+    const { user, router } = renderDiscover();
     await selectTarget(user);
     await user.click(screen.getByRole("button", { name: "Find subtitles" }));
     await waitFor(() => expect(release).toBeDefined());
@@ -351,19 +631,33 @@ describe("Discover retrieval", () => {
     );
     expect(screen.queryByText("The.Matrix.1999.1080p")).not.toBeInTheDocument();
     setAuthenticated(false);
-    await waitFor(() =>
-      expect(screen.getByLabelText("IMDb ID")).toHaveValue(""),
-    );
+    await waitFor(() => expect(screen.queryByLabelText("IMDb ID")).toBeNull());
+    expect(screen.queryByRole("button", { name: "Find subtitles" })).toBeNull();
   });
 
   it("blocks malformed IMDb identity and incomplete exact episodes", async () => {
-    const { user } = renderDiscover();
-    await selectTarget(user);
-    await chooseSegment(user, "Episode");
+    const { user, router } = renderDiscover();
+    expect(screen.queryByLabelText("IMDb ID")).toBeNull();
+    expect(screen.queryByLabelText("Subtitle language")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Find subtitles" })).toBeNull();
+    await selectTitle(user);
     expect(
       screen.getByRole("button", { name: "Find subtitles" }),
     ).toBeDisabled();
-    await user.type(screen.getByLabelText("Season"), "0");
+    await pickOption(user, "Subtitle language", "English");
+    expect(
+      screen.getByRole("button", { name: "Find subtitles" }),
+    ).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Back to Discover" }));
+    expect(screen.queryByRole("button", { name: "Find subtitles" })).toBeNull();
+    await selectShow(user);
+    expect(
+      screen.getByRole("button", { name: "Find subtitles" }),
+    ).toBeDisabled();
+    await user.click(
+      screen.getByRole("button", { name: "Enter episode numbers manually" }),
+    );
+    await user.type(screen.getByRole("textbox", { name: "Season" }), "0");
     await user.type(screen.getByRole("textbox", { name: "Episode" }), "3");
     expect(
       screen.getByRole("button", { name: "Find subtitles" }),
@@ -376,11 +670,6 @@ describe("Discover retrieval", () => {
     expect(
       screen.getByRole("button", { name: "Find subtitles" }),
     ).toBeEnabled();
-    await user.clear(screen.getByLabelText("IMDb ID"));
-    await user.type(screen.getByLabelText("IMDb ID"), "The Matrix");
-    expect(
-      screen.getByRole("button", { name: "Find subtitles" }),
-    ).toBeDisabled();
   });
 });
 
@@ -447,24 +736,26 @@ it("distinguishes successful empty, partial, failed and provider setup states", 
       HttpResponse.json(responses.shift()),
     ),
   );
-  const { user } = renderDiscover();
+  const { user, router } = renderDiscover();
   await selectTarget(user);
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
   expect(await screen.findByText(/No subtitles matched/)).toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: "Refresh subtitles" }));
+  await user.click(screen.getByRole("button", { name: "Search again" }));
   expect(
-    await screen.findByText(/Some providers could not complete/),
-  ).toBeInTheDocument();
+    screen.queryByText(/Some providers could not complete/),
+  ).not.toBeInTheDocument();
+  await screen.findByText("The.Matrix.1999.1080p");
+  await user.click(screen.getByText(/Search details/, { selector: "summary" }));
   expect(screen.getByText("The.Matrix.1999.1080p")).toBeInTheDocument();
   expect(
     screen.getByText("Sign in to this provider in provider settings"),
   ).toBeInTheDocument();
   expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0133093");
-  await user.click(screen.getByRole("button", { name: "Refresh subtitles" }));
+  await user.click(screen.getByRole("button", { name: "Search again" }));
   expect(await screen.findByText(/No provider completed/)).toBeInTheDocument();
   expect(screen.getByText("Provider search timed out")).toBeInTheDocument();
   expect(screen.queryByText("The.Matrix.1999.1080p")).not.toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: "Refresh subtitles" }));
+  await user.click(screen.getByRole("button", { name: "Search again" }));
   expect(
     await screen.findByText("Set up a subtitle provider"),
   ).toBeInTheDocument();
@@ -480,12 +771,14 @@ it("remembers only the explicit language and works when browser storage is block
       original.call(this, key, value);
     });
   try {
-    const { user } = renderDiscover();
+    const { user, router } = renderDiscover();
     await selectTarget(user);
     expect(screen.getByText(/remembered for this visit/)).toBeInTheDocument();
     expect(selectInput("Subtitle language")).toHaveValue("English");
-    await user.click(screen.getByRole("link", { name: "Provider settings" }));
-    await user.click(screen.getByRole("link", { name: "Return to Discover" }));
+    await user.click(screen.getByRole("link", { name: "Subtitle Hub" }));
+    await act(async () => {
+      await router.navigate(-1);
+    });
     expect(selectInput("Subtitle language")).toHaveValue("English");
   } finally {
     blocked.mockRestore();
@@ -531,11 +824,11 @@ it("says a seeded language is session-only once the search tries to remember it"
       original.call(this, key, value);
     });
   try {
-    const { user } = renderDiscover();
+    const { user, router } = renderDiscover();
+    await selectTitle(user);
     await waitFor(() =>
       expect(selectInput("Subtitle language")).toHaveValue("English"),
     );
-    await user.type(screen.getByLabelText("IMDb ID"), "tt0133093");
     // Seeding alone writes nothing, so there is nothing to report yet.
     expect(screen.queryByText(/remembered for this visit/)).toBeNull();
     await user.click(screen.getByRole("button", { name: "Find subtitles" }));
@@ -549,14 +842,17 @@ it("says a seeded language is session-only once the search tries to remember it"
 
 it("restores an explicit preference without deriving one from enabled library languages", async () => {
   localStorage.setItem("bazarr.discover.subtitle-language", "eng");
-  renderDiscover();
+  const { user, router } = renderDiscover();
+  expect(screen.queryByLabelText("IMDb ID")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Find subtitles" })).toBeNull();
+  await selectTitle(user);
   // The stored code is shown by its name once the language list has loaded.
   await findSelectInput("Subtitle language");
   await waitFor(() =>
     expect(selectInput("Subtitle language")).toHaveValue("English"),
   );
-  expect(screen.getByLabelText("IMDb ID")).toHaveValue("");
-  expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
+  expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0133093");
+  expect(screen.getByRole("button", { name: "Find subtitles" })).toBeEnabled();
 });
 
 it("preserves results when the shell replaces its router", async () => {
@@ -590,17 +886,75 @@ it("does not restore a logged-out task when its last request finishes", async ()
       return HttpResponse.json(snapshot());
     }),
   );
-  const { user } = renderDiscover();
+  const { user, router } = renderDiscover();
   await selectTarget(user);
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
   await waitFor(() => expect(finish).toBeDefined());
   setAuthenticated(false);
-  await waitFor(() => expect(screen.getByLabelText("IMDb ID")).toHaveValue(""));
+  await waitFor(() => expect(screen.queryByLabelText("IMDb ID")).toBeNull());
   finish?.();
   await waitFor(() =>
-    expect(
-      screen.getByRole("button", { name: "Find subtitles" }),
-    ).toBeDisabled(),
+    expect(screen.queryByRole("button", { name: "Find subtitles" })).toBeNull(),
   );
+  expect(screen.queryByText("The.Matrix.1999.1080p")).not.toBeInTheDocument();
+});
+
+it("keeps identified title retrieval focused on language and search", async () => {
+  const { user, router } = renderDiscover();
+  await selectTitle(user);
+  expect(screen.getByLabelText("Search")).toBeVisible();
+  expect(screen.getByLabelText("IMDb ID")).not.toBeVisible();
+  expect(
+    screen.queryByText("Match a copy in your library"),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByText(/Metadata fetched/)).not.toBeInTheDocument();
+  expect(
+    screen.queryByText(/Select a title and a subtitle language/),
+  ).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Find subtitles" })).toBeVisible();
+});
+
+it("restores completed subtitle results through browser Back and Forward without another search", async () => {
+  let searches = 0;
+  server.use(
+    http.post("/api/discover/search", () => {
+      searches++;
+      return HttpResponse.json(snapshot());
+    }),
+  );
+  const { user, router } = renderDiscover();
+  await selectTarget(user);
+  await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+  await screen.findByText("The.Matrix.1999.1080p");
+  const detail = router.state.location.search;
+  await user.click(screen.getByRole("button", { name: "Back to Discover" }));
+  expect(screen.queryByText("The.Matrix.1999.1080p")).not.toBeInTheDocument();
+  await act(async () => {
+    await router.navigate(-1);
+  });
+  await screen.findByText("The.Matrix.1999.1080p");
+  expect(router.state.location.search).toBe(detail);
+  expect(selectInput("Subtitle language")).toHaveValue("English");
+  expect(searches).toBe(1);
+  await act(async () => {
+    await router.navigate(1);
+  });
+  expect(screen.queryByText("The.Matrix.1999.1080p")).not.toBeInTheDocument();
+  await act(async () => {
+    await router.navigate(-1);
+  });
+  await screen.findByText("The.Matrix.1999.1080p");
+  expect(searches).toBe(1);
+  setAuthenticated(false);
+  await waitFor(() =>
+    expect(screen.queryByText("The.Matrix.1999.1080p")).not.toBeInTheDocument(),
+  );
+  setAuthenticated(true);
+  await act(async () => {
+    await router.navigate(1);
+  });
+  await act(async () => {
+    await router.navigate(-1);
+  });
   expect(screen.queryByText("The.Matrix.1999.1080p")).not.toBeInTheDocument();
 });

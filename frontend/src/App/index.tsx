@@ -34,7 +34,6 @@ import AppNavbar from "@/App/Navbar";
 import logoSrc from "@/assets/images/logo_no_orb128.png";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import { useWhatsNewAutoOpen } from "@/components/modals/useWhatsNewAutoOpen";
-import { DiscoverSetupReturn } from "@/contexts/Discover";
 import NavbarProvider from "@/contexts/Navbar";
 import OnlineProvider from "@/contexts/Online";
 import { notification } from "@/modules/task";
@@ -49,7 +48,7 @@ import {
 import { consumeRestartReloadPending } from "@/utilities/restart";
 import { registerAppNavigate } from "@/utilities/whatsNew";
 import AppHeader from "./Header";
-import styleVars from "@/assets/_variables.module.scss";
+import shellStyles from "./AppShell.module.scss";
 
 interface SupervisorStatus {
   state: "starting" | "running" | "crashed" | "stopping";
@@ -289,17 +288,19 @@ const App: FunctionComponent = () => {
       <NavbarProvider value={{ showed: navbar, show: setNavbar }}>
         <OnlineProvider value={{ online, setOnline }}>
           <AppShell
+            className={shellStyles.shell}
+            layout="alt"
             navbar={{
-              width: styleVars.navBarWidth,
+              width: 72,
               breakpoint: "sm",
-              collapsed: { mobile: !navbar },
+              collapsed: { mobile: true },
             }}
-            header={{ height: { base: styleVars.headerHeight } }}
+            header={{ height: { base: 134, sm: 82 } }}
             padding={0}
           >
-            <AppHeader></AppHeader>
+            <AppHeader />
             <AppNavbar></AppNavbar>
-            <AppShell.Main>
+            <AppShell.Main className={shellStyles.main}>
               {!online && hasConnected && (
                 <Alert
                   color="yellow"
@@ -313,9 +314,7 @@ const App: FunctionComponent = () => {
                   </Text>
                 </Alert>
               )}
-              <DiscoverSetupReturn>
-                <Outlet></Outlet>
-              </DiscoverSetupReturn>
+              <Outlet />
             </AppShell.Main>
           </AppShell>
           <Modal

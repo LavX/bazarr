@@ -2,6 +2,7 @@ import type {
   DigitalReleaseContext,
   DiscoverDownloadFeedback,
   DiscoverPreviewFeedback,
+  DiscoverSearchProgress,
   DiscoverSearchSnapshot,
   DiscoverSelection,
   MetadataEpisode,
@@ -42,6 +43,8 @@ export interface DiscoverBrowsing {
   releaseContext: DigitalReleaseContext | null;
   pagePosition: { target: string; focusId: string; scrollY: number } | null;
   trendingFilter: TrendingMediaType;
+  featuredSourceId: string | null;
+  manualSearch: boolean;
   query: string;
   mediaFilter: "movie" | "show";
   selectedType: "movie" | "show";
@@ -54,17 +57,20 @@ export interface DiscoverBrowsing {
   identityLoaded: boolean;
   adoptedMovieId: number | string | null;
   suggestionsClosed: boolean;
+  optionsOpen: boolean;
   returnTarget: string;
   focusId: string;
   scrollY: number;
 }
 
 export interface DiscoverState {
+  sessionId: number;
   browsing: DiscoverBrowsing;
   draft: DiscoverDraft;
   generation: number;
   status: "unsearched" | "searching" | "complete" | "partial" | "failed";
   snapshot: DiscoverSearchSnapshot | null;
+  searchProgress?: DiscoverSearchProgress;
   error: string | null;
   storageAvailable: boolean;
   // True while the subtitle language was preselected from the reader's
@@ -85,6 +91,7 @@ export function discoverPageKey(
     state.browsing.selectedSource,
     state.browsing.selectedType,
     state.browsing.selectedId,
+    state.browsing.manualSearch,
   ]);
 }
 
@@ -97,11 +104,14 @@ export function initialDiscoverState(): DiscoverState {
     storageAvailable = false;
   }
   return {
+    sessionId: 0,
     browsing: {
       recentContext: null,
       digitalRegion: "US",
       releaseContext: null,
       trendingFilter: "all",
+      featuredSourceId: null,
+      manualSearch: false,
       pagePosition: null,
       query: "",
       mediaFilter: "movie",
@@ -115,6 +125,7 @@ export function initialDiscoverState(): DiscoverState {
       identityLoaded: false,
       adoptedMovieId: null,
       suggestionsClosed: false,
+      optionsOpen: false,
       returnTarget: "/discover",
       focusId: "discover-title-query",
       scrollY: 0,
@@ -280,6 +291,7 @@ export function discoverContextKey(draft: DiscoverDraft): string {
 }
 
 type DiscoverAction =
+  | { type: "restore"; state: DiscoverState; generation: number }
   | { type: "browsing"; changes: Partial<DiscoverBrowsing> }
   | {
       type: "draft";
@@ -287,7 +299,9 @@ type DiscoverAction =
       generation: number;
       storageAvailable: boolean;
       languageSeeded?: boolean;
+      cached?: DiscoverState;
     }
+  | { type: "progress"; generation: number; progress: DiscoverSearchProgress }
   | { type: "start"; generation: number; storageAvailable?: boolean }
   | {
       type: "success";
@@ -305,19 +319,34 @@ type DiscoverAction =
   | { type: "download"; key: string; feedback: DiscoverDownloadFeedback }
   | { type: "preview"; key: string; feedback: DiscoverPreviewFeedback }
   | { type: "close-preview" }
+  | { type: "cancel"; generation: number }
   | { type: "clear"; generation: number };
 
 export function discoverReducer(
   state: DiscoverState,
   action: DiscoverAction,
 ): DiscoverState {
+  if (action.type === "restore") {
+    const saved = action.state;
+    return {
+      ...saved,
+      generation: action.generation,
+      status:
+        saved.status === "searching"
+          ? (saved.snapshot?.status ?? "unsearched")
+          : saved.status,
+      searchProgress: undefined,
+      download: saved.download?.status === "pending" ? null : saved.download,
+      preview: saved.preview?.status === "pending" ? null : saved.preview,
+    };
+  }
   if (action.type === "browsing")
     return {
       ...state,
       browsing: {
         ...state.browsing,
         ...(action.changes.selectedId != null
-          ? { releaseContext: null, recentContext: null }
+          ? { releaseContext: null, recentContext: null, manualSearch: false }
           : {}),
         ...((action.changes.selectedSeason !== undefined &&
           action.changes.selectedSeason !== state.browsing.selectedSeason) ||
@@ -329,7 +358,11 @@ export function discoverReducer(
       },
     };
   if (action.type === "clear") {
-    return { ...initialDiscoverState(), generation: action.generation };
+    return {
+      ...initialDiscoverState(),
+      sessionId: state.sessionId + 1,
+      generation: action.generation,
+    };
   }
   if (action.type === "draft") {
     const changed =
@@ -348,15 +381,37 @@ export function discoverReducer(
             download: null,
             preview: null,
             retiredResultIds: [],
+            ...(action.cached
+              ? {
+                  snapshot: action.cached.snapshot,
+                  status: action.cached.snapshot?.status ?? "unsearched",
+                  download:
+                    action.cached.download?.status === "pending"
+                      ? null
+                      : action.cached.download,
+                  preview:
+                    action.cached.preview?.status === "pending"
+                      ? null
+                      : action.cached.preview,
+                  retiredResultIds: action.cached.retiredResultIds,
+                }
+              : {}),
           } as const)
         : {}),
     };
+  }
+  if (action.type === "progress") {
+    return action.generation === state.generation &&
+      state.status === "searching"
+      ? { ...state, searchProgress: action.progress }
+      : state;
   }
   if (action.type === "start") {
     return {
       ...state,
       generation: action.generation,
       status: "searching",
+      searchProgress: undefined,
       error: null,
       // Searching with the language is using it: it stops being a seed, and
       // the write that promotes it is the same evidence about storage as any
@@ -366,6 +421,17 @@ export function discoverReducer(
     };
   }
   if (action.type === "close-preview") return { ...state, preview: null };
+  if (action.type === "cancel")
+    // Leaving the title retires what was still in flight. Filed results and
+    // settled feedback stay for the shared form; only the pending ones lose
+    // their owner, so the status cannot stick on searching forever.
+    return {
+      ...state,
+      generation: action.generation,
+      status: state.status === "searching" ? "unsearched" : state.status,
+      download: state.download?.status === "pending" ? null : state.download,
+      preview: state.preview?.status === "pending" ? null : state.preview,
+    };
   if (action.type === "preview") {
     const { feedback } = action;
     if (

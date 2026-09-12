@@ -7,6 +7,7 @@ import queryClient from "@/apis/queries";
 import ThemeProvider from "@/App/ThemeProvider";
 import { ModalsProvider } from "@/modules/modals";
 import { DiscoverProvider } from "./contexts/Discover";
+import { UniversalSearchProvider } from "./contexts/UniversalSearch";
 import { Environment } from "./utilities";
 
 export const AllProviders: FunctionComponent<PropsWithChildren> = ({
@@ -19,7 +20,9 @@ export const AllProviders: FunctionComponent<PropsWithChildren> = ({
           <Notifications position="bottom-left" limit={5} zIndex={10001} />
           {/* c8 ignore next 3 */}
           {Environment.queryDev && <ReactQueryDevtools initialIsOpen={false} />}
-          <DiscoverProvider>{children}</DiscoverProvider>
+          <DiscoverProvider>
+            <UniversalSearchProvider>{children}</UniversalSearchProvider>
+          </DiscoverProvider>
         </ModalsProvider>
       </ThemeProvider>
     </QueryClientProvider>
