@@ -338,6 +338,8 @@ validators = [
     Validator('plex.series_library', must_exist=True, default=[], is_type_of=(str, list)),
     Validator('plex.movie_library_ids', must_exist=True, default=[], is_type_of=list),
     Validator('plex.series_library_ids', must_exist=True, default=[], is_type_of=list),
+    Validator('plex.sports_library', must_exist=True, default=[], is_type_of=(str, list)),
+    Validator('plex.sports_library_ids', must_exist=True, default=[], is_type_of=list),
     Validator('plex.set_movie_added', must_exist=True, default=False, is_type_of=bool),
     Validator('plex.set_episode_added', must_exist=True, default=False, is_type_of=bool),
     Validator('plex.update_movie_library', must_exist=True, default=False, is_type_of=bool),
@@ -380,6 +382,8 @@ validators = [
     Validator('jellyfin.series_library', must_exist=True, default=[], is_type_of=list),
     Validator('jellyfin.movie_library_ids', must_exist=True, default=[], is_type_of=list),
     Validator('jellyfin.series_library_ids', must_exist=True, default=[], is_type_of=list),
+    Validator('jellyfin.sports_library', must_exist=True, default=[], is_type_of=list),
+    Validator('jellyfin.sports_library_ids', must_exist=True, default=[], is_type_of=list),
     Validator('jellyfin.update_movie_library', must_exist=True, default=False, is_type_of=bool),
     Validator('jellyfin.update_series_library', must_exist=True, default=False, is_type_of=bool),
     Validator('jellyfin.refresh_method', must_exist=True, default='immediate', is_type_of=str,
@@ -844,7 +848,9 @@ array_keys = ['excluded_tags',
               'movie_library',
               'series_library',
               'movie_library_ids',
-              'series_library_ids']
+              'series_library_ids',
+              'sports_library',
+              'sports_library_ids']
 
 empty_values = ['', 'None', 'null', 'undefined', None, []]
 
@@ -1127,6 +1133,7 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
     exclusion_updated = False
     sonarr_exclusion_updated = False
     radarr_exclusion_updated = False
+    sportarr_exclusion_updated = False
     use_embedded_subs_changed = False
     undefined_audio_track_default_changed = False
     undefined_subtitles_track_default_changed = False
@@ -1276,6 +1283,10 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
                    'settings-sportarr-excluded_tags', 'settings-sportarr-excluded_sports',
                    'settings-sportarr-only_monitored']:
             exclusion_updated = True
+
+        if key in ['settings-sportarr-excluded_tags', 'settings-sportarr-excluded_sports',
+                   'settings-sportarr-only_monitored']:
+            sportarr_exclusion_updated = True
 
         if key in ['settings-sonarr-excluded_tags', 'settings-sonarr-only_monitored',
                    'settings-sonarr-excluded_series_types', 'settings-sonarr-exclude_season_zero']:
@@ -1566,6 +1577,12 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
                 event_stream(type='reset-episode-wanted')
             if radarr_exclusion_updated:
                 event_stream(type='reset-movie-wanted')
+            # The sports wanted list is computed live against the exclusion
+            # settings, so saving them has to invalidate the client's cached
+            # sports rows. The 'sports' event is the one the socketio reducer
+            # maps to the whole sports query root, wanted included.
+            if sportarr_exclusion_updated:
+                event_stream(type='sports')
 
 
 def get_array_from(property):

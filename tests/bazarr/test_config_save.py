@@ -434,3 +434,121 @@ def test_all_config_writers_serialize_with_metadata_save(
     assert (env.metadata.configuration().revision == before_revision) is fail_move
     if other_writer == "ordinary_save":
         assert stored["general"]["page_size"] == env.settings.general.page_size == 51
+
+
+def test_sports_exclusion_save_emits_a_sports_event(monkeypatch):
+    """The sports wanted rows are computed live against the exclusion and
+    monitoring settings, so saving them has to invalidate the client's cached
+    sports queries. The 'sports' socketio event is the one the reducer maps to
+    the whole sports query root, wanted included."""
+    from app import config
+
+    executed = []
+    events = []
+
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.database",
+        SimpleNamespace(
+            database=SimpleNamespace(execute=lambda statement: executed.append(statement)),
+            update=lambda _model: _FakeUpdate(),
+            System=object,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "app.event_handler",
+        SimpleNamespace(event_stream=lambda **kwargs: events.append(kwargs)),
+    )
+
+    try:
+        config.save_settings(
+            [
+                ("settings-sportarr-excluded_sports", ["Golf"]),
+                ("settings-sportarr-only_monitored", ["false"]),
+            ]
+        )
+        assert config.settings.sportarr["excluded_sports"] == ["Golf"]
+        assert config.settings.sportarr["only_monitored"] is False
+    finally:
+        config.settings.unset("sportarr")
+
+    assert {"type": "badges"} in events
+    assert {"type": "sports"} in events
+
+
+def test_unrelated_saves_do_not_emit_a_sports_event(monkeypatch):
+    from app import config
+
+    executed = []
+    events = []
+
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.database",
+        SimpleNamespace(
+            database=SimpleNamespace(execute=lambda statement: executed.append(statement)),
+            update=lambda _model: _FakeUpdate(),
+            System=object,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "app.event_handler",
+        SimpleNamespace(event_stream=lambda **kwargs: events.append(kwargs)),
+    )
+
+    config.save_settings(
+        [("settings-general-instance_name", ["Bazarr"])]
+    )
+    assert all(event.get("type") != "sports" for event in events)
+
+
+def test_sports_library_settings_survive_a_save(monkeypatch):
+    """The sports library selections round-trip through the settings save the
+    way the movie and series ones do."""
+    from app import config
+
+    executed = []
+
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.database",
+        SimpleNamespace(
+            database=SimpleNamespace(execute=lambda statement: executed.append(statement)),
+            update=lambda _model: _FakeUpdate(),
+            System=object,
+        ),
+    )
+
+    previous_plex = config.settings.plex.sports_library
+    previous_plex_ids = config.settings.plex.sports_library_ids
+    previous_jellyfish = config.settings.jellyfin.sports_library
+    previous_jellyfin_ids = config.settings.jellyfin.sports_library_ids
+    try:
+        config.save_settings(
+            [
+                ("settings-plex-sports_library", ["Sports"]),
+                ("settings-plex-sports_library_ids", ["3"]),
+                ("settings-jellyfin-sports_library", ["Sports"]),
+                ("settings-jellyfin-sports_library_ids", ["9"]),
+            ]
+        )
+        assert config.settings.plex.sports_library == ["Sports"]
+        assert config.settings.plex.sports_library_ids == ["3"]
+        assert config.settings.jellyfin.sports_library == ["Sports"]
+        assert config.settings.jellyfin.sports_library_ids == ["9"]
+    finally:
+        config.settings.plex.sports_library = previous_plex
+        config.settings.plex.sports_library_ids = previous_plex_ids
+        config.settings.jellyfin.sports_library = previous_jellyfish
+        config.settings.jellyfin.sports_library_ids = previous_jellyfin_ids

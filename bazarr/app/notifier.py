@@ -271,6 +271,54 @@ def send_notifications_sports(sports_event_id, message, arr_instance_id=None):
     )
 
 
+def send_notifications_sports_league(league_id, message, arr_instance_id=None):
+    """League-level sports notification, for syncs that found nothing missing.
+
+    Mirrors ``send_notifications_sports`` at league granularity: the missing
+    subtitle check runs per league on the sports sync path, so the notification
+    names the league rather than one of its events. Scoped to the OWNING
+    instance for the same reason the event variant is.
+    """
+    providers = get_notifier_providers()
+    if not len(providers):
+        return
+
+    custom_notifier_used = _has_custom_notifier(providers)
+
+    if custom_notifier_used:
+        league = database.execute(
+            scoped(
+                select(TableSportsLeagues)
+                .where(TableSportsLeagues.id == league_id),
+                TableSportsLeagues.arr_instance_id, arr_instance_id))\
+            .scalars()\
+            .first()
+        if not league:
+            return
+        league_title = league.title
+        media_variables = _build_media_variables(league, 'sports')
+    else:
+        league_title = _sports_league_title(league_id, arr_instance_id)
+        if not league_title:
+            return
+        media_variables = None  # not consulted on this path
+
+    asset = AppriseAsset(async_mode=False)
+
+    apobj = Apprise(asset=asset)
+
+    for provider in providers:
+        if provider.name in _CUSTOM_NOTIFIER_NAMES:
+            apobj.add(_expand_notifier_url(provider.url, media_variables))
+        else:
+            apobj.add(provider.url)
+
+    apobj.notify(
+        title='Bazarr notification',
+        body=f"{league_title} : {message}",
+    )
+
+
 def _sports_league_title(league_id, arr_instance_id=None):
     if league_id is None:
         return None

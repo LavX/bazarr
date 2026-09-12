@@ -383,3 +383,41 @@ def jellyfin_update_library(client: JellyfinClient = None, is_movie_library: boo
 
     except Exception as e:
         logger.error(f"Error in jellyfin_update_library: {_redact(e)}")  # noqa: G004
+
+
+def jellyfin_update_sports_library() -> None:
+    """Trigger a library refresh for every configured Jellyfin sports library.
+
+    A sports event carries no identifiers of its own, so the item-level refresh
+    has nothing to resolve; refreshing each configured sports library is the
+    equivalent refresh for the sports content in it.
+    """
+    try:
+        client = get_jellyfin_client()
+    except ValueError as e:
+        logger.error(f"Jellyfin sports library refresh aborted: {_redact(e)}")  # noqa: G004
+        return
+
+    library_ids = settings.jellyfin.sports_library_ids
+    if not isinstance(library_ids, list):
+        library_ids = [library_ids] if library_ids else []
+    library_ids = [library_id for library_id in library_ids if library_id]
+
+    if not library_ids:
+        logger.debug("No sports libraries configured in Jellyfin settings")
+        return
+
+    updated_count = 0
+    for library_id in library_ids:
+        try:
+            client.refresh_item(library_id)
+            logger.info(f"Triggered refresh for Jellyfin sports library: {library_id}")  # noqa: G004
+            updated_count += 1
+        except Exception as e:
+            logger.error(f"Failed to refresh Jellyfin sports library '{library_id}': {_redact(e)}")  # noqa: G004
+            continue
+
+    if updated_count > 0:
+        logger.debug(f"Successfully triggered refresh for {updated_count} Jellyfin sports libraries")  # noqa: G004
+    else:
+        logger.warning("Failed to refresh any Jellyfin sports libraries")

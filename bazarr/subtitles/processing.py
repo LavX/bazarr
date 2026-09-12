@@ -3,7 +3,7 @@
 
 import logging
 import os
-from media_servers.events import observe_subtitle_change
+from media_servers.events import observe_subtitle_change, SubtitleMutation, notify_subtitle_mutation
 
 from app.config import settings, sync_checker as _defaul_sync_checker
 from utilities.path_mappings import path_mappings
@@ -15,8 +15,14 @@ from app.database import TableShows, TableEpisodes, TableMovies, database, selec
 from radarr.notify import notify_radarr
 from sonarr.notify import notify_sonarr
 from arr_instances.resolution import client_for_instance, scoped
-from plex.operations import plex_set_movie_added_date_now, plex_update_library, plex_set_episode_added_date_now, plex_refresh_item  # noqa: F401
-from jellyfin.operations import jellyfin_refresh_item
+from plex.operations import (  # noqa: F401
+    plex_set_movie_added_date_now,
+    plex_update_library,
+    plex_update_sports_library,
+    plex_set_episode_added_date_now,
+    plex_refresh_item,
+)
+from jellyfin.operations import jellyfin_refresh_item, jellyfin_update_sports_library
 from app.event_handler import event_stream
 
 from .utils import _get_download_code3
@@ -260,6 +266,33 @@ def _postprocessing_config(media_type, arr_instance_id):
     return use_pp, cmd, use_threshold, threshold
 
 
+def refresh_sports_media_servers(video_path, subtitle_path, arr_instance_id):
+    """Tell every configured media server a sports subtitle changed.
+
+    Series and movies refresh through item-level helpers keyed on identifiers a
+    sports event has not got. Each server's configured SPORTS library is scanned
+    instead, and a server with no sports library configured is left alone. Emby
+    and Silo instances refresh through the same publication dispatcher movies
+    and episodes use, scoped to their saved path mappings, so an instance whose
+    mappings do not cover this video is never asked to scan anything.
+    """
+    if settings.general.use_plex is True:
+        sports_library = settings.plex.sports_library
+        if isinstance(sports_library, str):
+            sports_library = [sports_library] if sports_library else []
+        if sports_library:
+            plex_update_sports_library()
+    if settings.general.use_jellyfin is True:
+        sports_library_ids = settings.jellyfin.sports_library_ids
+        if isinstance(sports_library_ids, str):
+            sports_library_ids = [sports_library_ids] if sports_library_ids else []
+        if sports_library_ids:
+            jellyfin_update_sports_library()
+    if settings.general.use_emby is True or settings.general.use_silo is True:
+        notify_subtitle_mutation(
+            SubtitleMutation('sports', video_path, subtitle_path, 'download', arr_instance_id))
+
+
 def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_upgrade=False, is_manual=False,
                      job_id=None, arr_instance_id=None, *,
                      context=None, validate=None, cancel=None, publication_guard=None):
@@ -300,27 +333,16 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
     logging.debug("Sync checker: %s", sync_checker)
 
     if media_type == 'sports':
-        # No arr rescan and no media-server refresh here, and both are blocked
-        # rather than forgotten:
+        # No arr rescan here; the Sportarr whole-library rescan is dispatched
+        # through sportarr.notify, once per affected owner per operation, because
+        # /api/library/rescan walks every root folder and is untargeted. Sonarr
+        # and Radarr each take a per-item Rescan command, which is why they get
+        # one below.
         #
-        # Sportarr exposes no targeted rescan. /api/library/rescan ignores a
-        # leagueId or a path and always walks every root folder, so firing it
-        # per subtitle would turn a cheap write into a full library scan.
-        # Sonarr and Radarr each take a per-item Rescan command, which is why
-        # they get one below.
-        #
-        # plex_refresh_item resolves its item with getGuid("imdb://<id>"), and
-        # a sports event has no imdbId: that is inherent to sports, not missing
-        # data. jellyfin_refresh_item is NOT imdbId-bound, it falls back to
-        # title and year, so that one is not the blocker there.
-        #
-        # What blocks both is the library setting. Each searches
-        # settings.plex.movie_library / series_library, or the Jellyfin
-        # movie_library_ids / series_library_ids, and returns early when the
-        # matching one is empty. There is no sports library setting for them to
-        # look in, and pointing sports at the movie or series library is a
-        # decision for the user to make, not one to assume here. Giving sports
-        # its own setting is a feature rather than a fix.
+        # The media-server refresh happens later in this function, through
+        # refresh_sports_media_servers: plex and jellyfin scan their configured
+        # sports libraries, and Emby and Silo go through the native publication
+        # dispatcher.
         instance = validate()
         if path != context.mapped_path:
             raise ValueError('Sports subtitle path does not match its event')
@@ -426,6 +448,7 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         mappings = read_sports_mappings(instance.path_mappings)
         reversed_path = apply_sports_mapping(path, mappings, reverse=True)
         reversed_subtitles_path = apply_sports_mapping(downloaded_path, mappings, reverse=True)
+        refresh_sports_media_servers(path, downloaded_path, owner_instance_id)
     elif media_type == 'series':
         # Reverse-map through the owning instance's path_mappings (#156) now that
         # the owner is known; None owner => global mapping, unchanged.

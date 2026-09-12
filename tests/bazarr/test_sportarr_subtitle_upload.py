@@ -98,3 +98,34 @@ def test_an_invalid_extension_is_rejected_before_any_work():
     ext_at = source.index("SUBTITLE_EXTENSIONS")
     upload_at = source.index("manual_upload_subtitle(")
     assert ext_at < upload_at
+
+
+def test_upload_consumers_for_sports_request_one_rescan(monkeypatch):
+    """An upload is a live write: Sportarr gets exactly one whole-library
+    rescan request for the owner, and unconfigured media servers are left
+    alone."""
+    from app.config import settings
+    from sportarr import notify as sportarr_notify
+    from subtitles import upload
+
+    requested = []
+    refreshes = []
+    monkeypatch.setattr(sportarr_notify, "notify_rescan", lambda owner: requested.append(owner))
+    monkeypatch.setattr(upload, "plex_update_sports_library",
+                        lambda: refreshes.append("plex"))
+    monkeypatch.setattr(upload, "jellyfin_update_sports_library",
+                        lambda: refreshes.append("jellyfin"))
+    monkeypatch.setattr(settings.general, "use_plex", True)
+    monkeypatch.setattr(settings.general, "use_jellyfin", True)
+    monkeypatch.setattr(settings.plex, "sports_library", [])
+    monkeypatch.setattr(settings.jellyfin, "sports_library_ids", [])
+
+    upload._refresh_upload_consumers("sports", None, 7)
+    assert requested == [7]
+    assert refreshes == []
+
+    monkeypatch.setattr(settings.plex, "sports_library", ["Sports"])
+    monkeypatch.setattr(settings.jellyfin, "sports_library_ids", ["10"])
+    upload._refresh_upload_consumers("sports", None, 7)
+    assert requested == [7, 7]
+    assert refreshes == ["plex", "jellyfin"]

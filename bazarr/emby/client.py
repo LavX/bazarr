@@ -14,7 +14,9 @@ _ITEM_TYPES = {"movie": "Movie", "episode": "Episode"}
 # An episode carries no identifier and no title of its own, so the identifier
 # and title rungs resolve its series and then descend to the file.
 _PARENT_TYPES = {"movie": "Movie", "episode": "Series"}
-_COLLECTION_TYPES = {"movie": "movies", "episode": "tvshows"}
+# Sports has no collection type of its own on Emby: a sports root sits inside a
+# movie or series library the user created, so None means "do not filter".
+_COLLECTION_TYPES = {"movie": "movies", "episode": "tvshows", "sports": None}
 
 
 def _accepted_items(result, item_type):
@@ -258,7 +260,8 @@ class EmbyClient:
                 locations = []
             if not isinstance(locations, list):
                 raise MediaServerError("invalid_response")
-            if (folder.get("CollectionType") or "").lower() != collection_type:
+            if (collection_type is not None
+                    and (folder.get("CollectionType") or "").lower() != collection_type):
                 continue
             if not any(media_path_contains(root, video_path) for root in locations):
                 continue

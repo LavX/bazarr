@@ -58,12 +58,15 @@ class PendingWork:
     event_ids: set[int] = field(default_factory=set)
 
 
-def reconcile_work(owner, batch, *, cancel, expected_connection, http_get=None, lock_timeout=None):
+def reconcile_work(owner, batch, *, cancel, expected_connection, http_get=None, lock_timeout=None,
+                   is_signalr=True):
     """Resolve native IDs only within the stream's owner, then use local sync IDs.
 
     ``lock_timeout`` bounds the wait for the owner's sync lock. The SSE repair
     thread leaves it None; the webhook, which runs on a request thread, passes
     one so it cannot park a Waitress worker behind a scheduled full sync.
+    ``is_signalr`` defaults True because every caller is a live library signal,
+    the analog of the Sonarr and Radarr signalr flag.
     """
     from sportarr.sync.leagues import require_sportarr, update_sports_for_instance
     from sportarr.sync.events import sync_events
@@ -72,7 +75,7 @@ def reconcile_work(owner, batch, *, cancel, expected_connection, http_get=None, 
     if connection_identity(instance) != expected_connection:
         raise ValueError('Sportarr stream connection changed')
     kwargs = dict(cancel=cancel, expected_connection=expected_connection, http_get=http_get,
-                  lock_timeout=lock_timeout)
+                  lock_timeout=lock_timeout, is_signalr=is_signalr)
     if batch.full:
         update_sports_for_instance(owner, **kwargs)
         return

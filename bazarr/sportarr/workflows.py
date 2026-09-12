@@ -112,41 +112,46 @@ def wanted_badge(session):
 def _run_events(rows, job_id, adaptive=False, language=None):
     outcomes = []
     failures = []
+    from sportarr.notify import rescan_batch
+
     jobs_queue.update_job_progress(job_id, progress_max=len(rows) or 1)
     try:
-        for position, row in enumerate(rows, 1):
-            signal = SportsJobSignal(row["arr_instance_id"], job_id)
-            try:
-                check_cancelled(signal)
-                outcome = search_event(
-                    row["id"],
-                    row["arr_instance_id"],
-                    job_id=job_id,
-                    cancel=signal,
-                    adaptive=adaptive,
-                    # A per-row language when the caller asked for one, so a
-                    # single missing-language badge can be actioned on its own
-                    # the way PATCH episodes/subtitles does for an episode.
-                    language=row.get("language", language),
-                )
-                outcomes.append(
-                    {"event_id": row["id"], "arr_instance_id": row["arr_instance_id"]}
-                    | outcome
-                )
-                if outcome.get("cancelled"):
-                    break
-            except JobCancelled:
-                raise
-            except Exception:
-                if signal.is_set():
-                    raise JobCancelled("Sportarr owner stopped") from None
-                failures.append(row["id"])
-                logging.exception(
-                    "Sports subtitle search failed for event %s, owner %s",
-                    row["id"],
-                    row["arr_instance_id"],
-                )
-            jobs_queue.update_job_progress(job_id, progress_value=position)
+        # One whole-library Sportarr rescan per affected owner per operation:
+        # every published subtitle asks for one, and the batch merges them.
+        with rescan_batch():
+            for position, row in enumerate(rows, 1):
+                signal = SportsJobSignal(row["arr_instance_id"], job_id)
+                try:
+                    check_cancelled(signal)
+                    outcome = search_event(
+                        row["id"],
+                        row["arr_instance_id"],
+                        job_id=job_id,
+                        cancel=signal,
+                        adaptive=adaptive,
+                        # A per-row language when the caller asked for one, so a
+                        # single missing-language badge can be actioned on its own
+                        # the way PATCH episodes/subtitles does for an episode.
+                        language=row.get("language", language),
+                    )
+                    outcomes.append(
+                        {"event_id": row["id"], "arr_instance_id": row["arr_instance_id"]}
+                        | outcome
+                    )
+                    if outcome.get("cancelled"):
+                        break
+                except JobCancelled:
+                    raise
+                except Exception:
+                    if signal.is_set():
+                        raise JobCancelled("Sportarr owner stopped") from None
+                    failures.append(row["id"])
+                    logging.exception(
+                        "Sports subtitle search failed for event %s, owner %s",
+                        row["id"],
+                        row["arr_instance_id"],
+                    )
+                jobs_queue.update_job_progress(job_id, progress_value=position)
     except JobCancelled:
         if not any(item["downloads"] for item in outcomes):
             raise
@@ -380,33 +385,38 @@ def upgrade_sports_subtitles(
         )
     rows = upgrade_rows(database, arr_instance_id, job_id)
     outcomes = []
+    from sportarr.notify import rescan_batch
+
     jobs_queue.update_job_progress(job_id, progress_max=len(rows) or 1)
     try:
-        for position, row in enumerate(rows, 1):
-            signal = SportsJobSignal(row["arr_instance_id"], job_id)
-            try:
-                outcomes.append(
-                    search_event(
-                        row["event_id"],
-                        row["arr_instance_id"],
-                        language=row["language"],
-                        minimum_score=row["score"] + 1,
-                        upgraded_from_id=row["upgradedFromId"] or row["id"],
-                        job_id=job_id,
-                        cancel=signal,
-                        previous_artifact=(
-                            row["mapped_subtitles_path"],
-                            row["artifact"],
-                        ),
+        # One whole-library Sportarr rescan per affected owner per operation,
+        # merged the same way the wanted download runs merge theirs.
+        with rescan_batch():
+            for position, row in enumerate(rows, 1):
+                signal = SportsJobSignal(row["arr_instance_id"], job_id)
+                try:
+                    outcomes.append(
+                        search_event(
+                            row["event_id"],
+                            row["arr_instance_id"],
+                            language=row["language"],
+                            minimum_score=row["score"] + 1,
+                            upgraded_from_id=row["upgradedFromId"] or row["id"],
+                            job_id=job_id,
+                            cancel=signal,
+                            previous_artifact=(
+                                row["mapped_subtitles_path"],
+                                row["artifact"],
+                            ),
+                        )
                     )
-                )
-            except ValueError:
-                if signal.is_set():
-                    raise JobCancelled("Sportarr owner stopped") from None
-                raise
-            if outcomes[-1].get("cancelled"):
-                break
-            jobs_queue.update_job_progress(job_id, progress_value=position)
+                except ValueError:
+                    if signal.is_set():
+                        raise JobCancelled("Sportarr owner stopped") from None
+                    raise
+                if outcomes[-1].get("cancelled"):
+                    break
+                jobs_queue.update_job_progress(job_id, progress_value=position)
     except JobCancelled:
         if not any(item["downloads"] for item in outcomes):
             raise

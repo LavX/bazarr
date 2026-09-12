@@ -22,8 +22,8 @@ from sonarr.history import history_log
 from radarr.history import history_log_movie
 from sonarr.notify import notify_sonarr
 from radarr.notify import notify_radarr
-from plex.operations import plex_refresh_item
-from jellyfin.operations import jellyfin_refresh_item
+from plex.operations import plex_refresh_item, plex_update_sports_library
+from jellyfin.operations import jellyfin_refresh_item, jellyfin_update_sports_library
 
 
 def _delete_subtitle_file(media_path, subtitle_path, on_publish=None):
@@ -115,17 +115,33 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
         from sportarr.history import sports_history_log
         from subtitles.indexer.sports import store_subtitles_sports
 
-        removed = _delete_subtitle_file(media_path, pr(subtitles_path))
+        removed = _delete_subtitle_file(media_path, pr(subtitles_path),
+                                        publication_callback(media_type, media_path, 'delete', arr_instance_id))
         store_subtitles_sports(sports_event_id, arr_instance_id)
         if not removed:
             return False
         sports_history_log(0, sports_event_id, arr_instance_id, result)
         event_stream(type='sports', action='update', payload=sports_event_id)
 
-        # No Sportarr rescan and no media-server refresh: Sportarr exposes only
-        # an untargeted whole-library scan, and the refresh helpers key on an
-        # imdbId a sports event does not have. Same constraint the download
-        # path records.
+        # One whole-library Sportarr rescan per affected owner, behind the
+        # per-instance transport and non-blocking; Sportarr exposes only that
+        # untargeted scan. The media servers refresh their configured sports
+        # libraries instead of an item the event carries no identifier for.
+        from sportarr.notify import notify_rescan
+        notify_rescan(arr_instance_id)
+        if settings.general.use_plex:
+            sports_library = settings.plex.sports_library
+            if isinstance(sports_library, str):
+                sports_library = [sports_library] if sports_library else []
+            if sports_library:
+                plex_update_sports_library()
+        if settings.general.use_jellyfin:
+            sports_library_ids = settings.jellyfin.sports_library_ids
+            if isinstance(sports_library_ids, str):
+                sports_library_ids = [sports_library_ids] if sports_library_ids else []
+            if sports_library_ids:
+                jellyfin_update_sports_library()
+
         call_external_webhook(
             subtitle_path=subtitles_path,
             media_path=media_path,

@@ -20,10 +20,12 @@ from app.database import (
     TableHistorySports,
     TableSportsEvents,
 )
+from app.config import settings
 from app.get_providers import get_providers
 from sportarr.connection import check_cancelled
 from sportarr.db import SportsTransactionOutcome, sports_transaction
 from sportarr.identity import SportsEventContext, resolve_event_in_session
+from sportarr.notify import notify_rescan
 from sportarr.output import (
     SportsOutputNamespace,
     lock_output_owners,
@@ -419,14 +421,21 @@ def save_sports_subtitle(
             # sports never did, so with Apprise configured every sports
             # download, upgrade and translate was invisible. Guarded because a
             # notifier fault must not push this state machine into the
-            # "published but history uncertain" branch below.
-            try:
-                send_notifications_sports(
-                    context.event_id, result.message,
-                    arr_instance_id=context.arr_instance_id,
-                )
-            except Exception:
-                logging.exception("BAZARR could not send a sports notification")
+            # "published but history uncertain" branch below. Silent for Manual
+            # Actions suppresses the manual sender the same way it does for
+            # series and movies.
+            if not (is_manual and settings.general.dont_notify_manual_actions):
+                try:
+                    send_notifications_sports(
+                        context.event_id, result.message,
+                        arr_instance_id=context.arr_instance_id,
+                    )
+                except Exception:
+                    logging.exception("BAZARR could not send a sports notification")
+            # Ask Sportarr to notice the subtitle it now records. The rescan is
+            # untargeted and dispatched per affected owner per operation, so it
+            # never blocks this state machine.
+            notify_rescan(context.arr_instance_id)
             phase = "index"
             outcome.refresh(candidate, database, cancel)
             if state["index"] != "completed":

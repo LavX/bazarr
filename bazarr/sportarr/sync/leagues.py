@@ -143,11 +143,14 @@ def _sync_leagues(arr_instance_id, cancel, expected_connection, http_get):
 
 
 def update_sports_for_instance(arr_instance_id, job_id=None, *, cancel=None, expected_connection=None,
-                               http_get=None, lock_timeout=None):
+                               http_get=None, lock_timeout=None, is_signalr=False):
     """Startup and periodic repair of one complete owned sports library.
 
     ``lock_timeout`` is threaded through so a request-thread caller can bound
     its wait; background callers leave it None and wait as they always have.
+    ``is_signalr`` marks a sync that a live library event triggered, the sports
+    analog of the Sonarr and Radarr signalr flag: only those syncs may report
+    "no missing subtitles".
     """
     from sportarr.rootfolder import sync_rootfolders
     from sportarr.sync.events import sync_events
@@ -160,5 +163,5 @@ def update_sports_for_instance(arr_instance_id, job_id=None, *, cancel=None, exp
         ids = sync_leagues(arr_instance_id, **kwargs)
         for league_id in ids:
             check_cancelled(cancel)
-            sync_events(league_id, arr_instance_id, **kwargs)
+            sync_events(league_id, arr_instance_id, **kwargs, is_signalr=is_signalr)
         return ids

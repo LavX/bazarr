@@ -3,6 +3,8 @@
 # ruff: noqa: F811
 import importlib.util
 import json
+import threading
+import time
 from threading import Event
 
 import pytest
@@ -1054,3 +1056,102 @@ def test_cancel_disabled_jobs_cancels_a_queued_sync_job(workflow_library, monkey
     )
     workflows.cancel_disabled_jobs(set())
     assert removed == [41] and cancelled == [42]
+
+
+def test_the_rescan_request_targets_the_untargeted_route_through_the_transport():
+    """POST /api/library/rescan is the only route Sportarr exposes, and it is
+    untargeted, so the request has to go through the same per-instance client
+    every other Sportarr call uses."""
+    import inspect
+
+    from sportarr import notify
+
+    source = inspect.getsource(notify._rescan_request)
+    assert "'/api/library/rescan'" in source
+    assert "ArrClientFactory" in source
+    assert "require_sportarr" in source
+
+
+def test_notify_rescan_outside_a_batch_dispatches_immediately(monkeypatch):
+    from sportarr import notify
+
+    requested = []
+    done = threading.Event()
+
+    def record(owner, *, client_factory=None):
+        requested.append(owner)
+        done.set()
+
+    monkeypatch.setattr(notify, "_rescan_request", record)
+    notify.notify_rescan(3)
+    assert done.wait(5)
+    time.sleep(0.05)
+    assert requested == [3]
+
+
+def test_notify_rescan_coalesces_one_request_per_owner_per_batch(monkeypatch):
+    """A batch that writes several events of one owner must ask for exactly one
+    whole-library rescan for it, and one for each other affected owner."""
+    from sportarr import notify
+
+    requested = []
+    done = threading.Event()
+
+    def record(owner, *, client_factory=None):
+        requested.append(owner)
+        if len(requested) == 2:
+            done.set()
+
+    monkeypatch.setattr(notify, "_rescan_request", record)
+    with notify.rescan_batch():
+        notify.notify_rescan(7)
+        notify.notify_rescan(7)
+        assert requested == []
+        notify.notify_rescan(9)
+    assert done.wait(5)
+    time.sleep(0.05)
+    assert sorted(requested) == [7, 9]
+
+
+def test_a_league_download_requests_one_rescan_for_the_owner(workflow_library, monkeypatch):
+    """A real download operation through the workflows batch must ask Sportarr
+    to rescan, exactly once for the affected owner."""
+
+    from sportarr import notify
+
+    requested = []
+    done = threading.Event()
+
+    def record(owner, *, client_factory=None):
+        requested.append(owner)
+        done.set()
+
+    monkeypatch.setattr(notify, "_rescan_request", record)
+    automatic, history, workflows, service, session, folder = workflow_library
+    workflows.sports_download_subtitles(51, 1, job_id="test")
+    assert done.wait(5)
+    time.sleep(0.05)
+    assert requested == [1]
+    assert (folder / "1/event.en.srt").exists()
+
+
+def test_a_single_manual_download_requests_one_rescan(manual_library, monkeypatch):
+    """The non-batch manual download path asks for one rescan for the owner."""
+
+    from sportarr import notify
+
+    requested = []
+    done = threading.Event()
+
+    def record(owner, *, client_factory=None):
+        requested.append(owner)
+        done.set()
+
+    monkeypatch.setattr(notify, "_rescan_request", record)
+    service, session, folder = manual_library
+    result = service.manual_search_sports(61, "en", arr_instance_id=1)[0]
+    service.manual_download_sports(61, result, 1)
+    assert done.wait(5)
+    time.sleep(0.05)
+    assert requested == [1]
+    assert (folder / "1/event.en.srt").exists()

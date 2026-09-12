@@ -1,5 +1,6 @@
 """Atomic native pagination and file-first, owner-scoped reconciliation."""
 
+import ast
 import logging
 from datetime import datetime
 
@@ -135,7 +136,7 @@ def sync_one_league(league_id, arr_instance_id, job_id=None, *, cancel=None):
 
 
 def sync_events(league_id, arr_instance_id, *, page_size=1000, cancel=None, expected_connection=None,
-                http_get=None, lock_timeout=None):
+                http_get=None, lock_timeout=None, is_signalr=False):
     with owner_sync_lock(arr_instance_id, cancel, timeout=lock_timeout):
         instance = require_sportarr(database, arr_instance_id)
         expected = connection_identity(instance)
@@ -208,4 +209,28 @@ def sync_events(league_id, arr_instance_id, *, page_size=1000, cancel=None, expe
         if ids:
             refresh_event_files(ids, arr_instance_id, cancel=cancel)
         notify(ids)
+        if is_signalr and settings.general.notify_if_nothing_is_missing_for_signalr_event:
+            _notify_league_fully_subtitled(database, league_id, arr_instance_id)
         return ids
+
+
+def _notify_league_fully_subtitled(session, league_id, owner):
+    """A live sync found a league with no missing subtitles left to search.
+
+    Mirrors the Sonarr and Radarr sync paths: the option only describes what a
+    live sync found, an empty league is not what it describes, and a league
+    that still has missing languages must not report the opposite.
+    """
+    rows = session.execute(select(TableSportsEvents.missing_subtitles).where(
+        TableSportsEvents.arr_instance_id == owner,
+        TableSportsEvents.league_id == league_id)).scalars().all()
+    if not rows:
+        return
+    if any(ast.literal_eval(row or '[]') for row in rows):
+        return
+    from app.notifier import send_notifications_sports_league
+    try:
+        send_notifications_sports_league(
+            league_id, "There are no missing subtitles in this league.", owner)
+    except Exception:
+        logging.exception('Could not send the sports sync-found-nothing notification')

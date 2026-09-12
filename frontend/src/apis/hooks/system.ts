@@ -118,6 +118,14 @@ export function useSettingsMutation(retryingMetadataRefresh = false) {
         queryKey: [QueryKeys.Wanted],
       });
 
+      // The sports wanted rows are computed live against the exclusion and
+      // monitoring settings, so saving them refreshes the cached sports
+      // queries (wanted included) the same way the ones above do for series
+      // and movies.
+      void client.invalidateQueries({
+        queryKey: [QueryKeys.Sports],
+      });
+
       void client.invalidateQueries({
         queryKey: [QueryKeys.Badges],
       });

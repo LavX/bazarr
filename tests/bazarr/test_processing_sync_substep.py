@@ -65,3 +65,62 @@ def test_movie_substep_sync_does_not_track_parent_job_progress():
     assert sync_mock.call_args.kwargs.get("job_id") == 99
     assert sync_mock.call_args.kwargs.get("owns_job_progress") is False
     assert sync_mock.call_args.kwargs.get("track_job_progress") is not False
+
+
+def test_sports_media_refresh_fires_only_for_configured_sports_libraries(monkeypatch):
+    """A sports write must refresh a server only when it has a sports library
+    configured: the Plex and Jellyfin refresh helpers are gated on their sports
+    library settings, and the Emby and Silo dispatcher notification is gated on
+    those master switches."""
+    from app.config import settings
+    from subtitles import processing
+
+    calls = []
+    notified = []
+    monkeypatch.setattr(processing, "plex_update_sports_library", lambda: calls.append("plex"))
+    monkeypatch.setattr(processing, "jellyfin_update_sports_library", lambda: calls.append("jellyfin"))
+    monkeypatch.setattr(processing, "notify_subtitle_mutation", notified.append)
+    monkeypatch.setattr(settings.general, "use_plex", True)
+    monkeypatch.setattr(settings.general, "use_jellyfin", True)
+    monkeypatch.setattr(settings.general, "use_emby", False)
+    monkeypatch.setattr(settings.general, "use_silo", False)
+    monkeypatch.setattr(settings.plex, "sports_library", [])
+    monkeypatch.setattr(settings.jellyfin, "sports_library_ids", [])
+
+    processing.refresh_sports_media_servers("/sports/Event.mkv", "/sports/Event.en.srt", 1)
+    assert calls == []
+    assert notified == []
+
+    monkeypatch.setattr(settings.plex, "sports_library", ["Sports"])
+    monkeypatch.setattr(settings.jellyfin, "sports_library_ids", ["10"])
+    processing.refresh_sports_media_servers("/sports/Event.mkv", "/sports/Event.en.srt", 1)
+    assert calls == ["plex", "jellyfin"]
+    assert notified == []
+
+    monkeypatch.setattr(settings.general, "use_emby", True)
+    monkeypatch.setattr(settings.general, "use_silo", True)
+    calls.clear()
+    processing.refresh_sports_media_servers("/sports/Event.mkv", "/sports/Event.en.srt", 1)
+    assert calls == ["plex", "jellyfin"]
+    assert len(notified) == 1
+    assert notified[0].media_type == "sports"
+    assert notified[0].operation == "download"
+    assert notified[0].arr_instance_id == 1
+    assert notified[0].video_path == "/sports/Event.mkv"
+
+
+def test_sports_process_subtitle_calls_the_media_server_refresh(monkeypatch):
+    """The sports branch of process_subtitle hands the write to the shared
+    refresh helper with the owning instance, mirroring how movies and episodes
+    reach Plex, Jellyfin, Emby and Silo from the same function."""
+    import inspect
+
+    from subtitles import processing
+
+    source = inspect.getsource(processing.process_subtitle)
+    sports = source[source.index("if media_type == 'sports':"):]
+    assert "refresh_sports_media_servers(path, downloaded_path, owner_instance_id)" in sports
+    source_helper = inspect.getsource(processing.refresh_sports_media_servers)
+    assert "plex_update_sports_library()" in source_helper
+    assert "jellyfin_update_sports_library()" in source_helper
+    assert "SubtitleMutation('sports'" in source_helper

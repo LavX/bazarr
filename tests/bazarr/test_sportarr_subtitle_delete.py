@@ -61,23 +61,44 @@ def test_a_failed_removal_records_no_history():
     from subtitles.tools import delete
 
     source = inspect.getsource(delete.delete_subtitles)
-    start = source.index("removed = _delete_subtitle_file(media_path, pr(subtitles_path))")
+    start = source.index("removed = _delete_subtitle_file(media_path, pr(subtitles_path)")
     sports = source[start : source.index("sports_history_log(") + 40]
     removed_at = sports.index("if not removed:")
     history_at = sports.index("sports_history_log(")
     assert removed_at < history_at
 
 
-def test_no_media_server_refresh_for_sports():
+def test_no_item_level_media_server_refresh_for_sports():
+    """The item-level Plex/Jellyfin refresh helpers stay out of the sports
+    branch: a sports event has no identifiers for them to resolve. The sports
+    branch refreshes the configured sports libraries and requests the
+    Sportarr whole-library rescan instead."""
     import inspect
 
     from subtitles.tools import delete
 
     source = inspect.getsource(delete.delete_subtitles)
-    start = source.index("if media_type == 'sports':")
+    start = source.rindex("if media_type == 'sports':")
     sports = source[start : source.index("if media_type == 'series':", start)]
     assert "plex_refresh_item" not in sports
     assert "jellyfin_refresh_item" not in sports
+    assert "plex_update_sports_library()" in sports
+    assert "jellyfin_update_sports_library()" in sports
+
+
+def test_sports_delete_requests_one_rescan_and_publishes_to_the_dispatcher():
+    """Deleting a sports subtitle asks Sportarr for one whole-library rescan,
+    and reaches the native Emby and Silo refresh through the same publication
+    callback the series and movie branches use."""
+    import inspect
+
+    from subtitles.tools import delete
+
+    source = inspect.getsource(delete.delete_subtitles)
+    start = source.rindex("if media_type == 'sports':")
+    sports = source[start : source.index("if media_type == 'series':", start)]
+    assert "notify_rescan(arr_instance_id)" in sports
+    assert "publication_callback(media_type, media_path, 'delete', arr_instance_id)" in sports
 
 
 def test_the_history_writer_uses_the_result_attributes_not_its_kwargs():
